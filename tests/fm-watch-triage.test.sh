@@ -825,11 +825,45 @@ queued_stale_wakes() {  # <state> <window>
   awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue"
 }
 
+# Wait until a live watcher records one more copy of <verdict> than <baseline>.
+# The declared-pause preflight performs liveness and authoritative-state reads
+# before capture or busy triage, so a fixed sleep can reap a healthy watcher
+# before that poll finishes on a loaded host.
+triage_verdict_count() {  # <state> <verdict>
+  local state=$1 verdict=$2
+  [ -e "$state/.watch-triage.log" ] || { printf '0\n'; return 0; }
+  grep -F -c "$verdict" "$state/.watch-triage.log" 2>/dev/null || true
+}
+
+wait_for_live_triage_verdict() {  # <pid> <state> <verdict> <baseline> [limit]
+  local pid=$1 state=$2 verdict=$3 baseline=$4 limit=${5:-100} i=0 count
+  while [ "$i" -lt "$limit" ]; do
+    kill -0 "$pid" 2>/dev/null || return 1
+    count=$(triage_verdict_count "$state" "$verdict")
+    [ "$count" -gt "$baseline" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+wait_for_live_file_change() {  # <pid> <file> <prior> [limit]
+  local pid=$1 file=$2 prior=$3 limit=${4:-100} i=0 value
+  while [ "$i" -lt "$limit" ]; do
+    kill -0 "$pid" 2>/dev/null || return 1
+    value=$(cat "$file" 2>/dev/null || true)
+    [ "$value" != "$prior" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 DECLARED_PAUSE_CASE_ERROR=
 
 declared_pause_capture_failure_case() {  # <name> <window-exists> <command> <crew-state> absorbed|surfaced|working
   local name=$1 window_exists=$2 command=$3 crew_state=$4 expect=$5
-  local dir state fakebin out statusf window key prior_hash pid wakes
+  local dir state fakebin out statusf window key prior_hash pid wakes verdict baseline
   DECLARED_PAUSE_CASE_ERROR=
   dir=$(make_case "declared-pause-capture-$name"); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; statusf="$state/held.status"; window="test:fm-held"
@@ -863,6 +897,12 @@ TMUX
   key=$(printf '%s' "$window" | tr ':/.' '___')
   prior_hash="capture-prior-$name"
   printf '%s' "$prior_hash" > "$state/.hash-$key"
+  if [ "$expect" = working ]; then
+    verdict="absorbed capture failure (provably working): $window"
+  else
+    verdict="absorbed stale (paused, awaiting external"
+  fi
+  baseline=$(triage_verdict_count "$state" "$verdict")
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
     FM_FAKE_TMUX_WINDOW_EXISTS="$window_exists" FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
     FM_FAKE_CREW_STATE="$crew_state" FM_STATE_OVERRIDE="$state" \
@@ -871,7 +911,7 @@ TMUX
     "$WATCH" > "$out" &
   pid=$!
   if [ "$expect" = surfaced ]; then
-    if ! wait_for_exit "$pid" 40; then
+    if ! wait_for_exit "$pid" 100; then
       DECLARED_PAUSE_CASE_ERROR="$name did not surface before the failed capture"
       return 1
     fi
@@ -886,6 +926,7 @@ TMUX
       DECLARED_PAUSE_CASE_ERROR="$name could not acknowledge its first surface"
       return 1
     fi
+    baseline=$(triage_verdict_count "$state" "$verdict")
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
       FM_FAKE_TMUX_WINDOW_EXISTS="$window_exists" FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
       FM_FAKE_CREW_STATE="$crew_state" FM_STATE_OVERRIDE="$state" \
@@ -893,7 +934,7 @@ TMUX
       FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
       "$WATCH" >> "$out" &
     pid=$!
-    if ! wait_live "$pid" 30; then
+    if ! wait_for_live_triage_verdict "$pid" "$state" "$verdict" "$baseline"; then
       reap "$pid"
       DECLARED_PAUSE_CASE_ERROR="$name repeated its immediate surface after rearm"
       return 1
@@ -909,7 +950,7 @@ TMUX
     reap "$pid"
     return 0
   fi
-  if ! wait_live "$pid" 30; then
+  if ! wait_for_live_triage_verdict "$pid" "$state" "$verdict" "$baseline"; then
     reap "$pid"
     DECLARED_PAUSE_CASE_ERROR="$name surfaced despite live-agent or run-step evidence"
     return 1
@@ -948,7 +989,7 @@ TMUX
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH" > "$out" &
   pid=$!
-  if ! wait_for_exit "$pid" 40; then
+  if ! wait_for_exit "$pid" 100; then
     reap "$pid"
     DECLARED_PAUSE_CASE_ERROR="$name did not re-surface after its bounded capture-failure cadence"
     return 1
@@ -965,6 +1006,7 @@ TMUX
     return 1
   fi
 
+  baseline=$(triage_verdict_count "$state" "$verdict")
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
     FM_FAKE_TMUX_WINDOW_EXISTS="$window_exists" FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
     FM_FAKE_CREW_STATE="$crew_state" FM_STATE_OVERRIDE="$state" \
@@ -972,7 +1014,7 @@ TMUX
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH" >> "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_for_live_triage_verdict "$pid" "$state" "$verdict" "$baseline"; then
     reap "$pid"
     DECLARED_PAUSE_CASE_ERROR="$name repeated its bounded capture-failure re-surface every poll"
     return 1
@@ -990,7 +1032,7 @@ TMUX
 
 declared_pause_surfaced_run_step_case() {  # <name> <active-command>
   local name=$1 active_command=$2
-  local dir state fakebin out capture_file statusf window key prior_hash pane pane_hash pid wakes round
+  local dir state fakebin out capture_file statusf window key prior_hash pane pane_hash pid wakes round verdict baseline
   DECLARED_PAUSE_CASE_ERROR=
   dir=$(make_case "declared-pause-surfaced-run-step-$name"); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -1025,6 +1067,7 @@ TMUX
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-held_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   printf '%s' "$prior_hash" > "$state/.hash-$key"
+  verdict="absorbed stale (paused, awaiting external"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CAPTURE_FAIL=1 FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
@@ -1033,7 +1076,7 @@ TMUX
     FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_for_exit "$pid" 40; then
+  if ! wait_for_exit "$pid" 100; then
     reap "$pid"
     DECLARED_PAUSE_CASE_ERROR="dead capture failure did not create the surfaced pause state"
     return 1
@@ -1048,6 +1091,7 @@ TMUX
     return 1
   fi
 
+  baseline=$(triage_verdict_count "$state" "$verdict")
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CAPTURE_FAIL=1 FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
     FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
@@ -1055,7 +1099,7 @@ TMUX
     FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_for_live_triage_verdict "$pid" "$state" "$verdict" "$baseline"; then
     reap "$pid"
     DECLARED_PAUSE_CASE_ERROR="still-dead surfaced pause repeated its immediate wake"
     return 1
@@ -1073,7 +1117,9 @@ TMUX
   fi
 
   round=1
+  verdict="absorbed capture failure (provably working): $window"
   while [ "$round" -le 2 ]; do
+    baseline=$(triage_verdict_count "$state" "$verdict")
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_FAKE_TMUX_CAPTURE_FAIL=1 FM_FAKE_TMUX_CURRENT_COMMAND="$active_command" \
       FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
@@ -1081,7 +1127,7 @@ TMUX
       FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
-    if ! wait_live "$pid" 30; then
+    if ! wait_for_live_triage_verdict "$pid" "$state" "$verdict" "$baseline"; then
       reap "$pid"
       DECLARED_PAUSE_CASE_ERROR="$name active run-step surfaced during failed capture round $round"
       return 1
@@ -1109,7 +1155,7 @@ TMUX
     FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  if ! wait_numeric_file "$state/.stale-since-$key" 40; then
+  if ! wait_numeric_file "$state/.stale-since-$key" 100; then
     reap "$pid"
     DECLARED_PAUSE_CASE_ERROR="active run-step stayed behind the surfaced pause marker"
     return 1
@@ -1126,7 +1172,7 @@ TMUX
 
 declared_pause_busy_case() {  # <name> <command> absorbed|surfaced
   local name=$1 command=$2 expect=$3
-  local dir state fakebin out capture_file statusf window key prior_hash pid wakes
+  local dir state fakebin out capture_file statusf window key prior_hash pid wakes verdict baseline
   DECLARED_PAUSE_CASE_ERROR=
   dir=$(make_case "declared-pause-busy-$name"); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -1139,6 +1185,7 @@ declared_pause_busy_case() {  # <name> <command> absorbed|surfaced
   key=$(printf '%s' "$window" | tr ':/.' '___')
   prior_hash="busy-prior-$name"
   printf '%s' "$prior_hash" > "$state/.hash-$key"
+  verdict="absorbed stale (paused, awaiting external"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
     FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
@@ -1147,7 +1194,7 @@ declared_pause_busy_case() {  # <name> <command> absorbed|surfaced
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if [ "$expect" = surfaced ]; then
-    if ! wait_for_exit "$pid" 40; then
+    if ! wait_for_exit "$pid" 100; then
       DECLARED_PAUSE_CASE_ERROR="$name waited behind the stale busy record"
       return 1
     fi
@@ -1162,6 +1209,7 @@ declared_pause_busy_case() {  # <name> <command> absorbed|surfaced
       DECLARED_PAUSE_CASE_ERROR="$name could not acknowledge its first surface"
       return 1
     fi
+    baseline=$(triage_verdict_count "$state" "$verdict")
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
       FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
@@ -1169,7 +1217,7 @@ declared_pause_busy_case() {  # <name> <command> absorbed|surfaced
       FM_BUSY_TURN_MAX_SECS=3600 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
-    if ! wait_live "$pid" 30; then
+    if ! wait_for_live_triage_verdict "$pid" "$state" "$verdict" "$baseline"; then
       reap "$pid"
       DECLARED_PAUSE_CASE_ERROR="$name repeated its immediate surface after rearm"
       return 1
@@ -1185,7 +1233,7 @@ declared_pause_busy_case() {  # <name> <command> absorbed|surfaced
     reap "$pid"
     return 0
   fi
-  if ! wait_live "$pid" 30; then
+  if ! wait_for_live_file_change "$pid" "$state/.hash-$key" "$prior_hash"; then
     reap "$pid"
     DECLARED_PAUSE_CASE_ERROR="$name surfaced despite a live agent"
     return 1
@@ -1237,7 +1285,7 @@ TOTAL_TRIAGE_CASE_ERROR=
 
 capture_failure_totality_case() {  # <name> <kind> <afk> <crew-state> surfaced|working|secondmate
   local name=$1 kind=$2 afk=$3 crew_state=$4 expect=$5
-  local dir state fakebin out statusf window pid wakes verdict
+  local dir state fakebin out statusf window pid wakes verdict baseline
   TOTAL_TRIAGE_CASE_ERROR=
   dir=$(make_case "capture-failure-totality-$name"); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; statusf="$state/task.status"; window="test:fm-task"
@@ -1256,13 +1304,19 @@ TMUX
   printf 'working: waiting for current state\n' > "$statusf"
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-task_status"
   [ "$afk" = 0 ] || date +%s > "$state/.afk"
+  case "$expect" in
+    working) verdict="absorbed capture failure (provably working): $window" ;;
+    secondmate) verdict="absorbed window (secondmate idle by charter): $window" ;;
+    *) verdict= ;;
+  esac
+  baseline=$(triage_verdict_count "$state" "$verdict")
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_CREW_STATE="$crew_state" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH" > "$out" &
   pid=$!
   if [ "$expect" = surfaced ]; then
-    if ! wait_for_exit "$pid" 40; then
+    if ! wait_for_exit "$pid" 100; then
       reap "$pid"
       TOTAL_TRIAGE_CASE_ERROR="$name capture failure was silently dropped"
       return 1
@@ -1274,16 +1328,12 @@ TMUX
     fi
     return 0
   fi
-  if ! wait_live "$pid" 30; then
+  if ! wait_for_live_triage_verdict "$pid" "$state" "$verdict" "$baseline"; then
     reap "$pid"
     TOTAL_TRIAGE_CASE_ERROR="$name capture failure surfaced despite authoritative absorption"
     return 1
   fi
   wakes=$(queued_stale_wakes "$state" "$window")
-  case "$expect" in
-    working) verdict="absorbed capture failure (provably working): $window" ;;
-    secondmate) verdict="absorbed window (secondmate idle by charter): $window" ;;
-  esac
   if [ "$wakes" -ne 0 ] || ! grep -F "$verdict" "$state/.watch-triage.log" >/dev/null 2>&1; then
     reap "$pid"
     TOTAL_TRIAGE_CASE_ERROR="$name capture failure did not record its absorbed verdict"
@@ -1341,7 +1391,7 @@ test_window_triage_records_every_capture_failure_verdict() {
 # wake means it was absorbed.
 declared_pause_liveness_case() {  # <case-name> <pane-command> absorbed|surfaced
   local name=$1 command=$2 expect=$3
-  local dir state fakebin out capture_file statusf window key pane pane_hash pid wakes
+  local dir state fakebin out capture_file statusf window key pane pane_hash pid wakes i
   dir=$(make_case "declared-pause-$name"); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
   window="test:fm-held"
@@ -1362,10 +1412,16 @@ declared_pause_liveness_case() {  # <case-name> <pane-command> absorbed|surfaced
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if [ "$expect" = absorbed ]; then
-    if ! wait_live "$pid" 30; then
-      reap "$pid"
-      fail "declared pause with a $name agent surfaced instead of absorbing: $(cat "$out")"
-    fi
+    i=0
+    while [ "$i" -lt 100 ] && kill -0 "$pid" 2>/dev/null; do
+      [ -e "$state/.paused-$key" ] \
+        && [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+        && break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    kill -0 "$pid" 2>/dev/null \
+      || { reap "$pid"; fail "declared pause with a $name agent surfaced instead of absorbing: $(cat "$out")"; }
     [ ! -s "$state/.wake-queue" ] \
       || { reap "$pid"; fail "declared pause with a $name agent queued a stale wake instead of absorbing"; }
     [ -e "$state/.paused-$key" ] \
@@ -1379,7 +1435,7 @@ declared_pause_liveness_case() {  # <case-name> <pane-command> absorbed|surfaced
     reap "$pid"
     return 0
   fi
-  wait_for_exit "$pid" 40 \
+  wait_for_exit "$pid" 100 \
     || { reap "$pid"; fail "declared pause with a $name agent was absorbed instead of surfacing: $(cat "$out")"; }
   wakes=$(queued_stale_wakes "$state" "$window")
   [ "$wakes" -ge 1 ] || fail "declared pause with a $name agent surfaced no stale wake for its window"
@@ -1514,7 +1570,7 @@ test_live_declared_pause_surfaces_once_after_agent_dies() {
     FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 \
+  wait_for_exit "$pid" 100 \
     || { reap "$pid"; fail "unchanged declared-pause pane did not surface after its agent died"; }
   wakes=$(queued_stale_wakes "$state" "$window")
   [ "$wakes" -eq 1 ] \
@@ -1601,7 +1657,7 @@ test_live_declared_pause_surfaces_once_after_agent_dies() {
     FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 \
+  wait_for_exit "$pid" 100 \
     || { reap "$pid"; fail "alive replacement's distinct death did not surface immediately"; }
   wakes=$(queued_stale_wakes "$state" "$window")
   [ "$wakes" -eq 1 ] \
@@ -1654,7 +1710,7 @@ test_scheduled_pause_recheck_does_not_throttle_later_death() {
     FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "unknown declared pause did not emit its scheduled recheck"
+  wait_for_exit "$pid" 100 || fail "unknown declared pause did not emit its scheduled recheck"
   [ "$(queued_stale_wakes "$state" "$window")" -eq 1 ] \
     || fail "unknown declared pause scheduled recheck did not queue exactly one wake"
   [ -e "$state/.paused-resurfaced-$key" ] \
@@ -1694,7 +1750,7 @@ test_scheduled_pause_recheck_does_not_throttle_later_death() {
     FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 \
+  wait_for_exit "$pid" 100 \
     || { reap "$pid"; fail "fresh scheduled recheck throttle hid the later agent death"; }
   [ "$(queued_stale_wakes "$state" "$window")" -eq 1 ] \
     || fail "agent death after a scheduled recheck did not queue exactly one immediate wake"
@@ -1808,7 +1864,7 @@ TMUX
     FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 \
+  wait_for_exit "$pid" 100 \
     || { reap "$pid"; fail "dead churning declared pause was cleared instead of surfacing: $(cat "$out")"; }
   wakes=$(queued_stale_wakes "$state" "$window")
   [ "$wakes" -eq 1 ] || fail "dead churning declared pause queued $wakes wakes on first sight (want exactly one)"
@@ -1843,8 +1899,8 @@ TMUX
 # watcher surfaces that anomaly once for reconciliation instead of annotating it as
 # a wait that still holds.
 # The #743 incident this guards is the FLOOD, not the first wake: six unchanged
-# polls must still cost exactly ONE wake, because the per-hash stale suppressor and
-# the pause markers take over the moment that first surface lands.
+# polls must still cost exactly ONE wake, because the death-surface record and
+# bounded-cadence pause markers take over the moment that first surface lands.
 # Both pauses here are FRESH under a high re-surface threshold, so the bounded
 # cadence can never wake: every wake counted below is the immediate surface, which
 # is the classification under test rather than any wake wording.
@@ -2103,7 +2159,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
 }
 
 test_nonterminal_paused_rechecks_authoritative_state() {
-  local dir state fakebin out capture_file window key pane_hash sig pid
+  local dir state fakebin out capture_file window key pane_hash sig pid i
   dir=$(make_case nonterminal-paused-recheck); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-pause-recheck"
   printf 'idle awaiting external\n' > "$capture_file"
@@ -2122,9 +2178,14 @@ test_nonterminal_paused_rechecks_authoritative_state() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"; fail "an active run behind a declared pause surfaced instead of resuming wedge tracking: $(cat "$out")"
-  fi
+  i=0
+  while [ "$i" -lt 100 ] && kill -0 "$pid" 2>/dev/null; do
+    [ ! -e "$state/.paused-$key" ] && [ -s "$state/.stale-since-$key" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null \
+    || { reap "$pid"; fail "an active run behind a declared pause surfaced instead of resuming wedge tracking: $(cat "$out")"; }
   [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "authoritative active run retained paused mode"; }
   [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "authoritative active run did not resume wedge tracking"; }
   reap "$pid"
@@ -2152,7 +2213,7 @@ test_paused_authoritative_working_preserves_wedge_timer() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "authoritative working state did not start wedge tracking"; }
+  wait_numeric_file "$state/.stale-since-$key" 100 || { reap "$pid"; fail "authoritative working state did not start wedge tracking"; }
   since=$(cat "$state/.stale-since-$key")
   sleep 2
   [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" = "$since" ] \

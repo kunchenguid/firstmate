@@ -6,9 +6,9 @@
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
-# working signal is never silently swallowed. A declared external-wait pause is
-# the separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# working signal is never silently swallowed. A declared external-wait pause uses
+# the separate idle triage owned by docs/architecture.md, although its initial
+# no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -18,9 +18,10 @@
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
-#                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
+#                          firstmate hands it to a no-mistakes validation. Declared
+#                          pauses use docs/architecture.md's liveness and current-state
+#                          precedence, bounded recheck, and once-per-death-episode
+#                          surface rather than the wedge timer. Only when neither
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
@@ -331,10 +332,10 @@ busy_turn_over_age() {  # <task>
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # captain-held transfer, and re-surface it once every
-# PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
-# stale poll once pause_state_class permits the bounded cadence, so it must be
-# cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
-# status file mtime, not a per-hash marker, so a churny idle pane (a ticking
+# PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called whenever
+# pause_state_class permits the bounded cadence, including after a failed capture,
+# so it must be cheap: it NEVER re-reads crew state. The re-surface age is anchored
+# on the status file mtime, not a per-hash marker, so a churny idle pane (a ticking
 # clock, a token counter) cannot keep resetting the cadence the way a hash-tied
 # timer would. A .paused-resurfaced-<key> throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
@@ -422,9 +423,10 @@ pause_declaration_liveness() {  # <window>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# The declaration itself classifies the pane; pause_declaration_liveness only
-# decides whether it still holds, so a confidently dead agent surfaces for
-# reconciliation while every other liveness read keeps the bounded cadence.
+# A current run-step supersedes the older declaration. Otherwise the declaration
+# classifies the pane and pause_declaration_liveness decides whether it still holds,
+# so a confidently dead agent surfaces for reconciliation while every other
+# liveness read keeps the bounded cadence.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last death_surface_file agent_alive line state source
   key=${win//:/_}
@@ -1038,8 +1040,10 @@ EOF
     fi
   fi
 
-  # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
-  # signature means the crewmate finished, is waiting, or is wedged. Each distinct
+  # Layer 1 backbone: metadata-backed pane triage. Declared-pause liveness and
+  # current run-step authority are reconciled before capture and busy-state guards.
+  # After a successful capture, two consecutive identical hashes with no busy
+  # signature mean the crewmate finished, is waiting, or is wedged. Each distinct
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
   while IFS= read -r w; do
@@ -1181,8 +1185,9 @@ EOF
           # unmodified terminal-status behavior).
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
-          # Decided once per distinct stale hash (the costly state reads run only
-          # on first sight, never every poll) via pause_state_class, which returns:
+          # Ordinary state is decided once per distinct stale hash. A tracked
+          # declaration re-derives current run-step authority so active work can
+          # reclaim the pane. pause_state_class returns:
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
           #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
