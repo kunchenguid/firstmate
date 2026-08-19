@@ -217,6 +217,46 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# A terminal `done:` is a completion claim, not a truthful checkpoint for a
+# partially completed task.  Every worker-facing variant must carry the same
+# concise autonomy, completion, and self-check contract.
+test_completion_contract_covers_every_variant() {
+  local home id brief kind mode
+  home="$TMP_ROOT/completion-contract-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes direct-PR local-only scout secondmate; do
+    id="brief-completion-$kind"
+    case "$kind" in
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle routed work.' \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+      *)
+        mode=$kind
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_grep "Keep working until every part of the assigned task is delivered." "$brief" \
+      "$kind brief missing the whole-task autonomy contract"
+    assert_grep "A turn ending, a natural pause, or one completed sub-part is not a checkpoint to await instruction." "$brief" \
+      "$kind brief lets a worker stop at a natural pause"
+    assert_grep "\`done:\` means every stated requirement is met." "$brief" \
+      "$kind brief does not define done as whole-task completion"
+    assert_grep "Candid partial-work reporting is \`blocked:\` or \`needs-decision:\`, never \`done:\`." "$brief" \
+      "$kind brief permits candid partial work to claim done"
+    assert_grep "Before \`done:\`, re-read the task, confirm every requirement, verify the requested deliverable exists where requested and survives teardown, and re-run the applicable project gate with its real exit status." "$brief" \
+      "$kind brief missing the mandatory completion self-check"
+    assert_grep "State anything not done and why; if a required item is missing, do not append \`done:\`." "$brief" \
+      "$kind brief does not make missing required work nonterminal"
+  done
+  pass "fm-brief.sh: completion contract covers ship, scout, and charter variants"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -716,6 +756,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_completion_contract_covers_every_variant
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

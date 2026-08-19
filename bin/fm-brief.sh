@@ -178,6 +178,17 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+IFS= read -r -d '' COMPLETION_CONTRACT <<'EOF' || true
+Keep working until every part of the assigned task is delivered.
+A turn ending, a natural pause, or one completed sub-part is not a checkpoint to await instruction.
+Stop only for genuine completion, a genuine blocker, or a decision genuinely above your authority.
+`done:` means every stated requirement is met.
+Candid partial-work reporting is `blocked:` or `needs-decision:`, never `done:`.
+Before `done:`, re-read the task, confirm every requirement, verify the requested deliverable exists where requested and survives teardown, and re-run the applicable project gate with its real exit status.
+State anything not done and why; if a required item is missing, do not append `done:`.
+EOF
+COMPLETION_CONTRACT=${COMPLETION_CONTRACT%$'\n'}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -250,6 +261,8 @@ The main firstmate's answer normally writes that closing line at answer time; wh
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
 # Definition of done
+$COMPLETION_CONTRACT
+
 You are persistent by default. Do not exit just because your queue is empty.
 On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
 When you have no assigned or in-flight work after that reconciliation, go idle and wait silently for the main firstmate to route you a task.
@@ -341,6 +354,7 @@ Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
+$COMPLETION_CONTRACT
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
@@ -461,5 +475,7 @@ If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, ad
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD
+
+$COMPLETION_CONTRACT
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
