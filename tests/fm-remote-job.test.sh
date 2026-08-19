@@ -18,6 +18,7 @@ FAKE_PERL_LOG="$TMP_ROOT/perl.log"
 REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
+RESIDUE_STATE=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -25,6 +26,9 @@ mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 cleanup_remote_job_fixture() {
   [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
+  if [ -n "$RESIDUE_STATE" ] && [ -f "$RESIDUE_STATE/worker.pid" ]; then
+    fm_remote_job_stop_worker_tree "$(cat "$RESIDUE_STATE/worker.pid")" || true
+  fi
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -620,5 +624,46 @@ kill -TERM "$RECOVERY_WORKER_PID"
 wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
 RECOVERY_WORKER_PID=
 pass "quarantine clears only after recorded execution has stopped"
+
+# A stop TERMs the whole worker group. The child's shutdown disarms its own
+# handler first, so the second TERM its supervisor sends can kill it between the
+# mktemp and the rename that publishes a lock file, leaving that staging file
+# inside the lock; a SIGKILL escalation or a lost machine leaves the same
+# residue. Ownership must still be reclaimable afterwards: while it was not,
+# ensure kept reporting a worker that never became ready and that account could
+# never run another job.
+RESIDUE_HOME="$TMP_ROOT/residue-account"
+RESIDUE_STATE="$TMP_ROOT/residue-jobs"
+# Every name a killed publish can leave staged inside the lock: the three files
+# that record ownership, and the shutdown guard the observed incident left.
+RESIDUE_STAGED=(.pid.abandoned .start.abandoned .command.abandoned .quarantine.abandoned)
+mkdir -p "$RESIDUE_HOME" "$RESIDUE_STATE/jobs" "$RESIDUE_STATE/logs" "$RESIDUE_STATE/worker.lock"
+chmod 700 "$RESIDUE_HOME" "$RESIDUE_STATE" "$RESIDUE_STATE/jobs" "$RESIDUE_STATE/logs" \
+  "$RESIDUE_STATE/worker.lock"
+sleep 0.01 &
+RESIDUE_OWNER_PID=$!
+wait "$RESIDUE_OWNER_PID" 2>/dev/null || true
+printf '%s\n' "$RESIDUE_OWNER_PID" > "$RESIDUE_STATE/worker.lock/pid"
+printf 'stale\n' > "$RESIDUE_STATE/worker.lock/start"
+printf 'stale\n' > "$RESIDUE_STATE/worker.lock/command"
+for STAGED in "${RESIDUE_STAGED[@]}"; do
+  : > "$RESIDUE_STATE/worker.lock/$STAGED"
+done
+chmod 600 "$RESIDUE_STATE/worker.lock"/* "$RESIDUE_STATE/worker.lock"/.*.abandoned
+touch -t 200001010000 "$RESIDUE_STATE/worker.lock"
+(
+  export FM_REMOTE_JOB_STATE_ROOT="$RESIDUE_STATE"
+  fm_remote_job_ensure_worker "$REMOTE_ROOT" "$RESIDUE_HOME"
+) || fail "a dead owner's abandoned staging file left worker ownership unreclaimable"
+assert_present "$RESIDUE_STATE/worker.ready" "the replacement worker never published readiness"
+for STAGED in "${RESIDUE_STAGED[@]}"; do
+  assert_absent "$RESIDUE_STATE/worker.lock/$STAGED" "the reclaimed lock kept the dead owner's $STAGED"
+done
+RESIDUE_WORKER_PID=$(cat "$RESIDUE_STATE/worker.pid")
+kill -0 "$RESIDUE_WORKER_PID" 2>/dev/null || fail "the reclaiming worker did not stay alive"
+[ "$(cat "$RESIDUE_STATE/worker.lock/pid")" = "$RESIDUE_WORKER_PID" ] \
+  || fail "the reclaimed lock does not record the live worker as its owner"
+fm_remote_job_stop_worker_tree "$RESIDUE_WORKER_PID" || fail "the reclaiming worker did not stop"
+pass "a dead owner's abandoned staging file cannot wedge ownership reclaim"
 
 echo "ALL TESTS PASSED"
