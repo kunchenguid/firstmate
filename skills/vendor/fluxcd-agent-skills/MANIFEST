@@ -1,0 +1,7 @@
+source_repo=fluxcd/agent-skills
+source_url=https://github.com/fluxcd/agent-skills
+license=Apache-2.0
+upstream_tag=v0.2.0
+upstream_commit=9b05787530a3e200a9ac031fc8a477566e0b7adc
+adopted_skills=gitops-knowledge gitops-repo-audit
+excluded_skills=gitops-cluster-debug

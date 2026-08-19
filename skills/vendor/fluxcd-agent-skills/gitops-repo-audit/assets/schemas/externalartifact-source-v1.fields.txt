@@ -1,0 +1,27 @@
+# schema source: Flux v2.9.2 https://github.com/fluxcd/flux2
+apiVersion <string> enum=source.toolkit.fluxcd.io/v1
+kind <string> enum=ExternalArtifact
+metadata.name <string> (required)
+metadata.namespace <string> (required)
+spec <object>	# ExternalArtifactSpec defines the desired state of ExternalArtifact
+spec.sourceRef <object>	# SourceRef points to the Kubernetes custom resource for which the artifact is generated.
+spec.sourceRef.apiVersion <string>	# API version of the referent, if not specified the Kubernetes preferred version will be used.
+spec.sourceRef.kind <string> (required)	# Kind of the referent.
+spec.sourceRef.name <string> (required)	# Name of the referent.
+spec.sourceRef.namespace <string>	# Namespace of the referent, when not specified it acts as LocalObjectReference.
+status <object>	# ExternalArtifactStatus defines the observed state of ExternalArtifact
+status.artifact <object>	# Artifact represents the output of an ExternalArtifact reconciliation.
+status.artifact.digest <string> (required) pattern="^[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[a-zA-Z0-9=_-]+$"	# Digest is the digest of the file in the form of '<algorithm>:<checksum>'.
+status.artifact.lastUpdateTime <string> (required) format=date-time	# LastUpdateTime is the timestamp corresponding to the last update of the Artifact.
+status.artifact.metadata <map[string]string>	# Metadata holds upstream information such as OCI annotations.
+status.artifact.path <string> (required)	# Path is the relative file path of the Artifact. It can be used to locate the file in the root of the Artifact storage on the local file system of the controller managing the Source.
+status.artifact.revision <string> (required)	# Revision is a human-readable identifier traceable in the origin source system. It can be a Git commit SHA, Git tag, a Helm chart version, etc.
+status.artifact.size <integer> format=int64	# Size is the number of bytes in the file.
+status.artifact.url <string> (required)	# URL is the HTTP address of the Artifact as exposed by the controller managing the Source. It can be used to retrieve the Artifact for consumption, e.g. by another controller applying the Artifact contents.
+status.conditions <[]object>	# Conditions holds the conditions for the ExternalArtifact.
+status.conditions[].lastTransitionTime <string> (required) format=date-time	# lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed. If that is not known, then using the time when the API field changed is acceptable.
+status.conditions[].message <string> (required) max=32768	# message is a human readable message indicating details about the transition. This may be an empty string.
+status.conditions[].observedGeneration <integer> format=int64 min=0	# observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+status.conditions[].reason <string> (required) pattern="^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$" min=1 max=1024	# reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+status.conditions[].status <string> (required) enum=True|False|Unknown	# status of the condition, one of True, False, Unknown.
+status.conditions[].type <string> (required) pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$" max=316	# type of condition in CamelCase or in foo.example.com/CamelCase.

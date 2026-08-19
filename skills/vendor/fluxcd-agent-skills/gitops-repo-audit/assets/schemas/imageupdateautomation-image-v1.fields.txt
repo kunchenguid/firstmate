@@ -1,0 +1,62 @@
+# schema source: Flux v2.9.2 https://github.com/fluxcd/flux2
+apiVersion <string> enum=image.toolkit.fluxcd.io/v1
+kind <string> enum=ImageUpdateAutomation
+metadata.name <string> (required)
+metadata.namespace <string> (required)
+spec <object>	# ImageUpdateAutomationSpec defines the desired state of ImageUpdateAutomation
+spec.git <object>	# GitSpec contains all the git-specific definitions. This is technically optional, but in practice mandatory until there are other kinds of source allowed.
+spec.git.checkout <object>	# Checkout gives the parameters for cloning the git repository, ready to make changes. If not present, the `spec.ref` field from the referenced `GitRepository` or its default will be used.
+spec.git.checkout.ref <object> (required)	# Reference gives a branch, tag or commit to clone from the Git repository.
+spec.git.checkout.ref.branch <string>	# Branch to check out, defaults to 'master' if no other field is defined.
+spec.git.checkout.ref.commit <string>	# Commit SHA to check out, takes precedence over all reference fields. This can be combined with Branch to shallow clone the branch, in which the commit is expected to exist.
+spec.git.checkout.ref.name <string>	# Name of the reference to check out; takes precedence over Branch, Tag and SemVer. It must be a valid Git reference: https://git-scm.com/docs/git-check-ref-format#_description Examples: "refs/heads/main", "refs/tags/v0.1.0", "refs/pull/420/head", "refs/merge-requests/1/head"
+spec.git.checkout.ref.semver <string>	# SemVer tag expression to check out, takes precedence over Tag.
+spec.git.checkout.ref.tag <string>	# Tag to check out, takes precedence over Branch.
+spec.git.commit <object> (required)	# Commit specifies how to commit to the git repository.
+spec.git.commit.author <object> (required)	# Author gives the email and optionally the name to use as the author of commits.
+spec.git.commit.author.email <string> (required)	# Email gives the email to provide when making a commit.
+spec.git.commit.author.name <string>	# Name gives the name to provide when making a commit.
+spec.git.commit.messageTemplate <string>	# MessageTemplate provides a template for the commit message, into which will be interpolated the details of the change made. Note: The `Updated` template field has been removed. Use `Changed` instead.
+spec.git.commit.messageTemplateValues <map[string]string>	# MessageTemplateValues provides additional values to be available to the templating rendering.
+spec.git.commit.signingKey <object>	# SigningKey provides the option to sign commits with an OpenPGP or SSH signing key, referenced from a Secret. See SigningKey.
+spec.git.commit.signingKey.secretRef <object> (required)	# SecretRef references a Secret containing the signing key. For type 'gpg', the Secret must contain a 'git.asc' (ASCII-armored OpenPGP keypair) and may contain a 'passphrase'. For type 'ssh', the Secret must contain an 'identity' (an SSH private key in any format golang.org/x/crypto/ssh.ParsePrivateKey accepts; typically the OpenSSH format produced by 'ssh-keygen') and may contain a 'password' (the key's passphrase). The SSH conventions match the GitRepository SSH transport-auth Secret format, allowing a single Secret to serve both transport and signing when the ImageUpdateAutomation lives in the same namespace as the GitRepository. The Secret itself must live in the same namespace as the ImageUpdateAutomation. Supported SSH key algorithms: ed25519, ecdsa-sha2-nistp256/384/521, and rsa (>= 2048-bit).
+spec.git.commit.signingKey.secretRef.name <string> (required)	# Name of the referent.
+spec.git.commit.signingKey.type <string> enum=gpg|ssh	# Type selects the signing-key format expected in the referenced Secret. When empty, the controller defaults to 'gpg'.
+spec.git.push <object>	# Push specifies how and where to push commits made by the automation. If missing, commits are pushed (back) to `.spec.checkout.branch` or its default.
+spec.git.push.branch <string>	# Branch specifies that commits should be pushed to the branch named. The branch is created using `.spec.checkout.branch` as the starting point, if it doesn't already exist.
+spec.git.push.options <map[string]string>	# Options specifies the push options that are sent to the Git server when performing a push operation. For details, see: https://git-scm.com/docs/git-push#Documentation/git-push.txt---push-optionltoptiongt
+spec.git.push.refspec <string>	# Refspec specifies the Git Refspec to use for a push operation. If both Branch and Refspec are provided, then the commit is pushed to the branch and also using the specified refspec. For more details about Git Refspecs, see: https://git-scm.com/book/en/v2/Git-Internals-The-Refspec
+spec.interval <string> (required) pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"	# Interval gives an lower bound for how often the automation run should be attempted.
+spec.policySelector <object>	# PolicySelector allows to filter applied policies based on labels. By default includes all policies in namespace.
+spec.policySelector.matchExpressions <[]object>	# matchExpressions is a list of label selector requirements. The requirements are ANDed.
+spec.policySelector.matchExpressions[].key <string> (required)	# key is the label key that the selector applies to.
+spec.policySelector.matchExpressions[].operator <string> (required)	# operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
+spec.policySelector.matchExpressions[].values <[]string>	# values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
+spec.policySelector.matchLabels <map[string]string>	# matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
+spec.sourceRef <object> (required)	# SourceRef refers to the resource giving access details to a git repository.
+spec.sourceRef.apiVersion <string>	# API version of the referent.
+spec.sourceRef.kind <string> (required) enum=GitRepository default="GitRepository"	# Kind of the referent.
+spec.sourceRef.name <string> (required)	# Name of the referent.
+spec.sourceRef.namespace <string>	# Namespace of the referent, defaults to the namespace of the Kubernetes resource object that contains the reference.
+spec.suspend <boolean>	# Suspend tells the controller to not run this automation, until it is unset (or set to false). Defaults to false.
+spec.update <object> default={"strategy":"Setters"}	# Update gives the specification for how to update the files in the repository. This can be left empty, to use the default value.
+spec.update.path <string>	# Path to the directory containing the manifests to be updated. Defaults to 'None', which translates to the root path of the GitRepositoryRef.
+spec.update.strategy <string> enum=Setters default="Setters"	# Strategy names the strategy to be used.
+status <object> default={"observedGeneration":-1}	# ImageUpdateAutomationStatus defines the observed state of ImageUpdateAutomation
+status.conditions <[]object>
+status.conditions[].lastTransitionTime <string> (required) format=date-time	# lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed. If that is not known, then using the time when the API field changed is acceptable.
+status.conditions[].message <string> (required) max=32768	# message is a human readable message indicating details about the transition. This may be an empty string.
+status.conditions[].observedGeneration <integer> format=int64 min=0	# observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+status.conditions[].reason <string> (required) pattern="^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$" min=1 max=1024	# reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+status.conditions[].status <string> (required) enum=True|False|Unknown	# status of the condition, one of True, False, Unknown.
+status.conditions[].type <string> (required) pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$" max=316	# type of condition in CamelCase or in foo.example.com/CamelCase.
+status.lastAutomationRunTime <string> format=date-time	# LastAutomationRunTime records the last time the controller ran this automation through to completion (even if no updates were made).
+status.lastHandledReconcileAt <string>	# LastHandledReconcileAt holds the value of the most recent reconcile request value, so a change of the annotation value can be detected.
+status.lastPushCommit <string>	# LastPushCommit records the SHA1 of the last commit made by the controller, for this automation object
+status.lastPushTime <string> format=date-time	# LastPushTime records the time of the last pushed change.
+status.observedGeneration <integer> format=int64
+status.observedPolicies <map[string]object>	# ObservedPolicies is the list of observed ImagePolicies that were considered by the ImageUpdateAutomation update process.
+status.observedPolicies.<key>.digest <string>	# Digest is the image's digest.
+status.observedPolicies.<key>.name <string> (required)	# Name is the bare image's name.
+status.observedPolicies.<key>.tag <string> (required)	# Tag is the image's tag.
+status.observedSourceRevision <string>	# ObservedSourceRevision is the last observed source revision. This can be used to determine if the source has been updated since last observation.

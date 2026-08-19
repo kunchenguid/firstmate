@@ -1,0 +1,47 @@
+# schema source: Flux Operator v0.55.0 https://github.com/controlplaneio-fluxcd/flux-operator
+apiVersion <string> enum=fluxcd.controlplane.io/v1
+kind <string> enum=FluxReport
+metadata.name <string> (required)
+metadata.namespace <string> (required)
+spec <object>	# FluxReportSpec defines the observed state of a Flux installation.
+spec.cluster <object>	# Cluster is the version information of the Kubernetes cluster.
+spec.cluster.nodes <integer>	# Nodes is the number of nodes in the Kubernetes cluster.
+spec.cluster.platform <string> (required)	# Platform is the os/arch of the Kubernetes control plane.
+spec.cluster.serverVersion <string> (required)	# ServerVersion is the version of the Kubernetes API server.
+spec.components <[]object>	# ComponentsStatus is the status of the Flux controller deployments.
+spec.components[].image <string> (required)	# Image is the container image of the Flux component.
+spec.components[].name <string> (required)	# Name is the name of the Flux component.
+spec.components[].ready <boolean> (required)	# Ready is the readiness status of the Flux component.
+spec.components[].status <string> (required)	# Status is a human-readable message indicating details about the Flux component observed state.
+spec.distribution <object> (required)	# Distribution is the version information of the Flux installation.
+spec.distribution.entitlement <string> (required)	# Entitlement is the entitlement verification status.
+spec.distribution.managedBy <string>	# ManagedBy is the name of the operator managing the Flux instance.
+spec.distribution.status <string> (required)	# Status is a human-readable message indicating details about the distribution observed state.
+spec.distribution.version <string>	# Version is the version of the Flux instance.
+spec.operator <object>	# Operator is the version information of the Flux Operator.
+spec.operator.apiVersion <string> (required)	# APIVersion is the API version of the Flux Operator.
+spec.operator.platform <string> (required)	# Platform is the os/arch of Flux Operator.
+spec.operator.version <string> (required)	# Version is the version number of Flux Operator.
+spec.reconcilers <[]object>	# ReconcilersStatus is the list of Flux reconcilers and their statistics grouped by API kind.
+spec.reconcilers[].apiVersion <string> (required)	# APIVersion is the API version of the Flux resource.
+spec.reconcilers[].kind <string> (required)	# Kind is the kind of the Flux resource.
+spec.reconcilers[].stats <object>	# Stats is the reconcile statics of the Flux resource kind.
+spec.reconcilers[].stats.failing <integer> (required)	# Failing is the number of reconciled resources in the Failing state and not Suspended.
+spec.reconcilers[].stats.running <integer> (required)	# Running is the number of reconciled resources in the Running state.
+spec.reconcilers[].stats.suspended <integer> (required)	# Suspended is the number of reconciled resources in the Suspended state.
+spec.reconcilers[].stats.totalSize <string>	# TotalSize is the total size of the artifacts in storage.
+spec.sync <object>	# SyncStatus is the status of the cluster sync Source and Kustomization resources.
+spec.sync.id <string> (required)	# ID is the identifier of the sync.
+spec.sync.path <string>	# Path is the kustomize path of the sync.
+spec.sync.ready <boolean> (required)	# Ready is the readiness status of the sync.
+spec.sync.source <string>	# Source is the URL of the source repository.
+spec.sync.status <string> (required)	# Status is a human-readable message indicating details about the sync observed state.
+status <object>	# FluxReportStatus defines the readiness of a FluxReport.
+status.conditions <[]object>	# Conditions contains the readiness conditions of the object.
+status.conditions[].lastTransitionTime <string> (required) format=date-time	# lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed. If that is not known, then using the time when the API field changed is acceptable.
+status.conditions[].message <string> (required) max=32768	# message is a human readable message indicating details about the transition. This may be an empty string.
+status.conditions[].observedGeneration <integer> format=int64 min=0	# observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+status.conditions[].reason <string> (required) pattern="^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$" min=1 max=1024	# reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+status.conditions[].status <string> (required) enum=True|False|Unknown	# status of the condition, one of True, False, Unknown.
+status.conditions[].type <string> (required) pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$" max=316	# type of condition in CamelCase or in foo.example.com/CamelCase.
+status.lastHandledReconcileAt <string>	# LastHandledReconcileAt holds the value of the most recent reconcile request value, so a change of the annotation value can be detected.

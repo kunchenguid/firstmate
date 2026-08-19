@@ -539,6 +539,9 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `bws` - load before any work with Bitwarden Secrets Manager CLI (`bws`, not `bw`): authentication checks, listing projects or secrets, reading secret values, creating, updating, rotating, or deleting secrets.
 - `google-developer-docs-style` - load before writing or editing project documentation, READMEs, ADRs, operator guides, error messages, UI copy, or PR descriptions that should follow Google developer documentation style.
 - `postgres-admin` - load before any PostgreSQL administration: creating or altering roles, schema ownership, grants and default privileges, `pg_dump`/`pg_restore`, backup or restore Jobs, or any psql statement that changes database state.
+- `gitops-knowledge` - load before Flux CD concept questions, CRD manifest generation, or GitOps repository structure guidance covered by the adopted official `fluxcd/agent-skills` skill; also load `flux-classic-gitops` when classic controller installs apply.
+- `gitops-repo-audit` - load before auditing or validating a local Flux GitOps repository with read-only schema, migration, and security checks from the adopted official `fluxcd/agent-skills` skill; also load `flux-classic-gitops` when classic controller installs apply.
+- `flux-classic-gitops` - load with an adopted Flux skill when controllers are installed from tracked gotk manifests rather than Flux Operator; overrides Operator and `flux bootstrap` preference only.
 
 ## 14. Relay
 

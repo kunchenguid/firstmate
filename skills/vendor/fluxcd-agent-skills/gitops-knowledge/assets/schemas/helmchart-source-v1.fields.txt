@@ -1,0 +1,46 @@
+# schema source: Flux v2.9.2 https://github.com/fluxcd/flux2
+apiVersion <string> enum=source.toolkit.fluxcd.io/v1
+kind <string> enum=HelmChart
+metadata.name <string> (required)
+metadata.namespace <string> (required)
+spec <object>	# HelmChartSpec specifies the desired state of a Helm chart.
+spec.chart <string> (required)	# Chart is the name or path the Helm chart is available at in the SourceRef.
+spec.ignoreMissingValuesFiles <boolean>	# IgnoreMissingValuesFiles controls whether to silently ignore missing values files rather than failing.
+spec.interval <string> (required) pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"	# Interval at which the HelmChart SourceRef is checked for updates. This interval is approximate and may be subject to jitter to ensure efficient use of resources.
+spec.reconcileStrategy <string> enum=ChartVersion|Revision default="ChartVersion"	# ReconcileStrategy determines what enables the creation of a new artifact. Valid values are ('ChartVersion', 'Revision'). See the documentation of the values for an explanation on their behavior. Defaults to ChartVersion when omitted.
+spec.sourceRef <object> (required)	# SourceRef is the reference to the Source the chart is available at.
+spec.sourceRef.apiVersion <string>	# APIVersion of the referent.
+spec.sourceRef.kind <string> (required) enum=HelmRepository|GitRepository|Bucket	# Kind of the referent, valid values are ('HelmRepository', 'GitRepository', 'Bucket').
+spec.sourceRef.name <string> (required)	# Name of the referent.
+spec.suspend <boolean>	# Suspend tells the controller to suspend the reconciliation of this source.
+spec.valuesFiles <[]string>	# ValuesFiles is an alternative list of values files to use as the chart values (values.yaml is not included by default), expected to be a relative path in the SourceRef. Values files are merged in the order of this list with the last file overriding the first. Ignored when omitted.
+spec.verify <object>	# Verify contains the secret name containing the trusted public keys used to verify the signature and specifies which provider to use to check whether OCI image is authentic. This field is only supported when using HelmRepository source with spec.type 'oci'. Chart dependencies, which are not bundled in the umbrella chart artifact, are not verified.
+spec.verify.matchOIDCIdentity <[]object>	# MatchOIDCIdentity specifies the identity matching criteria to use while verifying an OCI artifact which was signed using Cosign keyless signing. The artifact's identity is deemed to be verified if any of the specified matchers match against the identity.
+spec.verify.matchOIDCIdentity[].issuer <string> (required)	# Issuer specifies the regex pattern to match against to verify the OIDC issuer in the Fulcio certificate. The pattern must be a valid Go regular expression.
+spec.verify.matchOIDCIdentity[].subject <string> (required)	# Subject specifies the regex pattern to match against to verify the identity subject in the Fulcio certificate. The pattern must be a valid Go regular expression.
+spec.verify.provider <string> (required) enum=cosign|notation default="cosign"	# Provider specifies the technology used to sign the OCI Artifact.
+spec.verify.secretRef <object>	# SecretRef specifies the Kubernetes Secret containing the trusted public keys.
+spec.verify.secretRef.name <string> (required)	# Name of the referent.
+spec.version <string> default="*"	# Version is the chart version semver expression, ignored for charts from GitRepository and Bucket sources. Defaults to latest when omitted.
+status <object> default={"observedGeneration":-1}	# HelmChartStatus records the observed state of the HelmChart.
+status.artifact <object>	# Artifact represents the output of the last successful reconciliation.
+status.artifact.digest <string> (required) pattern="^[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[a-zA-Z0-9=_-]+$"	# Digest is the digest of the file in the form of '<algorithm>:<checksum>'.
+status.artifact.lastUpdateTime <string> (required) format=date-time	# LastUpdateTime is the timestamp corresponding to the last update of the Artifact.
+status.artifact.metadata <map[string]string>	# Metadata holds upstream information such as OCI annotations.
+status.artifact.path <string> (required)	# Path is the relative file path of the Artifact. It can be used to locate the file in the root of the Artifact storage on the local file system of the controller managing the Source.
+status.artifact.revision <string> (required)	# Revision is a human-readable identifier traceable in the origin source system. It can be a Git commit SHA, Git tag, a Helm chart version, etc.
+status.artifact.size <integer> format=int64	# Size is the number of bytes in the file.
+status.artifact.url <string> (required)	# URL is the HTTP address of the Artifact as exposed by the controller managing the Source. It can be used to retrieve the Artifact for consumption, e.g. by another controller applying the Artifact contents.
+status.conditions <[]object>	# Conditions holds the conditions for the HelmChart.
+status.conditions[].lastTransitionTime <string> (required) format=date-time	# lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed. If that is not known, then using the time when the API field changed is acceptable.
+status.conditions[].message <string> (required) max=32768	# message is a human readable message indicating details about the transition. This may be an empty string.
+status.conditions[].observedGeneration <integer> format=int64 min=0	# observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+status.conditions[].reason <string> (required) pattern="^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$" min=1 max=1024	# reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+status.conditions[].status <string> (required) enum=True|False|Unknown	# status of the condition, one of True, False, Unknown.
+status.conditions[].type <string> (required) pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$" max=316	# type of condition in CamelCase or in foo.example.com/CamelCase.
+status.lastHandledReconcileAt <string>	# LastHandledReconcileAt holds the value of the most recent reconcile request value, so a change of the annotation value can be detected.
+status.observedChartName <string>	# ObservedChartName is the last observed chart name as specified by the resolved chart reference.
+status.observedGeneration <integer> format=int64	# ObservedGeneration is the last observed generation of the HelmChart object.
+status.observedSourceArtifactRevision <string>	# ObservedSourceArtifactRevision is the last observed Artifact.Revision of the HelmChartSpec.SourceRef.
+status.observedValuesFiles <[]string>	# ObservedValuesFiles are the observed value files of the last successful reconciliation. It matches the chart in the last successfully reconciled artifact.
+status.url <string>	# URL is the dynamic fetch link for the latest Artifact. It is provided on a "best effort" basis, and using the precise HelmChartStatus.Artifact data is recommended.

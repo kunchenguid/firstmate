@@ -1,0 +1,218 @@
+{
+  "skill_name": "gitops-knowledge",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I want to deploy the Envoy Gateway Helm chart from the OCI registry at oci://docker.io/envoyproxy/gateway-helm into the envoy-gateway-system namespace. I need version pinning to 1.x, drift detection that warns but doesn't auto-correct, and it should retry on failure during both install and upgrade. Can you generate the complete YAML manifests?",
+      "expected_output": "An OCIRepository with layerSelector for Helm chart media type, and a HelmRelease using chartRef (not chart.spec) pointing to that OCIRepository. Drift detection mode should be 'warn'. Install and upgrade strategies should use RetryOnFailure.",
+      "files": [],
+      "expectations": [
+        "The OCIRepository uses apiVersion source.toolkit.fluxcd.io/v1",
+        "The OCIRepository spec includes layerSelector with mediaType 'application/vnd.cncf.helm.chart.content.v1.tar+gzip' and operation 'copy'",
+        "The OCIRepository url starts with 'oci://' prefix and references docker.io/envoyproxy/gateway-helm",
+        "The OCIRepository ref uses semver field with value '1.x' or similar semver range",
+        "The HelmRelease uses apiVersion helm.toolkit.fluxcd.io/v2 (not v1 or v2beta1)",
+        "The HelmRelease uses spec.chartRef (not spec.chart.spec) to reference the OCIRepository",
+        "The HelmRelease does NOT contain both spec.chart and spec.chartRef (mutual exclusivity)",
+        "The HelmRelease driftDetection.mode is 'warn' (not 'enabled' or 'disabled')",
+        "The HelmRelease install.strategy.name is 'RetryOnFailure' (exact casing)",
+        "The HelmRelease upgrade.strategy.name is 'RetryOnFailure' (exact casing)",
+        "Both resources are in the envoy-gateway-system namespace"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "We use GitHub pull requests for our app at https://github.com/acme-corp/web-platform. Set up preview environments for every PR labeled 'deploy-preview'. Requirements: (1) preview code is untrusted, so it must run under least privilege; use a namespace-scoped ServiceAccount named 'flux'. (2) Deploy all previews into a single shared 'preview' namespace. (3) The repo is private; authenticate with a GitHub App using a Secret named 'github-app-auth'. (4) Our CI builds and pushes an image tagged 'preview-<commit-sha>' for each PR, and the deployment must use that image. (5) The provider should poll GitHub every 2 minutes. Generate the complete manifests and note the one-time preview namespace and RBAC setup.",
+      "expected_output": "A ResourceSetInputProvider (type GitHubPullRequest, deploy-preview label filter, reconcileEvery 2m annotation) and a ResourceSet both in the 'preview' namespace. The ResourceSet runs under spec.serviceAccountName 'flux' (namespace-scoped, not cluster-admin), templates a GitRepository (provider github, secretRef github-app-auth, ref.commit inputs.sha) and a Kustomization (serviceAccountName flux, targetNamespace preview, nameSuffix per inputs.id, prune, an image override newTag preview-<< inputs.sha >>) into the shared preview namespace. No Namespace object is templated per PR. Uses << >> delimiters.",
+      "files": [],
+      "expectations": [
+        "The ResourceSetInputProvider spec.type is 'GitHubPullRequest' (exact casing)",
+        "The ResourceSetInputProvider has a filter.labels array containing 'deploy-preview'",
+        "The ResourceSetInputProvider sets its poll cadence via the fluxcd.controlplane.io/reconcileEvery annotation set to '2m' (does not support a spec.interval field)",
+        "Both the ResourceSetInputProvider and the ResourceSet are in the dedicated 'preview' namespace (not flux-system)",
+        "The ResourceSet references the input provider via spec.inputsFrom",
+        "The ResourceSet sets spec.serviceAccountName to 'flux' so previews reconcile under a namespace-scoped identity rather than the kustomize-controller's default cluster-admin",
+        "The ResourceSet does NOT template a per-PR Namespace object — all previews share the single pre-provisioned 'preview' namespace (isolation is by name, not by namespace)",
+        "The GitRepository uses apiVersion source.toolkit.fluxcd.io/v1 and is created in the 'preview' namespace",
+        "The GitRepository ref.commit uses inputs.sha (the PR head commit)",
+        "The GitRepository uses spec.provider 'github' and a secretRef.name 'github-app-auth' for GitHub App authentication",
+        "The Kustomization uses apiVersion kustomize.toolkit.fluxcd.io/v1",
+        "The Kustomization sets spec.serviceAccountName to 'flux' (least-privilege, matches the ResourceSet identity)",
+        "The Kustomization sets spec.targetNamespace to 'preview'",
+        "The Kustomization uses spec.nameSuffix templating inputs.id (e.g. '-pr<< inputs.id >>') to isolate each PR's workloads within the shared namespace",
+        "The Kustomization sets spec.images to override the app image with newTag 'preview-<< inputs.sha >>' (the image CI built for the PR commit)"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Set up Flux notifications for our production cluster. I need: (1) Slack alerts for all errors across all Kustomizations and HelmReleases, (2) GitHub commit status updates on our repo https://github.com/acme-corp/infra for the 'infra' Kustomization so we can see deploy status on commits, (3) a GitHub webhook Receiver that triggers immediate reconciliation of the 'infra' Kustomization on push events. Give me the Provider, Alert, Receiver, and Secret manifests for all three.",
+      "expected_output": "Two Providers (one Slack type, one GitHub type), two Alerts using notification.toolkit.fluxcd.io/v1beta3, and a Receiver using notification.toolkit.fluxcd.io/v1. Slack provider uses secretRef for webhook URL. GitHub provider uses address field for repo URL. Receiver type is 'github' with a secretRef for webhook validation.",
+      "files": [],
+      "expectations": [
+        "All Provider resources use apiVersion notification.toolkit.fluxcd.io/v1beta3 (not v1 or v1beta2)",
+        "All Alert resources use apiVersion notification.toolkit.fluxcd.io/v1beta3 (not v1 or v1beta2)",
+        "The Slack Provider spec.type is 'slack' (not 'Slack')",
+        "The Slack Provider has a secretRef pointing to a Secret",
+        "The Slack Secret has a 'token' key in stringData for the bot token",
+        "The GitHub Provider spec.type is 'github'",
+        "The GitHub Provider has spec.address set to the repository URL",
+        "The Slack Alert has eventSeverity set to 'error'",
+        "The Slack Alert eventSources include both Kustomization and HelmRelease with name '*'",
+        "The GitHub Alert eventSources reference the 'infra' Kustomization by name",
+        "Each Alert has a providerRef.name pointing to its respective Provider",
+        "The Receiver uses apiVersion notification.toolkit.fluxcd.io/v1 (not v1beta3)",
+        "The Receiver spec.type is 'github'",
+        "The Receiver has a secretRef pointing to a Secret for webhook validation",
+        "The Receiver spec.resources references a resource named 'infra' to reconcile on push — either a GitRepository source or the infra Kustomization is acceptable",
+        "The Receiver spec.events includes 'push' or a list of relevant GitHub events"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "I push container images to ghcr.io/acme-corp/api-server with semver tags. I want Flux to automatically detect new versions starting with 2.0.0, update the image tag in my deployment YAML at ./k8s/production/ in the Git repo https://github.com/acme-corp/api-server, and push changes to a branch called 'flux-image-updates'. Generate all the resources I need for this image automation pipeline.",
+      "expected_output": "An ImageRepository, ImagePolicy with semver policy, a GitRepository, and an ImageUpdateAutomation. All image resources use image.toolkit.fluxcd.io/v1. Includes the $imagepolicy marker format.",
+      "files": [],
+      "expectations": [
+        "The ImageRepository uses apiVersion image.toolkit.fluxcd.io/v1 (not v1beta1 or v1beta2)",
+        "The ImageRepository spec.image is 'ghcr.io/acme-corp/api-server' (no tag)",
+        "The ImagePolicy uses apiVersion image.toolkit.fluxcd.io/v1",
+        "The ImagePolicy has a semver policy with range that matches >= 2.0.0",
+        "The ImageUpdateAutomation uses apiVersion image.toolkit.fluxcd.io/v1",
+        "The ImageUpdateAutomation spec.git.push.branch is 'flux-image-updates'",
+        "The ImageUpdateAutomation spec.update.path is './k8s/production' or similar",
+        "The ImageUpdateAutomation spec.update.strategy is 'Setters'",
+        "The output mentions the $imagepolicy marker comment format for marking images in YAML"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "I'm setting up a new production Kubernetes cluster with Flux. I want to use the OCI-based (gitless) GitOps model. My fleet manifests are at oci://ghcr.io/acme-corp/fleet-prod. The cluster should be multi-tenant with medium sizing. I need two ResourceSets: 'infra' for deploying cert-manager and monitoring, and 'apps' for deploying frontend and backend services. The apps ResourceSet should wait for infra to be Ready before deploying. Each component gets its own namespace with an OCIRepository + Kustomization. Generate the FluxInstance and both ResourceSets.",
+      "expected_output": "A FluxInstance named 'flux' in flux-system with OCI sync, multi-tenancy enabled, medium cluster size. Two ResourceSets using << >> delimiters with a dependsOn chain using ready: true.",
+      "files": [],
+      "expectations": [
+        "The FluxInstance uses apiVersion fluxcd.controlplane.io/v1",
+        "The FluxInstance metadata.name is 'flux' (the only allowed name)",
+        "The FluxInstance is in the flux-system namespace",
+        "The FluxInstance spec.cluster.multitenant is true",
+        "The FluxInstance spec.cluster.size is 'medium'",
+        "The FluxInstance spec.sync.kind is 'OCIRepository'",
+        "The FluxInstance spec.sync.url starts with 'oci://'",
+        "Both ResourceSets use apiVersion fluxcd.controlplane.io/v1",
+        "Both ResourceSets use << >> template delimiters (not {{ }})",
+        "The apps ResourceSet has spec.dependsOn referencing the infra ResourceSet",
+        "The dependsOn includes ready: true (a readyExpr CEL expression is optional, not required)",
+        "The infra ResourceSet inputs include entries for cert-manager and monitoring",
+        "The apps ResourceSet inputs include entries for frontend and backend",
+        "Because the cluster is multitenant, each generated Kustomization (and OCIRepository) sets spec.serviceAccountName for tenant impersonation, and each tenant namespace is given a ServiceAccount plus RoleBinding — not bare namespaces",
+        "Each component gets its own OCIRepository with a distinct url/path (per-component sources), not a single shared OCIRepository reused across every component"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "I'm bootstrapping Flux Operator on a new EKS cluster named 'staging' with Terraform. The fleet is a private GitHub repo at https://github.com/acme-corp/fleet.git. We authenticate with a GitHub App (app ID, installation owner, and PEM private key passed as Terraform variables). I need: (1) the Terraform module block that loads the FluxInstance manifest from our fleet repo, (2) the managed Secret for GitHub App authentication, (3) a runtime_info entry publishing CLUSTER_REGION=eu-west-2, (4) the FluxInstance YAML with Git sync and a kustomize patch that wires postBuild.substituteFrom to the flux-runtime-info ConfigMap. Show the recommended repo layout too.",
+      "expected_output": "The recommended sibling layout (terraform/ and clusters/ at repo root), a module block using controlplaneio-fluxcd/flux-operator-bootstrap/kubernetes with ${path.root}/../clusters/... paths, a managed Secret containing githubAppID/githubAppInstallationOwner/githubAppPrivateKey, runtime_info with CLUSTER_REGION, and a FluxInstance with Git sync (provider: github) and a kustomize.patches entry adding postBuild.substituteFrom referencing flux-runtime-info.",
+      "files": [],
+      "expectations": [
+        "The Terraform module source is 'controlplaneio-fluxcd/flux-operator-bootstrap/kubernetes'",
+        "The 'instance_yaml' path uses '${path.root}/../clusters/' (NOT '${path.root}/clusters/')",
+        "The repo layout places 'terraform/' and 'clusters/' as siblings at the repo root (clusters/ is NOT nested under terraform/)",
+        "managed_resources.secrets_yaml composes a Secret with stringData keys githubAppID, githubAppInstallationOwner, and githubAppPrivateKey",
+        "The GitHub App Secret name matches the FluxInstance spec.sync.pullSecret (or is 'flux-system' if pullSecret is omitted)",
+        "managed_resources.runtime_info.data contains CLUSTER_REGION with value 'eu-west-2'",
+        "The FluxInstance spec.sync.kind is 'GitRepository' and spec.sync.url points at the GitHub repo",
+        "The FluxInstance spec.sync.provider is 'github' (required for GitHub App auth)",
+        "The FluxInstance spec.kustomize.patches adds postBuild.substituteFrom targeting the flux-system Kustomization and referencing the flux-runtime-info ConfigMap",
+        "The output references or loads the 'terraform-bootstrap.md' reference, OR demonstrates its patterns (sibling layout, ${path.root}/.. paths, managed_resources.runtime_info)",
+        "The output does NOT use the legacy 'fluxcd/flux' Terraform provider or 'flux bootstrap' CLI",
+        "The Terraform variable holding the GitHub App PEM is marked 'sensitive = true'"
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "Our team wants to adopt Gitless GitOps with Flux. We keep rendered Kubernetes manifests in a GitHub repo at https://github.com/acme-corp/k8s-infra under ./deploy. I need: (1) a GitHub Actions workflow that on push to main and on version tags validates the manifests against the Flux/Kubernetes schemas, then packages ./deploy as an OCI artifact in ghcr.io, applies our channel tagging conventions (immutable build tags, 'latest' for main, 'latest-stable' for releases), and signs the artifact with keyless Cosign; (2) the Flux CLI command to push the artifact manually with the Git origin metadata embedded; (3) the OCIRepository and Kustomization manifests for the production cluster that pull the 'latest-stable' channel, enforce Cosign signature verification of the GitHub Actions identity, and deploy to the 'apps' namespace.",
+      "expected_output": "A GitHub Actions workflow with packages:write and id-token:write permissions, using the Flux CLI or the controlplaneio-fluxcd push action and cosign-installer, signing the pushed digest with 'cosign sign --yes'. Tag conventions: immutable build tags plus 'latest' (main) and 'latest-stable' (releases). A 'flux push artifact' command with --path, --source, and --revision in '<branch>@sha1:<commit>' format. An OCIRepository (source.toolkit.fluxcd.io/v1) with ref.tag latest-stable and verify.provider cosign with matchOIDCIdentity, plus a Kustomization (kustomize.toolkit.fluxcd.io/v1) with prune and targetNamespace apps.",
+      "files": [],
+      "expectations": [
+        "The GitHub Actions workflow grants 'id-token: write' permission (required for keyless Cosign signing)",
+        "The GitHub Actions workflow grants 'packages: write' permission (required for pushing to ghcr.io)",
+        "The workflow validates the manifests with the Flux Schema plugin before publishing — via the 'fluxcd/flux-schema/actions/validate' action or a 'flux schema validate' step — so a schema-invalid manifest fails the build ahead of the push",
+        "The workflow pushes the OCI artifact to ghcr.io either via the controlplaneio-fluxcd/distribution push action OR via the Flux CLI ('flux push artifact')",
+        "The workflow installs Cosign (e.g. sigstore/cosign-installer) and signs the pushed artifact digest with 'cosign sign --yes'",
+        "The tagging follows the channel conventions: 'latest' for main branch builds and 'latest-stable' for release tags, alongside immutable build tags (commit SHA or version)",
+        "The manual CLI command is 'flux push artifact oci://...' with a --path flag pointing at the manifests directory",
+        "The 'flux push artifact' command sets --source with the Git URL and --revision in '<branch-or-tag>@sha1:<commit>' format",
+        "The OCIRepository uses apiVersion source.toolkit.fluxcd.io/v1",
+        "The OCIRepository url starts with 'oci://' and ref.tag is 'latest-stable'",
+        "The OCIRepository spec.verify.provider is 'cosign' with matchOIDCIdentity matching the GitHub Actions OIDC issuer (token.actions.githubusercontent.com) and the repo's workflow subject",
+        "The Kustomization uses apiVersion kustomize.toolkit.fluxcd.io/v1 with sourceRef kind OCIRepository",
+        "The Kustomization includes spec.prune and targetNamespace 'apps'",
+        "The keyless Cosign signing targets the artifact's immutable digest (signs the pushed digest), not a mutable channel tag like 'latest-stable'"
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "We run an air-gapped on-prem cluster with our own Sigstore stack (self-hosted Fulcio and Rekor). Deploy the podinfo Helm chart from our internal registry at oci://harbor.internal/charts/podinfo (version 6.x), with keyless Cosign verification against our custom Sigstore trusted root, which we stored in a Secret named 'sigstore-trusted-root'. For the HelmRelease: use the kstatus poller wait strategy; we inject an Istio sidecar via a Kustomize post-renderer, but Helm hooks must NOT be passed through the post-renderer (keep the Helm 3 behavior); and our comma-separated ALLOWED_HOSTS value ('svc-a.internal,svc-b.internal') is stored in the 'podinfo-config' ConfigMap under the 'allowedHosts' key — feed it from there into the chart values at config.allowedHosts as a literal string so Helm doesn't split it on the commas. Separately, apply our platform addons from oci://harbor.internal/platform/addons with a Kustomization into the 'platform' namespace — an HPA manages the addon Deployment's replicas, so Flux must not revert /spec/replicas during drift detection. Generate all manifests.",
+      "expected_output": "An OCIRepository (source.toolkit.fluxcd.io/v1) for the chart with layerSelector for the Helm media type and verify.provider cosign plus verify.trustedRootSecretRef pointing at 'sigstore-trusted-root'. A HelmRelease (helm.toolkit.fluxcd.io/v2) using chartRef, waitStrategy.name 'poller', postRenderStrategy 'nohooks', a postRenderers kustomize patch for the sidecar, and a valuesFrom entry referencing the 'podinfo-config' ConfigMap with valuesKey 'allowedHosts', targetPath config.allowedHosts, and literal: true. A second OCIRepository plus a Kustomization (kustomize.toolkit.fluxcd.io/v1) into the 'platform' namespace with spec.ignore excluding /spec/replicas on the Deployment and spec.prune set.",
+      "files": [],
+      "expectations": [
+        "The chart OCIRepository uses apiVersion source.toolkit.fluxcd.io/v1 with url starting oci:// and a Helm chart layerSelector (mediaType 'application/vnd.cncf.helm.chart.content.v1.tar+gzip', operation 'copy')",
+        "The chart OCIRepository spec.verify.provider is 'cosign'",
+        "The chart OCIRepository spec.verify.trustedRootSecretRef.name is 'sigstore-trusted-root' (custom Sigstore root for air-gapped keyless verification)",
+        "The HelmRelease uses apiVersion helm.toolkit.fluxcd.io/v2 and references the chart via spec.chartRef (not spec.chart.spec)",
+        "The HelmRelease spec.waitStrategy.name is 'poller' (not 'legacy')",
+        "The HelmRelease spec.postRenderStrategy is 'nohooks' (so hooks are not sent to post-renderers)",
+        "The HelmRelease spec.postRenderers contains a kustomize patch injecting the Istio sidecar",
+        "The HelmRelease has a spec.valuesFrom entry referencing the 'podinfo-config' ConfigMap with valuesKey 'allowedHosts', targetPath 'config.allowedHosts', and literal: true (so the comma-separated value is merged verbatim, not split by Helm --set syntax)",
+        "The Kustomization uses apiVersion kustomize.toolkit.fluxcd.io/v1 with sourceRef kind OCIRepository and targetNamespace 'platform'",
+        "The Kustomization spec.ignore contains a rule with paths ['/spec/replicas'] and a target selecting kind Deployment",
+        "The Kustomization does NOT use the 'kustomize.toolkit.fluxcd.io/ssa: Ignore' annotation for this (that would skip the whole object, not just the replicas field)"
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "Our fleet GitOps monorepo is at {FIXTURE:tests/gitops-knowledge/add-app-repo} (copy it to a scratch directory first). Add a new app called 'backend' deployed from the Helm chart at oci://ghcr.io/acme-corp/charts/backend - track 1.x releases. It should run in its own 'backend' namespace on both the staging and production clusters; the chart's replicaCount value should be 1 in staging and 3 in production. Follow the repo's existing conventions for structure and style, and make sure everything you leave behind is correct.",
+      "expected_output": "Eight new files mirroring the podinfo base+overlay layout: apps/base/backend with Namespace, OCIRepository (source.toolkit.fluxcd.io/v1, semver 1.x) and HelmRelease (helm.toolkit.fluxcd.io/v2, chartRef, RetryOnFailure), plus staging/production overlays patching replicaCount to 1 and 3. The agent inventories the repo (flux schema discover) before placing files and validates the rendered overlays (kustomize build | flux schema validate) before finishing.",
+      "files": [
+        "tests/gitops-knowledge/add-app-repo"
+      ],
+      "expectations": [
+        "Base directory apps/base/backend exists with a kustomization.yaml, a Namespace, an OCIRepository, and a HelmRelease, mirroring the podinfo layout",
+        "Staging and production overlays exist at apps/staging/backend and apps/production/backend, and 'kustomize build' succeeds for both",
+        "The OCIRepository uses apiVersion source.toolkit.fluxcd.io/v1 with url oci://ghcr.io/acme-corp/charts/backend and a 1.x semver ref (layerSelector optional, matching repo convention)",
+        "The HelmRelease uses apiVersion helm.toolkit.fluxcd.io/v2 with chartRef (the repo's convention) and RetryOnFailure install/upgrade strategy",
+        "Rendered replicaCount is 1 in the staging build output and 3 in the production build output",
+        "The rendered build output of both new overlays passes 'flux schema validate' with zero invalid documents",
+        "The final report states that schema validation (flux schema validate) was run as part of verification"
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "Flux on our staging cluster reports the Kustomization flux-system/apps as failing - the podinfo app errors with a kustomize build failure. A checkout of our GitOps monorepo is at {FIXTURE:tests/gitops-knowledge/debug-repo} (copy it to a scratch directory first). I don't have cluster access from here. Find and fix what's broken, and while you're in there make sure the rest of the repo's manifests are actually valid so we don't hit another failure right after this one.",
+      "expected_output": "Three planted bugs found and fixed: (1) apps/staging/podinfo/kustomization.yaml patch path typo podinfo-values.yml -> .yaml (kustomize build failure), (2) apps/base/podinfo/release.yaml interval '1 hour' -> valid duration (schema pattern violation that survives the build), (3) infrastructure/controllers/metrics-server/release.yaml sets both spec.chart and spec.chartRef (CEL violation). Agent reproduces the failure locally with kustomize build, fixes, and re-validates the whole repo (overlays via build output, plain dirs directly).",
+      "files": [
+        "tests/gitops-knowledge/debug-repo"
+      ],
+      "expectations": [
+        "The staging podinfo overlay builds again: 'kustomize build apps/staging/podinfo' succeeds and the staging values patch is applied (build output contains 'Hello from staging')",
+        "The base HelmRelease interval is a valid duration again (the '1 hour' schema violation is fixed)",
+        "The metrics-server HelmRelease CEL violation is fixed: it no longer sets both spec.chart and spec.chartRef",
+        "The whole repo is schema-clean: plain-manifest directories validate directly and overlays validate via their build output (--skip-missing-schemas for the third-party ClusterIssuer), with zero invalid documents",
+        "The final report identifies all three distinct issues (broken patch path, invalid interval duration, chart/chartRef conflict)"
+      ]
+    },
+    {
+      "id": 11,
+      "prompt": "We onboard internal teams onto our platform cluster with Flux Operator. In a scratch directory, create a tenants.yaml with a ResourceSet that, for each tenant (team-alpha and team-bravo), creates: the tenant namespace, a ServiceAccount named 'flux' in it, and a Flux Kustomization in the tenant namespace impersonating that ServiceAccount, applying path ./tenants/<tenant-name> from our existing GitRepository named 'tenants' in flux-system (every 10 minutes, with pruning). Last time we did this by hand a templating typo took down onboarding, so double-check your work before you hand it back.",
+      "expected_output": "A ResourceSet (fluxcd.controlplane.io/v1) with inputs for both tenants templating Namespace, ServiceAccount and Kustomization per tenant using << inputs.* >> delimiters; the Kustomization uses serviceAccountName flux and a cross-namespace sourceRef with namespace flux-system. The agent renders it locally (flux operator build resourceset) and schema-validates the rendered output.",
+      "files": [],
+      "expectations": [
+        "tenants.yaml contains a ResourceSet with apiVersion fluxcd.controlplane.io/v1 and inputs for both team-alpha and team-bravo",
+        "The template uses << inputs.* >> delimiters and contains no Go-template {{ }} expressions",
+        "'flux operator build resourceset -f tenants.yaml' renders successfully and produces 2 Namespaces, 2 ServiceAccounts named 'flux', and 2 Flux Kustomizations",
+        "Rendered Kustomizations are correct: in the tenant namespace, serviceAccountName 'flux', path ./tenants/<tenant>, sourceRef GitRepository 'tenants' with namespace flux-system (cross-namespace ref), interval 10m, prune true",
+        "The rendered build output passes 'flux schema validate' with zero invalid documents",
+        "The final report states the ResourceSet was rendered locally (flux-operator build) and schema-validated as verification"
+      ]
+    }
+  ]
+}

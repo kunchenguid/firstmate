@@ -1,0 +1,40 @@
+# schema source: Flux v2.9.2 https://github.com/fluxcd/flux2
+apiVersion <string> enum=notification.toolkit.fluxcd.io/v1
+kind <string> enum=Receiver
+metadata.name <string> (required)
+metadata.namespace <string> (required)
+spec <object>	# ReceiverSpec defines the desired state of the Receiver.
+spec.events <[]string>	# Events specifies the list of event types to handle, e.g. 'push' for GitHub or 'Push Hook' for GitLab.
+spec.interval <string> default="10m" pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"	# Interval at which to reconcile the Receiver with its Secret references.
+spec.oidcProviders <[]object>	# OIDCProviders specifies the OIDC providers used to authenticate incoming requests when Type is 'generic-oidc'. The provider whose IssuerURL matches the token's 'iss' claim is used to verify the token signature, expiration and audience, and to evaluate the configured CEL validations against the token claims.
+spec.oidcProviders[].audience <string>	# Audience is the expected audience ('aud' claim) for tokens issued by this provider. Defaults to 'notification-controller'.
+spec.oidcProviders[].issuerURL <string> (required) pattern="^https?://"	# IssuerURL is the OIDC issuer URL used for provider discovery. It must match the 'iss' claim of tokens issued by this provider.
+spec.oidcProviders[].validations <[]object> (required) min=1	# Validations is the list of CEL boolean expressions evaluated against the token claims and the variables. The request is accepted only if all of them evaluate to true; the message of each failing expression is returned to the caller. At least one validation is required. A valid signature alone does not authorize a request: public issuers issue tokens to any caller on the platform, so the validations must constrain the caller's identity claims (e.g. 'repository_owner' for GitHub Actions).
+spec.oidcProviders[].validations[].expression <string> (required)	# Expression is the CEL boolean expression to evaluate.
+spec.oidcProviders[].validations[].message <string> (required)	# Message is returned to the caller when the expression evaluates to false.
+spec.oidcProviders[].variables <[]object>	# Variables is an optional list of named CEL expressions, evaluated in order and exposed as 'vars.<name>'. Each expression can read the token claims via 'claims' and any variable defined before it. Use it to share sub-expressions across validations.
+spec.oidcProviders[].variables[].expression <string> (required)	# Expression is the CEL expression that defines the variable value.
+spec.oidcProviders[].variables[].name <string> (required)	# Name is the variable name; it must be a valid CEL identifier.
+spec.resourceFilter <string>	# ResourceFilter is a CEL expression expected to return a boolean that is evaluated for each resource referenced in the Resources field when a webhook is received. If the expression returns false then the controller will not request a reconciliation for the resource. The expression can read the resource metadata via 'res' and the webhook request body via 'req'. For generic-oidc receivers, the verified OIDC token claims are also available via 'claims'. When the expression is specified the controller will parse it and mark the object as terminally failed if the expression is invalid or does not return a boolean.
+spec.resources <[]object> (required)	# A list of resources to be notified about changes.
+spec.resources[].apiVersion <string>	# API version of the referent
+spec.resources[].filter <string>	# Filter is a CEL expression expected to return a boolean that is evaluated for each resource matched by this reference when a webhook is received, in addition to the top-level resourceFilter. A reconciliation is requested only when both expressions (when set) return true. The expression can read the resource metadata via 'res' and the webhook request body via 'req'. For generic-oidc receivers, the verified OIDC token claims are also available via 'claims'. When the expression is specified the controller will parse it and mark the object as terminally failed if the expression is invalid or does not return a boolean.
+spec.resources[].kind <string> (required) enum=Bucket|GitRepository|Kustomization|HelmRelease|HelmChart|HelmRepository|ImageRepository|ImagePolicy|ImageUpdateAutomation|OCIRepository|ArtifactGenerator|ExternalArtifact|FluxInstance|ResourceSet|ResourceSetInputProvider	# Kind of the referent
+spec.resources[].matchLabels <map[string]string>	# MatchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed. MatchLabels requires the name to be set to `*`.
+spec.resources[].name <string> (required) min=1 max=253	# Name of the referent If multiple resources are targeted `*` may be set.
+spec.resources[].namespace <string> min=1 max=253	# Namespace of the referent
+spec.secretRef <object>	# SecretRef specifies the Secret containing the token used to validate the payload authenticity. The Secret must contain a 'token' key. For GCR receivers, the Secret must also contain an 'email' key with the IAM service account email configured on the Pub/Sub push subscription, and an 'audience' key with the expected OIDC token audience. Required for all receiver types except 'generic-oidc', which authenticates requests using the OIDC token instead and must not set this field.
+spec.secretRef.name <string> (required)	# Name of the referent.
+spec.suspend <boolean>	# Suspend tells the controller to suspend subsequent events handling for this receiver.
+spec.type <string> (required) enum=generic|generic-hmac|generic-oidc|github|gitlab|bitbucket|harbor|dockerhub|quay|gcr|nexus|acr|cdevents	# Type of webhook sender, used to determine the validation procedure and payload deserialization.
+status <object> default={"observedGeneration":-1}	# ReceiverStatus defines the observed state of the Receiver.
+status.conditions <[]object>	# Conditions holds the conditions for the Receiver.
+status.conditions[].lastTransitionTime <string> (required) format=date-time	# lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed. If that is not known, then using the time when the API field changed is acceptable.
+status.conditions[].message <string> (required) max=32768	# message is a human readable message indicating details about the transition. This may be an empty string.
+status.conditions[].observedGeneration <integer> format=int64 min=0	# observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+status.conditions[].reason <string> (required) pattern="^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$" min=1 max=1024	# reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+status.conditions[].status <string> (required) enum=True|False|Unknown	# status of the condition, one of True, False, Unknown.
+status.conditions[].type <string> (required) pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$" max=316	# type of condition in CamelCase or in foo.example.com/CamelCase.
+status.lastHandledReconcileAt <string>	# LastHandledReconcileAt holds the value of the most recent reconcile request value, so a change of the annotation value can be detected.
+status.observedGeneration <integer> format=int64	# ObservedGeneration is the last observed generation of the Receiver object.
+status.webhookPath <string>	# WebhookPath is the generated incoming webhook address in the format of '/hook/sha256sum(token+name+namespace)'.

@@ -1,0 +1,40 @@
+# schema source: Flux v2.9.2 https://github.com/fluxcd/flux2
+apiVersion <string> enum=image.toolkit.fluxcd.io/v1
+kind <string> enum=ImageRepository
+metadata.name <string> (required)
+metadata.namespace <string> (required)
+spec <object>	# ImageRepositorySpec defines the parameters for scanning an image repository, e.g., `fluxcd/flux`.
+spec.accessFrom <object>	# AccessFrom defines an ACL for allowing cross-namespace references to the ImageRepository object based on the caller's namespace labels.
+spec.accessFrom.namespaceSelectors <[]object> (required)	# NamespaceSelectors is the list of namespace selectors to which this ACL applies. Items in this list are evaluated using a logical OR operation.
+spec.accessFrom.namespaceSelectors[].matchLabels <map[string]string>	# MatchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
+spec.certSecretRef <object>	# CertSecretRef can be given the name of a Secret containing either or both of - a PEM-encoded client certificate (`tls.crt`) and private key (`tls.key`); - a PEM-encoded CA certificate (`ca.crt`) and whichever are supplied, will be used for connecting to the registry. The client cert and key are useful if you are authenticating with a certificate; the CA cert is useful if you are using a self-signed server certificate. The Secret must be of type `Opaque` or `kubernetes.io/tls`. Note: Support for the `caFile`, `certFile` and `keyFile` keys has been deprecated.
+spec.certSecretRef.name <string> (required)	# Name of the referent.
+spec.exclusionList <[]string> default=["^.*\\.sig$"] max=25	# ExclusionList is a list of regex strings used to exclude certain tags from being stored in the database.
+spec.image <string> (required)	# Image is the name of the image repository
+spec.insecure <boolean>	# Insecure allows connecting to a non-TLS HTTP container registry.
+spec.interval <string> (required) pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"	# Interval is the length of time to wait between scans of the image repository.
+spec.provider <string> enum=generic|aws|azure|gcp default="generic"	# The provider used for authentication, can be 'aws', 'azure', 'gcp' or 'generic'. When not specified, defaults to 'generic'.
+spec.proxySecretRef <object>	# ProxySecretRef specifies the Secret containing the proxy configuration to use while communicating with the container registry.
+spec.proxySecretRef.name <string> (required)	# Name of the referent.
+spec.secretRef <object>	# SecretRef can be given the name of a secret containing credentials to use for the image registry. The secret should be created with `kubectl create secret docker-registry`, or the equivalent.
+spec.secretRef.name <string> (required)	# Name of the referent.
+spec.serviceAccountName <string> max=253	# ServiceAccountName is the name of the Kubernetes ServiceAccount used to authenticate the image pull if the service account has attached pull secrets.
+spec.suspend <boolean>	# This flag tells the controller to suspend subsequent image scans. It does not apply to already started scans. Defaults to false.
+spec.timeout <string> pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m))+$"	# Timeout for image scanning. Defaults to 'Interval' duration.
+status <object> default={"observedGeneration":-1}	# ImageRepositoryStatus defines the observed state of ImageRepository
+status.canonicalImageName <string>	# CanonicalName is the name of the image repository with all the implied bits made explicit; e.g., `docker.io/library/alpine` rather than `alpine`.
+status.conditions <[]object>
+status.conditions[].lastTransitionTime <string> (required) format=date-time	# lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed. If that is not known, then using the time when the API field changed is acceptable.
+status.conditions[].message <string> (required) max=32768	# message is a human readable message indicating details about the transition. This may be an empty string.
+status.conditions[].observedGeneration <integer> format=int64 min=0	# observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+status.conditions[].reason <string> (required) pattern="^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$" min=1 max=1024	# reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+status.conditions[].status <string> (required) enum=True|False|Unknown	# status of the condition, one of True, False, Unknown.
+status.conditions[].type <string> (required) pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$" max=316	# type of condition in CamelCase or in foo.example.com/CamelCase.
+status.lastHandledReconcileAt <string>	# LastHandledReconcileAt holds the value of the most recent reconcile request value, so a change of the annotation value can be detected.
+status.lastScanResult <object>	# LastScanResult contains the number of fetched tags.
+status.lastScanResult.latestTags <[]string>	# LatestTags is a small sample of the tags found in the last scan. It's the first 10 tags when sorting all the tags in descending alphabetical order.
+status.lastScanResult.revision <string>	# Revision is a stable hash of the scanned tags.
+status.lastScanResult.scanTime <string> format=date-time	# ScanTime is the time when the last scan was performed.
+status.lastScanResult.tagCount <integer> (required)	# TagCount is the number of tags found in the last scan.
+status.observedExclusionList <[]string>	# ObservedExclusionList is a list of observed exclusion list. It reflects the exclusion rules used for the observed scan result in status.lastScanResult.
+status.observedGeneration <integer> format=int64	# ObservedGeneration is the last reconciled generation.

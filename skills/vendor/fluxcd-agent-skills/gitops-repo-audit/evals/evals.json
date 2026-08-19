@@ -1,0 +1,129 @@
+{
+  "skill_name": "gitops-repo-audit",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Analyze the tests/gitops-repo-audit/monorepo-structure/ directory as a GitOps repository and provide a complete analysis report.",
+      "expected_output": "A comprehensive analysis report identifying this as a monorepo pattern with two clusters (staging and production), FluxInstance with GitRepository sync, ArtifactGenerator for monorepo decomposition, Kustomize base/overlay pattern, modern HelmRelease patterns, flags createNamespace/targetNamespace on metrics-server HelmRelease, and recommendations for cluster.size, GitHub App auth, and notifications.",
+      "files": [],
+      "expectations": [
+        "Identifies the repository as a monorepo pattern with apps/infrastructure/clusters structure",
+        "Detects two clusters: staging and production",
+        "Detects FluxInstance resources with sync.kind GitRepository",
+        "Identifies ArtifactGenerator usage for monorepo decomposition into ExternalArtifacts",
+        "Finds HelmRelease and OCIRepository resources",
+        "Notes the dependency chain: infra-controllers depends on nothing, infra-configs depends on infra-controllers, apps depends on infra-configs",
+        "Recognizes the Kustomize base/overlay pattern in apps/ with per-environment patches",
+        "Notes modern install.strategy and upgrade.strategy on HelmReleases",
+        "Detects drift detection enabled on podinfo HelmRelease and flags metrics-server HelmRelease for missing drift detection",
+        "Checks for deprecated API versions and reports findings",
+        "Flags the metrics-server HelmRelease for using targetNamespace and createNamespace instead of creating the namespace in the Kustomization or ResourceSet",
+        "Flags both FluxInstances for missing .spec.cluster.size setting and recommends configuring it for proper controller resource scaling",
+        "Recommends GitHub App auth (sync.provider: github) for the FluxInstance GitRepository sync with GitHub URLs instead of personal access tokens",
+        "Produces a structured report with summary, structure, best practices, and recommendations sections"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Analyze the tests/gitops-repo-audit/multi-repo-structure/ directory as a GitOps repository and provide a complete analysis report.",
+      "expected_output": "A comprehensive analysis report identifying this as an OCI-based multi-repo fleet management pattern using FluxInstance with OCIRepository sync, ResourceSet-based tenant management with dependency chain (policies -> infra -> apps), Cosign OIDC signature verification, ValidatingAdmissionPolicy with ConfigMap-based source allowlist, self-managed Flux Operator via ResourceSet, per-cluster runtime ConfigMaps with watch labels, and tag promotion strategy (latest for staging, latest-stable for production).",
+      "files": [],
+      "expectations": [
+        "Identifies the repository as an OCI-based multi-repo fleet management pattern",
+        "Detects FluxInstance resources with sync.kind OCIRepository and multitenant: true with tenantDefaultServiceAccount",
+        "Identifies four ResourceSet resources: flux-operator, policies, infra, apps, and their roles",
+        "Detects two clusters: staging (size: medium) and production (size: large)",
+        "Notes the OCI artifact sync strategy with tag promotion (latest for staging vs latest-stable for production)",
+        "Identifies the dependency chain: policies ResourceSet -> infra ResourceSet (via readyExpr) -> apps ResourceSet depends on infra-configs Kustomization in monitoring namespace (via readyExpr on observedGeneration)",
+        "Detects the infra ResourceSet internal dependency: infra-configs depends on infra-controllers",
+        "Identifies ValidatingAdmissionPolicy with ConfigMap-based source allowlist restricting tenant source URLs",
+        "Notes Cosign OIDC signature verification on OCI sources (matchOIDCIdentity with issuer and subject patterns)",
+        "Detects per-tenant RBAC: apps tenants get RoleBinding to admin, infra tenants get ClusterRoleBinding to cluster-admin",
+        "Flags that infra tenant Namespaces lack the toolkit.fluxcd.io/role: tenant label, meaning the ValidatingAdmissionPolicy source allowlist does not apply to infra tenants",
+        "Notes the flux-runtime-info ConfigMap with reconcile.fluxcd.io/watch: Enabled label for reactive reconciliation",
+        "Identifies postBuild.substituteFrom for environment-specific variable injection from runtime ConfigMaps",
+        "Notes Secret and ConfigMap injection via fluxcd.controlplane.io/copyFrom annotations for tenant isolation",
+        "Detects the self-managed Flux Operator pattern: ResourceSet deploys OCIRepository + HelmRelease for the operator itself",
+        "Produces a structured report with summary, structure, multi-tenancy, security, best practices, and recommendations sections"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Analyze the tests/gitops-repo-audit/image-automation/ directory as a GitOps repository and provide a complete analysis report.",
+      "expected_output": "A report identifying a monorepo with image automation for two apps (podinfo and frontend), flagging the frontend's ECR ImageRepository without Workload Identity, missing tag filtering on frontend ImagePolicy, frontend ImageUpdateAutomation pushing to main instead of a separate branch, plaintext git-push-credentials Secret, missing watch label on the podinfo-values ConfigMap used in valuesFrom, and recognizing the SOPS-encrypted Secret and proper notification setup as positives.",
+      "files": [],
+      "expectations": [
+        "Detects ImageRepository, ImagePolicy, and ImageUpdateAutomation resources for both podinfo and frontend apps",
+        "Flags the frontend ImageRepository pointing at ECR (dkr.ecr) without .spec.provider set to aws for Workload Identity",
+        "Flags the frontend ImagePolicy for missing filterTags pattern, allowing any tag format to be promoted",
+        "Flags the frontend ImageUpdateAutomation for pushing to main branch instead of a separate branch for PR review",
+        "Recognizes the podinfo ImageUpdateAutomation push branch (staging/image-updates) as the correct pattern",
+        "Recognizes the podinfo ImagePolicy filterTags with regex pattern as the correct pattern",
+        "Detects the plaintext Secret (git-push-credentials) with a GitHub PAT in stringData as unencrypted credentials in Git",
+        "Recognizes the SOPS-encrypted Secret (git-credentials) with sops: metadata and ENC[ prefixed values as properly encrypted",
+        "Flags the podinfo-values ConfigMap used in HelmRelease valuesFrom as missing the reconcile.fluxcd.io/watch: Enabled label",
+        "Flags the podinfo HelmRelease is missing storageNamespace",
+        "Flags overlapping Kustomization paths: notifications (./notifications) and notifications-dev (./notifications/dev) manage overlapping resources",
+        "Detects current notification API (v1beta3) Provider and Alert as properly configured",
+        "Notes that the FluxInstance includes image-reflector-controller and image-automation-controller components",
+        "Produces a structured report with image automation findings, security findings, and recommendations"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Analyze the tests/gitops-repo-audit/mixed-issues/ directory as a GitOps repository and provide a complete analysis report.",
+      "expected_output": "A report identifying multiple critical issues: gotk-sync.yaml indicating flux bootstrap (recommend Flux Operator migration), deprecated API versions on GitRepository v1beta1, Kustomization v1beta1/v1beta2, HelmRelease v2beta2, HelmRepository v1beta1, hardcoded password in redis HelmRelease, insecure source, HelmRepository type:oci legacy pattern, cross-namespace sourceRef on podinfo HelmRelease, missing prune/dependsOn on apps Kustomization, missing drift detection and remediation strategies, runtime-values ConfigMap without watch label, and targetNamespace/createNamespace on monitoring HelmRelease.",
+      "files": [],
+      "expectations": [
+        "Detects gotk-sync.yaml and recommends migrating to Flux Operator with link to https://fluxoperator.dev/docs/guides/migration/",
+        "Detects GitRepository using source.toolkit.fluxcd.io/v1beta1 (should be v1)",
+        "Detects Kustomization using kustomize.toolkit.fluxcd.io/v1beta1 and v1beta2 (should be v1)",
+        "Detects HelmRelease using helm.toolkit.fluxcd.io/v2beta2 (should be v2)",
+        "Detects HelmRepository using source.toolkit.fluxcd.io/v1beta1 (should be v1)",
+        "Detects the hardcoded password (supersecret123) in redis.yaml HelmRelease values",
+        "Flags the secretGenerator in apps/kustomization.yaml for containing plaintext credentials (DB_PASSWORD, CONNECTION_STRING) that should use SOPS encryption or External Secrets",
+        "Detects insecure: true on the ingress-nginx HelmRepository",
+        "Flags HelmRepository with type: oci (prometheus-community) as legacy, recommends migration to OCIRepository",
+        "Flags the podinfo HelmRelease for cross-namespace sourceRef (podinfo namespace referencing source in flux-system namespace)",
+        "Flags the apps Kustomization for missing prune: true",
+        "Flags missing dependsOn between apps and infra-controllers Kustomizations",
+        "Notes missing drift detection on all HelmReleases",
+        "Notes missing remediation/retry strategy on all HelmReleases",
+        "Flags the redis HelmRelease for wildcard chart version (version: '*')",
+        "Flags the redis HelmRelease for deploying to the default namespace",
+        "Flags the monorepo ArtifactGenerator with invalid overwrite",
+        "Flags the runtime-values ConfigMap used in postBuild.substituteFrom as missing the reconcile.fluxcd.io/watch: Enabled label",
+        "Flags the kube-prometheus-stack HelmRelease for using targetNamespace and createNamespace instead of creating the namespace in the Kustomization",
+        "Clearly conveys the repository has critical or severe issues requiring immediate attention (deprecated APIs, plaintext secrets, insecure sources)",
+        "Produces a structured report with API compliance, security, best practices, and recommendations sections"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Analyze the tests/gitops-repo-audit/overlay-effects/ directory as a GitOps repository and provide a complete analysis report focusing on security and operational best practices.",
+      "expected_output": "A report catching that the hardened base Deployment (apps/base/webapp) is subverted by the production Kustomize overlay (apps/production/webapp): the rendered manifest runs privileged: true, hostNetwork: true, readOnlyRootFilesystem: false, and a mutable :latest image tag. These issues are visible only in the effective/rendered output, not in the raw base files — the auditor must inspect the rendered overlay (via the validation bundle or kustomize build) to detect them.",
+      "files": [],
+      "expectations": [
+        "Flags the production webapp container image using a mutable ':latest' tag, set by the overlay's images transformer (raw base pins :1.4.2)",
+        "Flags the webapp container running as privileged (privileged: true) in production, set by the overlay patch (raw base has privileged: false)",
+        "Flags hostNetwork: true / host network namespace sharing on the webapp pod, added by the overlay patch (absent in raw base)",
+        "Flags readOnlyRootFilesystem disabled in production, overridden by the overlay patch (raw base has it enabled)",
+        "Demonstrates it inspected the effective/rendered manifests rather than only the raw base files, and does not incorrectly certify the deployment as secure"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Analyze the tests/gitops-repo-audit/overlay-stress/ directory as a GitOps repository and provide a complete analysis report focusing on security and operational best practices.",
+      "expected_output": "A report identifying that among six production app overlays (frontend, backend, cache, payments, analytics, notifications) sharing a hardened base, only the payments overlay is insecure: its rendered Deployment runs privileged: true, hostNetwork: true, readOnlyRootFilesystem: false, and a mutable :latest image tag. The five other overlays are benign. Detecting the payments needle requires rendering every overlay (via the validation bundle or kustomize build), not eyeballing raw base files — which are all hardened and would wrongly read as a clean, secure repo.",
+      "files": [],
+      "expectations": [
+        "Identifies payments specifically as the one insecure app among the six production overlays",
+        "Flags the payments production image using a mutable ':latest' tag (overlay images transformer)",
+        "Flags the payments container running as privileged (privileged: true) in production (overlay patch)",
+        "Flags hostNetwork: true on the payments pod (overlay patch)",
+        "Flags readOnlyRootFilesystem disabled on payments in production (overlay patch)",
+        "Does not certify the repository as secure/PASS on the basis of the hardened raw base files — inspects the rendered overlays for effective state"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+# schema source: Flux v2.9.2 https://github.com/fluxcd/flux2
+apiVersion <string> enum=source.toolkit.fluxcd.io/v1
+kind <string> enum=GitRepository
+metadata.name <string> (required)
+metadata.namespace <string> (required)
+spec <object>	# GitRepositorySpec specifies the required configuration to produce an Artifact for a Git repository.
+spec.ignore <string>	# Ignore overrides the set of excluded patterns in the .sourceignore format (which is the same as .gitignore). If not provided, a default will be used, consult the documentation for your version to find out what those are.
+spec.include <[]object>	# Include specifies a list of GitRepository resources which Artifacts should be included in the Artifact produced for this GitRepository.
+spec.include[].fromPath <string>	# FromPath specifies the path to copy contents from, defaults to the root of the Artifact.
+spec.include[].repository <object> (required)	# GitRepositoryRef specifies the GitRepository which Artifact contents must be included.
+spec.include[].repository.name <string> (required)	# Name of the referent.
+spec.include[].toPath <string>	# ToPath specifies the path to copy contents to, defaults to the name of the GitRepositoryRef.
+spec.interval <string> (required) pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"	# Interval at which the GitRepository URL is checked for updates. This interval is approximate and may be subject to jitter to ensure efficient use of resources.
+spec.provider <string> enum=generic|aws|azure|github	# Provider used for authentication, can be 'aws', 'azure', 'github', 'generic'. When not specified, defaults to 'generic'.
+spec.proxySecretRef <object>	# ProxySecretRef specifies the Secret containing the proxy configuration to use while communicating with the Git server.
+spec.proxySecretRef.name <string> (required)	# Name of the referent.
+spec.recurseSubmodules <boolean>	# RecurseSubmodules enables the initialization of all submodules within the GitRepository as cloned from the URL, using their default settings.
+spec.ref <object>	# Reference specifies the Git reference to resolve and monitor for changes, defaults to the 'master' branch.
+spec.ref.branch <string>	# Branch to check out, defaults to 'master' if no other field is defined.
+spec.ref.commit <string>	# Commit SHA to check out, takes precedence over all reference fields. This can be combined with Branch to shallow clone the branch, in which the commit is expected to exist.
+spec.ref.name <string>	# Name of the reference to check out; takes precedence over Branch, Tag and SemVer. It must be a valid Git reference: https://git-scm.com/docs/git-check-ref-format#_description Examples: "refs/heads/main", "refs/tags/v0.1.0", "refs/pull/420/head", "refs/merge-requests/1/head"
+spec.ref.semver <string>	# SemVer tag expression to check out, takes precedence over Tag.
+spec.ref.tag <string>	# Tag to check out, takes precedence over Branch.
+spec.secretRef <object>	# SecretRef specifies the Secret containing authentication credentials for the GitRepository. For HTTPS repositories the Secret must contain 'username' and 'password' fields for basic auth or 'bearerToken' field for token auth. For SSH repositories the Secret must contain 'identity' and 'known_hosts' fields.
+spec.secretRef.name <string> (required)	# Name of the referent.
+spec.serviceAccountName <string>	# ServiceAccountName is the name of the Kubernetes ServiceAccount used to authenticate to the GitRepository. This field is only supported for 'azure' and 'aws' providers.
+spec.sparseCheckout <[]string>	# SparseCheckout specifies a list of directories to checkout when cloning the repository. If specified, only these directories are included in the Artifact produced for this GitRepository.
+spec.suspend <boolean>	# Suspend tells the controller to suspend the reconciliation of this GitRepository.
+spec.timeout <string> default="60s" pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m))+$"	# Timeout for Git operations like cloning, defaults to 60s.
+spec.url <string> (required) pattern="^(http|https|ssh)://.*$"	# URL specifies the Git repository URL, it can be an HTTP/S or SSH address.
+spec.verify <object>	# Verification specifies the configuration to verify the Git commit signature(s).
+spec.verify.mode <string> enum=head|HEAD|Tag|TagAndHEAD default="HEAD"	# Mode specifies which Git object(s) should be verified. The variants "head" and "HEAD" both imply the same thing, i.e. verify the commit that the HEAD of the Git repository points to. The variant "head" solely exists to ensure backwards compatibility.
+spec.verify.secretRef <object> (required)	# SecretRef specifies the Secret containing the public keys of trusted Git authors. PGP public keys must be stored under keys with the .asc suffix, and SSH public keys must be stored under keys with the .sshpub suffix.
+spec.verify.secretRef.name <string> (required)	# Name of the referent.
+status <object> default={"observedGeneration":-1}	# GitRepositoryStatus records the observed state of a Git repository.
+status.artifact <object>	# Artifact represents the last successful GitRepository reconciliation.
+status.artifact.digest <string> (required) pattern="^[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[a-zA-Z0-9=_-]+$"	# Digest is the digest of the file in the form of '<algorithm>:<checksum>'.
+status.artifact.lastUpdateTime <string> (required) format=date-time	# LastUpdateTime is the timestamp corresponding to the last update of the Artifact.
+status.artifact.metadata <map[string]string>	# Metadata holds upstream information such as OCI annotations.
+status.artifact.path <string> (required)	# Path is the relative file path of the Artifact. It can be used to locate the file in the root of the Artifact storage on the local file system of the controller managing the Source.
+status.artifact.revision <string> (required)	# Revision is a human-readable identifier traceable in the origin source system. It can be a Git commit SHA, Git tag, a Helm chart version, etc.
+status.artifact.size <integer> format=int64	# Size is the number of bytes in the file.
+status.artifact.url <string> (required)	# URL is the HTTP address of the Artifact as exposed by the controller managing the Source. It can be used to retrieve the Artifact for consumption, e.g. by another controller applying the Artifact contents.
+status.conditions <[]object>	# Conditions holds the conditions for the GitRepository.
+status.conditions[].lastTransitionTime <string> (required) format=date-time	# lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed. If that is not known, then using the time when the API field changed is acceptable.
+status.conditions[].message <string> (required) max=32768	# message is a human readable message indicating details about the transition. This may be an empty string.
+status.conditions[].observedGeneration <integer> format=int64 min=0	# observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+status.conditions[].reason <string> (required) pattern="^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$" min=1 max=1024	# reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+status.conditions[].status <string> (required) enum=True|False|Unknown	# status of the condition, one of True, False, Unknown.
+status.conditions[].type <string> (required) pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$" max=316	# type of condition in CamelCase or in foo.example.com/CamelCase.
+status.includedArtifacts <[]object>	# IncludedArtifacts contains a list of the last successfully included Artifacts as instructed by GitRepositorySpec.Include.
+status.includedArtifacts[].digest <string> (required) pattern="^[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[a-zA-Z0-9=_-]+$"	# Digest is the digest of the file in the form of '<algorithm>:<checksum>'.
+status.includedArtifacts[].lastUpdateTime <string> (required) format=date-time	# LastUpdateTime is the timestamp corresponding to the last update of the Artifact.
+status.includedArtifacts[].metadata <map[string]string>	# Metadata holds upstream information such as OCI annotations.
+status.includedArtifacts[].path <string> (required)	# Path is the relative file path of the Artifact. It can be used to locate the file in the root of the Artifact storage on the local file system of the controller managing the Source.
+status.includedArtifacts[].revision <string> (required)	# Revision is a human-readable identifier traceable in the origin source system. It can be a Git commit SHA, Git tag, a Helm chart version, etc.
+status.includedArtifacts[].size <integer> format=int64	# Size is the number of bytes in the file.
+status.includedArtifacts[].url <string> (required)	# URL is the HTTP address of the Artifact as exposed by the controller managing the Source. It can be used to retrieve the Artifact for consumption, e.g. by another controller applying the Artifact contents.
+status.lastHandledReconcileAt <string>	# LastHandledReconcileAt holds the value of the most recent reconcile request value, so a change of the annotation value can be detected.
+status.observedGeneration <integer> format=int64	# ObservedGeneration is the last observed generation of the GitRepository object.
+status.observedIgnore <string>	# ObservedIgnore is the observed exclusion patterns used for constructing the source artifact.
+status.observedInclude <[]object>	# ObservedInclude is the observed list of GitRepository resources used to produce the current Artifact.
+status.observedInclude[].fromPath <string>	# FromPath specifies the path to copy contents from, defaults to the root of the Artifact.
+status.observedInclude[].repository <object> (required)	# GitRepositoryRef specifies the GitRepository which Artifact contents must be included.
+status.observedInclude[].repository.name <string> (required)	# Name of the referent.
+status.observedInclude[].toPath <string>	# ToPath specifies the path to copy contents to, defaults to the name of the GitRepositoryRef.
+status.observedRecurseSubmodules <boolean>	# ObservedRecurseSubmodules is the observed resource submodules configuration used to produce the current Artifact.
+status.observedSparseCheckout <[]string>	# ObservedSparseCheckout is the observed list of directories used to produce the current Artifact.
+status.sourceVerificationMode <string>	# SourceVerificationMode is the last used verification mode indicating which Git object(s) have been verified.
