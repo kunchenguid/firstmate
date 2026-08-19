@@ -1299,10 +1299,8 @@ EOF
 # retyping would duplicate it. Proven pending (and pending-unproven) retries
 # consume the budget; any other verdict returns immediately, so `unknown`
 # stays a loud refusal rather than a blind retry into an unreadable pane.
-# tmux keeps its own richer core (bin/fm-tmux-lib.sh: the busy-queued-Enter
-# and idle-baseline turn-started conversions its busy primitive enables), and
-# herdr confirms through native agent-state; both consume the same shared
-# verdict, so no shape knowledge lives in any of the three loops.
+# tmux and herdr keep richer cores that consume this same shared verdict plus
+# fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
 fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label]
   local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} i=0 state
   while :; do
@@ -1316,6 +1314,27 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || { printf '%s' "$state"; return 0; }
   done
+}
+
+# fm_composer_queued_enter_verdict: the ONE busy-queued-Enter policy.
+# After Enter retries are spent, convert a structurally proven pending
+# composer given a delivery-busy signal from the adapter:
+#   pending + busy  -> empty   (Enter was accepted and queued; do not re-send)
+#   pending + idle  -> pending (genuine swallow; caller must not assume delivery)
+#   pending + unknown -> pending (unreadable busy is not proof of a queue)
+# Every other composer verdict is returned unchanged, so pending-unproven,
+# empty, and unknown never receive this conversion.
+# Adapters supply their own busy primitive (tmux: fm_pane_is_busy; herdr:
+# native agent_status=working, or a rendered busy footer on an idle native
+# baseline). This function does not read a pane.
+fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
+  local state=$1 busy=${2:-}
+  [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
+  if [ "$busy" = busy ]; then
+    printf 'empty'
+  else
+    printf 'pending'
+  fi
 }
 
 _fm_composer_classify_pi_rows() {  # <screen> <styled>

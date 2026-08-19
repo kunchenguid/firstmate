@@ -254,23 +254,22 @@ Opencode can auto-upgrade itself in the background and the running TUI can exit 
 If a pane shows the exit banner, relaunch with `--continue` to resume the session.
 `--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
 
-**Busy-queued Enter (opencode 1.18.4, tmux backend fix, herdr known gap).**
+**Busy-queued Enter (opencode 1.18.4).**
 While opencode is mid-turn, the composer accepts Enter as a "send when the turn
 ends" keystroke but does not clear the typed text from the composer until the
 turn actually finishes.
-Without a fix, every `fm-send` to a busy opencode pane exits non-zero on a
+Without a conversion, every `fm-send` to a busy opencode pane exits non-zero on a
 false "Enter swallowed", and every daemon escalation that lands while the
 primary is mid-turn is treated as wedged.
-The shared `fm_tmux_submit_enter_core` (`bin/fm-tmux-lib.sh`) now falls back
-to `fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means
-the Enter was accepted and queued (reported as `empty` so the caller does not
-re-send), while an idle pane keeps `pending` as a genuine swallow. The herdr
-adapter observes the same opencode behavior but needs a separate fix; it is
-recorded as a known gap in `docs/herdr-backend.md` rather than patched here,
-so the tmux adapter does not paper over a herdr-specific shape.
-Regression coverage: `tests/fm-tmux-submit-busy.test.sh` covers the four
-scenarios (busy + pending -> `empty`, idle + pending -> `pending`, busy +
-cleared -> `empty`, idle + cleared -> `empty`).
+`fm_composer_queued_enter_verdict` (`bin/fm-composer-lib.sh`) is the ONE policy:
+after the Enter-retry budget, a busy pane plus proven pending is `empty` (queued,
+do not re-send), and an idle pane keeps `pending` as a genuine swallow.
+Tmux supplies `fm_pane_is_busy`; herdr supplies native `agent_status=working`,
+or a rendered busy footer on an idle native baseline because live Claude can
+keep `agent_status` idle through a landed turn.
+Regression coverage: `tests/fm-tmux-submit-busy.test.sh`,
+`tests/fm-composer-lib.test.sh`, and `tests/fm-backend-herdr.test.sh`.
+The live Herdr Claude guard is `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh`.
 
 **Primary-session guard fact (verified 2026-07-08, OpenCode 1.17.6).**
 The firstmate PRIMARY's own `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.
