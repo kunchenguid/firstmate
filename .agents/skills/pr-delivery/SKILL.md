@@ -46,5 +46,5 @@ Do not invent a parallel PR poll or merge path.
 
 ## Holds this scan respects
 
-The scan already blocks on checks, mergeability, review issues, migration evidence, authority (`needs-decision` without yolo), destructive or real-contact decisions, and missing task linkage.
+The scan already blocks on checks, mergeability, review issues, migration evidence, unresolved authority decisions, destructive or real-contact decisions, and missing task linkage.
 Do not override a hold the scan reported without new evidence or captain authority.

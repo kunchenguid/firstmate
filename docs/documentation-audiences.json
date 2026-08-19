@@ -165,6 +165,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/pr-delivery/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/project-management/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -362,6 +366,10 @@
     },
     {
       "path": "docs/verification/public-followup.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/pr-delivery.md",
       "audience": "maintainer-verification"
     },
     {
