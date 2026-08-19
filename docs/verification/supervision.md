@@ -480,6 +480,7 @@ ok - max-defer on an empty stuck pane types once, alarms, and preserves the buff
 ok - normal flush clears a stale wedge marker
 ok - confirmed pause recheck delivery stays retired until the next pause cadence
 ok - shutdown request starts no new submit and preserves the pending buffer
+ok - daemon shutdown reaps its exact watcher group across the env-to-script exec boundary
 ok - lifecycle: routine self-handles, terminal survives a watcher restart, buffers once, no dup, injects once
 ok - fm_backend_herdr_cli: an explicit timeout stops the whole stalled vendor process group
 ok - return catch-up precedes Bearings, owns live blocker remediation, preserves evidence once, and clears idempotently

@@ -1478,11 +1478,16 @@ fm_super_main() {
   migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: finish active delivery, preserve pending, reap, release -----
-  local WATCHER_PID="" WATCHER_IDENTITY="" CUR_TMP="" SHUTDOWN_REQUESTED=0
+  local WATCHER_PID="" CUR_TMP="" SHUTDOWN_REQUESTED=0
   watcher_process_group() {  # <watcher-pid>
-    local pid=$1 pgid current_identity
-    current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
-    [ -n "$WATCHER_IDENTITY" ] && [ "$current_identity" = "$WATCHER_IDENTITY" ] || return 1
+    local pid=$1 ppid pgid
+    # The watcher is this shell's unreaped direct child. That parent binding is
+    # stable across the env-to-script exec boundary, while fm_pid_identity's
+    # command component is not. A direct child PID cannot be reused before this
+    # shell reaps it, so parent plus isolated process-group equality is exact
+    # authority for signaling only the watcher tree this daemon launched.
+    ppid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]') || return 1
+    [ "$ppid" = "$$" ] || return 1
     pgid=$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d '[:space:]') || return 1
     case "$pgid" in ''|*[!0-9]*|0|1) return 1 ;; esac
     [ "$pgid" = "$pid" ] || return 1
@@ -1503,7 +1508,7 @@ fm_super_main() {
         attempt=$((attempt + 1))
       done
       kill -0 -- "-$pgid" 2>/dev/null && kill -KILL -- "-$pgid" 2>/dev/null || true
-    elif [ "$(fm_pid_identity "$pid" 2>/dev/null || true)" = "$WATCHER_IDENTITY" ] && [ -n "$WATCHER_IDENTITY" ]; then
+    elif [ "$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')" = "$$" ]; then
       kill -TERM "$pid" 2>/dev/null || true
       while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 20 ]; do
         sleep 0.1
@@ -1513,7 +1518,6 @@ fm_super_main() {
     fi
     wait "$pid" 2>/dev/null || true
     WATCHER_PID=""
-    WATCHER_IDENTITY=""
   }
   # shellcheck disable=SC2329 # Invoked indirectly by the TERM/INT trap below.
   request_shutdown() {
@@ -1572,16 +1576,6 @@ fm_super_main() {
     env -u FM_BACKEND_HERDR_CLI_TIMEOUT_SECS "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
     WATCHER_PID=$!
     [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
-    WATCHER_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null) || {
-      kill -TERM "$WATCHER_PID" 2>/dev/null || true
-      wait "$WATCHER_PID" 2>/dev/null || true
-      WATCHER_PID=""
-      rm -f "$CUR_TMP"
-      CUR_TMP=""
-      log "error: watcher identity publication failed; retrying in 5s"
-      sleep 5
-      return 1
-    }
   }
 
   local rc reason

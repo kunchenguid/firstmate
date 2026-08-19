@@ -775,6 +775,52 @@ test_shutdown_request_preserves_pending_without_new_submit() {
   pass "shutdown request starts no new submit and preserves the pending buffer"
 }
 
+test_daemon_shutdown_reaps_watcher_after_exec_identity_change() {
+  local dir state fakebin capture daemon_pid watcher_pid watcher_pgid i=0
+  dir=$(make_supercase shutdown-watcher-exec)
+  state="$dir/state"; fakebin="$dir/fakebin"; capture="$dir/pane.txt"
+  printf '❯ \n' > "$capture"
+  cat > "$fakebin/env" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -u ] && [ "${2:-}" = FM_BACKEND_HERDR_CLI_TIMEOUT_SECS ]; then
+  sleep 0.5
+fi
+exec /usr/bin/env "$@"
+SH
+  chmod +x "$fakebin/env"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=tmux \
+    FM_SUPERVISOR_TARGET=fakepane FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_POLL=30 FM_HOUSEKEEPING_TICK=999999 "$DAEMON" >"$dir/daemon.out" 2>"$dir/daemon.err" &
+  daemon_pid=$!
+  while [ "$i" -lt 100 ]; do
+    watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    case "$watcher_pid" in ''|*[!0-9]*) ;; *) break ;; esac
+    kill -0 "$daemon_pid" 2>/dev/null || fail "daemon exited before its watcher published a pid"
+    sleep 0.05
+    i=$((i + 1))
+  done
+  case "$watcher_pid" in ''|*[!0-9]*) fail "watcher did not publish a pid" ;; esac
+  sleep 0.6
+  kill -TERM "$daemon_pid" 2>/dev/null || fail "could not request daemon shutdown"
+  i=0
+  while kill -0 "$daemon_pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$daemon_pid" 2>/dev/null; then
+    watcher_pgid=$(ps -p "$watcher_pid" -o pgid= 2>/dev/null | tr -d '[:space:]')
+    case "$watcher_pgid" in ''|*[!0-9]*|0|1) ;; *) kill -TERM -- "-$watcher_pgid" 2>/dev/null || true ;; esac
+    kill -TERM "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    fail "daemon shutdown hung after its watcher exec changed process identity"
+  fi
+  wait "$daemon_pid" 2>/dev/null || true
+  [ ! -e "$state/.supervise-daemon.pid" ] || fail "daemon pidfile remained after watcher cleanup"
+  [ ! -e "$state/.supervise-daemon.lock" ] || fail "daemon lock remained after watcher cleanup"
+  pass "daemon shutdown reaps its exact watcher group across the env-to-script exec boundary"
+}
+
 test_afk_absent_daemon_does_not_inject() {
   local dir state fakebin sent capture
   dir=$(make_supercase afk-off)
@@ -1930,6 +1976,7 @@ test_terminal_stale_escalate_leaves_no_marker
 test_signal_escalate_marks_seen_no_catchall_refire
 test_collapse_newlines_pure
 test_shutdown_request_preserves_pending_without_new_submit
+test_daemon_shutdown_reaps_watcher_after_exec_identity_change
 test_afk_absent_daemon_does_not_inject
 test_busy_guard_defers_when_supervisor_busy
 test_marker_detection
