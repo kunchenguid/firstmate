@@ -74,7 +74,11 @@
 # session lingered instead, inflating the count by the length of every episode.
 # A parse failure on the block record is recorded here too, and so is a block count
 # that could not be written, since a record failure leaving no trace is the one
-# silent failure this file will not accept.
+# silent failure this file will not accept. The same rule covers a stand-down
+# write that could not be persisted (the block budget is exhausted but the flag
+# never lands) and a notice write that could not be persisted (the per-episode
+# dedup key never lands): both are this guard violating its own stated rule if
+# they go untraced.
 #
 # RECORD IDENTITY IS THE SESSION: both records are named per session_id, which is
 # the identity of the context accumulation itself (the transcript file is
@@ -327,9 +331,12 @@ record_field() {  # <file> <key>
 # The notice record tracks SEVERAL INDEPENDENT things, each in its own field,
 # because one field standing for several meant whichever fired first silenced the
 # others for the whole episode:
-#   stage       - the threshold notice last shown, advisory or ceiling.
-#   unrecorded  - the count-not-recorded degrade has been reported.
-#   badrecord   - an unparseable block record has been traced.
+#   stage         - the threshold notice last shown, advisory or ceiling.
+#   unrecorded    - the count-not-recorded degrade has been reported.
+#   badrecord     - an unparseable block record has been traced.
+#   standdownfail - the sticky stand-down write itself could not be persisted.
+#   noticedegraded - this very record could not be written and fell back to
+#                    NOTICE_DEGRADED_FILE below.
 # These are independent flags and NOT an ordering: nothing here ranks one above
 # another, which is what keeps this shape clear of the straddle case above.
 # `stage` holds a value and the others are 0/1, so the mapping lives in one place.
@@ -337,17 +344,38 @@ notice_field() {  # <notice>
   case "$1" in
     ceiling-unrecorded) printf 'unrecorded\n' ;;
     record-unparseable) printf 'badrecord\n' ;;
+    standdown-unrecorded) printf 'standdownfail\n' ;;
+    notice-unwritable) printf 'noticedegraded\n' ;;
     *) printf 'stage\n' ;;
   esac
+}
+
+# A fallback marker used ONLY when $NOTICE_FILE itself is unwritable while the
+# state directory still accepts a new file - the same narrower shape reproduced
+# for an unwritable block record, not the wholly-unwritable state directory
+# below. It carries the SAME fields as $NOTICE_FILE and exists to restore
+# stage_enter's once-per-crossing dedup when the primary record cannot be
+# rewritten, so a session stuck in that shape traces one notice-write failure
+# and then keeps deduping the ordinary crossing notices instead of retripping
+# on every turn end. It is consulted only when $NOTICE_FILE has no value for a
+# field, never treated as authoritative over it, and never read back to decide
+# anything the trip record itself decides.
+NOTICE_DEGRADED_FILE="$STATE/.context-budget-notice-degraded-$SESSION_ID"
+
+notice_record_field() {  # <key>
+  local val
+  val=$(record_field "$NOTICE_FILE" "$1")
+  [ -n "$val" ] || val=$(record_field "$NOTICE_DEGRADED_FILE" "$1")
+  printf '%s\n' "$val"
 }
 
 notice_seen() {  # <notice>
   local field
   field=$(notice_field "$1")
   if [ "$field" = stage ]; then
-    [ "$(record_field "$NOTICE_FILE" stage)" = "$1" ]
+    [ "$(notice_record_field stage)" = "$1" ]
   else
-    [ "$(record_field "$NOTICE_FILE" "$field")" = 1 ]
+    [ "$(notice_record_field "$field")" = 1 ]
   fi
 }
 
@@ -356,27 +384,52 @@ notice_seen() {  # <notice>
 # A notice that cannot be recorded may repeat on a later turn end. That is the
 # deliberate degrade: a repeated visible warning is harmless, while suppressing
 # it would lose the shipped default's only rendered behavior.
+#
+# But repeating is only acceptable when nothing CAN be deduped, as in the wholly
+# unwritable state directory below. When only $NOTICE_FILE is unwritable, falling
+# straight through here would silently lose stage_enter's per-crossing dedup and
+# retrip the guard's non-blocking notices on every single turn end above the
+# threshold - reintroducing the exact per-turn-end inflation this file's trip
+# record exists to avoid. The degraded marker preserves the same fields outside
+# $NOTICE_FILE so the next notice_seen still finds them, and falling back to it
+# is itself traced through the trip record exactly once per episode, via
+# noticedegraded, never by reading a decision back out of the trip file.
 notice_record() {  # <notice>
-  local stage unrecorded badrecord
-  stage=$(record_field "$NOTICE_FILE" stage)
-  unrecorded=$(record_field "$NOTICE_FILE" unrecorded)
-  badrecord=$(record_field "$NOTICE_FILE" badrecord)
+  local stage unrecorded badrecord standdownfail noticedegraded already_degraded
+  stage=$(notice_record_field stage)
+  unrecorded=$(notice_record_field unrecorded)
+  badrecord=$(notice_record_field badrecord)
+  standdownfail=$(notice_record_field standdownfail)
+  noticedegraded=$(notice_record_field noticedegraded)
   case "$(notice_field "$1")" in
     unrecorded) unrecorded=1 ;;
     badrecord) badrecord=1 ;;
+    standdownfail) standdownfail=1 ;;
+    noticedegraded) noticedegraded=1 ;;
     *) stage=$1 ;;
   esac
   [ "$unrecorded" = 1 ] || unrecorded=0
   [ "$badrecord" = 1 ] || badrecord=0
+  [ "$standdownfail" = 1 ] || standdownfail=0
+  already_degraded=$noticedegraded
+  [ "$noticedegraded" = 1 ] || noticedegraded=0
   [ -e "$NOTICE_FILE" ] || prune_dead_records
   # 2>/dev/null FIRST on every record write in this file: bash applies
   # redirections left to right, so a trailing one is not in place yet when the
   # output redirection itself fails on an unwritable record, and the shell's
   # "Permission denied" would leak - onto the very stderr the blocking path uses
   # to deliver the banner to the model.
-  printf 'stage=%s\nunrecorded=%s\nbadrecord=%s\ncompacts=%s\nsession=%s\n' \
-    "$stage" "$unrecorded" "$badrecord" "$COMPACTS" "$SESSION_ID" \
-    2>/dev/null > "$NOTICE_FILE" || true
+  if printf 'stage=%s\nunrecorded=%s\nbadrecord=%s\nstanddownfail=%s\nnoticedegraded=%s\ncompacts=%s\nsession=%s\n' \
+    "$stage" "$unrecorded" "$badrecord" "$standdownfail" "$noticedegraded" "$COMPACTS" "$SESSION_ID" \
+    2>/dev/null > "$NOTICE_FILE"; then
+    return 0
+  fi
+  noticedegraded=1
+  printf 'stage=%s\nunrecorded=%s\nbadrecord=%s\nstanddownfail=%s\nnoticedegraded=%s\ncompacts=%s\nsession=%s\n' \
+    "$stage" "$unrecorded" "$badrecord" "$standdownfail" "$noticedegraded" "$COMPACTS" "$SESSION_ID" \
+    2>/dev/null > "$NOTICE_DEGRADED_FILE" || true
+  [ "$already_degraded" = 1 ] || trip_record notice-unwritable
+  return 1
 }
 
 BUDGET_COUNT=0
@@ -518,7 +571,7 @@ record_predates_a_compaction() {  # <file>
   [ "$COMPACTS" -gt "$seen" ]
 }
 
-for record in "$BUDGET_FILE" "$NOTICE_FILE"; do
+for record in "$BUDGET_FILE" "$NOTICE_FILE" "$NOTICE_DEGRADED_FILE"; do
   if record_predates_a_compaction "$record"; then
     rm -f "$record" 2>/dev/null || true
   fi
@@ -529,7 +582,7 @@ done
 # here, so a session that has already spent its block budget is never blocked
 # again until it genuinely drops back under the advisory or genuinely compacts.
 if [ "$TOTAL" -lt "$ADVISORY" ]; then
-  rm -f "$BUDGET_FILE" "$NOTICE_FILE" 2>/dev/null || true
+  rm -f "$BUDGET_FILE" "$NOTICE_FILE" "$NOTICE_DEGRADED_FILE" 2>/dev/null || true
   exit 0
 fi
 
@@ -576,10 +629,19 @@ COUNT=$((BUDGET_COUNT + 1))
 if [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
   # Enter the stand-down as a recorded FLAG rather than a clamped count, so
   # raising FM_CONTEXT_BUDGET_BLOCK_BUDGET mid-session cannot re-arm a budget
-  # that was already spent. Say so exactly once, visibly.
-  budget_record "$COUNT" 1
-  system_message "$(printf 'firstmate context budget: this session measures %s tokens, over the %s ceiling, and the block budget is exhausted so this guard now stands down for the rest of the session. Run /stow and hand over; do not stall the fleet waiting on it.' \
-    "$TOTAL" "$CEILING")"
+  # that was already spent. Say so exactly once, visibly - and if the write
+  # itself fails, say THAT instead: claiming a durability the guard did not
+  # achieve would leave every later turn end re-reading the same unpersisted
+  # count, re-entering this branch, and repeating a false claim, with no trace
+  # anywhere. Through stage_enter, so the malfunction leaves its own trip line
+  # rather than resting on a notice that may never render.
+  if budget_record "$COUNT" 1; then
+    system_message "$(printf 'firstmate context budget: this session measures %s tokens, over the %s ceiling, and the block budget is exhausted so this guard now stands down for the rest of the session. Run /stow and hand over; do not stall the fleet waiting on it.' \
+      "$TOTAL" "$CEILING")"
+  elif stage_enter standdown-unrecorded; then
+    system_message "$(printf 'firstmate context budget: this session measures %s tokens, over the %s ceiling, and the block budget is exhausted, but the stand-down could not be persisted and may recur on later turn ends. Run /stow and hand over; do not stall the fleet waiting on it.' \
+      "$TOTAL" "$CEILING")"
+  fi
   exit 0
 fi
 

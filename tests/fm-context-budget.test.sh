@@ -822,6 +822,56 @@ plant_unwritable_block_record() {  # <dir> <session> <count>
   return 0
 }
 
+# Plant a notice record this session can READ but can never REWRITE, so a
+# write failure is isolated to the notice record while the state directory,
+# the trip record, and the block record all stay writable - narrower than a
+# wholly unwritable state directory. Returns non-zero when the host ignores
+# the mode, so the caller can skip.
+plant_unwritable_notice_record() {  # <dir> <session>
+  local file=$1/state/.context-budget-notice-$2
+  printf 'stage=\nunrecorded=0\nbadrecord=0\nstanddownfail=0\nnoticedegraded=0\ncompacts=0\nsession=%s\n' \
+    "$2" > "$file"
+  chmod 400 "$file"
+  if printf 'probe\n' 2>/dev/null >> "$file"; then
+    chmod 600 "$file"
+    return 1
+  fi
+  return 0
+}
+
+# A stand-down write can fail exactly like the block-count write it neighbors.
+# Claiming a durability it did not achieve would leave every later turn end
+# re-reading the same unpersisted count, re-entering this branch, and
+# repeating a false claim with no trace anywhere - the same failure class
+# ceiling-unrecorded already closed for the count write four lines above it.
+test_standdown_write_failure_leaves_a_durable_trip_and_correct_message() {
+  local dir transcript payload status trips
+  dir=$(make_primary_dir "$TMP_ROOT/standdown-unrecorded")
+  transcript="$dir/transcript.jsonl"
+  trips="$dir/state/.context-budget-trips"
+  write_transcript "$transcript" 210000
+  payload=$(stop_payload "$transcript" sess-sd-unrec)
+  if ! plant_unwritable_block_record "$dir" sess-sd-unrec 2; then
+    pass "fm-context-budget: skipped standdown-unrecorded row (test host ignores mode 400)"
+    return 0
+  fi
+  run_budget_channels_enforcing "$dir" "$payload" \
+    FM_CONTEXT_BUDGET_CEILING=180000 FM_CONTEXT_BUDGET_BLOCK_BUDGET=2
+  status=$?
+  chmod 600 "$dir/state/.context-budget-blocks-sess-sd-unrec"
+  expect_code 0 "$status" "a stand-down that could not be persisted must never block the turn end"
+  assert_system_message_contains "$BUDGET_STDOUT" "could not be persisted" \
+    "the message must admit the stand-down did not land"
+  assert_system_message_contains "$BUDGET_STDOUT" "may recur" \
+    "the message must warn the stand-down may recur on later turn ends"
+  if printf '%s' "$BUDGET_STDOUT" | grep -q 'now stands down for the rest of the session'; then
+    fail "the message must not claim a durability the guard did not achieve: $BUDGET_STDOUT"
+  fi
+  assert_grep 'stage=standdown-unrecorded' "$trips" \
+    "the lost stand-down flag must leave a durable trace, not only a notice that may never render"
+  pass "fm-context-budget: a stand-down write failure leaves one durable trip line and an honest message"
+}
+
 # The count-not-recorded degrade is a different MESSAGE from the ceiling notice,
 # and the record's single `stage` key stood for both: whichever fired first
 # silenced the other for the whole episode. A safety mechanism that promises to
@@ -1226,6 +1276,41 @@ test_ceiling_crossing_is_tripped_once_under_enforcement() {
   [ "$lines" = 1 ] \
     || fail "six enforcing turn ends over one ceiling crossing must record ONE line, got $lines"
   pass "fm-context-budget: an enforced ceiling crossing is recorded exactly once"
+}
+
+# The notice record's own write can fail while the state directory and the
+# trip and block records stay writable - narrower than a wholly unwritable
+# state directory. Losing the per-episode dedup key there must not reopen the
+# trip-record inflation commit a9fb47f removed: the malfunction gets its own
+# bounded trace, and a fallback marker restores the "once per crossing"
+# promise without ever reading a decision back out of the write-only trip
+# record. This fires above the advisory regardless of enforcement, so it is
+# exercised here in the shipped default (warning-only) mode, matching the
+# reported reproduction.
+test_unwritable_notice_file_restores_dedup_and_traces_the_malfunction() {
+  local dir transcript trips i lines
+  dir=$(make_primary_dir "$TMP_ROOT/notice-unwritable")
+  transcript="$dir/transcript.jsonl"
+  trips="$dir/state/.context-budget-trips"
+  write_transcript "$transcript" 210000
+  if ! plant_unwritable_notice_record "$dir" sess-notice-deg; then
+    pass "fm-context-budget: skipped unwritable-notice-file row (test host ignores mode 400)"
+    return 0
+  fi
+  for i in $(seq 1 5); do
+    run_budget "$dir" "$(stop_payload "$transcript" sess-notice-deg)" \
+      FM_CONTEXT_BUDGET_CEILING=180000 >/dev/null
+  done
+  chmod 600 "$dir/state/.context-budget-notice-sess-notice-deg"
+  lines=$(trip_count "$trips" ceiling)
+  [ "$lines" = 1 ] \
+    || fail "five turn ends over one crossing with an unwritable notice file must record ONE ceiling line, got $lines"
+  lines=$(trip_count "$trips" notice-unwritable)
+  [ "$lines" = 1 ] \
+    || fail "the notice write failure itself must be traced exactly once, got $lines"
+  assert_present "$dir/state/.context-budget-notice-degraded-sess-notice-deg" \
+    "a fallback marker must record the dedup key the primary notice file could not hold"
+  pass "fm-context-budget: an unwritable notice file traces its own failure once and a fallback marker restores per-crossing dedup"
 }
 
 # The property that keeps the trip record outside the record loss-path class: it
@@ -1641,6 +1726,7 @@ test_missing_session_id_is_inert
 test_unsafe_session_id_is_inert
 test_unwritable_record_degrades_to_a_visible_warning
 test_unwritable_state_dir_never_blocks_and_stays_visible
+test_standdown_write_failure_leaves_a_durable_trip_and_correct_message
 test_unrecorded_degrade_is_its_own_notice_key
 test_unrecorded_degrade_prints_once_per_episode
 test_unparseable_budget_record_keeps_the_guard_active
@@ -1657,6 +1743,7 @@ test_trip_record_is_not_written_below_the_advisory
 test_trip_record_stays_bounded
 test_trip_record_counts_crossings_not_turn_ends
 test_ceiling_crossing_is_tripped_once_under_enforcement
+test_unwritable_notice_file_restores_dedup_and_traces_the_malfunction
 test_trip_record_never_influences_a_decision
 test_degrades_on_empty_stdin
 test_degrades_on_malformed_stdin

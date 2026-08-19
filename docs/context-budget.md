@@ -164,6 +164,12 @@ It is written once per episode, like a notice: a record that is corrupt and also
 A block count that could not be written is recorded the same way, under `stage=ceiling-unrecorded`, and also once per episode.
 That case loses the bound on blocking, so the same argument applies: reporting it only through a notice would leave the guard's own malfunction to a channel that may never render.
 
+A stand-down flag that could not be written is recorded under `stage=standdown-unrecorded`, once per episode.
+The block budget is exhausted either way, so the turn is never blocked on it, but claiming the guard "now stands down for the rest of the session" is false the moment the flag does not land, and every later turn end would repeat that false claim with nothing to show for it.
+The session-facing message says the stand-down could not be persisted and may recur instead.
+
+A notice write that could not be written is recorded under `stage=notice-unwritable`, once per episode, closing the narrower gap below.
+
 The record is write-only by contract, and that contract is what keeps it outside the loss-path class the durable records below belong to:
 
 - Nothing ever reads a decision out of it.
@@ -174,7 +180,7 @@ The record is write-only by contract, and that contract is what keeps it outside
 
 ## Durable records
 
-Two records live under `state/`, both named per session: `.context-budget-blocks-<session_id>` and `.context-budget-notice-<session_id>`.
+Two records live under `state/`, both named per session: `.context-budget-blocks-<session_id>` and `.context-budget-notice-<session_id>`, with a third fallback file, `.context-budget-notice-degraded-<session_id>`, used only when the notice record itself cannot be written.
 
 `session_id` is the identity of the context accumulation itself, since the transcript file is literally `<session_id>.jsonl`, so a record keyed to it disappears exactly when the context genuinely resets.
 Naming the files per session also means two primary sessions in one home - the case the home session lock reports rather than prevents - cannot alias onto one record and wipe each other's stand-down.
@@ -201,7 +207,14 @@ Concretely:
   It still prints once per episode rather than at every turn end, because a repeated report of a condition that is not clearing is noise.
   When the whole state directory is unwritable nothing can be deduped, so it repeats; repeating a visible warning is the acceptable end of that trade, and going silent about a broken safety mechanism is not.
 - Records are pruned only when older than 30 days, and a stood-down session refreshes its own record on every turn end, so pruning can never reach a session that is still running.
-  The prune names the two per-session record prefixes explicitly and does not touch the trip record.
+  The prune glob covers every `.context-budget-notice-*` prefixed file, so the fallback marker below prunes on the same schedule without a separate rule.
+- The block-budget-exhausted stand-down flag is the same kind of write as the block count it neighbors: if the flag itself cannot be written, that failure is recorded under `stage=standdown-unrecorded` above rather than let the guard claim a durability it did not achieve.
+- The notice record's own write can fail on a narrower shape than a wholly unwritable state directory: the directory, the trip record, and the block record can all stay writable while `.context-budget-notice-<session_id>` specifically does not.
+  Without a fix that failure would silently drop the per-episode dedup key, and `stage_enter` would call `trip_record` on every single turn end above a threshold instead of once per crossing - reopening the per-turn-end trip-file inflation the crossing-not-turn-ends fix above closed.
+  The fix keeps the trip record write-only: nothing here reads a decision back out of it.
+  Instead, a dedicated fallback marker, `.context-budget-notice-degraded-<session_id>`, records the same dedup fields independently of the primary notice file.
+  Reads check the primary file first and fall back to the marker only for a field the primary file does not have, so a value once recorded to the fallback continues to dedupe normally even while the primary file stays unwritable.
+  The fallback write itself is traced once per episode under `stage=notice-unwritable`, so the malfunction leaves its own bounded trace rather than resting on a notice that may never render.
 
 ## This guard does not own the valve
 
