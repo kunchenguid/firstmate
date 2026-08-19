@@ -16,8 +16,8 @@
 # Enumerates open PRs for every merge-capable registered project independently
 # of secondmate status, classifies each head with live gh evidence, maintains a
 # reason-coded blocked queue, and prints ONE actionable stdout line when a
-# merge-eligible PR needs firstmate action or a newly merged PR needs post-merge
-# routing. Never invokes fm-pr-poll or executes state *.check.sh.
+# merge-eligible PR needs firstmate action. Never invokes fm-pr-poll or executes
+# state *.check.sh.
 #
 # Main home only; secondmate homes refuse scan/show/accelerate.
 set -u
@@ -35,7 +35,6 @@ SCAN_LOCK="$STATE/.pr-delivery-scan.lock"
 FINGERPRINT_DIR="$DELIVERY_DIR/fingerprints"
 DELIVERED_DIR="$DELIVERY_DIR/delivered"
 ACCELERATE_DIR="$DELIVERY_DIR/accelerate"
-MERGED_DIR="$DELIVERY_DIR/merged"
 PR_CURSOR_DIR="$DELIVERY_DIR/pr-cursors"
 GH_BIN="${GH_BIN:-gh}"
 PROJECT_MODE_BIN="${FM_PROJECT_MODE_BIN:-$SCRIPT_DIR/fm-project-mode.sh}"
@@ -136,7 +135,7 @@ refuse_secondmate() {
 }
 
 ensure_dirs() {
-  mkdir -p "$DELIVERY_DIR" "$FINGERPRINT_DIR" "$DELIVERED_DIR" "$ACCELERATE_DIR" "$MERGED_DIR" "$PR_CURSOR_DIR" || return 1
+  mkdir -p "$DELIVERY_DIR" "$FINGERPRINT_DIR" "$DELIVERED_DIR" "$ACCELERATE_DIR" "$PR_CURSOR_DIR" || return 1
   [ ! -L "$DELIVERY_DIR" ] || return 1
 }
 
@@ -478,10 +477,6 @@ accelerate_path() { # <url>
   printf '%s/%s.marker\n' "$ACCELERATE_DIR" "$(sha256_text "$url")"
 }
 
-merged_notice_path() { # <repo> <number>
-  printf '%s/%s-%s.noticed\n' "$MERGED_DIR" "$(repo_state_key "$1")" "$2"
-}
-
 pr_cursor_path() { # <repo>
   printf '%s/%s.cursor\n' "$PR_CURSOR_DIR" "$(repo_state_key "$1")"
 }
@@ -604,12 +599,6 @@ gh_fetch_pr_snapshot_once() { # <repo> <number>
       }'
 }
 
-gh_fetch_merged_state() { # <repo> <number>
-  local repo=$1 number=$2
-  fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    "$GH_BIN" pr view "$number" --repo "$repo" --json state,mergedAt 2>/dev/null
-}
-
 QUEUE_ROWS=''
 
 load_blocked_queue() {
@@ -679,47 +668,7 @@ process_pr_record() { # <repo> <project> <pr-json> <deadline> -> sets ACTIONABLE
   else
     rm -f "$delivered" || return 1
   fi
-  OPEN_PR_NUMS="${OPEN_PR_NUMS} ${num}"
   return 0
-}
-
-retire_pr_state() { # <repo> <number> <url>
-  queue_remove_row "$1" "$2"
-  rm -f -- \
-    "$(fingerprint_path "$1" "$2")" \
-    "$(delivered_path "$1" "$2")" \
-    "$(accelerate_path "$3")"
-}
-
-check_post_merge() { # <repo> <project> <number> <url> <task>
-  local repo=$1 project=$2 number=$3 url=$4 task=$5
-  local state_json state notice_path
-  notice_path=$(merged_notice_path "$repo" "$number")
-  if [ -f "$notice_path" ]; then
-    retire_pr_state "$repo" "$number" "$url"
-    return $?
-  fi
-  state_json=$(gh_fetch_merged_state "$repo" "$number") || return 0
-  state=$(printf '%s' "$state_json" | jq -r '.state // empty' 2>/dev/null)
-  case "$state" in
-    MERGED)
-      ACTIONABLE="post-merge: project=$project repo=$repo pr=$number task=${task:-} url=$url"
-      PENDING_NOTICE_PATH=$notice_path
-      PENDING_RETIRE_REPO=$repo
-      PENDING_RETIRE_NUMBER=$number
-      PENDING_RETIRE_URL=$url
-      ;;
-    CLOSED)
-      retire_pr_state "$repo" "$number" "$url"
-      ;;
-  esac
-}
-
-write_merged_notice() { # <path>
-  local path=$1 tmp
-  tmp=$(mktemp "$MERGED_DIR/.noticed.XXXXXX") || return 1
-  chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$path"
 }
 
 commit_actionable_state() {
@@ -727,17 +676,12 @@ commit_actionable_state() {
     write_fingerprint "$PENDING_DELIVERED_PATH" "$PENDING_DELIVERED_VALUE" || return 1
     rm -f "$PENDING_ACCEL_PATH" || return 1
   fi
-  if [ -n "${PENDING_NOTICE_PATH:-}" ]; then
-    write_merged_notice "$PENDING_NOTICE_PATH" || return 1
-    retire_pr_state "$PENDING_RETIRE_REPO" "$PENDING_RETIRE_NUMBER" "$PENDING_RETIRE_URL" || return 1
-  fi
 }
 
 scan_repo() { # <project> <repo> <deadline>
-  local project=$1 repo=$2 deadline=$3 safe num fp url task cursor
+  local project=$1 repo=$2 deadline=$3 cursor
   local list_json pr_json start=0 i offset count
   local -a numbers
-  OPEN_PR_NUMS=
   list_json=$(gh_fetch_open_prs "$repo") || return 0
   [ -n "$list_json" ] || list_json='[]'
   mapfile -t numbers < <(printf '%s' "$list_json" | jq -r '.[].number | tostring')
@@ -767,19 +711,6 @@ scan_repo() { # <project> <repo> <deadline>
       esac
     }
     write_pr_cursor "$repo" "$num" || return 1
-    [ -z "${ACTIONABLE:-}" ] || return 0
-  done
-  safe=$(repo_state_key "$repo")
-  for fp in "$FINGERPRINT_DIR"/"$safe"-*.fp; do
-    [ -e "$fp" ] || continue
-    [ "$(date +%s)" -lt "$deadline" ] || return 3
-    num=${fp##*/}; num=${num#"$safe"-}; num=${num%.fp}
-    case " ${OPEN_PR_NUMS:-} " in
-      *" $num "*) continue ;;
-    esac
-    url="https://github.com/$repo/pull/$num"
-    task=$(task_for_pr_url "$url" "$project" 2>/dev/null || true)
-    check_post_merge "$repo" "$project" "$num" "$url" "$task" || return 1
     [ -z "${ACTIONABLE:-}" ] || return 0
   done
   return 0
@@ -832,10 +763,6 @@ scan() {
   PENDING_DELIVERED_PATH=
   PENDING_DELIVERED_VALUE=
   PENDING_ACCEL_PATH=
-  PENDING_NOTICE_PATH=
-  PENDING_RETIRE_REPO=
-  PENDING_RETIRE_NUMBER=
-  PENDING_RETIRE_URL=
   load_blocked_queue
   command -v jq >/dev/null 2>&1 || { printf 'fm-pr-delivery: jq not found\n' >&2; return 1; }
   command -v "$GH_BIN" >/dev/null 2>&1 || return 0

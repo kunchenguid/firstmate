@@ -14,7 +14,7 @@ $ bin/fm-test-run.sh tests/fm-pr-delivery.test.sh
 all pr-delivery tests passed
 ```
 
-The suite covers registry discovery without a secondmate signal, complete green-check evidence, review and comment holds with later clearance, migration and authority holds with re-evaluation, base-branch changes, optional-review silence, inventory pagination, bounded-scan queue preservation, post-merge routing, and retry-safe wake publication.
+The suite covers registry discovery without a secondmate signal, complete green-check evidence, review and comment holds with later clearance, migration and authority holds with re-evaluation, base-branch changes, optional-review silence, inventory pagination, bounded-scan queue preservation, and retry-safe wake publication.
 
 ## Lint
 

@@ -44,15 +44,6 @@ if [ "${1:-}" = pr ] && [ "${2:-}" = list ]; then
   [ -f "$f" ] && jq -c --argjson limit "$limit" '.[0:$limit]' "$f"
   exit 0
 fi
-if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
-  case " $* " in
-    *reviewThreads*) exit 98 ;;
-  esac
-  f="$FIX/view/${repo//\//__}-${num}.json"
-  if [ -f "$f" ]; then jq -c 'del(.reviewThreads)' "$f"; exit 0; fi
-  printf '{"state":"OPEN"}\n'
-  exit 0
-fi
 if [ "${1:-}" = api ] && [ "${2:-}" = graphql ]; then
   if case "$query" in *pullRequests*) true ;; *) false ;; esac; then
     f="$FIX/open/${owner}__${name}.json"
@@ -476,54 +467,6 @@ EOF
   pass "partial scan preserves blocked queue rows"
 }
 
-test_post_merge_routing() {
-  local home fixture out fp
-  home=$(make_world merged)
-  fixture="$TMP_ROOT/fix-merged"
-  setup_project "$home" "$fixture"
-  write_open "$fixture" acme/alpha '[{"number":8,"url":"https://github.com/acme/alpha/pull/8","headRefName":"fm/merge8","headRefOid":"ggg","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
-  write_view "$fixture" acme/alpha 8 '{"number":8,"url":"https://github.com/acme/alpha/pull/8","headRefName":"fm/merge8","headRefOid":"ggg","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
-  fm_write_meta "$home/state/merge8.meta" \
-    'window=fm-merge8' "worktree=$home/projects/merge8" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
-    'pr=https://github.com/acme/alpha/pull/8'
-  run_delivery "$home" "$fixture" _scan-locked 1 >/dev/null
-  write_open "$fixture" acme/alpha '[]'
-  write_view "$fixture" acme/alpha 8 '{"state":"MERGED","mergedAt":"2026-08-18T00:00:00Z"}'
-  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
-  printf '%s\n' "$out" | grep -Fq 'post-merge:' \
-    || fail "merged PR did not trigger post-merge actionable"
-  pass "post-merge monitoring routes merged PR"
-}
-
-test_closed_pr_state_retires_and_reopens() {
-  local home fixture out
-  home=$(make_world closed)
-  fixture="$TMP_ROOT/fix-closed"
-  setup_project "$home" "$fixture"
-  write_open "$fixture" acme/alpha '[{"number":13,"url":"https://github.com/acme/alpha/pull/13","headRefName":"fm/closed13","headRefOid":"lll","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
-  write_view "$fixture" acme/alpha 13 '{"number":13,"url":"https://github.com/acme/alpha/pull/13","headRefName":"fm/closed13","headRefOid":"lll","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
-  fm_write_meta "$home/state/closed13.meta" \
-    'window=fm-closed13' "worktree=$home/projects/closed13" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
-  run_delivery "$home" "$fixture" _scan-locked 1 >/dev/null
-  write_open "$fixture" acme/alpha '[]'
-  write_view "$fixture" acme/alpha 13 '{"state":"CLOSED","mergedAt":null}'
-  run_delivery "$home" "$fixture" _scan-locked 1 >/dev/null
-  [ -z "$(find "$home/state/pr-delivery/fingerprints" -type f -name '*.fp' -print -quit)" ] \
-    || fail "closed PR retained its observation fingerprint"
-  [ -z "$(find "$home/state/pr-delivery/delivered" -type f -name '*.delivered' -print -quit)" ] \
-    || fail "closed PR retained its delivered marker"
-  run_delivery "$home" "$fixture" show | grep -Fq $'acme/alpha\t13\t' \
-    && fail "closed PR remained in the blocked queue"
-  write_open "$fixture" acme/alpha '[{"number":13,"url":"https://github.com/acme/alpha/pull/13","headRefName":"fm/closed13","headRefOid":"lll","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
-  write_view "$fixture" acme/alpha 13 '{"number":13,"url":"https://github.com/acme/alpha/pull/13","headRefName":"fm/closed13","headRefOid":"lll","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
-  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
-  printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
-    || fail "unchanged reopened PR remained suppressed"
-  pass "closed PR state retires and unchanged reopen re-evaluates"
-}
-
 test_repository_state_keys_do_not_alias() {
   local home fixture count
   home=$(make_world repokeys)
@@ -688,8 +631,8 @@ test_wake_failure_remains_retryable() {
   pass "wake publication failure remains retryable"
 }
 
-test_post_wake_commit_failure_preserves_tracking() {
-  local home fixture fp rc out
+test_post_wake_commit_failure_preserves_observation() {
+  local home fixture fp rc
   home=$(make_world wakefail)
   fixture="$TMP_ROOT/fix-wakefail"
   setup_project "$home" "$fixture"
@@ -709,14 +652,7 @@ test_post_wake_commit_failure_preserves_tracking() {
     || fail "merge wake was not durable before delivered-marker failure"
   fp=$(find "$home/state/pr-delivery/fingerprints" -type f -name '*.fp' -print -quit)
   [ -n "$fp" ] || fail "published wake lacked independent observation fingerprint"
-  rm -f "$fixture/fail-delivered-write" "$home/state/pr-delivery/delivered"
-  mkdir "$home/state/pr-delivery/delivered"
-  write_open "$fixture" acme/alpha '[]'
-  write_view "$fixture" acme/alpha 10 '{"state":"MERGED","mergedAt":"2026-08-18T00:00:00Z"}'
-  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
-  printf '%s\n' "$out" | grep -Fq 'post-merge:' \
-    || fail "observation fingerprint did not preserve post-merge routing"
-  pass "post-wake commit failure preserves post-merge tracking"
+  pass "post-wake commit failure preserves observation"
 }
 
 test_discovery_without_secondmate
@@ -735,8 +671,6 @@ test_check_evidence_requires_success
 test_generic_authority_hold_ignores_yolo
 test_open_pr_inventory_paginates
 test_partial_scan_preserves_blocked_queue
-test_post_merge_routing
-test_closed_pr_state_retires_and_reopens
 test_repository_state_keys_do_not_alias
 test_task_authority_stays_with_its_project
 test_deadline_retries_incomplete_repository
@@ -744,6 +678,6 @@ test_accelerate_marker
 test_show_blocked_queue
 test_secondmate_refuses_scan
 test_wake_failure_remains_retryable
-test_post_wake_commit_failure_preserves_tracking
+test_post_wake_commit_failure_preserves_observation
 
 echo "all pr-delivery tests passed"

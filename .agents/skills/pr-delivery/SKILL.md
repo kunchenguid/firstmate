@@ -3,7 +3,7 @@ name: pr-delivery
 description: >-
   Agent-only procedure for handling check: pr-delivery wakes from the bounded
   main-home PR delivery loop. Use on every check: pr-delivery wake to enumerate
-  actionable merge or post-merge obligations, merge under configured authority
+  merge-eligible PRs, merge under configured authority
   via fm-pr-merge.sh, fleet-sync after merge, and follow the normal teardown path.
 user-invocable: false
 metadata:
@@ -13,7 +13,7 @@ metadata:
 # pr-delivery
 
 `bin/fm-pr-delivery.sh` discovers open PRs for merge-capable registered projects and classifies each head with live gh evidence.
-The watcher and locked session start run its bounded `scan` adjunct; when a merge-eligible or post-merge obligation exists, they queue `check: pr-delivery` with the scan payload.
+The watcher and locked session start run its bounded `scan` adjunct; when a merge-eligible PR exists, they queue `check: pr-delivery` with the scan payload.
 
 This skill owns every handling turn for that wake.
 Do not invent a parallel PR poll or merge path.
@@ -21,7 +21,7 @@ Do not invent a parallel PR poll or merge path.
 ## On wake
 
 1. Read the wake payload from the drain.
-   It is either `merge-eligible: ...` with `project=`, `repo=`, `pr=`, `task=`, `url=`, and `head=` fields, or `post-merge: ...` without `head=`.
+   It is `merge-eligible: ...` with `project=`, `repo=`, `pr=`, `task=`, `url=`, and `head=` fields.
 2. Run `bin/fm-pr-delivery.sh show` when you need the current reason-coded blocked queue for operator context.
 
 ## merge-eligible
@@ -36,13 +36,6 @@ Do not invent a parallel PR poll or merge path.
    Never call `gh` or `gh-axi pr merge` directly around that helper.
 5. After a successful merge, refresh the project clone through the guarded fleet-sync path (`bin/fm-fleet-sync.sh`).
 6. Continue normal ship supervision: validation state, PR ready reporting, teardown only after landing is confirmed.
-
-## post-merge
-
-1. Refresh the named project clone through `bin/fm-fleet-sync.sh`.
-2. Surface the merge outcome to the captain with the full PR URL when review or merge authority requires it.
-3. Reconcile the linked task's current state and backlog; route lane notification through existing status and backlog paths rather than inventing a new deployment owner.
-4. Do not tear down until the ordinary landed-work gate passes.
 
 ## Holds this scan respects
 
