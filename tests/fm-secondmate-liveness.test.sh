@@ -390,6 +390,40 @@ test_sweep_leaves_alive_secondmate_untouched() {
   pass "sweep: an already-live secondmate is untouched and distinguishable in verbose diagnostics"
 }
 
+# The other half of liveness, and the gap this suite's own premise implies: a
+# secondmate whose agent process is genuinely alive can still have lost its wake
+# loop, and from outside those two look identical. A queued wake that home never
+# consumed is the evidence that separates them; without it the sweep called this
+# secondmate live while nothing had reached it for hours.
+test_sweep_reports_a_live_secondmate_whose_wake_loop_stopped() {
+  local w fb tmuxfb log out epoch
+  w=$(new_world sweep-wake-stall)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # One wake queued thirteen hours ago in that secondmate's own home, never
+  # consumed. Written directly because the production appender always stamps now.
+  epoch=$(( $(date +%s) - 46800 ))
+  printf '%s\t1\tcheck\tprocevent:x:1\tcheck: procevent x x-src 1\n' "$epoch" \
+    > "$w/sm1/state/.wake-queue"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" FM_BOOTSTRAP_VERBOSE_FACTS=1)
+  assert_contains "$out" "BOOTSTRAP_INFO: secondmate sm1 already live (backend=tmux)" \
+    "the fixture no longer presents a genuinely live agent process"
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: wake loop stalled" \
+    "a live agent whose wake queue went unconsumed for hours was reported as healthy"
+  [ ! -s "$log" ] || fail "a stalled wake loop must be reported, never respawned over: $(cat "$log")"
+
+  # And the same live secondmate with nothing waiting stays silent: an idle mate
+  # and a deaf one must stop reading the same.
+  rm -f "$w/sm1/state/.wake-queue"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1" \
+    "an idle live secondmate with an empty queue was reported as stalled"
+  pass "sweep: a live secondmate whose wake loop stopped is reported, an idle one is not"
+}
+
 test_sweep_respawns_authoritatively_missing_pi_secondmate() {
   local w fb tmuxfb log out
   w=$(new_world sweep-missing-pi)
@@ -546,6 +580,7 @@ test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
+test_sweep_reports_a_live_secondmate_whose_wake_loop_stopped
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process

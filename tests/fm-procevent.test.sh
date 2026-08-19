@@ -382,13 +382,36 @@ case "${1-}" in
   *) exit 2 ;;
 esac
 SH
+cat > "$ADAPTER_ROOT/bin/fm-procevent-rearming.sh" <<'SH'
+#!/usr/bin/env bash
+# Fixture adapter shaped like the real remote-reply adapter: every capture is
+# terminal for that exact registration, and re-arming the NEXT source happens
+# inside the application step. FM_HOME/state/apply-fail makes application fail,
+# which is what an unreachable remote host looks like from here.
+set -u
+case "${1-}" in
+  terminal) exit 0 ;;
+  self-announcing) exit 0 ;;
+  autohandle)
+    id=$2; seq=$3
+    [ ! -e "$FM_HOME/state/apply-fail" ] || exit 1
+    printf '%s %s\n' "$id" "$seq" >> "$FM_HOME/state/applied"
+    "$FM_PROCEVENT_UNDER_TEST" register rearming "$id" -- \
+      "$FM_PROCEVENT_TEST_BLOCKER" "$FM_HOME/state/next-delta" delta >/dev/null || exit 1
+    "$FM_PROCEVENT_UNDER_TEST" handled "$id" "$seq" >/dev/null || exit 1
+    ;;
+  *) exit 2 ;;
+esac
+SH
 chmod +x "$ADAPTER_ROOT/bin/fm-procevent-endnow.sh" "$ADAPTER_ROOT/bin/fm-procevent-openended.sh" \
-  "$ADAPTER_ROOT/bin/fm-procevent-applying.sh" "$ADAPTER_ROOT/bin/fm-procevent-selfann.sh"
+  "$ADAPTER_ROOT/bin/fm-procevent-applying.sh" "$ADAPTER_ROOT/bin/fm-procevent-selfann.sh" \
+  "$ADAPTER_ROOT/bin/fm-procevent-rearming.sh"
 
 pe_adapter() {  # <home> <command>...: run the runner against the fixture adapters
   local home=$1
   shift
   FM_ROOT_OVERRIDE="$ADAPTER_ROOT" FM_PROCEVENT_UNDER_TEST="$ROOT/bin/fm-procevent.sh" \
+    FM_PROCEVENT_TEST_BLOCKER="$BLOCKER" \
     FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" "$@"
 }
 
@@ -404,19 +427,19 @@ rmdir "$HPUBLISH/state/.wake-queue"
 # This source's child returns instantly, so leaving it registered would have the
 # recovery reconcile below start a detached poll that races every assertion after
 # it for the source claim, the next sequence, and this home's applied record.
-# Re-announcement is proven from the durable inbox alone and needs no
-# registration, so retire it first - the same retire-before-reconcile discipline
-# the blocker-backed sources rely on - and prove no competing poll was started.
+# Re-announcement and re-application are proven from the durable inbox alone and
+# need no registration, so retire it first - the same
+# retire-before-reconcile discipline the blocker-backed sources rely on.
 pe_adapter "$HPUBLISH" retire publish-src >/dev/null
 out=$(pe_adapter "$HPUBLISH" reconcile)
 assert_contains "$out" "published=1" "the unpublished capture was not announced on later reconciliation"
 assert_contains "$out" "started=0" "reconcile started an always-ready poll that races the recovery assertions"
 assert_contains "$(wake_payloads "$HPUBLISH")" "procevent applying publish-src 1" "later reconciliation did not deliver the capture to a handler"
-FM_HOME="$HPUBLISH" FM_PROCEVENT_UNDER_TEST="$ROOT/bin/fm-procevent.sh" \
-  "$ADAPTER_ROOT/bin/fm-procevent-applying.sh" autohandle publish-src 1 \
-    "$HPUBLISH/state/procevent-inbox/publish-src.1.result"
-assert_grep 'publish-src 1' "$HPUBLISH/state/applied" "the handler could not apply the later announcement"
-assert_present "$HPUBLISH/state/procevent-inbox/publish-src.1.handled" "the later handler application was not acknowledged"
+# Reconciliation re-drives the adapter's own application too: a result no
+# handler ever picks up must not stay unapplied forever, because for a
+# re-arming adapter that application is where the next source comes from.
+assert_grep 'publish-src 1' "$HPUBLISH/state/applied" "reconciliation announced the capture but never re-drove its application"
+assert_present "$HPUBLISH/state/procevent-inbox/publish-src.1.handled" "the re-driven application was not acknowledged"
 pass "automatic application waits for durable publication and failed publication remains recoverable"
 
 # A self-announcing adapter inverts that order on its own declaration: the
@@ -1181,5 +1204,84 @@ assert_contains "$runner_help" "Durability boundary" \
 assert_not_contains "$runner_help" "exactly-once" \
   "the runner's help claims no exactly-once delivery"
 pass "the published interfaces state the loss limitation and claim no lossless delivery"
+
+# --- an unhandled result must not permanently end intake --------------------
+# The failure this pins: an adapter whose result is terminal for that exact
+# registration re-arms its next source from inside its own application step, so
+# the runner retires the spent registration at capture. If that one application
+# then fails, the registration is gone and nothing re-registers it - intake
+# stops permanently rather than falling behind. Application here fails exactly
+# the way an unreachable remote host would.
+HREARM="$TMP_ROOT/hrearm"; new_home "$HREARM"
+PE_TRACKED+=("$HREARM|rearm-src")
+: > "$HREARM/state/apply-fail"
+: > "$HREARM/state/first-delta"
+pe_adapter "$HREARM" register rearming rearm-src -- "$BLOCKER" "$HREARM/state/first-delta" delta >/dev/null
+out=$(pe_adapter "$HREARM" start rearm-src 2>&1)
+assert_contains "$out" "retired: rearm-src" "the terminal capture did not retire its spent registration"
+assert_contains "$out" "not-autohandled: rearm-src" "the fixture's failing application was reported as applied"
+assert_absent "$HREARM/state/procevent/rearm-src.source" "a spent terminal registration survived its capture"
+assert_absent "$HREARM/state/procevent-inbox/rearm-src.1.handled" "a result the adapter could not apply was acknowledged anyway"
+
+# While application is still failing, reconciliation must keep the result
+# announced and unacknowledged, and must not fake a recovery.
+out=$(pe_adapter "$HREARM" reconcile)
+assert_absent "$HREARM/state/procevent-inbox/rearm-src.1.handled" "reconciliation acknowledged a result its adapter still could not apply"
+assert_absent "$HREARM/state/procevent/rearm-src.source" "reconciliation re-armed a source without a successful application"
+
+# Application recovers. The next ordinary reconcile - with no handler, no wake
+# handled, and nothing remembering to re-arm - must restore intake.
+rm -f "$HREARM/state/apply-fail"
+out=$(pe_adapter "$HREARM" reconcile)
+assert_grep 'rearm-src 1' "$HREARM/state/applied" "recovered application was never re-driven"
+assert_present "$HREARM/state/procevent-inbox/rearm-src.1.handled" "the re-driven application was not acknowledged"
+assert_present "$HREARM/state/procevent/rearm-src.source" "intake stayed permanently dead after one unhandled result"
+assert_contains "$out" "started=1" "the restored registration did not get its runner in the same reconcile pass"
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/rearm-src.claim" || fail "the restored source never claimed a runner"
+pe_adapter "$HREARM" retire rearm-src >/dev/null
+pass "one unhandled result delays intake instead of ending it permanently"
+
+# --- re-application never blocks and never doubles --------------------------
+# Two callers now apply one generation: the runner right after its own capture,
+# and reconcile re-driving a result nobody picked up. Reconcile declines rather
+# than waits, because a reconcile that blocks on someone else's application
+# stalls the watcher cycle it runs on.
+HAPPLY="$TMP_ROOT/happly"; new_home "$HAPPLY"
+PE_TRACKED+=("$HAPPLY|apply-src")
+: > "$HAPPLY/state/apply-fail"
+: > "$HAPPLY/state/first-delta"
+pe_adapter "$HAPPLY" register rearming apply-src -- "$BLOCKER" "$HAPPLY/state/first-delta" delta >/dev/null
+pe_adapter "$HAPPLY" start apply-src >/dev/null 2>&1
+rm -f "$HAPPLY/state/apply-fail"
+
+APPLY_READY="$TMP_ROOT/apply-ready"; APPLY_RELEASE="$TMP_ROOT/apply-release"
+FM_HOME="$HAPPLY" bash -c '
+  . "$1/bin/fm-pr-lib.sh"
+  . "$1/bin/fm-wake-lib.sh"
+  . "$1/bin/fm-procevent-lib.sh"
+  fm_lock_acquire_wait "$(fm_procevent_apply_lock_path "$2")" || exit 1
+  trap "fm_lock_release \"$(fm_procevent_apply_lock_path "$2")\"" EXIT
+  printf "ready\n" > "$3"
+  while [ ! -e "$4" ]; do
+    kill -0 "$5" 2>/dev/null || exit 0
+    sleep 0.02
+  done
+' _ "$ROOT" apply-src "$APPLY_READY" "$APPLY_RELEASE" $$ &
+APPLY_HOLDER=$!
+wait_for "$APPLY_READY" || fail "the application-lock holder never took the lock"
+before=$(date +%s)
+out=$(pe_adapter "$HAPPLY" reconcile)
+elapsed=$(( $(date +%s) - before ))
+[ "$elapsed" -lt 10 ] || fail "reconcile blocked ${elapsed}s waiting for another caller's application"
+assert_absent "$HAPPLY/state/applied" "reconcile applied a generation another caller was already holding"
+assert_contains "$out" "published=1" "reconcile stopped announcing when it declined to apply"
+: > "$APPLY_RELEASE"
+wait "$APPLY_HOLDER" 2>/dev/null || true
+out=$(pe_adapter "$HAPPLY" reconcile)
+assert_grep 'apply-src 1' "$HAPPLY/state/applied" "reconcile never retried the application it declined"
+[ "$(grep -c 'apply-src 1' "$HAPPLY/state/applied")" = 1 ] \
+  || fail "one generation was applied more than once: $(cat "$HAPPLY/state/applied")"
+pe_adapter "$HAPPLY" retire apply-src >/dev/null
+pass "re-application declines a held generation, retries later, and applies it once"
 
 printf '\nall procevent tests passed\n'

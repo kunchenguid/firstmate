@@ -58,6 +58,11 @@
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
+#   check: secondmate-wake-stall
+#                          a recorded secondmate's own durable wake queue has gone
+#                          unconsumed past its bound, so that home's wake loop is
+#                          not delivering even though its agent process may be
+#                          alive; bin/fm-secondmate-wake-check.sh owns the predicate
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -900,6 +905,26 @@ while :; do
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
+  fi
+
+  # A secondmate is woken by its own watcher, whose arming depends on its own
+  # session running, which depends on being woken. Once that loop stops with a
+  # wake already queued, nothing inside that home can restart it. So the check
+  # has to come from outside, and it has to ask something a live agent process
+  # cannot answer: is that home still consuming its own durable wake queue?
+  # bin/fm-secondmate-wake-check.sh owns that predicate, its own bounded
+  # cadence, and its own durable record; this is an adjunct to a cycle that
+  # already runs, not a second monitor. It reads only - arming a watcher in
+  # another home stays forbidden, and recovery remains firstmate nudging that
+  # secondmate through its own endpoint so it arms its own watcher.
+  mate_wake_out=
+  if mate_wake_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-secondmate-wake-check.sh" scan 2>/dev/null); then
+    if [ -n "$mate_wake_out" ]; then
+      wake "check: secondmate-wake-stall"
+    fi
+  else
+    triage_log "secondmate wake-loop check unavailable"
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).

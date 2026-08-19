@@ -221,6 +221,18 @@ If the secondmate is already running and only inherited local material changed, 
 To move a live LOCAL secondmate onto a newly pinned harness, model, or effort without a full recovery, set `config/secondmate-harness` and then relaunch it with `bin/fm-control.sh <id> relaunch`, which re-resolves that pin, stops the agent, and launches the replacement in the same home ([`docs/agent-control.md`](../../../docs/agent-control.md)).
 That plane refuses a remotely placed secondmate by name, because its agent runs on another host where none of the plane's postconditions can be read; use the remote route's own relaunch path for those.
 
+### A secondmate whose wake loop stalled
+
+A `check: secondmate-wake-stall <id>` wake means something different from a dead endpoint: that secondmate's agent process is alive, and its own durable wake queue has gone unconsumed past its bound, so notifications are reaching that home and nothing is picking them up.
+It cannot fix this itself, because a secondmate is woken by its own watcher, its watcher is armed by its own session, and its session runs only when woken - once that loop stops with a wake already queued, waking is precisely what it lost.
+`bin/fm-secondmate-wake-check.sh` owns the signal and the windows it leaves open.
+
+Recovery is a nudge, not a respawn, and never a cross-home arm.
+Send that secondmate one ordinary message through its own endpoint with `FM_HOME=<main-home> bin/fm-send.sh fm-<id> "<message>"`, which makes its own session take a turn; that turn drains its queue and its own harness arms its own watcher.
+Never run an arm command against another home: `bin/fm-watch-arm.sh` is single-home by design because reaching across homes can kill a sibling home's watcher.
+Respawn only if the nudge does not clear the stall, and then through the ordinary recovery above; a stalled wake loop is not evidence that the agent is dead, and respawning over a live agent risks its work.
+Treat a repeat stall on the same secondmate as a reason to inspect that home directly rather than to keep nudging.
+
 Do not reconstruct a secondmate's whole tree from the main home.
 The main firstmate reconciles only direct reports.
 Each secondmate is a firstmate in its own home, so it runs recovery on startup and reconciles its own crewmates.

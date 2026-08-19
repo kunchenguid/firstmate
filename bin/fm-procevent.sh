@@ -25,8 +25,9 @@
 #            says so, so a source that has ended stops being restarted.
 # reconcile  Idempotent liveness entry the watcher calls on its ordinary cycle:
 #            republish every durably captured result with no handled
-#            acknowledgement yet - regardless of any earlier publication - and
-#            start a runner for any registered source that has no live owner.
+#            acknowledgement yet - regardless of any earlier publication - retry
+#            the adapter's own application of each of those results, and start a
+#            runner for any registered source that has no live owner.
 #            This is liveness repair only - it never discovers results by
 #            polling the source, because the child blocks on the source itself.
 # handled    Durably and idempotently record that a captured result has been
@@ -92,6 +93,25 @@
 # while ACTING on it is firstmate's judgement, so the capture stays unacknowledged
 # and its `check` wake reaches the handler exactly as it would have anyway.
 #
+# Re-arming is deliberately independent of handling too, and for a sharper
+# reason. An adapter whose result is terminal for that exact registration
+# re-arms its next source from inside its own application step, so this runner
+# retires the spent registration at capture. If that one application then fails
+# - the remote host is down for a moment, the handler never runs - the
+# registration is gone, nothing re-registers it, and intake stops PERMANENTLY
+# rather than falling behind. A delay is acceptable; a silent permanent stop is
+# not. So `reconcile` retries `autohandle` for every durably captured result
+# that has no handled acknowledgement yet, on the same idempotent seam and in
+# the same adapter-declared order `start` uses. This weakens nothing about
+# acknowledgement: application that fails still leaves its result unhandled and
+# therefore still announced and still eligible for the next retry, and only the
+# adapter's own `handled` call ends re-announcement. What it removes is the
+# assumption that a handler will arrive at all.
+# It does NOT remove the assumption that reconcile itself runs: reconcile is
+# driven by this home's own watcher, so a home whose wake loop has stopped runs
+# no reconcile at all. bin/fm-secondmate-wake-check.sh is what notices that from
+# outside; the two are deliberately independent.
+#
 # Ownership is machine-wide per canonical source, because separate Firstmate
 # homes can share one underlying source store. A live owner is never displaced;
 # only a claim whose whole generation is gone is reclaimed. A runner leads its
@@ -120,7 +140,13 @@ REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,104p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+# Print the whole leading comment block. Derived from the file rather than a
+# fixed line range, so extending the header can never silently truncate the
+# published interface this help is.
+usage() {
+  awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+  exit 2
+}
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -157,18 +183,41 @@ staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
 # same generation. The adapter runs OUTSIDE any source-lock hold here, because a
 # handling adapter is expected to re-arm its own next source, which takes that
 # same lock.
-adapter_autohandle() {  # <adapter> <source-id> <result-file>
-  local adapter=$1 id=$2 result=$3 script seq
+#
+# The handled check is a read, not a claim, so it is held under the separate
+# per-source apply lock (bin/fm-procevent-lib.sh owns why that lock is not the
+# source lock). Two callers reach here for the same generation - the runner
+# right after its own capture, and reconcile re-driving a result no handler
+# picked up - and without the lock both can pass the check before either
+# records the acknowledgement, running the adapter's apply step twice.
+# <wait|nowait> chooses what happens when another caller holds it: the runner
+# waits for its own capture, while reconcile declines and retries next cycle,
+# because reconcile must never block on someone else's application.
+adapter_autohandle() {  # <wait|nowait> <adapter> <source-id> <result-file>
+  local mode=$1 adapter=$2 id=$3 result=$4 script seq lock status
   script=$(adapter_script "$adapter")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
   seq=$(fm_procevent_result_sequence "$result") || return 1
   case "$seq" in ''|*[!0-9]*) return 1 ;; esac
-  fm_procevent_is_handled "$STATE" "$id" "$seq" && return 0
+  (umask 077; mkdir -p "$(fm_procevent_claim_root)") || return 1
+  lock=$(fm_procevent_apply_lock_path "$id")
+  if [ "$mode" = wait ]; then
+    fm_lock_acquire_wait "$lock" || return 1
+  else
+    fm_lock_try_acquire "$lock" || return 1
+  fi
+  if fm_procevent_is_handled "$STATE" "$id" "$seq"; then
+    fm_lock_release "$lock"
+    return 0
+  fi
   # Silenced exactly like the terminal seam above, so an adapter that has no
   # such command is a quiet no-op rather than runner noise. This runner's own
   # one-line outcome is the interface; an adapter that failed keeps its result
   # announced, and the handler's own call reproduces the diagnostics in full.
   "$script" autohandle "$id" "$seq" "$result" >/dev/null 2>&1
+  status=$?
+  fm_lock_release "$lock"
+  return "$status"
 }
 
 # Pass a bound source's captured result to the one keyed-answer intake. The
@@ -446,7 +495,7 @@ cmd_start() {
   # own next source, and retiring afterwards would drop that fresh registration
   # and leave the source silently dead.
   if [ "$self_announcing" -eq 1 ]; then
-    if adapter_autohandle "$adapter" "$id" "$durable"; then
+    if adapter_autohandle wait "$adapter" "$id" "$durable"; then
       printf 'autohandled: %s\n' "$id"
     else
       printf 'not-autohandled: %s (left for the handler; still unacknowledged)\n' "$id" >&2
@@ -458,7 +507,7 @@ cmd_start() {
       published_capture=1
     fi
     publish_pending "$durable" >/dev/null
-  elif [ "$published_capture" -eq 1 ] && adapter_autohandle "$adapter" "$id" "$durable"; then
+  elif [ "$published_capture" -eq 1 ] && adapter_autohandle wait "$adapter" "$id" "$durable"; then
     printf 'autohandled: %s\n' "$id"
   else
     printf 'not-autohandled: %s (left for the handler; still unacknowledged)\n' "$id" >&2
@@ -503,9 +552,51 @@ detach_runner() {  # <source-id>
   isolate_runner detach "$1"
 }
 
+# One durably captured, still-unacknowledged result: announce it and re-drive
+# the adapter's own application of it, in the order that adapter declares (see
+# the announcement-ownership note in the header - a self-announcing adapter
+# applies first, everyone else publishes first). Prints 1 when it published, 0
+# otherwise, so the caller keeps its existing published= count.
+#
+# Both calls manage the source lock themselves and neither is nested inside the
+# other's hold, which matters because an adapter re-arming its next source takes
+# that same lock.
+reconcile_pending_result() {  # <result-file>
+  local result=$1 id adapter published=0
+  id=$(fm_procevent_result_source_id "$result")
+  fm_procevent_source_id_valid "$id" || { printf '0\n'; return 0; }
+  adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
+  if [ -z "$adapter" ]; then
+    publish_result "$result" && published=1
+    printf '%s\n' "$published"
+    return 0
+  fi
+  if adapter_self_announcing "$adapter"; then
+    adapter_autohandle nowait "$adapter" "$id" "$result" || true
+    publish_result "$result" && published=1
+  else
+    publish_result "$result" && published=1
+    adapter_autohandle nowait "$adapter" "$id" "$result" || true
+  fi
+  printf '%s\n' "$published"
+}
+
+# Announce and re-drive every pending capture. Runs before the claim and
+# registration loops below so a registration an adapter re-arms here gets its
+# runner started in this same reconcile pass rather than a later one.
+reconcile_pending() {
+  local result published=0 one
+  while IFS= read -r result; do
+    [ -n "$result" ] || continue
+    one=$(reconcile_pending_result "$result")
+    case "$one" in 1) published=$((published + 1)) ;; esac
+  done < <(fm_procevent_pending "$STATE")
+  printf '%s\n' "$published"
+}
+
 cmd_reconcile() {
   local rec id published started=0 stopped=0 uncertain=0 claim owner pid token identity claim_state stop_state
-  published=$(publish_pending)
+  published=$(reconcile_pending)
 
   # Stop a runner this home owns whose source is no longer registered. Without
   # this, unregistering a source that never completes leaves its child blocked

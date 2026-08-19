@@ -23,6 +23,8 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `docs/sessionstart-nudge.md` owns the native session-open adapter tiers that run or nudge the digest command, and the source routing between them.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
+Whether a recorded secondmate is still CONSUMING its own durable wake queue is a separate question that a live agent process does not answer, and `bin/fm-secondmate-wake-check.sh` owns it: its header states the signal, why the two rejected candidates were rejected, and which windows it leaves open, while the settings above bound its cadence and threshold.
+It runs as an adjunct to the watcher's ordinary cycle and to the session-start liveness sweep rather than as a monitor of its own, and it only reads - arming a watcher in another home stays forbidden.
 
 ## Pi Calm preference (config/calm)
 
@@ -463,7 +465,7 @@ A queued `check` delivery is reported at most once per captured source and seque
 A durable handled acknowledgement stops future source re-announcement, while a record already queued remains under the durable queue's authority until the ordinary drain's sequence-bound post-handling acknowledgement consumes it.
 
 Discovery is never a timer.
-Each registered source has its own child process blocking on that source, and the watcher's per-cycle `reconcile` republishes every captured result with no durable handled acknowledgement yet - regardless of any earlier publication - restarts a source whose owner is gone, and stops this home's runner when reconciliation runs after its registration disappeared unexpectedly.
+Each registered source has its own child process blocking on that source, and the watcher's per-cycle `reconcile` republishes every captured result with no durable handled acknowledgement yet - regardless of any earlier publication - retries the adapter's own application of each of those results, restarts a source whose owner is gone, and stops this home's runner when reconciliation runs after its registration disappeared unexpectedly.
 In supported steady state, a home with no registered source runs nothing, generates no state, and keeps its ordinary cadence.
 
 Whether a captured result ends its source is adapter knowledge, never the runner's.
@@ -476,6 +478,9 @@ Applying a captured result is adapter knowledge too, and some results carry no j
 Leaving that to a handler means it can silently not happen, so immediately after the terminal check above the runner calls `bin/fm-procevent-<adapter>.sh autohandle <source-id> <sequence> <result-file>` and lets the adapter apply and acknowledge its own result.
 That call runs strictly after terminal retirement, because a handling adapter re-arms its own next source and retiring afterwards would drop that fresh registration and leave the source silently dead.
 Exit 0 means the adapter fully applied and acknowledged the result; a missing command, an error, or any other exit is not a capture failure but leaves the result unacknowledged and therefore still eligible for re-announcement, so a handler receives it exactly as before and an adapter with no such command needs no change.
+Re-arming is therefore never left to whether a handler arrives: for an adapter whose result is terminal for that exact registration, the application step above is where the next source comes from, so one failed application would otherwise end intake permanently rather than delaying it.
+`reconcile` closes that by retrying `autohandle` for every captured result with no handled acknowledgement yet, on the same idempotent seam and in the same adapter-declared order, which changes nothing about acknowledgement: an application that fails still leaves its result unhandled, still announced, and still eligible for the next retry, and only the adapter's own `handled` call ends re-announcement.
+Because two callers can now reach one generation - a runner right after its own capture and a reconcile re-driving a result nobody picked up - application is serialized per source at a second machine-wide boundary, separate from the source boundary that the adapter's own re-arm takes; the runner waits for that boundary, while reconcile declines a generation another caller holds and retries on a later cycle rather than blocking the watcher.
 Announcement ordering is adapter-declared through `bin/fm-procevent-<adapter>.sh self-announcing`: an adapter that answers exit 0 declares that every result its autohandle fully applies is announced through a durable downstream channel of its own, so the runner applies first and publishes a `check` wake only for what remains unhandled afterwards; every other adapter keeps the strict publish-before-apply order, and its autohandle runs only when this capture's own wake was successfully appended to the durable queue.
 The remote-secondmate reply adapter declares itself self-announcing: a captured reply reaches its local status mirror and settles its correlated pending-reply expectation without any handler step, the mirrored status bytes are the single wake for one remote note through the same signal classification a local secondmate's append gets, a byte-identical replayed capture adds no bytes and stays quiet, and only a capture the adapter could not fully apply is published as a `check` wake, whose adapter handling remains idempotent.
 
@@ -546,6 +551,8 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_INACTIVE_RECONCILE_SECS=900  # 60..1800-second watcher cadence and inactivity threshold; locked session start also scans immediately
 FM_INACTIVE_RECONCILE_BUDGET_SECS=10  # 1..30-second scan deadline; wedged-scan kill backstop follows one second later
+FM_SECONDMATE_WAKE_STALL_SECS=1800  # 300..86400 seconds a recorded secondmate's oldest queued wake may sit unconsumed before it is reported
+FM_SECONDMATE_WAKE_SCAN_SECS=300  # 60..3600-second watcher cadence for that scan; the session-start liveness sweep asks the same question per secondmate with no cadence
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or Relay dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result

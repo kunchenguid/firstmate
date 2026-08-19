@@ -146,11 +146,26 @@ assert_grep 'done [corr=0123456789abcdef]' "$PARENT/state/ios.status" "failed re
 assert_grep 'ingested: ios appended=0' "$TMP_ROOT/handle-arm-fail.out" "failed re-arm did not replay the committed reply"
 rm -f "$PARENT/state/procevent"
 mkdir "$PARENT/state/procevent"
+# Reconciliation finishes that retry by itself. Re-arming this adapter happens
+# inside its application step, so a relay left waiting for a handler would stay
+# permanently unarmed rather than merely late.
 reconcile_out=$(remote_env "$ROOT/bin/fm-procevent.sh" reconcile)
-assert_contains "$reconcile_out" 'published=1' "failed re-arm did not leave the result eligible for retry"
+assert_present "$PARENT/state/procevent/$SID.source" \
+  "reconciliation did not re-arm the relay for the next delta"
+assert_present "$PARENT/state/procevent-inbox/$SID.1.handled" \
+  "reconciliation applied the capture without acknowledging it"
+# That fresh registration also gets its runner in the same pass. Stop that
+# detached poll now: its source blocks for the configured wait and would then
+# capture an empty delta into the sequence the assertions below expect. Re-arm
+# afterwards so the next block still starts from an armed relay.
+assert_contains "$reconcile_out" 'started=1' "reconciliation re-armed the relay but never started its runner"
+remote_env "$ROOT/bin/fm-procevent.sh" retire "$SID" >/dev/null
+assert_contains "$reconcile_out" 'published=0' \
+  "reconciliation re-announced a capture it had just applied and acknowledged"
 out=$(remote_env "$ADAPTER" handle ios 1 "$RESULT")
 assert_contains "$out" 'ingested: ios appended=0' "retried reply ingest was not idempotent"
-assert_contains "$out" 'handled: remote-reply-ios 1' "captured generation was not acknowledged"
+assert_contains "$out" 'already-handled: remote-reply-ios 1' \
+  "the generation reconciliation acknowledged was acknowledged a second time"
 assert_grep 'done [corr=0123456789abcdef]' "$PARENT/state/ios.status" "parent status did not receive the correlated reply"
 assert_grep 'data/remote-secondmates/ios/data/reply/report.md' "$PARENT/state/ios.status" "remote document pointer was not rewritten locally"
 cmp -s "$REMOTE/data/reply/report.md" "$PARENT/data/remote-secondmates/ios/data/reply/report.md" \

@@ -16,7 +16,7 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
-#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
+#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>|wake loop stalled: <detail>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
@@ -43,6 +43,11 @@
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
 #          process, an unreadable target, and an unverified backend; respawn
 #          failed names whether the endpoint was missing or agent-less.
+#          A live agent process answers only half the question, so a local
+#          secondmate confirmed alive is additionally asked whether its own wake
+#          loop is still consuming its queue, through
+#          bin/fm-secondmate-wake-check.sh, which owns that predicate and its
+#          limits; a stall prints the wake-loop-stalled variant.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
@@ -604,6 +609,28 @@ secondmate_liveness_sweep() {
   return 0
 }
 
+# The other half of liveness. A secondmate whose agent process is alive can
+# still have lost its wake loop, and from outside those two look identical - an
+# idle mate and a deaf one both show a live agent and a quiet pane. Ask the one
+# question that separates them: is that home still consuming its own durable
+# wake queue? bin/fm-secondmate-wake-check.sh owns that predicate, why it is the
+# signal, and which windows it leaves open. This reads only; it never arms a
+# watcher in another home.
+report_stalled_wake_loop() {  # <meta> <id>
+  local meta=$1 id=$2 home verdict age seq
+  home=$(fm_meta_get "$meta" home)
+  [ -n "$home" ] || return 0
+  verdict=$("$SCRIPT_DIR/fm-secondmate-wake-check.sh" probe "$home" 2>/dev/null) || return 0
+  case "$verdict" in
+    'stalled '*) ;;
+    *) return 0 ;;
+  esac
+  verdict=${verdict#stalled }
+  age=${verdict%% *}
+  seq=${verdict##* }
+  echo "SECONDMATE_LIVENESS: secondmate $id: wake loop stalled: its durable wake queue has gone ${age}s unconsumed (oldest sequence $seq) while its agent process is alive"
+}
+
 # One secondmate's liveness check. Split out of the sweep so each is individually
 # timed; every `return` here was a `continue` in the loop and means exactly the
 # same thing - move on to the next secondmate. SECONDMATE_RESPAWNED_IDS stays a
@@ -695,6 +722,7 @@ secondmate_liveness_one() {  # <meta> <id>
   esac
   case "$agent_state" in
     alive)
+      report_stalled_wake_loop "$meta" "$id"
       if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
         echo "BOOTSTRAP_INFO: secondmate $id already live (backend=$backend)"
       fi

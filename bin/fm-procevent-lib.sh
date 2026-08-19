@@ -80,6 +80,19 @@ fm_procevent_source_lock_path() {
   printf '%s/%s.lock\n' "$(fm_procevent_claim_root)" "$1"
 }
 
+# A SECOND, separate boundary that serializes only adapter application of one
+# source's captured results. It cannot be the source lock: an adapter applying a
+# terminal capture re-arms its next source, which takes that same source lock,
+# which is exactly why the runner calls autohandle outside it. Two callers now
+# apply - a runner right after its own capture, and reconcile re-driving a
+# result no handler picked up - and without this they can both pass the handled
+# check before either records the acknowledgement, running one adapter's apply
+# step twice. Machine-wide for the same reason the source lock is: separate
+# homes can share one underlying source store.
+fm_procevent_apply_lock_path() {
+  printf '%s/%s.apply.lock\n' "$(fm_procevent_claim_root)" "$1"
+}
+
 fm_procevent_source_lock_acquire() {
   local id=$1 root
   fm_procevent_source_id_valid "$id" || return 1
