@@ -677,6 +677,14 @@
       "audience": "public-product"
     },
     {
+      "path": "skills/kubectl-ops/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": ".agents/skills/kubectl-ops/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "skills/postgres-admin/SKILL.md",
       "audience": "public-product"
     },
