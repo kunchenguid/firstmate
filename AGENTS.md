@@ -54,7 +54,7 @@ Each secondmate has a persistent isolated `FM_HOME`, including its own state, ba
 Tracked files hold shared instructions and tooling; `data/` holds durable private fleet records; `state/` holds runtime records and append-only status events; `config/` holds local operating choices; and `projects/` contains clones that are read-only to firstmate except under hard rule 1's concrete captain-approved project operation exception.
 
 ```
-AGENTS.md            this file (CLAUDE.md is a symlink to it)
+AGENTS.md            this file (CLAUDE.md is a real @AGENTS.md pointer to it)
 CONTRIBUTING.md      contributor workflow and repo conventions
 README.md            public overview and development notes
 .github/workflows/   shared CI and PR enforcement, committed
@@ -107,6 +107,7 @@ state/               runtime records and signals; gitignored
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (section 13)
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
+  decision-bindings/ private bindings from a captured-answer source id to the captain-hold origin its keyed answers close; written only by bin/fm-decision-hold.sh bind, dropped by unbind and by source retirement (section 13; docs/decision-hold-lifecycle.md)
   when/              private condition->action watch specs, their trust bindings, and single-fire markers; written only by bin/fm-procevent-when.sh (section 13's process-event-sources trigger)
   x-inbox/           generated Relay pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated Relay durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
@@ -188,8 +189,8 @@ If static `config/crew-harness` or `config/secondmate-harness` names an unverifi
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
 When dispatch profiles exist, consult them at every crewmate or scout intake and pass the resolved concrete profile required by `fm-spawn`.
 Routing precedence is an explicit per-task captain override, then the best-fit configured rule, then the configured default, then the static crewmate harness.
-Firstmate alone resolves a matched profile array: run `quota-axi --json` at that intake, evaluate every configured candidate against that current output, and choose with inspectable effective headroom and usable runway, using pace and reserve only later when needed.
-Account for every candidate with the catalog evidence, provider relationship, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, and the headroom, runway, and later pace or reserve evidence used in selection; never omit a candidate, guess, fall back silently, or call the result quota-informed without them.
+Firstmate alone resolves a matched profile array: begin with `quota-axi`'s default TOON at that intake, using the skill's narrow TOON-then-`--json` fallback only for genuine ambiguity, evaluate every configured candidate against that current output, and choose with inspectable `spendPriority` as the one quota-perspective ranker after the skill's eligibility, reasoning-class, and runway-feasibility gates.
+Account for every candidate with the catalog evidence, provider relationship, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, and the spendPriority and runway evidence used in selection; never omit a candidate, guess, fall back silently, or call the result quota-informed without them.
 Establish model support and provider family from that harness's own authoritative catalog, then read `quota-axi` at the granularity the vendor actually supplies: provider-level or all-model evidence applies to every model established in that family, and a named-model window bounds only that model.
 Missing model-level quota, a missing authentication source, unmeasurable headroom, or unmodeled authentication is disclosed uncertainty that keeps a candidate eligible, never a credential or login escalation.
 Only concrete contradictory evidence blocks a candidate, such as an authoritative catalog proving the model unsupported or proof that the credential selected for that surface is unusable; never infer a credential store, provider family, or quota mapping from a harness, model, or source name, and never launch another harness's CLI to judge a candidate.
@@ -197,7 +198,7 @@ Preserve malformed profile configuration as an actionable error rather than sele
 When every candidate is tight, preserve the captain's strongest-reasoning class rather than silently downgrading it solely to conserve quota; stop and report the tight choice if that class cannot proceed.
 Break genuine evidence ties without array-order or harness bias.
 `quota-axi` owns how model or product windows relate to bounding account windows and remains data-only.
-Load `quota-array-dispatch` before choosing among a matched profile array; that skill is the single owner of the completion-aware selection procedure.
+Load `quota-array-dispatch` before choosing among a matched profile array; that skill is the single owner of the TOON-first spendPriority selection procedure.
 The generic effort fallback and its precedence are owned by `harness-adapters`: explicit captain and standing configured effort win; otherwise use low for well-understood explicit work, xhigh for ambiguous investigation or design, intermediate levels proportionally, and never max without explicit captain preference.
 Do not add model-specific versions of that policy.
 
@@ -247,7 +248,7 @@ Route durable knowledge to its most specific owner:
 Firstmate never writes a project's `AGENTS.md` directly.
 A crewmate creates or updates it lazily through the project's selected delivery path, using `bin/fm-ensure-agents-md.sh` and preferring pointers to authoritative sources over copied detail.
 Keep fleet delivery posture and captain-private strategy out of project memory.
-When the captain invokes `/stow`, load the `stow` skill for the complete knowledge-routing and unfinished-work sweep.
+When the captain invokes `/stow`, load the `stow` skill for its memory curation, knowledge routing, and persistence of the open work records this session is holding; it files and corrects only the open work that session is holding, and never reconciles the backlog against repository or PR reality.
 
 ## 7. Task lifecycle
 
@@ -371,6 +372,7 @@ Retire one only on an explicit captain or main-firstmate decision, after loading
 A completed scout must leave a self-contained report before its scratch worktree can be discarded; read and relay its findings, record the report as the Done artifact, and re-evaluate the queue.
 A report may recommend implementation but does not authorize it.
 Before treating the investigation or any visual review as complete, load `decision-hold-lifecycle`; teardown enforces that shared completion gate.
+When a scout's deliverable is a visual artifact the captain will iterate on, prefer keeping that scout alive to host its own Lavish loop rather than tearing it down and mediating from firstmate, so the scout keeps its investigation context and the captain iterates in one continuous session.
 When implementation is separately authorized, promote the existing scout through `bin/fm-promote.sh` rather than creating a duplicate task.
 The promoted worker must inventory scratch state, return to a clean default-branch base, carry over only intended fix changes, create the ship branch, and follow the project's selected delivery path while leaving scratch commits and debug edits behind and turning a reproduced bug into the regression test.
 
@@ -522,7 +524,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `PR_CHECK_MIGRATION:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, or `FMX:`); silence and `BOOTSTRAP_INFO:` need no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding, regardless of the project's `yolo` posture.
-- `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi output.
+- `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi default TOON.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
 - `project-management` - load before adding, creating, removing, or initializing a project.
