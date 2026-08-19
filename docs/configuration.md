@@ -31,6 +31,7 @@ A Firstmate checkout that lands work on its own fork, while keeping a third-part
 `bin/fm-landing-remote.sh` is the single owner of that remapping: it runs only on the primary checkout, names the parent `upstream`, sets the `gh` default repo to `origin`, and re-inits no-mistakes without `--fork-url` so the gate opens PRs on the landing remote.
 Its header owns the flags, URL comparison, linked-worktree refusal, and idempotency.
 `apply` has one outcome: it exits 0 only when the remap, the refetch, the branch tracking repair, the `gh` default, and the no-mistakes re-init all succeeded, because a partial remap still sends a flagless `gh pr create` to the parent.
+A `gh` or `no-mistakes` that is not on `PATH` at all is the single exception: `apply` warns, names the one command to run once that tool is installed, and still exits 0.
 Every refusal runs before the first write, and any later failure restores the remotes, the branch tracking, and the git defaults it found, so a failed `apply` leaves the checkout as it was and can be re-run.
 The remap shape is recorded before the first write, and traps on `EXIT`, `HUP`, `INT` and `TERM` cover the whole mutating window, so a `set -e` abort, a Ctrl-C, or a `kill` during the refetch still restores and still exits non-zero rather than leaving the checkout with no `origin`.
 Only an uncatchable `SIGKILL` can get past that window.

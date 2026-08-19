@@ -42,6 +42,7 @@ Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.
 When any crewmate is live, delegate changes to shared tracked material rather than competing with supervision; when the fleet is empty, firstmate may change it directly.
 This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` are captain-private and gitignored.
 Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
+Firstmate repo tasks land into this home's local `main` via `bin/fm-merge-local.sh` once approved, while the outward-facing PR remains open; `docs/configuration.md` owns which remote that PR opens on.
 Never add an agent name as a commit co-author.
 
 ## 2. Layout and state

@@ -22,7 +22,10 @@
 # when `gh` is on PATH, and re-inits no-mistakes without --fork-url when
 # `no-mistakes` is on PATH so its PR target follows the new origin.
 # apply has one outcome: it exits 0 only when every one of those steps
-# succeeded. Everything that can refuse runs before anything is written, and
+# succeeded. A gh or no-mistakes that is not on PATH at all is the single
+# exception: apply warns, names the one command to run once that tool is
+# installed, and still exits 0.
+# Everything that can refuse runs before anything is written, and
 # every later failure - a remote rename or add, a git config write, the
 # refetch, the gh default, the no-mistakes re-init - restores the remotes, the
 # branch tracking, and the git defaults it found, so a failed apply leaves the
