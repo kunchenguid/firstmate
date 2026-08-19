@@ -3,7 +3,9 @@
 #
 # Every environment variable the session-lock cohort proof reads: the launch
 # markers in FM_SESSION_LAUNCH_MARKERS, and the container guards and pane ids in
-# FM_SESSION_CONTAINERS (bin/fm-session-lock-lib.sh owns both tables).
+# FM_SESSION_CONTAINERS (bin/fm-session-lock-lib.sh owns both tables). Both are
+# row-per-line tables whose first column is the harness or provider that owns the
+# row, so both are read the same way and only the variable columns are emitted.
 #
 # A fixture that starts a harness-named process MUST clear all of them, or that
 # process inherits the captain session's own launch marker and pane id, is
@@ -26,9 +28,12 @@ FM_TEST_SESSION_SIGNAL_VARS=$(
   lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/fm-session-lock-lib.sh"
   # shellcheck source=bin/fm-session-lock-lib.sh
   . "$lib" || exit 1
-  for marker in $FM_SESSION_LAUNCH_MARKERS; do
-    printf '%s\n' "$marker"
-  done
+  while read -r _ var; do
+    [ -n "$var" ] || continue
+    printf '%s\n' "$var"
+  done <<MARKERS
+$FM_SESSION_LAUNCH_MARKERS
+MARKERS
   while read -r _ guard panevar; do
     [ -n "$guard" ] || continue
     printf '%s\n%s\n' "$guard" "$panevar"

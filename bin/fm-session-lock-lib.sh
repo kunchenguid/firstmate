@@ -74,12 +74,11 @@ fm_harness_path_name() {  # <path>
 # harness name, or return 1.
 #
 # The strictest of this file's path rules, and used by the `MainThread` branch
-# below and nowhere else. A harness component ANYWHERE in the path is too loose
-# THERE, because an interpreter's argv also carries the values of its own flags:
-# inside that branch `--require /opt/hooks/claude/instrument.js` names no harness,
-# and its basename `instrument.js` is what says so. That is a statement about the
-# MainThread branch only; the sibling interpreter branch below is looser still and
-# says so itself.
+# below and nowhere else. That branch has exactly one token of evidence, so it
+# takes the strictest reading of it; the sibling interpreter branch reads the same
+# token positions under the same stop-at-the-first-flag rule but by whole path
+# component, because the only shape it identifies at all is a node-hosted bin
+# entry that is NOT named after the harness.
 #
 # Exact equality is deliberate, and under `MainThread` it is the ONLY evidence
 # there is: the command path is literally `MainThread` and argv[0] is the
@@ -105,10 +104,17 @@ fm_harness_basename_name() {  # <path>
 # Print the first verified harness name that appears anywhere in string $1, or
 # return 1.
 #
-# This NAMES a match one of the rules above already made; it never decides one.
+# This NAMES a match one of the rules below already made; it never decides one,
+# and it is only ever handed the one string that match was made against - the
+# reported command basename. Over a whole argument string it would outrank the
+# token that actually matched and name a harness by table order instead: in
+# `node /opt/tools/codex/cli.js --config /etc/claude/x.toml` the first name it
+# reaches is claude. Every other rule therefore names its own match from the exact
+# path or basename that decided it.
+#
 # The name is what scopes FM_SESSION_LAUNCH_MARKERS below to the harness whose
-# marker was actually verified, so a looser rule that matched cannot lend its
-# verdict to a different harness's marker.
+# marker was actually verified, so a rule that matched cannot lend its verdict to
+# a different harness's marker.
 fm_harness_name_in() {  # <string>
   local text=$1 name
   for name in "${FM_HARNESS_NAMES[@]}"; do
@@ -129,7 +135,8 @@ fm_harness_name_in() {  # <string>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
+#   3. a bare interpreter (node, python) running a harness script path, taken
+#      from the argv tokens before the first flag by whole path component.
 #   4. node's own `MainThread` exec name, resolved from the one argv token after
 #      the interpreter by exact basename only, and refused outright when that
 #      token is a flag.
@@ -143,7 +150,7 @@ fm_harness_name_in() {  # <string>
 FM_HARNESS_IS_CLAUDE=0
 FM_HARNESS_KIND=
 fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name script
+  local comm=$1 args=$2 base argv0 name script rest
   FM_HARNESS_IS_CLAUDE=0
   FM_HARNESS_KIND=
   base=$(basename -- "$comm")
@@ -159,28 +166,51 @@ fm_harness_process_matches() {  # <comm> <args>
     return 0
   fi
   # Bare interpreter (e.g. node, python) that reports its OWN name as the exec
-  # name: match a verified harness name anywhere in the argument string.
+  # name: identity comes from the interpreter's script path in argv, read under
+  # the same discipline the MainThread branch below uses. The tokens after the
+  # interpreter are read in order and the scan STOPS at the first one beginning
+  # with `-`, because from there on a path-shaped token may be an interpreter flag
+  # or the VALUE of one, and a flag's value can be named anything at all. A token
+  # before that boundary carries a verdict only when a whole path component of it
+  # is exactly a harness name.
   #
-  # This is the loosest rule in the file, looser than the whole-path-component
-  # rule above and much looser than the exact-basename rule the MainThread branch
-  # below uses, and it does reach shapes that are not harnesses at all:
+  # Reading the whole argument string is what this rule used to do, and it
+  # identified shapes that are not harnesses at all, because that test was an
+  # unanchored regex with no path-component requirement in it: an unrelated
+  # service carrying any ordinary `~/.claude/...` hook, settings, log or
+  # transcript argument reported itself as Claude, as did
   # `node --require /opt/hooks/claude/instrument.js /srv/app/server.js` and
-  # `python3 /srv/app.py --config /etc/claude/x.toml` both classify as a harness
-  # here, the second with FM_HARNESS_IS_CLAUDE=1. A path component must be exactly
-  # a harness name for that to happen, so an ordinary `~/.claude/...` argument
-  # does not, which is what keeps the reachability narrow rather than absent.
+  # `python3 /srv/app.py --config /etc/claude/x.toml`. None of the three is
+  # identified now.
   #
-  # It is PRE-EXISTING and deliberately left alone rather than tightened alongside
-  # the MainThread branch, because the same looseness is currently the only rule
-  # that identifies a node-hosted harness whose bin entry is not named after the
-  # harness - `node /path/to/claude/cli.js` is identified here and nowhere else -
-  # so narrowing it needs its own evidence from a real install, not inference.
+  # Stopping at the first flag gives up the inferred
+  # `node --experimental-foo /path/to/claude/cli.js` shape on purpose, which is
+  # the same trade the MainThread branch takes: the alternative is an allowlist of
+  # value-taking interpreter flags that would rot silently every time a vendor
+  # adds one, and silently stale recorded state is the failure this whole
+  # mechanism exists to remove. Both outputs are derived from the token that
+  # matched and never from the whole argv, so a harness name sitting elsewhere in
+  # the arguments can neither name the kind nor raise the Claude flag.
   case "$comm" in
     *node*|*python*)
-      if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
-        case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
-        FM_HARNESS_KIND=$(fm_harness_name_in "$args" || true)
-        return 0
+      rest=${args#* }
+      if [ "$rest" != "$args" ]; then
+        while [ -n "$rest" ]; do
+          script=${rest%% *}
+          case "$rest" in
+            *' '*) rest=${rest#* } ;;
+            *) rest='' ;;
+          esac
+          [ -n "$script" ] || continue
+          case "$script" in
+            -*) break ;;
+          esac
+          if name=$(fm_harness_path_name "$script"); then
+            case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+            FM_HARNESS_KIND=$name
+            return 0
+          fi
+        done
       fi
       ;;
   esac
@@ -198,9 +228,9 @@ fm_harness_process_matches() {  # <comm> <args>
   # values are paths that can be named anything, `/opt/vendor/claude` included.
   #
   # So the branch REFUSES to identify anything as soon as that first token is a
-  # flag, rather than trying to work out where the flags end. That refusal binds
-  # this branch only, which is the branch a `MainThread` exec name reaches; an
-  # interpreter that reports its own name is decided by the looser rule above.
+  # flag, rather than trying to work out where the flags end. An interpreter that
+  # reports its own name is decided by the rule above, which stops at the first
+  # flag in the same way but reads whole path components rather than a basename.
   #
   # The refusal gives up the inferred `node --enable-source-maps .../bin/codex`
   # shape on purpose: the alternative is an allowlist of value-taking interpreter

@@ -144,10 +144,9 @@ SH
 # node program can present cannot carry a harness verdict on its own.
 #
 # Every case below pins the `MainThread` branch and nothing else. An interpreter
-# that reports its own name (`node`, `python3`) is decided by a separate, looser
-# rule that these negatives say nothing about, and that rule's known looseness is
-# recorded in bin/fm-session-lock-lib.sh and docs/verification/runtime-backends.md
-# as a deferred defect rather than pinned here as a contract.
+# that reports its own name (`node`, `python3`) reaches a separate rule that stops
+# at the first flag in the same way but reads whole path components rather than a
+# basename, and the case after this one pins that rule on its own shapes.
 test_node_main_thread_identity_comes_only_from_the_script_path() {
   local dir fakebin shape
   dir="$TMP_ROOT/main-thread"
@@ -214,6 +213,93 @@ SH
     fi
   done
   pass "session-lock: a MainThread-named harness is identified from the one plain script token, and only from there"
+}
+
+# An interpreter that reports its OWN exec name (`node`, `python3`) never reaches
+# the MainThread branch above, so it has its own rule: the argv tokens before the
+# first flag, matched by whole path component. The component rule rather than that
+# branch's exact basename is what identifies a node-hosted harness whose bin entry
+# is not named after the harness, which is the only shape this rule identifies at
+# all.
+#
+# Every negative below was observed classifying as a Claude harness when this rule
+# read the whole argument string instead, so each is a real regression guard.
+test_bare_interpreter_identity_stops_at_the_first_flag() {
+  local dir fakebin shape kind
+  dir="$TMP_ROOT/bare-interpreter"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_ARGV_SHAPE:-claudecli}" in
+  770:comm=:pyconfig) printf '%s\n' python3 ;;
+  770:comm=:*) printf '%s\n' node ;;
+  770:args=:claudecli) printf '%s\n' 'node /path/to/claude/cli.js' ;;
+  770:args=:codexcli) printf '%s\n' 'node /opt/tools/codex/cli.js' ;;
+  770:args=:codexthenclaudearg) printf '%s\n' 'node /opt/tools/codex/cli.js --config /etc/claude/x.toml' ;;
+  770:args=:hookarg) printf '%s\n' 'node /srv/app/server.js --hooks /home/u/.claude/hooks.json' ;;
+  770:args=:transcriptarg) printf '%s\n' 'node /srv/x/server.js --transcript /home/u/.claude/p/t.jsonl' ;;
+  770:args=:requirepath) printf '%s\n' 'node --require /opt/hooks/claude/instrument.js /srv/app.js' ;;
+  770:args=:pyconfig) printf '%s\n' 'python3 /srv/app.py --config /etc/claude/x.toml' ;;
+  770:args=:flagged) printf '%s\n' 'node --experimental-foo /path/to/claude/cli.js' ;;
+  770:args=:dotcomponent) printf '%s\n' 'node /srv/app/server.js /home/u/.claude/hooks.json' ;;
+  770:args=:bare) printf '%s\n' 'node' ;;
+  770:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=:*) printf '%s\n' 770 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '770\n' > "$dir/state/.lock"
+
+  # A node-hosted harness whose bin entry is `cli.js` is identified by the harness
+  # component of its install path, and by nothing else in this file.
+  for shape in claudecli codexcli codexthenclaudearg; do
+    FM_TEST_ARGV_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 770' \
+      || fail "$shape: a node-hosted harness under a harness-named install path was not recognized as a harness"
+    FM_TEST_ARGV_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$shape: a node-hosted harness session could not recognize its own lock"
+  done
+
+  # The kind must come from the token that matched, not from the table order of
+  # the names: a codex install carrying a claude-shaped flag value is codex.
+  kind=$(FM_TEST_ARGV_SHAPE=codexthenclaudearg lib_eval "$fakebin" 'fm_harness_pid_kind 770' | tr -d '[:space:]')
+  [ "$kind" = codex ] || fail \
+    "a codex install whose arguments also mention claude reported harness kind '$kind', so the kind is decided by table order rather than by what matched"
+  kind=$(FM_TEST_ARGV_SHAPE=claudecli lib_eval "$fakebin" 'fm_harness_pid_kind 770' | tr -d '[:space:]')
+  [ "$kind" = claude ] || fail "a node-hosted claude install reported harness kind '$kind'"
+
+  # Nothing at or after the first flag may decide the verdict, because a flag's
+  # value is a path that can be named anything at all, and a component that merely
+  # STARTS with a harness name is not one either - `.claude` is not `claude`.
+  #
+  # `flagged` is a DELIBERATE refusal, not an oversight: once any flag precedes the
+  # script this rule stops guessing which token is the script, because the
+  # alternative is an allowlist of value-taking interpreter flags that would rot
+  # silently as vendors add them. Do not restore a whole-argv match to make it
+  # pass; teach it a shape only from a real release that reports it.
+  for shape in hookarg transcriptarg requirepath pyconfig flagged dotcomponent bare; do
+    if FM_TEST_ARGV_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 770'; then
+      fail "$shape: an interpreter argument at or after the first flag carried a harness verdict"
+    fi
+    if FM_TEST_ARGV_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+      fail "$shape: an unrelated interpreted program claimed a home's session lock"
+    fi
+    if FM_TEST_ARGV_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_kind 770'; then
+      fail "$shape: an unrelated interpreted program was named as a harness kind"
+    fi
+  done
+  pass "session-lock: a bare interpreter is identified from the argv path components before the first flag"
 }
 
 test_harness_beyond_a_gap_never_owns_the_lock() {
@@ -768,6 +854,11 @@ SH
 # The two cases below run the SAME fixture and differ only in which harness asks,
 # so neither can pass by never reaching the marker path: the codex asker must be
 # refused, and the claude asker must still converge.
+# Called DIRECTLY and never through a command substitution, for the same reason
+# start_cohort_holder is: the holder pid it registers for cleanup would be
+# appended to a subshell copy of COHORT_PIDS and discarded, leaving a live
+# harness-named process behind after the suite exits. The holder pid is published
+# in COHORT_HOLDER_PID rather than printed.
 cross_harness_fixture() {  # <dir> <asker-bin>
   local dir=$1 asker_bin=$2 holder
   make_cohort_fixture "$dir"
@@ -790,13 +881,13 @@ SH
   "${COHORT_ENV_ARGV[@]}" FM_FIX="$dir" FM_FIX_LIB="$LIB" FM_FIX_HOLDER="$holder" \
     FM_FIX_ROOT="$ROOT" CLAUDE_PID="$holder" HERDR_ENV=1 HERDR_PANE_ID=fixture-pane \
     "$asker_bin" "$dir/asker.sh"
-  printf '%s\n' "$holder"
 }
 
 test_a_different_harness_never_believes_an_inherited_launch_marker() {
   local dir holder asker
   dir="$TMP_ROOT/cohort-cross-harness"
-  holder=$(cross_harness_fixture "$dir" "$NAMED_CODEX")
+  cross_harness_fixture "$dir" "$NAMED_CODEX"
+  holder=$COHORT_HOLDER_PID
   asker=$(tr -d '[:space:]' < "$dir/asker-pid")
 
   # Divergence: the marker IS present and DOES name the holder, and co-location
@@ -826,7 +917,8 @@ test_a_different_harness_never_believes_an_inherited_launch_marker() {
 test_the_same_harness_still_converges_on_the_identical_fixture() {
   local dir holder asker
   dir="$TMP_ROOT/cohort-same-harness"
-  holder=$(cross_harness_fixture "$dir" "$NAMED_CLAUDE")
+  cross_harness_fixture "$dir" "$NAMED_CLAUDE"
+  holder=$COHORT_HOLDER_PID
   asker=$(tr -d '[:space:]' < "$dir/asker-pid")
 
   [ "$(cohort_field "$dir" launcher_self)" = "$holder" ] || fail \
@@ -1213,6 +1305,7 @@ test_unusable_stop_sampling_settings_cannot_release_a_live_holder() {
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_node_main_thread_identity_comes_only_from_the_script_path
+test_bare_interpreter_identity_stops_at_the_first_flag
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home
