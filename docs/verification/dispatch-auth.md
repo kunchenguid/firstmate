@@ -111,6 +111,22 @@ There is no `projectionBasis` field; its absence means `cycle_average`.
 Projection confidence is not present on every known runway, so selection must preserve that absence as uncertainty rather than fabricate it.
 The older-schema fallback contract is owned by `quota-array-dispatch`; this evidence does not reinterpret an absent runway, pace, or selection field.
 
+## Codex model and reasoning-level catalog
+
+Verified 2026-08-19 against codex-cli 0.147.0 and the installed Codex model cache.
+
+```sh
+codex --version
+jq -c '{fetched_at, client_version, model: [.models[] | select(.slug == "gpt-5.6-luna") | {slug, display_name, default_reasoning_level, supported_reasoning_levels: [.supported_reasoning_levels[].effort], visibility, supported_in_api}]}' "${CODEX_HOME:-$HOME/.codex}/models_cache.json"
+```
+
+```text
+codex-cli 0.147.0
+{"fetched_at":"2026-08-19T11:00:45.669461Z","client_version":"0.147.0","model":[{"slug":"gpt-5.6-luna","display_name":"GPT-5.6-Luna","default_reasoning_level":"medium","supported_reasoning_levels":["low","medium","high","xhigh","max"],"visibility":"list","supported_in_api":true}]}
+```
+
+The installed Codex catalog therefore provides current model and max-effort evidence for the `codex` launch-profile row in [`harness-adapters`](../../.agents/skills/harness-adapters/SKILL.md#launch-profile-axes).
+
 ## Provider-family counterfactual that this producer schema supports
 
 Verified 2026-07-30 on Pi 0.82.0 and quota-axi 0.1.16.
