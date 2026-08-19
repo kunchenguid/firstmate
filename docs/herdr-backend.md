@@ -103,10 +103,10 @@ Reporting never renames a workspace, never renames a tab, and never touches any 
 Every report is best-effort: a refused or unsupported call is absorbed, because a sidebar row is never a reason to fail a spawn.
 
 Reporting happens at spawn time only, and no path retitles a worker that is already running.
-An existing fleet therefore converges as its tasks turn over, and a relaunch re-reports the same worker because tokens merge rather than accumulate.
-A projected task's Space keeps the task's own role and scope across a relaunch, because the report reads projectedness from the presentation journal, which outlives the spawn that created it.
+An existing fleet therefore converges as its tasks turn over, and a relaunch re-badges only the worker pane, whose replacement carries no metadata yet.
+A relaunch leaves the Space's existing tokens untouched, which is lossless because reported tokens persist per key until overwritten, so the Space keeps the role and scope its original spawn reported.
 
-`tests/fm-backend-herdr.test.sh` covers the role vocabulary, the reported argv, omission of unknown facts, independence of the name and the tokens, absorption of a refusal, the journal-derived Space role that survives a relaunch, the stable home-Space scope, and the guarantee that reporting emits no rename, label, create, or close.
+`tests/fm-backend-herdr.test.sh` covers the role vocabulary, the reported argv, omission of unknown facts, independence of the name and the tokens, absorption of a refusal, the stable home-Space scope, and the guarantee that reporting emits no rename, label, create, or close.
 `tests/fm-backend-herdr-smoke.test.sh` proves against the real binary that the reported values land on a live pane and Space and that both labels, and label-based discovery, come back unchanged.
 
 ## Presentation spaces

@@ -721,25 +721,6 @@ fm_backend_herdr_sidebar_display() {  # <role> <scope>
   printf '%s' "$text"
 }
 
-# fm_backend_herdr_sidebar_workspace_role <state-dir> <task-id> <task-role>:
-# the role a task's Space reports. The presentation journal
-# (fm_backend_herdr_projection_journal_path) is the durable record that a task
-# lives in its own projected one-task Space: it is published before that Space
-# is created and retired only at teardown, so it names projectedness on a
-# fresh spawn and on a plain relaunch alike, where no spawn-scoped flag
-# survives. Journal present means the Space holds exactly this one task and
-# carries the task's own role; journal absent means the shared per-home
-# container, which is a home and says so.
-fm_backend_herdr_sidebar_workspace_role() {  # <state-dir> <task-id> <task-role>
-  local journal
-  journal=$(fm_backend_herdr_projection_journal_path "${1:-}" "${2:-}")
-  if [ -e "$journal" ] || [ -L "$journal" ]; then
-    printf '%s' "${3:-}"
-    return 0
-  fi
-  printf 'home'
-}
-
 # fm_backend_herdr_sidebar_home_scope <home-label>: the stable scope a shared
 # per-home Space reports - the secondmate's own id for a secondmate home and
 # the primary home's label for the primary home. The value is the home's own
