@@ -12,6 +12,11 @@ Pi same-process session replacement follows the generation-owner contract in `.p
 Cursor's `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) owns routine tokenless re-arm for a Cursor primary by parking that awaited hook on `bin/fm-watch-arm.sh` and returning an actionable close as one follow-up; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns its loop bounds and supersession baton.
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
+The hook may act only for the session that holds this home's lock, and `bin/fm-session-lock-lib.sh` owns both proofs of that ownership.
+Harness ancestry is the first proof and is unchanged.
+The delivering session's own identity is the second, and it is required because Claude Code serves hook commands from a shared per-user worker pool whose top process is reparented to init once the session that first started it exits, which can leave a hook whose contiguous harness ancestry never reaches its own live session.
+That second proof is a conjunction: the delivered payload names a session id, the delivering session exported that same session id, the session pid it exported is exactly the pid this home's lock records, and that pid is still a live Claude process.
+Requiring pid equality is stricter than ancestry membership rather than weaker, so a session that does not hold the lock still cannot claim the home and several firstmate homes on one machine stay independent.
 A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
@@ -81,7 +86,9 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
+The same suite runs both ownership proofs over real processes, including a hook served from a worker chain that cannot reach its own session, the foreign-session refusal that is the safety counter-proof, an unconfirmed, absent, or malformed delivered identity, a missing or malformed recorded owner, and a main home's session refused against a secondmate home on the same machine.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
+It also fails, naming the installed harness and version, if Claude Code stops delivering the session identity the second proof depends on, on the synchronous Stop path or on the detached `asyncRewake` path the hook itself runs on.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset.
 
 ## Active limits and verification

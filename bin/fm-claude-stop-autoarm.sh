@@ -10,11 +10,18 @@
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
-#   - Identity: only when THIS session's harness ancestor holds state/.lock.
-#     When an existing numeric owner fails the shared harness-liveness predicate,
-#     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
+#   - Identity: only when THIS session holds state/.lock, proven either by
+#     harness ancestry or by the delivering Claude session's own identity. The
+#     second proof is required because Claude Code serves hook commands from a
+#     shared worker pool whose top process is reparented to init, which can leave
+#     a hook with no ancestry path back to its live session at all; both proofs
+#     and the disjunction over them are owned by bin/fm-session-lock-lib.sh, so
+#     the admission check and the post-recovery re-check cannot drift apart.
+#     When an existing numeric owner fails the shared harness-liveness
+#     predicate, the hook delegates guarded recovery to bin/fm-lock.sh and then
+#     re-verifies ownership through that same disjunction. A live owner, a
+#     missing or malformed lock, and a lock naming another session all remain
+#     inert, so a competing session never arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -48,7 +55,13 @@
 # suppresses any later automatic continuation in that unresolved episode.
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
-# exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
+# exit 0 is always silent, and exit 2 carries the rewake banner on stderr. The
+# opt-in FM_CLAUDE_AUTOARM_TRACE diagnostic is the one exception: when it is
+# set to a non-empty value, every gate that ends the run inert BEFORE it claims
+# the cycle names itself on stderr, which is what diagnoses a hook that never
+# claims the home under real hook conditions. Exits after that claim stay silent
+# and are read from the epoch ledger instead. It changes no decision and is
+# never set in normal operation.
 # On any uncertainty such as unresolvable ancestry, malformed lock state, or
 # lock contention, it exits 0 and leaves continuity to the synchronous guard and
 # the model.
@@ -69,6 +82,13 @@ case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
   *) AUTOARM_ATTEMPTS=2 ;;
 esac
+
+# Opt-in gate diagnostic. Silent unless FM_CLAUDE_AUTOARM_TRACE is set to a
+# non-empty value, so the production contract above is unchanged.
+trace() {  # <message>
+  [ -n "${FM_CLAUDE_AUTOARM_TRACE:-}" ] || return 0
+  printf 'autoarm-trace: %s\n' "$*" >&2
+}
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -92,10 +112,16 @@ PAYLOAD=$(cat 2>/dev/null || true)
 # the declared multi-hour timeout - the exact wedge grok 1.0.0 produced
 # (docs/turnend-guard.md "Harness integrations"). Cursor's own park adapter owns
 # its turn boundary, so stand down on a Cursor-delivered payload.
-fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
+if fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+  trace 'inert: payload delivered by a foreign host'
+  exit 0
+fi
 
 # --- scope: genuine primary checkout only -----------------------------------
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+if ! fm_primary_scope_matches "$FM_ROOT" "$STATE"; then
+  trace "inert: $FM_ROOT is not a primary home with state dir $STATE"
+  exit 0
+fi
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
 # A prior session may have died after leaving its numeric harness pid in .lock.
@@ -104,40 +130,73 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.
 RECOVER_SESSION_LOCK=0
-if ! fm_session_lock_owned_by_self "$STATE"; then
+if fm_session_lock_owned_by_this_claude_session "$STATE" "$PAYLOAD"; then
+  case "$FM_SESSION_LOCK_PROOF" in
+    ancestry) trace 'identity: proven by harness ancestry' ;;
+    claude-session)
+      trace "identity: proven by the delivering Claude session (pid ${CLAUDE_PID:-?})"
+      ;;
+  esac
+else
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$LOCK_PID" in
-    ''|*[!0-9]*) exit 0 ;;
+    ''|*[!0-9]*)
+      trace 'inert: no usable session lock, and neither identity proof applies'
+      exit 0
+      ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  if fm_harness_pid_alive "$LOCK_PID"; then
+    trace "inert: live session $LOCK_PID owns this home and neither identity proof applies (CLAUDE_PID=${CLAUDE_PID:-unset})"
+    exit 0
+  fi
+  trace "identity: recorded owner $LOCK_PID is dead, recovery pending"
   RECOVER_SESSION_LOCK=1
 fi
 
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
-[ -e "$STATE/.afk" ] && exit 0
+if [ -e "$STATE/.afk" ]; then
+  trace 'inert: away mode owns supervision'
+  exit 0
+fi
 
 # --- need: in-flight work or an X-mode relay poll ----------------------------
 need_supervision() {
   fm_supervision_needed "$STATE" "$GRACE"
 }
-need_supervision || exit 0
+if ! need_supervision; then
+  trace 'inert: nothing in flight and no relay poll to run'
+  exit 0
+fi
 
 # --- stale session-lock recovery ---------------------------------------------
 # Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics
 # remain the single acquisition owner, then re-verify current-session identity
-# before touching any auto-arm state.
+# before touching any auto-arm state. The re-check uses the same two-proof
+# predicate as the admission gate above on purpose: if fm-lock.sh ever elects a
+# different pid than it does today, this verification must not silently narrow
+# to ancestry alone.
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
-  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
-  fm_session_lock_owned_by_self "$STATE" || exit 0
+  if ! "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1; then
+    trace 'inert: guarded session-lock recovery refused'
+    exit 0
+  fi
+  if ! fm_session_lock_owned_by_this_claude_session "$STATE" "$PAYLOAD"; then
+    trace 'inert: ownership unproven after session-lock recovery'
+    exit 0
+  fi
 fi
 
 # --- single-flight owner claim ------------------------------------------------
 # Claude runs one background process per firing with no dedupe. Exactly one
 # owner foregrounds the arm and translates its close; every other firing exits
 # 0 so one watcher cycle maps to at most one exit-2 rewake.
-fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+if ! fm_lock_try_acquire "$OWNER_LOCK"; then
+  trace 'inert: another firing of this hook already owns the cycle'
+  exit 0
+fi
 if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
   fm_lock_release "$OWNER_LOCK"
+  trace 'inert: could not record ownership of the auto-arm cycle'
   exit 0
 fi
 trap 'fm_lock_release "$OWNER_LOCK"' EXIT

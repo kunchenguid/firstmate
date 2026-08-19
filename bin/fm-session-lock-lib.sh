@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # Shared session-lock harness identity.
 #
-# ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
-# bin/fm-lock.sh uses it to acquire and inspect state/.lock;
-# bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
+# ONE owner of "may this run act for the session that holds this home's lock?",
+# over two independent proofs and the disjunction that arbitrates them. Ancestry
+# asks whether the current process descends from the verified harness the lock
+# records. Delivered Claude session identity instead asks whether the session
+# that emitted this hook event is the one the lock names, which is needed
+# because Claude Code serves hook commands from a shared per-user worker pool
+# whose top process is reparented to init, leaving a hook with no ancestry path
+# back to its own live session; docs/watcher-continuity.md owns that contract.
+# bin/fm-lock.sh uses this file to acquire and inspect state/.lock;
+# bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires for the
 # lock-owning primary session before it may arm or rewake.
 # This file is sourced by scripts and has no side effects on source.
 
@@ -152,6 +158,67 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+# Print the session id carried by Claude Code hook payload $1, or return 1.
+#
+# The extractor is deliberately plain text and takes no jq dependency, because
+# the value is never trusted on its own. Its only consumer compares it to the
+# session id the delivering session exported into this process's environment, so
+# a mis-parse can withhold the proof but can never manufacture one.
+fm_claude_payload_session_id() {  # <payload>
+  local payload=${1-} id
+  [ -n "$payload" ] || return 1
+  id=$(printf '%s' "$payload" \
+    | tr ',{}' '\n' \
+    | sed -n 's/^[[:space:]]*"session_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9._-]\{1,\}\)"[[:space:]]*$/\1/p' \
+    | sed -n '1p')
+  [ -n "$id" ] || return 1
+  printf '%s\n' "$id"
+}
+
+# True when state dir $1 holds a session lock owned by the very Claude Code
+# session that delivered hook payload $2.
+#
+# This is the second, ancestry-independent membership proof, and it exists
+# because a Claude Code hook does not reliably run under its own session. Claude
+# Code serves hook and tool commands from a shared per-user worker pool
+# (claude bg-spare -> claude bg-pty-host -> claude daemon run) whose top process
+# is reparented to init once the session that first started it exits. A hook
+# served by such a pool has a contiguous claude ancestry that does not contain
+# the live session at all, so the ancestry proof fails through no fault of the
+# session and the hook goes inert (docs/watcher-continuity.md).
+#
+# The proof is a conjunction, and every part is required:
+#   1. the delivered payload names a session id, which no inherited environment
+#      can supply - it describes THIS event;
+#   2. the session id the delivering session exported matches that payload, so
+#      the environment read below belongs to the session that emitted the event
+#      rather than to some ancestor session it was inherited from;
+#   3. the exported session pid is EXACTLY the pid recorded in this home's lock,
+#      which is stricter than ancestry membership rather than weaker;
+#   4. that pid is still a live Claude process, so a recycled or dead pid never
+#      passes.
+#
+# A foreign session therefore still fails: it exports its own pid, which is not
+# the pid this home's lock records. A missing, malformed, or foreign-owned lock
+# fails closed, and so does every home whose lock names another session, which
+# is what keeps several firstmate homes on one machine independent.
+fm_session_lock_owned_by_claude_hook() {  # <state-dir> <payload>
+  local state=$1 payload=${2-} lock_pid payload_session
+  case "${CLAUDE_PID:-}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || return 1
+  payload_session=$(fm_claude_payload_session_id "$payload") || return 1
+  [ "$payload_session" = "$CLAUDE_CODE_SESSION_ID" ] || return 1
+  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$lock_pid" = "$CLAUDE_PID" ] || return 1
+  fm_harness_pid_alive "$lock_pid" || return 1
+  [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
+}
+
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
 # of the current process: this script runs inside the session that owns the
 # home's fleet lock. Membership is the honest test of that question, because the
@@ -172,5 +239,39 @@ fm_session_lock_owned_by_self() {
   done <<EOF
 $pids
 EOF
+  return 1
+}
+
+# True when the Claude session behind the current run holds state dir $1's
+# session lock, proven either by harness ancestry or by the identity delivered
+# with hook payload $2. This disjunction is the ONE owner of "may this run act
+# for this home", so the gate that admits a run and any later re-verification
+# cannot drift apart.
+#
+# Both members are load-bearing. Ancestry is tried first and left unchanged,
+# because a legitimate claude-launched-by-claude wrapper chain records the
+# OUTERMOST pid in the lock while CLAUDE_PID names the inner session, so
+# preferring the delivered identity would refuse that case. The delivered
+# identity is required because a hook served by the shared per-user worker pool
+# reparented to init has no ancestry path back to its live session at all.
+# Neither member is a fallback for the other: a caller that needs only one of
+# them still calls that one directly.
+#
+# FM_SESSION_LOCK_PROOF names the member that carried the verdict, so a caller
+# can report which proof applied; it is empty when neither holds.
+# shellcheck disable=SC2034 # Read by sourcing callers, not inside this file.
+FM_SESSION_LOCK_PROOF=''
+# shellcheck disable=SC2034 # FM_SESSION_LOCK_PROOF is a caller-read output.
+fm_session_lock_owned_by_this_claude_session() {  # <state-dir> <payload>
+  local state=$1 payload=${2-}
+  FM_SESSION_LOCK_PROOF=''
+  if fm_session_lock_owned_by_self "$state"; then
+    FM_SESSION_LOCK_PROOF=ancestry
+    return 0
+  fi
+  if fm_session_lock_owned_by_claude_hook "$state" "$payload"; then
+    FM_SESSION_LOCK_PROOF=claude-session
+    return 0
+  fi
   return 1
 }
