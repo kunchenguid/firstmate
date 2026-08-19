@@ -44,13 +44,23 @@ assert any(
     "Release remains the only exit" in line for line in doc.splitlines()
     if not line.lstrip().startswith("<!--")
 ), "docs/azure-workers.md no longer states that release owns work which held capacity"
+surrender_doc_lines = [
+    line for line in doc.splitlines()
+    if "surrender" in line.lower() and not line.lstrip().startswith("<!--")
+]
+assert any(
+    "refusal-first" in line and "--confirm-discard-unlanded" in line
+    for line in surrender_doc_lines
+), ("docs/azure-workers.md mentions surrender without its refusal-first gates "
+    "and the unlanded-work confirmation", surrender_doc_lines)
 for marker in (
     '"assigned", "clean-warm", "deallocated", "orphaned-safe-to-delete", "retained-for-investigation"',
     "REGIONAL_ADMISSION_CEILING_VCPUS = 128", "AUTHOR_PLAN_VCPUS = MAX_WORKERS * VCPUS_PER_WORKER",
     "SPECIALIZED_SHAPE_VCPUS = 40", "SHARED_HEADROOM_VCPUS = 22", "MAX_WORKERS = 16",
     'FM_AZURE_WORKER_WARM_IDLE currently must remain zero', "pending_action",
     "capacity-reserve", "capacity-reserve-shape", "capacity-release", "merged_specialized_reservations",
-    "command_withdraw",
+    "command_withdraw", "command_surrender", "WORKER AUTHORITY REFUSED",
+    "--confirm-discard-unlanded",
     "REVIEWED_CONTROL_SKU_FAMILY", "command_capacity_reserve_shape",
     "fm.worker-authority/v1", "authority-receipt", "fm.worker-execution/v1",
 ):
@@ -2248,6 +2258,380 @@ PY
   pass "restart replays one exact idempotency key without duplicating assignment"
 }
 
+
+surrender_lane() {
+  local tmp provider fixture home envfile
+  fm_test_tmproot_into tmp fm-worker-surrender
+  provider="$tmp/provider.py"
+  fixture="$tmp/provider-state.json"
+  home="$tmp/home"
+  mkdir -p "$home"
+  write_fixture_provider "$provider"
+  envfile="$tmp/env"
+  cat >"$envfile" <<EOF
+FM_HOME=$home
+FM_AZURE_SUBSCRIPTION_ID=$SUB
+FM_AZURE_DEPLOYMENT_GENERATION=dep-one
+FM_AZURE_OWNER_TAG=owner
+FM_AZURE_NAMING_PREFIX=fmtest
+FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0
+FM_WORKER_PROVIDER_COMMAND=python3 $provider
+FIXTURE_STATE=$fixture
+FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS=1
+EOF
+
+  python3 - "$CONTROLLER" "$WRAPPER" "$envfile" "$fixture" <<'PY' || fail "surrender lane exercise failed"
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+controller_path, wrapper, envfile, fixture_path = sys.argv[1:]
+env = os.environ.copy()
+for line in Path(envfile).read_text().splitlines():
+    key, value = line.split("=", 1)
+    env[key] = value
+
+def run(*args, check=True):
+    result = subprocess.run([wrapper] + list(args), env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and result.returncode != 0:
+        raise AssertionError("{} failed: {}".format(args, result.stderr))
+    return result
+
+def binding(number):
+    return format(number, "064x")
+
+def controller_state():
+    return json.loads((Path(env["FM_HOME"]) / "state/azure-workers/controller.json").read_text())
+
+run(
+    "request", "--task", "task-1", "--task-generation", "gen-1",
+    "--home-binding", binding(1001), "--account-binding", binding(2001),
+    "--worktree-binding", binding(3001), "--repository-binding", binding(4001),
+    "--repository-generation", "repo-1", "--owner-kind", "primary", "--eligible",
+)
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+state = controller_state()
+assert state["queue"]["task-1@gen-1"]["status"] == "assigned"
+slot = str(state["queue"]["task-1@gen-1"]["slot"])
+
+surrender = [
+    "surrender", "--task", "task-1", "--task-generation", "gen-1",
+    "--reason", "local teardown consumed the task metadata before any receipt existed",
+    "--output", str(Path(env["FM_HOME"]) / "surrender-1.json"),
+]
+confirm = ["--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]]
+
+# Confirmation gates.
+refused = run(*surrender, *confirm, check=False)
+assert refused.returncode != 0 and "--confirm-surrender" in refused.stderr, refused.stderr
+refused = run(*surrender, "--confirm-surrender", "--confirm-subscription", "22222222-2222-4222-8222-222222222222", check=False)
+assert refused.returncode != 0 and "confirm-subscription" in refused.stderr, refused.stderr
+refused = run(*surrender[:-2], "--output", surrender[-1], "--reason", " ", "--confirm-surrender", *confirm, check=False)
+assert refused.returncode != 0 and "--reason" in refused.stderr, refused.stderr
+
+# Live compute refuses: the fixture VM is running.
+refused = run(*surrender, "--confirm-surrender", *confirm, check=False)
+assert refused.returncode != 0 and "dark compute" in refused.stderr, refused.stderr
+assert controller_state()["workers"][slot].get("release_proof") is None
+
+# The TTL fires outside the controller: model it in provider-side cloud state.
+fixture = json.loads(Path(fixture_path).read_text())
+fixture["workers"][slot]["resources"]["vm"]["power_state"] = "VM deallocated"
+Path(fixture_path).write_text(json.dumps(fixture, sort_keys=True, separators=(",", ":")) + "\n")
+
+# Durable execution evidence of unlanded work blocks the lane until the
+# discard is named, and the named discard is recorded in the proof. The
+# record is injected into durable controller state exactly where
+# apply_action_result persists executions.
+state = controller_state()
+evidence_digest = "b" * 64
+state["executions"][evidence_digest] = {
+    "task": "task-1", "task_generation": "gen-1",
+    "assignment_generation": state["workers"][slot]["assignment_generation"],
+    "outcome_present": True, "outcome_commits": 1,
+}
+(Path(env["FM_HOME"]) / "state/azure-workers/controller.json").write_text(
+    json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
+refused = run(*surrender, "--confirm-surrender", *confirm, check=False)
+assert refused.returncode != 0 and evidence_digest in refused.stderr, refused.stderr
+assert controller_state()["workers"][slot].get("release_proof") is None
+
+# The ordinary authority genuinely refuses here (no task metadata exists in
+# this home), so surrender proceeds against dark compute once the discard is
+# deliberately named.
+staged = Path(env["FM_HOME"]) / "state" / "task-1.cloud-account"
+staged.mkdir(parents=True)
+(staged / "auth.json").write_text("{}")
+result = run(*surrender, "--confirm-surrender", "--confirm-discard-unlanded", *confirm)
+assert "FM-SURRENDERED task-1 gen-1" in result.stdout, result.stdout
+assert not staged.exists(), "staged provider credential survived the surrender receipt"
+
+state = controller_state()
+worker = state["workers"][slot]
+proof = worker["release_proof"]
+assert state["queue"]["task-1@gen-1"]["status"] == "releasing"
+assert worker["phase"] == "release-proved"
+assert proof["surrender"]["reason"].startswith("local teardown")
+assert proof["surrender"]["ordinary_refusal"]
+assert proof["surrender"]["discarded_unlanded_executions"] == [evidence_digest]
+assert all(v["verdict"] == "surrendered" for v in proof["authorities"].values())
+written = json.loads((Path(env["FM_HOME"]) / "surrender-1.json").read_text())
+assert written == proof
+
+# The proof digest round-trips the canonical digest, and the ordinary release
+# command refuses the surrender bundle outright.
+unsigned = dict(proof)
+supplied = unsigned.pop("proof_digest")
+recomputed = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+assert supplied == recomputed, "surrender proof digest does not round-trip"
+import importlib.util
+spec = importlib.util.spec_from_file_location("controller", controller_path)
+controller = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(controller)
+try:
+    controller.release_receipt(state, str(Path(env["FM_HOME"]) / "surrender-1.json"))
+except controller.LifecycleError as exc:
+    assert "did not prove release safety" in str(exc), exc
+else:
+    raise AssertionError("the ordinary release validator accepted a surrendered verdict")
+
+# Re-running is idempotent and re-issues the receipt without a second proof.
+(Path(env["FM_HOME"]) / "surrender-1.json").unlink()
+again = run(*surrender, "--confirm-surrender", *confirm)
+assert "already recorded" in again.stdout and "FM-SURRENDERED task-1 gen-1" in again.stdout
+assert controller_state()["workers"][slot]["release_proof"] == proof
+rewritten = json.loads((Path(env["FM_HOME"]) / "surrender-1.json").read_text())
+assert rewritten == proof, "the idempotent rerun did not re-issue the exact stored proof"
+
+# Reconcile now converges the surrendered slot to nothing through the ordinary
+# fenced machinery: delete-compute, then reset.
+for _ in range(4):
+    run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+state = controller_state()
+assert state["workers"] == {}, state["workers"]
+assert state["queue"]["task-1@gen-1"]["status"] == "complete"
+assert slot not in json.loads(Path(fixture_path).read_text())["workers"]
+PY
+  pass "surrender releases an authority-less worker through refusal-first gates and ordinary reset"
+}
+
+surrender_refuses_when_ordinary_authority_passes() {
+  # The gate under test is the caller's reaction to an authority SUCCESS. The
+  # subprocess contract itself (argv shape, refusal capture) is exercised for
+  # real in surrender_lane above; here only the attempt outcome is substituted,
+  # at module level, to prove success closes the lane.
+  local tmp
+  fm_test_tmproot_into tmp fm-worker-surrender-authority-pass
+  mkdir -p "$tmp/home"
+  python3 - "$CONTROLLER" "$tmp/home" <<'PY' || fail "surrender accepted a worker the ordinary release lane can still prove"
+import importlib.util
+import json
+import sys
+import types
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("controller", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+home = Path(sys.argv[2])
+(home / "state/azure-workers").mkdir(parents=True)
+env = {
+    "home": home, "state_dir": home / "state/azure-workers",
+    "subscription": "11111111-1111-4111-8111-111111111111",
+}
+worker = {
+    "slot": 1, "queue_key": "task-1@gen-1", "assignment_generation": "asg-00000001",
+    "cloud_instance_id": "cloud-1", "resources": {},
+    "bindings": {
+        "home_binding": "1" * 64, "task": "task-1", "task_generation": "gen-1",
+        "assignment_generation": "asg-00000001", "account_binding": "2" * 64,
+        "worktree_binding": "3" * 64, "repository_binding": "4" * 64,
+        "repository_generation": "repo-1",
+    },
+}
+state = {
+    "queue": {"task-1@gen-1": {"status": "assigned", "slot": 1, "task": "task-1", "task_generation": "gen-1"}},
+    "workers": {"1": worker},
+    "pending_action": None,
+}
+
+module.load_state = lambda _env: state
+module.controller_lock = __import__("contextlib").nullcontext
+module.save_state = lambda _env, _state: (_ for _ in ()).throw(AssertionError("a refused surrender persisted state"))
+module.ordinary_authority_attempt = lambda _env, _args, _worker: None
+module.provider_call = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("surrender consulted the provider after an authority success"))
+
+args = types.SimpleNamespace(
+    task="task-1", task_generation="gen-1", reason="reason", output=str(home / "out.json"),
+    confirm_surrender=True, confirm_subscription="11111111-1111-4111-8111-111111111111",
+)
+try:
+    module.command_surrender(env, args)
+except module.LifecycleError as exc:
+    assert "ordinary release authority succeeded" in str(exc), exc
+else:
+    raise AssertionError("surrender did not refuse a provable ordinary release")
+assert worker.get("release_proof") is None
+PY
+  pass "surrender refuses when the ordinary release authority still succeeds"
+}
+
+
+
+surrender_refusal_matrix() {
+  # Every advertised surrender refusal, pinned at the command against durable
+  # state the production loader accepts. The provider is only consulted where
+  # the gate under test sits past the inventory read.
+  local tmp
+  fm_test_tmproot_into tmp fm-worker-surrender-refusals
+  mkdir -p "$tmp/home"
+  python3 - "$CONTROLLER" "$tmp/home" <<'PY' || fail "a surrender refusal gate is not enforced"
+import contextlib
+import importlib.util
+import json
+import sys
+import types
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("controller", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+home = Path(sys.argv[2])
+(home / "state/azure-workers").mkdir(parents=True)
+env = {
+    "home": home, "state_dir": home / "state/azure-workers",
+    "subscription": "11111111-1111-4111-8111-111111111111",
+}
+# Captured before any expect_refusal stomps the module attribute: the
+# fail-closed block below must drive the REAL classification code.
+real_attempt = module.ordinary_authority_attempt
+
+def worker_record():
+    return {
+        "slot": 1, "queue_key": "task-1@gen-1", "assignment_generation": "asg-00000001",
+        "cloud_instance_id": "cloud-1", "resources": {}, "phase": "assigned",
+        "bindings": {
+            "home_binding": "1" * 64, "task": "task-1", "task_generation": "gen-1",
+            "assignment_generation": "asg-00000001", "account_binding": "2" * 64,
+            "worktree_binding": "3" * 64, "repository_binding": "4" * 64,
+            "repository_generation": "repo-1",
+        },
+    }
+
+def base_state():
+    return {
+        "queue": {"task-1@gen-1": {"status": "assigned", "slot": 1, "task": "task-1", "task_generation": "gen-1"}},
+        "workers": {"1": worker_record()},
+        "pending_action": None,
+        "executions": {},
+    }
+
+def args(**overrides):
+    value = types.SimpleNamespace(
+        task="task-1", task_generation="gen-1", reason="reason",
+        output=str(home / "out.json"), confirm_surrender=True,
+        confirm_discard_unlanded=False,
+        confirm_subscription="11111111-1111-4111-8111-111111111111",
+    )
+    for key, item in overrides.items():
+        setattr(value, key, item)
+    return value
+
+def expect_refusal(state, call_args, fragment, *, attempt=None, provider=None):
+    module.load_state = lambda _env: state
+    module.controller_lock = contextlib.nullcontext
+    module.save_state = lambda _env, _state: (_ for _ in ()).throw(
+        AssertionError("a refused surrender persisted state"))
+    module.ordinary_authority_attempt = attempt or (
+        lambda *_a: (_ for _ in ()).throw(AssertionError("authority consulted past the gate under test")))
+    module.provider_call = provider or (
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("provider consulted past the gate under test")))
+    try:
+        module.command_surrender(env, call_args)
+    except module.LifecycleError as exc:
+        assert fragment in str(exc), (fragment, str(exc))
+    else:
+        raise AssertionError("surrender did not refuse: {}".format(fragment))
+
+# Malformed identities refuse before anything else runs.
+expect_refusal(base_state(), args(task="../escape"), "bounded identifier characters")
+
+# A pending provider action blocks the whole lane.
+state = base_state()
+state["pending_action"] = {"type": "execute", "request": {"task": "other", "task_generation": "gen-9"}}
+expect_refusal(state, args(), "pending provider action")
+
+# A converged entry names its credential recovery instead of a generic refusal.
+state = base_state()
+state["queue"]["task-1@gen-1"]["status"] = "complete"
+del state["workers"]["1"]
+expect_refusal(state, args(), "fm_cloud_state_remove")
+
+# An ordinary release proof is never replaced or re-issued by surrender.
+state = base_state()
+state["workers"]["1"]["release_proof"] = {"schema": "fm.worker-release/v2", "proof_digest": "a" * 64}
+expect_refusal(state, args(), "ordinary release proof")
+
+# A stored surrender proof for a DIFFERENT generation is never re-issued.
+state = base_state()
+state["queue"]["task-1@gen-1"]["status"] = "releasing"
+state["workers"]["1"]["release_proof"] = {
+    "schema": "fm.worker-release/v2", "task": "task-1", "task_generation": "gen-OTHER",
+    "surrender": {"reason": "x"}, "proof_digest": "a" * 64,
+}
+expect_refusal(state, args(), "different task generation")
+
+# Durable execution evidence of unlanded repository work outranks the operator
+# unless the discard is named; the refusal must list the exact execution.
+for evidence in (
+    {"outcome_present": True},
+    {"outcome_uncommitted_changes": True},
+    {"outcome_commits": 2},
+):
+    state = base_state()
+    record = {"task": "task-1", "task_generation": "gen-1", "assignment_generation": "asg-00000001"}
+    record.update(evidence)
+    state["executions"]["e" * 64] = record
+    expect_refusal(state, args(), "e" * 64)
+
+# The authority tool breaking is NOT a refusal: surrender stays closed. The
+# subprocess boundary is substituted; the classification of its outcome is the
+# real production code.
+real_run = module.subprocess.run
+try:
+    module.subprocess.run = lambda *_a, **_k: types.SimpleNamespace(
+        returncode=1, stderr=b"Traceback (most recent call last): KeyError: 'window'", stdout=b"")
+    try:
+        real_attempt(env, args(), worker_record())
+    except module.LifecycleError as exc:
+        assert "failed rather than refusing" in str(exc), exc
+    else:
+        raise AssertionError("a broken authority tool unlocked surrender")
+    module.subprocess.run = lambda *_a, **_k: types.SimpleNamespace(
+        returncode=2, stderr=b"WORKER AUTHORITY REFUSED: ordinary task metadata authority is absent", stdout=b"")
+    refusal = real_attempt(env, args(), worker_record())
+    assert "metadata authority is absent" in refusal
+finally:
+    module.subprocess.run = real_run
+
+# A worker the live inventory cannot prove assigned is ambiguous, not
+# surrenderable - including a slot absent from inventory entirely.
+state = base_state()
+expect_refusal(
+    state, args(), "non-assigned or ambiguous",
+    attempt=lambda *_a: "WORKER AUTHORITY REFUSED: fixture refusal",
+    provider=lambda *_a, **_k: {"inventory": {"workers": []}},
+)
+PY
+  pass "every advertised surrender refusal is enforced at the command"
+}
+
+
 static_contract
 classification_and_admission_matrix
 azure_provider_refusal_matrix
@@ -2259,5 +2643,8 @@ endpoint_authority_checkout_helper
 account_authority_real_helper
 restart_idempotency
 partial_apply_never_persists
+surrender_lane
+surrender_refuses_when_ordinary_authority_passes
+surrender_refusal_matrix
 
 echo "# fm-worker-lifecycle.test.sh: all assertions passed"

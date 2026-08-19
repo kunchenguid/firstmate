@@ -38,8 +38,9 @@ The controller rejects duplicate active account or writable-worktree bindings.
 A general request has role `author`, is explicitly eligible, and is owned by either the primary or a secondmate.
 The same task generation and exact identity is idempotent, while a changed identity under the same task generation refuses.
 An assigned request stays in the queue until its ordinary release proof is accepted and every exact cloud resource is safely reset.
-A request that never reached assignment leaves the queue by `withdraw`, which is the only other queue mutation: it accepts an entry still in `queued`, refuses anything a worker owns or a pending provider action names, requires `--confirm-withdraw` and `--confirm-subscription`, touches no capacity, and removes the per-task cloud state including the staged provider credential.
+A request that never reached assignment leaves the queue by `withdraw`: it accepts an entry still in `queued`, refuses anything a worker owns or a pending provider action names, requires `--confirm-withdraw` and `--confirm-subscription`, touches no capacity, and removes the per-task cloud state including the staged provider credential.
 Release remains the only exit for work that ever held capacity.
+Operator surrender is not a second exit: it mints that release proof for the one case where the ordinary authorities are unrecoverable, under its own refusal-first gates (below).
 Therefore a truly empty queue also means there is no active task worker and desired worker compute is zero.
 
 ```sh
@@ -183,6 +184,14 @@ Warm reuse never passes a prior task's filesystem, process, credential, browser 
 Reset deletion uses exact IDs, immutable identities, tags or metadata, detach relations, and provider ETags where supported.
 A replacement, unreadable relation, foreign tag, missing ETag, public NIC relation, or partial inventory records a bounded cleanup refusal and retains the resources.
 No age or cost override can convert retained-for-investigation into safe deletion.
+
+### Operator surrender for unrecoverable ordinary authority
+
+`surrender` releases one exact ASSIGNED worker whose ordinary release authority can no longer be minted, for example when local teardown consumed the task metadata before any receipt existed.
+Surrender is refusal-first, not a shortcut: the command runs the ordinary authority itself and refuses when that succeeds (and fails closed when the authority tool breaks rather than refuses), refuses live compute (the VM must be deallocated or stopped), refuses to replace an ordinary release proof, refuses while a pending provider action exists, refuses when the controller's own execution records show repository work whose landing is unproven unless the operator passes `--confirm-discard-unlanded`, and demands an operator `--reason` plus the same explicit confirmation pair as withdraw.
+The minted bundle keeps the `fm.worker-release/v2` shape the deallocate/delete-compute/reset machinery fences on, but every authority verdict is `surrendered` - `release` rejects that verdict, so a surrender bundle can never replay through the ordinary release command - and a top-level `surrender` block records the operator reason and the ordinary authority's refusal verbatim.
+After the proof is recorded, reconcile owns deallocation, compute deletion, and reset exactly as for an ordinary release, and the wrapper removes the task's locally staged provider credential keyed off the command's own `FM-SURRENDERED` receipt.
+If the wrapper dies between the receipt and that removal and reconcile then converges the entry to `complete`, the rerun refusal names the recovery: remove the staged credential with `fm_cloud_state_remove` from `bin/fm-cloud-state-lib.sh`.
 
 ## Recovery and reconciliation classes
 

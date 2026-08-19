@@ -35,6 +35,7 @@
 #   fm-worker-lifecycle.sh proof-template --task <id> --task-generation <id>
 #   fm-worker-lifecycle.sh release --task <id> --task-generation <id> --proof-file <json>
 #   fm-worker-lifecycle.sh withdraw --task <id> --task-generation <id> --confirm-withdraw --confirm-subscription <uuid>
+#   fm-worker-lifecycle.sh surrender --task <id> --task-generation <id> --reason <text> --output <json> --confirm-surrender --confirm-subscription <uuid>
 #   fm-worker-lifecycle.sh resume <exact recovery flags>
 #   fm-worker-lifecycle.sh steer <exact assignment flags>
 #   fm-worker-lifecycle.sh status [--live] [--json]
@@ -78,6 +79,28 @@ case "${1:-}" in
       state_root="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
       if [ -e "$state_root/$withdraw_receipt.cloud-account/auth.json" ]; then
         echo "ELASTIC WORKER REFUSED: withdrew $withdraw_receipt but its staged provider credential remains" >&2
+        exit 4
+      fi
+    fi
+    exit 0
+    ;;
+  surrender)
+    fm_refuse_if_gate_agent
+    # A surrendered task's local cloud state has the same no-owner problem as a
+    # withdrawn one: its endpoint, metadata and teardown are already gone (that
+    # is what made surrender necessary), so nothing else will ever remove the
+    # staged provider credential at $STATE/<id>.cloud-account/auth.json. The
+    # cloud-side copies go later, through reconcile's fenced reset; the local
+    # staging is owned here, keyed off the FM-SURRENDERED receipt for exactly
+    # the reasons the withdraw lane documents above.
+    surrender_output=$(python3 "$SCRIPT_DIR/fm-worker-lifecycle.py" "$@")
+    printf '%s\n' "$surrender_output"
+    surrender_receipt=$(printf '%s\n' "$surrender_output" | awk '$1 == "FM-SURRENDERED" { print $2; exit }')
+    if [ -n "$surrender_receipt" ]; then
+      fm_cloud_state_remove "${FM_STATE_OVERRIDE:-${FM_HOME:?FM_HOME is required}/state}" "$surrender_receipt"
+      state_root="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+      if [ -e "$state_root/$surrender_receipt.cloud-account/auth.json" ]; then
+        echo "ELASTIC WORKER REFUSED: surrendered $surrender_receipt but its staged provider credential remains" >&2
         exit 4
       fi
     fi
