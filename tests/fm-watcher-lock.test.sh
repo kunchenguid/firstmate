@@ -44,8 +44,10 @@ test_singleton_start() {
   mark_pr_check_migration_complete "$state"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out1" &
   pid1=$!
+  fm_test_track_pid "$pid1"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
   pid2=$!
+  fm_test_track_pid "$pid2"
   i=0
   while [ "$i" -lt 50 ]; do
     live=0
@@ -82,6 +84,7 @@ test_stale_watch_lock_reclaimed() {
   printf '%s\n' "$dead_pid" > "$state/.watch.lock/pid"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
+  fm_test_track_pid "$pid"
   i=0
   live=0
   lock_pid=
@@ -174,6 +177,7 @@ test_guard_warnings() {
   printf 'project=x\n' > "$state/task.meta"
   sleep 60 &
   pid=$!
+  fm_test_track_pid "$pid"
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") || fail "could not identify fresh guard watcher"
   mkdir -p "$state/.watch.lock"
   printf '%s\n' "$pid" > "$state/.watch.lock/pid"
@@ -287,6 +291,7 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
     fm_lock_release "$2.steal"
   ' _ "$LIB" "$lockdir" "$holder_file" &
   holder=$!
+  fm_test_track_pid "$holder"
   i=0
   while [ "$i" -lt 50 ] && [ ! -s "$holder_file" ]; do
     sleep 0.1
@@ -317,6 +322,9 @@ test_lock_does_not_steal_live_lock() {
   lockdir="$state/.contend.lock"
   sleep 300 &
   live=$!
+  fm_test_track_pid "$live"
+  fm_test_wait_exec_settled "$live" 'sleep 300' \
+    || fail "backgrounded sleep never settled on its exec'd image (ps: $(LC_ALL=C ps -p "$live" -o command= 2>/dev/null))"
   mkdir "$lockdir"
   printf '%s\n' "$live" > "$lockdir/pid"
   out=$(FM_STATE_OVERRIDE="$state" bash -c '
@@ -429,6 +437,9 @@ test_watch_restart_rejects_reused_pid() {
   mark_pr_check_migration_complete "$state"
   sleep 300 &
   live=$!
+  fm_test_track_pid "$live"
+  fm_test_wait_exec_settled "$live" 'sleep 300' \
+    || fail "backgrounded sleep never settled on its exec'd image (ps: $(LC_ALL=C ps -p "$live" -o command= 2>/dev/null))"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$live" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
@@ -436,6 +447,7 @@ test_watch_restart_rejects_reused_pid() {
   printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
   pid=$!
+  fm_test_track_pid "$pid"
   i=0
   while [ "$i" -lt 80 ] && is_live_non_zombie "$pid"; do
     sleep 0.1
@@ -462,6 +474,7 @@ test_watch_restart_attaches_to_healthy_peer() {
   mark_pr_check_migration_complete "$state"
   node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" &
   peer=$!
+  fm_test_track_pid "$peer"
   i=0
   while [ "$i" -lt 50 ] && [ ! -s "$peer_ready" ]; do
     sleep 0.1
@@ -481,6 +494,7 @@ test_watch_restart_attaches_to_healthy_peer() {
   touch "$state/.last-watcher-beat"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$out" &
   armpid=$!
+  fm_test_track_pid "$armpid"
   i=0
   while [ "$i" -lt 80 ]; do
     grep -qF "watcher: attached pid=$peer" "$out" 2>/dev/null && break
@@ -507,6 +521,7 @@ test_watcher_self_evicts_on_lock_takeover() {
   out="$dir/watch.out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
+  fm_test_track_pid "$pid"
   i=0
   while [ "$i" -lt 80 ]; do
     [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
@@ -538,6 +553,7 @@ test_arm_self_eviction_is_loud_without_successor() {
   mark_pr_check_migration_complete "$state"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
   armpid=$!
+  fm_test_track_pid "$armpid"
   i=0
   while [ "$i" -lt 80 ]; do
     grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
@@ -569,6 +585,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   # A genuinely live watcher with a fresh beacon already holds the singleton.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wpid=$!
+  fm_test_track_pid "$wpid"
   i=0
   while [ "$i" -lt 60 ]; do
     [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
@@ -580,6 +597,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   # exit while the seed still holds the healthy lock.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
   armpid=$!
+  fm_test_track_pid "$armpid"
   i=0
   while [ "$i" -lt 80 ]; do
     grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
@@ -610,6 +628,7 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger() {
   armout="$dir/arm.out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wpid=$!
+  fm_test_track_pid "$wpid"
   i=0
   while [ "$i" -lt 60 ]; do
     [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
@@ -619,6 +638,7 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger() {
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
   armpid=$!
+  fm_test_track_pid "$armpid"
   i=0
   while [ "$i" -lt 80 ]; do
     grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
@@ -662,6 +682,7 @@ test_arm_starts_and_self_heals() {
     fi
     PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
     armpid=$!
+    fm_test_track_pid "$armpid"
     i=0
     while [ "$i" -lt 80 ]; do
       if [ "$row" = dead-pid ]; then
@@ -701,6 +722,7 @@ test_arm_hup_cleans_child_and_temp_output() {
   armout="$dir/arm.out"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   armpid=$!
+  fm_test_track_pid "$armpid"
   i=0
   while [ "$i" -lt 80 ]; do
     grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
@@ -760,6 +782,9 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   mark_pr_check_migration_complete "$state"
   sleep 300 &
   peer=$!
+  fm_test_track_pid "$peer"
+  fm_test_wait_exec_settled "$peer" 'sleep 300' \
+    || fail "backgrounded sleep never settled on its exec'd image (ps: $(LC_ALL=C ps -p "$peer" -o command= 2>/dev/null))"
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
@@ -768,6 +793,7 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
   armpid=$!
+  fm_test_track_pid "$armpid"
   # Synchronize on the owned child declining the live peer lock before making
   # the peer healthy. Sleeping for the same one-second budget as the arm made
   # this regression fixture race the confirmation deadline under full-suite
@@ -809,6 +835,9 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   mark_pr_check_migration_complete "$state"
   sleep 300 &
   live=$!
+  fm_test_track_pid "$live"
+  fm_test_wait_exec_settled "$live" 'sleep 300' \
+    || fail "backgrounded sleep never settled on its exec'd image (ps: $(LC_ALL=C ps -p "$live" -o command= 2>/dev/null))"
   # A live process holds the lock but is NOT a confirmable watcher (no identity),
   # and the beacon is stale. The fresh child cannot steal a LIVE lock, so no
   # watcher can ever be confirmed - the honest answer is FAILED, not healthy.
@@ -817,6 +846,7 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   touch -t 200001010000 "$state/.last-watcher-beat"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$armout" &
   armpid=$!
+  fm_test_track_pid "$armpid"
   wait_for_exit "$armpid" 120
   status=$?
   [ "$status" -ne 124 ] || fail "arm never returned for an unconfirmable watcher"
@@ -848,6 +878,7 @@ SH
 
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   first_arm=$!
+  fm_test_track_pid "$first_arm"
   wait "$first_arm" || fail "first ledger cycle did not surface its actionable wake"
   grep -q "arm_pid=$first_arm.*reason=actionable-check.*successor=none" "$state/.watch-cycle-exits.log" \
     || fail "first ledger record omitted its actionable classification"
@@ -857,6 +888,7 @@ SH
   armout="$dir/successor-arm.out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   successor_arm=$!
+  fm_test_track_pid "$successor_arm"
   i=0
   while [ "$i" -lt 80 ]; do
     grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
@@ -882,6 +914,7 @@ SH
     armout="$dir/bounded-$iteration.out"
     PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES=1400 FM_WATCH_CYCLE_LOG_KEEP_LINES=2 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
     successor_arm=$!
+    fm_test_track_pid "$successor_arm"
     i=0
     while [ "$i" -lt 80 ]; do
       grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
@@ -911,6 +944,7 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   mark_pr_check_migration_complete "$state"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   armpid=$!
+  fm_test_track_pid "$armpid"
   i=0
   while [ "$i" -lt 80 ]; do
     grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
@@ -950,6 +984,9 @@ test_pid_identity_is_locale_invariant() {
   local real_first real_second observed
   sleep 300 &
   live=$!
+  fm_test_track_pid "$live"
+  fm_test_wait_exec_settled "$live" 'sleep 300' \
+    || fail "backgrounded sleep never settled on its exec'd image (ps: $(LC_ALL=C ps -p "$live" -o command= 2>/dev/null))"
   no_proc="$TMP_ROOT/no-proc"
   fakebin="$TMP_ROOT/locale-ps"
   locale_log="$TMP_ROOT/locale-ps.observed"
@@ -995,6 +1032,53 @@ SH
     pass "real ps fallback locale check skipped where ps -o lstart= is unsupported"
   fi
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
+}
+
+# The regression that keeps test_pid_identity_is_locale_invariant honest.
+#
+# Its assertion compares two identity samples of one live process and requires
+# them byte-identical. That only tests the locale pin if the process has already
+# become what it is going to be: sampled between fork and execve it still
+# reports the test script's own command line, and sampled during execve it
+# reports the kernel's bracketed placeholder, so the comparison fails for a
+# reason the assertion is not about.
+#
+# The window is a few microseconds on a warm machine, which is why the flake was
+# only ever seen on a cold CI runner. Here it is widened deliberately and
+# reproducibly by delaying the exec, so this case fails whenever sampling stops
+# waiting for the exec'd image - and the first assertion below fails if the
+# widened window ever stops being a real divergence, so the case cannot pass
+# vacuously.
+test_pid_identity_sampling_waits_for_execve() {
+  local dir state early settled confirm child iteration diverged
+  dir=$(make_case exec-settle)
+  state="$dir/state"
+  diverged=0
+  iteration=0
+  while [ "$iteration" -lt 5 ]; do
+    bash -c 'sleep 0.3; exec sleep 300' &
+    child=$!
+    fm_test_track_pid "$child"
+
+    # Sampled immediately: still the forking shell, not the exec'd image.
+    early=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$child" 2>/dev/null || true)
+
+    fm_test_wait_exec_settled "$child" 'sleep 300' \
+      || fail "widened exec window never settled (ps: $(LC_ALL=C ps -p "$child" -o command= 2>/dev/null))"
+    settled=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$child" 2>/dev/null || true)
+    confirm=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$child" 2>/dev/null || true)
+
+    [ -n "$settled" ] || fail "no identity was readable after the exec settled"
+    [ "$settled" = "$confirm" ] \
+      || fail "identity kept changing after the exec settled (got '$confirm', want '$settled')"
+    [ "$early" = "$settled" ] || diverged=$((diverged + 1))
+
+    fm_test_reap_pid "$child" || fail "could not reap the widened-window child"
+    iteration=$((iteration + 1))
+  done
+  [ "$diverged" -eq 5 ] \
+    || fail "the widened exec window stopped diverging ($diverged of 5); this case can no longer detect early sampling"
+  pass "pid identity sampling waits for execve and is stable once it has"
 }
 
 write_fake_proc_identity() {
@@ -1088,6 +1172,9 @@ test_msys_pid_identity_uses_proc() {
   esac
   sleep 300 &
   live=$!
+  fm_test_track_pid "$live"
+  fm_test_wait_exec_settled "$live" 'sleep 300' \
+    || fail "backgrounded sleep never settled on its exec'd image (ps: $(LC_ALL=C ps -p "$live" -o command= 2>/dev/null))"
   identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
@@ -1100,6 +1187,7 @@ test_msys_pid_identity_uses_proc() {
 
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_pid_identity_sampling_waits_for_execve
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed

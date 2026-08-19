@@ -284,8 +284,10 @@ wait_for_exit() {
     sleep 0.1
     i=$((i + 1))
   done
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  # Escalate rather than block: a process whose signal handler was dropped
+  # survives TERM, and an unbounded wait on it turns one stuck child into a
+  # stuck script and then a stuck lane.
+  fm_test_reap_pid "$pid" || true
   return 124
 }
 

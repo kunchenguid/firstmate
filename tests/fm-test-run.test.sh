@@ -703,6 +703,172 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+# --- lane safety ------------------------------------------------------------
+#
+# Three independent properties, each of which alone was enough to turn one stuck
+# process into a lane that sat for hours with no output at all:
+#   - a descendant that outlives its script must not hold the lane's own output
+#     stream, and the lane must not wait on anything but the script it started;
+#   - a script that stops making progress must be terminated and named;
+#   - a process a script leaves running must be reaped by the PID and group the
+#     lane started, never by matching command lines against a shared process
+#     table that other lanes are also using.
+
+# A child that keeps its parent's stdout and refuses to die on TERM. This is the
+# exact shape that used to wedge a lane: the reader of the lane's pipe never saw
+# EOF, so the lane blocked on it forever.
+write_stubborn_leak_fixture() {  # <path> <pid-file>
+  cat >"$1" <<SH
+#!/usr/bin/env bash
+echo "ok - fixture body ran"
+bash -c 'trap "" TERM HUP; exec sleep 600' &
+printf '%s\n' "\$!" >"$2"
+exit 0
+SH
+  chmod +x "$1"
+}
+
+wait_pid_gone() {  # <pid> <ticks>
+  local pid=$1 limit=$2 i=0
+  while [ "$i" -lt "$limit" ]; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_lane_reaps_a_leaked_child_and_keeps_going() {
+  local tmp leak_pid_file after_marker out rc leaked
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-leak.XXXXXX")
+  leak_pid_file="$tmp/leaked.pid"
+  after_marker="$tmp/after.ran"
+  write_stubborn_leak_fixture "$tmp/leaky.test.sh" "$leak_pid_file"
+  cat >"$tmp/after.test.sh" <<SH
+#!/usr/bin/env bash
+: >"$after_marker"
+echo "ok - the lane reached the next script"
+SH
+  chmod +x "$tmp/after.test.sh"
+
+  out="$tmp/out"
+  rc=0
+  # A generous budget: this case must be decided by reaping, not by the timeout.
+  "$RUNNER" --script-timeout 120 "$tmp/leaky.test.sh" "$tmp/after.test.sh" >"$out" 2>"$tmp/err" || rc=$?
+
+  [ -f "$after_marker" ] || { rm -rf "$tmp"; fail "the lane never reached the script after the leaking one"; }
+  grep -Fq "FM_TEST_LEAK $tmp/leaky.test.sh" "$out" \
+    || { rm -rf "$tmp"; fail "a leaked descendant was not reported: $(cat "$out")"; }
+  grep -Fq 'exit=0' "$out" \
+    || { rm -rf "$tmp"; fail "the leaking script's own result was not preserved: $(cat "$out")"; }
+  leaked=$(cat "$leak_pid_file" 2>/dev/null || true)
+  [ -n "$leaked" ] || { rm -rf "$tmp"; fail "fixture recorded no leaked pid"; }
+  if ! wait_pid_gone "$leaked" 50; then
+    kill -KILL "$leaked" 2>/dev/null || true
+    rm -rf "$tmp"
+    fail "the lane left pid $leaked running after the script that started it exited"
+  fi
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "a reaped leak must not fail the lane, got $rc"; }
+  rm -rf "$tmp"
+  pass "a leaked descendant is reaped by pid and the lane keeps running"
+}
+
+test_lane_times_out_a_hung_script_and_names_it() {
+  local tmp out rc started elapsed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-hang.XXXXXX")
+  cat >"$tmp/hang.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - about to stop making progress"
+sleep 600
+echo "not ok - the budget never fired"
+SH
+  cat >"$tmp/after.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - the lane reached the next script"
+SH
+  chmod +x "$tmp/hang.test.sh" "$tmp/after.test.sh"
+
+  out="$tmp/out"
+  started=$(date +%s)
+  rc=0
+  "$RUNNER" --script-timeout 3 "$tmp/hang.test.sh" "$tmp/after.test.sh" >"$out" 2>"$tmp/err" || rc=$?
+  elapsed=$(( $(date +%s) - started ))
+
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "a script killed by the budget must fail the lane"; }
+  [ "$elapsed" -lt 120 ] || { rm -rf "$tmp"; fail "the budget did not bound the lane (took ${elapsed}s)"; }
+  grep -Fq "$tmp/hang.test.sh exceeded the per-script budget" "$out" \
+    || { rm -rf "$tmp"; fail "the budget failure did not name the script: $(cat "$out")"; }
+  grep -Fq "exit=124" "$out" \
+    || { rm -rf "$tmp"; fail "a budget kill must be reported as exit=124: $(cat "$out")"; }
+  grep -Fq 'ok - the lane reached the next script' "$out" \
+    || { rm -rf "$tmp"; fail "the lane stopped at the hung script: $(cat "$out")"; }
+  grep -Fq 'not ok - the budget never fired' "$out" \
+    && { rm -rf "$tmp"; fail "the hung script kept running past its budget"; }
+  rm -rf "$tmp"
+  pass "a script that stops making progress is terminated, named, and the lane continues"
+}
+
+test_lane_output_is_complete_and_ordered_without_a_shared_pipe() {
+  local tmp out expected
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-stream.XXXXXX")
+  cat >"$tmp/chatty.test.sh" <<'SH'
+#!/usr/bin/env bash
+i=1
+while [ "$i" -le 200 ]; do
+  printf 'line %s\n' "$i"
+  i=$((i + 1))
+done
+printf 'stderr line\n' >&2
+echo "ok - chatty"
+SH
+  chmod +x "$tmp/chatty.test.sh"
+  out="$tmp/out"
+  "$RUNNER" "$tmp/chatty.test.sh" >"$out" 2>"$tmp/err" \
+    || { rm -rf "$tmp"; fail "chatty fixture should pass"; }
+  expected=$(grep -c '^line ' "$out" || true)
+  [ "$expected" -eq 200 ] || { rm -rf "$tmp"; fail "expected 200 streamed lines, got $expected"; }
+  grep -Fq 'stderr line' "$out" || { rm -rf "$tmp"; fail "script stderr was dropped"; }
+  # Order is preserved end to end, so a follower cannot silently reshuffle output.
+  [ "$(grep -n '^line 1$' "$out" | cut -d: -f1)" -lt "$(grep -n '^line 200$' "$out" | cut -d: -f1)" ] \
+    || { rm -rf "$tmp"; fail "streamed output lost its order"; }
+  rm -rf "$tmp"
+  pass "a script's full stdout and stderr reach the lane in order"
+}
+
+test_test_helper_reaps_processes_a_failing_script_left_running() {
+  local tmp pid_file leaked rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-helper-reap.XXXXXX")
+  pid_file="$tmp/tracked.pid"
+  # A test that starts a real process and then fails an assertion before its own
+  # reap: `fail` exits immediately, so only the registry can stop the process.
+  cat >"$tmp/failing.test.sh" <<SH
+#!/usr/bin/env bash
+set -u
+. "$ROOT/tests/lib.sh"
+bash -c 'trap "" TERM HUP; exec sleep 600' &
+child=\$!
+fm_test_track_pid "\$child"
+printf '%s\n' "\$child" >"$pid_file"
+fail "deliberate failure before this test reaps its own child"
+SH
+  chmod +x "$tmp/failing.test.sh"
+
+  rc=0
+  # No group reaping here: the script is run directly, so only the helper's own
+  # registry can be what stops the process.
+  bash "$tmp/failing.test.sh" >"$tmp/out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "the failing fixture should exit non-zero"; }
+  leaked=$(cat "$pid_file" 2>/dev/null || true)
+  [ -n "$leaked" ] || { rm -rf "$tmp"; fail "fixture recorded no tracked pid"; }
+  if ! wait_pid_gone "$leaked" 100; then
+    kill -KILL "$leaked" 2>/dev/null || true
+    rm -rf "$tmp"
+    fail "pid $leaked outlived the failing test that started it"
+  fi
+  rm -rf "$tmp"
+  pass "a registered process is reaped even when the test fails before reaping it"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -721,3 +887,7 @@ test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
+test_lane_reaps_a_leaked_child_and_keeps_going
+test_lane_times_out_a_hung_script_and_names_it
+test_lane_output_is_complete_and_ordered_without_a_shared_pipe
+test_test_helper_reaps_processes_a_failing_script_left_running
