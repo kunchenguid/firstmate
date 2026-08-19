@@ -58,93 +58,194 @@
 # Bytes-to-human, matching the units du -h prints, so a reclaim line reads the
 # same as what an operator would have measured by hand.
 fm_next_cache_human_kb() {  # <kilobytes>
-  local kb=${1:-0}
+  local kb=${1:-} tenths
+  case "$kb" in ''|*[!0-9]*) return 1 ;; esac
+  kb=$((10#$kb))
   if [ "$kb" -lt 1024 ]; then
     printf '%dK\n' "$kb"
   elif [ "$kb" -lt 1048576 ]; then
-    awk -v k="$kb" 'BEGIN { printf "%.1fM\n", k / 1024 }'
+    tenths=$(( (kb * 10 + 512) / 1024 ))
+    printf '%d.%dM\n' "$(( tenths / 10 ))" "$(( tenths % 10 ))"
   else
-    awk -v k="$kb" 'BEGIN { printf "%.1fG\n", k / 1048576 }'
+    tenths=$(( (kb * 10 + 524288) / 1048576 ))
+    printf '%d.%dG\n' "$(( tenths / 10 ))" "$(( tenths % 10 ))"
   fi
 }
 
-# Size of <dir> in kilobytes, or 0 when it cannot be measured. Reporting must
-# never be the thing that fails a reclaim, so an unreadable size is not an error.
+# Size of <dir> in kilobytes. An unreadable or malformed measurement is not zero.
 fm_next_cache_size_kb() {  # <dir>
-  local dir=$1 kb
-  kb=$(du -sk -- "$dir" 2>/dev/null | awk 'NR == 1 { print $1 }') || kb=
-  case "$kb" in
-    ''|*[!0-9]*) printf '0\n' ;;
-    *) printf '%s\n' "$kb" ;;
+  local dir=$1 output kb rest
+  output=$(du -sk -- "$dir" 2>/dev/null) || return 1
+  kb=${output%%[!0-9]*}
+  case "$kb" in ''|*[!0-9]*) return 1 ;; esac
+  rest=${output#"$kb"}
+  case "$rest" in
+    $'\t'*|' '*) ;;
+    *) return 1 ;;
   esac
+  printf '%s\n' "$kb"
 }
 
 # Is <parent> a Next.js app root? See proof 2 in the header.
 fm_next_cache_parent_is_next_app() {  # <parent-dir>
-  local parent=$1 ext
+  local parent=$1 ext grep_status
   for ext in js cjs mjs ts cts mts; do
     [ -f "$parent/next.config.$ext" ] && return 0
   done
   [ -f "$parent/package.json" ] || return 1
-  grep -Eq '"next"[[:space:]]*:' "$parent/package.json" 2>/dev/null
+  if grep -Eq '"next"[[:space:]]*:' "$parent/package.json" 2>/dev/null; then
+    return 0
+  else
+    grep_status=$?
+  fi
+  [ "$grep_status" -eq 1 ] && return 1
+  return 2
 }
 
 # Does <dir> pass both proofs, as a real directory inside repo <root>?
 fm_next_cache_is_build_output() {  # <repo-root> <dir>
-  local root=$1 dir=$2 real parent
+  local root=$1 dir=$2 real parent ignore_status app_status
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then return 2; fi
   [ -d "$dir" ] || return 1
   # A symlink is never removed: the target may live outside the worktree
   # entirely, and rm -rf on it would follow the operator's intent nowhere good.
   if [ -L "$dir" ]; then return 1; fi
-  real=$(CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P) || return 1
+  real=$(CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P) || return 2
   # Containment: only ever a path physically under the worktree we were given.
   case "$real" in
     "$root"/*) ;;
-    *) return 1 ;;
+    *) return 2 ;;
   esac
-  git -C "$root" check-ignore -q -- "$real" 2>/dev/null || return 1
-  parent=$(dirname -- "$real")
-  fm_next_cache_parent_is_next_app "$parent"
+  if git -C "$root" check-ignore -q -- "$real" 2>/dev/null; then
+    ignore_status=0
+  else
+    ignore_status=$?
+  fi
+  [ "$ignore_status" -eq 1 ] && return 1
+  [ "$ignore_status" -eq 0 ] || return 2
+  parent=${real%/*}
+  if fm_next_cache_parent_is_next_app "$parent"; then
+    return 0
+  else
+    app_status=$?
+  fi
+  [ "$app_status" -eq 1 ] && return 1
+  return 2
+}
+
+FM_NEXT_CACHE_PLAN=
+FM_NEXT_CACHE_TOTAL_KB=0
+FM_NEXT_CACHE_INSPECTION_ERROR=
+
+fm_next_cache_inspect() {  # <worktree>
+  local wt=$1 root tmp dir candidate_status kb record rc=0
+  FM_NEXT_CACHE_PLAN=
+  FM_NEXT_CACHE_TOTAL_KB=0
+  FM_NEXT_CACHE_INSPECTION_ERROR=
+  if ! root=$(CDPATH='' cd -- "$wt" 2>/dev/null && pwd -P); then
+    FM_NEXT_CACHE_INSPECTION_ERROR="cannot enter worktree: $wt"
+    return 1
+  fi
+  if ! git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+    FM_NEXT_CACHE_INSPECTION_ERROR="not an inspectable git worktree: $wt"
+    return 1
+  fi
+  if ! tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-next-cache-find.XXXXXX" 2>/dev/null); then
+    FM_NEXT_CACHE_INSPECTION_ERROR="cannot stage build-output discovery for: $wt"
+    return 1
+  fi
+  if ! find "$root" \( -name node_modules -o -name .git \) -prune -o \
+    -type d -name .next -print0 -prune > "$tmp" 2>/dev/null; then
+    FM_NEXT_CACHE_INSPECTION_ERROR="cannot walk worktree for build output: $wt"
+    rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    while IFS= read -r -d '' dir; do
+      case "$dir" in
+        ''|*$'\t'*|*$'\r'*|*$'\n'*)
+          FM_NEXT_CACHE_INSPECTION_ERROR="unsafe build-output path in worktree: $wt"
+          rc=1
+          break
+          ;;
+      esac
+      if fm_next_cache_is_build_output "$root" "$dir"; then
+        candidate_status=0
+      else
+        candidate_status=$?
+      fi
+      case "$candidate_status" in
+        0)
+          if ! kb=$(fm_next_cache_size_kb "$dir"); then
+            FM_NEXT_CACHE_INSPECTION_ERROR="cannot measure build output at: $dir"
+            rc=1
+            break
+          fi
+          record="$kb"$'\t'"$dir"
+          if [ -n "$FM_NEXT_CACHE_PLAN" ]; then
+            FM_NEXT_CACHE_PLAN="$FM_NEXT_CACHE_PLAN"$'\n'"$record"
+          else
+            FM_NEXT_CACHE_PLAN=$record
+          fi
+          FM_NEXT_CACHE_TOTAL_KB=$(( FM_NEXT_CACHE_TOTAL_KB + kb ))
+          ;;
+        1) ;;
+        *)
+          FM_NEXT_CACHE_INSPECTION_ERROR="cannot establish build-output eligibility at: $dir"
+          rc=1
+          break
+          ;;
+      esac
+    done < "$tmp"
+  fi
+  if ! rm -f -- "$tmp"; then
+    FM_NEXT_CACHE_INSPECTION_ERROR="cannot clear build-output discovery state for: $wt"
+    rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    FM_NEXT_CACHE_PLAN=
+    FM_NEXT_CACHE_TOTAL_KB=0
+    return 1
+  fi
+  return 0
 }
 
 # Print each reclaimable Next.js build-output directory in <worktree>, one
-# absolute path per line. Prints nothing (exit 0) when the worktree is missing,
-# is not a git repo, or holds none.
+# absolute path per line. An incomplete inspection returns non-zero.
 fm_next_cache_dirs() {  # <worktree>
-  local wt=$1 root dir
-  root=$(CDPATH='' cd -- "$wt" 2>/dev/null && pwd -P) || return 0
-  git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
-  while IFS= read -r dir; do
-    [ -n "$dir" ] || continue
-    fm_next_cache_is_build_output "$root" "$dir" || continue
-    printf '%s\n' "$dir"
-  done < <(find "$root" \( -name node_modules -o -name .git \) -prune -o \
-    -type d -name .next -print -prune 2>/dev/null)
+  local wt=$1 dir
+  fm_next_cache_inspect "$wt" || return 1
+  while IFS=$'\t' read -r _ dir; do
+    [ -n "$dir" ] && printf '%s\n' "$dir"
+  done <<EOT
+$FM_NEXT_CACHE_PLAN
+EOT
 }
 
 # Total kilobytes <worktree> holds, without printing or removing anything.
 # Sets FM_NEXT_CACHE_TOTAL_KB and prints it.
 fm_next_cache_total_kb() {  # <worktree>
-  local wt=$1 dir
-  FM_NEXT_CACHE_TOTAL_KB=0
-  while IFS= read -r dir; do
-    [ -n "$dir" ] || continue
-    FM_NEXT_CACHE_TOTAL_KB=$(( FM_NEXT_CACHE_TOTAL_KB + $(fm_next_cache_size_kb "$dir") ))
-  done < <(fm_next_cache_dirs "$wt")
+  local wt=$1
+  fm_next_cache_inspect "$wt" || return 1
   printf '%s\n' "$FM_NEXT_CACHE_TOTAL_KB"
 }
 
 # Report what <worktree> holds without removing anything. One line per
 # directory; nothing when there is none. Sets FM_NEXT_CACHE_TOTAL_KB.
 fm_next_cache_report() {  # <worktree> <label>
-  local wt=$1 label=$2 dir kb
-  FM_NEXT_CACHE_TOTAL_KB=0
-  while IFS= read -r dir; do
-    [ -n "$dir" ] || continue
-    kb=$(fm_next_cache_size_kb "$dir")
-    FM_NEXT_CACHE_TOTAL_KB=$(( FM_NEXT_CACHE_TOTAL_KB + kb ))
-    printf '%s: would reclaim %s from %s\n' "$label" "$(fm_next_cache_human_kb "$kb")" "$dir"
-  done < <(fm_next_cache_dirs "$wt")
+  local wt=$1 label=$2 dir kb human
+  if ! fm_next_cache_inspect "$wt"; then
+    printf '%s: could not inspect Next.js build output (%s)\n' \
+      "$label" "$FM_NEXT_CACHE_INSPECTION_ERROR" >&2
+    return 1
+  fi
+  while IFS=$'\t' read -r kb dir; do
+    if [ -n "$dir" ]; then
+      human=$(fm_next_cache_human_kb "$kb") || return 1
+      printf '%s: would reclaim %s from %s\n' "$label" "$human" "$dir"
+    fi
+  done <<EOT
+$FM_NEXT_CACHE_PLAN
+EOT
 }
 
 # Remove every reclaimable directory in <worktree>, printing one line each with
@@ -155,19 +256,28 @@ fm_next_cache_report() {  # <worktree> <label>
 # reclaim is worth seeing, but it is never a reason to fail the caller's own
 # work, so callers report it rather than abort on it.
 fm_next_cache_reclaim() {  # <worktree> <label>
-  local wt=$1 label=$2 dir kb rc=0
+  local wt=$1 label=$2 dir kb human rc=0 plan
+  if ! fm_next_cache_inspect "$wt"; then
+    printf '%s: could not inspect Next.js build output (%s)\n' \
+      "$label" "$FM_NEXT_CACHE_INSPECTION_ERROR" >&2
+    return 1
+  fi
+  plan=$FM_NEXT_CACHE_PLAN
   FM_NEXT_CACHE_TOTAL_KB=0
-  while IFS= read -r dir; do
-    [ -n "$dir" ] || continue
-    kb=$(fm_next_cache_size_kb "$dir")
-    if rm -rf -- "$dir" 2>/dev/null && [ ! -e "$dir" ]; then
-      FM_NEXT_CACHE_TOTAL_KB=$(( FM_NEXT_CACHE_TOTAL_KB + kb ))
-      printf '%s: reclaimed %s of Next.js build output from %s\n' \
-        "$label" "$(fm_next_cache_human_kb "$kb")" "$dir"
-    else
-      printf '%s: could not remove Next.js build output at %s\n' "$label" "$dir" >&2
-      rc=1
+  while IFS=$'\t' read -r kb dir; do
+    if [ -n "$dir" ]; then
+      human=$(fm_next_cache_human_kb "$kb") || return 1
+      if rm -rf -- "$dir" 2>/dev/null && [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+        FM_NEXT_CACHE_TOTAL_KB=$(( FM_NEXT_CACHE_TOTAL_KB + kb ))
+        printf '%s: reclaimed %s of Next.js build output from %s\n' \
+          "$label" "$human" "$dir"
+      else
+        printf '%s: could not remove Next.js build output at %s\n' "$label" "$dir" >&2
+        rc=1
+      fi
     fi
-  done < <(fm_next_cache_dirs "$wt")
+  done <<EOT
+$plan
+EOT
   return "$rc"
 }

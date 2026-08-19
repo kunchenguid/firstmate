@@ -52,17 +52,34 @@
 # pool lookup failed (already reported), 2 on a usage or environment error.
 set -u
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd -P)}"
+case "${BASH_SOURCE[0]}" in
+  */*) script_parent=${BASH_SOURCE[0]%/*} ;;
+  *) script_parent=. ;;
+esac
+if ! SCRIPT_DIR=$(CDPATH='' cd -- "$script_parent" 2>/dev/null && pwd -P); then
+  printf 'fm-next-cache-sweep: cannot resolve the script directory\n' >&2
+  exit 2
+fi
+if [ -n "${FM_ROOT_OVERRIDE:-}" ]; then
+  FM_ROOT=$FM_ROOT_OVERRIDE
+elif ! FM_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P); then
+  printf 'fm-next-cache-sweep: cannot resolve the firstmate root\n' >&2
+  exit 2
+fi
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 
+if [ ! -r "$SCRIPT_DIR/fm-next-cache-lib.sh" ] \
+  || [ ! -r "$SCRIPT_DIR/fm-secondmate-registry-lib.sh" ]; then
+  printf 'fm-next-cache-sweep: required libraries are unreadable\n' >&2
+  exit 2
+fi
 # shellcheck source=bin/fm-next-cache-lib.sh
-. "$SCRIPT_DIR/fm-next-cache-lib.sh"
+. "$SCRIPT_DIR/fm-next-cache-lib.sh" || exit 2
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
-. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh" || exit 2
 
 sweep_die() { printf 'fm-next-cache-sweep: %s\n' "$1" >&2; exit 2; }
 
@@ -115,20 +132,107 @@ sweep_resolve_directory() {
 }
 
 sweep_path_identity() {  # <path>
-  local resolved
+  local resolved platform identity device inode
   resolved=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || return 1
-  if [ "$(uname)" = Darwin ]; then
-    stat -L -f '%d:%i' "$resolved" 2>/dev/null
+  platform=$(uname 2>/dev/null) || return 1
+  if [ "$platform" = Darwin ]; then
+    identity=$(stat -L -f '%d:%i' "$resolved" 2>/dev/null) || return 1
   else
-    stat -L -c '%d:%i' "$resolved" 2>/dev/null
+    identity=$(stat -L -c '%d:%i' "$resolved" 2>/dev/null) || return 1
   fi
+  device=${identity%%:*}
+  inode=${identity#*:}
+  [ "$device:$inode" = "$identity" ] || return 1
+  case "$device$inode" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$identity"
+}
+
+sweep_read_text_file() {  # <path>
+  python3 - "$1" <<'PY'
+import os, stat, sys
+
+flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+try:
+    fd = os.open(sys.argv[1], flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError()
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+except OSError:
+    sys.exit(1)
+data = b"".join(chunks)
+if b"\0" in data:
+    sys.exit(1)
+sys.stdout.buffer.write(data)
+PY
+}
+
+sweep_task_meta_files() {  # <state-dir>
+  python3 - "$1" <<'PY'
+import os, sys
+
+try:
+    entries = list(os.scandir(sys.argv[1]))
+except OSError:
+    sys.exit(1)
+paths = []
+for entry in entries:
+    if entry.name.endswith(".meta"):
+        path = entry.path
+        if any(c in path for c in "\t\r\n"):
+            sys.exit(1)
+        paths.append(path)
+for path in sorted(paths):
+    print(path)
+PY
+}
+
+sweep_project_directories() {  # <projects-dir>
+  python3 - "$1" <<'PY'
+import os, sys
+
+try:
+    entries = list(os.scandir(sys.argv[1]))
+except OSError:
+    sys.exit(1)
+paths = []
+for entry in entries:
+    try:
+        is_dir = entry.is_dir()
+    except OSError:
+        sys.exit(1)
+    if is_dir:
+        path = entry.path
+        if any(c in path for c in "\t\r\n"):
+            sys.exit(1)
+        paths.append(path)
+for path in sorted(paths):
+    print(path)
+PY
 }
 
 sweep_task_record_state_dirs() {
-  local registry="$DATA/secondmates.md" registry_contents line home resolved_home
-  TASK_STATE_DIRS=$STATE
-  if [ ! -f "$registry" ] || [ -L "$registry" ] || [ ! -r "$registry" ] \
-    || ! registry_contents=$(cat "$registry" 2>/dev/null); then
+  local registry="$DATA/secondmates.md" registry_contents line home resolved_home resolved_state
+  if ! resolved_state=$(sweep_resolve_directory "$STATE"); then
+    sweep_incomplete "cannot resolve task state directory: $STATE"
+    return
+  fi
+  case "$resolved_state" in *$'\t'*|*$'\r'*|*$'\n'*)
+    sweep_incomplete "unsafe task state directory: $STATE"
+    return
+    ;;
+  esac
+  TASK_STATE_DIRS=$resolved_state
+  if ! registry_contents=$(sweep_read_text_file "$registry"); then
     sweep_incomplete "cannot read secondmate registry: $registry"
     return
   fi
@@ -141,6 +245,11 @@ sweep_task_record_state_dirs() {
         fi
         if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ]; then
           home=$SECONDMATE_REGISTRY_HOME
+          case "$home" in *$'\t'*|*$'\r'*|*$'\n'*)
+            sweep_incomplete "unsafe registered local secondmate home: $home"
+            return
+            ;;
+          esac
           case "$home" in
             /*) ;;
             *)
@@ -152,6 +261,11 @@ sweep_task_record_state_dirs() {
             sweep_incomplete "cannot resolve registered local secondmate home: $home"
             return
           fi
+          case "$resolved_home" in *$'\t'*|*$'\r'*|*$'\n'*)
+            sweep_incomplete "unsafe resolved local secondmate home: $home"
+            return
+            ;;
+          esac
           TASK_STATE_DIRS="$TASK_STATE_DIRS"$'\n'"$resolved_home/state"
         fi
         ;;
@@ -164,7 +278,8 @@ EOT
 TASK_WORKTREES=
 TASK_WORKTREE_IDENTITIES=
 sweep_load_task_worktrees() {
-  local state_dir meta meta_contents worktree kind remote_host identity
+  local state_dir metas meta meta_contents worktree kind remote_host identity line
+  local seen_worktree seen_kind seen_remote_host
   TASK_WORKTREES=
   TASK_WORKTREE_IDENTITIES=
   sweep_task_record_state_dirs || return 1
@@ -177,18 +292,54 @@ sweep_load_task_worktrees() {
       sweep_incomplete "cannot read task state directory: $state_dir"
       return
     fi
-    for meta in "$state_dir"/*.meta; do
-      if [ -e "$meta" ] || [ -L "$meta" ]; then
-        if [ ! -f "$meta" ] || [ -L "$meta" ] || [ ! -r "$meta" ] \
-          || ! meta_contents=$(cat "$meta" 2>/dev/null); then
+    if ! metas=$(sweep_task_meta_files "$state_dir"); then
+      sweep_incomplete "cannot enumerate task metadata in: $state_dir"
+      return
+    fi
+    while IFS= read -r meta; do
+      if [ -n "$meta" ]; then
+        if ! meta_contents=$(sweep_read_text_file "$meta"); then
           sweep_incomplete "cannot read task metadata: $meta"
           return
         fi
-        worktree=$(printf '%s\n' "$meta_contents" | sed -n 's/^worktree=//p')
-        kind=$(printf '%s\n' "$meta_contents" | sed -n 's/^kind=//p')
-        remote_host=$(printf '%s\n' "$meta_contents" | sed -n 's/^remote_host=//p')
+        worktree=
+        kind=
+        remote_host=
+        seen_worktree=0
+        seen_kind=0
+        seen_remote_host=0
+        while IFS= read -r line || [ -n "$line" ]; do
+          case "$line" in
+            worktree=*)
+              [ "$seen_worktree" -eq 0 ] || {
+                sweep_incomplete "task metadata has duplicate worktree fields: $meta"
+                return
+              }
+              worktree=${line#worktree=}
+              seen_worktree=1
+              ;;
+            kind=*)
+              [ "$seen_kind" -eq 0 ] || {
+                sweep_incomplete "task metadata has duplicate kind fields: $meta"
+                return
+              }
+              kind=${line#kind=}
+              seen_kind=1
+              ;;
+            remote_host=*)
+              [ "$seen_remote_host" -eq 0 ] || {
+                sweep_incomplete "task metadata has duplicate remote_host fields: $meta"
+                return
+              }
+              remote_host=${line#remote_host=}
+              seen_remote_host=1
+              ;;
+          esac
+        done <<EOT
+$meta_contents
+EOT
         case "$worktree" in
-          ''|*$'\n'*)
+          ''|*$'\t'*|*$'\r'*|*$'\n'*)
             sweep_incomplete "task metadata has no single worktree: $meta"
             return
             ;;
@@ -199,7 +350,7 @@ sweep_load_task_worktrees() {
             ;;
         esac
         case "$kind$remote_host" in
-          *$'\n'*)
+          *$'\t'*|*$'\r'*|*$'\n'*)
             sweep_incomplete "task metadata has ambiguous placement: $meta"
             return
             ;;
@@ -223,7 +374,9 @@ sweep_load_task_worktrees() {
           fi
         fi
       fi
-    done
+    done <<EOT
+$metas
+EOT
   done <<EOT
 $TASK_STATE_DIRS
 EOT
@@ -231,14 +384,21 @@ EOT
 
 # Does any task record name <path> as its worktree?
 sweep_task_owns() {  # <path>
-  local path=$1 path_identity
-  if [ -n "$TASK_WORKTREES" ] && printf '%s\n' "$TASK_WORKTREES" | grep -Fxq -- "$path"; then
-    return 0
+  local path=$1 path_identity recorded
+  if [ -n "$TASK_WORKTREES" ]; then
+    while IFS= read -r recorded; do
+      [ "$recorded" = "$path" ] && return 0
+    done <<EOT
+$TASK_WORKTREES
+EOT
   fi
   path_identity=$(sweep_path_identity "$path") || return 2
-  if [ -n "$TASK_WORKTREE_IDENTITIES" ] \
-    && printf '%s\n' "$TASK_WORKTREE_IDENTITIES" | grep -Fxq -- "$path_identity"; then
-    return 0
+  if [ -n "$TASK_WORKTREE_IDENTITIES" ]; then
+    while IFS= read -r recorded; do
+      [ "$recorded" = "$path_identity" ] && return 0
+    done <<EOT
+$TASK_WORKTREE_IDENTITIES
+EOT
   fi
   return 1
 }
@@ -247,9 +407,14 @@ sweep_task_owns() {  # <path>
 # treehouse resolves the pool from the working directory, and reading pool
 # status changes nothing in the clone.
 sweep_pool_entries() {  # <project-dir>
-  local raw
-  raw=$(cd "$1" && treehouse status --json 2>/dev/null) || return 1
-  printf '%s\n' "$raw" | python3 -c '
+  local tmp parse_status=0
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-next-cache-pool.XXXXXX" 2>/dev/null) \
+    || return 1
+  if ! (cd "$1" && treehouse status --json > "$tmp" 2>/dev/null); then
+    rm -f -- "$tmp" || true
+    return 1
+  fi
+  python3 - "$tmp" <<'PY' || parse_status=$?
 import json, sys
 
 # Anything this cannot read as a list of pool entries exits non-zero, so the
@@ -257,11 +422,15 @@ import json, sys
 # unparseable pool is not an empty pool, and it is certainly not a pool of
 # unowned copies.
 try:
-    pool = json.load(sys.stdin)
-except ValueError:
+    raw = open(sys.argv[1], "rb").read()
+    if b"\0" in raw:
+        raise ValueError()
+    pool = json.loads(raw.decode("utf-8"))
+except (OSError, UnicodeError, ValueError):
     sys.exit(1)
 if not isinstance(pool, list):
     sys.exit(1)
+rows = []
 for entry in pool:
     if not isinstance(entry, dict):
         sys.exit(1)
@@ -271,68 +440,87 @@ for entry in pool:
         sys.exit(1)
     if not isinstance(path, str) or not path or not path.startswith("/"):
         sys.exit(1)
-    if any(c in status or c in path for c in "\t\r\n"):
+    if any(c in status or c in path for c in "\0\t\r\n"):
         sys.exit(1)
+    rows.append((status, path))
+for status, path in rows:
     print("%s\t%s" % (status, path))
-'
+PY
+  if ! rm -f -- "$tmp"; then return 1; fi
+  return "$parse_status"
 }
 
-# Why <worktree> may not be swept, printed as "<class><tab><reason>"; empty when
-# it may be. `owned` is a complete answer for that copy. `undetermined` makes
-# the project's preflight incomplete, so none of that project's copies may be
-# touched.
+# Classify why <worktree> may not be swept in SWEEP_OWNER_CLASS and
+# SWEEP_OWNER_REASON. `owned` is a complete answer; `undetermined` makes the
+# project's preflight incomplete.
 sweep_unowned_reason() {  # <status> <worktree>
   local status=$1 wt=$2 task_ownership
+  SWEEP_OWNER_CLASS=free
+  SWEEP_OWNER_REASON=
   # Only the pool's own word for "available" clears this check. Any other
   # value - in-use, a status this version of treehouse does not print, or none
   # at all - means ownership was not established, which is not the same as
   # establishing that there is no owner.
   if [ "$status" = in-use ]; then
-    printf 'owned\tin use by the pool\n'
+    SWEEP_OWNER_CLASS=owned
+    SWEEP_OWNER_REASON="in use by the pool"
     return 0
   fi
   if [ "$status" != available ]; then
-    printf 'undetermined\tthe pool did not report it available\n'
+    SWEEP_OWNER_CLASS=undetermined
+    SWEEP_OWNER_REASON="the pool did not report it available"
     return 0
   fi
   sweep_task_owns "$wt"
   task_ownership=$?
   case "$task_ownership" in
     0)
-      printf 'owned\tstill claimed by a task record\n'
+      SWEEP_OWNER_CLASS=owned
+      SWEEP_OWNER_REASON="still claimed by a task record"
       return 0
       ;;
     2)
-      printf 'undetermined\tcannot compare it with task-record worktrees\n'
+      SWEEP_OWNER_CLASS=undetermined
+      SWEEP_OWNER_REASON="cannot compare it with task-record worktrees"
       return 0
       ;;
   esac
   if ! git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
-    printf 'undetermined\tnot an inspectable git worktree\n'
+    SWEEP_OWNER_CLASS=undetermined
+    SWEEP_OWNER_REASON="not an inspectable git worktree"
     return 0
   fi
   local dirty stashes
   if ! dirty=$(git -C "$wt" status --porcelain 2>/dev/null); then
-    printf 'undetermined\tcannot inspect it for uncommitted changes\n'
+    SWEEP_OWNER_CLASS=undetermined
+    SWEEP_OWNER_REASON="cannot inspect it for uncommitted changes"
     return 0
   fi
   if [ -n "$dirty" ]; then
-    printf 'owned\thas uncommitted changes\n'
+    SWEEP_OWNER_CLASS=owned
+    SWEEP_OWNER_REASON="has uncommitted changes"
     return 0
   fi
   if ! stashes=$(git -C "$wt" stash list 2>/dev/null); then
-    printf 'undetermined\tcannot inspect it for stashes\n'
+    SWEEP_OWNER_CLASS=undetermined
+    SWEEP_OWNER_REASON="cannot inspect it for stashes"
     return 0
   fi
   if [ -n "$stashes" ]; then
-    printf 'owned\thas stashed work\n'
+    SWEEP_OWNER_CLASS=owned
+    SWEEP_OWNER_REASON="has stashed work"
     return 0
   fi
-  printf '\n'
+  return 0
 }
 
+SWEEP_PROJECT_PLAN=
+SWEEP_PROJECT_INSPECTED=0
 sweep_project_plan() {  # <entries>
-  local entries=$1 status wt verdict class reason plan='' record
+  local entries=$1 status wt record pool_identity recorded_identity
+  local pool_identities=
+  SWEEP_PROJECT_PLAN=
+  SWEEP_PROJECT_INSPECTED=0
   while IFS=$'\t' read -r status wt; do
     if [ -n "$status$wt" ]; then
       if [ -z "$status" ] || [ -z "$wt" ]; then
@@ -343,46 +531,69 @@ sweep_project_plan() {  # <entries>
         sweep_incomplete "pool worktree is not an inspectable directory: $wt"
         return
       fi
-      verdict=$(sweep_unowned_reason "$status" "$wt")
-      if [ -n "$verdict" ]; then
-        class=${verdict%%	*}
-        reason=${verdict#*	}
-        if [ "$class" = undetermined ]; then
-          sweep_incomplete "$wt could not be assessed ($reason)"
-          return
-        fi
-        record="owned"$'\t'"$reason"$'\t'"$wt"
-      else
-        record="free"$'\t'"-"$'\t'"$wt"
+      if ! pool_identity=$(sweep_path_identity "$wt"); then
+        sweep_incomplete "pool worktree identity cannot be established: $wt"
+        return
       fi
-      if [ -n "$plan" ]; then
-        plan="$plan"$'\n'"$record"
+      if [ -n "$pool_identities" ]; then
+        while IFS= read -r recorded_identity; do
+          if [ "$recorded_identity" = "$pool_identity" ]; then
+            sweep_incomplete "pool entries name a duplicate filesystem copy: $wt"
+            return
+          fi
+        done <<EOT
+$pool_identities
+EOT
+        pool_identities="$pool_identities"$'\n'"$pool_identity"
       else
-        plan=$record
+        pool_identities=$pool_identity
+      fi
+      sweep_unowned_reason "$status" "$wt"
+      if [ "$SWEEP_OWNER_CLASS" = undetermined ]; then
+        sweep_incomplete "$wt could not be assessed ($SWEEP_OWNER_REASON)"
+        return
+      fi
+      if ! fm_next_cache_inspect "$wt"; then
+        sweep_incomplete "$wt build output could not be inspected ($FM_NEXT_CACHE_INSPECTION_ERROR)"
+        return
+      fi
+      SWEEP_PROJECT_INSPECTED=$(( SWEEP_PROJECT_INSPECTED + 1 ))
+      if [ "$SWEEP_OWNER_CLASS" = owned ]; then
+        record="owned"$'\t'"$SWEEP_OWNER_REASON"$'\t'"$FM_NEXT_CACHE_TOTAL_KB"$'\t'"$wt"
+      else
+        record="free"$'\t'"-"$'\t'"$FM_NEXT_CACHE_TOTAL_KB"$'\t'"$wt"
+      fi
+      if [ -n "$SWEEP_PROJECT_PLAN" ]; then
+        SWEEP_PROJECT_PLAN="$SWEEP_PROJECT_PLAN"$'\n'"$record"
+      else
+        SWEEP_PROJECT_PLAN=$record
       fi
     fi
   done <<EOT
 $entries
 EOT
-  printf '%s\n' "$plan"
 }
 
 sweep_apply_project_plan() {  # <plan>
-  local plan=$1 action reason wt
-  while IFS=$'\t' read -r action reason wt; do
+  local plan=$1 action reason planned_kb wt apply_status
+  while IFS=$'\t' read -r action reason planned_kb wt; do
     if [ -n "$action" ]; then
       if [ "$action" = owned ]; then
-        fm_next_cache_total_kb "$wt" >/dev/null
-        if [ "$FM_NEXT_CACHE_TOTAL_KB" -gt 0 ]; then
+        if [ "$planned_kb" -gt 0 ]; then
           printf 'sweep: skipped %s (%s), holding %s\n' \
-            "$wt" "$reason" "$(fm_next_cache_human_kb "$FM_NEXT_CACHE_TOTAL_KB")"
+            "$wt" "$reason" "$(fm_next_cache_human_kb "$planned_kb")"
           SKIPPED=$(( SKIPPED + 1 ))
         fi
       else
+        apply_status=0
         if [ "$DRY_RUN" = 1 ]; then
-          fm_next_cache_report "$wt" "sweep" || RC=1
+          fm_next_cache_report "$wt" "sweep" || apply_status=$?
         else
-          fm_next_cache_reclaim "$wt" "sweep" || RC=1
+          fm_next_cache_reclaim "$wt" "sweep" || apply_status=$?
+        fi
+        if [ "$apply_status" -ne 0 ]; then
+          RC=1
+          FAILED=$(( FAILED + 1 ))
         fi
         if [ "$FM_NEXT_CACHE_TOTAL_KB" -gt 0 ]; then
           TOTAL_KB=$(( TOTAL_KB + FM_NEXT_CACHE_TOTAL_KB ))
@@ -396,33 +607,40 @@ EOT
 }
 
 sweep_project() {  # <project>
-  local project=$1 project_real entries plan
+  local project=$1 project_real entries
+  SWEEP_PROJECT_INSPECTED=0
+  SWEEP_PROJECT_COMPLETE=0
   if ! project_real=$(sweep_resolve_directory "$project"); then
     sweep_incomplete "cannot enter project: $project"
+    return
+  fi
+  if ! git -C "$project_real" rev-parse --git-dir >/dev/null 2>&1; then
+    sweep_incomplete "cannot inspect project Git metadata: $project_real"
     return
   fi
   if ! entries=$(sweep_pool_entries "$project_real"); then
     sweep_incomplete "cannot read the worktree pool for $project_real"
     return
   fi
-  if ! plan=$(sweep_project_plan "$entries"); then
+  if ! sweep_project_plan "$entries"; then
     return 1
   fi
-  sweep_apply_project_plan "$plan"
+  sweep_apply_project_plan "$SWEEP_PROJECT_PLAN"
+  SWEEP_PROJECT_COMPLETE=1
 }
 
 if [ "${#PROJECT_ARGS[@]}" -gt 0 ]; then
   TARGETS=("${PROJECT_ARGS[@]}")
 else
   TARGETS=()
-  for dir in "$PROJECTS"/*/; do
-    if [ -d "$dir" ]; then
-      dir=${dir%/}
-      if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
-        TARGETS+=("$dir")
-      fi
-    fi
-  done
+  if ! project_dirs=$(sweep_project_directories "$PROJECTS"); then
+    sweep_die "cannot enumerate project clones under $PROJECTS"
+  fi
+  while IFS= read -r dir; do
+    [ -n "$dir" ] && TARGETS+=("$dir")
+  done <<EOT
+$project_dirs
+EOT
 fi
 
 [ "${#TARGETS[@]}" -gt 0 ] || sweep_die "no project clones to sweep under $PROJECTS"
@@ -434,10 +652,18 @@ TOTAL_KB=0
 RECLAIMED=0
 SKIPPED=0
 INCOMPLETE=0
+INSPECTED=0
+FAILED=0
+COMPLETE_PROJECTS=0
 for project in "${TARGETS[@]}"; do
-  if ! sweep_project "$project"; then
+  sweep_project "$project"
+  project_status=$?
+  INSPECTED=$(( INSPECTED + SWEEP_PROJECT_INSPECTED ))
+  if [ "$project_status" -ne 0 ]; then
     RC=1
     INCOMPLETE=$(( INCOMPLETE + 1 ))
+  elif [ "$SWEEP_PROJECT_COMPLETE" -eq 1 ]; then
+    COMPLETE_PROJECTS=$(( COMPLETE_PROJECTS + 1 ))
   fi
 done
 
@@ -454,21 +680,38 @@ if [ "$INCOMPLETE" -gt 0 ]; then
   INCOMPLETE_NOTE="; $(sweep_projects "$INCOMPLETE") could not be inspected"
 fi
 
+FAILED_NOTE=
+if [ "$FAILED" -gt 0 ]; then
+  FAILED_NOTE="; $(sweep_copies "$FAILED") could not be processed"
+fi
+
 if [ "$RECLAIMED" -eq 0 ]; then
-  if [ "$SKIPPED" -gt 0 ]; then
+  if [ "$FAILED" -gt 0 ]; then
+    printf 'sweep: reclamation incomplete%s%s\n' "$FAILED_NOTE" "$INCOMPLETE_NOTE"
+  elif [ "$SKIPPED" -gt 0 ]; then
     printf 'sweep: nothing to reclaim; %s were skipped as owned (listed above)%s\n' \
       "$(sweep_copies "$SKIPPED")" "$INCOMPLETE_NOTE"
   elif [ "$INCOMPLETE" -gt 0 ]; then
-    printf 'sweep: nothing to reclaim in inspected projects%s\n' "$INCOMPLETE_NOTE"
+    if [ "$INSPECTED" -eq 0 ]; then
+      printf 'sweep: no copy was completely inspected%s\n' "$INCOMPLETE_NOTE"
+    else
+      printf 'sweep: nothing to reclaim in %s%s\n' \
+        "$(sweep_copies "$INSPECTED")" "$INCOMPLETE_NOTE"
+    fi
+  elif [ "$INSPECTED" -eq 0 ]; then
+    printf 'sweep: nothing to reclaim; %s contained no copies\n' \
+      "$(sweep_projects "$COMPLETE_PROJECTS")"
   else
     printf 'sweep: nothing to reclaim; no idle copy holds Next.js build output\n'
   fi
 elif [ "$DRY_RUN" = 1 ]; then
-  printf 'sweep: would reclaim %s from %s%s\n' \
-    "$(fm_next_cache_human_kb "$TOTAL_KB")" "$(sweep_copies "$RECLAIMED")" "$INCOMPLETE_NOTE"
+  printf 'sweep: would reclaim %s from %s%s%s\n' \
+    "$(fm_next_cache_human_kb "$TOTAL_KB")" "$(sweep_copies "$RECLAIMED")" \
+    "$FAILED_NOTE" "$INCOMPLETE_NOTE"
 else
-  printf 'sweep: reclaimed %s from %s%s\n' \
-    "$(fm_next_cache_human_kb "$TOTAL_KB")" "$(sweep_copies "$RECLAIMED")" "$INCOMPLETE_NOTE"
+  printf 'sweep: reclaimed %s from %s%s%s\n' \
+    "$(fm_next_cache_human_kb "$TOTAL_KB")" "$(sweep_copies "$RECLAIMED")" \
+    "$FAILED_NOTE" "$INCOMPLETE_NOTE"
 fi
 
 exit "$RC"

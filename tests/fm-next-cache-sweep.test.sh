@@ -114,6 +114,18 @@ SH
   chmod +x "$case_dir/fakebin/stat"
 }
 
+install_stat_empty_stub() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "${FM_FAKE_STAT_EMPTY:-}" ]; then exit 0; fi
+exec "$FM_REAL_STAT" "$@"
+SH
+  chmod +x "$case_dir/fakebin/stat"
+}
+
 run_sweep() {  # <case-dir> [args...]
   local case_dir=$1; shift
   FM_HOME="$case_dir" \
@@ -674,6 +686,157 @@ test_sweep_refuses_when_recorded_identity_is_unreadable() {
   pass "an unreadable existing task path refuses the whole sweep"
 }
 
+test_sweep_preserves_task_owner_when_grep_fails() {
+  local case_dir wt out real_grep
+  case_dir=$(make_case task-owner-grep-failure)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "endpoint_task_id=task-x1" "worktree=$wt" "project=$case_dir/projects/app" \
+    "kind=ship" "mode=no-mistakes"
+  real_grep=$(command -v grep)
+  cat > "$case_dir/fakebin/grep" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = -Fxq ]; then exit 2; fi
+done
+exec "$FM_REAL_GREP" "$@"
+SH
+  chmod +x "$case_dir/fakebin/grep"
+
+  out=$(FM_REAL_GREP="$real_grep" run_sweep "$case_dir" 2>&1)
+
+  assert_present "$wt/packages/frontend/.next" \
+    "task-owner-grep-failure: a failed comparison tool must not erase task ownership"
+  assert_contains "$out" "still claimed by a task record" \
+    "task-owner-grep-failure: exact task ownership must remain determinate"
+  pass "task ownership cannot become a no-match when grep fails"
+}
+
+test_sweep_refuses_empty_candidate_identity() {
+  local case_dir wt out rc real_stat
+  case_dir=$(make_case empty-candidate-identity)
+  install_treehouse_stub "$case_dir"
+  install_stat_empty_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  real_stat=$(command -v stat)
+
+  set +e
+  out=$(FM_REAL_STAT="$real_stat" FM_FAKE_STAT_EMPTY="$wt" \
+    run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "empty-candidate-identity: empty identity output must be incomplete"
+  assert_present "$wt/packages/frontend/.next" \
+    "empty-candidate-identity: empty stat output must not prove the copy unowned"
+  assert_contains "$out" "$wt" \
+    "empty-candidate-identity: the incomplete candidate must be named"
+  pass "empty filesystem identity output refuses the project"
+}
+
+test_sweep_refuses_nul_task_metadata() {
+  local case_dir wt out rc meta
+  case_dir=$(make_case nul-task-metadata)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  meta="$case_dir/state/task-x1.meta"
+  {
+    printf 'endpoint_task_id=task-x1\nworktree=%s\nkind=secondmate\n' "$wt"
+    printf 'remote_host=helper\0\n'
+  } > "$meta"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 2 "$rc" "nul-task-metadata: malformed global ownership must refuse"
+  assert_present "$wt/packages/frontend/.next" \
+    "nul-task-metadata: NUL normalization must not hide a local task owner"
+  assert_contains "$out" "$meta" \
+    "nul-task-metadata: the malformed ownership file must be named"
+  pass "NUL-bearing task metadata refuses the whole sweep"
+}
+
+test_sweep_refuses_nul_secondmate_registry() {
+  local case_dir wt out rc registry
+  case_dir=$(make_case nul-secondmate-registry)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  registry="$case_dir/data/secondmates.md"
+  printf 'registry\0record\n' > "$registry"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 2 "$rc" "nul-secondmate-registry: malformed global ownership must refuse"
+  assert_present "$wt/packages/frontend/.next" \
+    "nul-secondmate-registry: an incompletely readable registry must prevent deletion"
+  assert_contains "$out" "$registry" \
+    "nul-secondmate-registry: the malformed registry must be named"
+  pass "a NUL-bearing secondmate registry refuses the whole sweep"
+}
+
+test_sweep_refuses_nul_pool_status() {
+  local case_dir wt out rc
+  case_dir=$(make_case nul-pool-status)
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+python3 - "$FM_FAKE_POOL_DIR" <<'PY'
+import json, sys
+print(json.dumps([{"status": "avail\x00able", "path": sys.argv[1] + "/1"}]))
+PY
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nul-pool-status: malformed pool input must return nonzero"
+  assert_present "$wt/packages/frontend/.next" \
+    "nul-pool-status: NUL normalization must not forge available status"
+  assert_contains "$out" "worktree pool" \
+    "nul-pool-status: the malformed pool must be reported"
+  pass "a NUL-bearing pool field cannot forge availability"
+}
+
+test_sweep_refuses_conflicting_alias_pool_entries() {
+  local case_dir wt alias out rc
+  case_dir=$(make_case conflicting-alias-pool-entries)
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  alias="$case_dir/pool-copy-alias"
+  ln -s "$wt" "$alias"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '[{"status":"in-use","path":"%s/1"},{"status":"available","path":"%s"}]\n' \
+  "$FM_FAKE_POOL_DIR" "$FM_FAKE_POOL_ALIAS"
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(FM_FAKE_POOL_ALIAS="$alias" run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "conflicting-alias-pool-entries: ambiguous pool input must refuse"
+  assert_present "$wt/packages/frontend/.next" \
+    "conflicting-alias-pool-entries: available alias must not override an in-use copy"
+  assert_contains "$out" "duplicate filesystem copy" \
+    "conflicting-alias-pool-entries: the pool collision must be named"
+  pass "conflicting pool aliases refuse the project atomically"
+}
+
 test_sweep_refuses_pathless_pool_entry_atomically() {
   local case_dir wt out rc
   case_dir=$(make_case pathless-pool-entry)
@@ -836,6 +999,309 @@ test_sweep_refuses_project_when_git_inspection_fails() {
   assert_contains "$out" "$wt" \
     "git-failing: the refused copy must be named"
   pass "an unreadable git state refuses the whole project"
+}
+
+test_sweep_refuses_implicit_project_with_unreadable_git_metadata() {
+  local case_dir out rc broken
+  case_dir=$(make_case implicit-project-git-failure)
+  broken="$case_dir/projects/broken"
+  mkdir -p "$broken/.git"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '[]\n'
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "implicit-project-git-failure: an uninspectable discovered project must count"
+  assert_not_contains "$out" "no idle copy holds Next.js build output" \
+    "implicit-project-git-failure: silently omitted projects make the clean claim false"
+  assert_contains "$out" "$broken" \
+    "implicit-project-git-failure: the uninspectable project must be named"
+  pass "implicit discovery records projects whose Git metadata is uninspectable"
+}
+
+test_sweep_refuses_when_build_output_walk_fails() {
+  local case_dir wt out rc real_find
+  case_dir=$(make_case build-output-walk-failure)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  real_find=$(command -v find)
+  cat > "$case_dir/fakebin/find" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "$FM_FAKE_FIND_ROOT" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = -print0 ]; then
+      printf '%s\0' "$FM_FAKE_FIND_PATH"
+      exit 1
+    fi
+  done
+  printf '%s\n' "$FM_FAKE_FIND_PATH"
+  exit 1
+fi
+exec "$FM_REAL_FIND" "$@"
+SH
+  chmod +x "$case_dir/fakebin/find"
+
+  set +e
+  out=$(FM_REAL_FIND="$real_find" FM_FAKE_FIND_ROOT="$wt" \
+    FM_FAKE_FIND_PATH="$wt/packages/frontend/.next" \
+    run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "build-output-walk-failure: a partial walk must be incomplete"
+  assert_present "$wt/packages/frontend/.next" \
+    "build-output-walk-failure: partial discovery must precede no deletion"
+  assert_contains "$out" "$wt" \
+    "build-output-walk-failure: the incompletely walked copy must be named"
+  pass "a partial build-output walk refuses the project atomically"
+}
+
+test_sweep_refuses_when_build_output_size_fails() {
+  local case_dir wt out rc real_du
+  case_dir=$(make_case build-output-size-failure)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  real_du=$(command -v du)
+  cat > "$case_dir/fakebin/du" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "$FM_FAKE_DU_PATH" ]; then exit 1; fi
+exec "$FM_REAL_DU" "$@"
+SH
+  chmod +x "$case_dir/fakebin/du"
+
+  set +e
+  out=$(FM_REAL_DU="$real_du" FM_FAKE_DU_PATH="$wt/packages/frontend/.next" \
+    run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "build-output-size-failure: an unmeasurable cache must be incomplete"
+  assert_present "$wt/packages/frontend/.next" \
+    "build-output-size-failure: failed measurement must not normalize to empty"
+  assert_contains "$out" "$wt" \
+    "build-output-size-failure: the unmeasurable copy must be named"
+  pass "an unmeasurable build-output directory refuses the project"
+}
+
+test_sweep_refuses_when_package_inspection_fails() {
+  local case_dir wt app out rc real_grep
+  case_dir=$(make_case package-inspection-failure)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  app="$wt/packages/frontend"
+  mkdir -p "$app/.next"
+  printf '{"dependencies":{"next":"16.3.0"}}\n' > "$app/package.json"
+  printf 'build\n' > "$app/.next/BUILD_ID"
+  printf 'packages/frontend/.next\n' >> "$wt/.gitignore"
+  git -C "$wt" add -A >/dev/null 2>&1
+  git -C "$wt" -c commit.gpgsign=false -c user.email=t@t -c user.name=t \
+    commit -qm "package-only next app"
+  printf '1 available\n' > "$case_dir/pool-status"
+  real_grep=$(command -v grep)
+  cat > "$case_dir/fakebin/grep" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "$FM_FAKE_GREP_PATH" ]; then exit 2; fi
+exec "$FM_REAL_GREP" "$@"
+SH
+  chmod +x "$case_dir/fakebin/grep"
+
+  set +e
+  out=$(FM_REAL_GREP="$real_grep" FM_FAKE_GREP_PATH="$app/package.json" \
+    run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "package-inspection-failure: failed app proof must be incomplete"
+  assert_present "$app/.next" \
+    "package-inspection-failure: a failed app proof must not read as not-an-app"
+  assert_contains "$out" "$wt" \
+    "package-inspection-failure: the incompletely inspected copy must be named"
+  pass "a failed package inspection refuses the project"
+}
+
+test_sweep_refuses_when_gitignore_inspection_fails() {
+  local case_dir wt out rc real_git
+  case_dir=$(make_case gitignore-inspection-failure)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  real_git=$(command -v git)
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = check-ignore ]; then exit 2; fi
+done
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  set +e
+  out=$(FM_REAL_GIT="$real_git" run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitignore-inspection-failure: failed ignore proof must be incomplete"
+  assert_present "$wt/packages/frontend/.next" \
+    "gitignore-inspection-failure: a Git error must not read as not ignored"
+  assert_contains "$out" "$wt" \
+    "gitignore-inspection-failure: the incompletely inspected copy must be named"
+  pass "a failed gitignore inspection refuses the project"
+}
+
+test_sweep_refuses_worktree_that_becomes_unenterable() {
+  local case_dir wt out rc real_git
+  case_dir=$(make_case worktree-becomes-unenterable)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  real_git=$(command -v git)
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_FAKE_UNENTERABLE_WT" ] \
+  && [ "${3:-}" = stash ] && [ "${4:-}" = list ]; then
+  "$FM_REAL_GIT" "$@"
+  rc=$?
+  chmod 000 "$FM_FAKE_UNENTERABLE_WT"
+  exit "$rc"
+fi
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  set +e
+  out=$(FM_REAL_GIT="$real_git" FM_FAKE_UNENTERABLE_WT="$wt" \
+    run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+  chmod 700 "$wt"
+
+  expect_code 1 "$rc" "worktree-becomes-unenterable: failed entry must be incomplete"
+  assert_present "$wt/packages/frontend/.next" \
+    "worktree-becomes-unenterable: failed entry must not read as no build output"
+  assert_not_contains "$out" "no idle copy holds Next.js build output" \
+    "worktree-becomes-unenterable: no inspected copy means no clean empty claim"
+  pass "a worktree that cannot be entered is reported as incomplete"
+}
+
+test_sweep_reports_human_size_without_awk() {
+  local case_dir wt out real_awk
+  case_dir=$(make_case human-size-without-awk)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  head -c 2097152 /dev/zero > "$wt/packages/frontend/.next/static/large.js"
+  printf '1 available\n' > "$case_dir/pool-status"
+  real_awk=$(command -v awk)
+  cat > "$case_dir/fakebin/awk" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = -v ]; then exit 2; fi
+done
+exec "$FM_REAL_AWK" "$@"
+SH
+  chmod +x "$case_dir/fakebin/awk"
+
+  out=$(FM_REAL_AWK="$real_awk" run_sweep "$case_dir" 2>&1)
+
+  assert_absent "$wt/packages/frontend/.next" \
+    "human-size-without-awk: healthy build output must still be reclaimed"
+  assert_not_contains "$out" "reclaimed  of Next.js build output" \
+    "human-size-without-awk: a formatter failure must not erase the reported size"
+  pass "human-readable reclaim sizes do not depend on an unchecked formatter"
+}
+
+test_sweep_records_failed_removal() {
+  local case_dir wt out rc real_rm
+  case_dir=$(make_case failed-removal)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  real_rm=$(command -v rm)
+  cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "$FM_FAKE_RM_PATH" ]; then exit 1; fi
+exec "$FM_REAL_RM" "$@"
+SH
+  chmod +x "$case_dir/fakebin/rm"
+
+  set +e
+  out=$(FM_REAL_RM="$real_rm" FM_FAKE_RM_PATH="$wt/packages/frontend/.next" \
+    run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "failed-removal: a failed deletion must return nonzero"
+  assert_present "$wt/packages/frontend/.next" \
+    "failed-removal: failed deletion must leave the directory present"
+  assert_not_contains "$out" "no idle copy holds Next.js build output" \
+    "failed-removal: a retained cache makes the clean empty claim false"
+  assert_contains "$out" "could not be processed" \
+    "failed-removal: the summary must count the failed copy"
+  pass "a failed removal is a named summary outcome"
+}
+
+test_sweep_records_dry_run_inspection_failure() {
+  local case_dir wt out rc real_find counter
+  case_dir=$(make_case dry-run-inspection-failure)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  real_find=$(command -v find)
+  counter="$case_dir/find-count"
+  cat > "$case_dir/fakebin/find" <<'SH'
+#!/usr/bin/env bash
+count=0
+if [ -f "$FM_FAKE_FIND_COUNT" ]; then count=$(sed -n '1p' "$FM_FAKE_FIND_COUNT"); fi
+count=$(( count + 1 ))
+printf '%s\n' "$count" > "$FM_FAKE_FIND_COUNT"
+if [ "$count" -gt 1 ]; then exit 1; fi
+exec "$FM_REAL_FIND" "$@"
+SH
+  chmod +x "$case_dir/fakebin/find"
+
+  set +e
+  out=$(FM_REAL_FIND="$real_find" FM_FAKE_FIND_COUNT="$counter" \
+    run_sweep "$case_dir" --dry-run 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "dry-run-inspection-failure: a failed report must return nonzero"
+  assert_present "$wt/packages/frontend/.next" \
+    "dry-run-inspection-failure: dry run must leave build output present"
+  assert_contains "$out" "could not be processed" \
+    "dry-run-inspection-failure: the summary must count the failed report"
+  pass "a dry-run report failure is a named summary outcome"
+}
+
+test_sweep_distinguishes_empty_pool_from_uninspected_copy() {
+  local case_dir out
+  case_dir=$(make_case empty-pool)
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '[]\n'
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  out=$(run_sweep "$case_dir" 2>&1)
+
+  assert_not_contains "$out" "no idle copy holds Next.js build output" \
+    "empty-pool: zero inspected copies must not select the copy-level clean claim"
+  assert_contains "$out" "contained no copies" \
+    "empty-pool: a completely read empty pool must get its own determinate summary"
+  pass "an empty pool is distinct from a copy that could not be inspected"
 }
 
 # --- discovery rule: only regenerable Next.js build output -------------------
@@ -1089,42 +1555,64 @@ test_teardown_stays_quiet_without_build_output() {
   pass "teardown says nothing about reclamation when there is nothing to reclaim"
 }
 
-test_sweep_reclaims_available_copy
-test_sweep_reports_nothing_found
-test_sweep_dry_run_removes_nothing
-test_sweep_skips_in_use_copy
-test_sweep_skips_copy_claimed_by_task_record
-test_sweep_skips_copy_claimed_by_secondmate_task_record
-test_sweep_skips_dirty_copy
-test_sweep_skips_stashed_copy
-test_sweep_refuses_project_with_unknown_pool_status
-test_sweep_skips_whole_project_when_pool_is_unreadable
-test_sweep_skips_project_when_pool_lookup_fails
-test_sweep_skips_project_when_pool_prints_json_then_fails
-test_sweep_refuses_unreadable_secondmate_state
-test_sweep_refuses_malformed_secondmate_registry
-test_sweep_refuses_absent_secondmate_home
-test_sweep_refuses_relative_secondmate_home
-test_sweep_refuses_unreadable_secondmate_registry
-test_sweep_refuses_absent_secondmate_registry
-test_sweep_skips_symlink_aliased_task_worktree
-test_sweep_skips_final_symlink_aliased_task_worktree
-test_sweep_refuses_broken_task_worktree_symlink
-test_sweep_skips_case_aliased_task_worktree
-test_sweep_refuses_when_candidate_identity_is_unreadable
-test_sweep_refuses_when_recorded_identity_is_unreadable
-test_sweep_refuses_pathless_pool_entry_atomically
-test_sweep_refuses_nondirectory_pool_entry_atomically
-test_sweep_reports_incomplete_project_count
-test_sweep_refuses_without_treehouse
-test_sweep_refuses_uninspectable_worktree_project
-test_sweep_refuses_project_when_git_inspection_fails
-test_sweep_leaves_tracked_next_directory
-test_sweep_leaves_ignored_next_outside_a_next_app
-test_sweep_leaves_node_modules_and_source
-test_sweep_reclaims_nested_build_output_once
-test_sweep_never_sweeps_the_project_clone
-test_teardown_reclaims_before_returning_the_copy
-test_teardown_reclaims_only_after_the_copy_is_quiet
-test_teardown_refusal_keeps_the_copy_intact
-test_teardown_stays_quiet_without_build_output
+run_next_cache_test() {
+  if [ -z "${FM_NEXT_CACHE_TEST:-}" ] || [ "$FM_NEXT_CACHE_TEST" = "$1" ]; then
+    "$1"
+  fi
+}
+
+run_next_cache_test test_sweep_reclaims_available_copy
+run_next_cache_test test_sweep_reports_nothing_found
+run_next_cache_test test_sweep_dry_run_removes_nothing
+run_next_cache_test test_sweep_skips_in_use_copy
+run_next_cache_test test_sweep_skips_copy_claimed_by_task_record
+run_next_cache_test test_sweep_skips_copy_claimed_by_secondmate_task_record
+run_next_cache_test test_sweep_skips_dirty_copy
+run_next_cache_test test_sweep_skips_stashed_copy
+run_next_cache_test test_sweep_refuses_project_with_unknown_pool_status
+run_next_cache_test test_sweep_skips_whole_project_when_pool_is_unreadable
+run_next_cache_test test_sweep_skips_project_when_pool_lookup_fails
+run_next_cache_test test_sweep_skips_project_when_pool_prints_json_then_fails
+run_next_cache_test test_sweep_refuses_unreadable_secondmate_state
+run_next_cache_test test_sweep_refuses_malformed_secondmate_registry
+run_next_cache_test test_sweep_refuses_absent_secondmate_home
+run_next_cache_test test_sweep_refuses_relative_secondmate_home
+run_next_cache_test test_sweep_refuses_unreadable_secondmate_registry
+run_next_cache_test test_sweep_refuses_absent_secondmate_registry
+run_next_cache_test test_sweep_skips_symlink_aliased_task_worktree
+run_next_cache_test test_sweep_skips_final_symlink_aliased_task_worktree
+run_next_cache_test test_sweep_refuses_broken_task_worktree_symlink
+run_next_cache_test test_sweep_skips_case_aliased_task_worktree
+run_next_cache_test test_sweep_refuses_when_candidate_identity_is_unreadable
+run_next_cache_test test_sweep_refuses_when_recorded_identity_is_unreadable
+run_next_cache_test test_sweep_preserves_task_owner_when_grep_fails
+run_next_cache_test test_sweep_refuses_empty_candidate_identity
+run_next_cache_test test_sweep_refuses_nul_task_metadata
+run_next_cache_test test_sweep_refuses_nul_secondmate_registry
+run_next_cache_test test_sweep_refuses_nul_pool_status
+run_next_cache_test test_sweep_refuses_conflicting_alias_pool_entries
+run_next_cache_test test_sweep_refuses_pathless_pool_entry_atomically
+run_next_cache_test test_sweep_refuses_nondirectory_pool_entry_atomically
+run_next_cache_test test_sweep_reports_incomplete_project_count
+run_next_cache_test test_sweep_refuses_without_treehouse
+run_next_cache_test test_sweep_refuses_uninspectable_worktree_project
+run_next_cache_test test_sweep_refuses_project_when_git_inspection_fails
+run_next_cache_test test_sweep_refuses_implicit_project_with_unreadable_git_metadata
+run_next_cache_test test_sweep_refuses_when_build_output_walk_fails
+run_next_cache_test test_sweep_refuses_when_build_output_size_fails
+run_next_cache_test test_sweep_refuses_when_package_inspection_fails
+run_next_cache_test test_sweep_refuses_when_gitignore_inspection_fails
+run_next_cache_test test_sweep_refuses_worktree_that_becomes_unenterable
+run_next_cache_test test_sweep_reports_human_size_without_awk
+run_next_cache_test test_sweep_records_failed_removal
+run_next_cache_test test_sweep_records_dry_run_inspection_failure
+run_next_cache_test test_sweep_distinguishes_empty_pool_from_uninspected_copy
+run_next_cache_test test_sweep_leaves_tracked_next_directory
+run_next_cache_test test_sweep_leaves_ignored_next_outside_a_next_app
+run_next_cache_test test_sweep_leaves_node_modules_and_source
+run_next_cache_test test_sweep_reclaims_nested_build_output_once
+run_next_cache_test test_sweep_never_sweeps_the_project_clone
+run_next_cache_test test_teardown_reclaims_before_returning_the_copy
+run_next_cache_test test_teardown_reclaims_only_after_the_copy_is_quiet
+run_next_cache_test test_teardown_refusal_keeps_the_copy_intact
+run_next_cache_test test_teardown_stays_quiet_without_build_output
