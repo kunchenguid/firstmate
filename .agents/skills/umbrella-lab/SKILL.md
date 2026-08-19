@@ -55,7 +55,15 @@ Running umbrellas in parallel on different harnesses or models is fine and expec
 The template exists to carry two rules every epic inherits: its stories land as PRs into `epic/<slug>` with evidence and firstmate review, and the full epic is validated by no-mistakes before it ships.
 Parallel-on-different-harness never means autonomous design crews: architecture stays captain-direct tech-lead work, never delegated to a spawned scout, exactly as this skill already requires.
 
+## From a designed epic to queued backlog work
+
+When the umbrella's design produces a delegable epic - a `plans/<epic-dir>/epic.md` plus `stories/*.md` (the harness-agnostic standard) - promote it with `bin/fm-umbrella-promote.sh <umbrella-id>`, run with `FM_HOME` set to this home.
+It moves the epic dir into `data/plans/` and seeds every story into the backlog, deriving each backlog id and `[<epic>]` tag from the story frontmatter so they match the story files by construction.
+That construction is the whole point: a hand-seed whose ids or tags drift from the story files (`lh-01`/`[lh]` against story files `LH-01`/`aimica-learning-hub`) leaves orphan tasks and a doubled epic in the dashboard, which is exactly what two home firstmates did by hand.
+The helper is idempotent and fail-closed - all validation runs before any write, a re-run is a safe no-op, and a mismatched prior seed is refused rather than duplicated - and it STOPS at the sign-off gate: it never signs the epic, cuts a branch, or dispatches.
+Those remain human/firstmate steps, and the helper prints them: review `DESIGN.md` and sign `epic.md`, `bin/fm-epic-branch.sh create <slug> <repo>` per involved repo, dispatch the queued stories, then tear down the umbrella.
+`bin/fm-umbrella-promote.sh --help` owns the exact contract.
+
 ## Not yet built
 
-Only the lab itself (`create`/`teardown`/`list`) is implemented.
-The delegated `--epic` fan-out and aggregate status described in `docs/cross-repo-workspaces.md` section 9 are designed but not built, so the per-repo implementation hand-off is still ordinary tasks dispatched by hand.
+The aggregate epic status described in `docs/cross-repo-workspaces.md` section 9 - an `epic=` grouping projected over child task state - is designed but not built, so once the stories are queued, dispatch and progress tracking are ordinary per-repo tasks.

@@ -31,6 +31,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-decision-hold.sh`    | One-release compatibility shim mapping the retired decision commands onto fm-captain-hold.sh |
 | `fm-brief.sh`            | Scaffold ship (explicit `--mode`), scout, secondmate-charter, and Herdr-lab briefs   |
 | `fm-umbrella.sh`         | Stand up or tear down a captain-driven cross-repo design lab of side-by-side worktrees ([cross-repo-workspaces.md](cross-repo-workspaces.md)) |
+| `fm-umbrella-promote.sh` | Promote a designed umbrella epic into the home: move it into `data/plans/` + seed its stories into the backlog (idempotent, fail-closed, stops at the sign-off gate) ([cross-repo-workspaces.md](cross-repo-workspaces.md)) |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |

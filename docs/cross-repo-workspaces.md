@@ -1,6 +1,6 @@
 # Cross-repo workspaces (design proposal)
 
-Status: proposal. Rollout step 1 (the umbrella lab, `bin/fm-umbrella.sh`) is implemented; the epic fan-out (steps 2-3 in section 9) is not yet built.
+Status: proposal. Rollout step 1 (the umbrella lab, `bin/fm-umbrella.sh`) and the design-to-backlog promote (`bin/fm-umbrella-promote.sh`, section 9 step 2a) are implemented; the `--epic` meta threading and aggregate epic status (section 9 step 2b) are not yet built.
 Audience: firstmate maintainers.
 This document proposes how firstmate should support a feature that spans several repositories at once, while keeping the captain close to the design and in control of the result.
 
@@ -152,7 +152,8 @@ These make the delegated phase behave as well as the captain doing it directly.
 ## 9. Rollout
 
 1. Ship `fm-umbrella.sh create`/`teardown` and the `kind=umbrella` metadata. This alone delivers the you-drive cross-repo lab (the Conductor-beating capability) with zero risk to existing task flow.
-2. Add `--epic` / `--anchor-design` threading and the fleet-snapshot grouping. This delivers supervised fan-out with shared contract.
+2. a. Promote a designed epic into the home: move `plans/<epic-dir>/` into `data/plans/` and seed its stories into the backlog, deriving each backlog id and `[<epic>]` tag from the story frontmatter so they match the story files by construction (no orphans, one epic). Built as `bin/fm-umbrella-promote.sh` - idempotent, fail-closed, and it stops at the sign-off gate rather than signing, cutting branches, or dispatching; see `bin/fm-umbrella-promote.sh --help`.
+   b. Add `--epic` / `--anchor-design` threading and the fleet-snapshot grouping for aggregate epic status. Not yet built.
 3. Consider the coordinated-ready-branches case (open question) only if real usage demands it.
 
 The first step is small and self-contained, and it is the one that closes the capability gap; the rest is convenience over machinery firstmate already has.
