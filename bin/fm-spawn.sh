@@ -1061,6 +1061,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+    # Presenting the task's recorded pane as the launcher (HERDR_PANE_ID above)
+    # is what puts a replacement back in the workspace the task already lived
+    # in. When the endpoint is provably absent, that pane is gone too, and
+    # placement has nothing left to read - the exact case --relaunch exists for
+    # would refuse with the workspace it needed sitting in this very record.
+    # Hand the recorded placement to the backend as an explicit, evidence-gated
+    # recovery input; fm_backend_herdr_relaunch_placement owns every condition
+    # under which it may be used and announces it when it is.
+    if [ "$RELAUNCH_ENDPOINT_MISSING" = 1 ]; then
+      # shellcheck disable=SC2034  # read by the sourced herdr adapter's placement
+      FM_BACKEND_HERDR_RELAUNCH_SESSION=$HERDR_SES
+      # shellcheck disable=SC2034  # read by the sourced herdr adapter's placement
+      FM_BACKEND_HERDR_RELAUNCH_WORKSPACE_ID=$HERDR_WORKSPACE_ID
+    fi
   fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config

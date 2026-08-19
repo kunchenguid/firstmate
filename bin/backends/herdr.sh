@@ -1685,6 +1685,55 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
   fi
 }
 
+# fm_backend_herdr_relaunch_placement: the workspace a RELAUNCH may place its
+# replacement pane in when the launcher pane it would otherwise inherit
+# placement from is provably gone.
+#
+# fm-spawn.sh's --relaunch path presents the task's OWN recorded pane as the
+# launcher, so that a replacement lands back in the workspace the task already
+# lived in. That works while the pane merely holds a stopped agent. It cannot
+# work in the case relaunch recovery exists for - a pane destroyed out from
+# under a running worker - because the pane placement derives from is the very
+# thing that was lost, and fm_backend_herdr_launcher_identity then refuses.
+#
+# The refusal it bypasses protects one property: a worker is never placed in a
+# workspace that is not its own. This does not weaken that property, because
+# the recorded workspace id is a STRONGER identity than the label search the
+# refusal exists to prevent - it is the exact id herdr assigned when this exact
+# task was placed, written to the task's own durable record by the spawn that
+# placed it, not a mutable, non-unique label that a sibling workspace can
+# coincidentally match (docs/herdr-backend.md "Label collisions").
+#
+# Every condition below is required, and each is proof rather than inference:
+#   1. A relaunch actually opted in by passing its recorded session and
+#      workspace. A fresh spawn passes neither and keeps the refusal.
+#   2. The recorded session is the session being spawned into. Herdr workspace
+#      ids restart at the same low values in every session, so a recorded id
+#      from another session can resolve to a real but unrelated workspace here.
+#   3. The pane is PROVABLY absent - herdr answered `pane_not_found`, the same
+#      "provably absent" boundary --relaunch itself uses for the endpoint. An
+#      unreadable pane, a down server, or a timeout all read `unknown` and keep
+#      the refusal: "I could not check" is never "it is gone".
+#   4. The recorded workspace is PROVABLY present, exactly once, right now. A
+#      workspace that was closed along with its panes, or that reads
+#      ambiguously, leaves nothing to recover to and keeps the refusal.
+# On success it says so on stderr. A recovered placement is always an announced
+# decision, never a silent one.
+#
+# Sets FM_BACKEND_HERDR_WS_ID and returns 0 only when all four hold; returns 1
+# otherwise, leaving the caller's original refusal in force.
+fm_backend_herdr_relaunch_placement() {  # <session> <pane> <recorded-session> <recorded-workspace-id>
+  local session=$1 pane=$2 recorded_session=$3 recorded_workspace=$4
+  [ -n "$recorded_workspace" ] || return 1
+  [ -n "$pane" ] || return 1
+  [ "$recorded_session" = "$session" ] || return 1
+  [ "$(fm_backend_herdr_pane_presence_state "$session" "$pane")" = dead ] || return 1
+  [ "$(fm_backend_herdr_workspace_presence_state "$session" "$recorded_workspace")" = present ] || return 1
+  echo "notice: herdr launcher pane '$pane' is provably gone, so this relaunch is placing its replacement in the task's own recorded workspace '$recorded_workspace', verified present in session '$session'" >&2
+  FM_BACKEND_HERDR_WS_ID=$recorded_workspace
+  return 0
+}
+
 # fm_backend_herdr_workspace_ensure: the workspace this spawn's task tab
 # belongs in inside <session> - the launching agent's own exact workspace when
 # it has one, otherwise this HOME's persistent workspace, created in <cwd> if
@@ -1745,6 +1794,16 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 # identity to disambiguate them is an unresolvable placement, and adopting
 # either one is the very defect this refuses.
 #
+# A RELAUNCH is the one caller whose launcher pane is EXPECTED to be gone: it
+# recovers a task whose own pane was destroyed, and fm-spawn.sh's --relaunch
+# path deliberately presents that destroyed pane as the launcher so the
+# replacement lands back where the task already lived. The pane read then fails
+# and the placement above refuses - correctly, but with nothing left to recover
+# to, because the identity placement derives from died with the endpoint being
+# recovered. fm_backend_herdr_relaunch_placement below is the ONLY path out of
+# that refusal, and it is opt-in, evidence-gated, and announced. See its own
+# header for the exact conditions.
+#
 # Returns 0 on success, 3 for a refusal whose exact reason is already on
 # stderr, and 1 for a failed or unparseable herdr call.
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship>]
@@ -1760,7 +1819,14 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
         return 0
         ;;
       2) ;;
-      *) return 3 ;;
+      *)
+        if fm_backend_herdr_relaunch_placement "$session" "${HERDR_PANE_ID:-}" \
+             "${FM_BACKEND_HERDR_RELAUNCH_SESSION:-}" "${FM_BACKEND_HERDR_RELAUNCH_WORKSPACE_ID:-}"; then
+          printf '%s' "$FM_BACKEND_HERDR_WS_ID"
+          return 0
+        fi
+        return 3
+        ;;
     esac
   fi
   label=$(fm_backend_herdr_workspace_label)
