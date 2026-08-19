@@ -59,10 +59,10 @@ PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
 EXPECTED_HEAD=
 if [ "${1:-}" = --expected-head ]; then
-  [ "$#" -ge 2 ] && fm_pr_head_valid "$2" || {
+  if [ "$#" -lt 2 ] || ! fm_pr_head_valid "$2"; then
     echo "error: invalid expected PR head" >&2
     exit 2
-  }
+  fi
   EXPECTED_HEAD=$2
   shift 2
 fi

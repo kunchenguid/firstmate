@@ -420,10 +420,10 @@ reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_d
     return 0
   fi
   case "$checks" in
-    none) REASON_CODE=checks-missing; REASON_DETAIL='no successful checks reported'; return 0 ;;
-    incomplete) REASON_CODE=checks-incomplete; REASON_DETAIL='check evidence is truncated'; return 0 ;;
-    pending) REASON_CODE=checks-pending; REASON_DETAIL='checks still running'; return 0 ;;
-    failing) REASON_CODE=checks-failing; REASON_DETAIL='one or more checks failed'; return 0 ;;
+    none) REASON_CODE='checks-missing'; REASON_DETAIL='no successful checks reported'; return 0 ;;
+    incomplete) REASON_CODE='checks-incomplete'; REASON_DETAIL='check evidence is truncated'; return 0 ;;
+    pending) REASON_CODE='checks-pending'; REASON_DETAIL='checks still running'; return 0 ;;
+    failing) REASON_CODE='checks-failing'; REASON_DETAIL='one or more checks failed'; return 0 ;;
   esac
   if [ "$mergeable" != MERGEABLE ]; then
     REASON_CODE=not-mergeable
@@ -433,17 +433,17 @@ reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_d
   if [ "$review" = CHANGES_REQUESTED ] || [ "$unresolved" -gt 0 ] \
     || [ "$review_requests" -gt 0 ] || [ "$conversation_requests" -gt 0 ] \
     || [ "$reviews_truncated" = true ] || [ "$comments_truncated" = true ]; then
-    REASON_CODE=review-issue
+    REASON_CODE='review-issue'
     REASON_DETAIL='review requests, comments, or unresolved threads'
     return 0
   fi
   if [ "$evidence_changed" = true ]; then
-    REASON_CODE=evidence-changing
+    REASON_CODE='evidence-changing'
     REASON_DETAIL='PR evidence changed during capture; defer to next cycle'
     return 0
   fi
   if [ -z "$task" ]; then
-    REASON_CODE=no-task
+    REASON_CODE='no-task'
     REASON_DETAIL='no fm/<id> branch or pr= meta match'
     return 0
   fi
@@ -518,6 +518,7 @@ gh_fetch_open_prs() { # <repo>
   owner=${repo%%/*}
   name=${repo#*/}
   [ -n "$owner" ] && [ -n "$name" ] && [ "$owner" != "$name" ] || return 1
+  # shellcheck disable=SC2016 # GraphQL variables must reach GitHub literally.
   pages=$(fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     "$GH_BIN" api graphql --paginate \
     -f owner="$owner" -f name="$name" \
@@ -568,6 +569,7 @@ gh_fetch_pr_snapshot_once() { # <repo> <number>
   owner=${repo%%/*}
   name=${repo#*/}
   [ -n "$owner" ] && [ -n "$name" ] && [ "$owner" != "$name" ] || return 1
+  # shellcheck disable=SC2016 # GraphQL variables must reach GitHub literally.
   pages=$(fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     "$GH_BIN" api graphql --paginate \
     -f owner="$owner" -f name="$name" -F number="$number" \
@@ -691,7 +693,7 @@ retire_pr_state() { # <repo> <number> <url>
 
 check_post_merge() { # <repo> <project> <number> <url> <task>
   local repo=$1 project=$2 number=$3 url=$4 task=$5
-  local notice state_json state notice_path
+  local state_json state notice_path
   notice_path=$(merged_notice_path "$repo" "$number")
   if [ -f "$notice_path" ]; then
     retire_pr_state "$repo" "$number" "$url"
