@@ -590,6 +590,88 @@ PY
   return "$parse_status"
 }
 
+sweep_pool_worktree_provenance() {  # <project-dir> <worktree>
+  local project=$1 wt=$2 wt_real top top_real tmp verify_status=0
+  SWEEP_POOL_PROVENANCE_REASON=
+  if ! wt_real=$(sweep_resolve_directory "$wt"); then
+    SWEEP_POOL_PROVENANCE_REASON="not an inspectable git worktree"
+    return 1
+  fi
+  if ! top=$(git -C "$wt_real" rev-parse --show-toplevel 2>/dev/null); then
+    SWEEP_POOL_PROVENANCE_REASON="not an inspectable git worktree"
+    return 1
+  fi
+  case "$top" in
+    ''|*$'\t'*|*$'\r'*|*$'\n'*)
+      SWEEP_POOL_PROVENANCE_REASON="worktree root is malformed"
+      return 1
+      ;;
+  esac
+  if ! top_real=$(sweep_resolve_directory "$top"); then
+    SWEEP_POOL_PROVENANCE_REASON="worktree root cannot be resolved"
+    return 1
+  fi
+  if [ "$top_real" != "$wt_real" ]; then
+    SWEEP_POOL_PROVENANCE_REASON="pool path is not a worktree root"
+    return 1
+  fi
+  if ! tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-next-cache-worktrees.XXXXXX" 2>/dev/null); then
+    SWEEP_POOL_PROVENANCE_REASON="cannot stage the project's worktree registry"
+    return 1
+  fi
+  if ! git -C "$project" worktree list --porcelain -z > "$tmp" 2>/dev/null; then
+    rm -f -- "$tmp" || true
+    SWEEP_POOL_PROVENANCE_REASON="cannot read the project's worktree registry"
+    return 1
+  fi
+  python3 - "$tmp" "$wt_real" "$project" <<'PY' || verify_status=$?
+import os, sys
+
+try:
+    raw = open(sys.argv[1], "rb").read()
+    candidate = os.stat(sys.argv[2])
+    project = os.stat(sys.argv[3])
+except OSError:
+    sys.exit(1)
+candidate_id = (candidate.st_dev, candidate.st_ino)
+project_id = (project.st_dev, project.st_ino)
+if candidate_id == project_id or not raw.endswith(b"\0\0"):
+    sys.exit(1)
+records = raw[:-2].split(b"\0\0")
+if not records or any(not record for record in records):
+    sys.exit(1)
+seen = set()
+matches = 0
+for record in records:
+    fields = record.split(b"\0")
+    worktrees = [field[len(b"worktree "):] for field in fields
+                 if field.startswith(b"worktree ")]
+    if len(worktrees) != 1 or not worktrees[0] or fields[0] != b"worktree " + worktrees[0]:
+        sys.exit(1)
+    try:
+        info = os.stat(worktrees[0])
+    except OSError:
+        sys.exit(1)
+    identity = (info.st_dev, info.st_ino)
+    if identity in seen:
+        sys.exit(1)
+    seen.add(identity)
+    if identity == candidate_id:
+        matches += 1
+if matches != 1:
+    sys.exit(1)
+PY
+  if ! rm -f -- "$tmp"; then
+    SWEEP_POOL_PROVENANCE_REASON="cannot clear the project's worktree registry state"
+    return 1
+  fi
+  if [ "$verify_status" -ne 0 ]; then
+    SWEEP_POOL_PROVENANCE_REASON="not a linked worktree registered to this project"
+    return 1
+  fi
+  return 0
+}
+
 # Classify why <worktree> may not be swept in SWEEP_OWNER_CLASS and
 # SWEEP_OWNER_REASON. `owned` is a complete answer; `undetermined` makes the
 # project's preflight incomplete.
@@ -656,8 +738,9 @@ sweep_unowned_reason() {  # <status> <worktree>
 
 SWEEP_PROJECT_PLAN=
 SWEEP_PROJECT_INSPECTED=0
-sweep_project_plan() {  # <entries>
-  local entries=$1 status wt record pool_identity recorded_identity
+sweep_project_plan() {  # <project> <entries>
+  local project=$1 entries=$2 status wt record pool_identity recorded_identity
+  local inspected=0
   local pool_identities=
   SWEEP_PROJECT_PLAN=
   SWEEP_PROJECT_INSPECTED=0
@@ -673,6 +756,10 @@ sweep_project_plan() {  # <entries>
       fi
       if ! pool_identity=$(sweep_path_identity "$wt"); then
         sweep_incomplete "pool worktree identity cannot be established: $wt"
+        return
+      fi
+      if ! sweep_pool_worktree_provenance "$project" "$wt"; then
+        sweep_incomplete "$wt pool provenance could not be established ($SWEEP_POOL_PROVENANCE_REASON)"
         return
       fi
       if [ -n "$pool_identities" ]; then
@@ -697,7 +784,7 @@ EOT
         sweep_incomplete "$wt build output could not be inspected ($FM_NEXT_CACHE_INSPECTION_ERROR)"
         return
       fi
-      SWEEP_PROJECT_INSPECTED=$(( SWEEP_PROJECT_INSPECTED + 1 ))
+      inspected=$(( inspected + 1 ))
       if [ "$SWEEP_OWNER_CLASS" = owned ]; then
         record="owned"$'\t'"$SWEEP_OWNER_REASON"$'\t'"$FM_NEXT_CACHE_TOTAL_KB"$'\t'"$wt"
       else
@@ -712,6 +799,7 @@ EOT
   done <<EOT
 $entries
 EOT
+  SWEEP_PROJECT_INSPECTED=$inspected
 }
 
 sweep_apply_project_plan() {  # <plan>
@@ -762,7 +850,7 @@ sweep_project() {  # <project>
     sweep_incomplete "cannot read the worktree pool for $project_real"
     return
   fi
-  if ! sweep_project_plan "$entries"; then
+  if ! sweep_project_plan "$project_real" "$entries"; then
     return 1
   fi
   sweep_apply_project_plan "$SWEEP_PROJECT_PLAN"
@@ -798,12 +886,15 @@ COMPLETE_PROJECTS=0
 for project in "${TARGETS[@]}"; do
   sweep_project "$project"
   project_status=$?
-  INSPECTED=$(( INSPECTED + SWEEP_PROJECT_INSPECTED ))
   if [ "$project_status" -ne 0 ]; then
     RC=1
     INCOMPLETE=$(( INCOMPLETE + 1 ))
   elif [ "$SWEEP_PROJECT_COMPLETE" -eq 1 ]; then
+    INSPECTED=$(( INSPECTED + SWEEP_PROJECT_INSPECTED ))
     COMPLETE_PROJECTS=$(( COMPLETE_PROJECTS + 1 ))
+  else
+    RC=1
+    INCOMPLETE=$(( INCOMPLETE + 1 ))
   fi
 done
 
@@ -825,19 +916,28 @@ if [ "$FAILED" -gt 0 ]; then
   FAILED_NOTE="; $(sweep_copies "$FAILED") could not be processed"
 fi
 
-if [ "$RECLAIMED" -eq 0 ]; then
-  if [ "$FAILED" -gt 0 ]; then
+RUN_COMPLETE=0
+if [ "$INCOMPLETE" -eq 0 ] && [ "$FAILED" -eq 0 ] \
+  && [ "$COMPLETE_PROJECTS" -eq "${#TARGETS[@]}" ]; then
+  RUN_COMPLETE=1
+fi
+
+if [ "$RUN_COMPLETE" -eq 0 ]; then
+  if [ "$DRY_RUN" = 1 ] && [ "$RECLAIMED" -gt 0 ]; then
+    printf 'sweep: would reclaim %s from %s, but inspection was incomplete%s%s\n' \
+      "$(fm_next_cache_human_kb "$TOTAL_KB")" "$(sweep_copies "$RECLAIMED")" \
+      "$FAILED_NOTE" "$INCOMPLETE_NOTE"
+  elif [ "$RECLAIMED" -gt 0 ]; then
+    printf 'sweep: reclaimed %s from %s, but processing was incomplete%s%s\n' \
+      "$(fm_next_cache_human_kb "$TOTAL_KB")" "$(sweep_copies "$RECLAIMED")" \
+      "$FAILED_NOTE" "$INCOMPLETE_NOTE"
+  else
     printf 'sweep: reclamation incomplete%s%s\n' "$FAILED_NOTE" "$INCOMPLETE_NOTE"
-  elif [ "$SKIPPED" -gt 0 ]; then
+  fi
+elif [ "$RECLAIMED" -eq 0 ]; then
+  if [ "$SKIPPED" -gt 0 ]; then
     printf 'sweep: nothing to reclaim; %s were skipped as owned (listed above)%s\n' \
       "$(sweep_copies "$SKIPPED")" "$INCOMPLETE_NOTE"
-  elif [ "$INCOMPLETE" -gt 0 ]; then
-    if [ "$INSPECTED" -eq 0 ]; then
-      printf 'sweep: no copy was completely inspected%s\n' "$INCOMPLETE_NOTE"
-    else
-      printf 'sweep: nothing to reclaim in %s%s\n' \
-        "$(sweep_copies "$INSPECTED")" "$INCOMPLETE_NOTE"
-    fi
   elif [ "$INSPECTED" -eq 0 ]; then
     printf 'sweep: nothing to reclaim; %s contained no copies\n' \
       "$(sweep_projects "$COMPLETE_PROJECTS")"

@@ -884,7 +884,60 @@ SH
     "nondirectory-pool-entry: project preflight must precede every deletion"
   assert_contains "$out" "$case_dir/pool/not-a-directory" \
     "nondirectory-pool-entry: the refusal must name the invalid path"
+  assert_not_contains "$out" "nothing to reclaim" \
+    "nondirectory-pool-entry: a discarded plan is not a completed empty inspection"
   pass "a nondirectory pool entry refuses its project before any deletion"
+}
+
+test_sweep_refuses_pool_entry_for_live_copy_child() {
+  local case_dir wt child out rc
+  case_dir=$(make_case live-copy-child)
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  child="$wt/packages/frontend"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "endpoint_task_id=task-x1" "worktree=$wt" "project=$case_dir/projects/app" \
+    "kind=ship" "mode=no-mistakes"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '[{"status":"available","path":"%s/1/packages/frontend"}]\n' \
+  "$FM_FAKE_POOL_DIR"
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "live-copy-child: an interior repository path must refuse"
+  assert_present "$child/.next" \
+    "live-copy-child: a pool path inside a live task copy must never authorize deletion"
+  assert_contains "$out" "$child" \
+    "live-copy-child: the unproved pool path must be named"
+  pass "a live copy child cannot masquerade as a pooled worktree"
+}
+
+test_sweep_refuses_pool_entry_for_project_clone() {
+  local case_dir clone out rc
+  case_dir=$(make_case project-clone-entry)
+  clone="$case_dir/projects/app"
+  add_next_app "$clone" packages/frontend
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '[{"status":"available","path":"%s"}]\n' "$FM_FAKE_PROJECT_CLONE"
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(FM_FAKE_PROJECT_CLONE="$clone" run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "project-clone-entry: the project clone is not a pool copy"
+  assert_present "$clone/packages/frontend/.next" \
+    "project-clone-entry: the sweep must never delete from the project clone"
+  assert_contains "$out" "$clone" \
+    "project-clone-entry: the unproved pool path must be named"
+  pass "the project clone cannot masquerade as a pooled worktree"
 }
 
 test_sweep_reports_incomplete_project_count() {
@@ -1555,8 +1608,24 @@ test_teardown_stays_quiet_without_build_output() {
   pass "teardown says nothing about reclamation when there is nothing to reclaim"
 }
 
+test_unknown_test_selector_fails() {
+  local out rc
+
+  set +e
+  out=$(FM_NEXT_CACHE_TEST=test_selector_that_does_not_exist \
+    /bin/bash "$ROOT/tests/fm-next-cache-sweep.test.sh" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unknown-selector: an unmatched selector must fail"
+  assert_contains "$out" "test_selector_that_does_not_exist" \
+    "unknown-selector: the unmatched selector must be named"
+  pass "an unknown test selector cannot produce a vacuous pass"
+}
+
+FM_NEXT_CACHE_TEST_MATCHED=0
 run_next_cache_test() {
   if [ -z "${FM_NEXT_CACHE_TEST:-}" ] || [ "$FM_NEXT_CACHE_TEST" = "$1" ]; then
+    FM_NEXT_CACHE_TEST_MATCHED=1
     "$1"
   fi
 }
@@ -1593,6 +1662,8 @@ run_next_cache_test test_sweep_refuses_nul_pool_status
 run_next_cache_test test_sweep_refuses_conflicting_alias_pool_entries
 run_next_cache_test test_sweep_refuses_pathless_pool_entry_atomically
 run_next_cache_test test_sweep_refuses_nondirectory_pool_entry_atomically
+run_next_cache_test test_sweep_refuses_pool_entry_for_live_copy_child
+run_next_cache_test test_sweep_refuses_pool_entry_for_project_clone
 run_next_cache_test test_sweep_reports_incomplete_project_count
 run_next_cache_test test_sweep_refuses_without_treehouse
 run_next_cache_test test_sweep_refuses_uninspectable_worktree_project
@@ -1616,3 +1687,8 @@ run_next_cache_test test_teardown_reclaims_before_returning_the_copy
 run_next_cache_test test_teardown_reclaims_only_after_the_copy_is_quiet
 run_next_cache_test test_teardown_refusal_keeps_the_copy_intact
 run_next_cache_test test_teardown_stays_quiet_without_build_output
+run_next_cache_test test_unknown_test_selector_fails
+
+if [ -n "${FM_NEXT_CACHE_TEST:-}" ] && [ "$FM_NEXT_CACHE_TEST_MATCHED" -eq 0 ]; then
+  fail "unknown FM_NEXT_CACHE_TEST selector: $FM_NEXT_CACHE_TEST"
+fi
