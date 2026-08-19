@@ -66,6 +66,10 @@ make_case() {
     git -C "$publisher" add advanced-main.txt
     git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
     git -C "$publisher" push --quiet origin "$default"
+  else
+    printf 'must survive a newly spawned branch\n' > "$project/advanced-main.txt"
+    git -C "$project" add advanced-main.txt
+    git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local-default
   fi
 
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
@@ -190,7 +194,7 @@ test_direct_pr_and_scout_refresh_before_launch() {
 }
 
 test_local_only_without_origin_uses_local_default() {
-  local rec id out status expected
+  local rec id out status expected head
   id='pool-local-only-no-origin-r6'
   rec=$(make_case local-only-no-origin "$id" main no-origin)
   read_case_record "$rec"
@@ -200,9 +204,16 @@ test_local_only_without_origin_uses_local_default() {
   expect_code 0 "$status" "local-only spawn should proceed without origin"
   assert_contains "$out" "spawned $id" "local-only spawn without origin did not report success"
   [ -z "$(git -C "$POOL_DIR" remote)" ] || fail "local-only spawn created or inferred a remote"
-  expected=$(git -C "$PROJECT_DIR" rev-parse main)
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$expected" ] \
+  expected=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$expected" != "$INITIAL_SHA" ] \
+    || fail "fixture did not prove the local default branch advanced past the pool base"
+  [ "$head" != "$INITIAL_SHA" ] \
+    || fail "local-only spawn without origin left the pooled worktree on stale history"
+  [ "$head" = "$expected" ] \
     || fail "local-only spawn without origin did not use the local default base"
+  assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-main.txt" \
+    "local-only spawn without origin omitted the local default branch tip content"
   pass "a local-only spawn without origin uses the clean local default base"
 }
 

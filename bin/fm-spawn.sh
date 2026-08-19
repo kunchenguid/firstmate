@@ -1759,7 +1759,7 @@ freshen_spawn_worktree_base() {  # <worktree>
       echo "error: could not determine the local default branch for pooled worktree '$worktree'; refusing to launch without a valid local base" >&2
       return 1
     fi
-    target="$default"
+    target="refs/heads/$default"
   else
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
