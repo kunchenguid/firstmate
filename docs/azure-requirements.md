@@ -140,35 +140,48 @@ change by a claude-backed reviewer, both through pi, on distinct accounts.
 
 ## R7. Everything is logged in
 
-Status: FRAGILE, and superseded in practice by R8.
+Status: HOLDS, through R8.
 
-The eight pi profiles are valid until 2026-08-25.
+The eight pi profiles renew on their own now, which is R8.
 Two of the three profiles in `~/.local/share/agent-fleet/accounts/claude/` hold blanked,
-length-zero tokens.
-The third is `refreshable`: its access token expired on 2026-08-17, but refresh material is
-present and declares itself valid to 2026-09-10, so it may be recoverable without a fresh login.
-That matters to R6, which currently assumes an owner login is required.
+length-zero tokens; the third is `refreshable` with material declared valid to 2026-09-10.
+That third profile does not help R6.
+It is a Claude CLI credential, and pi's anthropic OAuth authenticates as its own client against
+its own token endpoint, so a refresh token issued to one client cannot be spent by the other.
+R6 therefore does need an owner login, as stated there.
 
 ## R8. Auth refreshes on its own
 
-Status: NOT STARTED. Hard deadline 2026-08-25.
+Status: DONE.
 
-Nothing in Firstmate refreshes a token.
-`bin/fm-credential-expiry.py` is the detector and stops at the actuator by design.
+`bin/fm-pi-refresh.py` selects the profiles whose access token dies inside a horizon, copies the
+pool, hands the due slots to `bin/fm-pi-refresh.mjs`, republishes each renewed slot into the
+account home its consumers read, and re-reads that home through the expiry owner before reporting
+success, so its exit code means the fleet is live rather than that an HTTP call returned 200.
 
-The mechanism exists in pi: `@earendil-works/pi-ai` performs the OAuth refresh and returns a
-rotated refresh token, and pi's file-backed auth storage persists it under its own lock.
+The rotation runs through pi's own OAuth flow inside pi's own credential lock, because the
+write-back has to land under the lock a running pi takes and the refresh has to happen inside that
+same lock or two refreshers spend one refresh token.
+It runs host-side because the reviewer compartment's egress allowlist carries the provider's API
+host and deliberately not its auth host.
 
-It must run host-side.
-The reviewer compartment's egress allowlist is Azure DNS plus one provider API host and
-deliberately no auth host, so a token can never be refreshed inside the VM.
-Refresh on the host, then stage a fresh credential.
+The schedule is one machine-global macOS LaunchAgent, `com.firstmate.pi-auth-refresh`, running
+`run-once --all --scheduled` every six hours against a horizon of half the observed ten-day
+credential life.
+It is machine-global because the pool is: one `auth.json` serves all nine Firstmate homes on this
+machine, and every home reads the same job because the installed schedule is identified by what it
+runs rather than by which checkout is asking.
+A heartbeat counts only when it carries the activation nonce baked into the installed plist, which
+reaches a process only through launchd's copy of the job environment, so a hand-typed
+`--scheduled` writes nothing and can neither forge proof of life nor destroy the real one.
 
-Work: a refresher that runs pi's own refresh per profile ahead of expiry, writes back through pi's
-lock, re-projects the account homes, and is scheduled.
+Acceptance met on 2026-08-19: all eight profiles renewed from 2026-08-25 to 2026-08-29 through the
+tool, `bin/fm-credential-expiry.py report` shows eight `usable`, `bin/fm-crosscheck.py`'s own
+reader still derives eight distinct accounts, and launchd's own first fire ran a renewal pass and
+stamped a matching nonce with `scheduler-status` reporting `installed`.
 
-Acceptance: profiles refresh unattended across an expiry boundary with no human login, and
-`bin/fm-credential-expiry.py report` shows every profile usable afterward.
+Residual: the profiles have not yet crossed an expiry boundary unattended, because the first one
+they will cross is 2026-08-29. The mechanism is proven; the calendar is not.
 
 ## R9. Everything is set up and proven
 
@@ -208,8 +221,24 @@ Status: NOT DONE.
 The controller holds a single `pending_action`, so every provider mutation serializes.
 That is the direct blocker on this requirement.
 
+The lock is the other half, and the harder one: `controller_lock` is held across provider calls
+and for an execute's whole guest run, and the code's own note records that fixing only the lock was
+tried and reverted.
+
 Work: per-assignment pending state, so reconcile drives many workers concurrently, with
-idempotency preserved per action rather than globally.
+idempotency preserved per action rather than globally, and a lock discipline that puts the provider
+call outside the fleet lock.
+The first of three changes landed on 2026-08-19: a provider mutation now applies into a copy,
+commits only on success, and is refused if its effects reach outside the one compartment its slot
+owns.
+Two remain: the per-slot pending map with a revision fence, still fully serialized; then the lock
+discipline, which has to ship as one change because a half-serialized controller is worse than
+either end state.
+
+One thing not to do, found while designing this: the three capacity commands stay fully locked.
+`merged_specialized_reservations` ignores local reservations whose status is not `reserved`, so a
+candidate parked by one concurrent reserve is invisible to another's admission arithmetic and two
+of them can each admit against a budget that fits one.
 
 Acceptance: several crewmates, a no-mistakes offload, and a crosscheck run concurrently without
 the controller serializing them.
@@ -236,8 +265,8 @@ task ended releases and deallocates unattended.
 
 ## Order of work
 
-1. R8, because the deadline is 2026-08-25 and everything else stops without it.
-2. C2, because contention blocks demonstrating anything at scale.
+1. R8, done 2026-08-19.
+2. C2, because contention blocks demonstrating anything at scale. One of its three changes landed.
 3. R2/R3, the largest architectural gap and the requirement most misread by the current build.
 4. R6, which needs an owner login before it can be finished.
 5. R4, which needs the runner caller built and one validation cell closed.
