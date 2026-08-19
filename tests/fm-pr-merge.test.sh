@@ -253,6 +253,27 @@ test_records_pr_and_head_before_merging() {
   pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
 }
 
+test_records_expected_head_without_worktree() {
+  local case_dir rc
+  case_dir=$(make_case records-without-worktree)
+  add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/11 \
+    --expected-head cccccccccccccccccccccccccccccccccccccccc \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "records-without-worktree: fm-pr-merge should succeed"
+  assert_grep 'pr_head=cccccccccccccccccccccccccccccccccccccccc' "$case_dir/state/task-x1.meta" \
+    "records-without-worktree: pr_head= was not recorded"
+  grep -qxF 'pr merge 11 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "records-without-worktree: eligible PR was not merged"
+  pass "fm-pr-merge records and verifies the head without a local worktree"
+}
+
 test_expected_head_refuses_stale_pr() {
   local case_dir rc
   case_dir=$(make_case stale-expected-head)
@@ -834,6 +855,7 @@ test_github_still_forwards_sha_arg() {
 }
 
 test_records_pr_and_head_before_merging
+test_records_expected_head_without_worktree
 test_expected_head_refuses_stale_pr
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
