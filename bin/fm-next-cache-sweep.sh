@@ -50,6 +50,146 @@
 #
 # Exit status is 0 when the sweep completed, 1 when a removal or a project's
 # pool lookup failed (already reported), 2 on a usage or environment error.
+#
+# INPUT COMPLETENESS INVENTORY
+#
+# The contract for every item below is that an absent, unreadable, malformed,
+# ambiguous, or incomplete ownership input cannot produce a determinate answer.
+# A global input refuses the sweep, a project input refuses that project before
+# its plan is applied, and a copy input prevents that copy from authorizing any
+# deletion while also making its project incomplete.
+#
+# Each source site is identified by file, function, and the exact statement or
+# command that reads it rather than by a numeric line that this inventory itself
+# would immediately invalidate.
+# The inventory was built by tracing every external command and its status,
+# every command substitution, every filesystem predicate and directory entry,
+# every file-content parser, every environment or CLI value, every Python to
+# shell boundary, and every value that selects or qualifies the final summary.
+# That input-oriented trace includes implicit omission paths that a syntax search
+# for `continue` cannot find, so every value entering either script is accounted
+# for whether its failure direction was already safe or required conversion.
+#
+# Sweep entry and global ownership inputs:
+# - `bin/fm-next-cache-sweep.sh: startup -> BASH_SOURCE, FM_* overrides, cd,
+#   readable library predicates, and source`: resolution, readability, or source
+#   failure currently exits 2, which is the required global refusal.
+# - `bin/fm-next-cache-sweep.sh: argument loops -> "$@"`: an unknown option
+#   currently exits 2 and explicit project paths are retained for checked project
+#   resolution, which is the required direction.
+# - `bin/fm-next-cache-sweep.sh: command preflight -> command -v treehouse and
+#   python3`: absence currently exits 2, which is the required global refusal.
+# - `bin/fm-next-cache-sweep.sh: sweep_task_record_state_dirs ->
+#   sweep_resolve_directory "$STATE"`: an absent or unresolvable primary state
+#   directory currently refuses globally, which is required.
+# - `bin/fm-next-cache-sweep.sh: sweep_task_record_state_dirs ->
+#   sweep_read_text_file "$DATA/secondmates.md"`: a missing, non-regular,
+#   symlinked, unreadable, or NUL-bearing registry currently refuses globally,
+#   which is required.
+# - `bin/fm-next-cache-sweep.sh: sweep_task_record_state_dirs -> registry line
+#   loop and secondmate_registry_parse_line`: a malformed local record, unsafe
+#   field, non-absolute home, or unresolvable home currently refuses globally;
+#   remote homes are deliberately excluded because they cannot own this host's
+#   pool, which is the required scope.
+# - `bin/fm-next-cache-sweep.sh: sweep_load_task_worktrees -> state directory
+#   predicates and sweep_task_meta_files`: absent, unreadable, unsearchable, or
+#   unscannable state directories and unsafe metadata names currently refuse
+#   globally, which is required.
+# - `bin/fm-next-cache-sweep.sh: sweep_load_task_worktrees ->
+#   sweep_read_text_file "$meta" and metadata field loop`: unreadable,
+#   NUL-bearing, duplicate, missing, non-absolute, or invalid-placement metadata
+#   currently refuses globally, which is required.
+#   The earlier `sed -n` field extraction discarded parse status and could omit
+#   an owner; the checked single-pass parser is the required converted behavior.
+# - `bin/fm-next-cache-sweep.sh: sweep_path_identity -> cd, uname, and stat -L`:
+#   an unresolvable referent, platform lookup failure, stat failure, empty output,
+#   or malformed device and inode currently refuses the relevant scope, which is
+#   required.
+# - `bin/fm-next-cache-sweep.sh: sweep_task_owns -> recorded paths and identities`:
+#   exact path or device-inode equality proves ownership, a complete mismatch
+#   proves no recorded owner, and candidate identity failure returns undetermined,
+#   which is the required three-way result.
+#
+# Project discovery, pool, and candidate inputs:
+# - `bin/fm-next-cache-sweep.sh: sweep_project_directories -> os.scandir and
+#   entry.is_dir`: enumeration, entry-type, or unsafe-path failure currently exits
+#   2 instead of silently dropping a project, which is the required global refusal.
+# - `bin/fm-next-cache-sweep.sh: sweep_project -> sweep_resolve_directory and
+#   git rev-parse --git-dir`: an unenterable project or unreadable Git answer
+#   currently refuses that project, which is required.
+# - `bin/fm-next-cache-sweep.sh: sweep_pool_entries -> mktemp, treehouse status
+#   --json, staged-file read, JSON decode, and temp removal`: command failure,
+#   malformed encoding or JSON, NUL, wrong top-level shape, or staging failure
+#   currently refuses that project atomically, which is required.
+# - `bin/fm-next-cache-sweep.sh: sweep_pool_entries -> status and path fields`:
+#   missing, non-string, empty, non-absolute, NUL-bearing, tab-bearing, or
+#   newline-bearing fields currently refuse the project before shell parsing,
+#   which is required at the Python to shell boundary.
+# - `bin/fm-next-cache-sweep.sh: sweep_project_plan -> pool directory predicate,
+#   sweep_path_identity, and duplicate identity scan`: an absent or unresolvable
+#   path or duplicate filesystem copy currently refuses the project, which is
+#   required.
+# - `bin/fm-next-cache-sweep.sh: sweep_project_plan and sweep_unowned_reason ->
+#   candidate provenance`: today any repository directory passes because
+#   `git rev-parse --git-dir` answers in the project clone and in child directories.
+#   The contract requires positive proof that the candidate is the root of a
+#   linked worktree registered to this project and is not the project clone.
+# - `bin/fm-next-cache-sweep.sh: sweep_unowned_reason -> pool status`: only the
+#   exact `available` value can proceed, `in-use` is a proven owner, and every
+#   other value is undetermined, which is the required direction.
+# - `bin/fm-next-cache-sweep.sh: sweep_unowned_reason -> git status --porcelain
+#   and git stash list`: command failure is undetermined and non-empty output is
+#   owned, which is the required fail-closed direction.
+# - `bin/fm-next-cache-sweep.sh: sweep_project_plan -> fm_next_cache_inspect and
+#   FM_NEXT_CACHE_* outputs`: failed discovery, eligibility, or measurement
+#   refuses the project and a completed result becomes an owned or free plan row,
+#   which is the required project-atomic boundary.
+#
+# Shared build-output discovery and removal inputs:
+# - `bin/fm-next-cache-lib.sh: fm_next_cache_size_kb -> du -sk`: command failure
+#   or malformed output currently returns nonzero, which is required.
+#   The earlier implementation normalized failed measurement to zero and could
+#   report unmeasured output as absent; that unsafe direction has been converted.
+# - `bin/fm-next-cache-lib.sh: fm_next_cache_parent_is_next_app -> next.config.*
+#   and package.json predicates plus grep`: absent app evidence is a safe negative,
+#   a grep match is positive, and a grep error is undetermined, which is required.
+# - `bin/fm-next-cache-lib.sh: fm_next_cache_is_build_output -> path existence,
+#   directory and symlink predicates, physical resolution, containment, git
+#   check-ignore, and app-root result`: a proven non-candidate is retained while
+#   missing evidence or command failure is undetermined, which is required.
+# - `bin/fm-next-cache-lib.sh: fm_next_cache_inspect -> worktree cd and git
+#   rev-parse --git-dir`: entry or Git failure currently returns an inspection
+#   error, which is required.
+#   The earlier `fm_next_cache_dirs` returned success with no output for these
+#   failures and could report an unreadable copy as empty; that has been converted.
+# - `bin/fm-next-cache-lib.sh: fm_next_cache_inspect -> mktemp, find -print0,
+#   NUL-delimited read, and temp removal`: staging, traversal, unsafe-path, read,
+#   or cleanup failure currently discards the plan and returns nonzero, which is
+#   required.
+#   The earlier process-substitution walk discarded `find` status and could emit
+#   a partial directory set; staged checked traversal is the converted behavior.
+# - `bin/fm-next-cache-lib.sh: fm_next_cache_report and fm_next_cache_reclaim ->
+#   plan rows and fm_next_cache_human_kb`: malformed formatting or a repeated
+#   inspection failure returns nonzero, which is required.
+# - `bin/fm-next-cache-lib.sh: fm_next_cache_reclaim -> rm -rf and post-removal
+#   existence predicates`: failed or incomplete removal is reported and returns
+#   nonzero while successful removal alone contributes reclaimed bytes, which is
+#   required.
+#
+# Outcome and summary inputs:
+# - `bin/fm-next-cache-sweep.sh: sweep_apply_project_plan -> report or reclaim
+#   status and FM_NEXT_CACHE_TOTAL_KB`: failures currently become named failed
+#   outcomes and successful measured work contributes totals, which is required.
+#   The earlier dry-run and removal branches only changed exit status, allowing
+#   all-zero counters to select a clean summary; named failure outcomes are the
+#   required converted behavior.
+# - `bin/fm-next-cache-sweep.sh: sweep_project_plan, sweep_project, project loop,
+#   and final summary -> project completeness and copy verdicts`: today a copy
+#   inspected before a later project refusal still increments the run's inspected
+#   count even though its discarded plan produced no outcome.
+#   The contract requires only fully applied project verdicts to enter run totals,
+#   and it makes every clean `nothing to reclaim` sentence unreachable unless
+#   every requested project completed and every returned copy has a final verdict.
 set -u
 
 case "${BASH_SOURCE[0]}" in
