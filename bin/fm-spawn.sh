@@ -148,8 +148,10 @@
 #   bricking every spawn; FM_SPAWN_READY_BYPASS=1 is a test-fixture escape hatch
 #   for suites whose fake backend has no shell behind it, never for a live home.
 #   The marker command is sent unquoted so no truncation can strand the pane's
-#   shell in a quote continuation; a probe path that is not a plain absolute path
-#   of shell-inert characters therefore refuses the spawn rather than be sent.
+#   shell in a quote continuation. The probe directory is created under TMPDIR
+#   when that yields a plain absolute marker path, and otherwise under the same
+#   fixed /tmp root TASK_TMP uses, with one stderr notice; only a /tmp that also
+#   cannot yield a plain path refuses the spawn.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -2211,8 +2213,24 @@ spawn_ready_cleanup() {
   SPAWN_READY_DIR=
 }
 
+# spawn_ready_probe_dir <root>: mktemp one probe directory under <root> and echo
+# it, or return non-zero when that root cannot yield a marker path the probe line
+# can carry unquoted. Separate from the caller so the preferred root and the
+# known-safe fallback root run the exact same validation.
+spawn_ready_probe_dir() {  # <root>
+  local dir
+  dir=$(mktemp -d "$1/fm-spawn-ready.XXXXXX") || return 1
+  case "$dir/ready" in
+    [!/]*|*[!A-Za-z0-9._/+:@-]*)
+      rm -rf "$dir" 2>/dev/null || true
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$dir"
+}
+
 spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
-  local target=$1 about=$2 marker polls interval resend_every i=0 sends=0
+  local target=$1 about=$2 marker polls interval resend_every root i=0 sends=0
   [ "${FM_SPAWN_READY_BYPASS:-}" != 1 ] || return 0
   polls=${FM_SPAWN_READY_POLLS:-300}
   interval=${FM_SPAWN_READY_INTERVAL:-0.1}
@@ -2229,26 +2247,27 @@ spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
     *[1-9]*) : ;;
     *) interval=0.1 ;;
   esac
-  SPAWN_READY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-spawn-ready.XXXXXX") || {
-    echo "error: could not create a shell-readiness probe directory for $W" >&2
-    return 1
-  }
-  marker="$SPAWN_READY_DIR/ready"
   # The probe line carries the marker path UNQUOTED on purpose. A quoted line
   # can lose enough leading bytes to leave the pane's shell holding one
   # unbalanced quote, and from that PS2 continuation every later probe adds an
   # even number of quotes, so the parity never returns and no probe ever runs.
   # Unquoted, every head truncation still degrades to a word the shell cannot
   # run, which is the property this gate depends on. That only holds while the
-  # path needs no quoting, so refuse anything but a plain absolute path made of
-  # characters no shell reinterprets, exactly as the quote guard did before.
-  case "$marker" in
-    [!/]*|*[!A-Za-z0-9._/+:@-]*)
-      spawn_ready_cleanup
-      echo "error: shell-readiness probe path is not a plain absolute path and cannot be sent safely: $marker" >&2
-      return 1
-      ;;
-  esac
+  # path itself needs no quoting, and TMPDIR is inherited from whoever launched
+  # this spawn - so an unusable TMPDIR falls back to the same fixed /tmp root
+  # TASK_TMP already uses rather than failing a spawn over the caller's
+  # environment. Only a /tmp that also cannot yield a plain path refuses.
+  root=${TMPDIR:-/tmp}
+  SPAWN_READY_DIR=$(spawn_ready_probe_dir "$root") || SPAWN_READY_DIR=
+  if [ -z "$SPAWN_READY_DIR" ] && [ "$root" != /tmp ]; then
+    echo "notice: shell-readiness probe root $root cannot yield a plain absolute marker path; falling back to /tmp for task $ID" >&2
+    SPAWN_READY_DIR=$(spawn_ready_probe_dir /tmp) || SPAWN_READY_DIR=
+  fi
+  if [ -z "$SPAWN_READY_DIR" ]; then
+    echo "error: no shell-readiness probe directory for task $ID: /tmp yielded no plain absolute marker path, so the probe line cannot be sent without shell quoting" >&2
+    return 1
+  fi
+  marker="$SPAWN_READY_DIR/ready"
   while [ "$i" -lt "$polls" ]; do
     if [ $((i % resend_every)) -eq 0 ]; then
       # Every resend after the first clears the input line with C-c first, so a

@@ -117,6 +117,12 @@ SH
 
 # make_case <name> <id> builds a home plus a real project/worktree pair, and
 # echoes the per-case paths the run helper needs.
+#
+# Each case also gets its own empty TMPDIR. The gate derives its probe directory
+# from TMPDIR, so a case-private root is what makes the leak assertion hermetic:
+# the real-backend smoke suites in this same family run the gate unbypassed and
+# would otherwise be writing identically named directories into the shared
+# ambient TMPDIR while this suite counted them.
 make_case() {
   local name=$1 id=$2 case_dir home proj wt fakebin
   case_dir="$TMP_ROOT/$name"
@@ -124,18 +130,19 @@ make_case() {
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_lossy_fakebin "$case_dir/fake")
-  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" "$case_dir/tmp"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
-  printf '%s|%s|%s|%s|%s|%s\n' \
-    "$home" "$proj" "$wt" "$fakebin" "$case_dir/delivered" "$case_dir/delivery-count"
+  printf '%s|%s|%s|%s|%s|%s|%s\n' \
+    "$home" "$proj" "$wt" "$fakebin" "$case_dir/delivered" "$case_dir/delivery-count" \
+    "$case_dir/tmp"
 }
 
 read_case() {
-  IFS='|' read -r HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR DELIVERED COUNTFILE <<EOF
+  IFS='|' read -r HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR DELIVERED COUNTFILE CASE_TMP <<EOF
 $1
 EOF
 }
@@ -157,6 +164,7 @@ run_spawn() {
     FM_FAKE_SWALLOW_FROM="$from" FM_FAKE_SWALLOW_UNTIL="$upto" \
     FM_FAKE_SWALLOW_AFTER_TREEHOUSE="${FM_FAKE_SWALLOW_AFTER_TREEHOUSE:-0}" \
     FM_SPAWN_READY_INTERVAL=0.05 FM_SPAWN_READY_RESEND_EVERY=1 \
+    TMPDIR="$CASE_TMP" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -166,9 +174,10 @@ delivered_line_count() {
   grep -c -x -F -- "$1" "$DELIVERED" 2>/dev/null || true
 }
 
-# count_probe_scratch: how many readiness probe directories exist right now.
+# count_probe_scratch: probe directories left in THIS case's private probe root.
+# Scoped to the case so no concurrent spawn elsewhere can decide the verdict.
 count_probe_scratch() {
-  find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'fm-spawn-ready.*' 2>/dev/null | wc -l | tr -d ' '
+  find "$CASE_TMP" -maxdepth 1 -name 'fm-spawn-ready.*' 2>/dev/null | wc -l | tr -d ' '
 }
 
 # delivered_prefix_count <prefix>: delivered lines that START with <prefix>.
@@ -190,6 +199,27 @@ assert_delivered_prefix() {
 assert_not_delivered_prefix() {
   [ "$(delivered_prefix_count "$1")" -eq 0 ] || fail \
     "$2 (a delivered line starts with '$1')"$'\n'"--- delivered ---"$'\n'"$(cat "$DELIVERED" 2>/dev/null)"
+}
+
+# assert_only_probes_delivered <msg>: nothing but readiness probes and the
+# gate's own bookkeeping keys ever reached the pane.
+#
+# Stated as a whole-file invariant rather than as a list of forbidden spellings
+# on purpose. A case that truncates EVERY delivery cannot detect a leaked send by
+# the intact text - `treehouse get` would arrive as `reehouse get` and no
+# prefix-anchored check on the intact form could ever fire. A probe line is an
+# intact `touch <marker>` or one of its head-truncated forms, and every marker
+# lives under a `fm-spawn-ready.` directory and is named `ready`, so anything
+# else on the wire is a leak whichever way it arrived.
+assert_only_probes_delivered() {
+  local stray
+  stray=$(awk '
+    /^key / { next }
+    index($0, "fm-spawn-ready.") > 0 && /\/ready$/ { next }
+    { print }
+  ' "$DELIVERED" 2>/dev/null)
+  [ -z "$stray" ] || fail \
+    "$1"$'\n'"--- non-probe deliveries ---"$'\n'"$stray"
 }
 
 # The live incident: the first three deliveries lose their leading byte. The
@@ -257,8 +287,8 @@ test_unready_shell_fails_loudly() {
   assert_contains "$out" "treehouse get" \
     "the refusal did not name the send it refused"
   assert_not_contains "$out" "spawned $id" "spawn reported success despite an unready shell"
-  assert_not_delivered_prefix "treehouse get" \
-    "treehouse get reached the pane after the readiness gate had given up"
+  assert_only_probes_delivered \
+    "a task command reached the pane after the readiness gate had given up"
   # Each resend must be able to escape a continuation prompt a partial line left
   # behind. A bare Enter cannot; C-c can, which is why the pre-clear is a C-c.
   [ "$(delivered_line_count 'key C-c')" -ge 1 ] \
@@ -298,15 +328,15 @@ test_healthy_shell_pays_one_probe_per_gate() {
 # The probe directory is scratch: it must never survive the spawn, on the
 # success path or the refusal path.
 #
-# The refusal half runs against its own fully scaffolded fixture rather than a
-# made-up id on the success fixture. An id with no brief dies at fm-spawn's
-# brief check, long before a pane or a probe directory exists, so the cleanup
-# assertion would pass vacuously. The case therefore proves the refusal actually
-# came from the readiness gate before it trusts what the gate left behind.
+# Each half runs against its own fully scaffolded fixture with its own empty
+# probe root, so the count is an absolute zero attributable to that one spawn
+# rather than a before/after diff of state anything else can write. The refusal
+# half needs a real brief: an id without one dies at fm-spawn's brief check long
+# before a pane or a probe directory exists, so its cleanup assertion would pass
+# vacuously. The case therefore proves the refusal came from the readiness gate
+# before it trusts what that gate left behind.
 test_probe_scratch_is_cleaned_up() {
-  local rec id out status before after
-  before=$(count_probe_scratch)
-
+  local rec id out status
   id=first-send-scratch-e5
   rec=$(make_case scratch "$id")
   read_case "$rec"
@@ -314,6 +344,8 @@ test_probe_scratch_is_cleaned_up() {
   status=$?
   expect_code 0 "$status" "the success half of the cleanup case never spawned"
   assert_contains "$out" "spawned $id" "the success half of the cleanup case never spawned"
+  [ "$(count_probe_scratch)" = 0 ] \
+    || fail "readiness probe scratch survived a successful spawn ($(count_probe_scratch) left in $CASE_TMP)"
 
   id=first-send-scratch-refused-g7
   rec=$(make_case scratch-refused "$id")
@@ -323,11 +355,35 @@ test_probe_scratch_is_cleaned_up() {
   [ "$status" -ne 0 ] || fail "the refusal half of the cleanup case did not refuse"
   assert_contains "$out" "never confirmed it can read a command line" \
     "the refusal half never reached the readiness gate, so its cleanup is unproven"
-
-  after=$(count_probe_scratch)
-  [ "$after" -le "$before" ] \
-    || fail "readiness probe scratch directories leaked (before=$before after=$after)"
+  [ "$(count_probe_scratch)" = 0 ] \
+    || fail "readiness probe scratch survived a refused spawn ($(count_probe_scratch) left in $CASE_TMP)"
   pass "readiness probe scratch is removed on both the success and refusal paths"
+}
+
+# The probe root is derived from an INHERITED TMPDIR, so a TMPDIR that cannot
+# carry an unquoted probe line must not fail the spawn. fm-spawn worked in such
+# an environment before this gate existed, and the pane is not at fault, so the
+# probe falls back to the fixed /tmp root and says so once instead of refusing.
+test_unusable_tmpdir_falls_back_instead_of_refusing() {
+  local rec id out status
+  id=first-send-odd-tmpdir-j9
+  rec=$(make_case odd-tmpdir "$id")
+  read_case "$rec"
+  mkdir -p "$CASE_TMP/has space"
+  CASE_TMP="$CASE_TMP/has space"
+
+  out=$(run_spawn "$id" 1 0)
+  status=$?
+  expect_code 0 "$status" \
+    "a TMPDIR that cannot carry an unquoted probe line refused the spawn instead of falling back"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_contains "$out" "falling back to /tmp" \
+    "the probe root fallback was silent, so the condition is invisible to the captain"
+  assert_delivered_prefix "treehouse get" \
+    "the pane never received an intact treehouse get, so the fallback probe never proved readiness"
+  [ "$(count_probe_scratch)" = 0 ] \
+    || fail "a probe directory was created under the unusable root instead of the fallback"
+  pass "an unusable TMPDIR falls back to /tmp with a notice instead of failing the spawn"
 }
 
 # A misconfigured budget knob must not brick spawning. A zero poll count would
@@ -374,6 +430,7 @@ test_second_gate_protects_the_launch_environment
 test_unready_shell_fails_loudly
 test_healthy_shell_pays_one_probe_per_gate
 test_misconfigured_budget_knob_falls_back_to_its_default
+test_unusable_tmpdir_falls_back_instead_of_refusing
 test_fixture_bypass_is_explicit
 test_probe_scratch_is_cleaned_up
 
