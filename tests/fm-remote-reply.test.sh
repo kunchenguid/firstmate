@@ -400,6 +400,32 @@ assert_not_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
 unset FM_PENDING_REPLY_GRACE_SECS
 pass "a reply that arrives after escalation resolves it and clears the open decision"
 
+rm -f -- "$PARENT/state/remote-replies/ios.caught-up"
+remote_env "$ADAPTER" source ios > "$TMP_ROOT/preempted-source.out" 2>&1 &
+PREEMPTED_SOURCE=$!
+running_poll=''
+for _ in $(seq 1 100); do
+  for job in "$TMP_ROOT"/remote-jobs/jobs/job-*; do
+    [ -d "$job" ] || continue
+    if [ "$(fm_remote_job_read_state "$job" 2>/dev/null || true)" = running ]; then
+      running_poll=$job
+      break 2
+    fi
+  done
+  sleep 0.05
+done
+[ -n "$running_poll" ] || fail "the reply poll did not begin running before preemption"
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-file.sh get data/reply/report.md 262144 >/dev/null
+set +e
+wait "$PREEMPTED_SOURCE"
+preempted_rc=$?
+set -e
+[ "$preempted_rc" -eq "$FM_REMOTE_JOB_PREEMPTED_EXIT" ] \
+  || fail "the reply poll did not expose remote-job preemption: $preempted_rc"
+assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
+  "a preempted reply poll published a caught-up watermark"
+pass "a preempted reply poll cannot publish channel freshness"
+
 # A quiet window is the one moment this channel can prove it is NOT behind, and
 # the parent's pending-reply guard needs that proof: a remote report that exists
 # but has not been mirrored yet must never be mistaken for a report the mate
