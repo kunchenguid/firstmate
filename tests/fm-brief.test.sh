@@ -354,6 +354,46 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# The evidence-recording contract is what makes bin/fm-pr-merge.sh's refusal
+# reachable: only the worker knows which commit its figures came from. It belongs
+# to the two PR-based modes and to neither of the paths that never reach a PR
+# merge, so an instruction with no enforcer is never scaffolded.
+test_pr_modes_require_recording_the_measured_commit() {
+  local home id brief
+  home="$TMP_ROOT/evidence-home"
+  mkdir -p "$home/data"
+  for id in brief-evidence-nm brief-evidence-dpr; do
+    case "$id" in
+      brief-evidence-nm) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "## Record the commit your evidence was measured on" "$brief" \
+      "$id: PR-based brief lost the evidence-recording contract"
+    # The recorded form is the one the merge guard reads: task id, then the
+    # commit, resolved in the worktree at measurement time.
+    assert_grep "bin/fm-evidence-record.sh $id \"\$(git rev-parse HEAD)\"" "$brief" \
+      "$id: brief must show the exact recording command, resolving the commit in the worktree"
+    assert_grep "Record it again after EVERY re-measurement" "$brief" \
+      "$id: brief must require re-recording, which is what a final-head instruction cannot win"
+    assert_grep "The merge refuses when the recorded commit is not the pull request's head" "$brief" \
+      "$id: brief must state the consequence that makes the record load-bearing"
+  done
+
+  for id in brief-evidence-local brief-evidence-scout; do
+    case "$id" in
+      brief-evidence-local) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1 ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_no_grep "fm-evidence-record.sh" "$brief" \
+      "$id: a scaffold that never reaches the PR merge guard must not carry its recording contract"
+  done
+  pass "fm-brief.sh: PR-based ship briefs require recording the commit their evidence was measured on"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -721,6 +761,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_pr_modes_require_recording_the_measured_commit
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

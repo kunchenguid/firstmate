@@ -213,6 +213,81 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# evidence_head=<sha> records the exact commit a task's reported verification
+# evidence was measured on, and optional evidence_note=<one line> records what
+# that measurement was. bin/fm-evidence-record.sh is the only writer and
+# bin/fm-pr-merge.sh the only reader: a merge is refused unless evidence_head
+# equals the pull request's live head, so a suite figure or exploit result
+# measured before a later fix, documentation, or rebase commit can never be
+# presented as the merging head's result.
+FM_PR_EVIDENCE_HEAD=
+FM_PR_EVIDENCE_NOTE=
+
+# fm_pr_evidence_note_valid <note>: a note is one printable line, bounded, so it
+# can never split the key=value record it is stored in.
+fm_pr_evidence_note_valid() {
+  local note=${1-}
+  local LC_ALL=C
+  [ "${#note}" -le 200 ] || return 1
+  [[ "$note" =~ ^[[:print:]]*$ ]]
+}
+
+# fm_pr_evidence_read <meta>: load the task's evidence record into
+# FM_PR_EVIDENCE_HEAD and FM_PR_EVIDENCE_NOTE. Returns 0 with an empty head when
+# no record exists, and non-zero when the metadata is unreadable or the recorded
+# head is malformed, so a corrupt record is never mistaken for a matching one.
+fm_pr_evidence_read() {
+  local meta=${1-} head note
+  FM_PR_EVIDENCE_HEAD=
+  FM_PR_EVIDENCE_NOTE=
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  head=$(grep '^evidence_head=' "$meta" | tail -1 || true)
+  [ -n "$head" ] || return 0
+  head=${head#evidence_head=}
+  fm_pr_head_valid "$head" || return 1
+  note=$(grep '^evidence_note=' "$meta" | tail -1 || true)
+  note=${note#evidence_note=}
+  fm_pr_evidence_note_valid "$note" || return 1
+  FM_PR_EVIDENCE_HEAD=$head
+  FM_PR_EVIDENCE_NOTE=$note
+}
+
+# fm_pr_evidence_write <meta> <sha> [note]: atomically replace the task's
+# evidence record, preserving every other metadata line, and re-read the result
+# so a partially written record can never be reported as recorded. Requires
+# bin/fm-wake-lib.sh for the shared per-task metadata lock.
+fm_pr_evidence_write() {
+  local meta=$1 head=$2 note=${3-} dir base tmp lock rc=0
+  fm_pr_head_valid "$head" || return 1
+  fm_pr_evidence_note_valid "$note" || return 1
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
+  dir=${meta%/*}
+  base=${meta##*/}
+  [ "$dir" != "$meta" ] || dir=.
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock"
+  tmp=$(mktemp "$dir/.${base}.fm-evidence.XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  while :; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(fm_pr_file_link_count "$meta")" = 1 ] || { rc=1; break; }
+    fm_pr_regular_destination_or_absent "$meta" || { rc=1; break; }
+    { grep -vE '^evidence_head=|^evidence_note=' "$meta" || true; } > "$tmp" || { rc=1; break; }
+    printf 'evidence_head=%s\n' "$head" >> "$tmp" || { rc=1; break; }
+    if [ -n "$note" ]; then
+      printf 'evidence_note=%s\n' "$note" >> "$tmp" || { rc=1; break; }
+    fi
+    chmod 0600 "$tmp" || { rc=1; break; }
+    mv -f -- "$tmp" "$meta" || { rc=1; break; }
+    tmp=
+    break
+  done
+  [ -z "$tmp" ] || rm -f -- "$tmp"
+  fm_lock_release "$lock"
+  [ "$rc" = 0 ] || return 1
+  fm_pr_evidence_read "$meta" || return 1
+  [ "$FM_PR_EVIDENCE_HEAD" = "$head" ] && [ "$FM_PR_EVIDENCE_NOTE" = "$note" ]
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null
@@ -316,6 +391,12 @@ fm_pr_metadata_identity_parse() {
         fi
         ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+        ;;
+      # A re-measurement recorded after the merge poll was armed rewrites the
+      # evidence lines to the end of the record, so they legitimately appear
+      # after pr=. Their own validity is enforced by fm_pr_evidence_read, which
+      # refuses the merge on a malformed record rather than passing it here.
+      evidence_head=*|evidence_note=*)
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1

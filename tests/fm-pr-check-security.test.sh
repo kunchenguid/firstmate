@@ -116,6 +116,14 @@ write_task_meta() {
     "project=$dir/project" \
     "kind=ship" \
     "mode=no-mistakes"
+  # bin/fm-pr-merge.sh refuses a merge whose recorded evidence commit is not the
+  # PR head, so every merge fixture here needs that record. It is written through
+  # the real recorder rather than as a literal line, so this suite cannot drift
+  # from the writer's format. The commit matches the gh mock's default head.
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir/home" \
+    "$ROOT/bin/fm-evidence-record.sh" "$id" 0123456789abcdef0123456789abcdef01234567 \
+    'fixture verification run' > /dev/null \
+    || fail "write_task_meta: recording the evidence commit for $id failed"
 }
 
 write_poll_meta() {
@@ -611,6 +619,10 @@ SH
       "project=$dir/project" \
       'kind=ship' \
       'mode=local-only'
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir/home" \
+      "$ROOT/bin/fm-evidence-record.sh" "$id" 0123456789abcdef0123456789abcdef01234567 \
+      'fixture verification run' > /dev/null \
+      || fail "legacy fixture: recording the evidence commit for $id failed"
     mkdir -p "$dir/home/state/.pr-check-quarantine"
     chmod 0700 "$dir/home/state/.pr-check-quarantine"
     printf 'reserved migration evidence\n' \
