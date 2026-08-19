@@ -134,10 +134,15 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   Before a fresh ship or scout worker starts, its clean task worktree fetches
-#   origin, resolves the current remote default branch, and resets to its tip.
-#   An unreachable origin, unresolved default branch, or non-clean worktree
-#   refuses the spawn rather than risking a PR based on stale history.
+#   Before a fresh ship or scout worker starts, its clean task worktree is
+#   reset to the current default-branch tip. On Firstmate's own repository
+#   (the project is this FM_ROOT or FM_HOME) that tip is the primary's local
+#   default-branch commit, never origin: local main is authoritative and
+#   origin may be a third-party parent. On every other project the worktree
+#   fetches origin, resolves the current remote default branch, and resets to
+#   its tip. An unreachable origin (ordinary projects), an unresolved default
+#   branch, or a non-clean worktree refuses the spawn rather than risking a
+#   PR based on stale or foreign history.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1729,6 +1734,43 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
+  local proj_real root_real home_real
+  proj_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || proj_real=$PROJ_ABS
+  root_real=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || root_real=$FM_ROOT
+  home_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || home_real=$FM_HOME
+  # Firstmate-on-itself: local default branch is the fleet's running tree.
+  # Fetching origin here would reset workers onto a third-party parent tip
+  # whenever origin still names that parent, which is how unreviewed
+  # upstream commits enter a ship branch.
+  if [ "$proj_real" = "$root_real" ] || [ "$proj_real" = "$home_real" ]; then
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine the local default branch for firstmate worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="refs/heads/$default"
+    expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+      echo "error: local default branch '$default' is not a commit for firstmate worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    status=$(git -C "$worktree" status --porcelain) || {
+      echo "error: could not inspect firstmate worktree '$worktree' before refreshing its base" >&2
+      return 1
+    }
+    if [ -n "$status" ]; then
+      echo "error: firstmate worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
+      echo "error: could not reset firstmate worktree '$worktree' to local '$default'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+    if [ "$actual" != "$expected" ]; then
+      echo "error: firstmate worktree '$worktree' is at '${actual:-unknown}', not local '$default' ('$expected'); refusing to launch" >&2
+      return 1
+    fi
+    return 0
+  fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1

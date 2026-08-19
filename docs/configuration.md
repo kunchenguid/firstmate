@@ -24,6 +24,14 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Landing remote (git `origin`)
+
+Git, `gh`, and no-mistakes all default to the `origin` remote.
+A Firstmate checkout that lands work on its own fork, while keeping a third-party parent around for courtesy upstream PRs, must point `origin` at that fork so a worker doing the obvious thing branches, pulls, and opens PRs there.
+`bin/fm-landing-remote.sh` is the single owner of that remapping: it runs only on the primary checkout, names the parent `upstream`, sets the `gh` default repo to `origin`, and re-inits no-mistakes without `--fork-url` so the gate opens PRs on the landing remote.
+Its header owns the flags, URL comparison, linked-worktree refusal, and idempotency.
+Do not rewrite remotes from a linked worktree; the configuration is shared with the primary.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.

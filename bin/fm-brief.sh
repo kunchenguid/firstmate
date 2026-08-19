@@ -425,7 +425,9 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. Confirm this worktree is on the local default branch before creating yours: \`git rev-parse HEAD\` must equal \`git rev-parse refs/heads/main\` (or \`refs/heads/master\` if that is the default).
+If it does not, STOP - do not branch from a remote tip - append \`blocked: worktree is not on the local default branch\` to the status file and stop.
+Then create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
 # Rules
 $RULE1
