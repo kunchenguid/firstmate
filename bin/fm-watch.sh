@@ -1235,9 +1235,19 @@ EOF
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
+        # Same three verdicts as the stale dispatchers above, and they must be routed
+        # the same way here. Clearing belongs to `working` alone, where an
+        # authoritative run supersedes the declaration and the pane returns to
+        # ordinary wedge tracking. `none` means the declaration is CONTRADICTED by a
+        # confidently dead agent, so it surfaces: a dead pane that churns every poll
+        # never reaches the two-consecutive-hash path, and clearing it here would
+        # erase its tracking every poll and never tell firstmate the worker is gone.
+        # surface_nonterminal_stale records the surfaced marker, so the next poll
+        # returns paused and the churning pane still costs exactly one wake.
         case "$(pause_state_class "$w" "$task")" in
-          paused) handle_paused_stale "$w" "$task" "$h" ;;
-          *)      clear_pause_tracking "$w" ;;
+          paused)  handle_paused_stale "$w" "$task" "$h" ;;
+          working) clear_pause_tracking "$w" ;;
+          *)       surface_nonterminal_stale "$w" "$h" ;;
         esac
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
         # Same rule as the stable-hash branch: never clear pause bookkeeping the

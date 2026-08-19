@@ -1072,6 +1072,116 @@ test_live_declared_pause_surfaces_once_after_agent_dies() {
   pass "a live declared pause surfaces once when its dead agent later reads unknown"
 }
 
+# --- a DECLARED pause on a pane whose content CHANGES every poll ------------
+# The steady-hash paths above are not the only way a parked worker is triaged.
+# When a pane's content differs from the previous poll the hash counter resets, so
+# the two-consecutive-hash stale path is never reached and the changing-hash
+# dispatcher decides alone. A dead agent's idle shell is exactly the pane most
+# likely to churn - a clock, a timestamped prompt, a spinner the exited agent left
+# behind - so the dead-agent guarantee is worthless if it only holds for a pane
+# that happens to sit perfectly still.
+#
+# Live and churning must stay absorbed, because a live worker is still there to end
+# its own declared wait. Dead and churning must surface, and must surface ONCE:
+# after that surface records its marker the pane returns to the bounded cadence, so
+# a churning dead pane costs one wake rather than one per poll.
+#
+# The pause is FRESH under a high re-surface threshold, so the bounded cadence can
+# never wake here; every wake counted below is the immediate surface.
+test_declared_pause_changing_hash_live_to_dead() {
+  local dir state fakebin out statusf window key pid round wakes
+  dir=$(make_case declared-pause-changing-hash); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; statusf="$state/held.status"
+  window="test:fm-held"
+  # A pane whose captured content differs on every read, so its hash never repeats
+  # and the changing-hash dispatcher owns every poll.
+  cat > "$fakebin/tmux" <<'TMUX'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "list-windows" ]; then
+  printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
+  exit 0
+fi
+if [ "${1:-}" = "capture-pane" ]; then
+  tick=$(cat "$FM_FAKE_TICK_FILE" 2>/dev/null || printf '0')
+  tick=$((tick + 1))
+  printf '%s' "$tick" > "$FM_FAKE_TICK_FILE"
+  printf 'idle, holding for the upstream release (tick %s)\n' "$tick"
+  exit 0
+fi
+if [ "${1:-}" = "display-message" ]; then
+  case "$*" in
+    *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+  esac
+fi
+exit 1
+TMUX
+  chmod +x "$fakebin/tmux"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # Phase A: the worker is LIVE and its pane churns. It must stay absorbed, because
+  # the worker is still present to end the wait it declared.
+  round=1
+  while [ "$round" -le 3 ]; do
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TICK_FILE="$dir/tick" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+      FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    if ! wait_live "$pid" 30; then
+      reap "$pid"
+      fail "live churning declared pause surfaced instead of absorbing on round $round: $(cat "$out")"
+    fi
+    wakes=$(queued_stale_wakes "$state" "$window")
+    [ "$wakes" -eq 0 ] || { reap "$pid"; fail "live churning declared pause queued $wakes wakes on round $round"; }
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the live churning absorb on round $round"
+    round=$((round + 1))
+  done
+
+  # Phase B, first sight of death: nothing is left to end the declared wait, so the
+  # churning pane must surface rather than have its tracking silently cleared.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TICK_FILE="$dir/tick" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || { reap "$pid"; fail "dead churning declared pause was cleared instead of surfacing: $(cat "$out")"; }
+  wakes=$(queued_stale_wakes "$state" "$window")
+  [ "$wakes" -eq 1 ] || fail "dead churning declared pause queued $wakes wakes on first sight (want exactly one)"
+  [ -e "$state/.paused-$key" ] || fail "dead churning surface did not record its bounded-cadence marker"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the dead churning surface"
+
+  # Phase B, repeats: the pane keeps churning and the agent stays dead, so the
+  # once-only bound must hold - no further wake, one per poll is the flood this
+  # whole classification exists to avoid.
+  round=1
+  while [ "$round" -le 3 ]; do
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TICK_FILE="$dir/tick" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+      FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    if wait_live "$pid" 30; then reap "$pid"; else wait "$pid" || fail "dead churning repeat round $round failed"; fi
+    wakes=$(queued_stale_wakes "$state" "$window")
+    [ "$wakes" -eq 0 ] \
+      || fail "dead churning declared pause replayed $wakes wakes on repeat round $round (want none after the first surface)"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the dead churning repeat round $round"
+    round=$((round + 1))
+  done
+  pass "a declared pause on a churning pane stays absorbed while live and surfaces exactly once once its agent is confirmed dead"
+}
+
 # A captain-held or paused crew can leave a stable backend endpoint after its agent
 # exits. fm-crew-state then authoritatively reports stopped rather than paused, and
 # a confidently dead agent means nothing is left to end the declared wait, so the
@@ -2391,6 +2501,7 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_declared_pause_liveness_decides_trust
+test_declared_pause_changing_hash_live_to_dead
 test_unknown_declared_pause_caches_authoritative_rechecks
 test_live_declared_pause_surfaces_once_after_agent_dies
 test_exited_declared_pause_surfaces_once_while_live_pane_holds
