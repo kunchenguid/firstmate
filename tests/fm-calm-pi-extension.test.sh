@@ -17,6 +17,9 @@ PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
 TMUX_SOCKET="fm-calm-$$"
 TMUX_SESSION="fm-calm-e2e"
+# Grace period after /reload's final text reappears, so the geometry assertion reads a
+# settled repaint instead of a still-reflowing one.
+GEOMETRY_RELOAD_SETTLE_SECONDS=2
 # Verified against Pi 0.81.1 and 0.82.0 (docs/calm-mode-feasibility.md). This is
 # known-good evidence, not a support ceiling: the fixtures below run against whatever
 # Pi is actually installed, and record_pi_version_evidence never rejects a newer
@@ -69,6 +72,54 @@ find_chrome() {
     fi
   done
   return 1
+}
+
+start_geometry_pi() {
+  local project=$1 home=$2 config=$3 session_arg=$4
+  tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 100 -y 44 \
+    "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-context-files --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./geometry-provider.ts $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+}
+
+capture_geometry_viewport() {
+  local file=$1
+  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$file" 2>/dev/null
+}
+
+wait_for_geometry_text() {
+  local file=$1 text=$2 attempt=0
+  while [ "$attempt" -lt 120 ]; do
+    capture_geometry_viewport "$file" || true
+    grep -Fq "$text" "$file" 2>/dev/null && return 0
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+# Shared wait-until-absent: proves a repaint actually happened (the prior
+# content is gone) instead of racing a short-lived transient banner against a
+# 10ms poll, which can repaint and vanish between two polls.
+wait_for_geometry_absence() {
+  local file=$1 text=$2 attempt=0
+  while [ "$attempt" -lt 120 ]; do
+    capture_geometry_viewport "$file" || true
+    grep -Fq "$text" "$file" 2>/dev/null || return 0
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+assert_geometry_gap() {
+  local file=$1 label=$2 skill_line final_line gap
+  skill_line=$(grep -n -m1 '\[skill\] ahoy' "$file" | cut -d: -f1)
+  final_line=$(grep -n -m1 'CALM_GEOMETRY_FINAL' "$file" | cut -d: -f1)
+  [ -n "$skill_line" ] && [ -n "$final_line" ] \
+    || fail "$label did not render the collapsed skill row and final assistant response"
+  gap=$((final_line - skill_line - 1))
+  [ "$gap" -eq 2 ] \
+    || fail "$label left $gap rows between the collapsed skill row and final response instead of the two standard visible-row separators"
 }
 
 test_home_resolution() {
@@ -352,6 +403,92 @@ JS
   [ "$status" -eq 0 ] || fail "Pi calm missing-adapter-export path failed: $out"
   [ -z "$out" ] || fail "Pi calm missing-adapter-export test printed output: $out"
   pass "missing Pi presentation class exports reach the independent adapter degradation path"
+}
+
+test_calm_assistant_layout_field_check_and_restore() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for Pi calm assistant-layout field-check test"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/assistant-layout-field-check"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+  printf '%s\n' \
+    '{"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}' \
+    >"$fixture/project/node_modules/@earendil-works/pi-coding-agent/package.json"
+  printf '%s\n' \
+    'export function getMarkdownTheme() { return {}; }' \
+    'export class UserMessageComponent {}' \
+    'export class AssistantMessageComponent {' \
+    '  updateContent(message) { this.rendered = message; }' \
+    '}' \
+    >"$fixture/project/node_modules/@earendil-works/pi-coding-agent/index.js"
+
+  out=$(cd "$fixture/project" && node --input-type=module 2>&1 <<'JS'
+const pkg = await import("@earendil-works/pi-coding-agent");
+const { AssistantMessageComponent } = pkg;
+
+// A throwing original stands in for a Pi upgrade whose updateContent fails mid-render;
+// the patch must still restore lastMessage instead of losing the original thinking content.
+let originalCalls = 0;
+AssistantMessageComponent.prototype.updateContent = function () {
+  originalCalls++;
+  throw new Error("boom-from-original-updateContent");
+};
+
+const assistant = await import("./.pi/extensions/lib/fm-calm-assistant-layout.ts");
+const visibility = await import("./.pi/extensions/lib/fm-calm-visibility.ts");
+assistant.installCalmAssistantLayout();
+
+{
+  const instance = Object.create(AssistantMessageComponent.prototype);
+  let reason;
+  try {
+    instance.updateContent({ stopReason: "endTurn", content: [] });
+  } catch (error) {
+    reason = error instanceof Error ? error.message : String(error);
+  }
+  if (!reason?.includes("hiddenThinkingLabel") || !reason.includes("hideThinkingBlock")) {
+    throw new Error(
+      `an instance missing hiddenThinkingLabel/hideThinkingBlock did not fail loudly naming both fields: ${String(reason)}`,
+    );
+  }
+  if (originalCalls !== 0) {
+    throw new Error("the missing-field check ran after calling the original updateContent instead of before");
+  }
+}
+
+{
+  visibility.setCalmPresentation(true);
+  const instance = Object.create(AssistantMessageComponent.prototype);
+  instance.hiddenThinkingLabel = "";
+  instance.hideThinkingBlock = true;
+  const original = { stopReason: "endTurn", content: [{ type: "thinking", text: "secret" }] };
+  let threw = false;
+  try {
+    instance.updateContent(original);
+  } catch {
+    threw = true;
+  }
+  if (!threw) {
+    throw new Error("fixture precondition failed: the original updateContent did not throw");
+  }
+  if (instance.lastMessage !== original) {
+    throw new Error("a mid-render throw from the original updateContent left lastMessage unrestored");
+  }
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi calm assistant-layout field-check and restore-on-throw path failed: $out"
+  [ -z "$out" ] || fail "Pi calm assistant-layout field-check test printed output: $out"
+  pass "the collapsed-thinking adapter fails loudly on a renamed hiddenThinkingLabel/hideThinkingBlock field and restores lastMessage even when the original updateContent throws mid-render"
 }
 
 test_builtin_gate_load_time() {
@@ -2072,56 +2209,7 @@ export default function (pi: ExtensionAPI): void {
 }
 TS
 
-  start_geometry_pi() {
-    local session_arg=$1
-    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 100 -y 44 \
-      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-context-files --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./geometry-provider.ts $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
-  }
-
-  capture_geometry_viewport() {
-    local file=$1
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$file" 2>/dev/null
-  }
-
-  wait_for_geometry_text() {
-    local file=$1 text=$2 attempt=0
-    while [ "$attempt" -lt 120 ]; do
-      capture_geometry_viewport "$file" || true
-      grep -Fq "$text" "$file" 2>/dev/null && return 0
-      sleep 0.05
-      attempt=$((attempt + 1))
-    done
-    return 1
-  }
-
-  wait_for_geometry_transition() {
-    local file=$1 transient_text=$2 final_text=$3 attempt=0 saw_transient=0
-    while [ "$attempt" -lt 600 ]; do
-      capture_geometry_viewport "$file" || true
-      if grep -Fq "$transient_text" "$file" 2>/dev/null; then
-        saw_transient=1
-      elif [ "$saw_transient" -eq 1 ] && grep -Fq "$final_text" "$file" 2>/dev/null; then
-        return 0
-      fi
-      sleep 0.01
-      attempt=$((attempt + 1))
-    done
-    return 1
-  }
-
-  assert_geometry_gap() {
-    local file=$1 label=$2
-    skill_line=$(grep -n -m1 '\[skill\] ahoy' "$file" | cut -d: -f1)
-    final_line=$(grep -n -m1 'CALM_GEOMETRY_FINAL' "$file" | cut -d: -f1)
-    [ -n "$skill_line" ] && [ -n "$final_line" ] \
-      || fail "$label did not render the collapsed skill row and final assistant response"
-    gap=$((final_line - skill_line - 1))
-    [ "$gap" -eq 2 ] \
-      || fail "$label left $gap rows between the collapsed skill row and final response instead of the two standard visible-row separators"
-  }
-
-  start_geometry_pi "--session-dir '$sessions'"
+  start_geometry_pi "$project" "$home" "$config" "--session-dir '$sessions'"
   wait_for_geometry_text "$snapshot" "geometry-provider.ts" \
     || fail "Pi Calm hidden-block geometry E2E did not reach the ready composer"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm-geometry-e2e'
@@ -2131,13 +2219,8 @@ TS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   wait_for_geometry_text "$snapshot" "visible row two" \
     || fail "Pi Calm hidden-block geometry E2E did not complete the /skill:ahoy turn"
-  i=0
-  while [ "$i" -lt 120 ]; do
-    capture_geometry_viewport "$snapshot"
-    tail -12 "$snapshot" | grep -Fq "Working..." || break
-    sleep 0.05
-    i=$((i + 1))
-  done
+  wait_for_geometry_absence "$snapshot" "Working..." \
+    || fail "Pi Calm hidden-block geometry E2E left the working indicator visible"
   assert_contains "$(cat "$snapshot")" "[skill] ahoy" "Calm hid the collapsed skill header"
   assert_contains "$(cat "$snapshot")" "CALM_GEOMETRY_FINAL" "Calm hid the final assistant response"
   assert_not_contains "$(cat "$snapshot")" "Thinking..." "Calm left a collapsed thinking label visible"
@@ -2154,11 +2237,12 @@ TS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/reload'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-  wait_for_geometry_transition \
-    "$snapshot" \
-    "Reloading keybindings, extensions, skills, prompts, themes, and context files..." \
-    "CALM_GEOMETRY_FINAL" \
+  # The reload banner is transient and can repaint faster than a poll catches it, so
+  # accept the settled final text without depending on ever observing the banner.
+  wait_for_geometry_text "$snapshot" "CALM_GEOMETRY_FINAL" \
     || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
+  sleep "$GEOMETRY_RELOAD_SETTLE_SECONDS"
+  capture_geometry_viewport "$snapshot"
   assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
@@ -2166,14 +2250,8 @@ TS
     || fail "thinking expansion did not restore Calm-hidden reasoning"
   assert_not_contains "$(cat "$expanded_snapshot")" "probe-one.txt" "thinking expansion restored Calm-hidden tool rows"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
-  i=0
-  while [ "$i" -lt 120 ]; do
-    capture_geometry_viewport "$snapshot"
-    grep -Fq "CALM_GEOMETRY_THINKING_ONE" "$snapshot" || break
-    sleep 0.05
-    i=$((i + 1))
-  done
-  assert_not_contains "$(cat "$snapshot")" "CALM_GEOMETRY_THINKING_ONE" "collapsing thinking restored hidden-row output"
+  wait_for_geometry_absence "$snapshot" "CALM_GEOMETRY_THINKING_ONE" \
+    || fail "collapsing thinking restored hidden-row output"
   assert_geometry_gap "$snapshot" "re-collapsed native Calm transcript"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
@@ -2198,7 +2276,7 @@ TS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   sleep 0.2
   tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-  start_geometry_pi "--session '$session_file'"
+  start_geometry_pi "$project" "$home" "$config" "--session '$session_file'"
   wait_for_geometry_text "$restarted_snapshot" "visible row two" \
     || fail "Pi did not restore the Calm hidden-block geometry session"
   assert_not_contains "$(cat "$restarted_snapshot")" "Thinking..." "restart restored a collapsed thinking label under Calm"
@@ -3957,6 +4035,7 @@ test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
+test_calm_assistant_layout_field_check_and_restore
 test_builtin_gate_load_time
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle

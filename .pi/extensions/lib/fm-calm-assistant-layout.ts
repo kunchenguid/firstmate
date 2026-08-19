@@ -70,6 +70,11 @@ export function installCalmAssistantLayout(): void {
     message: AssistantMessage,
   ): void {
     const state = this as unknown as AssistantMessagePresentationState;
+    if (typeof state.hiddenThinkingLabel !== "string" || typeof state.hideThinkingBlock !== "boolean") {
+      throw new Error(
+        "Firstmate Calm requires AssistantMessageComponent.hiddenThinkingLabel and hideThinkingBlock",
+      );
+    }
     const hideThinking =
       state.hiddenThinkingLabel === "" &&
       state.hideThinkingBlock &&
@@ -88,8 +93,11 @@ export function installCalmAssistantLayout(): void {
           }
         : message;
 
-    originalUpdateContent.call(this, presentationMessage);
-    if (presentationMessage !== message) state.lastMessage = message;
+    try {
+      originalUpdateContent.call(this, presentationMessage);
+    } finally {
+      if (presentationMessage !== message) state.lastMessage = message;
+    }
   };
 
   registry[CALM_ASSISTANT_LAYOUT_PATCH] = patch;
