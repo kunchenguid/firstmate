@@ -77,6 +77,44 @@ fm_test_pid_identity() {
     '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid"
 }
 
+# Block until <pid>'s published command line IS <argv> twice in a row, or fail
+# after a bounded wait.
+#
+# `cmd &` forks first and only then runs execve, and a process sampled inside
+# that window still reports the forking shell's own command line; while execve
+# is swapping the address space the kernel publishes no argv at all, which ps
+# renders as a bracketed placeholder. A test that samples a freshly started
+# child before it has finished becoming itself therefore records an identity
+# that changes milliseconds later for reasons unrelated to what it asserts -
+# reliably green on a warm machine, red on a cold runner that widens the window.
+# Requiring two identical reads makes a mid-execve transient insufficient, and
+# the bounded wait fails loudly instead of quietly sampling early. The match is
+# the WHOLE command line, never a substring: a forking shell's command line can
+# contain the command it is about to exec, so a substring match would accept the
+# very pre-exec image this exists to wait past.
+fm_test_wait_exec_settled() {  # <pid> <argv> [<ticks>]
+  local pid=$1 want=$2 limit=${3:-500} i=0 seen prev=
+  case "$pid" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  while [ "$i" -lt "$limit" ]; do
+    seen=$(LC_ALL=C ps -p "$pid" -o command= 2>/dev/null || true)
+    seen=${seen#"${seen%%[![:space:]]*}"}
+    seen=${seen%"${seen##*[![:space:]]}"}
+    if [ "$seen" = "$want" ]; then
+      if [ "$prev" = settled ]; then
+        return 0
+      fi
+      prev=settled
+    else
+      prev=
+    fi
+    sleep 0.01
+    i=$((i + 1))
+  done
+  return 1
+}
+
 FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   rm -f "$FM_TEST_CLEANUP_REGISTRY"
   return 1
@@ -84,6 +122,7 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
 
 fm_test_cleanup() {
   local d
+  fm_test_reap_tracked_pids
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
@@ -93,6 +132,165 @@ fm_test_cleanup() {
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
+}
+
+# --- spawned-process registry -----------------------------------------------
+#
+# A test that starts a real background process (a watcher, an arm, a daemon)
+# owns that process for its whole life. `fail` exits the script immediately, so
+# a reap written after an assertion never runs on the failing path and the
+# process outlives the script: reparented to init, still holding whatever
+# stdout it inherited. One such survivor was enough to hold an entire test lane
+# open indefinitely with no diagnostic. Registering the PID makes the reap
+# unconditional, because the same EXIT/INT/TERM traps that remove temp roots
+# also stop every registered process.
+#
+# Reaping is TERM, a bounded grace, then KILL: a process whose signal handler
+# was dropped survives TERM, and waiting on it forever is how a stuck reap
+# becomes a stuck script and then a stuck lane. Nothing here ever matches on a
+# command line - lanes share this machine's process table, and a pattern kill
+# reaches into a sibling lane.
+#
+# The registry is a `$$`-keyed file for the same reason the temp-root registry
+# is: a helper that runs inside `$(...)` cannot write to the caller's arrays.
+# Registration costs one append and no fork, because it runs at every spawn in
+# suites that start dozens of real processes.
+
+FM_TEST_PID_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-pids.$$.XXXXXX") || return 1
+# Ticks of 0.05s allowed between TERM and KILL, and again after KILL.
+FM_TEST_REAP_GRACE_TICKS=${FM_TEST_REAP_GRACE_TICKS:-60}
+
+# Register one or more PIDs this test started, so cleanup reaps them even when
+# an assertion fails before the test's own reap runs.
+#
+# Two conditions decide whether a registered PID is actually reaped, and both
+# are the caller's to keep. First, the reap runs from fm_test_cleanup, so a test
+# file that installs its own EXIT trap must call fm_test_cleanup from inside it
+# or nothing here ever runs. Second, the PID must still be provably this shell's
+# at cleanup time, as one of its jobs or as a live descendant; a PID already
+# reparented to init cannot be told apart from a recycled one, so it is reported
+# rather than signalled. Register a process while its parent is still alive, and
+# reap it explicitly with fm_test_reap_pid on the passing path.
+fm_test_track_pid() {  # <pid> [<pid>...]
+  local pid
+  for pid in "$@"; do
+    case "$pid" in
+      '' | *[!0-9]*) continue ;;
+    esac
+    printf '%s\n' "$pid" >> "$FM_TEST_PID_REGISTRY" 2>/dev/null || true
+  done
+}
+
+# PIDs descended from <pid> in the current process table, deepest last. Read
+# from the live parent/child graph, never from a command-line match.
+fm_test_descendant_pids() {  # <pid>
+  local root=$1
+  case "$root" in
+    '' | *[!0-9]*) return 0 ;;
+  esac
+  ps -eo pid=,ppid= 2>/dev/null | awk -v root="$root" '
+    { pid[NR] = $1; ppid[NR] = $2; n = NR }
+    END {
+      want[root] = 1
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (i = 1; i <= n; i++) {
+          if (!(pid[i] in want) && (ppid[i] in want)) {
+            want[pid[i]] = 1
+            changed = 1
+          }
+        }
+      }
+      for (p in want) {
+        if (p != root) print p
+      }
+    }'
+}
+
+fm_test_pid_gone() {  # <pid>
+  ! kill -0 "$1" 2>/dev/null
+}
+
+# TERM one PID, allow a bounded grace, then KILL. Bash reaps a finished
+# background job from its own SIGCHLD handler, so kill -0 stops succeeding as
+# soon as the process is really gone and the grace is never spent on a zombie.
+fm_test_signal_pid_hard() {  # <pid>
+  local pid=$1 i=0
+  fm_test_pid_gone "$pid" && return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  while [ "$i" -lt "$FM_TEST_REAP_GRACE_TICKS" ] && ! fm_test_pid_gone "$pid"; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  fm_test_pid_gone "$pid" && return 0
+  kill -KILL "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt "$FM_TEST_REAP_GRACE_TICKS" ] && ! fm_test_pid_gone "$pid"; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  fm_test_pid_gone "$pid"
+}
+
+# Reap <pid>, then whatever it left running. Signalling the process first and
+# its leftovers second is deliberate: a process that cleans up after itself gets
+# to, and only what actually outlived it is signalled directly. Returns non-zero
+# when something survived both TERM and KILL, which is worth surfacing rather
+# than waiting out.
+fm_test_reap_pid() {  # <pid>
+  local pid=$1 kid rc=0 kids
+  case "$pid" in
+    '' | *[!0-9]*) return 0 ;;
+  esac
+  kids=$(fm_test_descendant_pids "$pid")
+  fm_test_signal_pid_hard "$pid" || rc=1
+  wait "$pid" 2>/dev/null || true
+  # Anything from that snapshot still alive is now an orphan of this test, so
+  # reap it by the PID recorded while it was still a verified descendant.
+  for kid in $kids; do
+    fm_test_pid_gone "$kid" && continue
+    fm_test_signal_pid_hard "$kid" || rc=1
+  done
+  return "$rc"
+}
+
+# Reap every registered PID this shell can still prove belongs to it: one of its
+# own live jobs, or a live descendant in the current process table.
+#
+# Both memberships are PID-recycling guards. Bash drops a job as soon as it reaps
+# it, so a PID the kernel later hands to an unrelated process is not in the job
+# table; and a PID that is a descendant of this shell right now is this shell's
+# process whatever it was before. Descendants matter because a test may register
+# a process a helper started for it - a watcher armed by bin/fm-watch-arm.sh is a
+# grandchild, never a job of the test shell - and the job table alone would drop
+# it with no diagnostic.
+#
+# `jobs` must run in THIS shell. A command or process substitution runs it in a
+# subshell with no copy of the job table, which would report every job gone and
+# silently reap nothing - the same trap bin/fm-test-run.sh's scheduler documents.
+fm_test_reap_tracked_pids() {
+  local pid live
+  [ -n "${FM_TEST_PID_REGISTRY:-}" ] || return 0
+  [ -f "$FM_TEST_PID_REGISTRY" ] || return 0
+  live="$FM_TEST_PID_REGISTRY.live"
+  : > "$live"
+  jobs -rp >> "$live" 2>/dev/null || true
+  jobs -sp >> "$live" 2>/dev/null || true
+  fm_test_descendant_pids "$$" >> "$live" 2>/dev/null || true
+  while IFS= read -r pid; do
+    case "$pid" in
+      '' | *[!0-9]*) continue ;;
+    esac
+    fm_test_pid_gone "$pid" && continue
+    if ! grep -qx -- "$pid" "$live" 2>/dev/null; then
+      printf 'warn - registered pid %s is alive but is no longer a job or a descendant of this shell, so it was left alone\n' \
+        "$pid" >&2
+      continue
+    fi
+    fm_test_reap_pid "$pid" || true
+  done < "$FM_TEST_PID_REGISTRY"
+  rm -f "$live" "$FM_TEST_PID_REGISTRY"
 }
 
 fm_test_tmproot() {

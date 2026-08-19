@@ -365,6 +365,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/test-lane-safety.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/trace-context.md",
       "audience": "maintainer-verification"
     },

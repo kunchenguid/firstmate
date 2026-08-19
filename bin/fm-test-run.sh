@@ -37,6 +37,11 @@
 #                   "skip: <token>" (e.g. --fail-on-gate-skip 'herdr not found').
 #                   The required Herdr CI lane uses this so a missing pin cannot
 #                   silently pass as a gate skip.
+#   --script-timeout N
+#                   per-script wall-clock budget in seconds (default 1800, or
+#                   FM_TEST_SCRIPT_TIMEOUT). A script that exceeds it is
+#                   terminated, its process group reaped, and the script
+#                   reported as failed with exit=124 rather than hanging the lane.
 #   --jobs N        run the selected scripts with up to N concurrent workers.
 #                   Default is 1 (serial). N>1 is allowed only when every
 #                   selected script is in the proven-isolated set
@@ -47,6 +52,8 @@
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
+#   FM_TEST_LEAK <script> pgid=<n>   (script left running descendants; lane reaped
+#                                     them, and the script's own status is kept)
 #
 # After all scripts (stdout):
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
@@ -68,6 +75,13 @@
 # configured shard count is refused, so a CI matrix cannot silently drop a shard.
 # --changed is conservative: it over-selects related families rather than
 # under-selecting, and never expands to the complete suite unless --all.
+#
+# Every script runs contained: its own process group, a private output file
+# instead of a share of the lane's own stream, a wall-clock budget, and a reap
+# of whatever it leaves behind. A test remains responsible for stopping what it
+# starts (tests/lib.sh owns that side); this layer exists so a lapse there stays
+# a reported leak instead of an indefinite silent hang. Evidence and the
+# regressions that re-check it: docs/verification/test-lane-safety.md.
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -88,6 +102,13 @@ EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
 JOBS=1
 JOBS_MAX=8
+
+# Per-script wall-clock budget in seconds. A script that stops making progress is
+# terminated and reported as a failure naming it, so no lane can sit silently for
+# hours behind one wedged descendant.
+SCRIPT_TIMEOUT=${FM_TEST_SCRIPT_TIMEOUT:-1800}
+# Ticks of 0.05s a reap allows between TERM and KILL, and again after KILL.
+REAP_GRACE_TICKS=100
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -126,6 +147,215 @@ now_ms() {
     # Second precision only when python3 is unavailable.
     echo $(($(date +%s) * 1000))
   fi
+}
+
+# --- lane process containment ------------------------------------------------
+#
+# Every test script runs as its own process-group leader with its output on a
+# private file, and the lane waits only on the script's own PID under a budget.
+# The three properties are independent and each is load-bearing:
+#
+#   own process group  a descendant that outlives the script keeps that group id
+#                      even after init reparents it, so the lane reaps it by that
+#                      id. Never by a command-line pattern: lanes share this
+#                      machine's process table and a pattern kill reaches into a
+#                      sibling lane.
+#   private output file a leaked descendant inherits a file, not the lane's own
+#                      pipe, so it can no longer keep a reader of that pipe from
+#                      seeing EOF. That inheritance is what turned one orphan
+#                      into an indefinite silent lane hang.
+#   per-script budget  a script that stops making progress is killed and reported
+#                      as a failure naming the script, instead of stalling the
+#                      lane with no diagnostic.
+#
+# The lane's own process group, captured before any script runs. Reaping refuses
+# to signal it, so a script that failed to become a group leader can never take
+# the lane down with it.
+LANE_PGID=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]') || LANE_PGID=
+case "$LANE_PGID" in
+  '' | *[!0-9]*) LANE_PGID= ;;
+esac
+
+# Under job control bash makes every background job its own group leader, so a
+# script's group id IS its PID. Prove that once, against a probe this lane
+# controls, rather than reading it back with ps per script: a fast script can
+# exit before ps reports, and an empty answer there silently disables reaping
+# exactly when the script that leaked was quick.
+LANE_GROUP_REAPING=0
+# What the lane must reap when it is interrupted rather than allowed to finish.
+# The in-flight script runs inside a command substitution, so its PID cannot
+# reach this shell through a variable; it is published as a file instead.
+LANE_FOLLOWER_PID=
+LANE_INFLIGHT_DIR=
+probe_group_reaping() {
+  local pid probe_pgid
+  set -m
+  sleep 30 &
+  pid=$!
+  set +m
+  probe_pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || probe_pgid=
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$probe_pgid" = "$pid" ] || return 1
+  [ -n "$LANE_PGID" ] || return 1
+  [ "$probe_pgid" != "$LANE_PGID" ] || return 1
+  return 0
+}
+
+# Echo <pid>'s process group, nothing when group reaping is unavailable here.
+# Without it the lane still reaps the PID it started, which is never a pattern.
+script_process_group() {  # <pid>
+  local pid=$1
+  [ "$LANE_GROUP_REAPING" -eq 1 ] || return 1
+  [ "$pid" != "$LANE_PGID" ] || return 1
+  printf '%s\n' "$pid"
+}
+
+group_is_populated() {  # <pgid>
+  kill -0 -- "-$1" 2>/dev/null
+}
+
+# TERM the group, allow a bounded grace, then KILL what ignored it. A watcher
+# whose signal handler is dropped survives TERM, so escalation is what keeps one
+# swallowed signal from wedging the lane. Non-zero when the group outlives both.
+reap_process_group() {  # <pgid>
+  local pgid=$1 i
+  [ -n "$pgid" ] || return 0
+  [ -z "$LANE_PGID" ] || [ "$pgid" != "$LANE_PGID" ] || return 0
+  group_is_populated "$pgid" || return 0
+  kill -TERM -- "-$pgid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt "$REAP_GRACE_TICKS" ] && group_is_populated "$pgid"; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  group_is_populated "$pgid" || return 0
+  kill -KILL -- "-$pgid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt "$REAP_GRACE_TICKS" ] && group_is_populated "$pgid"; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  ! group_is_populated "$pgid"
+}
+
+# Wait for <pid> under a wall-clock budget. 0 when it exited in time, 1 on
+# timeout. SECONDS is a shell variable, so a multi-minute script costs no forks.
+wait_pid_within_budget() {  # <pid> <seconds>
+  local pid=$1 budget=$2 started=$SECONDS
+  while kill -0 "$pid" 2>/dev/null; do
+    [ $((SECONDS - started)) -ge "$budget" ] && return 1
+    sleep 0.05
+  done
+  return 0
+}
+
+# Copy a growing file to stdout until <stop-flag> exists, then flush once more
+# and return. Checking the flag BEFORE measuring the file is what makes the last
+# flush complete: nothing can append after the flag appears, so the size read
+# after it is final. This replaces the `| tee` that used to publish the lane's
+# own pipe to every descendant of every test.
+stream_growing_file() {  # <file> <stop-flag>
+  local file=$1 stop=$2 pos=1 size stopped
+  while :; do
+    stopped=0
+    [ -e "$stop" ] && stopped=1
+    # The flag lives beside the file. If the file itself is gone the lane that
+    # owns both is gone too, so no flag can ever arrive and there is nothing
+    # left to flush: return instead of holding the lane's stdout open forever.
+    [ -e "$file" ] || return 0
+    size=$(wc -c <"$file" 2>/dev/null | tr -d '[:space:]')
+    case "$size" in
+      '' | *[!0-9]*) size=0 ;;
+    esac
+    if [ "$size" -ge "$pos" ]; then
+      tail -c "+$pos" "$file" 2>/dev/null | head -c "$((size - pos + 1))"
+      pos=$((size + 1))
+    fi
+    [ "$stopped" -eq 1 ] && return 0
+    sleep 0.05
+  done
+}
+
+# TERM one PID, allow a bounded grace, then KILL, then confirm it is really
+# gone. Bash reaps a finished background job in its own SIGCHLD handler, so
+# kill -0 stops succeeding as soon as the job is really gone and this never
+# spins out its grace on a zombie. Non-zero when the PID outlived even KILL,
+# which a caller must not follow with an unbounded wait: a process wedged in
+# uninterruptible sleep survives KILL until its I/O returns, and waiting on it
+# is the same silent hang this containment exists to remove.
+kill_pid_hard() {  # <pid>
+  local pid=$1 i=0
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  while [ "$i" -lt "$REAP_GRACE_TICKS" ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill -KILL "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt "$REAP_GRACE_TICKS" ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  ! kill -0 "$pid" 2>/dev/null
+}
+
+# Run one test script contained: own group, private output file, budget, reap.
+# Writes the exit status to <status-file>; 124 marks the budget kill, matching
+# timeout(1). The status goes to a file rather than to stdout on purpose: a
+# command substitution is a foreground command, and bash defers every pending
+# trap until a foreground command returns, so capturing the status that way would
+# make the lane deaf to SIGINT and SIGTERM for as long as a script runs. Here the
+# lane only ever blocks in short sleeps and in `wait`, both of which let a signal
+# through immediately.
+run_script_contained() {  # <script> <output-file> <status-file>
+  local script=$1 out=$2 status=$3 pid pgid rc timed_out=0 unreaped=0 inflight
+  set -m
+  bash "$script" >"$out" 2>&1 &
+  pid=$!
+  set +m
+  pgid=$(script_process_group "$pid") || pgid=
+  inflight=
+  if [ -n "$LANE_INFLIGHT_DIR" ] && [ -d "$LANE_INFLIGHT_DIR" ]; then
+    inflight="$LANE_INFLIGHT_DIR/$pid"
+    printf '%s %s\n' "$pid" "$pgid" >"$inflight" 2>/dev/null || inflight=
+  fi
+  if ! wait_pid_within_budget "$pid" "$SCRIPT_TIMEOUT"; then
+    timed_out=1
+    printf 'not ok - %s exceeded the per-script budget of %ss and was terminated\n' \
+      "$script" "$SCRIPT_TIMEOUT" >>"$out"
+    log "per-script budget of ${SCRIPT_TIMEOUT}s exceeded, terminating: $script"
+    if ! kill_pid_hard "$pid"; then
+      unreaped=1
+      printf 'not ok - %s survived SIGKILL after its budget and was abandoned\n' \
+        "$script" >>"$out"
+      log "could not reap $script after its budget; moving on without waiting on it"
+    fi
+  fi
+  rc=0
+  if [ "$unreaped" -eq 0 ]; then
+    wait "$pid" 2>/dev/null || rc=$?
+  fi
+  [ "$timed_out" -eq 0 ] || rc=124
+  # Anything the script left behind dies here, while its group id still names it
+  # and nothing else. A descendant that ignored TERM is escalated, because one
+  # swallowed signal is all it takes to hold the lane. The leak is reported but
+  # does not fail the script: reaping its own children is the script's own
+  # obligation, and this layer exists so a regression there stays survivable.
+  if [ -n "$pgid" ] && group_is_populated "$pgid"; then
+    printf 'FM_TEST_LEAK %s pgid=%s\n' "$script" "$pgid" >>"$out"
+    log "reaping processes $script left behind (group $pgid)"
+    if ! reap_process_group "$pgid"; then
+      printf 'not ok - %s left processes the lane could not reap in group %s\n' \
+        "$script" "$pgid" >>"$out"
+      log "could not fully reap process group $pgid left by $script"
+      [ "$rc" -ne 0 ] || rc=1
+    fi
+  fi
+  [ -z "$inflight" ] || rm -f "$inflight"
+  printf '%s\n' "$rc" >"$status"
 }
 
 # Primary family for one tests/*.test.sh basename. Unmapped scripts are
@@ -1256,6 +1486,15 @@ while [ "$#" -gt 0 ]; do
       JSON_PATH=${1#--json=}
       shift
       ;;
+    --script-timeout)
+      [ "$#" -gt 1 ] || die "--script-timeout requires a positive integer"
+      SCRIPT_TIMEOUT=$2
+      shift 2
+      ;;
+    --script-timeout=*)
+      SCRIPT_TIMEOUT=${1#--script-timeout=}
+      shift
+      ;;
     --jobs)
       [ "$#" -gt 1 ] || die "--jobs requires a positive integer"
       JOBS=$2
@@ -1364,6 +1603,10 @@ case "$JOBS" in
   ''|*[!0-9]*) die "--jobs must be a positive integer" ;;
 esac
 [ "$JOBS" -ge 1 ] || die "--jobs must be >= 1"
+case "$SCRIPT_TIMEOUT" in
+  ''|*[!0-9]*) die "--script-timeout must be a positive integer number of seconds" ;;
+esac
+[ "$SCRIPT_TIMEOUT" -ge 1 ] || die "--script-timeout must be >= 1"
 [ "$JOBS" -le "$JOBS_MAX" ] || die "--jobs is capped at $JOBS_MAX (got $JOBS)"
 
 case "${MODE:-}" in
@@ -1453,8 +1696,45 @@ fi
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
+LANE_INFLIGHT_DIR="$RUN_TMP/inflight"
+mkdir -p "$LANE_INFLIGHT_DIR"
 : >"$RECORDS"
+
+# An interrupted lane reaps what it started before it goes. Without this the
+# lane dies on the signal while its output follower - which bash makes immune to
+# SIGINT, because this shell runs without job control - keeps the lane's stdout
+# pipe open forever, so whatever reads the lane never sees EOF. That is the same
+# silent indefinite hang a leaked test descendant used to cause.
+# shellcheck disable=SC2329 # Registered by the INT and TERM traps below.
+lane_abort() {  # <signal-name> <exit-code>
+  local sig=$1 code=$2 entry pid pgid worker
+  trap - INT TERM EXIT
+  log "interrupted by SIG$sig, reaping what this lane started"
+  if [ -n "$LANE_FOLLOWER_PID" ]; then
+    kill_pid_hard "$LANE_FOLLOWER_PID" || true
+    LANE_FOLLOWER_PID=
+  fi
+  for worker in "${WORKER_PIDS[@]+"${WORKER_PIDS[@]}"}"; do
+    [ -n "$worker" ] || continue
+    kill_pid_hard "$worker" || true
+  done
+  if [ -n "$LANE_INFLIGHT_DIR" ] && [ -d "$LANE_INFLIGHT_DIR" ]; then
+    for entry in "$LANE_INFLIGHT_DIR"/*; do
+      [ -f "$entry" ] || continue
+      pid=
+      pgid=
+      read -r pid pgid <"$entry" || true
+      [ -z "$pid" ] || kill_pid_hard "$pid" || true
+      [ -z "$pgid" ] || reap_process_group "$pgid" || true
+    done
+  fi
+  rm -rf "$RUN_TMP"
+  exit "$code"
+}
+
 trap 'rm -rf "$RUN_TMP"' EXIT
+trap 'lane_abort INT 130' INT
+trap 'lane_abort TERM 143' TERM
 
 RUN_STARTED_ISO=$(now_iso)
 RUN_STARTED_MS=$(now_ms)
@@ -1531,11 +1811,15 @@ record_script_result() {
 
 run_one_serial() {
   local script=$1
-  local base family expected out begin_iso begin_ms end_ms end_iso duration rc
+  local base family expected out stop status follower begin_iso begin_ms end_ms end_iso duration rc
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
   out="$RUN_TMP/out.$TOTAL"
+  stop="$RUN_TMP/stop.$TOTAL"
+  status="$RUN_TMP/status.$TOTAL"
+  rm -f "$stop" "$status"
+  : >"$out"
   begin_iso=$(now_iso)
   begin_ms=$(now_ms)
 
@@ -1543,10 +1827,18 @@ run_one_serial() {
     "$begin_iso" "$script" "$family" "$expected"
 
   set +e
-  # Stream live output while retaining a copy for gate-skip detection.
-  # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  bash "$script" 2>&1 | tee "$out"
-  rc=${PIPESTATUS[0]}
+  # Live output comes from a follower this lane owns, reading the same private
+  # file that feeds gate-skip detection. The script's own descendants only ever
+  # hold that file, never the lane's stdout.
+  stream_growing_file "$out" "$stop" &
+  follower=$!
+  LANE_FOLLOWER_PID=$follower
+  run_script_contained "$script" "$out" "$status"
+  rc=$(cat "$status" 2>/dev/null || true)
+  : >"$stop"
+  wait "$follower" 2>/dev/null
+  LANE_FOLLOWER_PID=
+  rm -f "$stop"
   set -e
   : "${rc:=1}"
 
@@ -1558,6 +1850,12 @@ run_one_serial() {
   fi
   record_script_result "$script" "$rc" "$duration" "$out" "$end_iso"
 }
+
+if probe_group_reaping; then
+  LANE_GROUP_REAPING=1
+else
+  log "job control did not give this lane per-script process groups; a leaked descendant will be reaped only by the PID the lane started"
+fi
 
 if [ "$JOBS" -eq 1 ]; then
   for script in "${SCRIPTS[@]}"; do
@@ -1652,8 +1950,9 @@ else
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
-      bash "$script" >"$work/output" 2>&1
-      rc=$?
+      run_script_contained "$script" "$work/output" "$work/status"
+      rc=$(cat "$work/status" 2>/dev/null || true)
+      : "${rc:=1}"
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))
       if [ "$duration" -lt 0 ]; then
