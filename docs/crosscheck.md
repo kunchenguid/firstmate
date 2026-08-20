@@ -109,6 +109,62 @@ Each run records both values: `base_sha` is the reviewed merge base, and `base_b
 The authoring worktree is not cloned, checked for cleanliness, or required to match the PR head because no verdict about the remote PR may depend on mutable author-lane filesystem state.
 An empty `FM_STATE_OVERRIDE` falls back to the home state directory, so task metadata, the shared per-task lock, and the disposable review checkout cannot split across callers' current working directories.
 
+### Recorded phase durations
+
+Every run record carries `durations_ms`, an integer millisecond breakdown of where that invocation's wall clock went (C1, `docs/azure-requirements.md`).
+The local lane records `snapshot` (task metadata, the GitHub head/claims lookup, reviewer selection, and the exact-head review checkout), `reviewer` (the bounded reviewer subprocess), `proofs` (the reproduction and mutation verification the gate re-executes for itself), `ledger` (reading and validating the durable ledger plus this invocation's earlier writes), and `total`.
+The Azure compartment lane additionally records `create`, `stage`, `boot`, and `collect`, which only that lane performs.
+
+A phase appears only if the run actually entered it.
+An absent phase means the lane never did that work; it never means the work was free, so a run that failed before reviewer launch records no `reviewer` key rather than `reviewer: 0`.
+Durations are measured on `time.monotonic()`, so a clock change cannot move them, while the record's `at` stamp remains the wall clock it has always been.
+Phases never nest and named phases round down while `total` rounds up, so `total >= sum(named phases)` holds exactly; the difference is real unattributed time between phases, not rounding.
+Two reviewer attempts inside one invocation accumulate into one `reviewer` phase, because the invocation really did spend both.
+The one cost `total` does not include is the final write that lands the record: a record cannot contain the duration of writing itself, which makes `total` a floor rather than an inflated estimate.
+
+The readable report and the run's own output each name the total and the largest phases on one line.
+The full table is a read-only subcommand that takes no lock and changes nothing:
+
+```sh
+bin/fm-crosscheck.sh timings <task-id>
+```
+
+```
+at                    family          state         snapshot  reviewer  proofs  ledger  create  stage  boot  collect  total
+2026-08-02T00:00:00Z  -               tool-failure  -         -         -       -       -       -      -     -        -
+2026-08-20T13:49:06Z  codex-fallback  clear         1217      539       479     0       -       -      -     -        2525
+```
+
+Rows are per run record, not per invocation, and their totals can overlap.
+One invocation that fails over to a second reviewer writes two rows: the first records the invocation up to that failure, and the second records the whole invocation including it.
+Summing the `total` column therefore double counts; read the last row of an invocation for its duration, not the column sum.
+
+`durations_ms` is additive.
+A run recorded before this field existed still validates and still renders, and shows `-` in every phase column rather than a fabricated zero.
+A record that does carry one is held to the full contract: integers only, never negative, only phase names the gate defines, a `snapshot` phase (every run that reaches a record has performed it), and a `total` that covers the phases it names.
+The compartment phases are lane-bound rather than writer-asserted: `create`, `stage`, `boot`, and `collect` are admitted only on a record whose own reviewer entry carries `execution_mode: azure-compartment-v1`, so "absent means this lane did not do it" is enforced by the gate and not merely by the writer's good behavior.
+A run's `at` stamp is pinned to `YYYY-MM-DDTHH:MM:SSZ` for the same reason: it is the one free-form string the table renders, and an embedded newline would let one record forge extra rows.
+
+The writer validates the measurement against that same contract before writing it, and drops it if it fails.
+Everything that later reads this ledger validates it, so an unvalidated write would be a durable outage: one writer bug and `run`, `verify` and `timings` all refuse the task until a human edits the JSON by hand.
+The measurement is the disposable half of that trade, so a timing bug loudly costs one run its breakdown and never the durable findings.
+#### Known gap, bound to the `fm-ccm` image rebake: stamp the compartment lane at its START
+
+The compartment lane's discriminator only exists on a run that COMPLETED that lane, so a compartment review which fails part-way loses its measurement entirely.
+`bin/fm-crosscheck-azure.py` `_run_azure_review_in_lane` stamps `execution_mode: azure-compartment-v1` onto the reviewer record only at the end, after a digest-bound result exists.
+A review that fails during `create`, `stage`, `boot`, or `collect` therefore reaches `append_failed_run` with those phases measured but no `execution_mode`, fails `validate_durations`' lane check, and has its whole `durations_ms` dropped by `stamp_durations` rather than written.
+That is precisely the run whose numbers would be most diagnostic: a compartment review that died in create or boot is the one an operator most needs a breakdown of.
+
+The obvious fix does not work as written, which is why this is recorded rather than done.
+Stamping `execution_mode` earlier makes `validate_ledger` route the record into `bin/fm-crosscheck-azure.py` `validate_azure_reviewer_record`, which demands a complete `azure_identity` (review generation, request and credential digests, model/tool/verifier identities).
+A failed part-way review has no such identity, so an early `execution_mode` would refuse the record outright: it trades a lost measurement for a bricked ledger, which is the worse end of the same trade.
+
+**Follow-up, due when the compartment lane becomes executable again:** before any compartment timing is relied on, stamp the lane at its start, either by making `validate_azure_reviewer_record` apply only to records that claim a completed compartment review, or by adding a separate early lane marker that `run_is_compartment_lane` also accepts.
+Do this at the rebake, not before: while the `fm-ccm` image carries no `pi` binary the compartment lane cannot run at all, so a failed compartment review is impossible and the lost-measurement cost is exactly zero.
+Adding schema surface for a lane that cannot execute would freeze a contract nothing has exercised.
+
+Until then the current behavior is deliberate and is preferred over both alternatives, which are bricking the ledger and letting any record claim compartment phases it never performed.
+
 `bin/fm-pr-merge.sh` calls the verification form automatically after approval.
 Do not call the verification form as a substitute for running a reviewer.
 

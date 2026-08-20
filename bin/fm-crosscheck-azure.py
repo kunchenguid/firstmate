@@ -67,6 +67,29 @@ class AzureCrosscheckError(RuntimeError):
     """Remote compartment or identity failure."""
 
 
+@contextlib.contextmanager
+def measured_phase(phase_timer: Any, name: str) -> Any:
+    """Measure one compartment-lane phase into the core's run timer.
+
+    C1 (docs/azure-requirements.md) attributes this lane's duration to the
+    work only this lane does: `create` (capacity admission and the model VM),
+    `stage` (the credential archive, request, and their uploads), `boot` (the
+    run-command dispatch that starts the guest), `collect` (the result
+    download and its verification), plus the shared `reviewer` and `proofs`
+    phases the core also uses locally.
+
+    The timer is optional so the adapter's own CLI and its hermetic tests can
+    drive a review with nothing to measure into; when it is absent nothing is
+    recorded, which reads as "not measured" rather than as a zero.
+    """
+
+    if phase_timer is None:
+        yield
+        return
+    with phase_timer.phase(name):
+        yield
+
+
 def canonical_bytes(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
@@ -1599,6 +1622,7 @@ def run_azure_review(
     ledger: dict[str, Any],
     config: dict[str, str],
     author_account_identity: str,
+    phase_timer: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """FIFO lane admission around one reviewer run.
 
@@ -1630,6 +1654,7 @@ def run_azure_review(
             review_dir=review_dir, proof_root=proof_root,
             snapshot_value=snapshot_value, ledger=ledger, config=config,
             author_account_identity=author_account_identity, lane=lane,
+            phase_timer=phase_timer,
         )
     finally:
         release_review_lane(lane_handle)
@@ -1649,6 +1674,7 @@ def _run_azure_review_in_lane(
     config: dict[str, str],
     author_account_identity: str,
     lane: int,
+    phase_timer: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     del root
     azure = runtime_config(home)
@@ -1711,31 +1737,32 @@ def _run_azure_review_in_lane(
         input_path = work / "request.json"
         credential_path = work / "credential.tar.gz"
         result_path = work / "result.json"
-        credential_archive_digest, credential_digest = create_credential_archive(
-            credential_path,
-            credential,
-            identity,
-            config,
-            reviewer_account_identity,
-        )
-        reproved = inspect_reviewer_credential(core, config)
-        if reproved != (credential, source, identifier, reviewer_account_identity):
-            raise AzureCrosscheckError(
-                "reviewer credential identity changed before exact staging"
+        with measured_phase(phase_timer, "stage"):
+            credential_archive_digest, credential_digest = create_credential_archive(
+                credential_path,
+                credential,
+                identity,
+                config,
+                reviewer_account_identity,
             )
-        identity.update(
-            {
-                "credential_archive_digest": credential_archive_digest,
-                "credential_digest": credential_digest,
-            }
-        )
-        request_digest = make_input(
-            input_path,
-            prompt=prompt,
-            schema=schema,
-            identity=identity,
-            config=config,
-        )
+            reproved = inspect_reviewer_credential(core, config)
+            if reproved != (credential, source, identifier, reviewer_account_identity):
+                raise AzureCrosscheckError(
+                    "reviewer credential identity changed before exact staging"
+                )
+            identity.update(
+                {
+                    "credential_archive_digest": credential_archive_digest,
+                    "credential_digest": credential_digest,
+                }
+            )
+            request_digest = make_input(
+                input_path,
+                prompt=prompt,
+                schema=schema,
+                identity=identity,
+                config=config,
+            )
         prefix = (
             identity["home_binding"].split(":", 1)[1][:16]
             + "/"
@@ -1752,30 +1779,36 @@ def _run_azure_review_in_lane(
         resources: dict[str, Any] | None = None
         cleanup_error: Exception | None = None
         ledger_identity: dict[str, Any] | None = None
-        model_capacity = reserve_model_capacity(azure, identity, runner)
+        with measured_phase(phase_timer, "create"):
+            model_capacity = reserve_model_capacity(azure, identity, runner)
         try:
-            upload_blob(azure, input_path, staged["input_blob"])
-            uploaded.add(staged["input_blob"])
-            upload_blob(azure, credential_path, staged["credential_blob"])
-            uploaded.add(staged["credential_blob"])
-            resources = provision_model_vm(azure, identity, staged)
-            model_run = submit_model_run(azure, identity, resources)
-            resources["resource_id"] = model_run["resource_id"]
-            resources["vm_instance_id"] = model_run["vm_instance_id"]
-            resources["run_command_id"] = model_run["run_command_id"]
-            resources["vm_etag"] = model_run["etag"]
-            result_digest, boot_id = poll_model_run(
-                azure, resources["run_command_id"], azure["timeout_seconds"]
-            )
-            download_blob(azure, staged["output_blob"], result_path)
-            result = parse_result(
-                result_path,
-                result_digest,
-                identity,
-                request_digest,
-                resources["resource_id"],
-                resources["vm_instance_id"],
-            )
+            with measured_phase(phase_timer, "stage"):
+                upload_blob(azure, input_path, staged["input_blob"])
+                uploaded.add(staged["input_blob"])
+                upload_blob(azure, credential_path, staged["credential_blob"])
+                uploaded.add(staged["credential_blob"])
+            with measured_phase(phase_timer, "create"):
+                resources = provision_model_vm(azure, identity, staged)
+            with measured_phase(phase_timer, "boot"):
+                model_run = submit_model_run(azure, identity, resources)
+                resources["resource_id"] = model_run["resource_id"]
+                resources["vm_instance_id"] = model_run["vm_instance_id"]
+                resources["run_command_id"] = model_run["run_command_id"]
+                resources["vm_etag"] = model_run["etag"]
+            with measured_phase(phase_timer, "reviewer"):
+                result_digest, boot_id = poll_model_run(
+                    azure, resources["run_command_id"], azure["timeout_seconds"]
+                )
+            with measured_phase(phase_timer, "collect"):
+                download_blob(azure, staged["output_blob"], result_path)
+                result = parse_result(
+                    result_path,
+                    result_digest,
+                    identity,
+                    request_digest,
+                    resources["resource_id"],
+                    resources["vm_instance_id"],
+                )
             model_identity = {
                 "resource_id": resources["resource_id"],
                 "vm_instance_id": resources["vm_instance_id"],
@@ -1806,25 +1839,26 @@ def _run_azure_review_in_lane(
                 review_generation=identity["review_generation"],
                 evidence_files=evidence_files,
             )
-            review = core.validate_review_shape(
-                raw_review,
-                snapshot_value,
-                review_dir,
-                config,
-                evidence_executor=evidence_executor,
-            )
-            working_ledger, run = core.apply_review(
-                ledger,
-                review,
-                review_dir,
-                proof_root,
-                snapshot_value,
-                config,
-                evidence_executor=evidence_executor,
-                mutation_executor=remote_mutation_executor(
-                    core, evidence_executor, evidence_files
-                ),
-            )
+            with measured_phase(phase_timer, "proofs"):
+                review = core.validate_review_shape(
+                    raw_review,
+                    snapshot_value,
+                    review_dir,
+                    config,
+                    evidence_executor=evidence_executor,
+                )
+                working_ledger, run = core.apply_review(
+                    ledger,
+                    review,
+                    review_dir,
+                    proof_root,
+                    snapshot_value,
+                    config,
+                    evidence_executor=evidence_executor,
+                    mutation_executor=remote_mutation_executor(
+                        core, evidence_executor, evidence_files
+                    ),
+                )
             if not evidence_executor.attempts:
                 raise AzureCrosscheckError(
                     "Azure review completed without remote execution evidence"

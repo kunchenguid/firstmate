@@ -100,7 +100,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-github-pr.py`        | Adapt observed gh-axi TOON PR reads through a fail-closed read-only CLI               |
-| `fm-crosscheck.sh`       | Run, verify, or atomically merge through the durable exact-head PR finding ledger     |
+| `fm-crosscheck.sh`       | Run, verify, time, or atomically merge through the durable exact-head PR finding ledger |
 | `fm-crosscheck.py`       | Validate and execute crosscheck reviewer evidence and finding lifecycle transitions  |
 | `fm-crosscheck-slack.sh` | Launch or selftest the Slack Socket Mode crosscheck exposure (docs/crosscheck-slack.md) |
 | `fm-crosscheck-slack.py` | Listen for Slack mentions and run allowlisted, metered, lane-named crosscheck reviews |

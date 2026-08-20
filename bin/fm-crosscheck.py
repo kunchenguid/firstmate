@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import contextlib
 import copy
 import datetime as dt
 import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -35,6 +37,11 @@ from fm_bounded_io import BoundedIOError, read_bounded_json, run_bounded
 SCHEMA = "firstmate.crosscheck-ledger.v2"
 REVIEW_SCHEMA = "firstmate.crosscheck-review.v2"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# `utc_now()` is the only producer of a run's `at` stamp and has only ever
+# emitted this shape. Pinning it keeps a free-form string out of the rendered
+# `timings` table, where an embedded newline would otherwise let a recorded
+# stamp forge additional table rows.
+RUN_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 FINDING_ID_RE = re.compile(r"^cc-[0-9a-f]{12}$")
 ACTIVE_LIFECYCLES = {"open", "claimed-fixed"}
@@ -75,6 +82,19 @@ PI_MODEL_PROVIDERS = {
 # Review family provenance recorded in every run's ledger reviewer record.
 REVIEW_FAMILY_GLM_PRIMARY = "glm-primary"
 REVIEW_FAMILY_CODEX_FALLBACK = "codex-fallback"
+
+# C1 (docs/azure-requirements.md): every run records where its wall clock went.
+# The local lane owns the first four; the Azure compartment lane additionally
+# owns the four that only exist when a compartment was created, staged, booted,
+# and collected from. A phase is recorded ONLY if the run actually entered it,
+# so an absent phase means "this lane did not do that" rather than "it was
+# free" - a zero would be a fabricated measurement.
+CROSSCHECK_LOCAL_PHASES = ("snapshot", "reviewer", "proofs", "ledger")
+CROSSCHECK_COMPARTMENT_PHASES = ("create", "stage", "boot", "collect")
+CROSSCHECK_PHASES = CROSSCHECK_LOCAL_PHASES + CROSSCHECK_COMPARTMENT_PHASES
+CROSSCHECK_TOTAL_PHASE = "total"
+# Report and console lines name at most this many phases after the total.
+REPORTED_PHASE_COUNT = 3
 
 MAX_CAPTURE = 200_000
 DEFAULT_REVIEWER_CAPTURE = 16 * 1024 * 1024
@@ -226,6 +246,97 @@ def tool_fail(message: str) -> NoReturn:
 
 def blocking_fail(message: str) -> NoReturn:
     raise CrosscheckBlockingError(message)
+
+
+class PhaseTimer:
+    """Accumulate this crosscheck invocation's per-phase wall clock.
+
+    C1 asks where a review's duration goes, so every phase is measured on
+    `time.monotonic()` - a clock a clock change or an NTP step cannot move -
+    while the record's human-readable `at` stamp stays the wall clock it has
+    always been.
+
+    Two properties make the recorded object honest rather than decorative:
+
+    - Phases never nest. A nested phase would be double counted, and the
+      recorded total would then no longer cover its named phases, so entering
+      a phase while another is open is refused rather than silently summed.
+    - A phase exists in the recorded object only after it has been entered.
+      An absent phase means the lane never did that work; it never means the
+      work was instantaneous.
+
+    Retries accumulate: two reviewer attempts inside one invocation add into
+    one `reviewer` phase, because the invocation really did spend both.
+    """
+
+    def __init__(self) -> None:
+        self._started = time.monotonic()
+        self._elapsed: dict[str, float] = {}
+        self._open: tuple[str, float] | None = None
+
+    @contextlib.contextmanager
+    def phase(self, name: str) -> Any:
+        require(name in CROSSCHECK_PHASES, f"unknown crosscheck phase {name}")
+        require(
+            self._open is None,
+            f"crosscheck phase {name} cannot nest inside "
+            f"{self._open[0] if self._open else ''}",
+        )
+        began = time.monotonic()
+        self._open = (name, began)
+        try:
+            yield
+        finally:
+            self._open = None
+            self._elapsed[name] = self._elapsed.get(name, 0.0) + max(
+                0.0, time.monotonic() - began
+            )
+
+    def durations_ms(self) -> dict[str, int]:
+        """Snapshot the measurement, including any phase still open.
+
+        Named phases round DOWN and the total rounds UP, so
+        `total >= sum(named phases)` holds exactly rather than approximately;
+        a reader can trust the arithmetic instead of allowing for rounding.
+        """
+
+        elapsed = dict(self._elapsed)
+        if self._open is not None:
+            name, began = self._open
+            elapsed[name] = elapsed.get(name, 0.0) + max(
+                0.0, time.monotonic() - began
+            )
+        recorded = {
+            name: int(seconds * 1000.0) for name, seconds in elapsed.items()
+        }
+        recorded[CROSSCHECK_TOTAL_PHASE] = int(
+            math.ceil(max(0.0, time.monotonic() - self._started) * 1000.0)
+        )
+        return recorded
+
+
+def phase_summary(durations: Any) -> str:
+    """One short line naming the total and the biggest phases, or empty."""
+
+    if not isinstance(durations, dict) or CROSSCHECK_TOTAL_PHASE not in durations:
+        return ""
+    named = [
+        (name, value)
+        for name, value in durations.items()
+        if name != CROSSCHECK_TOTAL_PHASE
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+    ]
+    named.sort(key=lambda item: (-item[1], item[0]))
+    biggest = ", ".join(
+        f"{name} {value / 1000.0:.1f}s"
+        for name, value in named[:REPORTED_PHASE_COUNT]
+    )
+    total = durations[CROSSCHECK_TOTAL_PHASE]
+    if not isinstance(total, int) or isinstance(total, bool):
+        return ""
+    line = f"total {total / 1000.0:.1f}s"
+    return f"{line} ({biggest})" if biggest else line
 
 
 def environment_value(name: str, default: str) -> str:
@@ -2448,6 +2559,106 @@ def execute_mutation_proof(
     return proof
 
 
+def validate_durations(
+    value: Any, label: str, *, compartment: bool = False
+) -> dict[str, int]:
+    """Hold a recorded phase measurement to its contract.
+
+    Milliseconds, integers, never negative, never a bool masquerading as an
+    integer, only phase names this gate defines, and a `total` that actually
+    covers the phases it names. A record that fails any of these is a
+    fabricated measurement, and a ledger holding one is refused rather than
+    read as evidence about where a review's time went.
+
+    Two of those checks are the gate's own, not the writer's word for it.
+    "Absent means this lane did not do it" is only true if the gate refuses a
+    lane's phases on a record that does not place the run in that lane, so
+    `create`/`stage`/`boot`/`collect` are admitted only for a reviewer record
+    the compartment lane actually stamped. And every run that reaches a record
+    has performed the snapshot phase, so a measurement without one describes a
+    run that cannot exist and is refused rather than read as a breakdown.
+    """
+
+    require(isinstance(value, dict), f"{label} must be an object")
+    unknown = sorted(
+        set(value) - set(CROSSCHECK_PHASES) - {CROSSCHECK_TOTAL_PHASE}
+    )
+    require(not unknown, f"{label} names unknown phase(s): {', '.join(unknown)}")
+    if not compartment:
+        misplaced = sorted(set(value) & set(CROSSCHECK_COMPARTMENT_PHASES))
+        require(
+            not misplaced,
+            f"{label} records compartment-lane phase(s) "
+            f"({', '.join(misplaced)}) on a run whose reviewer record does not "
+            "place it in the Azure compartment lane",
+        )
+    require(CROSSCHECK_TOTAL_PHASE in value, f"{label} must record a total")
+    require(
+        "snapshot" in value,
+        f"{label} must record the snapshot phase, which every run that reaches "
+        "a record has performed",
+    )
+    for name in sorted(value):
+        measured = value[name]
+        require(
+            isinstance(measured, int)
+            and not isinstance(measured, bool)
+            and measured >= 0,
+            f"{label}.{name} must be a non-negative integer millisecond count",
+        )
+    named = sum(
+        measured
+        for name, measured in value.items()
+        if name != CROSSCHECK_TOTAL_PHASE
+    )
+    require(
+        value[CROSSCHECK_TOTAL_PHASE] >= named,
+        f"{label}.total ({value[CROSSCHECK_TOTAL_PHASE]}ms) does not cover its "
+        f"named phases ({named}ms)",
+    )
+    return dict(value)
+
+
+def run_is_compartment_lane(run: dict[str, Any]) -> bool:
+    """Whether this run's own reviewer record places it in the Azure lane."""
+
+    reviewer = run.get("reviewer")
+    return (
+        isinstance(reviewer, dict)
+        and reviewer.get("execution_mode") == "azure-compartment-v1"
+    )
+
+
+def stamp_durations(run: dict[str, Any], measured: dict[str, int]) -> None:
+    """Record this run's measurement, or drop it rather than brick the ledger.
+
+    Everything that later reads this ledger validates it, so an unvalidated
+    write is a durable outage waiting to happen: one writer bug and `run`,
+    `verify` and `timings` all refuse the task until a human edits the JSON by
+    hand. The measurement is the disposable half of that trade. A timing bug
+    should cost the operator a breakdown, never the durable findings, so a
+    measurement that fails its own contract is dropped loudly and the record
+    is written without it.
+    """
+
+    try:
+        validate_durations(
+            measured,
+            "recorded durations_ms",
+            compartment=run_is_compartment_lane(run),
+        )
+    except CrosscheckError as exc:
+        run.pop("durations_ms", None)
+        print(
+            "crosscheck: dropping this run's phase measurement because it "
+            f"failed its own contract ({exc}); the run record and the durable "
+            "findings are unaffected",
+            file=sys.stderr,
+        )
+        return
+    run["durations_ms"] = measured
+
+
 def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
     require(isinstance(value, dict), "existing findings ledger must be an object")
     require_exact_keys(value, {"schema", "task_id", "pull_request", "findings", "runs"}, "ledger")
@@ -2590,13 +2801,29 @@ def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
             "active_blockers",
             "suspicions",
         }
-        require_exact_keys(run, run_keys, label)
+        # `durations_ms` (C1) is additive: a run recorded before phase timing
+        # existed carries no such key and must still validate, while a record
+        # that carries one is held to the full shape below. Every OTHER key
+        # stays exactly as required, so this is not a loosened contract.
+        optional_run_keys = {"durations_ms"}
+        require_exact_keys(run, run_keys | (set(run) & optional_run_keys), label)
+        if "durations_ms" in run:
+            validate_durations(
+                run["durations_ms"],
+                f"{label}.durations_ms",
+                compartment=run_is_compartment_lane(run),
+            )
         require(
             run.get("state")
             in {"clear", "blocking", "cannot-certify", "unreviewed", "tool-failure"},
             f"{label}.state is invalid",
         )
-        require_string(run.get("at"), f"{label}.at")
+        recorded_at = require_string(run.get("at"), f"{label}.at")
+        require(
+            RUN_AT_RE.fullmatch(recorded_at) is not None,
+            f"{label}.at must be a UTC instant of the form "
+            "YYYY-MM-DDTHH:MM:SSZ",
+        )
         head = run.get("head_sha")
         require(isinstance(head, str) and SHA_RE.fullmatch(head) is not None, f"{label}.head_sha is invalid")
         base = run.get("base_sha")
@@ -4050,6 +4277,11 @@ def render_report(ledger: dict[str, Any], run: dict[str, Any]) -> str:
                 "",
             ]
         )
+    timing = phase_summary(run.get("durations_ms"))
+    if timing:
+        # C1: the operator sees where the clock went without opening the
+        # ledger. `fm-crosscheck.sh timings <task-id>` prints the full table.
+        lines.extend([f"Timing: {timing}.", ""])
     lines.extend(
         [
             f"Summary: {run['summary']}",
@@ -4291,39 +4523,71 @@ def write_ledger(path: Path, ledger: dict[str, Any]) -> None:
 
 
 def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
+    # C1 (docs/azure-requirements.md): the invocation's clock starts here, so
+    # the recorded `total` covers everything the caller waits for, including
+    # the unattributed gaps between the named phases.
+    timer = PhaseTimer()
     state = Path(environment_value("FM_STATE_OVERRIDE", str(home / "state")))
     azure_adapter = load_azure_crosscheck_adapter(root)
     use_azure = azure_adapter.azure_review_enabled(home)
     data = Path(environment_value("FM_DATA_OVERRIDE", str(home / "data")))
-    try:
-        meta = parse_meta(state / f"{task_id}.meta")
-    except CrosscheckError as exc:
-        tool_fail(str(exc))
+    with timer.phase("snapshot"):
+        try:
+            meta = parse_meta(state / f"{task_id}.meta")
+        except CrosscheckError as exc:
+            tool_fail(str(exc))
     ledger_path = data / task_id / "crosscheck-ledger.json"
     report_path = data / task_id / "crosscheck.md"
-    try:
-        snapshot_value = github_snapshot(root, url)
-    except CrosscheckError as exc:
-        tool_fail(f"GitHub snapshot preflight failed: {exc}")
-    try:
-        ledger = load_ledger(ledger_path, task_id, url)
-    except CrosscheckError as exc:
-        reason = f"finding-ledger preflight failed at {ledger_path}: {exc}"
+    with timer.phase("snapshot"):
         try:
-            atomic_write(
-                report_path,
-                render_unloadable_ledger_report(ledger_path, snapshot_value, reason),
-                mode=0o644,
-            )
-        except OSError:
-            pass
-        tool_fail(reason)
+            snapshot_value = github_snapshot(root, url)
+        except CrosscheckError as exc:
+            tool_fail(f"GitHub snapshot preflight failed: {exc}")
+    with timer.phase("ledger"):
+        try:
+            ledger = load_ledger(ledger_path, task_id, url)
+        except CrosscheckError as exc:
+            reason = f"finding-ledger preflight failed at {ledger_path}: {exc}"
+            try:
+                atomic_write(
+                    report_path,
+                    render_unloadable_ledger_report(
+                        ledger_path, snapshot_value, reason
+                    ),
+                    mode=0o644,
+                )
+            except OSError:
+                pass
+            tool_fail(reason)
+
+    def persist(run: dict[str, Any]) -> None:
+        """Stamp this run's measurement, then land the ledger and the report.
+
+        The snapshot is taken with the ledger phase open, so it carries the
+        ledger read/validate above and every earlier write this invocation
+        made. The one cost it cannot carry is the write that lands it: a
+        record cannot contain the duration of writing itself. That leaves the
+        final write as the only unmeasured step, which keeps `total` a floor
+        rather than an inflated estimate.
+
+        The measurement is validated before it is written, against the same
+        contract every later reader enforces, and dropped rather than written
+        if it fails. A timing bug must cost this run its breakdown, never the
+        task's durable ledger.
+        """
+
+        with timer.phase("ledger"):
+            stamp_durations(run, timer.durations_ms())
+            write_ledger(ledger_path, ledger)
+            atomic_write(report_path, render_report(ledger, run), mode=0o644)
+
     config: dict[str, str] | None = None
     try:
-        try:
-            candidates = reviewer_candidates(home, meta)
-        except CrosscheckError as exc:
-            tool_fail(f"reviewer preflight failed: {exc}")
+        with timer.phase("snapshot"):
+            try:
+                candidates = reviewer_candidates(home, meta)
+            except CrosscheckError as exc:
+                tool_fail(f"reviewer preflight failed: {exc}")
         with tempfile.TemporaryDirectory(prefix=f".{task_id}.crosscheck.", dir=state) as temporary:
             temp_root = Path(temporary)
             write_neutral_runner_config(temp_root)
@@ -4365,28 +4629,30 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                     )
                 remaining = len(candidates) - position - 1
                 review_dir = temp_root / f"review-{position}"
-                try:
-                    snapshot_value["base_branch_sha"] = snapshot_value.get(
-                        "base_branch_sha", snapshot_value["base_sha"]
-                    )
-                    # The reviewed base becomes the merge base for every
-                    # downstream consumer -- prompt, execution proof, ledger,
-                    # and verify -- so one stable value is used end to end.
-                    resolved_base = prepare_review_checkout(
-                        review_dir, snapshot_value, fetched_source
-                    )
-                    fetched_source = review_dir
-                    if reviewed_base:
-                        require(
-                            resolved_base == reviewed_base,
-                            "PR base resolution failed: the reviewed merge base "
-                            f"moved from {reviewed_base} to {resolved_base} "
-                            "between reviewer attempts",
+                with timer.phase("snapshot"):
+                    try:
+                        snapshot_value["base_branch_sha"] = snapshot_value.get(
+                            "base_branch_sha", snapshot_value["base_sha"]
                         )
-                    reviewed_base = resolved_base
-                    snapshot_value["base_sha"] = reviewed_base
-                except CrosscheckError as exc:
-                    tool_fail(f"review checkout preflight failed: {exc}")
+                        # The reviewed base becomes the merge base for every
+                        # downstream consumer -- prompt, execution proof,
+                        # ledger, and verify -- so one stable value is used
+                        # end to end.
+                        resolved_base = prepare_review_checkout(
+                            review_dir, snapshot_value, fetched_source
+                        )
+                        fetched_source = review_dir
+                        if reviewed_base:
+                            require(
+                                resolved_base == reviewed_base,
+                                "PR base resolution failed: the reviewed merge "
+                                f"base moved from {reviewed_base} to "
+                                f"{resolved_base} between reviewer attempts",
+                            )
+                        reviewed_base = resolved_base
+                        snapshot_value["base_sha"] = reviewed_base
+                    except CrosscheckError as exc:
+                        tool_fail(f"review checkout preflight failed: {exc}")
                 try:
                     if use_azure:
                         ledger, run = azure_adapter.run_azure_review(
@@ -4406,14 +4672,19 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                             # pool) and the adapter's same-account refusal
                             # arms once an authorship identity exists.
                             author_account_identity="",
+                            # The compartment lane owns create/stage/boot/
+                            # collect; it measures them into this same timer
+                            # so one run record carries the whole clock.
+                            phase_timer=timer,
                         )
                     else:
-                        raw_review = run_reviewer(
-                            review_dir,
-                            snapshot_value,
-                            ledger,
-                            config,
-                        )
+                        with timer.phase("reviewer"):
+                            raw_review = run_reviewer(
+                                review_dir,
+                                snapshot_value,
+                                ledger,
+                                config,
+                            )
                 except CrosscheckToolError as exc:
                     if not remaining:
                         raise
@@ -4425,8 +4696,7 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                         config,
                         "tool-failure",
                     )
-                    write_ledger(ledger_path, ledger)
-                    atomic_write(report_path, render_report(ledger, run), mode=0o644)
+                    persist(run)
                     print(
                         f"crosscheck: reviewer {config['harness']} at "
                         f"{config['account_home']} could not return a verdict "
@@ -4437,15 +4707,16 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                 assert_review_checkout_intact(review_dir, snapshot_value["head_sha"])
                 if use_azure:
                     break
-                review = validate_review_shape(
-                    raw_review,
-                    snapshot_value,
-                    review_dir,
-                    config,
-                )
-                ledger, run = apply_review(
-                    ledger, review, review_dir, temp_root, snapshot_value, config
-                )
+                with timer.phase("proofs"):
+                    review = validate_review_shape(
+                        raw_review,
+                        snapshot_value,
+                        review_dir,
+                        config,
+                    )
+                    ledger, run = apply_review(
+                        ledger, review, review_dir, temp_root, snapshot_value, config
+                    )
                 assert_review_checkout_intact(review_dir, snapshot_value["head_sha"])
                 break
             require(run is not None, "no configured reviewer was attempted")
@@ -4453,33 +4724,34 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
         run = append_failed_run(
             ledger, snapshot_value, str(exc), config, "tool-failure"
         )
-        write_ledger(ledger_path, ledger)
-        atomic_write(report_path, render_report(ledger, run), mode=0o644)
+        persist(run)
         raise
     except CrosscheckCertificationError as exc:
         run = append_failed_run(
             ledger, snapshot_value, str(exc), config, "cannot-certify"
         )
-        write_ledger(ledger_path, ledger)
-        atomic_write(report_path, render_report(ledger, run), mode=0o644)
+        persist(run)
         raise
     except CrosscheckError as exc:
         run = append_failed_run(
             ledger, snapshot_value, str(exc), config, "unreviewed"
         )
-        write_ledger(ledger_path, ledger)
-        atomic_write(report_path, render_report(ledger, run), mode=0o644)
+        persist(run)
         raise
 
-    write_ledger(ledger_path, ledger)
-    atomic_write(report_path, render_report(ledger, run), mode=0o644)
+    persist(run)
+    timing = phase_summary(run.get("durations_ms"))
     if run["state"] != "clear":
         print(
             f"CROSSCHECK {run['state'].upper()}: {url} at {snapshot_value['head_sha']}",
             file=sys.stderr,
         )
+        if timing:
+            print(f"crosscheck timing: {timing}", file=sys.stderr)
         return 1
     print(f"crosscheck clear: {url} at {snapshot_value['head_sha']}")
+    if timing:
+        print(f"crosscheck timing: {timing}")
     return 0
 
 
@@ -4580,6 +4852,93 @@ def verify_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
     return 0
 
 
+def render_timings(ledger: dict[str, Any]) -> str:
+    """The recorded per-run phase table, one row per run, milliseconds."""
+
+    columns = ("at", "family", "state", *CROSSCHECK_PHASES, CROSSCHECK_TOTAL_PHASE)
+    rows: list[tuple[str, ...]] = []
+    for run in ledger["runs"]:
+        reviewer = run.get("reviewer")
+        family = (
+            reviewer.get("review_family_mode") or "-"
+            if isinstance(reviewer, dict)
+            else "-"
+        )
+        durations = run.get("durations_ms")
+        measured = durations if isinstance(durations, dict) else {}
+        rows.append(
+            (
+                str(run["at"]),
+                str(family),
+                str(run["state"]),
+                *(
+                    str(measured[name]) if name in measured else "-"
+                    for name in (*CROSSCHECK_PHASES, CROSSCHECK_TOTAL_PHASE)
+                ),
+            )
+        )
+    # Second gate on row forgery. `validate_ledger` already pins `at` and the
+    # other cells come from fixed sets, but this renderer turns records into
+    # lines, so it refuses any cell carrying the whitespace that would let one
+    # record occupy two rows rather than trusting an upstream check.
+    for row in rows:
+        for index, cell in enumerate(row):
+            require(
+                cell == " ".join(cell.split()) and "\n" not in cell,
+                f"crosscheck run record field {columns[index]} carries "
+                "whitespace that would forge a timings row",
+            )
+    widths = [
+        max(len(column), *(len(row[index]) for row in rows)) if rows else len(column)
+        for index, column in enumerate(columns)
+    ]
+    lines = ["  ".join(column.ljust(widths[index]) for index, column in enumerate(columns)).rstrip()]
+    for row in rows:
+        lines.append(
+            "  ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)).rstrip()
+        )
+    if not rows:
+        lines.append("(no runs recorded)")
+    else:
+        # A run recorded before phase timing existed shows `-` in every phase
+        # column. That is the honest reading: nothing was measured, which is
+        # not the same as a phase that took no time.
+        lines.append("")
+        lines.append(
+            f"{len(rows)} run(s); milliseconds; `-` means not recorded for that run."
+        )
+    return "\n".join(lines)
+
+
+def timings_crosscheck(home: Path, task_id: str) -> int:
+    """Print the recorded per-phase breakdown for one task's crosscheck runs.
+
+    Read-only, and deliberately outside the run lock: an operator asking where
+    the time went must not have to wait for, or interfere with, a review that
+    is still running.
+    """
+
+    data = Path(environment_value("FM_DATA_OVERRIDE", str(home / "data")))
+    ledger_path = data / task_id / "crosscheck-ledger.json"
+    if not ledger_path.exists() and not ledger_path.is_symlink():
+        tool_fail(f"no crosscheck ledger exists at {ledger_path}")
+    try:
+        raw = read_json(
+            ledger_path,
+            "findings ledger",
+            maximum_bytes=MAX_LEDGER_BYTES,
+            maximum_items=262_144,
+        )
+        require(isinstance(raw, dict), "existing findings ledger must be an object")
+        url = require_string(raw.get("pull_request"), "ledger.pull_request")
+        ledger = validate_ledger(raw, task_id, url)
+    except CrosscheckError as exc:
+        tool_fail(f"finding-ledger preflight failed at {ledger_path}: {exc}")
+    print(f"crosscheck timings for {task_id} ({url})")
+    print(render_timings(ledger))
+    return 0
+
+
 def load_azure_crosscheck_adapter(root: Path) -> Any:
     """Load the dedicated Azure review/ledger adapter without weakening local review."""
 
@@ -4659,6 +5018,8 @@ def build_parser() -> argparse.ArgumentParser:
         command = subparsers.add_parser(name)
         command.add_argument("task_id")
         command.add_argument("pr_url")
+    timings = subparsers.add_parser("timings")
+    timings.add_argument("task_id")
     merge = subparsers.add_parser("merge")
     merge.add_argument("task_id")
     merge.add_argument("pr_url")
@@ -4713,6 +5074,10 @@ def main() -> int:
     home = Path(environment_value("FM_HOME", str(root))).resolve()
     state = Path(environment_value("FM_STATE_OVERRIDE", str(home / "state")))
     try:
+        if args.command == "timings":
+            # Read-only, so it takes no run lock and creates no state: asking
+            # where the time went must never block or be blocked by a review.
+            return timings_crosscheck(home, args.task_id)
         state.mkdir(parents=True, exist_ok=True)
         lock_path = state / f".{args.task_id}.crosscheck.lock"
         with lock_path.open("a+", encoding="utf-8") as lock:

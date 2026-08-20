@@ -159,6 +159,29 @@ The reused Azure runner independently performs the same identity-pinned cleanup 
 Foreign, missing, replaced, unreadable, or partially deleted resources retain state and fail closed.
 No resource group, subnet, shared storage account, foundation resource, sibling prefix, author VM, validation run, browser, supervisor, or another review can be deleted.
 
+## Recorded phase durations
+
+This lane measures the four phases only it performs into the core run record's `durations_ms` (C1, `docs/azure-requirements.md`), alongside the `reviewer` and `proofs` phases the local lane also records:
+
+- `create`: shared-allocator capacity reservation plus model VM provisioning.
+- `stage`: the credential archive, the request document, and their two blob uploads.
+- `boot`: the Managed Run Command dispatch that starts the guest.
+- `reviewer`: polling that run command to completion, which is the remote review itself.
+- `collect`: the result download and its digest-bound parse.
+
+Cleanup is deliberately not one of them, so `total` is larger than the sum of the named phases by the cleanup and admission time between them.
+The timer is optional at this boundary: the adapter's own CLI records nothing, and nothing recorded reads as "not measured" rather than as a zero.
+
+These phases are lane-bound in the ledger contract: they are admitted only on a run record whose reviewer entry carries `execution_mode: azure-compartment-v1`, which this adapter stamps once a review completes.
+A compartment review that fails before that identity record is complete therefore cannot keep its recorded `create`/`stage` phases, and the writer drops that run's whole measurement rather than write a record every later reader would refuse.
+That loses exactly the numbers a failed compartment review would be most useful for, and it is a deliberate choice over the two alternatives: bricking the task ledger, or letting any record claim compartment phases it never performed.
+**This is a known gap with a follow-up bound to the image rebake below: the lane must be stamped at its START before any compartment timing is relied on.**
+`docs/crosscheck.md` owns that follow-up, including why stamping `execution_mode` earlier refuses the record instead of fixing it.
+
+These numbers do not exist yet.
+The compartment lane is disabled in the operator home and is code-only until the `fm-ccm` model image is rebaked with pi, so no run has executed these phases since they were instrumented.
+`bin/fm-crosscheck.sh timings <task-id>` shows `-` in the `create`, `stage`, `boot`, and `collect` columns for every local-lane run, which is the honest reading: that lane did not do that work.
+
 ## Operator setup
 
 The complete retained 29-resource private foundation, its controller-identity inventory correction, and the shared whole-fleet allocator are released on `main` with zero VMs; live Azure Crosscheck acceptance remains unperformed and happens later from released public main under separate explicit billable and security-sensitive authorization.
