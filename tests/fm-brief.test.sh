@@ -690,6 +690,79 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# Both worker-behavior corrections below were recorded as learnings first and never reached the
+# scaffold, which is the only text a worker actually reads: blocking sleeps cost 16.7 hours of
+# agent time in ten days while firstmate retyped the correction seven times, and a single final
+# report write silently lost three whole scout reports in one day. These tests therefore assert
+# the GENERATED brief, per variant, because the defect was text that was never emitted at all.
+test_briefs_forbid_waiting_in_a_blocking_sleep() {
+  local home id brief variant
+  home="$TMP_ROOT/waiting-contract-home"
+  mkdir -p "$home/data"
+  for variant in no-mistakes direct-PR local-only scout; do
+    id="brief-waiting-$variant"
+    if [ "$variant" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 \
+        || fail "$variant: scaffold exited non-zero"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$variant" >/dev/null 2>&1 \
+        || fail "$variant: scaffold exited non-zero"
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$variant: brief was not scaffolded"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'Never wait in a foreground blocking `sleep`' "$brief" \
+      "$variant: brief does not forbid waiting in a foreground blocking sleep"
+    assert_grep "indistinguishable from a stall" "$brief" \
+      "$variant: brief does not say a blocking wait reads as a stall from outside"
+    assert_grep "prefer a harness-tracked background job whose completion" "$brief" \
+      "$variant: brief does not prefer a harness-tracked background job for a wait"
+    assert_grep "otherwise poll briefly and do other useful work between checks" "$brief" \
+      "$variant: brief lost the poll-briefly-and-do-other-work fallback"
+    assert_grep "otherwise record the thing as unverified and move on" "$brief" \
+      "$variant: brief lost the record-as-unverified fallback"
+  done
+  pass "fm-brief.sh: every ship mode and the scout forbid waiting in a blocking sleep"
+}
+
+# Scope is deliberate: the scout report and the secondmate charter's detailed answer are the
+# document-producing deliverables a silent long-write failure can destroy whole. Ship tasks
+# deliver code through commits, so this instruction is not pasted into them.
+test_document_producing_briefs_require_incremental_writes() {
+  local home brief
+  home="$TMP_ROOT/incremental-write-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-incremental-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "scout: scaffold exited non-zero"
+  brief="$home/data/brief-incremental-scout/brief.md"
+  assert_grep "Write it incrementally, section by section, straight to that file" "$brief" \
+    "scout brief does not require writing the report incrementally"
+  assert_grep "never compose the whole report and write it once at the end" "$brief" \
+    "scout brief does not forbid one final whole-report write"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    "$ROOT/bin/fm-brief.sh" brief-incremental-mate --secondmate alpha >/dev/null 2>&1 \
+    || fail "secondmate: scaffold exited non-zero"
+  brief="$home/data/brief-incremental-mate/brief.md"
+  assert_grep "Write that doc incrementally, section by section, straight to the file" "$brief" \
+    "secondmate charter does not require writing a detailed answer incrementally"
+  assert_grep "never compose the whole document and write it once at the end" "$brief" \
+    "secondmate charter does not forbid one final whole-document write"
+
+  # Both variants must name the recorded cause and its one-line recovery, so a worker that hits
+  # the error retries instead of restarting the deliverable from nothing.
+  for brief in "$home/data/brief-incremental-scout/brief.md" "$home/data/brief-incremental-mate/brief.md"; do
+    assert_grep "API Error: The system encountered an unexpected error during processing" "$brief" \
+      "$brief: incremental-write instruction lost the recorded failure it exists for"
+    assert_grep "ends the turn silently and loses everything unwritten" "$brief" \
+      "$brief: incremental-write instruction lost the silent-turn-end consequence"
+    assert_grep "that error is transient, so retry rather than restart" "$brief" \
+      "$brief: incremental-write instruction lost the transient-retry recovery"
+  done
+  pass "fm-brief.sh: scout and secondmate document deliverables are written incrementally"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -731,4 +804,6 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_briefs_forbid_waiting_in_a_blocking_sleep
+test_document_producing_briefs_require_incremental_writes
 test_scout_and_secondmate_scaffold
