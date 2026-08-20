@@ -11,14 +11,17 @@
 #   fm-bearings-board.sh build <data.json>
 #   fm-bearings-board.sh path
 #
-# build      Validate the payload, inject it into a fresh copy of the shipped
-#            template at the stable board path, bind the board's answer source
-#            to the any-origin keyed-answer intake, then arm it as a Lavish
-#            process-event source when it is not already registered. Bind
-#            ALWAYS precedes arm, so the board can never produce an answer that
-#            has nowhere to go (decision-hold-lifecycle's ordering rule,
-#            enforced here rather than left to agent memory). Output lines:
+# build      Validate the payload and inject it into a fresh copy of the shipped
+#            template at the stable board path. Establish or resume the Lavish
+#            session on that board BEFORE binding and arming its answer source,
+#            so a registered poll can never race a session that does not exist.
+#            Bind to the any-origin keyed-answer intake ALWAYS precedes arm, so
+#            the board can never produce an answer that has nowhere to go
+#            (decision-hold-lifecycle's ordering rule, enforced here rather
+#            than left to agent memory). Output lines include lavish-axi's
+#            session URL followed by:
 #              board: <path>
+#              served: <path>
 #              bound: <source-id> (any-origin)
 #              armed: <source-id>            (first registration)
 #              already-armed: <source-id>    (registration already present)
@@ -83,6 +86,7 @@ validate_payload() {  # <data.json>
       and repo_marker
       and (.title | nonempty_string)
       and (.options | type == "array")
+      and ((.options | length) > 0 or .allow_freeform == true)
       and ([.options[]
         | type == "object"
           and (.value | slug(128))
@@ -167,6 +171,10 @@ command_build() {
     fail "cannot publish the board"
   fi
   printf 'board: %s\n' "$board"
+
+  command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"
+  lavish-axi "$board" || fail "cannot establish the board Lavish session"
+  printf 'served: %s\n' "$board"
 
   sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \
     || fail "cannot derive the board source id"

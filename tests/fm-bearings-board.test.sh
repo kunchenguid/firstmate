@@ -165,6 +165,12 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   [ "$rc" -ne 0 ] || fail "a non-boolean renderer field was accepted"
 
   write_valid_payload "$data"
+  jq '.captains_call[0].options = [] | .captains_call[0].allow_freeform = false' "$data" > "$data.tmp" \
+    && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "an unanswerable captains_call item was accepted"
+
+  write_valid_payload "$data"
   jq '.captains_call[1].pr_url = "javascript:alert(1)"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a non-HTTPS Captain’s Call PR URL was accepted"
@@ -193,6 +199,7 @@ test_build_injects_binds_then_arms() {
 
   out=$(run_board "$home" build "$data") || fail "a valid payload did not build"
   assert_contains "$out" "board: $board" "build did not report the board path: $out"
+  assert_contains "$out" "served: $board" "build did not establish the Lavish session: $out"
   assert_contains "$out" "(any-origin)" "build did not report the any-origin binding: $out"
   assert_contains "$out" "armed: " "the first build did not arm the board source: $out"
   assert_present "$board" "build reported success without a board"
@@ -217,6 +224,30 @@ test_build_injects_binds_then_arms() {
   run_procevent "$home" list | awk 'NR > 1 { print $1 }' | grep -Fxq "$sid" \
     || fail "the board source is not registered after build"
   pass "build injects the payload, binds any-origin, then arms the source"
+}
+
+test_build_does_not_bind_or_arm_when_session_start_fails() {
+  local home data rc sid
+  home=$(make_home serve-failure)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  cat > "$home/fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fakebin/lavish-axi"
+
+  set +e
+  run_board "$home" build "$data" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "build continued after Lavish session establishment failed"
+  sid=$(run_lavish_source_id "$home" "$home/.lavish/bearings-board.html")
+  ! run_decisions "$home" binding "$sid" >/dev/null 2>&1 \
+    || fail "build bound the board before its Lavish session existed"
+  ! run_procevent "$home" list | awk 'NR > 1 { print $1 }' | grep -Fxq "$sid" \
+    || fail "build armed the board before its Lavish session existed"
+  pass "build establishes the Lavish session before binding and arming"
 }
 
 run_lavish_source_id() {  # <home> <artifact>
@@ -264,5 +295,6 @@ test_build_refuses_a_template_without_exactly_one_slot() {
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_build_injects_binds_then_arms
+test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
 test_build_refuses_a_template_without_exactly_one_slot
