@@ -205,6 +205,8 @@ out=$(cd "$FIXTURE" && \
   EXT="$FIXTURE/.pi/extensions/fm-pi-quota-status.ts" \
   LIB="$FIXTURE/.pi/extensions/lib/fm-pi-quota-status.ts" \
   node --input-type=module 2>&1 <<'JS'
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -568,6 +570,25 @@ const invalidRunwayRelation = structuredClone(fullyPopulated);
 invalidRunwayRelation.providers[1].quotaSemantics.effectiveAvailability[0].runway.status = "unknown";
 const invalidSelectionRelation = structuredClone(fullyPopulated);
 invalidSelectionRelation.providers[1].quotaSemantics.effectiveAvailability[0].selection.status = "unknown";
+const missingPaceBlockers = structuredClone(fullyPopulated);
+missingPaceBlockers.providers[1].quotaSemantics.effectiveAvailability[0].pace = { status: "unknown" };
+const missingRunwayBlockers = structuredClone(fullyPopulated);
+missingRunwayBlockers.providers[1].quotaSemantics.effectiveAvailability[0].runway = { status: "unknown" };
+const missingSelectionBlockers = structuredClone(fullyPopulated);
+missingSelectionBlockers.providers[1].quotaSemantics.effectiveAvailability[0].selection = { status: "unknown" };
+const foreignSelectionBlocker = structuredClone(fullyPopulated);
+foreignSelectionBlocker.providers[1].quotaSemantics.effectiveAvailability[0].selection = {
+  status: "unknown",
+  unmeasurableWindowIds: ["not-a-bound"],
+};
+const foreignPaceWindow = structuredClone(fullyPopulated);
+foreignPaceWindow.providers[1].quotaSemantics.effectiveAvailability[0].pace.behindWindowIds = ["not-a-bound"];
+foreignPaceWindow.providers[1].quotaSemantics.effectiveAvailability[0].pace.worstReserveWindowId = "not-a-bound";
+const foreignRunwayWindow = structuredClone(fullyPopulated);
+foreignRunwayWindow.providers[1].quotaSemantics.effectiveAvailability[0].runway.status = "projected_exhaustion";
+foreignRunwayWindow.providers[1].quotaSemantics.effectiveAvailability[0].runway.usableRunwaySeconds = 10;
+foreignRunwayWindow.providers[1].quotaSemantics.effectiveAvailability[0].runway.projectedExhaustedAt = new Date(now + 10_000).toISOString();
+foreignRunwayWindow.providers[1].quotaSemantics.effectiveAvailability[0].runway.limitingWindowId = "not-a-bound";
 const invalidAvailabilityRelation = structuredClone(fullyPopulated);
 invalidAvailabilityRelation.providers[1].quotaSemantics.effectiveAvailability[0].status = "unknown";
 const invalidAuthStatus = structuredClone(fullyPopulated);
@@ -591,6 +612,12 @@ for (const [malformedReport, description] of [
   [invalidPaceRelation, "invalid pace status relation"],
   [invalidRunwayRelation, "invalid runway status relation"],
   [invalidSelectionRelation, "invalid selection status relation"],
+  [missingPaceBlockers, "unknown pace without blockers"],
+  [missingRunwayBlockers, "unknown runway without blockers"],
+  [missingSelectionBlockers, "unknown selection without blockers"],
+  [foreignSelectionBlocker, "selection blocker outside its bounds"],
+  [foreignPaceWindow, "pace window outside its bounds"],
+  [foreignRunwayWindow, "runway window outside its bounds"],
   [invalidAvailabilityRelation, "invalid availability status relation"],
   [invalidAuthStatus, "invalid auth status"],
 ]) {
@@ -812,6 +839,22 @@ await waitFor(
 );
 assert(lifecycle.widgets.get("firstmate-quota")?.options?.placement === "belowEditor", "quota did not use its width-aware footer row");
 assert(lifecycle.widgetText(72).includes("narrow") && lifecycle.widgetText(72).includes("3 windows"), "composed narrow footer did not degrade explicitly");
+const originalReadFileSync = fs.readFileSync;
+let synchronousRenderReads = 0;
+let renderWithoutAuthIo = "";
+try {
+  fs.readFileSync = (...args) => {
+    synchronousRenderReads += 1;
+    return originalReadFileSync(...args);
+  };
+  syncBuiltinESMExports();
+  renderWithoutAuthIo = lifecycle.widgetText(400);
+} finally {
+  fs.readFileSync = originalReadFileSync;
+  syncBuiltinESMExports();
+}
+assert(renderWithoutAuthIo.includes("week 94% left"), "footer redraw lost cached fresh quota");
+assert(synchronousRenderReads === 0, "footer redraw synchronously read credential storage");
 assert(lifecycle.statuses.get("aaa-unrelated") === "UNRELATED_STATUS", "quota widget replaced an unrelated extension status");
 assert(lifecycle.footer === "BUILTIN_FOOTER", "quota widget replaced Pi's built-in footer");
 assert(process.stdout.listenerCount("resize") === baselineResizeListeners, "session start installed a direct resize listener");
@@ -828,10 +871,10 @@ const callsAfterClaude = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"
 assert(callsAfterClaude === callsBeforeClaude, "uncorrelatable Claude auth invoked quota-axi");
 await lifecycle.emit("model_select", { model: fixtureModel("kimi-coding", "kimi-fixture") });
 await waitFor(
-  () => lifecycle.widgetText(240).includes("week 83% left"),
-  "model change did not correlate the active Pi Kimi source",
+  () => lifecycle.widgetText(240).includes("account unverified"),
+  "Kimi quota without report-side identity was not classified unverified",
 );
-assert(!lifecycle.widgetText(240).includes("account unverified"), "active Pi Kimi quota remained unverified");
+assert(!lifecycle.widgetText(240).includes("83%"), "unidentified Kimi quota was presented as active");
 const callsBeforeCadence = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 await sleep(180);
 const callsAfterCadence = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
@@ -856,9 +899,10 @@ const kimiApiKey = makePi(
 );
 await kimiApiKey.emit("session_start", { reason: "startup" });
 await waitFor(
-  () => kimiApiKey.widgetText(240).includes("week 83% left"),
-  `stored Kimi API-key quota was not correlated: ${kimiApiKey.widgetText(240)}`,
+  () => kimiApiKey.widgetText(240).includes("account unverified"),
+  `stored Kimi API-key quota without identity was not refused: ${kimiApiKey.widgetText(240)}`,
 );
+assert(!kimiApiKey.widgetText(240).includes("83%"), "unidentified Kimi API-key quota was presented as active");
 await kimiApiKey.emit("session_shutdown", { reason: "quit" });
 const callsBeforeRuntimeKimi = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 const runtimeKimiApiKey = makePi(
@@ -959,6 +1003,32 @@ await waitFor(
 );
 await stalledAuth.emit("session_shutdown", { reason: "quit" });
 
+const savedAuthFile = await readFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, "utf8");
+await writeFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, JSON.stringify({
+  "openai-codex": {
+    type: "oauth",
+    access: fixtureAccessToken("fixture-codex-account"),
+    refresh: "fixture-refresh-openai-codex",
+    expires: Date.now() + 24 * 60 * 60 * 1000,
+    padding: "x".repeat(2048),
+  },
+}));
+const callsBeforeOversizedAuth = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+const oversizedAuth = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 100,
+  maxAuthBytes: 256,
+}));
+await oversizedAuth.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => oversizedAuth.widgetText(240).includes("auth data too large"),
+  `oversized auth storage was not rejected explicitly: ${oversizedAuth.widgetText(240)}`,
+);
+const callsAfterOversizedAuth = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+assert(callsAfterOversizedAuth === callsBeforeOversizedAuth, "oversized auth storage invoked quota-axi");
+await oversizedAuth.emit("session_shutdown", { reason: "quit" });
+await writeFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, savedAuthFile);
+
 await setStoredOAuth("openai-codex", fixtureAccessToken("fixture-codex-account"));
 const credentialChange = makePi(createFirstmateQuotaStatusExtension({
   refreshMs: 60_000,
@@ -970,9 +1040,9 @@ await waitFor(
   "credential-change fixture did not publish initial account quota",
 );
 await setStoredOAuth("openai-codex", fixtureAccessToken("replacement-codex-account"));
-assert(
-  !credentialChange.widgetText(400).includes("94%"),
-  "credential change remained fresh at the render boundary",
+await waitFor(
+  () => !credentialChange.widgetText(400).includes("94%"),
+  "credential change remained fresh after watcher invalidation",
 );
 await waitFor(
   () => credentialChange.widgetText(240).includes("account unverified"),
@@ -988,11 +1058,11 @@ assert(
 );
 
 for (const reason of ["reload", "new", "resume", "fork"]) {
-  lifecycle.ctx.model = fixtureModel("kimi-coding", "kimi-fixture");
+  lifecycle.ctx.model = fixtureModel("openai-codex", "codex-fixture");
   await lifecycle.emit("session_start", { reason });
   await waitFor(
-    () => lifecycle.widgetText(240).includes("week 83% left"),
-    `${reason} did not correlate the active Pi Kimi source`,
+    () => lifecycle.widgetText(240).includes("week 94% left"),
+    `${reason} did not correlate the active Codex account`,
   );
   assert(process.stdout.listenerCount("resize") === baselineResizeListeners, `${reason} changed resize listeners`);
   await lifecycle.emit("session_shutdown", { reason: "reload" });

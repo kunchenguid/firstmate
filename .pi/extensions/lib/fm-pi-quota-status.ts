@@ -323,7 +323,11 @@ function parseAttempts(value: unknown): ParsedAttempt[] | null | undefined {
   return attempts;
 }
 
-function validEffectivePace(value: unknown, requireAuditFields: boolean): boolean {
+function validEffectivePace(
+  value: unknown,
+  requireAuditFields: boolean,
+  boundedBy: string[],
+): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_EFFECTIVE_PACE_STATUSES);
@@ -340,7 +344,7 @@ function validEffectivePace(value: unknown, requireAuditFields: boolean): boolea
     if (entries === undefined) continue;
     if (!validNonemptyTextArray(entries)) return false;
     for (const entry of entries) {
-      if (seen.has(entry)) return false;
+      if (seen.has(entry) || !boundedBy.includes(entry)) return false;
       seen.add(entry);
     }
   }
@@ -349,13 +353,16 @@ function validEffectivePace(value: unknown, requireAuditFields: boolean): boolea
     ? null
     : exactText(value.worstReserveWindowId);
   if (value.worstReserveWindowId !== undefined && worstId === null) return false;
+  if (worstId !== null && !boundedBy.includes(worstId)) return false;
   if ((value.worstReservePercentPoints !== undefined) !== (worstId !== null)) return false;
 
+  if (requireAuditFields && seen.size !== boundedBy.length) return false;
   if (status === "unknown") {
     return value.aheadWindowIds === undefined &&
       value.behindWindowIds === undefined &&
       value.onPaceWindowIds === undefined &&
-      value.worstReservePercentPoints === undefined;
+      value.worstReservePercentPoints === undefined &&
+      validNonemptyTextArray(value.unknownWindowIds);
   }
   if (value.worstReservePercentPoints === undefined) return false;
   if (requireAuditFields && worstId !== null && !seen.has(worstId)) return false;
@@ -375,7 +382,11 @@ function validEffectivePace(value: unknown, requireAuditFields: boolean): boolea
     (!requireAuditFields || validNonemptyTextArray(value.behindWindowIds));
 }
 
-function validRunway(value: unknown): boolean {
+function validRunway(
+  value: unknown,
+  boundedBy: string[],
+  allowedBlockers: string[],
+): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_RUNWAY_STATUSES);
@@ -386,6 +397,7 @@ function validRunway(value: unknown): boolean {
     ? null
     : exactText(value.limitingWindowId);
   if (value.limitingWindowId !== undefined && limitingWindowId === null) return false;
+  if (limitingWindowId !== null && !boundedBy.includes(limitingWindowId)) return false;
   const projectionConfidence = value.projectionConfidence === undefined
     ? null
     : exactEnum(value.projectionConfidence, QUOTA_PROJECTION_CONFIDENCES);
@@ -395,13 +407,18 @@ function validRunway(value: unknown): boolean {
     value.unmeasurableWindowIds !== undefined &&
     !validNonemptyTextArray(value.unmeasurableWindowIds)
   ) return false;
+  if (
+    Array.isArray(value.unmeasurableWindowIds) &&
+    value.unmeasurableWindowIds.some((id) => !allowedBlockers.includes(id))
+  ) return false;
 
   if (status === "unknown") {
     return value.usableRunwaySeconds === undefined &&
       value.projectedExhaustedAt === undefined &&
       value.limitingWindowId === undefined &&
       value.projectionConfidence === undefined &&
-      value.projectionBasis === undefined;
+      value.projectionBasis === undefined &&
+      validNonemptyTextArray(value.unmeasurableWindowIds);
   }
   if (value.unmeasurableWindowIds !== undefined) return false;
   if (status === "exhausted_now") {
@@ -423,7 +440,7 @@ function validRunway(value: unknown): boolean {
     projectionConfidence !== null;
 }
 
-function validSelection(value: unknown): boolean {
+function validSelection(value: unknown, allowedBlockers: string[]): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_SELECTION_STATUSES);
@@ -433,12 +450,20 @@ function validSelection(value: unknown): boolean {
     value.unmeasurableWindowIds !== undefined &&
     !validNonemptyTextArray(value.unmeasurableWindowIds)
   ) return false;
+  if (
+    Array.isArray(value.unmeasurableWindowIds) &&
+    value.unmeasurableWindowIds.some((id) => !allowedBlockers.includes(id))
+  ) return false;
   return status === "known"
     ? value.spendPriority !== undefined && value.unmeasurableWindowIds === undefined
-    : value.spendPriority === undefined;
+    : value.spendPriority === undefined && validNonemptyTextArray(value.unmeasurableWindowIds);
 }
 
-function validEffectiveAvailability(value: unknown, requireAuditFields: boolean): boolean {
+function validEffectiveAvailability(
+  value: unknown,
+  requireAuditFields: boolean,
+  unresolvedWindowIds: string[],
+): boolean {
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_AVAILABILITY_STATUSES);
   if (exactText(value.scope) === null || !status) return false;
@@ -457,9 +482,10 @@ function validEffectiveAvailability(value: unknown, requireAuditFields: boolean)
   } else if (value.effectivePercentRemaining !== undefined || value.limitingWindowIds !== undefined) {
     return false;
   }
-  return validEffectivePace(value.pace, requireAuditFields) &&
-    validRunway(value.runway) &&
-    validSelection(value.selection);
+  const allowedBlockers = [...value.boundedBy, ...unresolvedWindowIds];
+  return validEffectivePace(value.pace, requireAuditFields, value.boundedBy) &&
+    validRunway(value.runway, value.boundedBy, allowedBlockers) &&
+    validSelection(value.selection, allowedBlockers);
 }
 
 function validQuotaSemantics(
@@ -473,11 +499,16 @@ function validQuotaSemantics(
   if (!status) return false;
   if (requireDescription && typeof value.description !== "string") return false;
   if (value.description !== undefined && typeof value.description !== "string") return false;
+  if (!validOptionalTextArray(value.unresolvedWindowIds)) return false;
+  const unresolvedWindowIds = Array.isArray(value.unresolvedWindowIds)
+    ? value.unresolvedWindowIds as string[]
+    : [];
   if (
     !Array.isArray(value.effectiveAvailability) ||
-    !value.effectiveAvailability.every((entry) => validEffectiveAvailability(entry, requireAuditFields))
+    !value.effectiveAvailability.every((entry) => (
+      validEffectiveAvailability(entry, requireAuditFields, unresolvedWindowIds)
+    ))
   ) return false;
-  if (!validOptionalTextArray(value.unresolvedWindowIds)) return false;
   if (status === "known") {
     return value.effectiveAvailability.length > 0 && value.unresolvedWindowIds === undefined;
   }
