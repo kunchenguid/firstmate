@@ -200,7 +200,7 @@ fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
 fm-lint-workflows.sh: 3 workflow files valid
 
 $ bin/fm-doc-audience-check.sh
-fm-doc-audience-check: ok surfaces=69 local_links=254
+fm-doc-audience-check: ok surfaces=69 local_links=256
 
 $ git diff --check
 (no output)
