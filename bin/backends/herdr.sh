@@ -2761,6 +2761,22 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # submit vocabulary. Empty means confirmed submitted for every backend; how
 # each backend confirms it is an internal decision.
 #
+# Incident (2026-08-18, recurred 2026-08-20): a herdr claude pane's Enter was
+# repeatedly reported swallowed (verdict=pending) by this loop, yet a manual
+# operator follow-up `fm-send --key Enter` landed the same text every time.
+# The retry budget above governs how many Enters this loop sends while a
+# composer verdict is still settling; it is not itself proof that a further
+# bare Enter cannot land a stubborn swallow. FM_BACKEND_HERDR_SWALLOW_RETRIES
+# (default 2) bounds a SEPARATE, final Enter-only sweep that fires only when
+# the main loop is about to report a genuine idle-baseline swallow (proven
+# pending, native never went busy): each sweep Enter re-checks the composer
+# once and returns 'empty' the moment it clears, so the caller never has to
+# do by hand what this adapter can safely retry itself. The fail-closed
+# contract is unchanged: a target that stays unreadable, or whose composer
+# still holds the text after the sweep, still reports pending/unknown exactly
+# as before, and 'send-failed' or 'unknown' from the main loop is returned
+# immediately without the sweep (those are not proven swallows to retry).
+#
 # fm_backend_herdr_queued_enter_busy: delivery-busy for the shared queued-Enter
 # conversion. Native agent_status=working is generating; blocked is not (a
 # permission prompt, or Cursor's always-blocked native state, is not a queued
@@ -2778,6 +2794,29 @@ fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
   else
     printf 'idle'
   fi
+}
+
+# fm_backend_herdr_swallow_sweep: bounded Enter-only follow-up for a proven
+# idle-baseline swallow (see the send_text_submit incident note above). Sends
+# up to FM_BACKEND_HERDR_SWALLOW_RETRIES (default 2) further bare Enters,
+# re-reading the composer after each, and returns as soon as it clears.
+# Never retypes <target>'s text; only ever sends Enter. Stops immediately on
+# a send-key failure or an unreadable composer, preserving fail-closed.
+fm_backend_herdr_swallow_sweep() {  # <target> <sleep-s> -> empty|pending|unknown
+  local target=$1 sleep_s=$2 tries verdict j=0
+  tries=${FM_BACKEND_HERDR_SWALLOW_RETRIES:-2}
+  while [ "$j" -lt "$tries" ]; do
+    fm_backend_herdr_send_key "$target" Enter || { printf 'pending'; return 0; }
+    sleep "$sleep_s"
+    verdict=$(fm_backend_herdr_composer_state "$target")
+    case "$verdict" in
+      empty) printf 'empty'; return 0 ;;
+      pending|pending-unproven) ;;
+      *) printf '%s' "$verdict"; return 0 ;;
+    esac
+    j=$((j + 1))
+  done
+  printf 'pending'
 }
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
@@ -2841,10 +2880,14 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     if [ "$i" -ge "$retries" ]; then
       if [ "$enter_sent" -eq 0 ]; then
         printf 'send-failed'
-      else
-        fm_composer_queued_enter_verdict "$verdict" \
-          "$(fm_backend_herdr_queued_enter_busy "$target" "$allow_rendered")"
+        return 0
       fi
+      verdict=$(fm_composer_queued_enter_verdict "$verdict" \
+        "$(fm_backend_herdr_queued_enter_busy "$target" "$allow_rendered")")
+      if [ "$verdict" = pending ] && [ "$baseline" = idle ]; then
+        verdict=$(fm_backend_herdr_swallow_sweep "$target" "$sleep_s")
+      fi
+      printf '%s' "$verdict"
       return 0
     fi
   done

@@ -3430,22 +3430,57 @@ test_send_text_submit_detects_landed_send() {
 }
 
 test_send_text_submit_detects_swallowed_enter() {
-  local dir log resp fb out
+  local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # Every post-Enter agent-get read still reports idle, and the composer still
-  # holds the typed text: a genuine swallow, not a queued Enter.
+  # holds the typed text: a genuine swallow, not a queued Enter. Calls 9-10
+  # are the exhaustion-time queued_enter_busy check (agent get, then a
+  # rendered-footer pane read since baseline was idle); calls 11-14 are the
+  # bounded post-exhaustion swallow sweep (fm_backend_herdr_swallow_sweep),
+  # here stubbed to keep observing the same unsent text so a genuine
+  # persistent swallow still reports pending, never a false 'empty'.
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/8.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/9.out"
-  printf '  ready\n' > "$resp/10.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/12.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/14.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = pending ] || fail "send_text_submit should report pending once retries are exhausted with agent_status never going busy and the composer still holding the text, got '$out'"
-  pass "fm_backend_herdr_send_text_submit: reports 'pending' when agent_status stays idle and the composer still holds unsent text after retried Enters (swallowed)"
+  [ "$out" = pending ] || fail "send_text_submit should report pending once retries and the follow-up swallow sweep are both exhausted with the composer still holding the text, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 4 ] || fail "swallow sweep should send exactly FM_BACKEND_HERDR_SWALLOW_RETRIES (default 2) extra Enters after the main retry budget's 2 Enters, sent $enter_count Enter(s) total"
+  pass "fm_backend_herdr_send_text_submit: reports 'pending' when agent_status stays idle and the composer still holds unsent text after retried Enters AND the bounded follow-up swallow sweep (persistent swallow)"
+}
+
+# Recurring incident (2026-08-18, again 2026-08-20): a herdr claude pane's
+# Enter was reported swallowed by the main retry loop, yet a manual operator
+# follow-up `fm-send --key Enter` reliably landed the SAME text. This proves
+# the new bounded swallow sweep (fm_backend_herdr_swallow_sweep) does that
+# follow-up itself instead of leaving it to the operator: the composer is
+# still pending when the main retry budget is exhausted, but clears on the
+# sweep's first extra Enter.
+test_send_text_submit_swallow_sweep_lands_a_stubborn_enter() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-swallow-sweep-lands"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/8.out"
+  # Sweep Enter #1 (call 11) finally lands it: the composer reads clear (call
+  # 12), the same bordered bare-prompt shape test_composer_state_bare_prompt_is_empty
+  # (above) uses for a positively-cleared composer.
+  printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ──────╯\n\n  Shift+Tab:mode\n' > "$resp/12.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "send_text_submit should report empty once the swallow sweep's own follow-up Enter clears the composer, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 3 ] || fail "the swallow sweep should stop at its first Enter that clears the composer (2 main-loop Enters + 1 sweep Enter), sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: the bounded post-exhaustion swallow sweep sends the follow-up Enter itself and reports 'empty' once it lands, instead of failing out with the text left in the composer"
 }
 
 # Regression coverage for the 2026-07-03 incident using the NEW mechanism: a
@@ -4543,6 +4578,7 @@ test_wait_for_working_returns_unknown_when_never_readable
 test_wait_for_working_treats_blocked_as_submit_active
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
+test_send_text_submit_swallow_sweep_lands_a_stubborn_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_pending_is_queued_enter
