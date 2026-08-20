@@ -349,6 +349,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/agy-model-switch.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/agy-quota-poll.md",
       "audience": "maintainer-verification"
     },

@@ -142,28 +142,50 @@ fm_agy_quota_record() {  # <model> <percent> <reset-window> <state_dir> [<now>]
     > "$state_dir/.agy-quota-$(fm_agy_quota_key "$model")"
 }
 
-# fm_agy_quota_observe: extract and record quota from an agy pane footer.
+# fm_agy_footer_fields: the ONE parse of an agy pane footer, printing
+# "<model>\t<quota-percent>\t<reset-window>" for the last footer line in
+# <text>, or nothing at all.
+#
 # Format: Gemini 3.1 Pro (High) | ctx: 10.5% | quota: 94.7% (4h 24m)
+#
+# One extraction for all three fields, so a partial match can never record a
+# model against another line's percentage. The reset window is optional: the
+# percentage is the evidence, and the ceiling in fm_agy_quota_read bounds it
+# whether or not a window came with it.
 #
 # The separators are matched with tolerance for surrounding whitespace rather
 # than as the exact literals " | ctx: " and " | quota: ". A renderer that pads a
 # column differently is a cosmetic change to agy; it must not silently stop the
 # floor being enforced, which is what an exact-literal match made it do.
+#
+# This is a SINGLE owner on purpose: bin/fm-agy-descent-lib.sh reads the same
+# footer to confirm which model a running worker is actually on, and a second
+# copy of this expression would drift the moment only one was updated.
+fm_agy_footer_fields() {  # <text>
+  local line
+  line=$(printf '%s\n' "$1" | fm_agy_strip_ansi | LC_ALL=C grep -F 'quota:' | tail -1)
+  [ -n "$line" ] || return 1
+  printf '%s\n' "$line" | LC_ALL=C sed -nE \
+    's/^[[:space:]]*(.*[^[:space:]])[[:space:]]*\|[[:space:]]*ctx:[^|]*\|[[:space:]]*quota:[[:space:]]*([0-9]+(\.[0-9]+)?)[[:space:]]*%?[[:space:]]*(\(([^)]*)\))?.*$/\1\t\2\t\5/p'
+}
+
+# fm_agy_footer_model: just the model name the footer names, or nothing.
+fm_agy_footer_model() {  # <text>
+  local parsed
+  parsed=$(fm_agy_footer_fields "$1") || return 1
+  [ -n "$parsed" ] || return 1
+  printf '%s' "${parsed%%	*}"
+}
+
+# fm_agy_quota_observe: record the quota an agy pane footer reports.
+# fm_agy_footer_fields above owns the parse.
 # The optional <now> stamps the reading instead of the wall clock, so a caller
 # that must reason about a reading's exact age - a test pinning the max-age
 # ceiling - can do so without racing the second hand.
 fm_agy_quota_observe() {  # <text> <state_dir> [<now>]
-  local text="$1" state_dir="$2" now="${3:-}" line parsed model quota reset_time
+  local text="$1" state_dir="$2" now="${3:-}" parsed model quota reset_time
 
-  line=$(printf '%s\n' "$text" | fm_agy_strip_ansi | LC_ALL=C grep -F 'quota:' | tail -1)
-  [ -n "$line" ] || return 0
-
-  # One extraction for all three fields, so a partial match can never record a
-  # model against another line's percentage. The reset window is optional: the
-  # percentage is the evidence, and the ceiling in fm_agy_quota_read bounds it
-  # whether or not a window came with it.
-  parsed=$(printf '%s\n' "$line" | LC_ALL=C sed -nE \
-    's/^[[:space:]]*(.*[^[:space:]])[[:space:]]*\|[[:space:]]*ctx:[^|]*\|[[:space:]]*quota:[[:space:]]*([0-9]+(\.[0-9]+)?)[[:space:]]*%?[[:space:]]*(\(([^)]*)\))?.*$/\1\t\2\t\5/p')
+  parsed=$(fm_agy_footer_fields "$text") || return 0
   [ -n "$parsed" ] || return 0
 
   model=${parsed%%	*}

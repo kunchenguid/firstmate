@@ -48,6 +48,13 @@
 #                          and has not been surfaced yet; reported once per
 #                          captured generation, never again while that record
 #                          stays queued and never once it is acknowledged
+#   check: agy ladder <outcome>
+#                          a running agy worker crossed its rung's quota floor.
+#                          Reported only when something happened or something
+#                          needs the captain: the worker was moved down a rung
+#                          automatically, or the move was refused because it
+#                          could not be proved safe. A healthy fleet on healthy
+#                          rungs is silent.
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -92,6 +99,12 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-agy-quota-lib.sh
 . "$SCRIPT_DIR/fm-agy-quota-lib.sh"
+# Live agy ladder enforcement. The launch gate only covers a worker being
+# started; this is what moves one that is ALREADY RUNNING off a rung it has
+# spent, so the captain's reserved quarter of rung 1 survives the run and not
+# just the dispatch.
+# shellcheck source=bin/fm-agy-descent-lib.sh
+. "$SCRIPT_DIR/fm-agy-descent-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -875,6 +888,17 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
+
+  # Live agy ladder enforcement. Silent and free unless this home is running an
+  # agy worker on a ladder rung, rate-limited to FM_AGY_DESCENT_INTERVAL, and
+  # queued rather than acted on here: the descent has already happened (or
+  # already been refused) by the time a line comes back, and the wake is how the
+  # captain finds out about it.
+  while IFS= read -r agy_line; do
+    [ -n "$agy_line" ] || continue
+    fm_wake_append check agy-ladder "check: agy ladder $agy_line" || exit 1
+    wake "check: agy ladder $agy_line"
+  done < <(fm_agy_descent_tick "$STATE" 2>/dev/null || true)
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
