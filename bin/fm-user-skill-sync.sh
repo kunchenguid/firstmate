@@ -328,10 +328,16 @@ cleanup_workspace() {
 
 # A signal handler that only cleans up would let the interrupted apply loop run
 # to completion and report success, so INT and TERM exit with their conventional
-# statuses instead.
+# statuses instead. The trap covers the read-only preflight too, so the
+# diagnosis reports mutation only once a planned step has actually begun.
+MUTATION_STARTED=0
 interrupted() {
   cleanup_workspace
-  printf 'error: interrupted by %s; any earlier planned changes remain applied\n' "$1" >&2
+  if [ "$MUTATION_STARTED" -eq 0 ]; then
+    printf 'error: interrupted by %s before any planned change began; nothing was mutated\n' "$1" >&2
+  else
+    printf 'error: interrupted by %s; earlier planned changes may already be applied\n' "$1" >&2
+  fi
   exit "$2"
 }
 
@@ -596,6 +602,7 @@ remove_verified_duplicate() {
 }
 
 while IFS=$'\t' read -r action first second; do
+  MUTATION_STARTED=1
   case "$action" in
     mkdir) mkdir -p "$first" ;;
     copy)

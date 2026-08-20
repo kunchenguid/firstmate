@@ -423,6 +423,23 @@ test_mode_only_difference_names_permission_bits() {
   pass "a permission-bit-only difference is diagnosed as such"
 }
 
+# Shadows one external command with a stub that announces itself and blocks
+# until the test releases it, giving a deterministic pause point inside the run.
+make_blocking_stub() {
+  local fakebin=$1 name=$2 real=$3
+  cat > "$fakebin/$name" <<SH
+#!/usr/bin/env bash
+: > "\${STUB_STARTED:?}"
+waited=0
+while [ ! -e "\${STUB_RELEASE:?}" ] && [ "\$waited" -lt 600 ]; do
+  sleep 0.1
+  waited=\$((waited + 1))
+done
+exec $real "\$@"
+SH
+  chmod +x "$fakebin/$name"
+}
+
 # The apply loop is paused deterministically by shadowing `cp` with a stub that
 # blocks after the canonical copy is planned, so the signal is always delivered
 # mid-plan rather than racing the run to completion. Bash defers the trap until
@@ -433,24 +450,14 @@ test_interrupt_stops_apply() {
   make_skill "$home/.gemini/skills" alpha body
   out="$home/apply.out"
   fakebin=$(fm_fakebin "$home")
-  cat > "$fakebin/cp" <<'SH'
-#!/usr/bin/env bash
-: > "${COPY_STARTED:?}"
-waited=0
-while [ ! -e "${COPY_RELEASE:?}" ] && [ "$waited" -lt 600 ]; do
-  sleep 0.1
-  waited=$((waited + 1))
-done
-exec /bin/cp "$@"
-SH
-  chmod +x "$fakebin/cp"
+  make_blocking_stub "$fakebin" cp /bin/cp
 
-  PATH="$fakebin:$PATH" COPY_STARTED="$home/copy.started" COPY_RELEASE="$home/copy.release" \
+  PATH="$fakebin:$PATH" STUB_STARTED="$home/stub.started" STUB_RELEASE="$home/stub.release" \
     HOME="$home" CODEX_HOME="$home/.codex" "$SCRIPT" --apply > "$out" 2>&1 &
   pid=$!
 
   waited=0
-  while [ ! -e "$home/copy.started" ]; do
+  while [ ! -e "$home/stub.started" ]; do
     kill -0 "$pid" 2>/dev/null || fail "apply exited before reaching the canonical copy"
     [ "$waited" -lt 600 ] || fail "apply never reached the canonical copy"
     sleep 0.1
@@ -458,7 +465,7 @@ SH
   done
 
   kill -TERM "$pid" || fail "apply was no longer running when the signal was sent"
-  : > "$home/copy.release"
+  : > "$home/stub.release"
   set +e
   wait "$pid"
   rc=$?
@@ -466,11 +473,53 @@ SH
 
   [ "$rc" -eq 143 ] || fail "interrupted apply exited $rc instead of 143"
   assert_contains "$(cat "$out")" "interrupted by SIGTERM" "interrupted apply lacked an interruption diagnosis"
+  assert_contains "$(cat "$out")" "may already be applied" \
+    "mid-apply interruption did not report that changes may be applied"
   assert_not_contains "$(cat "$out")" "user skills converged" "interrupted apply still claimed convergence"
   [ -f "$home/.agents/skills/alpha/SKILL.md" ] || fail "the copy that was in flight did not complete"
   [ -d "$home/.gemini/skills/alpha" ] || fail "the interrupted apply kept executing later plan steps"
   [ ! -e "$home/.claude/skills/alpha" ] || fail "the interrupted apply kept linking after the signal"
   pass "an interrupted apply stops at the signal instead of finishing the plan"
+}
+
+test_interrupt_during_preflight_reports_no_mutation() {
+  local home out pid rc fakebin waited real_diff
+  home=$(new_home)
+  make_skill "$home/.agents/skills" alpha body
+  make_skill "$home/.gemini/skills" alpha body
+  out="$home/dryrun.out"
+  fakebin=$(fm_fakebin "$home")
+  real_diff=$(command -v diff)
+  make_blocking_stub "$fakebin" diff "$real_diff"
+
+  PATH="$fakebin:$PATH" STUB_STARTED="$home/stub.started" STUB_RELEASE="$home/stub.release" \
+    HOME="$home" CODEX_HOME="$home/.codex" "$SCRIPT" > "$out" 2>&1 &
+  pid=$!
+
+  waited=0
+  while [ ! -e "$home/stub.started" ]; do
+    kill -0 "$pid" 2>/dev/null || fail "dry run exited before reaching the preflight comparison"
+    [ "$waited" -lt 600 ] || fail "dry run never reached the preflight comparison"
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  kill -TERM "$pid" || fail "dry run was no longer running when the signal was sent"
+  : > "$home/stub.release"
+  set +e
+  wait "$pid"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 143 ] || fail "interrupted dry run exited $rc instead of 143"
+  assert_contains "$(cat "$out")" "before any planned change began" \
+    "preflight interruption did not report that nothing was mutated"
+  assert_not_contains "$(cat "$out")" "may already be applied" \
+    "preflight interruption wrongly claimed applied changes"
+  [ -f "$home/.agents/skills/alpha/SKILL.md" ] || fail "interrupted dry run mutated the canonical skill"
+  [ -d "$home/.gemini/skills/alpha" ] || fail "interrupted dry run removed the duplicate"
+  [ ! -e "$home/.claude" ] || fail "interrupted dry run created a managed root"
+  pass "an interrupted read-only run reports that nothing was mutated"
 }
 
 test_unresolvable_codex_home_reports_one_cause() {
@@ -544,5 +593,6 @@ test_codex_home_separator_spelling_converges
 test_unreadable_managed_root_refuses
 test_mode_only_difference_names_permission_bits
 test_interrupt_stops_apply
+test_interrupt_during_preflight_reports_no_mutation
 test_unresolvable_codex_home_reports_one_cause
 test_remote_routes_through_registered_home
