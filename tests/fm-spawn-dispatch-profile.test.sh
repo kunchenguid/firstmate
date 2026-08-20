@@ -30,6 +30,25 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# fm-spawn probes the bare `claude` that its template launches, so the fake must
+# shadow any real CLI on the developer's PATH or the verdict would differ between
+# a workstation with claude installed and CI without it.
+make_spawn_claude_probe() {
+  local fakebin=$1
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Usage: claude [options] [prompt]' '  --dangerously-skip-permissions'
+  if [ "${FM_FAKE_CLAUDE_REMOTE:-yes}" = yes ]; then
+    printf '%s\n' '  --remote-control [name]   Start an interactive session with Remote Control enabled'
+  fi
+fi
+exit 0
+SH
+  chmod +x "$fakebin/claude"
+}
+
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -76,6 +95,7 @@ SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
+  make_spawn_claude_probe "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -127,6 +147,7 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_CLAUDE_REMOTE="${FM_TEST_CLAUDE_REMOTE:-yes}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
@@ -165,7 +186,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --remote-control '$id' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -448,6 +469,8 @@ test_codex_threads_model_and_effort() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread model and reasoning effort config"
+  assert_not_contains "$launch" "--remote-control" \
+    "Claude Remote Control must stay scoped to the claude harness"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
@@ -808,6 +831,74 @@ test_non_claude_harness_ignores_config_dir() {
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
+test_claude_remote_control_knob_selects_reachability() {
+  local value rec id out status launch
+  for value in absent empty on off bogus; do
+    id="profile-claude-remote-$value-z20"
+    rec=$(make_spawn_case "profile-claude-remote-$value" claude "$id")
+    read_case_record "$rec"
+    case "$value" in
+      absent) : ;;
+      empty) : > "$HOME_DIR/config/claude-remote-control" ;;
+      *) printf '%s\n' "$value" > "$HOME_DIR/config/claude-remote-control" ;;
+    esac
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "claude spawn with claude-remote-control=$value should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    if [ "$value" = off ]; then
+      assert_not_contains "$launch" "--remote-control" \
+        "config/claude-remote-control=off must launch the worker without Remote Control"
+    else
+      assert_contains "$launch" "--remote-control '$id'" \
+        "config/claude-remote-control=$value must name the Remote Control session after the task"
+    fi
+    if [ "$value" = bogus ]; then
+      assert_contains "$out" "unrecognized value" \
+        "an unrecognized claude-remote-control value must warn instead of deciding silently"
+    fi
+  done
+  pass "config/claude-remote-control: absent, empty, and on enable Remote Control; off opts out; a typo warns and keeps the default"
+}
+
+test_claude_remote_control_omitted_when_installed_cli_lacks_the_flag() {
+  local rec id out status launch
+  id=profile-claude-remote-oldcli-z21
+  rec=$(make_spawn_case profile-claude-remote-oldcli claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_CLAUDE_REMOTE=no \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a claude CLI without --remote-control must still spawn"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--remote-control" \
+    "a claude CLI that does not advertise --remote-control must launch unchanged"
+  assert_contains "$out" "does not support --remote-control" \
+    "an unsupported --remote-control must be reported, not dropped silently"
+  pass "an installed claude without --remote-control launches unchanged and says so"
+}
+
+test_claude_secondmate_launch_carries_remote_control() {
+  local rec id sm out status launch
+  id=profile-claude-remote-secondmate-z22
+  rec=$(make_spawn_case profile-claude-remote-secondmate claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "claude secondmate spawn should succeed"
+  assert_contains "$out" "spawned $id harness=claude kind=secondmate" \
+    "secondmate launch did not resolve the claude harness"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--remote-control '$id'" \
+    "a claude secondmate must be reachable through Remote Control like any other claude worker"
+  pass "a claude secondmate launch carries Remote Control named after its task"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -856,6 +947,9 @@ test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
+test_claude_remote_control_knob_selects_reachability
+test_claude_remote_control_omitted_when_installed_cli_lacks_the_flag
+test_claude_secondmate_launch_carries_remote_control
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"
