@@ -58,6 +58,8 @@
 #   (z)  recorded physical path, pool holds the $HOME spelling -> ALLOW  (reconciled)
 #   (aa) no pool spelling manages the worktree at all          -> REFUSE as recorded
 #   (ab) managed spelling fails for its own reason             -> REFUSE, real cause kept
+#   (ac) managed spelling momentarily locked, recorded refused -> retry ALLOW under
+#        the recognized spelling (the two recoveries composed)
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -382,7 +384,11 @@ SH
 # FM_FAKE_TREEHOUSE_LOG so a test can assert which spellings were tried, and in
 # what order. FM_FAKE_TREEHOUSE_MANAGED_FAIL makes the managed spelling fail with
 # that text instead of succeeding, the shape of a worktree treehouse does manage
-# but cannot return for a reason of its own.
+# but cannot return for a reason of its own. FM_FAKE_TREEHOUSE_MANAGED_LOCK_ONCE
+# names a marker file and makes the managed spelling's first attempt fail with the
+# git index.lock signature (clearing the lock as a dying crew git process would),
+# the shape of a worktree whose recorded spelling is refused while the spelling
+# treehouse does manage is momentarily locked.
 add_pool_spelling_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
@@ -401,6 +407,18 @@ if [ "${1:-}" = return ]; then
     if [ -n "${FM_FAKE_TREEHOUSE_MANAGED_FAIL:-}" ]; then
       echo "$FM_FAKE_TREEHOUSE_MANAGED_FAIL" >&2
       exit 1
+    fi
+    if [ -n "${FM_FAKE_TREEHOUSE_MANAGED_LOCK_ONCE:-}" ] \
+      && [ ! -e "$FM_FAKE_TREEHOUSE_MANAGED_LOCK_ONCE" ]; then
+      : > "$FM_FAKE_TREEHOUSE_MANAGED_LOCK_ONCE"
+      lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+      case "$lock" in
+        /*|'') ;;
+        *) lock="$wt/$lock" ;;
+      esac
+      echo "fatal: Unable to create '${lock:-index.lock}': File exists." >&2
+      [ -z "$lock" ] || rm -f "$lock"
+      exit 128
     fi
     echo "Worktree returned to pool."
     exit 0
@@ -2224,6 +2242,59 @@ test_managed_spelling_real_failure_is_not_hidden_by_the_recorded_refusal() {
   pass "an alternative spelling's genuinely different failure survives the recorded path's refusal"
 }
 
+test_managed_spelling_transient_lock_is_retried_under_that_same_spelling() {
+  local case_dir rc home_link recorded managed log marker lock
+  case_dir=$(make_case managed-spelling-transient-lock)
+  home_link=$(make_symlinked_home "$case_dir" managed-spelling-transient-lock)
+  recorded="$(cd "$case_dir" && pwd -P)/wt"
+  managed="$home_link/wt"
+  log="$case_dir/treehouse-paths"
+  marker="$case_dir/managed-lock-once"
+  : > "$log"
+
+  write_physical_meta "$case_dir"
+  land_shippable_commit "$case_dir"
+  add_pool_spelling_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+
+  # A fresh lock, so patience must win rather than the stale-lock force-remove.
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch "$lock"
+
+  set +e
+  # The recorded spelling is refused as unmanaged, then the spelling treehouse does
+  # manage is momentarily locked. The patience window must be spent on that same
+  # spelling: retrying the recorded one would keep being refused forever.
+  FM_FAKE_TREEHOUSE_MANAGED="$managed" \
+  FM_FAKE_TREEHOUSE_MANAGED_LOCK_ONCE="$marker" \
+  FM_FAKE_TREEHOUSE_LOG="$log" \
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
+    run_teardown --home "$home_link" "$case_dir" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "managed-spelling-transient-lock: teardown should succeed once the lock under treehouse's own spelling clears"
+  assert_grep "succeeded on retry" "$case_dir/stderr" \
+    "managed-spelling-transient-lock: teardown did not report success on retry"
+  assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
+    "managed-spelling-transient-lock: teardown force-removed a lock that only needed patience"
+  [ "$(sed -n 1p "$log")" = "$recorded" ] \
+    || fail "managed-spelling-transient-lock: the recorded path must be tried first, got '$(sed -n 1p "$log")'"
+  [ "$(sed -n 2p "$log")" = "$managed" ] \
+    || fail "managed-spelling-transient-lock: treehouse's own spelling must be tried next, got '$(sed -n 2p "$log")'"
+  [ "$(sed -n 3p "$log")" = "$managed" ] \
+    || fail "managed-spelling-transient-lock: the lock retry must reuse the recognized spelling, got '$(sed -n 3p "$log")'"
+  assert_absent "$lock" \
+    "managed-spelling-transient-lock: lock should remain cleared after success"
+  pass "a transient lock under treehouse's own spelling is retried under that spelling, not the refused one"
+}
+
 test_parked_own_run_is_aborted_before_teardown() {
   local case_dir rc head
   case_dir=$(make_case parked-run-abort)
@@ -2809,6 +2880,7 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_symlinked_home_pool_spelling_is_reconciled_on_return
 test_unmanaged_worktree_return_reports_the_recorded_path
 test_managed_spelling_real_failure_is_not_hidden_by_the_recorded_refusal
+test_managed_spelling_transient_lock_is_retried_under_that_same_spelling
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
