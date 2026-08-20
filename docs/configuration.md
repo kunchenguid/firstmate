@@ -289,6 +289,29 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## User skill layout
+
+User-installed skill content is canonical in `$HOME/.agents/skills`.
+Claude Code and Codex receive relative per-skill links, while Gemini, OpenCode, and Pi use their native canonical-store discovery without duplicate per-harness copies.
+Codex's `.system` skills and every harness's plugin installation remain outside this operation.
+The command's header and `--help` are the authoritative owner of managed roots, conflict checks, and mutation mechanics.
+
+Preview local convergence, then apply the reviewed plan explicitly:
+
+```sh
+bin/fm-user-skill-sync.sh
+bin/fm-user-skill-sync.sh --apply
+```
+
+Use a registered remote secondmate route for the remote Mac; this preserves the configured SSH host and remote home rather than selecting another home:
+
+```sh
+bin/fm-user-skill-sync.sh --remote <secondmate-id-or-ssh-alias>
+bin/fm-user-skill-sync.sh --remote <secondmate-id-or-ssh-alias> --apply
+```
+
+The current Codex link verification boundary and its non-invasive test command are recorded in [`docs/verification/user-skills.md`](verification/user-skills.md).
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

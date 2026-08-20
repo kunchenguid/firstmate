@@ -369,6 +369,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/user-skills.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/watcher-continuity.md",
       "audience": "operator-current"
     },
