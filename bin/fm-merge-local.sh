@@ -38,9 +38,9 @@
 # this machine: absolute, no control character, no ".." segment, and a space or
 # any other ordinary path character welcome. A path-shaped origin that cannot be
 # anchored, or that is anchored and still unusable, refuses naming the fault
-# rather than being reported as somewhere else. An
-# origin that is absent, a bare repository, or a URL on another host is not a
-# folder anyone reads, so the landing simply reports that it ended at the clone.
+# rather than being reported as somewhere else. An origin that is absent, a bare
+# repository, or a URL on another host is not a folder anyone reads, so the
+# landing simply reports that it ended at the clone.
 # Both stages are idempotent, so a repeat run converges instead of refusing.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
@@ -174,9 +174,10 @@ fi
 ORIGIN_PATH=$origin_real
 
 # git resolves a relative origin against each linked worktree's own directory
-# rather than the clone's toplevel, so a clone spelled that way can receive this
-# carry but can never have a worker spawned in it. The landing is the one place
-# that follows the spelling, so it is the one place that says what it costs.
+# rather than the clone's toplevel, and never expands a leading tilde in a
+# local-path remote at all, so a clone spelled either way can receive this carry
+# but can never have a worker spawned in it. The landing is the one place that
+# follows either spelling, so it is the one place that says what it costs.
 advise_origin_spelling() {
   [ -n "$ORIGIN_ANCHORED" ] || return 0
   echo "note: $PROJ names its origin as $ORIGIN_URL; re-point it at $ORIGIN_PATH so workers can still be spawned from that clone"
