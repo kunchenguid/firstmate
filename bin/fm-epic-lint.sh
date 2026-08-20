@@ -15,15 +15,20 @@
 # failure, that:
 #   - epic.md has a valid `epic:` slug (a valid epic/<slug> branch name) and a
 #     non-empty `repos:` list, every repo registered in this home;
-#   - every story file's frontmatter is EXACTLY the seven contract keys
-#     (id/epic/repo/pr_base/depends/kind/gate) - no missing key and no ad-hoc key
-#     such as `story:` or `phase:`;
+#   - every story file's frontmatter is the seven required contract keys
+#     (id/epic/repo/pr_base/depends/kind/gate), optionally plus `delivery:` - no
+#     missing required key and no ad-hoc key such as `story:` or `phase:`;
 #   - each `id:` is lower-kebab, unique in the epic, and equals its filename stem;
 #   - each `epic:` equals epic.md's slug;
 #   - each `repo:` is registered in this home;
 #   - each `pr_base:` is a valid branch name;
 #   - each `kind:` is ship or scout and each `gate:` is true or false, with
 #     EXACTLY ONE `gate: true` story in the epic;
+#   - each optional `delivery:` (when present) is a known mode: no-mistakes,
+#     direct-PR, or local-only. Absent = no finding (the mode is resolved at
+#     dispatch as before). A direct-PR story on a no-mistakes-prod-only repo is
+#     WARNED, never failed: that mode fits only an internal-only surface, and the
+#     mode stays firstmate's overridable call at dispatch (never a hard lock);
 #   - every `depends:` id names a real story in the epic, with no dependency cycle;
 #   - each story's plan/brief pointer (the backtick path in its `## Implementation
 #     plan` section) RESOLVES relative to the epic dir. A still-templated pointer
@@ -32,14 +37,20 @@
 #     scaffolded epic AND catches a concrete pointer that points nowhere.
 #
 # Exit codes: 0 valid, 1 contract problems (numbered list on stderr), 2 usage/
-# structural error (bad args, no epic.md, no stories/).
+# structural error (bad args, no epic.md, no stories/). Warnings (a posture
+# conflict on an optional `delivery:` key) print to stderr but never change the
+# exit code - they are advisory, not a hard lock.
 #
 # Overrides (mechanical/test seams, same style as bin/fm-umbrella-promote.sh):
-#   FM_ROOT_OVERRIDE   firstmate code root (default: this script's ..).
-#   FM_HOME            the home whose registry is checked (default: FM_ROOT).
-#   FM_DATA_OVERRIDE   data dir (default $FM_HOME/data); its projects.md is the
-#                      registry.
-#   FM_PROJECTS_REG    direct path to the registry file, overriding the above.
+#   FM_ROOT_OVERRIDE     firstmate code root (default: this script's ..).
+#   FM_HOME              the home whose registry is checked (default: FM_ROOT).
+#   FM_DATA_OVERRIDE     data dir (default $FM_HOME/data); its projects.md is the
+#                        registry.
+#   FM_PROJECTS_REG      direct path to the registry file, overriding the above.
+#   FM_PROJECT_MODE_BIN  registered-posture accessor for the `delivery:` posture
+#                        warning (default $FM_ROOT/bin/fm-project-mode.sh); reads
+#                        $FM_DATA_OVERRIDE/projects.md, so the warning resolves the
+#                        same registry only when FM_PROJECTS_REG is not repointed.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,6 +58,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="${FM_PROJECTS_REG:-$DATA/projects.md}"
+PROJECT_MODE_BIN="${FM_PROJECT_MODE_BIN:-$FM_ROOT/bin/fm-project-mode.sh}"
 
 # shellcheck source=bin/fm-epic-lint-lib.sh
 . "$FM_ROOT/bin/fm-epic-lint-lib.sh"
@@ -63,9 +75,11 @@ usage:
 
 Exits 0 when the epic is valid, 1 with a numbered problem list when it is not,
 and 2 on a usage or structural error. Enforces the epic/story contract (the
-seven story keys, lower-kebab unique ids matching their filenames, matching
-epic slug, registered repos, valid pr_base, exactly one gate story, acyclic
-depends, and a resolving plan pointer). See the header for the full contract.
+seven required story keys plus an optional delivery mode, lower-kebab unique ids
+matching their filenames, matching epic slug, registered repos, valid pr_base,
+exactly one gate story, acyclic depends, and a resolving plan pointer). A
+delivery/posture conflict prints an advisory warning without failing. See the
+header for the full contract.
 EOF
   exit "$code"
 }
@@ -88,13 +102,24 @@ STORIES_DIR="$EPIC_DIR/stories"
 [ -d "$STORIES_DIR" ] || die "no stories/ dir in $EPIC_DIR"
 
 REQUIRED_KEYS="id epic repo pr_base depends kind gate"
+OPTIONAL_KEYS="delivery"
 
 problems=()
 add() { problems+=("$*"); }
+warnings=()
+warn() { warnings+=("$*"); }
 
-# key_allowed <key>: 0 if <key> is one of the seven contract keys.
+# key_allowed <key>: 0 if <key> is a required contract key or a known optional one.
 key_allowed() {
-  case " $REQUIRED_KEYS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+  case " $REQUIRED_KEYS $OPTIONAL_KEYS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+# repo_mode <repo>: the RAW registered posture word for <repo> (e.g.
+# no-mistakes-prod-only), via the one owner of registered posture
+# (bin/fm-project-mode.sh --raw). Empty when the repo is unknown. Pointed at the
+# same data dir this lint resolved so it reads the same registry.
+repo_mode() {
+  FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE_BIN" --raw "$1" 2>/dev/null | awk 'NR==1{print $1}'
 }
 
 # valid_branch <name>: 0 if <name> is a valid git branch name (for pr_base and the
@@ -148,7 +173,7 @@ for sf in "$STORIES_DIR"/*.md; do
   while IFS= read -r k; do
     [ -n "$k" ] || continue
     present_keys="$present_keys$k "
-    key_allowed "$k" || add "story $base: unexpected frontmatter key \"$k:\" (only id/epic/repo/pr_base/depends/kind/gate are allowed)"
+    key_allowed "$k" || add "story $base: unexpected frontmatter key \"$k:\" (only id/epic/repo/pr_base/depends/kind/gate and the optional delivery are allowed)"
   done < <(fm_frontmatter_keys "$sf")
   for k in $REQUIRED_KEYS; do
     case "$present_keys" in *" $k "*) : ;; *) add "story $base: missing frontmatter key \"$k:\"" ;; esac
@@ -202,6 +227,26 @@ for sf in "$STORIES_DIR"/*.md; do
       true) gate_true=$((gate_true + 1)) ;;
       false) : ;;
       *) add "story $base: gate \"$sgate\" must be true or false" ;;
+    esac
+  fi
+
+  # delivery (OPTIONAL): a known mode when present; absent = no finding (mode is
+  # resolved at dispatch as before). An unknown value is a hard contract error; a
+  # direct-PR story on a no-mistakes-prod-only repo is only WARNED, since that mode
+  # is valid for an internal-only surface (which the lint cannot see) and firstmate
+  # keeps the surface classification at dispatch (AGENTS.md section 7).
+  if fm_frontmatter_has "$sf" delivery; then
+    sdelivery="$(fm_frontmatter_get "$sf" delivery)"
+    case "$sdelivery" in
+      no-mistakes | local-only) : ;;
+      direct-PR)
+        srepo_d="$(fm_frontmatter_get "$sf" repo)"
+        if [ -n "$srepo_d" ] && [ "$(repo_mode "$srepo_d")" = no-mistakes-prod-only ]; then
+          warn "story $base: delivery: direct-PR on repo \"$srepo_d\" whose registered posture is no-mistakes-prod-only - direct-PR fits only an internal-only surface; product-facing or mixed work must ship no-mistakes (firstmate classifies the surface at dispatch)"
+        fi
+        ;;
+      "") add "story $base: delivery: is empty" ;;
+      *) add "story $base: delivery \"$sdelivery\" must be no-mistakes, direct-PR, or local-only" ;;
     esac
   fi
 
@@ -287,6 +332,17 @@ for ((i = 0; i < ${#story_ids[@]}; i++)); do
   dfs "$i"
   [ -n "$cycle_from" ] && { add "dependency cycle among stories (e.g. $cycle_from)"; break; }
 done
+
+# --- warnings ---------------------------------------------------------------
+# Advisory only: printed on stderr in both the pass and fail cases, never
+# changing the exit code (a posture conflict is firstmate's call, not a hard lock).
+if [ "${#warnings[@]}" -gt 0 ]; then
+  {
+    printf 'epic lint WARNINGS for %s (%d):\n' "$EPIC_DIR" "${#warnings[@]}"
+    n=0
+    for w in "${warnings[@]}"; do n=$((n + 1)); printf '  %d. %s\n' "$n" "$w"; done
+  } >&2
+fi
 
 # --- verdict ----------------------------------------------------------------
 if [ "${#problems[@]}" -gt 0 ]; then

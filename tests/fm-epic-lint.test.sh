@@ -8,6 +8,10 @@
 # registered repos, valid pr_base, exactly one gate story, acyclic depends, and a
 # resolving plan pointer - including the real incident case (uppercase id +
 # story:/phase: keys + id-vs-filename mismatch) that this story exists to catch.
+#
+# The optional `delivery:` key (epflow-07) is covered too: absent = no finding,
+# a valid mode passes, an unknown value is RED, and a direct-PR story on a
+# no-mistakes-prod-only repo WARNS (stderr) without failing the lint.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -252,6 +256,78 @@ test_red_missing_epic_slug() {
   pass "an epic.md with no epic: slug is RED"
 }
 
+# --- delivery: OPTIONAL key (epflow-07) --------------------------------------
+# A separate registry+data dir so the posture warning resolves through
+# fm-project-mode.sh against the SAME registry the lint reads (FM_DATA_OVERRIDE,
+# not FM_PROJECTS_REG, so both agree). `svc` is direct-PR, `prod` is prod-only.
+DEL_DATA="$TMP_ROOT/deldata"
+mkdir -p "$DEL_DATA"
+cat > "$DEL_DATA/projects.md" <<'EOF'
+# Projects
+- svc [direct-PR production=main] - fixture repo (added 260101)
+- prod [no-mistakes-prod-only production=main] - prod-only fixture (added 260101)
+EOF
+
+# add_delivery <story-file> <value> : append a `delivery:` key to a story.
+add_delivery() { perl -i -pe "s/^(gate: .*)\$/\$1\ndelivery: $2/" "$1"; }
+
+# lint_data <epic-dir> -> OUT, RC : lint reading the delivery-fixture data dir.
+lint_data() { OUT=$(FM_DATA_OVERRIDE="$DEL_DATA" "$LINT" "$1" 2>&1); RC=$?; }
+
+# --- GREEN: absence changes nothing (backward compatible) --------------------
+test_green_delivery_absent() {
+  local d; d=$(fresh delabsent)
+  lint_data "$d"
+  expect_code 0 "$RC" "no delivery key should still pass: $OUT"
+  assert_not_contains "$OUT" "delivery" "an absent delivery key must produce no finding"
+  pass "a story with no delivery: key is GREEN and unmentioned (backward compatible)"
+}
+
+# --- GREEN: a valid delivery mode passes -------------------------------------
+test_green_delivery_valid() {
+  local d; d=$(fresh delvalid)
+  add_delivery "$d/stories/svc-02.md" no-mistakes
+  add_delivery "$d/stories/svc-03.md" local-only
+  lint_data "$d"
+  expect_code 0 "$RC" "valid delivery modes should pass: $OUT"
+  assert_contains "$OUT" "epic lint OK" "a valid delivery: key must not fail the lint"
+  pass "a story carrying a valid delivery: mode is GREEN"
+}
+
+# --- GREEN + WARN: direct-PR on a prod-only repo warns but does not fail ------
+test_warn_delivery_posture_conflict() {
+  local d; d=$(fresh delposture)
+  # Point svc-02 at the prod-only repo and mark it direct-PR.
+  perl -i -pe 's/^repo: svc$/repo: prod/' "$d/stories/svc-02.md"
+  add_delivery "$d/stories/svc-02.md" direct-PR
+  lint_data "$d"
+  expect_code 0 "$RC" "a posture conflict must WARN, not fail: $OUT"
+  assert_contains "$OUT" "WARNINGS" "the posture conflict must surface as a warning"
+  assert_contains "$OUT" "no-mistakes-prod-only" "the warning must name the conflicting posture"
+  assert_contains "$OUT" "epic lint OK" "the epic must still pass despite the warning"
+  pass "delivery: direct-PR on a no-mistakes-prod-only repo WARNS without failing"
+}
+
+# --- GREEN: direct-PR on a non-prod-only repo is silent ----------------------
+test_green_delivery_directpr_ok() {
+  local d; d=$(fresh deldirect)
+  add_delivery "$d/stories/svc-02.md" direct-PR   # svc is registered direct-PR
+  lint_data "$d"
+  expect_code 0 "$RC" "direct-PR on a matching repo should pass silently: $OUT"
+  assert_not_contains "$OUT" "WARNINGS" "no warning when the repo is not prod-only"
+  pass "delivery: direct-PR on a non-prod-only repo is GREEN and silent"
+}
+
+# --- RED: an unknown delivery value is a hard contract error ------------------
+test_red_delivery_unknown() {
+  local d; d=$(fresh delbad)
+  add_delivery "$d/stories/svc-02.md" yolo-ship
+  lint_data "$d"
+  expect_code 1 "$RC" "an unknown delivery mode must fail"
+  assert_contains "$OUT" "must be no-mistakes, direct-PR, or local-only" "did not reject the unknown delivery value"
+  pass "an unknown delivery: value is RED"
+}
+
 # --- structural: bad usage exits 2 -------------------------------------------
 test_structural_errors() {
   lint "$TMP_ROOT/does-not-exist"
@@ -284,6 +360,11 @@ test_red_depends_unknown
 test_red_depends_cycle
 test_red_unresolvable_pointer
 test_red_missing_epic_slug
+test_green_delivery_absent
+test_green_delivery_valid
+test_warn_delivery_posture_conflict
+test_green_delivery_directpr_ok
+test_red_delivery_unknown
 test_structural_errors
 
 echo "# all fm-epic-lint tests passed"

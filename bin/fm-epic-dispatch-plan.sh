@@ -13,8 +13,8 @@
 #      the fm-brief.sh + fm-spawn.sh pair, with the resolved PR base (the story's
 #      pr_base) and the resolved delivery mode.
 #
-# Delivery mode resolution (G-mode): a story's `delivery:` frontmatter key wins
-# when present (epflow-07 may add it); otherwise the project's REGISTERED posture
+# Delivery mode resolution (G-mode): a story's optional `delivery:` frontmatter
+# key wins when present (epflow-07); otherwise the project's REGISTERED posture
 # (bin/fm-project-mode.sh --raw) is used, since that is the captain's standing
 # posture (AGENTS.md section 7). A `no-mistakes-prod-only` posture is a per-task
 # surface classification only firstmate can make, so the plan surfaces BOTH

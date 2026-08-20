@@ -1,0 +1,29 @@
+==================== 1+2. lint the epic (valid + conflicting keys) ====================
+epic lint WARNINGS for /var/folders/6l/_c1hp08x59dg6dz_d4hq17dw0000gn/T//epflow07-demo.GVfgSZ/home/data/plans/epic-demo (1):
+  1. story demo-03.md: delivery: direct-PR on repo "prod" whose registered posture is no-mistakes-prod-only - direct-PR fits only an internal-only surface; product-facing or mixed work must ship no-mistakes (firstmate classifies the surface at dispatch)
+epic lint OK: "demo" - 4 stories, contract satisfied.
+-> lint EXIT 0 (valid; the conflict is a warning, not a failure)
+
+==================== 1. dispatch-plan reflects the delivery mode ====================
+# --- demo-02  (repo: svc, base: main) ---
+bin/fm-brief.sh demo-02 svc --mode direct-PR --base main
+# fill the {TASK} placeholder in data/demo-02/brief.md, then (yolo is firstmate's call; off is the registered default):
+bin/fm-spawn.sh demo-02 svc --mode direct-PR --yolo off --base main
+bin/fm-brief.sh demo-03 prod --mode direct-PR --base main
+bin/fm-spawn.sh demo-03 prod --mode direct-PR --yolo off --base main
+# --- demo-04  (repo: prod, base: main) ---
+# delivery mode NEEDS firstmate surface classification (repo posture is no-mistakes-prod-only):
+# then run the pair below with your chosen --mode:
+bin/fm-brief.sh demo-04 prod --mode <no-mistakes|direct-PR> --base main
+# fill the {TASK} placeholder in data/demo-04/brief.md, then (yolo is firstmate's call; off is the registered default):
+bin/fm-spawn.sh demo-04 prod --mode <no-mistakes|direct-PR> --yolo off --base main
+
+==================== 3. an INVALID delivery value fails ====================
+-> lint EXIT 1 as expected. Reason:
+     1. story demo-02.md: delivery "yolo-ship" must be no-mistakes, direct-PR, or local-only
+
+==================== 4. an ABSENT delivery key is unchanged ====================
+-> lint EXIT 0 with no delivery key present.
+   (no 'delivery' string in the output - absence is a no-op)
+
+OK - valid passes + shows the mode, conflict warns, invalid fails, absent is unchanged.
