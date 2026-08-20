@@ -1924,6 +1924,87 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
   pass "a busy pane under a declared pause is rechecked on the long cadence, and lifting the pause restores the wedge escalation"
 }
 
+# --- declared pause vs an ALREADY-RUNNING wedge escalation chain -----------
+# The busy-pane fixture above starts from clean bookkeeping and asserts the wedge
+# timer and counter never appear, so it pins the declaration's effect only BEFORE
+# any escalation exists; it seeds .stale-since-<key> just once, in its final phase,
+# after the declaration has already been lifted. That leaves the case a fleet
+# report actually hit uncovered: a healthy worker collecting repeated "possible
+# wedge" escalations while its log ended in paused:, where the running chain
+# itself was suspected of disabling the damping.
+#
+# This fixture covers exactly that gap. The declaration is read fresh on every
+# poll, so a chain five escalations deep whose timer is already past the threshold
+# - the very next poll would have escalated - is absorbed and retired (A). Phase B
+# flips one condition in an otherwise identical second case, the declaration, and
+# the same seeded chain escalates, so a pass in A cannot come from a blanket
+# silencing of the escalator.
+test_busy_declared_pause_damps_a_running_wedge_escalation_chain() {
+  local dir state fakebin out capture_file window key sig pid statusf
+  dir=$(make_case busy-pause-running-chain); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-verify-worker"
+  statusf="$state/verify-worker.status"
+  printf 'Working... (7200.4s) post-rebase verify' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/verify-worker.meta"
+  record_pi_busy "$state" verify-worker
+  printf 'working: rebased onto main\npaused: post-rebase verify in flight, polling the verify log\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-verify-worker_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # No completed turn for hours: the verify runs inside one blocking foreground
+  # call, so the pane stays busy while the turn marker ages past the bound.
+  touch -t 200001010000 "$state/verify-worker.meta"
+
+  # Phase A: a chain five escalations deep, with its timer already past the wedge
+  # threshold. The declaration must take the pane and retire the chain.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  echo 5 > "$state/.wedge-escalations-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a declared pause did not damp a running wedge escalation chain: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a declared pause on a chained busy pane printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a declared pause on a chained busy pane enqueued a wake: $(cat "$state/.wake-queue")"
+  [ -e "$state/.paused-$key" ] || fail "the declared-pause cadence did not take a chained busy pane"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a damped chain left its wedge timer running"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a damped chain left its escalation counter behind"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional damped-chain phase-A stop"
+
+  # Phase B: the smallest counterfactual. A SECOND case, identical in every
+  # respect - same seeded chain, same busy over-age pane, same crew verdict, same
+  # thresholds - except that its status log never declares the wait. Running it as
+  # its own case rather than lifting the declaration in place keeps the flipped
+  # condition to exactly one: lifting a pause additionally retires the chain by
+  # design (clear_pause_tracking), which would confound the comparison.
+  dir=$(make_case busy-pause-running-chain-undeclared); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  statusf="$state/verify-worker.status"
+  printf 'Working... (7200.4s) post-rebase verify' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/verify-worker.meta"
+  record_pi_busy "$state" verify-worker
+  printf 'working: rebased onto main\nworking: running the post-rebase verify\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-verify-worker_status"
+  touch -t 200001010000 "$state/verify-worker.meta"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  echo 5 > "$state/.wedge-escalations-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an undeclared busy pane did not continue its seeded wedge escalation"; }
+  grep -F "possible wedge" "$out" >/dev/null || fail "the undeclared escalation did not flag a possible wedge: $(cat "$out")"
+  grep -F "escalation 6" "$out" >/dev/null || fail "the undeclared escalation did not continue the seeded counter: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 6 ] || fail "the seeded escalation counter was not continued"
+  pass "a declared pause damps a wedge escalation chain already under way, while the same chain without a declaration escalates"
+}
+
 # Behavioral proof that the production default (no FM_BUSY_TURN_MAX_SECS override
 # anywhere in this env) is 3600s: a completed turn 5 minutes old must not start a
 # wedge timer, while one 66 minutes old must - bracketing the default around 3600
@@ -2504,6 +2585,7 @@ test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
+test_busy_declared_pause_damps_a_running_wedge_escalation_chain
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
