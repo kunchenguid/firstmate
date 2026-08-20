@@ -75,6 +75,7 @@ fm-prompt-exec.test.sh	hermetic
 fm-report-stack-a.test.sh	hermetic
 fm-report-stack-b.test.sh	hermetic
 fm-review-diff.test.sh	hermetic
+fm-secondmate-cloud-monitor.test.sh	hermetic
 fm-secondmate-harness.test.sh	hermetic
 fm-secondmate-lifecycle-e2e.test.sh	hermetic
 fm-secondmate-liveness.test.sh	hermetic

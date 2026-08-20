@@ -11,7 +11,10 @@ data-plane transport with one delivery-fencing contract PR 4 must implement:
 a slot-addressed transfer runs outside the controller lock, so a late message
 can land in a recreated slot's container; the secondmate monitor therefore
 stamps assignment_generation inside every message envelope and the session
-runner refuses envelopes naming a foreign generation.
+runner refuses envelopes naming a foreign generation. The runner half is
+DEFERRED: the runner's closed inbox schema cannot carry the field yet, so
+the generation rides inside the envelope nonce and only the controller's
+exact-assignment gate enforces it today.
 """
 
 import contextlib
@@ -1619,7 +1622,10 @@ def message_put(controller, message):
     slot-addressed and runs outside the controller lock, so a late put can
     land in a recreated slot's container; the monitor therefore stamps
     assignment_generation inside every message envelope and the session
-    runner refuses envelopes naming a foreign generation.
+    runner refuses envelopes naming a foreign generation (the runner half
+    is DEFERRED: the closed inbox schema cannot carry the field yet, so the
+    generation rides inside the nonce and only the controller's
+    exact-assignment gate enforces it today).
     """
     slot = verify_message_spec(message, "file")
     lane = message.get("lane")

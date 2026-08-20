@@ -496,8 +496,16 @@ RECOVERY_ACCOUNT=0
 # crewmates on elastic Azure workers through bin/fm-worker-lifecycle.sh) or
 # off/local (default). Any other value fails closed. When the switch is off,
 # spawn behavior and task metadata stay byte-identical to the local-only path.
-# Secondmate and account-recovery spawns always stay on the local backend by
-# design (workers never run secondmates; recovery re-binds a local endpoint).
+# Account-recovery spawns always stay on the local backend by design
+# (recovery re-binds a local endpoint). Secondmate spawns stay local too
+# UNLESS FM_SPAWN_SECONDMATE_CLOUD=1 (R2/R3 design B.9, expand/contract): with
+# the flag set, a --secondmate spawn with cloud placement becomes a
+# compartment - an ordinary reviewed worker slot whose queue entry carries
+# role=secondmate, whose durable home stays on this machine, and whose
+# session legs are dispatched by bin/fm-secondmate-cloud-monitor.sh (this
+# spawn queues the request and launches the monitor; it never dispatches an
+# execute itself). With the flag unset or any other value the gate below is
+# byte-identical to the pre-flag behavior.
 SPAWN_CLOUD=off
 SPAWN_CLOUD_VALUE=
 SPAWN_CLOUD_SOURCE=default
@@ -516,7 +524,8 @@ case "$SPAWN_CLOUD_VALUE" in
     exit 1
     ;;
 esac
-if [ "$SPAWN_CLOUD" = azure ] && { [ "$KIND" = secondmate ] || [ "$RECOVERY_ACCOUNT" = 1 ]; }; then
+if [ "$SPAWN_CLOUD" = azure ] \
+  && { { [ "$KIND" = secondmate ] && [ "${FM_SPAWN_SECONDMATE_CLOUD:-}" != 1 ]; } || [ "$RECOVERY_ACCOUNT" = 1 ]; }; then
   echo "notice: cloud placement covers new ship/scout spawns only; this spawn stays on the local backend" >&2
   SPAWN_CLOUD=off
 fi
@@ -3983,6 +3992,10 @@ if [ "$SPAWN_CLOUD" = azure ]; then
   # bounded and non-interactive under the supervisor's device-null stdin.
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands on the worker, not here
   CLOUD_WORKER_LAUNCH="env PI_CODING_AGENT_DIR=/mnt/account/pi-agent pi --print --approve --exclude-tools ask_question ${MODELFLAG}${EFFORTFLAG}"'"$(cat /mnt/task/.fm-task/brief.md)"'
+  # A secondmate compartment has no single worker entrypoint: its session
+  # legs are built and dispatched by fm-secondmate-cloud-monitor.sh, so the
+  # crewmate launch string above is never persisted or executed for it.
+  [ "$KIND" != secondmate ] || CLOUD_WORKER_LAUNCH=
   # Cloud state files are keyed by task ID while the queue is keyed
   # ID@GENERATION: a re-spawn of the same task must not inherit the previous
   # generation's result (the monitor would exit on it at once), dispatch
@@ -3993,6 +4006,31 @@ if [ "$SPAWN_CLOUD" = azure ]; then
     "$STATE/$ID.cloud-execute-dispatched" "$STATE/$ID.cloud-worktree" \
     "$STATE/$ID.worker-result.json" "$STATE/$ID.worker-execute.log"
   rm -rf "$STATE/$ID.cloud-payload" "$STATE/$ID.cloud-account"
+  if [ "$KIND" = secondmate ]; then
+    # Compartment monitor state is generation-scoped the same way: a re-spawn
+    # must not inherit leg dispatch markers (the new monitor would think legs
+    # already ran), the collect cursor, the chain state, or a terminal status.
+    rm -f "$STATE/$ID".cloud-secondmate-leg-*.dispatched \
+      "$STATE/$ID".cloud-secondmate-leg-*.result.json \
+      "$STATE/$ID".cloud-secondmate-leg-*.log \
+      "$STATE/$ID.cloud-secondmate-state.json" "$STATE/$ID.cloud-secondmate-status" \
+      "$STATE/$ID.cloud-secondmate-first-dispatch" "$STATE/$ID.cloud-collect-cursor"
+    # The mailbox can hold unlanded commit bundles and the inbox unrelayed
+    # captain text - the same "never destroy the last copy" doctrine as the
+    # outcome directory below. Preserve non-empty ones under superseded names.
+    for cloud_dir in cloud-mailbox cloud-inbox; do
+      if [ -d "$STATE/$ID.$cloud_dir" ] && [ -n "$(ls -A "$STATE/$ID.$cloud_dir" 2>/dev/null)" ]; then
+        superseded="$STATE/$ID.$cloud_dir.superseded-$(date -u +%Y%m%d%H%M%S)-$$"
+        if mv "$STATE/$ID.$cloud_dir" "$superseded"; then
+          echo "notice: $ID had a non-empty $cloud_dir; preserved at $superseded" >&2
+        else
+          echo "error: $ID has a non-empty $cloud_dir that could not be preserved; refusing to sweep it" >&2
+          exit 1
+        fi
+      fi
+      rm -rf "$STATE/$ID.$cloud_dir"
+    done
+  fi
   # The outcome directory is NOT transport. When the monitor cannot
   # fast-forward it tells the operator the bundle is "kept for manual
   # landing", and by then the guest copy is usually gone with the VM, so a
@@ -4017,7 +4055,12 @@ if [ "$SPAWN_CLOUD" = azure ]; then
   # travel inside the launch string; without FM_HOME the monitor's
   # required-environment guard exits at once and the tracking pane dies at
   # spawn time.
-  LAUNCH="FM_HOME=$(printf '%q' "$FM_HOME") FM_STATE_OVERRIDE=$(printf '%q' "$STATE") exec $(printf '%q' "$SCRIPT_DIR/fm-spawn-cloud-monitor.sh") $(printf '%q' "$ID") $(printf '%q' "$SPAWN_GENERATION_ID")"
+  CLOUD_MONITOR_SCRIPT=$SCRIPT_DIR/fm-spawn-cloud-monitor.sh
+  # A secondmate compartment's pane runs the compartment monitor: the same
+  # tracking-pane idiom, but it owns leg dispatch, inbox relay, collect and
+  # chain verification instead of a single converged execute.
+  [ "$KIND" != secondmate ] || CLOUD_MONITOR_SCRIPT=$SCRIPT_DIR/fm-secondmate-cloud-monitor.sh
+  LAUNCH="FM_HOME=$(printf '%q' "$FM_HOME") FM_STATE_OVERRIDE=$(printf '%q' "$STATE") exec $(printf '%q' "$CLOUD_MONITOR_SCRIPT") $(printf '%q' "$ID") $(printf '%q' "$SPAWN_GENERATION_ID")"
 fi
 case "$BACKEND" in
   tmux)
@@ -4302,7 +4345,11 @@ spawn_cloud_persist_convergence_artifacts() {
   fi
   (
     umask 077
-    printf '%s\n' "$CLOUD_WORKER_LAUNCH" > "$STATE/$ID.cloud-entrypoint" || exit 1
+    # A secondmate compartment has no single persisted entrypoint: leg argvs
+    # are built per dispatch by fm-secondmate-cloud-monitor.sh, and leaving a
+    # crewmate-shaped entrypoint here could tempt a future converged dispatch
+    # into running the wrong thing.
+    [ "$KIND" = secondmate ] || printf '%s\n' "$CLOUD_WORKER_LAUNCH" > "$STATE/$ID.cloud-entrypoint" || exit 1
     # Crewmate payload: the repository as a credential-free bundle of the
     # leased worktree's exact HEAD, plus the two task files the entrypoint
     # reads; and the provider-account material the worker stages onto its
@@ -4319,7 +4366,24 @@ spawn_cloud_persist_convergence_artifacts() {
       echo "error: cloud payload repository bundle failed for $ID" >&2
       exit 1
     }
-    cp "$DATA/$ID/brief.md" "$STATE/$ID.cloud-payload/brief.md" || exit 1
+    if [ -f "$DATA/$ID/brief.md" ]; then
+      cp "$DATA/$ID/brief.md" "$STATE/$ID.cloud-payload/brief.md" || exit 1
+    elif [ "$KIND" = secondmate ] && [ -f "$WT/data/charter.md" ]; then
+      # A secondmate's standing brief is its persistent charter in the home;
+      # the compartment payload carries a copy so the cloud agent's brief is
+      # the same document the local launch would have read.
+      cp "$WT/data/charter.md" "$STATE/$ID.cloud-payload/brief.md" || exit 1
+    else
+      echo "error: no brief for cloud payload of $ID (looked for $DATA/$ID/brief.md)" >&2
+      exit 1
+    fi
+    if [ "$KIND" = secondmate ]; then
+      # The compartment payload additionally ships the session runner and the
+      # spawn-intent pi extension; the supervisor stages them (digest-bound)
+      # at /mnt/task/.fm-task/ where the monitor's leg argv names them.
+      cp "$SCRIPT_DIR/fm-secondmate-session.py" "$STATE/$ID.cloud-payload/fm-secondmate-session.py" || exit 1
+      cp "$SCRIPT_DIR/fm-secondmate-spawn.pi-ext.ts" "$STATE/$ID.cloud-payload/fm-secondmate-spawn.pi-ext.ts" || exit 1
+    fi
     CLOUD_ACCOUNT_SOURCE=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
     if [ ! -f "$CLOUD_ACCOUNT_SOURCE/auth.json" ]; then
       echo "error: cloud account source lacks auth.json at $CLOUD_ACCOUNT_SOURCE" >&2
@@ -4335,6 +4399,18 @@ spawn_cloud_persist_convergence_artifacts() {
       printf 'export FM_SPAWN_CLOUD_WALL_SECONDS=%q\n' "$wall"
       [ -z "${FM_WORKER_PROVIDER_COMMAND:-}" ] \
         || printf 'export FM_WORKER_PROVIDER_COMMAND=%q\n' "$FM_WORKER_PROVIDER_COMMAND"
+      if [ "$KIND" = secondmate ]; then
+        # Compartment leg configuration is durable per compartment: the
+        # monitor pane runs in the Herdr server's closed environment, so the
+        # values the spawn ran with must ride the persisted file. Numeric
+        # ids only, allowlisted by name - never secret values.
+        for var in FM_SECONDMATE_LEG_SECONDS FM_SECONDMATE_POLL_SECONDS \
+          FM_SECONDMATE_IDLE_SECONDS FM_SECONDMATE_TTL_HOURS; do
+          [ -n "${!var+x}" ] || continue
+          case "${!var}" in ''|*[!0-9]*) continue ;; esac
+          printf 'export %s=%q\n' "$var" "${!var}"
+        done
+      fi
       for var in $SPAWN_CLOUD_ENV_ALLOWLIST; do
         [ -n "${!var+x}" ] || continue
         printf 'export %s=%q\n' "$var" "${!var}"
@@ -4348,16 +4424,23 @@ spawn_cloud_claim_execute_dispatch() {
   (set -C; : > "$STATE/$ID.cloud-execute-dispatched") 2>/dev/null
 }
 spawn_cloud_dispatch() {
-  local owner_kind=primary assignment wall
+  local owner_kind=primary assignment wall role_args
   CLOUD_PLACEMENT_STATE=queued
   [ ! -f "$FM_HOME/$SUB_HOME_MARKER" ] || owner_kind=secondmate
   spawn_cloud_persist_convergence_artifacts || {
     echo "error: cloud worker convergence artifacts could not be persisted for $ID" >&2
     return 1
   }
+  role_args=()
+  # A --secondmate spawn on the cloud lane queues a COMPARTMENT: role=
+  # secondmate on an ordinary author slot (R2/R3 B.1). The controller's
+  # verify_request owns the depth-1 bound (role=secondmate requires
+  # owner_kind=primary), so a secondmate home requesting a compartment is
+  # refused there, loudly. Crewmate requests keep their exact pre-flag argv.
+  [ "$KIND" != secondmate ] || role_args=(--role secondmate)
   spawn_cloud_lifecycle request \
     --task "$ID" --task-generation "$SPAWN_GENERATION_ID" \
-    --owner-kind "$owner_kind" --eligible >&2 || {
+    --owner-kind "$owner_kind" ${role_args[@]+"${role_args[@]}"} --eligible >&2 || {
     # No durable queue entry exists, so the convergence artifacts have no
     # owner; remove them (including the copied provider credential) with the
     # rolled-back spawn.
@@ -4394,6 +4477,13 @@ spawn_cloud_dispatch() {
     return 1
   }
   CLOUD_PLACEMENT_STATE=assigned
+  if [ "$KIND" = secondmate ]; then
+    # The compartment monitor owns EVERY leg dispatch (O_EXCL per-leg
+    # markers); the spawn never runs an execute for a compartment, so there
+    # is no shared dispatch marker to claim here.
+    echo "notice: secondmate compartment $ID is assigned; fm-secondmate-cloud-monitor dispatches its session legs" >&2
+    return 0
+  fi
   wall=${FM_SPAWN_CLOUD_WALL_SECONDS:-3600}
   case "$wall" in ''|*[!0-9]*) echo "error: invalid FM_SPAWN_CLOUD_WALL_SECONDS '$wall'" >&2; return 1 ;; esac
   spawn_cloud_claim_execute_dispatch || {

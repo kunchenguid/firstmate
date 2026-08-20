@@ -30,6 +30,12 @@
 # or a status-pointed doc instead of stranding it in chat the main firstmate
 # never reads. A crewmate/scout target, an explicit backend-target escape-hatch
 # target, and the --key path are never marked - their behavior is unchanged.
+# A secondmate whose meta ALSO records placement=azure is a cloud compartment:
+# its marked text is not typed anywhere - it becomes one durable, canonical,
+# content-addressed envelope in state/<id>.cloud-inbox/<seq>-<sha256>.json that
+# bin/fm-secondmate-cloud-monitor.sh relays to the worker, and --key is refused
+# (there is no composer). Only meta written by the gated cloud secondmate spawn
+# selects this route, so every other send path is byte-identical.
 # Successful text steering for a managed account task is also appended to the
 # task-owned data/<id>/steering.md trail for provider-neutral continuation.
 # After a successful text submit fm-send pauses FM_SEND_SETTLE seconds (default 1,
@@ -201,6 +207,116 @@ if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARG
   MARK_FROM_FIRSTMATE=1
 fi
 
+# Cloud secondmate compartment routing (R2/R3 design B.4). A secondmate whose
+# durable meta records placement=azure has no local composer at all: its agent
+# runs on an elastic worker and its inbound lane is the compartment inbox that
+# bin/fm-secondmate-cloud-monitor.sh relays through the claim-exempt
+# message-put. The classification is driven ONLY by durable meta this home's
+# own gated spawn wrote (kind=secondmate + placement=azure), so every existing
+# local secondmate and crewmate send path is byte-identical.
+CLOUD_SECONDMATE_ROUTE=0
+if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$(fm_meta_get "$TARGET_META" placement)" = azure ]; then
+  CLOUD_SECONDMATE_ROUTE=1
+fi
+
+fm_send_cloud_secondmate_enqueue() {  # <marked-message-text>
+  # One durable inbox envelope per send: the exact canonical JSON message the
+  # session runner's closed inbox schema accepts ({kind, text, nonce}), named
+  # <seq>-<sha256>.json where the digest is the content address of the file
+  # bytes - the monitor uploads the file VERBATIM, so this name digest equals
+  # the session/in/<sha256>.json blob the runner verifies and dedupes on.
+  # The assignment generation rides INSIDE the nonce: the runner's schema
+  # refuses any unknown envelope key, and nonce is its one documented
+  # free-form field, so the delivery-fencing generation stamp lives there
+  # (runner-side refusal of a foreign generation is deferred to a runner
+  # change and documented in the PR that added this routing). The nonce also
+  # makes two sends of identical text distinct messages instead of one
+  # deduped blob. Sequencing claims .claims/<seq> with O_EXCL so concurrent
+  # sends never share a sequence number.
+  local send_id assignment send_generation
+  send_id=$(fm_send_id_from_meta "$TARGET_META")
+  # The controller's CURRENT assignment is the authority: meta records the
+  # spawn-time assignment once, but a resume mints a new assignment
+  # generation, and an envelope fenced to the dead one would misname every
+  # message for the rest of the compartment's life. Meta is only the
+  # fallback for a controller that is momentarily unreadable.
+  send_generation=$(fm_meta_get "$TARGET_META" generation_id)
+  assignment=$(python3 - "$STATE/azure-workers/controller.json" "$send_id" "$send_generation" <<'PY'
+import json
+import sys
+
+path, task, generation = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8") as handle:
+        state = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(0)
+item = (state.get("queue") or {}).get("{}@{}".format(task, generation)) or {}
+if item.get("status") == "assigned" and item.get("assignment_generation"):
+    print(item["assignment_generation"])
+PY
+  ) || assignment=
+  [ -n "$assignment" ] || assignment=$(fm_meta_get "$TARGET_META" worker_assignment_generation)
+  if [ -z "$assignment" ]; then
+    echo "error: cloud secondmate $send_id has no worker assignment yet; run bin/fm-worker-lifecycle.sh reconcile --apply and retry so the message envelope can be generation-fenced" >&2
+    return 1
+  fi
+  python3 - "$STATE/$send_id.cloud-inbox" "$assignment" "$1" <<'PY' || return 1
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+inbox, assignment, text = sys.argv[1:]
+inbox = Path(inbox)
+claims = inbox / ".claims"
+claims.mkdir(parents=True, exist_ok=True, mode=0o700)
+os.chmod(inbox, 0o700)
+existing = [
+    int(path.name) for path in claims.iterdir()
+    if path.name.isdigit() and len(path.name) == 8
+]
+sequence = max(existing) + 1 if existing else 1
+for _attempt in range(10000):
+    try:
+        fd = os.open(str(claims / "{:08d}".format(sequence)), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        sequence += 1
+        continue
+    os.close(fd)
+    break
+else:
+    print("error: could not claim a cloud inbox sequence", file=sys.stderr)
+    raise SystemExit(1)
+message = {
+    "kind": "fm.secondmate-message/v1",
+    "text": text,
+    "nonce": "{}/{:08d}".format(assignment, sequence),
+}
+body = json.dumps(message, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+if len(body) > 256 * 1024:
+    print("error: message exceeds the 262144-byte compartment envelope cap", file=sys.stderr)
+    raise SystemExit(1)
+name = "{:08d}-{}.json".format(sequence, hashlib.sha256(body).hexdigest())
+fd, staging = tempfile.mkstemp(prefix=".fm-send-", dir=str(inbox))
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(body)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(staging, str(inbox / name))
+finally:
+    try:
+        os.unlink(staging)
+    except FileNotFoundError:
+        pass
+print(str(inbox / name))
+PY
+}
+
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
 # scope the codex `$<skill>` popup-settle below. A task selector carries
 # meta; an explicit backend-target escape hatch has none, so its harness is
@@ -248,6 +364,10 @@ if [ -n "$EXPECTED_ACCOUNT_PROFILE" ]; then
 fi
 
 if [ "${1:-}" = "--key" ]; then
+  if [ "$CLOUD_SECONDMATE_ROUTE" = 1 ]; then
+    echo "error: '$RAW_TARGET' is a cloud secondmate compartment with no local composer; --key cannot reach it - send text instead, which routes through the compartment inbox" >&2
+    exit 1
+  fi
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL" "$RECORDED_SCOPED_TARGET"; then
     echo "error: key '$2' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
@@ -263,6 +383,16 @@ else
   MESSAGE=$*
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     fm_message_mark_from_firstmate "$MESSAGE" MESSAGE
+  fi
+  if [ "$CLOUD_SECONDMATE_ROUTE" = 1 ]; then
+    # The marked text is enqueued durably; the compartment monitor relays it
+    # through the claim-exempt message-put and the guest polls it within its
+    # poll interval. No pane is typed into and no submit is verified here -
+    # the durable envelope plus the monitor's relay receipt are the delivery
+    # evidence for this lane.
+    ENVELOPE=$(fm_send_cloud_secondmate_enqueue "$MESSAGE") || exit 1
+    echo "queued for cloud secondmate '$RAW_TARGET': $ENVELOPE (relayed by fm-secondmate-cloud-monitor)"
+    exit 0
   fi
   persist_managed_steering() (  # <file-name> <header> <annotation> <message...>
     local file_name=$1 header=$2 annotation=$3
