@@ -87,6 +87,21 @@ wait_for() {  # <file> [tries]
   return 1
 }
 
+# <file> <count> [tries]: wait until <file> holds at least <count> lines. A
+# detached runner appends its execution marker after the command that started it
+# has already returned, so a caller that needs that append must wait for it
+# rather than assume a fixed settle window covered it on a loaded machine.
+wait_for_lines() {
+  local f=$1 want=$2 n=${3:-100} have
+  for _ in $(seq 1 "$n"); do
+    have=$(wc -l < "$f" 2>/dev/null | tr -d ' ')
+    case "$have" in ''|*[!0-9]*) have=0 ;; esac
+    [ "$have" -ge "$want" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 hold_source_lock() {  # <source-id> <ready-file> <release-file>
   local id=$1 ready=$2 release=$3 parent=$$
   FM_HOME="$TMP_ROOT/lock-helper-home" bash -c '
@@ -146,7 +161,10 @@ sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
 assert_contains "$sup" yes "a registered source needs supervision with no task metadata"
 
 pe "$H1" reconcile >/dev/null
-sleep 0.5
+# Reconcile's replacement runner is detached, so ownership is recorded after
+# reconcile has already returned. Wait for the claim itself: a duplicate start
+# only has an owner to lose to once that claim exists.
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/src-one.claim" || fail "reconcile never claimed the registered source"
 out=$(pe "$H1" start src-one)
 assert_contains "$out" "already owned" "a duplicate start loses instead of running a second child"
 
@@ -383,8 +401,16 @@ assert_contains "$out" "not-autohandled: publish-src" "failed publication did no
 assert_absent "$HPUBLISH/state/applied" "a result was applied before its wake was durably published"
 assert_absent "$HPUBLISH/state/procevent-inbox/publish-src.1.handled" "a result was acknowledged before its wake was durably published"
 rmdir "$HPUBLISH/state/.wake-queue"
+# This source's child returns instantly, so leaving it registered would have the
+# recovery reconcile below start a detached poll that races every assertion after
+# it for the source claim, the next sequence, and this home's applied record.
+# Re-announcement is proven from the durable inbox alone and needs no
+# registration, so retire it first - the same retire-before-reconcile discipline
+# the blocker-backed sources rely on - and prove no competing poll was started.
+pe_adapter "$HPUBLISH" retire publish-src >/dev/null
 out=$(pe_adapter "$HPUBLISH" reconcile)
 assert_contains "$out" "published=1" "the unpublished capture was not announced on later reconciliation"
+assert_contains "$out" "started=0" "reconcile started an always-ready poll that races the recovery assertions"
 assert_contains "$(wake_payloads "$HPUBLISH")" "procevent applying publish-src 1" "later reconciliation did not deliver the capture to a handler"
 FM_HOME="$HPUBLISH" FM_PROCEVENT_UNDER_TEST="$ROOT/bin/fm-procevent.sh" \
   "$ADAPTER_ROOT/bin/fm-procevent-applying.sh" autohandle publish-src 1 \
@@ -403,6 +429,7 @@ PE_TRACKED+=("$HSELF|self-src")
 pe_adapter "$HSELF" register selfann self-src -- /bin/echo "self announced" >/dev/null
 out=$(pe_adapter "$HSELF" start self-src 2>&1)
 assert_contains "$out" "autohandled: self-src" "the self-announcing adapter did not apply its own capture"
+assert_not_contains "$out" "not-autohandled" "the applied capture was still reported as left for the handler"
 assert_grep 'self-src 1' "$HSELF/state/applied" "the self-announcing capture was not applied"
 assert_present "$HSELF/state/procevent-inbox/self-src.1.handled" "the self-announcing application was not acknowledged"
 if [ -e "$HSELF/state/.wake-queue" ] && grep -q 'procevent selfann self-src 1' "$HSELF/state/.wake-queue"; then
@@ -795,8 +822,13 @@ sleep 0.5
 assert_absent "$ORPHAN_OVERLAP" "no replacement source starts while the crashed generation remains alive"
 case "$orphan_out" in
   *"started=1"*)
-    [ -e "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" ] \
+    # The replacement is detached: it records its own claim and execs its source
+    # after reconcile has already returned, so both effects must be waited for
+    # rather than snapshotted behind the settle window above.
+    wait_for "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" \
       || fail "a replacement runner started without recording its own claim"
+    wait_for_lines "$ORPHAN_LOG" 2 \
+      || fail "the replacement runner never started its source: $(cat "$ORPHAN_LOG")"
     [ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" = 2 ] \
       || fail "reconcile did not start exactly one replacement source: $(cat "$ORPHAN_LOG")"
     ;;

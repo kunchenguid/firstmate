@@ -25,8 +25,8 @@
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
 #   fm-decision-hold.sh answer <origin-id> <decision-key> --decision-file <path>
-#   fm-decision-hold.sh answers <origin-id> --source <provenance>   (keyed answers on stdin)
-#   fm-decision-hold.sh bind <source-id> <origin-id>
+#   fm-decision-hold.sh answers (<origin-id> | --any-origin) --source <provenance>   (keyed answers on stdin)
+#   fm-decision-hold.sh bind <source-id> (<origin-id> | --any-origin)
 #   fm-decision-hold.sh unbind <source-id>
 #   fm-decision-hold.sh binding <source-id>
 #   fm-decision-hold.sh decline <origin-id> <decision-key> --decision-file <path>
@@ -71,7 +71,15 @@
 # `<decision-key>\t<answer>\t<label>` lines on stdin, maps each key to this
 # origin's `<origin-id>-decision-<key>` hold, and closes it through the very same
 # `answer` path above, so every guard applies identically no matter which channel
-# the answer arrived on. `--source` is provenance text recorded in the durable
+# the answer arrived on. With `--any-origin` in place of an origin id, each key
+# is instead a FULL hold identity `<origin>-decision-<key>`, split at its first
+# `-decision-`, so one source can carry answers for holds across origins - the
+# aggregation a bearings board needs. An origin id that itself contains
+# `-decision-` is outside any-origin resolution; bind such a source to its one
+# origin instead. A key with no `-decision-` separator (a merge or dispatch
+# instruction, for example) is reported as `skipped:` and feeds nothing, which
+# keeps non-decision answers out of the hold ledger by construction.
+# `--source` is provenance text recorded in the durable
 # decision, never a behavior switch: this command has no per-channel branch and
 # no knowledge of chat, review decks, or any transport.
 #
@@ -87,14 +95,17 @@
 # skipping is never forced closure, and the command exits nonzero when any key
 # was skipped.
 #
-# `bind`, `unbind`, and `binding` record which origin a captured-answer SOURCE
-# belongs to, for any channel whose answers arrive detached from the origin (a
+# `bind`, `unbind`, and `binding` record whether a captured-answer SOURCE belongs
+# to one origin or uses the any-origin intake, for any channel whose answers arrive detached from the origin (a
 # process-event source id, for example). The binding is a private record under
 # `state/decision-bindings/`; a source with no binding feeds nothing, so this
 # whole path is opt-in per source and an unbound source behaves as if it did not
 # exist. `bind` deliberately does not require the source to exist yet, so a
 # channel can be bound BEFORE it is armed and never produce an answer that has
-# nowhere to go.
+# nowhere to go. `bind <source-id> --any-origin` records the any-origin marker
+# instead of one origin; `binding` prints that marker verbatim and `answers`
+# accepts it, so the process-event runner feeds an any-origin source through the
+# same seam with no runner change.
 #
 # `decline` is the unrouted path for a decision the captain answered with no
 # follow-up work. It takes no --routed-to task, records `(none)` as the routed
@@ -675,6 +686,11 @@ command_answer() {
 BINDING_DIR="$STATE/decision-bindings"
 BINDING_SCHEMA=fm-decision-binding.v1
 
+# The any-origin binding marker. Slug validation rejects parentheses, so no real
+# origin id can collide with it; `binding` prints it and `answers` accepts it,
+# which is what lets the runner's feed seam carry an any-origin source unchanged.
+BINDING_ANY='(any)'
+
 validate_source_id() {  # <source-id>
   validate_slug source-id "$1"
   [ "${#1}" -le 64 ] || fail "source-id must be at most 64 characters: $1"
@@ -694,9 +710,11 @@ read_binding() {  # <source-id>
   schema=$(sed -n 's/^schema=//p' "$path" | head -1)
   [ "$schema" = "$BINDING_SCHEMA" ] || fail "decision binding has an incompatible schema: $path"
   origin=$(sed -n 's/^origin=//p' "$path" | head -1)
-  case "$origin" in
-    ''|*[!A-Za-z0-9._-]*) fail "decision binding has an invalid origin id: $path" ;;
-  esac
+  if [ "$origin" != "$BINDING_ANY" ]; then
+    case "$origin" in
+      ''|*[!A-Za-z0-9._-]*) fail "decision binding has an invalid origin id: $path" ;;
+    esac
+  fi
   printf '%s\n' "$origin"
 }
 
@@ -704,7 +722,11 @@ command_bind() {
   local source=${1:-} origin=${2:-} dest tmp
   [ "$#" -eq 2 ] || { usage >&2; exit 2; }
   validate_source_id "$source"
-  validate_slug origin-id "$origin"
+  if [ "$origin" = --any-origin ]; then
+    origin=$BINDING_ANY
+  else
+    validate_slug origin-id "$origin"
+  fi
   (umask 077; mkdir -p "$BINDING_DIR") || fail "cannot create $BINDING_DIR"
   [ -d "$BINDING_DIR" ] && [ ! -L "$BINDING_DIR" ] || fail "decision binding dir is unsafe: $BINDING_DIR"
   dest=$(binding_path "$source")
@@ -749,7 +771,7 @@ sanitize_field() {  # <text>
 }
 
 command_answers() {
-  local origin=${1:-} source='' key answer label hold tmp err closed=0 skipped=0 reason
+  local origin=${1:-} source='' any=0 key answer label hold k_origin k_key tmp err closed=0 skipped=0 reason
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -759,7 +781,14 @@ command_answers() {
     esac
     shift
   done
-  validate_slug origin-id "$origin"
+  # `binding` prints the stored marker, so accept both the flag spelling a human
+  # types and the marker the runner pipes through unchanged.
+  if [ "$origin" = --any-origin ] || [ "$origin" = "$BINDING_ANY" ]; then
+    any=1
+    origin=$BINDING_ANY
+  else
+    validate_slug origin-id "$origin"
+  fi
   [ -n "$source" ] || fail "--source provenance is required so the durable decision records where the answer came from"
   source=$(sanitize_field "$source")
   require_tasks_axi
@@ -769,14 +798,36 @@ command_answers() {
   while IFS=$'\t' read -r key answer label; do
     [ -n "${key:-}" ] || continue
     case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
-    [ "${#key}" -le 64 ] || continue
+    if [ "$any" = 1 ]; then
+      [ "${#key}" -le 128 ] || continue
+    else
+      [ "${#key}" -le 64 ] || continue
+    fi
     answer=$(sanitize_field "${answer:-}")
     [ -n "$answer" ] || continue
     label=$(sanitize_field "${label:-}")
-    hold="$origin-decision-$key"
-    keyed_decision_text "$source" "$key" "$answer" "$label" > "$tmp" \
+    if [ "$any" = 1 ]; then
+      # Each key is a full hold identity; split at its FIRST -decision- so the
+      # origin half can never swallow a later separator inside the decision key.
+      case "$key" in
+        *-decision-*) : ;;
+        *)
+          printf 'skipped: %s (not a full hold identity)\n' "$key"
+          skipped=$((skipped + 1))
+          continue
+          ;;
+      esac
+      k_origin=${key%%-decision-*}
+      k_key=${key#*-decision-}
+      hold=$key
+    else
+      k_origin=$origin
+      k_key=$key
+      hold="$origin-decision-$key"
+    fi
+    keyed_decision_text "$source" "$k_key" "$answer" "$label" > "$tmp" \
       || fail "cannot stage the captain decision for $hold"
-    if "$0" answer "$origin" "$key" --decision-file "$tmp" >/dev/null 2>"$err"; then
+    if "$0" answer "$k_origin" "$k_key" --decision-file "$tmp" >/dev/null 2>"$err"; then
       printf 'closed: %s\n' "$hold"
       closed=$((closed + 1))
     else

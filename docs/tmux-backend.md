@@ -98,7 +98,6 @@ Without that baseline, an `unknown` verdict is preserved untouched, so a busy-lo
 ## Limits and regression entry points
 
 - tmux is the reference path and supports secondmate homes.
-- The OpenCode busy-queue exception is tmux-specific; Herdr retains its separately documented gap.
 
 ```sh
 tests/fm-backend-tmux-smoke.test.sh
