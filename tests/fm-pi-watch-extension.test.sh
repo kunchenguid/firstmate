@@ -409,6 +409,158 @@ EOF
   pass "Pi actionable close starts one successor before wake delivery settles"
 }
 
+test_pi_empty_rearm_resurface_stays_silent_across_many_cycles() {
+  local repo home plugin log stop confirm out status
+  repo="$TMP_ROOT/pi-empty-rearm-storm-root"
+  home="$TMP_ROOT/pi-empty-rearm-storm-home"
+  log="$TMP_ROOT/pi-empty-rearm-storm.log"
+  stop="$TMP_ROOT/pi-empty-rearm-storm.stop"
+  confirm="$TMP_ROOT/pi-empty-rearm-storm.confirm"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_CONFIRM_LOG:?}"
+  exit 0
+fi
+count=0
+[ -f "$FM_ARM_LOG" ] && count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+count=$((count + 1))
+printf 'arm=%s count=%s\n' "$$" "$count" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=empty-%s\n' "$$" "$count"
+if [ "$count" -lt 18 ]; then
+  printf 'check: rearm-resurface\n'
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_CONFIRM_LOG="$confirm" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompts = 0;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts += 1;
+    throw new Error(`empty rearm surfaced a follow-up: ${message}`);
+  },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-empty-rearm", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && rows().length < 18; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (rows().length !== 18) throw new Error(`expected 18 ordinary rearm cycles, got ${rows().length}: ${rows().join(" | ")}`);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts !== 0) throw new Error(`empty rearm emitted ${prompts} follow-ups`);
+if (!existsSync(process.env.FM_CONFIRM_LOG)) throw new Error("empty rearm handling was not silently confirmed");
+const confirmations = readFileSync(process.env.FM_CONFIRM_LOG, "utf8").trim().split("\n").filter(Boolean);
+if (confirmations.length < 1) throw new Error("empty rearm never confirmed a successor");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi empty rearm-resurface cycles must not create follow-up storms"
+  [ -z "$out" ] || fail "Pi empty rearm-resurface storm test printed output: $out"
+  pass "Pi empty rearm-resurface cycles stay silent while a successor remains owned"
+}
+
+test_pi_real_wake_reasons_still_deliver_once() {
+  local reason label repo home plugin log stop out status queue_row
+  for label in signal stale check heartbeat queued-rearm; do
+    repo="$TMP_ROOT/pi-real-$label-root"
+    home="$TMP_ROOT/pi-real-$label-home"
+    log="$TMP_ROOT/pi-real-$label.log"
+    stop="$TMP_ROOT/pi-real-$label.stop"
+    mkdir -p "$repo/bin" "$home/state" "$home/config"
+    install_pi_watch_extension_fixture "$repo"
+    plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+    case "$label" in
+      signal) reason='signal: worker.status' ;;
+      stale) reason='stale: worker-pane' ;;
+      check) reason='check: startup-network' ;;
+      heartbeat) reason='heartbeat' ;;
+      queued-rearm)
+        reason='check: rearm-resurface'
+        queue_row=$(printf '1700000000\t1\tcheck\tstartup-network\tcheck: startup-network')
+        printf '%s\n' "$queue_row" > "$home/state/.wake-queue"
+        ;;
+    esac
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  exit 0
+fi
+count=0
+[ -f "$FM_ARM_LOG" ] && count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+count=$((count + 1))
+printf 'arm=%s count=%s\n' "$$" "$count" >> "${FM_ARM_LOG:?}"
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf '%s\n' "${FM_REASON:?}"
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=real-%s\n' "$$" "$count"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_REASON="$reason" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-real", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && prompts.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 1) throw new Error(`expected one prompt, got ${prompts.length}: ${prompts.join(" | ")}`);
+if (!prompts[0].startsWith("\u2063FIRSTMATE_OP: v1 watcher: ")) throw new Error(`untyped prompt: ${prompts[0]}`);
+if (!prompts[0].includes(process.env.FM_REASON)) throw new Error(`prompt lost reason ${process.env.FM_REASON}: ${prompts[0]}`);
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+if (rows.length !== 2) throw new Error(`expected one successor, got ${rows.length}: ${rows.join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+    status=$?
+    expect_code 0 "$status" "Pi real $label wake reason must deliver exactly once"
+    [ -z "$out" ] || fail "Pi real-$label wake test printed output: $out"
+  done
+  pass "Pi real signal, stale, check, heartbeat, and queued recovery reasons still deliver once"
+}
+
 test_pi_hung_successor_falls_back_to_typed_wake() {
   local repo home plugin log out status
   repo="$TMP_ROOT/pi-hung-successor-root"
@@ -2155,6 +2307,8 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_empty_rearm_resurface_stays_silent_across_many_cycles
+test_pi_real_wake_reasons_still_deliver_once
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision

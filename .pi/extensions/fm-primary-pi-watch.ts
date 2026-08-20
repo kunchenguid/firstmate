@@ -31,7 +31,7 @@ type ArmResult = {
 type LockOwnership = "owned" | "missing" | "other";
 
 type CloseClassification = {
-  kind: "actionable" | "failure";
+  kind: "actionable" | "empty-rearm" | "failure";
   message: string;
 };
 
@@ -154,10 +154,27 @@ function actionableLine(output: string): string {
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
 }
 
+function wakeQueueHasRows(): boolean {
+  try {
+    return readFileSync(`${state}/.wake-queue`, "utf8").split(/\r?\n/).some((line) => {
+      if (!line) return false;
+      const fields = line.split("\t");
+      return fields.length >= 5 && /^(signal|stale|check|heartbeat)$/.test(fields[2] ?? "");
+    });
+  } catch {
+    return false;
+  }
+}
+
 function classifyClose(stdout: string, stderr: string, code: number | null, signal: NodeJS.Signals | null): CloseClassification {
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
-  if (reason) return { kind: "actionable", message: reason };
+  if (reason) {
+    if (reason === "check: rearm-resurface" && !wakeQueueHasRows()) {
+      return { kind: "empty-rearm", message: reason };
+    }
+    return { kind: "actionable", message: reason };
+  }
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -250,15 +267,7 @@ export default function (pi: ExtensionAPI) {
     );
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
     if (recovery) {
-      const result = spawnSync(
-        "bash",
-        [armScript, "--handling-delivered", recovery.generation, "--watcher-pid", recovery.watcherPid],
-        {
-          cwd: fmRoot,
-          env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
-        },
-      );
-      if (result.status !== 0) throw new Error("watcher recovery delivery could not be confirmed");
+      if (!confirmRecoveryHandling(recovery)) throw new Error("watcher recovery delivery could not be confirmed");
     }
   }
 
@@ -266,6 +275,18 @@ export default function (pi: ExtensionAPI) {
     void sendWake(owner, message).catch(() => {
       // Pi owns delivery errors; continuity restoration never waits on prompting.
     });
+  }
+
+  function confirmRecoveryHandling(recovery: { generation: string; watcherPid: string }): boolean {
+    const result = spawnSync(
+      "bash",
+      [armScript, "--handling-delivered", recovery.generation, "--watcher-pid", recovery.watcherPid],
+      {
+        cwd: fmRoot,
+        env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
+      },
+    );
+    return result.status === 0;
   }
 
   function retryDelay(attempt: number): number {
@@ -456,6 +477,31 @@ export default function (pi: ExtensionAPI) {
           if (!generationIsLive(owner)) return;
           const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
           await sendWake(owner, message, restoration.recovery);
+        })().catch(() => {
+        });
+        return;
+      }
+      if (classification.kind === "empty-rearm") {
+        owner.retryFailures = 0;
+        owner.restoring = true;
+        void (async () => {
+          const restoration = await restoreAfterActionableClose(owner, predecessor);
+          if (generationIsLive(owner)) owner.restoring = false;
+          if (!generationIsLive(owner)) return;
+          if (restoration.failure) {
+            await sendWake(owner, `${classification.message}\n\n${restoration.failure}`);
+            return;
+          }
+          if (wakeQueueHasRows()) {
+            await sendWake(owner, classification.message, restoration.recovery);
+            return;
+          }
+          if (restoration.recovery && !confirmRecoveryHandling(restoration.recovery)) {
+            surfaceFailure(
+              owner,
+              `watcher: FAILED - Pi extension could not silently confirm empty re-arm handling\n${classification.message}`,
+            );
+          }
         })().catch(() => {
         });
         return;

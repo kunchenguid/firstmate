@@ -1035,6 +1035,60 @@ EOF
   pass ".pi primary extension: no-tool and multi-tool runs each inject exactly one guard follow-up"
 }
 
+test_pi_extension_stays_silent_across_healthy_settled_turns() {
+  local repo home ext log out status
+  repo="$TMP_ROOT/pi-healthy-settled-root"
+  home="$TMP_ROOT/pi-healthy-settled-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  log="$TMP_ROOT/pi-healthy-settled-guard.log"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard\n' >> "${FM_GUARD_LOG:?}"
+exit 0
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let prompts = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  async sendUserMessage(message) {
+    prompts += 1;
+    throw new Error(`healthy turn emitted follow-up: ${message}`);
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const settled = handlers.get("agent_settled");
+if (!settled) throw new Error("agent_settled handler was not registered");
+for (let i = 0; i < 25; i += 1) {
+  await settled({ type: "agent_settled", turn: i }, {});
+}
+if (prompts !== 0) throw new Error(`healthy settled turns injected ${prompts} follow-ups`);
+const guardRuns = readFileSync(process.env.FM_GUARD_LOG, "utf8").trim().split("\n").length;
+if (guardRuns !== 25) throw new Error(`guard predicate ran ${guardRuns} times`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi healthy settled turns must remain silent"
+  [ -z "$out" ] || fail "Pi healthy settled-turn test printed output: $out"
+  pass ".pi primary extension: healthy settled turns stay silent across repeated assistant turns"
+}
+
 test_pi_extension_retries_after_followup_delivery_failure() {
   local repo home ext out status
   repo="$TMP_ROOT/pi-delivery-failure-root"
@@ -1646,6 +1700,7 @@ test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
+test_pi_extension_stays_silent_across_healthy_settled_turns
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
