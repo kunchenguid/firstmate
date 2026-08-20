@@ -193,7 +193,8 @@ function validTextArray(value: unknown): boolean {
 function validNonemptyTextArray(value: unknown): value is string[] {
   return Array.isArray(value) &&
     value.length > 0 &&
-    value.every((entry) => exactText(entry) !== null);
+    value.every((entry) => exactText(entry) !== null) &&
+    new Set(value).size === value.length;
 }
 
 function validOptionalTextArray(value: unknown): boolean {
@@ -472,12 +473,14 @@ function validEffectiveAvailability(
   value: unknown,
   requireAuditFields: boolean,
   unresolvedWindowIds: string[],
+  windowsById: ReadonlyMap<string, QuotaWindowView>,
 ): boolean {
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_AVAILABILITY_STATUSES);
   if (exactText(value.scope) === null || !status) return false;
   if (!validOptionalNumber(value.effectivePercentRemaining, (number) => number >= 0 && number <= 100)) return false;
   if (!validNonemptyTextArray(value.boundedBy)) return false;
+  if (value.boundedBy.some((id) => !windowsById.has(id))) return false;
   if (
     value.limitingWindowIds !== undefined &&
     !validNonemptyTextArray(value.limitingWindowIds)
@@ -487,11 +490,25 @@ function validEffectiveAvailability(
     value.limitingWindowIds.some((id) => !value.boundedBy.includes(id))
   ) return false;
   if (status === "known") {
-    if (value.effectivePercentRemaining === undefined || value.limitingWindowIds === undefined) return false;
+    if (
+      value.effectivePercentRemaining === undefined ||
+      !validNonemptyTextArray(value.limitingWindowIds)
+    ) return false;
+    const percentages = value.boundedBy.map((id) => windowsById.get(id)?.percentRemaining ?? null);
+    if (percentages.some((percentage) => percentage === null)) return false;
+    const effectivePercentRemaining = Math.min(...percentages as number[]);
+    const limitingWindowIds = value.boundedBy.filter(
+      (id) => windowsById.get(id)?.percentRemaining === effectivePercentRemaining,
+    );
+    if (
+      value.effectivePercentRemaining !== effectivePercentRemaining ||
+      value.limitingWindowIds.length !== limitingWindowIds.length ||
+      value.limitingWindowIds.some((id, index) => id !== limitingWindowIds[index])
+    ) return false;
   } else if (value.effectivePercentRemaining !== undefined || value.limitingWindowIds !== undefined) {
     return false;
   }
-  const allowedBlockers = [...value.boundedBy, ...unresolvedWindowIds];
+  const allowedBlockers = [...new Set([...value.boundedBy, ...unresolvedWindowIds])];
   return validEffectivePace(value.pace, requireAuditFields, value.boundedBy) &&
     validRunway(value.runway, value.boundedBy, allowedBlockers) &&
     validSelection(value.selection, allowedBlockers);
@@ -501,6 +518,7 @@ function validQuotaSemantics(
   value: unknown,
   requireDescription: boolean,
   requireAuditFields: boolean,
+  windows: QuotaWindowView[],
 ): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
@@ -512,12 +530,20 @@ function validQuotaSemantics(
   const unresolvedWindowIds = Array.isArray(value.unresolvedWindowIds)
     ? value.unresolvedWindowIds as string[]
     : [];
-  if (
-    !Array.isArray(value.effectiveAvailability) ||
-    !value.effectiveAvailability.every((entry) => (
-      validEffectiveAvailability(entry, requireAuditFields, unresolvedWindowIds)
-    ))
-  ) return false;
+  const windowsById = new Map(windows.map((window) => [window.id, window]));
+  if (windowsById.size !== windows.length) return false;
+  if (!Array.isArray(value.effectiveAvailability)) return false;
+  const scopes = new Set<string>();
+  for (const entry of value.effectiveAvailability) {
+    if (!isRecord(entry)) return false;
+    const scope = exactText(entry.scope);
+    if (
+      scope === null ||
+      scopes.has(scope) ||
+      !validEffectiveAvailability(entry, requireAuditFields, unresolvedWindowIds, windowsById)
+    ) return false;
+    scopes.add(scope);
+  }
   if (status === "known") {
     return value.effectiveAvailability.length > 0 && value.unresolvedWindowIds === undefined;
   }
@@ -553,8 +579,16 @@ function validProviderFields(
   }
   if (value.plan !== undefined && cleanText(value.plan, 48) === null) return false;
   if (!validProviderState(value.state, requireFullFields)) return false;
-  if (!Array.isArray(value.windows) || !value.windows.every((window) => parseWindow(window) !== null)) return false;
-  if (!validQuotaSemantics(value.quotaSemantics, requireFullFields, requireFullFields)) return false;
+  if (!Array.isArray(value.windows)) return false;
+  const parsedWindows = value.windows.map((window) => parseWindow(window));
+  if (parsedWindows.some((window) => window === null)) return false;
+  if (new Set(parsedWindows.map((window) => window?.id)).size !== parsedWindows.length) return false;
+  if (!validQuotaSemantics(
+    value.quotaSemantics,
+    requireFullFields,
+    requireFullFields,
+    parsedWindows as QuotaWindowView[],
+  )) return false;
   if (parseCredits(value.credits) === null) return false;
   if (parseAccount(value.account) === null || parseAttempts(value.attempts) === null) return false;
   return true;
@@ -668,13 +702,13 @@ export function selectActiveProviderQuota(
   ) {
     return { kind: "unverified", provider };
   }
-  if (
-    options.expectedSuccessfulSource !== undefined &&
-    !attempts?.some((attempt) => (
+  if (options.expectedSuccessfulSource !== undefined) {
+    if (!attempts?.some((attempt) => (
       attempt.source === options.expectedSuccessfulSource && attempt.status === "success"
-    ))
-  ) {
-    return { kind: "unverified", provider };
+    ))) {
+      return { kind: "unverified", provider };
+    }
+    if (options.expectedAccountId === undefined) return { kind: "unverified", provider };
   }
 
   return {

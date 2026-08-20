@@ -405,11 +405,15 @@ assert(
   }).kind === "malformed",
   "invalid report identity status was accepted as fresh",
 );
-const verifiedKimiSource = selectActiveProviderQuota(parsed, "kimi-coding", {
+const sourceOnlyKimi = selectActiveProviderQuota(parsed, "kimi-coding", {
   nowMs: now,
   expectedSuccessfulSource: "pi:kimi-coding",
 });
-assert(verifiedKimiSource.kind === "fresh", "successful Pi Kimi source was not correlated");
+assert(sourceOnlyKimi.kind === "unverified", "source-only Pi Kimi quota was accepted without identity");
+assert(
+  !formatQuotaStatus(sourceOnlyKimi, 200, now).includes("83%"),
+  "source-only Pi Kimi provenance exposed quota percentages",
+);
 const failedKimiSource = report(now);
 failedKimiSource.providers[2].attempts[0].status = "failed";
 const failedKimiParsed = parseQuotaAxiJson(JSON.stringify(failedKimiSource));
@@ -603,6 +607,53 @@ foreignRunwayWindow.providers[1].quotaSemantics.effectiveAvailability[0].runway.
 foreignRunwayWindow.providers[1].quotaSemantics.effectiveAvailability[0].runway.limitingWindowId = "not-a-bound";
 const invalidAvailabilityRelation = structuredClone(fullyPopulated);
 invalidAvailabilityRelation.providers[1].quotaSemantics.effectiveAvailability[0].status = "unknown";
+const duplicateWindowId = structuredClone(fullyPopulated);
+duplicateWindowId.providers[1].windows[1].id = "weekly";
+const foreignDerivedBound = structuredClone(fullyPopulated);
+foreignDerivedBound.providers[1].quotaSemantics.effectiveAvailability[0] = {
+  scope: "all_models",
+  status: "known",
+  effectivePercentRemaining: 1,
+  boundedBy: ["ghost"],
+  limitingWindowIds: ["ghost"],
+};
+const duplicateDerivedBound = structuredClone(fullyPopulated);
+duplicateDerivedBound.providers[1].quotaSemantics.effectiveAvailability[0] = {
+  scope: "all_models",
+  status: "known",
+  effectivePercentRemaining: 94,
+  boundedBy: ["weekly", "weekly"],
+  limitingWindowIds: ["weekly"],
+};
+const wrongEffectivePercentage = structuredClone(fullyPopulated);
+wrongEffectivePercentage.providers[1].quotaSemantics.effectiveAvailability[0] = {
+  scope: "all_models",
+  status: "known",
+  effectivePercentRemaining: 1,
+  boundedBy: ["weekly"],
+  limitingWindowIds: ["weekly"],
+};
+const wrongLimitingWindow = structuredClone(fullyPopulated);
+wrongLimitingWindow.providers[1].quotaSemantics.effectiveAvailability[0] = {
+  scope: "all_models",
+  status: "known",
+  effectivePercentRemaining: 94,
+  boundedBy: ["weekly", "spark-session"],
+  limitingWindowIds: ["spark-session"],
+};
+const missingTiedLimiter = structuredClone(fullyPopulated);
+missingTiedLimiter.providers[1].windows[1].percentRemaining = 94;
+missingTiedLimiter.providers[1].quotaSemantics.effectiveAvailability[0] = {
+  scope: "all_models",
+  status: "known",
+  effectivePercentRemaining: 94,
+  boundedBy: ["weekly", "spark-session"],
+  limitingWindowIds: ["weekly"],
+};
+const duplicateAvailabilityScope = structuredClone(fullyPopulated);
+duplicateAvailabilityScope.providers[1].quotaSemantics.effectiveAvailability.push(
+  structuredClone(duplicateAvailabilityScope.providers[1].quotaSemantics.effectiveAvailability[0]),
+);
 const invalidAuthStatus = structuredClone(fullyPopulated);
 invalidAuthStatus.providers[1].state.authStatus = "invalid";
 for (const [malformedReport, description] of [
@@ -632,6 +683,13 @@ for (const [malformedReport, description] of [
   [foreignPaceWindow, "pace window outside its bounds"],
   [foreignRunwayWindow, "runway window outside its bounds"],
   [invalidAvailabilityRelation, "invalid availability status relation"],
+  [duplicateWindowId, "duplicate window identifier"],
+  [foreignDerivedBound, "derived bound outside provider windows"],
+  [duplicateDerivedBound, "duplicate derived bound"],
+  [wrongEffectivePercentage, "effective percentage detached from its bounds"],
+  [wrongLimitingWindow, "limiter detached from the minimum bound"],
+  [missingTiedLimiter, "incomplete tied limiters"],
+  [duplicateAvailabilityScope, "duplicate availability scope"],
   [invalidAuthStatus, "invalid auth status"],
 ]) {
   const structurallyParsed = parseQuotaAxiJson(JSON.stringify(malformedReport));
