@@ -319,6 +319,73 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
+# Incident (2026-08-18, recurred 2026-08-20): the scaffold's stock `fm/<id>`
+# branch language overrode per-task instructions to use a different prefix in
+# a shared repo where another fleet already owns the `fm/*` namespace, and
+# crews pushed into that other fleet's namespace. config/branch-prefix (local,
+# gitignored) parameterizes it; absent resolves to the historical `fm/` default.
+test_branch_prefix_defaults_to_fm() {
+  local home id brief
+  home="$TMP_ROOT/branch-prefix-default-home"
+  mkdir -p "$home/data"
+  id="brief-branch-default-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b fm/$id" "$brief" \
+    "no-mistakes brief did not default the branch-creation step to the fm/ prefix"
+  pass "fm-brief.sh: an absent config/branch-prefix defaults every generated brief to the fm/ prefix"
+}
+
+test_branch_prefix_honors_configured_value() {
+  local home id brief
+  home="$TMP_ROOT/branch-prefix-configured-home"
+  mkdir -p "$home/data" "$home/config"
+  printf 'ryan-fm/\n' > "$home/config/branch-prefix"
+  id="brief-branch-configured-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b ryan-fm/$id" "$brief" \
+    "no-mistakes brief did not honor the configured branch prefix in its branch-creation step"
+  assert_no_grep "git checkout -b fm/$id" "$brief" \
+    "no-mistakes brief kept the stock fm/ prefix alongside the configured one"
+
+  id="brief-branch-configured-direct-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "push only your \`ryan-fm/$id\` branch" "$brief" \
+    "direct-PR brief's push rule did not honor the configured branch prefix"
+  assert_no_grep "\`fm/$id\` branch" "$brief" \
+    "direct-PR brief's push rule kept the stock fm/ prefix"
+
+  id="brief-branch-configured-local-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Work only on your \`ryan-fm/$id\` branch" "$brief" \
+    "local-only brief's rule did not honor the configured branch prefix"
+  assert_grep "committed on your branch \`ryan-fm/$id\`" "$brief" \
+    "local-only brief's definition of done did not honor the configured branch prefix"
+  assert_grep "ready in branch ryan-fm/$id" "$brief" \
+    "local-only brief's done-report instruction did not honor the configured branch prefix"
+  assert_no_grep "\`fm/$id\`" "$brief" \
+    "local-only brief kept the stock fm/ prefix alongside the configured one"
+  assert_no_grep "ready in branch fm/$id" "$brief" \
+    "local-only brief's done-report instruction kept the stock fm/ prefix alongside the configured one"
+  pass "fm-brief.sh: config/branch-prefix is honored consistently across the branch-creation step, push rule, and every mode's fm/<id> mention"
+}
+
+test_branch_prefix_blank_file_falls_back_to_default() {
+  local home id brief
+  home="$TMP_ROOT/branch-prefix-blank-home"
+  mkdir -p "$home/data" "$home/config"
+  printf '   \n' > "$home/config/branch-prefix"
+  id="brief-branch-blank-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b fm/$id" "$brief" \
+    "a whitespace-only config/branch-prefix should fall back to the fm/ default, not an empty prefix"
+  pass "fm-brief.sh: a blank config/branch-prefix falls back to the fm/ default instead of an empty prefix"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -720,6 +787,9 @@ test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
+test_branch_prefix_defaults_to_fm
+test_branch_prefix_honors_configured_value
+test_branch_prefix_blank_file_falls_back_to_default
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

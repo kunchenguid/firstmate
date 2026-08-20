@@ -117,6 +117,13 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Branch prefix (config/branch-prefix)
+
+Every generated ship brief's task-branch language - the branch-creation step, the push rule, and every mode's `<prefix><task-id>` mention in its definition of done - uses the prefix from the local, gitignored `config/branch-prefix` file, trimmed of surrounding whitespace.
+An absent file, or one that is empty or whitespace-only, resolves to the historical default `fm/`.
+This exists for a shared repo where another fleet already owns the `fm/*` namespace: per-task instructions can name a distinct prefix (e.g. `ryan-fm/`) and the scaffold now carries it consistently instead of the stock `fm/` language silently overriding it.
+`bin/fm-brief.sh` reads the file once per scaffold from the resolved `FM_HOME/config`, so it is not inherited: a secondmate home wanting a non-default prefix sets its own `config/branch-prefix` file.
+
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
 The optional local, gitignored `config/trace-context` presence flag enables default-off native W3C trace-context propagation.
