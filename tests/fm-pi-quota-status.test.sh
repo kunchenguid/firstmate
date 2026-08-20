@@ -264,6 +264,17 @@ const allProviders = [
       { id: "session", label: "session", kind: "session", percentRemaining: 72.5, resetsAt: reset(2 * 60 * 60 * 1000) },
       { id: "week", label: "week", kind: "weekly", percentRemaining: 61, resetsAt: reset(4 * 24 * 60 * 60 * 1000) },
     ],
+    quotaSemantics: {
+      status: "known",
+      description: "Claude account windows bound every model.",
+      effectiveAvailability: [{
+        scope: "all_models",
+        status: "known",
+        effectivePercentRemaining: 61,
+        boundedBy: ["session", "week"],
+        limitingWindowIds: ["week"],
+      }],
+    },
     credits: { unlimited: true, unit: "credits" },
     account: { accountId: "fixture-claude-account" },
   }),
@@ -284,12 +295,29 @@ const allProviders = [
   provider("copilot", "GitHub Copilot", "api", {
     plan: "business",
     windows: [],
+    quotaSemantics: {
+      status: "unknown",
+      description: "No quota windows are available.",
+      effectiveAvailability: [],
+      unresolvedWindowIds: [],
+    },
     account: { accountId: "fixture-copilot-account" },
   }),
   provider("grok", "Grok", "web", {
     windows: [
       { id: "credits", label: "credits", kind: "credits", percentRemaining: 48, resetText: "next month" },
     ],
+    quotaSemantics: {
+      status: "known",
+      description: "Grok shared credits bind every product.",
+      effectiveAvailability: [{
+        scope: "all_products",
+        status: "known",
+        effectivePercentRemaining: 48,
+        boundedBy: ["credits"],
+        limitingWindowIds: ["credits"],
+      }],
+    },
     account: { email: "fixture@example.invalid" },
     attempts: [
       { source: "web", status: "success" },
@@ -300,6 +328,17 @@ const allProviders = [
     windows: [
       { id: "weekly", label: "week", kind: "weekly", percentRemaining: 83, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
     ],
+    quotaSemantics: {
+      status: "known",
+      description: "Kimi account windows jointly bind every model.",
+      effectiveAvailability: [{
+        scope: "all_models",
+        status: "known",
+        effectivePercentRemaining: 83,
+        boundedBy: ["weekly"],
+        limitingWindowIds: ["weekly"],
+      }],
+    },
     attempts: [{ source: "pi:kimi-coding", status: "success" }],
   }),
 ];
@@ -458,6 +497,20 @@ function report(now = Date.now()) {
     ],
   };
 }
+function schema5CodexSemantics(value, full) {
+  const codex = value.providers.find((provider) => provider.provider === "codex");
+  return {
+    status: "known",
+    ...(full ? { description: "Codex base account windows bound every model." } : {}),
+    effectiveAvailability: [{
+      scope: "all_models",
+      status: "known",
+      effectivePercentRemaining: 94,
+      boundedBy: [codex.windows[0].id],
+      limitingWindowIds: [codex.windows[0].id],
+    }],
+  };
+}
 function schema5Default(value) {
   const current = structuredClone(value);
   current.schemaVersion = 5;
@@ -468,6 +521,8 @@ function schema5Default(value) {
     delete provider.state.refreshedAt;
     delete provider.state.sourcesTried;
   }
+  current.providers.find((provider) => provider.provider === "codex").quotaSemantics =
+    schema5CodexSemantics(current, false);
   return current;
 }
 
@@ -483,12 +538,29 @@ assert(currentCodex.kind === "fresh", `quota-axi schema-5 default provider was n
 assert(currentCodex.label === "Codex", "schema-5 default provider label was not supplied safely");
 const schema5Full = report(now);
 schema5Full.schemaVersion = 5;
+schema5Full.providers[1].quotaSemantics = schema5CodexSemantics(schema5Full, true);
 const parsedSchema5Full = parseQuotaAxiJson(JSON.stringify(schema5Full), { projection: "full" });
 assert(parsedSchema5Full, "quota-axi schema-5 full JSON was rejected");
 assert(
   selectActiveProviderQuota(parsedSchema5Full, "openai-codex", { nowMs: now }).kind === "fresh",
   "valid quota-axi schema-5 full provider was not fresh",
 );
+for (const [projection, schema5Report] of [
+  ["default", currentSchema],
+  ["full", schema5Full],
+]) {
+  const missingSemantics = structuredClone(schema5Report);
+  delete missingSemantics.providers[1].quotaSemantics;
+  const missingSemanticsParsed = parseQuotaAxiJson(
+    JSON.stringify(missingSemantics),
+    { projection },
+  );
+  assert(missingSemanticsParsed, `schema-5 ${projection} fixture without semantics did not parse structurally`);
+  assert(
+    selectActiveProviderQuota(missingSemanticsParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+    `schema-5 ${projection} output without quota semantics was accepted as fresh`,
+  );
+}
 for (const field of ["label", "source"]) {
   const missingFullField = structuredClone(schema5Full);
   delete missingFullField.providers[1][field];
@@ -647,6 +719,10 @@ for (const expectedAccountId of [null, "different-account"]) {
 }
 const explicitlyUnverifiedAccount = report(now);
 explicitlyUnverifiedAccount.schemaVersion = 5;
+explicitlyUnverifiedAccount.providers[1].quotaSemantics = schema5CodexSemantics(
+  explicitlyUnverifiedAccount,
+  false,
+);
 explicitlyUnverifiedAccount.providers[1].account.identityStatus = "unverified";
 const explicitlyUnverifiedParsed = parseQuotaAxiJson(JSON.stringify(explicitlyUnverifiedAccount));
 assert(explicitlyUnverifiedParsed, "explicitly-unverified account fixture did not parse structurally");
@@ -659,6 +735,10 @@ assert(
 );
 const invalidIdentityStatus = report(now);
 invalidIdentityStatus.schemaVersion = 5;
+invalidIdentityStatus.providers[1].quotaSemantics = schema5CodexSemantics(
+  invalidIdentityStatus,
+  false,
+);
 invalidIdentityStatus.providers[1].account.identityStatus = "maybe";
 const invalidIdentityParsed = parseQuotaAxiJson(JSON.stringify(invalidIdentityStatus));
 assert(invalidIdentityParsed, "invalid-identity fixture did not parse structurally");
@@ -1063,6 +1143,23 @@ falseExhaustedRunway.providers[1].quotaSemantics.effectiveAvailability[0].runway
 };
 const invalidSelectionRelation = structuredClone(schema5Populated);
 invalidSelectionRelation.providers[1].quotaSemantics.effectiveAvailability[0].selection.status = "unknown";
+const falseUnknownSelection = structuredClone(schema5Populated);
+falseUnknownSelection.providers[1].quotaSemantics.effectiveAvailability[0].selection = {
+  status: "unknown",
+  unmeasurableWindowIds: ["weekly"],
+};
+const falseUnknownAvailability = structuredClone(schema5Populated);
+Object.assign(falseUnknownAvailability.providers[1].quotaSemantics.effectiveAvailability[0], {
+  status: "unknown",
+  effectivePercentRemaining: undefined,
+  limitingWindowIds: undefined,
+});
+const falseUnknownSemantics = structuredClone(schema5Populated);
+falseUnknownSemantics.providers[1].quotaSemantics = {
+  status: "unknown",
+  description: "Known Codex bounds mislabeled unknown.",
+  effectiveAvailability: [],
+};
 const missingPaceBlockers = structuredClone(fullyPopulated);
 missingPaceBlockers.providers[1].quotaSemantics.effectiveAvailability[0].pace = { status: "unknown" };
 const missingRunwayBlockers = structuredClone(fullyPopulated);
@@ -1133,6 +1230,17 @@ duplicateAvailabilityScope.providers[1].quotaSemantics.effectiveAvailability.pus
 );
 const invalidAuthStatus = structuredClone(fullyPopulated);
 invalidAuthStatus.providers[1].state.authStatus = "invalid";
+const freshUnusableAuth = structuredClone(fullyPopulated);
+freshUnusableAuth.providers[1].state.authStatus = "unusable";
+const falseUnknownSelectionParsed = parseQuotaAxiJson(
+  JSON.stringify(falseUnknownSelection),
+  { projection: "full" },
+);
+assert(falseUnknownSelectionParsed, "false unknown-selection fixture did not parse structurally");
+assert(
+  selectActiveProviderQuota(falseUnknownSelectionParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "unknown selection despite measurable bounds was accepted as fresh",
+);
 for (const [malformedReport, description] of [
   [missingWindows, "missing windows"],
   [missingWindowKind, "missing window kind"],
@@ -1159,6 +1267,8 @@ for (const [malformedReport, description] of [
   [invalidRunwayRelation, "invalid runway status relation"],
   [falseExhaustedRunway, "exhausted runway with remaining quota"],
   [invalidSelectionRelation, "invalid selection status relation"],
+  [falseUnknownAvailability, "unknown availability despite measurable bounds"],
+  [falseUnknownSemantics, "unknown semantics despite recognized bounds"],
   [missingPaceBlockers, "unknown pace without blockers"],
   [missingRunwayBlockers, "unknown runway without blockers"],
   [missingSelectionBlockers, "unknown selection without blockers"],
@@ -1174,6 +1284,7 @@ for (const [malformedReport, description] of [
   [missingTiedLimiter, "incomplete tied limiters"],
   [duplicateAvailabilityScope, "duplicate availability scope"],
   [invalidAuthStatus, "invalid auth status"],
+  [freshUnusableAuth, "fresh state with unusable auth"],
 ]) {
   const structurallyParsed = parseQuotaAxiJson(JSON.stringify(malformedReport));
   assert(structurallyParsed, `${description} fixture should remain structurally parseable`);

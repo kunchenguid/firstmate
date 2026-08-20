@@ -51,6 +51,17 @@ process.stdout.write(JSON.stringify({
       { id: "model:spark:5h", label: "GPT-5.3-Codex-Spark session", kind: "model", percentRemaining: 100, resetsAt: reset(5 * 60 * 60 * 1000) },
       { id: "model:spark:7d", label: "GPT-5.3-Codex-Spark week", kind: "model", percentRemaining: 100, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
     ],
+    quotaSemantics: {
+      status: "known",
+      description: "Codex base account windows bound every model.",
+      effectiveAvailability: [{
+        scope: "all_models",
+        status: "known",
+        effectivePercentRemaining: 94,
+        boundedBy: ["weekly"],
+        limitingWindowIds: ["weekly"],
+      }],
+    },
     credits: { remaining: 0, unlimited: false, unit: "credits" },
     state: { status: "fresh", stale: false, refreshedAt: generatedAt, sourcesTried: ["live-fake"] },
   }],
