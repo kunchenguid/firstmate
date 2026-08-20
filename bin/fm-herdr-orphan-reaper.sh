@@ -23,7 +23,7 @@
 #   - Pane's tab label does not match fm-<id>.
 #   - Backend is not herdr.
 #   - --close requested without the session lock.
-#   - Workspace holds fm-* panes but state/ has no task records (wrong home).
+#   - Workspace holds fm-* panes but state/ is absent or unreadable (wrong home).
 #
 # Usage:
 #   bin/fm-herdr-orphan-reaper.sh [--report|--close]
@@ -156,22 +156,21 @@ closed_count=0
 refused_count=0
 
 # Self-check (recommendation 4): refuse to close when the workspace holds
-# fm-* panes but state/ holds no task records at all.
-# That combination means the reaper resolved the wrong home or is reading
-# an empty state directory, and every pane it can see belongs to someone else.
+# fm-* panes but state/ is absent or unreadable.
+# A home whose state directory is missing or not a readable directory is
+# genuinely misresolved - the reaper cannot trust its own resolution.
+# A home whose state/ exists and is readable but holds no *.meta files is
+# simply idle (all tasks completed and torn down); the per-pane safety
+# checks handle it correctly, and a loud refusal on every bootstrap of a
+# healthy idle home trains the reader to ignore the one refusal we least
+# want ignored.
 if [ "$MODE" = close ]; then
   fm_tab_count=$(printf '%s' "$TABS_JSON" | jq '[.result.tabs[]? | select(.label | startswith("fm-"))] | length' 2>/dev/null) || fm_tab_count=0
-  meta_count=0
-  if [ -d "$STATE" ]; then
-    for _meta in "$STATE"/*.meta; do
-      [ -f "$_meta" ] || continue
-      meta_count=$((meta_count + 1))
-      break
-    done
-  fi
-  if [ "$fm_tab_count" -gt 0 ] && [ "$meta_count" -eq 0 ]; then
-    echo "HERDR_ORPHAN_REAPER: refusing --close: workspace has $fm_tab_count fm-* pane(s) but state/ has no task records (wrong home or empty state)" >&2
-    exit 0
+  if [ "$fm_tab_count" -gt 0 ]; then
+    if [ ! -d "$STATE" ] || [ ! -r "$STATE" ]; then
+      echo "HERDR_ORPHAN_REAPER: refusing --close: workspace has $fm_tab_count fm-* pane(s) but state/ is absent or unreadable (wrong home)" >&2
+      exit 0
+    fi
   fi
 fi
 

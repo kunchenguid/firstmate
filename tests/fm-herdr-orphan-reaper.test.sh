@@ -539,7 +539,7 @@ seed_tab "wA" "wA:t1" "fm-orphan-no-lock"
 seed_pane "wA:p1" "wA:t1" "wA"
 seed_process_info "wA:p1" 99999
 # No lock file - deliberately omitted.
-# Seed a meta so the self-check does not interfere.
+# Seed a meta to give this home a realistic non-idle shape.
 seed_meta "some-task" "wA:pOther"
 
 out=$("$ROOT/bin/fm-herdr-orphan-reaper.sh" --close 2>&1)
@@ -550,30 +550,56 @@ assert_contains "$out" "refusing --close without session lock" "no-lock: should 
 [ ! -f "$HERDR_STATE/closed-panes.log" ] || fail "no-lock: close call was issued (closed-panes.log exists)"
 pass "--close refuses without session lock (gated on lock)"
 
-# --- Test 16: self-check refuses when fm-* panes but no meta -----------------
-# Change (4): workspace has fm-* panes but state/ has no task records.
-# The reaper resolved the wrong home or is reading an empty state directory.
+# --- Test 16: wrong home with absent state/ is caught by lock gate -----------
+# When state/ does not exist, the lock file is also absent, so the lock gate
+# refuses first.  The self-check behind it is defense-in-depth for the same
+# condition.  This test verifies that a misresolved home with no state
+# directory is always caught before anything destructive runs.
 PATH="$SAVE_PATH"
-setup_test "wrong-home"
+setup_test "wrong-home-no-state"
 seed_workspace "wA" "firstmate"
 seed_tab "wA" "wA:t1" "fm-someones-task"
 seed_pane "wA:p1" "wA:t1" "wA"
 seed_process_info "wA:p1" 99999
-# Seed a lock (so the lock gate passes).
-printf '%s\n' "$$" > "$TDIR/home/state/.lock"
-# Deliberately NO meta files - state/ has no task records at all.
+# Point state/ at a path that does not exist.
+FM_STATE_OVERRIDE="$TDIR/home/missing-state"
+export FM_STATE_OVERRIDE
 
 out=$("$ROOT/bin/fm-herdr-orphan-reaper.sh" --close 2>&1)
 rc=$?
-[ "$rc" -eq 0 ] || fail "wrong-home: expected exit 0, got $rc"
-assert_contains "$out" "refusing --close" "wrong-home: should refuse"
-assert_contains "$out" "no task records" "wrong-home: should mention no task records"
+[ "$rc" -eq 0 ] || fail "wrong-home-no-state: expected exit 0, got $rc"
+assert_contains "$out" "refusing --close" "wrong-home-no-state: should refuse"
 # The critical assertion: no close call was issued.
-[ ! -f "$HERDR_STATE/closed-panes.log" ] || fail "wrong-home: close call was issued (closed-panes.log exists)"
-pass "self-check refuses when fm-* panes exist but state/ has no task records"
+[ ! -f "$HERDR_STATE/closed-panes.log" ] || fail "wrong-home-no-state: close call was issued (closed-panes.log exists)"
+pass "wrong home with absent state/ is caught (lock gate refuses)"
+
+# --- Test 17: idle home does NOT refuse (valid state/, no meta) ---------------
+# An idle home has a valid, readable state/ directory but zero *.meta files.
+# This is the legitimate condition reported by the lucie secondmate.
+# The reaper must NOT produce a loud refusal on every bootstrap for this case.
+PATH="$SAVE_PATH"
+setup_test "idle-home"
+seed_workspace "wA" "firstmate"
+seed_tab "wA" "wA:t1" "fm-idle-home-pane"
+seed_pane "wA:p1" "wA:t1" "wA"
+seed_process_info "wA:p1" 99999
+# Seed a lock (so the lock gate passes).
+printf '%s\n' "$$" > "$TDIR/home/state/.lock"
+# Deliberately NO meta files - state/ exists and is readable, just empty of tasks.
+# This is the idle-home shape: valid state/, no *.meta, fm-* panes from the
+# secondmate's own supervisor pane.
+
+out=$("$ROOT/bin/fm-herdr-orphan-reaper.sh" --close 2>&1)
+rc=$?
+[ "$rc" -eq 0 ] || fail "idle-home: expected exit 0, got $rc"
+# The critical assertion: no "refusing" diagnostic was printed.
+case "$out" in
+  *"refusing --close"*) fail "idle-home: should NOT refuse for an idle home with valid state/" ;;
+esac
+pass "idle home (valid state/, no meta) does not trigger self-check refusal"
 
 
-# --- Test 17: --close refuses with a STALE session lock ----------------------
+# --- Test 18: --close refuses with a STALE session lock ----------------------
 PATH="$SAVE_PATH"
 setup_test "stale-lock"
 seed_workspace "wA" "firstmate"
@@ -582,7 +608,7 @@ seed_pane "wA:p1" "wA:t1" "wA"
 seed_process_info "wA:p1" 99999
 # Seed a STALE lock file. 99999 is our mocked dead PID.
 printf '99999\n' > "$TDIR/home/state/.lock"
-# Seed a meta so the self-check does not interfere.
+# Seed a meta to give this home a realistic non-idle shape.
 seed_meta "some-task" "wA:pOther"
 
 out=$("$ROOT/bin/fm-herdr-orphan-reaper.sh" --close 2>&1)
