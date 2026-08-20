@@ -849,6 +849,288 @@ documented_acceptance_contract() {
   pass "operator documentation enumerates malicious, concurrency, fault, force-push, and cloud-default acceptance"
 }
 
+image_attestation_guard_unit() {
+  python3 - "$ADAPTER" "$ROOT/docs/azure-crosscheck/model-image-closure.json" "$DOC" <<'PYIMG' || fail "model image harness attestation guard failed"
+import ast
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+adapter_path, closure_path, doc_path = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("azure_image_attestation", adapter_path)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+closure = json.loads(closure_path.read_text(encoding="utf-8"))
+PI = closure["piTarballSha256"]["value"]
+NODE = closure["nodeTarballSha256"]["value"]
+CODEX = closure["codexCliSha256"]["value"]
+SUBSCRIPTION = "5f0f9efb-723c-4bd8-a2e2-ba13625ea014"
+GALLERY = (
+    "/subscriptions/%s/resourceGroups/rg-firstmate-pilot-eastus-001/providers"
+    "/Microsoft.Compute/galleries/sig_fm7c799d/images/crosscheck-model"
+    "/versions/1.0.1787092687" % SUBSCRIPTION
+)
+MANAGED = (
+    "/subscriptions/%s/resourceGroups/rg-firstmate-pilot-eastus-001/providers"
+    "/Microsoft.Compute/images/img-fm7c799d-ccm-1.0.1787091895" % SUBSCRIPTION
+)
+CONFIG = {"subscription": SUBSCRIPTION, "model_image_id": GALLERY}
+
+requested = []
+
+
+def install_az(replies):
+    """Serve exact ARM GETs by resource id and record every URL requested."""
+
+    def call(config, args, *, check=True):
+        assert config is CONFIG, "the guard read a foreign config"
+        assert args[:3] == ["rest", "--method", "get"], args
+        assert check is False, "an image read must not raise past the guard"
+        url = args[args.index("--url") + 1]
+        requested.append(url)
+        for resource_id, reply in replies.items():
+            if url.startswith("https://management.azure.com" + resource_id + "?"):
+                return reply
+        raise AssertionError("guard requested an unexpected resource: " + url)
+
+    del requested[:]
+    m.az = call
+
+
+def gallery(tags, source=MANAGED):
+    body = {"id": GALLERY, "tags": tags}
+    if source is not None:
+        body["properties"] = {"storageProfile": {"source": {"id": source}}}
+    return (body, 0, "")
+
+
+def managed(tags):
+    return ({"id": MANAGED, "tags": tags}, 0, "")
+
+
+def refusal(harness, config=None):
+    try:
+        m.require_model_image_attests_harness(config or CONFIG, harness)
+    except m.AzureCrosscheckError as exc:
+        return str(exc)
+    raise AssertionError("the guard admitted harness %r" % harness)
+
+
+# (a) An image whose source managed image carries the pinned harness digests
+# admits, and the guard returns exactly what it proved. The digests are read
+# from the tracked closure, so a closure change cannot leave this green by
+# comparing a constant to itself.
+install_az({
+    GALLERY: gallery({"firstmate-role": "crosscheck-model-image"}),
+    MANAGED: managed({"pi-tarball-sha256": PI, "node-tarball-sha256": NODE}),
+})
+assert m.require_model_image_attests_harness(CONFIG, "pi") == {
+    "pi-tarball-sha256": PI,
+    "node-tarball-sha256": NODE,
+}
+# The source is followed exactly once even though two tags were resolved from
+# it, and each resource is read at its own api-version: a gallery image
+# version and a managed image are different resource types.
+assert len(requested) == 2, requested
+assert requested[0].endswith("?api-version=" + m.GALLERY_IMAGE_VERSION_API_VERSION)
+assert requested[1].endswith("?api-version=" + m.MANAGED_IMAGE_API_VERSION)
+
+# The same image admits from its own tags with no source read at all, which is
+# the shape a gallery promotion that copies artifactTags produces.
+install_az({GALLERY: gallery({"pi-tarball-sha256": PI, "node-tarball-sha256": NODE})})
+assert m.require_model_image_attests_harness(CONFIG, "pi")
+assert len(requested) == 1, requested
+
+# (b) ABSENCE refuses. This is the failure that burned VMs: an image built
+# before a harness was added carries no tag for it at all.
+install_az({
+    GALLERY: gallery({}, source=None),
+    MANAGED: managed({"pi-tarball-sha256": PI, "node-tarball-sha256": NODE}),
+})
+message = refusal("pi")
+assert "does not attest reviewer harness 'pi'" in message, message
+assert "attestation tag 'pi-tarball-sha256' is absent" in message, message
+assert "refusing before any model VM" in message, message
+assert GALLERY in message, message
+
+# Absence of the second bound tag refuses on its own: Pi runs under a
+# `#!/usr/bin/env node` entrypoint, so an image with pi and no pinned Node
+# dies at reviewer launch in the same paid VM.
+install_az({
+    GALLERY: gallery({}),
+    MANAGED: managed({"pi-tarball-sha256": PI}),
+})
+message = refusal("pi")
+assert "attestation tag 'node-tarball-sha256' is absent" in message, message
+assert MANAGED in message, message
+
+# (c) A MISMATCHED digest refuses with its own string naming which digest
+# disagreed, and carries both sides so an operator can tell which image booted.
+install_az({
+    GALLERY: gallery({}),
+    MANAGED: managed({"pi-tarball-sha256": "0" * 64, "node-tarball-sha256": NODE}),
+})
+message = refusal("pi")
+assert "disagrees with pinned closure 'piTarballSha256'" in message, message
+assert "'pi-tarball-sha256'" in message, message
+assert "0" * 64 in message and PI in message, message
+assert "absent" not in message, message
+# The node digest is the one that disagrees when it is the one substituted.
+install_az({
+    GALLERY: gallery({}),
+    MANAGED: managed({"pi-tarball-sha256": PI, "node-tarball-sha256": "1" * 64}),
+})
+message = refusal("pi")
+assert "disagrees with pinned closure 'nodeTarballSha256'" in message, message
+
+# (d) Fail closed. An unreadable image, an unreadable source, and an
+# unreadable tag object are all refusals, never admissions.
+install_az({GALLERY: (None, 3, "ERROR: (AuthorizationFailed) no read on the gallery")})
+message = refusal("pi")
+assert "model image is unreadable" in message, message
+assert "AuthorizationFailed" in message, message
+
+install_az({
+    GALLERY: gallery({}),
+    MANAGED: (None, 3, "ERROR: (ResourceNotFound) the managed image is gone"),
+})
+message = refusal("pi")
+assert "model image is unreadable" in message, message
+assert "source managed image" in message, message
+
+install_az({GALLERY: ("not-a-resource", 0, "")})
+assert "model image is unreadable" in refusal("pi")
+
+for hostile in ("pi-tarball-sha256", ["pi-tarball-sha256"], {"pi-tarball-sha256": 7}):
+    install_az({GALLERY: gallery(hostile, source=None)})
+    message = refusal("pi")
+    assert "exposes no readable tags" in message, (hostile, message)
+
+# A resource that reports no tags at all is not ambiguous - it attests
+# nothing - so it refuses as absence rather than as unreadability.
+install_az({GALLERY: ({"id": GALLERY}, 0, "")})
+assert "is absent" in refusal("pi")
+
+# (e) A harness other than the one attested refuses. The image below carries a
+# complete Pi closure and no codex digest at all.
+install_az({
+    GALLERY: gallery({}),
+    MANAGED: managed({"pi-tarball-sha256": PI, "node-tarball-sha256": NODE}),
+})
+message = refusal("codex")
+assert "does not attest reviewer harness 'codex'" in message, message
+assert "attestation tag 'codex-cli-sha256' is absent" in message, message
+# And the codex lane admits on an image that does attest it.
+install_az({
+    GALLERY: gallery({}),
+    MANAGED: managed({"codex-cli-sha256": CODEX}),
+})
+assert m.require_model_image_attests_harness(CONFIG, "codex") == {
+    "codex-cli-sha256": CODEX
+}
+
+# A harness with no attestation mapping refuses rather than defaulting to
+# admitted; the retired claude lane is exactly such a harness.
+for unknown in ("claude", "", "pi "):
+    install_az({})
+    message = refusal(unknown)
+    assert "no image attestation for reviewer harness" in message, message
+
+# An unreadable pinned closure refuses too: presence alone is not the check
+# this guard promises.
+install_az({
+    GALLERY: gallery({}),
+    MANAGED: managed({"pi-tarball-sha256": PI, "node-tarball-sha256": NODE}),
+})
+real_closure = m.MODEL_IMAGE_CLOSURE
+try:
+    m.MODEL_IMAGE_CLOSURE = closure_path.with_name("model-image-closure.absent.json")
+    assert "pinned image closure is unreadable" in refusal("pi")
+finally:
+    m.MODEL_IMAGE_CLOSURE = real_closure
+
+# CALL SITE. Everything above proves the function; this proves the lane calls
+# it, with the harness it is actually about to dispatch, before anything
+# billable exists. Read from CODE, so a comment describing the guard cannot
+# keep this green after the call is deleted.
+source = adapter_path.read_text(encoding="utf-8")
+lane = next(
+    node for node in ast.walk(ast.parse(source))
+    if isinstance(node, ast.FunctionDef) and node.name == "_run_azure_review_in_lane"
+)
+
+
+def call_lines(name):
+    return sorted(
+        node.lineno for node in ast.walk(lane)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == name
+    )
+
+
+guard = call_lines("require_model_image_attests_harness")
+assert len(guard) == 1, ("the lane does not call the image attestation guard", guard)
+for billable in (
+    "reserve_model_capacity",
+    "upload_blob",
+    "provision_model_vm",
+    "submit_model_run",
+):
+    spends = call_lines(billable)
+    assert spends, "the lane no longer calls " + billable
+    assert guard[0] < spends[0], (
+        "the image attestation guard runs after billable work: " + billable
+    )
+guard_call = next(
+    node for node in ast.walk(lane)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Name)
+    and node.func.id == "require_model_image_attests_harness"
+)
+# The dispatched harness, not a literal: an image checked against a hardcoded
+# harness would admit every other one.
+harness_argument = guard_call.args[1]
+assert isinstance(harness_argument, ast.Subscript), ast.dump(harness_argument)
+assert isinstance(harness_argument.value, ast.Name)
+assert harness_argument.value.id == "config"
+assert harness_argument.slice.value == "harness", ast.dump(harness_argument)
+
+# Every harness the adapter can dispatch must have an attestation, and the
+# table may not accumulate entries for harnesses no lane dispatches. A new
+# lane added without a tag is refused rather than admitted, so this is a
+# drift check and not the safety boundary.
+assert set(m.HARNESS_IMAGE_ATTESTATION) == set(m.HARNESS_PROVIDER_HOSTS), (
+    sorted(set(m.HARNESS_IMAGE_ATTESTATION) ^ set(m.HARNESS_PROVIDER_HOSTS))
+)
+
+# The declaration must keep writing the tags this guard now reads.
+declaration = json.loads(
+    (closure_path.parent / "model-image.json").read_text(encoding="utf-8")
+)
+artifact_tags = declaration["resources"][0]["properties"]["distribute"][0]["artifactTags"]
+for harness, bindings in m.HARNESS_IMAGE_ATTESTATION.items():
+    for tag, closure_key in bindings:
+        assert "'%s'" % tag in artifact_tags, (harness, tag)
+        assert "parameters('%s')" % closure_key in artifact_tags, (harness, closure_key)
+        assert closure_key in closure, closure_key
+
+# The owning doc must record that these tags are load-bearing and must not
+# still describe the read as missing.
+text = doc_path.read_text(encoding="utf-8")
+for phrase in (
+    "Admission refuses a model image that does not attest the reviewer harness",
+    "load-bearing",
+    "attests a harness, not that the harness runs",
+):
+    assert phrase in text, phrase
+assert "nothing reads those tags" not in text
+PYIMG
+  pass "admission refuses a model image that does not attest the dispatched reviewer harness"
+}
+
 shared_capacity_unit() {
   python3 - "$ROOT/bin/fm-crosscheck-azure.py" <<'PY' || fail "shared model capacity binding failed"
 import importlib.util,json,os,sys,tempfile,types
@@ -1267,5 +1549,6 @@ replay_positive_and_failure_unit
 shared_capacity_unit
 lane_queue_unit
 image_and_policy_contract
+image_attestation_guard_unit
 documented_acceptance_contract
 printf 'Azure Crosscheck tests passed.\n'

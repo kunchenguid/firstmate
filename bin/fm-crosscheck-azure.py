@@ -417,6 +417,160 @@ def verify_scope_and_foundation(config: dict[str, Any]) -> Any:
     return runner
 
 
+# The image build declaration (docs/azure-crosscheck/model-image.json) writes
+# one attestation tag per reviewer harness onto the managed image it
+# distributes, taking every digest from the pinned closure
+# (docs/azure-crosscheck/model-image-closure.json). Until this guard landed
+# nothing read those tags. PR #246 exists because of what that costs: every Pi
+# reviewer that reached a live model VM died on `pi: command not found`, one
+# paid VM per attempt, because admission never compared the harness it was
+# about to dispatch against what the configured image actually carries.
+#
+# `pi` binds two tags. Pi ships a `#!/usr/bin/env node` entrypoint and declares
+# `engines.node >= 22.19.0`, so an image carrying `pi` without the pinned Node
+# runtime fails the reviewer at launch for the same reason and at the same
+# cost as an image carrying no `pi` at all.
+MODEL_IMAGE_CLOSURE = ROOT / "docs" / "azure-crosscheck" / "model-image-closure.json"
+GALLERY_IMAGE_VERSION_API_VERSION = "2023-07-03"
+MANAGED_IMAGE_API_VERSION = "2024-03-01"
+HARNESS_IMAGE_ATTESTATION: dict[str, tuple[tuple[str, str], ...]] = {
+    "pi": (
+        ("pi-tarball-sha256", "piTarballSha256"),
+        ("node-tarball-sha256", "nodeTarballSha256"),
+    ),
+    "codex": (("codex-cli-sha256", "codexCliSha256"),),
+}
+
+
+def image_api_version(resource_id: str) -> str:
+    lowered = resource_id.lower()
+    if "/galleries/" in lowered and "/versions/" in lowered:
+        return GALLERY_IMAGE_VERSION_API_VERSION
+    return MANAGED_IMAGE_API_VERSION
+
+
+def read_image_tags(
+    config: dict[str, Any], resource_id: str, label: str
+) -> tuple[dict[str, str], str | None]:
+    """Read one image resource's tags and its source image, failing closed.
+
+    An unreadable resource and an unreadable tag object are both refusals:
+    this guard exists to stand between a wrong image and a paid VM, so it may
+    never admit on ambiguity. An ARM resource with no `tags` at all is not
+    ambiguous - it is an image that attests nothing - so that reads as an
+    empty tag set and the caller refuses it as absence.
+    """
+
+    url = (
+        "https://management.azure.com"
+        + resource_id
+        + "?api-version="
+        + image_api_version(resource_id)
+    )
+    resource, rc, detail = az(
+        config, ["rest", "--method", "get", "--url", url], check=False
+    )
+    if rc != 0 or not isinstance(resource, dict):
+        diagnostic = detail.strip()[-400:] if isinstance(detail, str) else ""
+        raise AzureCrosscheckError(
+            "Azure Crosscheck model image is unreadable, so its harness "
+            f"attestation is unproven: {label} {resource_id}: "
+            + (diagnostic or "no diagnostic")
+        )
+    tags = resource.get("tags")
+    if tags is None:
+        tags = {}
+    if not isinstance(tags, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in tags.items()
+    ):
+        raise AzureCrosscheckError(
+            "Azure Crosscheck model image exposes no readable tags, so its "
+            f"harness attestation is unproven: {label} {resource_id}"
+        )
+    properties = resource.get("properties")
+    storage = properties.get("storageProfile") if isinstance(properties, dict) else None
+    source = storage.get("source") if isinstance(storage, dict) else None
+    source_id = source.get("id") if isinstance(source, dict) else None
+    if not isinstance(source_id, str) or not source_id.startswith("/subscriptions/"):
+        source_id = None
+    return tags, source_id
+
+
+def pinned_image_closure() -> dict[str, Any]:
+    try:
+        value = json.loads(MODEL_IMAGE_CLOSURE.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AzureCrosscheckError(
+            "Azure Crosscheck pinned image closure is unreadable, so the model "
+            f"image attestation cannot be compared: {exc}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise AzureCrosscheckError(
+            "Azure Crosscheck pinned image closure is unreadable, so the model "
+            "image attestation cannot be compared: it is not an object"
+        )
+    return value
+
+
+def require_model_image_attests_harness(
+    config: dict[str, Any], harness: str
+) -> dict[str, str]:
+    """Refuse a model image that does not attest the harness about to run.
+
+    This is a preflight refusal and nothing more: when it passes, the lane
+    does exactly what it did before. It proves the configured image was built
+    from a declaration carrying that harness's pinned artifact, which is not
+    the same claim as the harness executing successfully inside the guest.
+    """
+
+    expected_tags = HARNESS_IMAGE_ATTESTATION.get(harness)
+    if not expected_tags:
+        raise AzureCrosscheckError(
+            "Azure Crosscheck has no image attestation for reviewer harness "
+            f"{harness!r}"
+        )
+    closure = pinned_image_closure()
+    image_id = config["model_image_id"]
+    tags, source_id = read_image_tags(config, image_id, "configured image")
+    source_tags: dict[str, str] | None = None
+    attested: dict[str, str] = {}
+    for tag, closure_key in expected_tags:
+        value = tags.get(tag)
+        if value is None and source_id is not None:
+            # The build writes its artifactTags onto the managed image it
+            # distributes; promoting that image into a gallery image version
+            # is a separate operator step that need not carry them, so the
+            # source is followed exactly once before absence is declared.
+            if source_tags is None:
+                source_tags, _ = read_image_tags(
+                    config, source_id, "source managed image"
+                )
+            value = source_tags.get(tag)
+        if value is None:
+            raise AzureCrosscheckError(
+                "Azure Crosscheck model image does not attest reviewer harness "
+                f"{harness!r}: attestation tag {tag!r} is absent from {image_id}"
+                + (f" and from its source {source_id}" if source_id else "")
+                + "; refusing before any model VM"
+            )
+        entry = closure.get(closure_key)
+        pinned = entry.get("value") if isinstance(entry, dict) else None
+        if not isinstance(pinned, str) or not pinned:
+            raise AzureCrosscheckError(
+                "Azure Crosscheck pinned image closure is unreadable, so the "
+                "model image attestation cannot be compared: "
+                f"{closure_key!r} is missing"
+            )
+        if value != pinned:
+            raise AzureCrosscheckError(
+                "Azure Crosscheck model image attestation "
+                f"{tag!r} disagrees with pinned closure {closure_key!r}: image "
+                f"{value} is not closure {pinned}; refusing before any model VM"
+            )
+        attested[tag] = value
+    return attested
+
+
 # R6 (docs/azure-requirements.md): these pins must equal the constants in
 # bin/fm-crosscheck.py; tests/fm-crosscheck-azure.test.sh enforces the
 # equality. The GLM lane binds exactly one Foundry resource + deployment and
@@ -1685,6 +1839,16 @@ def _run_azure_review_in_lane(
         # The lane locks are the queue authority; this live-VM read is only a
         # safety cap against leaked or foreign reviewer compute.
         raise core.CrosscheckToolError("Azure review admission reached its local model concurrency safety cap")
+    # Nothing billable exists yet: no capacity reservation, no staged object,
+    # no model VM. This is the last point at which a model image that does not
+    # attest the harness this review dispatches can be refused for free, so
+    # the attestation tags the build writes are read here. The refusal is a
+    # tool failure rather than a hard error because the same image can attest
+    # a different harness, which is exactly what reviewer rotation is for.
+    try:
+        require_model_image_attests_harness(azure, config["harness"])
+    except AzureCrosscheckError as exc:
+        raise core.CrosscheckToolError(str(exc)) from exc
     config["account_selector"] = {
         "codex": "CODEX_HOME",
         "pi": "PI_CODING_AGENT_DIR",
