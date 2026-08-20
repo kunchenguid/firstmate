@@ -6,6 +6,25 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Pi quota footer
+
+- Verified 2026-08-20 against Pi 0.84.2 through an isolated credential-free pseudo-terminal and fake `quota-axi --json` producer.
+- The live footer retained Pi's cwd, branch, context, and model rows plus an unrelated extension status while the auto-discovered Firstmate extension rendered all three fake Codex windows, resets, plan, and credits through `setStatus`.
+- Pi and `pi-signed` share this Pi extension surface; Claude, Grok, Codex, OpenCode, and Cursor do not discover `.pi/extensions`, so their primary UI paths remain unchanged.
+- tmux, Herdr, Zellij, Orca, and cmux only host the selected process and need no quota-specific branch, so the Pi-family behavior is backend-independent and non-Pi processes remain unchanged.
+
+```sh
+FM_PI_QUOTA_STATUS_LIVE=1 bin/fm-test-run.sh tests/fm-pi-quota-status-live-e2e.test.sh
+```
+
+```text
+ok - pi 0.84.2 auto-discovered complete quota through Pi setStatus while preserving the built-in footer and unrelated status
+# harness absent, not verified here: pi-signed
+ok - live Pi quota guard verified 1 installed Pi-family harness(es)
+```
+
+The portable `tests/fm-pi-quota-status.test.sh` regression owns schema parsing, active-provider selection, responsive formatting, subprocess bounds, unavailable outcomes, refresh, replacement, and cleanup without credentials.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
