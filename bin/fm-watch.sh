@@ -20,7 +20,9 @@
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
 #                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
+#                          re-surface cadence, never as a wedge - bounded by
+#                          FM_PAUSE_DEMAND_INSPECT_COUNT windows, past which the
+#                          recheck itself demands a deep inspection. Only when neither
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
@@ -170,6 +172,8 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # bounded cadence, while a live or ambiguously read agent still surfaces once.
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
+# FM_PAUSE_DEMAND_INSPECT_COUNT below bounds how many of those windows a single
+# unrefreshed declaration may absorb before the recheck demands a closer look.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
@@ -280,6 +284,23 @@ recorded_windows() {
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
+# Recheck windows an external wait may stand UNREFRESHED before its own recheck
+# demands a deep inspection (default 3). Such a wait is absorbed on the long
+# PAUSE_RESURFACE_SECS cadence precisely because it is expected to clear on its
+# own, so its recheck deliberately reads as routine. A wait that never clears is
+# the opposite case: the worker may be wedged behind the pause it wrote just
+# before wedging, a captain-held transfer may have outlived what it was recorded
+# for, or a pane-derived limit banner may never lift, and an identical routine
+# recheck every window is exactly how that stays invisible - the declaration
+# damps the wedge chain without ever bounding itself. Past this many windows the
+# recheck keeps its declared-wait identity (it is still not a wedge verdict) but
+# carries the same demand-deep-inspection marker wedge_timer_check uses above, so
+# the wake payload itself stops reading as routine. The measure is the
+# DECLARATION's own age, not a counter: any status append re-anchors it, so a
+# worker that keeps its declaration current - or re-declares the wait - is never
+# decorated, and no marker file has to be reset or torn down.
+FM_PAUSE_DEMAND_INSPECT_COUNT=${FM_PAUSE_DEMAND_INSPECT_COUNT:-3}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -366,7 +387,10 @@ busy_turn_over_age() {  # <task>
 # clock, a token counter) cannot keep resetting the cadence the way a hash-tied
 # timer would. A .paused-resurfaced-<key> throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
-# every poll. Advances the stale suppressor to <hash> and flags the key paused.
+# every poll. That same status-file age bounds the declaration itself: past
+# FM_PAUSE_DEMAND_INSPECT_COUNT windows without a refresh the recheck carries the
+# demand-deep-inspection marker, so a wait can damp a wedge chain without
+# silencing it forever. Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
@@ -381,6 +405,9 @@ handle_paused_stale() {  # <window> <task> <hash>
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
     reason="stale: $win (paused ${age}s, awaiting external - declared pause or a pane-derived Claude account-limit banner, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+    if [ "$age" -ge $(( PAUSE_RESURFACE_SECS * FM_PAUSE_DEMAND_INSPECT_COUNT )) ]; then
+      reason="stale: $win (paused ${age}s, awaiting external - declared wait unrefreshed for $FM_PAUSE_DEMAND_INSPECT_COUNT recheck windows, demand-deep-inspection: reconcile it against current state - do not re-absorb on the declaration alone)"
+    fi
     fm_wake_append stale "$win" "$reason" || exit 1
     date +%s > "$rf"
     wake "$reason"

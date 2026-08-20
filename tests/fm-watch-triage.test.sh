@@ -2005,6 +2005,69 @@ test_busy_declared_pause_damps_a_running_wedge_escalation_chain() {
   pass "a declared pause damps a wedge escalation chain already under way, while the same chain without a declaration escalates"
 }
 
+# --- an external wait must bound ITSELF ------------------------------------
+# Damping a wedge chain is safe only while the declaration stays current. A
+# worker that wedges just after writing paused: would otherwise silence the wedge
+# path forever behind an identical routine "confirm the wait still holds" recheck
+# every window, with nothing in the wake payload separating hour one from hour
+# twenty. FM_PAUSE_DEMAND_INSPECT_COUNT bounds that: a declaration still inside
+# the bound stays routine (A), and past it the recheck keeps its declared-wait
+# identity while demanding a deep inspection (B), so the bound measures the
+# declaration's own staleness rather than the wait's length.
+test_declared_pause_recheck_demands_inspection_once_unrefreshed() {
+  local dir state fakebin out capture_file window key pane_hash sig pid statusf
+  dir=$(make_case pause-unrefreshed-bound); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-long-wait"
+  statusf="$state/long-wait.status"
+  printf 'idle\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/long-wait.meta"
+  printf 'paused: holding for the upstream release\n' > "$statusf"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$(cat "$capture_file")")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # Phase A: the declaration is one recheck window old - past the cadence, well
+  # inside the bound. It re-surfaces as the routine recheck it has always been.
+  set_mtime $(( $(date +%s) - 150 )) "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-long-wait_status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream release' \
+    FM_PAUSE_RESURFACE_SECS=100 FM_PAUSE_DEMAND_INSPECT_COUNT=3 FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a declared pause past its cadence was never rechecked"; }
+  grep -F "awaiting external" "$out" >/dev/null || fail "the in-bound recheck was not labeled a declared-wait recheck: $(cat "$out")"
+  grep -F "demand-deep-inspection" "$out" >/dev/null && fail "an in-bound declared pause demanded a deep inspection: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the in-bound declared-pause recheck"
+
+  # Phase B: nothing about the worker changes - same idle pane, same declaration,
+  # same paused verdict - only the declaration's own age crosses the bound. Drop
+  # the throttle so this poll is the recheck that lands.
+  rm -f "$state/.paused-resurfaced-$key"
+  set_mtime $(( $(date +%s) - 350 )) "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-long-wait_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream release' \
+    FM_PAUSE_RESURFACE_SECS=100 FM_PAUSE_DEMAND_INSPECT_COUNT=3 FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an unrefreshed declared pause was never rechecked"; }
+  grep -F "demand-deep-inspection" "$out" >/dev/null || fail "an unrefreshed declared pause never demanded a deep inspection: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the bounded recheck lost its declared-wait identity: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "the bounded recheck was mislabeled a wedge verdict: $(cat "$out")"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the bounded recheck started the wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "the bounded recheck incremented the wedge counter"
+  pass "an unrefreshed external wait demands a deep inspection past its bound while staying a declared-wait recheck"
+}
+
 # Behavioral proof that the production default (no FM_BUSY_TURN_MAX_SECS override
 # anywhere in this env) is 3600s: a completed turn 5 minutes old must not start a
 # wedge timer, while one 66 minutes old must - bracketing the default around 3600
@@ -2586,6 +2649,7 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_busy_declared_pause_damps_a_running_wedge_escalation_chain
+test_declared_pause_recheck_demands_inspection_once_unrefreshed
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
