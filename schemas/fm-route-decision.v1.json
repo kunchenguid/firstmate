@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:firstmate:schema:fm-route-decision.v1",
+  "title": "Firstmate advisory model route decision",
+  "description": "A strict, advisory-only route decision. It records a logical route profile and never names credentials or a provider endpoint.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "route",
+    "provider",
+    "model",
+    "confidence",
+    "privacy",
+    "source",
+    "reason",
+    "override"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fm-route-decision.v1"
+    },
+    "route": {
+      "type": "string",
+      "enum": [
+        "local-qwen-14b",
+        "cloud-luna",
+        "cloud-opus-4-8",
+        "escalate"
+      ]
+    },
+    "provider": {
+      "type": "string",
+      "enum": [
+        "local",
+        "cloud",
+        "none"
+      ]
+    },
+    "model": {
+      "type": "string",
+      "enum": [
+        "qwen-14b",
+        "luna",
+        "opus-4-8",
+        "none"
+      ]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "privacy": {
+      "type": "string",
+      "enum": [
+        "local-only",
+        "cloud-allowed"
+      ]
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "advisory",
+        "explicit"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "override": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "route",
+            "reason"
+          ],
+          "properties": {
+            "route": {
+              "type": "string",
+              "enum": [
+                "local-qwen-14b",
+                "cloud-luna",
+                "cloud-opus-4-8",
+                "escalate"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "route": {
+            "const": "local-qwen-14b"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "const": "local"
+          },
+          "model": {
+            "const": "qwen-14b"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "route": {
+            "const": "cloud-luna"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "const": "cloud"
+          },
+          "model": {
+            "const": "luna"
+          },
+          "privacy": {
+            "const": "cloud-allowed"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "route": {
+            "const": "cloud-opus-4-8"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "const": "cloud"
+          },
+          "model": {
+            "const": "opus-4-8"
+          },
+          "privacy": {
+            "const": "cloud-allowed"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "route": {
+            "const": "escalate"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "const": "none"
+          },
+          "model": {
+            "const": "none"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "const": "advisory"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "override": {
+            "const": null
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "const": "explicit"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "override": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  ],
+  "x-route-profiles": {
+    "local-qwen-14b": {
+      "provider": "local",
+      "model": "qwen-14b",
+      "privacy": [
+        "local-only",
+        "cloud-allowed"
+      ],
+      "endpoint": "operator-configured"
+    },
+    "cloud-luna": {
+      "provider": "cloud",
+      "model": "luna",
+      "privacy": [
+        "cloud-allowed"
+      ]
+    },
+    "cloud-opus-4-8": {
+      "provider": "cloud",
+      "model": "opus-4-8",
+      "privacy": [
+        "cloud-allowed"
+      ]
+    },
+    "escalate": {
+      "provider": "none",
+      "model": "none",
+      "privacy": [
+        "local-only",
+        "cloud-allowed"
+      ]
+    }
+  }
+}

@@ -289,6 +289,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/model-routing.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/sessionstart-nudge.md",
       "audience": "operator-current"
     },
