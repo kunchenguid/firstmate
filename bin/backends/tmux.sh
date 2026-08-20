@@ -264,8 +264,9 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # session, and that session either holds the recorded window name - the renamed
 # but running agent, `unreadable`, because relaunching it could duplicate an
 # agent on a live worktree - or it does not, which proves the recorded endpoint
-# gone and reports `missing`. A fuzzy probe that also fails is `missing`, which
-# is what a prefix matching several live sessions still reports.
+# gone and reports `missing`. A fuzzy probe that also fails is `missing` only
+# on tmux's definitive missing-session response - which is also what a prefix
+# matching several live sessions emits - and `unreadable` on any other failure.
 #
 # The verdict combines two independent name sources rather than trusting either
 # alone. Either source naming a verified harness is enough for `alive`, because
@@ -291,11 +292,17 @@ fm_backend_tmux_agent_state() {  # <target>
   if [ "$inventory_status" -ne 0 ]; then
     case "$windows" in
       *"can't find session:"*)
-        if fuzzy_windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null) \
-          && printf '%s\n' "$fuzzy_windows" | grep -Fqx "$window"; then
-          printf 'unreadable'
+        if fuzzy_windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+          if printf '%s\n' "$fuzzy_windows" | grep -Fqx "$window"; then
+            printf 'unreadable'
+          else
+            printf 'missing'
+          fi
         else
-          printf 'missing'
+          case "$fuzzy_windows" in
+            *"can't find session:"*) printf 'missing' ;;
+            *) printf 'unreadable' ;;
+          esac
         fi
         ;;
       *"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")

@@ -78,9 +78,20 @@ case "\${1:-}" in
     exit 1
     ;;
   list-windows)
+    exact=0
+    for a in "\$@"; do case "\$a" in =*) exact=1 ;; esac; done
     case '$inventory' in
       missing) printf '%s\n' main ; exit 0 ;;
       missing-session) printf '%s\n' "can't find session: sess" >&2; exit 1 ;;
+      fuzzy-transient)
+        [ "\$exact" = 1 ] && { printf '%s\n' "can't find session: sess" >&2; exit 1; }
+        printf '%s\n' "lost server" >&2; exit 1 ;;
+      renamed-live)
+        [ "\$exact" = 1 ] && { printf '%s\n' "can't find session: sess" >&2; exit 1; }
+        printf '%s\n' fm-sm1; exit 0 ;;
+      renamed-gone)
+        [ "\$exact" = 1 ] && { printf '%s\n' "can't find session: sess" >&2; exit 1; }
+        printf '%s\n' other-win; exit 0 ;;
       missing-server) printf '%s\n' "no server running on /tmp/tmux-test/default" >&2; exit 1 ;;
       missing-socket) printf '%s\n' "error connecting to /tmp/tmux-test/default (No such file or directory)" >&2; exit 1 ;;
       present) printf '%s\n' fm-sm1 ; exit 0 ;;
@@ -127,10 +138,16 @@ test_tmux_agent_state_classifies() {
     [ "$out" = unreadable ] || fail "a $inventory inventory case should stay unreadable, got '$out'"
   done
 
-  for inventory in missing-session missing-server missing-socket; do
+  for inventory in missing-session missing-server missing-socket renamed-gone; do
     fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-$inventory" "$inventory")
     out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:fm-sm1' "$ROOT")
     [ "$out" = missing ] || fail "a confirmed $inventory inventory failure should classify as missing, got '$out'"
+  done
+
+  for inventory in fuzzy-transient renamed-live; do
+    fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-$inventory" "$inventory")
+    out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:fm-sm1' "$ROOT")
+    [ "$out" = unreadable ] || fail "a $inventory fuzzy re-probe should stay unreadable, got '$out'"
   done
 
   pass "fm_backend_tmux_agent_state: separates live, dead, missing, ambiguous, and unreadable"
