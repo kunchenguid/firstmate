@@ -838,8 +838,22 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
+# The launch path must be its own git worktree root and must NOT be the primary
+# checkout. Both comparisons test filesystem IDENTITY (device + inode, via test
+# -ef), never path text: bash's `pwd -P` resolves symlinks, `.`, `..`, and
+# trailing slashes, but it does NOT case-fold, so on a case-insensitive
+# filesystem (macOS's default) two spellings of ONE directory - the primary
+# checkout as `.../firstmate` and as `.../Firstmate` - survive canonicalization
+# as unequal text. A text compare then blesses the primary checkout as isolated
+# and the crewmate branches and commits in it (issue #2654). Identity refuses
+# every alias of one directory - case variants, symlinks, and firmlinks alike -
+# and accepts genuinely distinct worktrees reached under any spelling.
+#
+# The guard refuses whenever distinctness cannot be PROVEN. `test -ef` is also
+# false when a side cannot be stat'd, which would read as "distinct", so each
+# side is confirmed to be an existing directory before any identity test runs.
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real reason
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -850,8 +864,20 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
     wt_top_real=
   fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+  reason=
+  if [ -z "$wt_real" ] || [ ! -d "$wt_real" ]; then
+    reason="launch path did not resolve to a directory"
+  elif [ -z "$wt_top_real" ] || [ ! -d "$wt_top_real" ]; then
+    reason="launch path is not inside a git worktree"
+  elif [ -z "$proj_real" ] || [ ! -d "$proj_real" ]; then
+    reason="primary checkout did not resolve to a directory"
+  elif [ ! "$wt_real" -ef "$wt_top_real" ]; then
+    reason="launch path is not a worktree root"
+  elif [ "$wt_real" -ef "$proj_real" ]; then
+    reason="launch path is the primary checkout under another name"
+  fi
+  if [ -n "$reason" ]; then
+    echo "error: $source did not yield an isolated worktree ($reason; resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
 }

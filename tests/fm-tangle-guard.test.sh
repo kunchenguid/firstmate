@@ -214,6 +214,60 @@ test_spawn_isolation_abort() {
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 
+# The isolation guard must compare filesystem IDENTITY, not path text.
+#
+# bash's `pwd -P` already resolves symlinks, `.`, `..`, and trailing slashes, so
+# those aliases of the primary checkout are caught before the guard even runs.
+# Case is the one thing it does NOT fold: on a case-insensitive filesystem
+# (macOS's default) the primary checkout spelled `.../proj` and `.../PROJ`
+# canonicalizes to two unequal strings for ONE directory, so a text compare
+# called it "isolated" and let the crewmate branch and commit in the primary
+# checkout (issue #2654). Comparing device + inode closes that gap and, unlike
+# the text compare it replaces, accepts a genuinely distinct worktree reached
+# under any spelling.
+#
+# same_dir <a> <b> is true when both paths are the same directory on disk.
+same_dir() {
+  [ -d "$1" ] && [ -d "$2" ] && [ "$1" -ef "$2" ]
+}
+
+test_spawn_isolation_compares_identity_not_text() {
+  local home proj fakebin out status variant wt wt_variant
+  home="$TMP_ROOT/spawn-ident-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-ident-proj")
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-ident-fake")
+  variant="$TMP_ROOT/SPAWN-IDENT-PROJ"
+
+  if same_dir "$proj" "$variant"; then
+    # The project argument names the primary checkout in a different case while
+    # the pane never leaves it. Before the fix this spawn succeeded and recorded
+    # the primary checkout as the task's worktree.
+    out=$(run_spawn "$home" abort-casefold-gg7 "$variant" "$proj" "$fakebin"); status=$?
+    expect_code 1 "$status" "spawn must abort when the launch path is the primary checkout under another case"
+    assert_contains "$out" "did not yield an isolated worktree" \
+      "case-variant primary checkout was blessed as an isolated worktree"
+    assert_absent "$home/state/abort-casefold-gg7.meta" \
+      "aborted case-variant spawn must not record meta"
+  else
+    echo "# note: case-sensitive filesystem - case-variant alias case not applicable"
+  fi
+
+  # No false rejections: a genuinely distinct worktree stays acceptable even
+  # when the pane reports it under a case-variant spelling. The text compare
+  # this replaces rejected exactly this launch, because git reports the
+  # worktree root in its true case while the pane reported the variant.
+  wt="$TMP_ROOT/spawn-ident-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  wt_variant="$TMP_ROOT/SPAWN-IDENT-WT"
+  same_dir "$wt" "$wt_variant" || wt_variant="$wt"
+  out=$(run_spawn "$home" ok-ident-ii9 "$proj" "$wt_variant" "$fakebin"); status=$?
+  expect_code 0 "$status" "a genuinely distinct worktree must still be accepted"
+  assert_not_contains "$out" "did not yield an isolated worktree" \
+    "distinct worktree wrongly tripped the identity guard"
+  pass "fm-spawn: isolation guard compares filesystem identity, not path text"
+}
+
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
 
 # The prevention guard also depends on fm-spawn building robust tmux commands
@@ -306,4 +360,5 @@ test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
+test_spawn_isolation_compares_identity_not_text
 test_spawn_tmux_window_construction
