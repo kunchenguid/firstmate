@@ -279,7 +279,7 @@ cmd_handle_locked() {
     fm_remote_status_append "$id" "blocked [key=ida-submission-ambiguous]: iDA session identity is ambiguous; reconcile or adopt before any retry" || die "cannot append iDA blocker"
   elif jq -e '.terminal == false' "$result" >/dev/null; then
     if [ "$availability" = error ]; then
-      next_phase=result-unavailable
+      next_phase="result-unavailable"
       case "$REMOTE_STATE_PHASE" in submission-not-started|submission-unknown) next_phase=$REMOTE_STATE_PHASE ;; esac
       fm_remote_state_transition "$id" "$next_phase" unavailable "$class" provider-readback-unavailable rearming "$availability" "$artifact" "" "$patch" || die "cannot checkpoint unavailable iDA readback"
     else
