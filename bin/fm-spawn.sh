@@ -138,8 +138,9 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   A repository with no origin remote configured (a supported local-only
 #   project shape) skips the fetch and instead resets the clean worktree to the
-#   tip of the local default branch - the branch the primary checkout is on -
-#   which the shared object store keeps as the freshest base.
+#   tip of the local default branch - local main or master, else the branch the
+#   primary checkout is on - which the shared object store keeps as the
+#   freshest base.
 #   An unreachable origin, an unresolved remote or local default branch, or a
 #   non-clean worktree refuses the spawn rather than risking a PR based on
 #   stale history.
@@ -1733,15 +1734,25 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 # Resolve the LOCAL default branch for a task worktree whose repository has no
-# origin remote: the branch the primary checkout has checked out, read as the
-# shared common dir's HEAD symref. Echoes the branch name, or returns 1 when
-# the primary checkout is detached or the common dir cannot be resolved.
+# origin remote. Prefers default_branch (fm-ff-lib.sh), the repo-wide owner of
+# this question that fm-review-diff, fm-merge-local and fm-teardown also follow,
+# so a primary stranded on a feature branch still bases the task on the real
+# trunk instead of propagating that branch. Falls back to the primary
+# checkout's HEAD symref - read from the shared common dir - only when neither
+# main nor master exists, which keeps a repo on some other trunk spawnable.
+# Echoes a branch name that has a local head, or returns 1.
 spawn_local_default_branch() {  # <worktree>
   local worktree=$1 common ref
+  ref=$(default_branch "$worktree" 2>/dev/null) || ref=''
+  if [ -n "$ref" ] && git -C "$worktree" show-ref --verify --quiet "refs/heads/$ref"; then
+    printf '%s\n' "$ref"
+    return 0
+  fi
   common=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   [ -n "$common" ] || return 1
   ref=$(git --git-dir="$common" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   [ -n "$ref" ] || return 1
+  git -C "$worktree" show-ref --verify --quiet "refs/heads/$ref" || return 1
   printf '%s\n' "$ref"
 }
 

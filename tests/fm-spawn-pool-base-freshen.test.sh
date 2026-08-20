@@ -259,8 +259,8 @@ test_unresolved_remote_default_refuses_pool() {
 
 test_remoteless_pool_refreshes_to_local_default_tip() {
   local rec id out status current branch_head default
-  # trunk proves resolution follows the primary checkout's actual branch, not a
-  # hardcoded main/master guess.
+  # main goes through the shared default_branch convention; trunk has no
+  # main/master and so proves the primary-HEAD fallback keeps it spawnable.
   for default in main trunk; do
     id="pool-remoteless-$default-r6"
     rec=$(make_remoteless_case "remoteless-$default" "$id" "$default")
@@ -284,6 +284,38 @@ test_remoteless_pool_refreshes_to_local_default_tip() {
   pass "a remoteless pooled worktree refreshes to the local default branch tip before launch"
 }
 
+# A remoteless primary parked on a feature branch must NOT drag that branch's
+# commits into the task base: fm-review-diff, fm-merge-local and fm-teardown all
+# resolve the local default as main/master, so spawn has to agree with them.
+test_remoteless_off_default_primary_bases_on_local_default() {
+  local rec id out status default_tip wip_tip branch_head
+  id='pool-remoteless-off-default-r9'
+  rec=$(make_remoteless_case remoteless-off-default "$id")
+  read_case_record "$rec"
+  default_tip=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  git -C "$PROJECT_DIR" checkout --quiet -b wip
+  printf 'stray feature work\n' > "$PROJECT_DIR/wip-only.txt"
+  git -C "$PROJECT_DIR" add wip-only.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm wip-work
+  wip_tip=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a remoteless spawn should still launch while the primary sits on a feature branch"
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$branch_head" = "$default_tip" ] \
+    || fail "remoteless spawn did not base on the local $DEFAULT_BRANCH tip while the primary was on wip"
+  [ "$branch_head" != "$wip_tip" ] || fail "remoteless spawn based the task on the primary's feature branch"
+  [ ! -e "$POOL_DIR/wip-only.txt" ] || fail "remoteless spawn pulled the primary's feature-branch commits into the task base"
+  assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-local.txt" \
+    "remoteless spawn omitted content committed to the local default branch"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed off-default remoteless base: HEAD=%s %s=%s wip=%s\n' \
+      "$branch_head" "$DEFAULT_BRANCH" "$default_tip" "$wip_tip"
+  fi
+  pass "a remoteless primary parked on a feature branch still bases the task on the local default branch"
+}
+
 test_remoteless_dirty_pool_refuses_without_discarding_work() {
   local rec id out status before
   id='pool-remoteless-dirty-r7'
@@ -303,10 +335,12 @@ test_remoteless_dirty_pool_refuses_without_discarding_work() {
   pass "a dirty remoteless pooled worktree is refused without discarding its local work"
 }
 
+# No main/master to fall back on AND a detached primary: neither resolver can
+# name a local default, so the spawn must refuse rather than guess.
 test_remoteless_unresolved_local_default_refuses_pool() {
   local rec id out status before
   id='pool-remoteless-detached-r8'
-  rec=$(make_remoteless_case remoteless-detached "$id")
+  rec=$(make_remoteless_case remoteless-detached "$id" trunk)
   read_case_record "$rec"
   git -C "$PROJECT_DIR" checkout --quiet --detach
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
@@ -328,6 +362,7 @@ test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_remoteless_pool_refreshes_to_local_default_tip
+test_remoteless_off_default_primary_bases_on_local_default
 test_remoteless_dirty_pool_refuses_without_discarding_work
 test_remoteless_unresolved_local_default_refuses_pool
 
