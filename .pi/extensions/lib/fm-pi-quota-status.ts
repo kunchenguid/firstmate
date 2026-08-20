@@ -240,7 +240,99 @@ function validOptionalTextArray(value: unknown): boolean {
   return value === undefined || validTextArray(value);
 }
 
-function validPace(value: unknown): boolean {
+function roundedPace(value: number): number {
+  return Number(value.toFixed(4));
+}
+
+function equalPaceNumber(value: unknown, expected: number): boolean {
+  const parsed = finiteNumber(value);
+  return parsed !== null && Math.abs(parsed - expected) <= 0.0001;
+}
+
+function validKnownPaceAudit(
+  pace: Record<string, unknown>,
+  window: Record<string, unknown>,
+  generatedAtMs: number,
+  status: Exclude<(typeof QUOTA_PACE_STATUSES)[number], "unknown">,
+): boolean {
+  const percentRemaining = finiteNumber(window.percentRemaining);
+  if (percentRemaining === null) return false;
+  const percentUsed = window.percentUsed === undefined
+    ? 100 - percentRemaining
+    : finiteNumber(window.percentUsed);
+  if (percentUsed === null) return false;
+  const resetsAtMs = parseTimestamp(window.resetsAt);
+  if (resetsAtMs === null || resetsAtMs <= generatedAtMs) return false;
+
+  let cycleBasis: (typeof QUOTA_CYCLE_BASES)[number];
+  let cycleSeconds: number;
+  let startsAtMs: number;
+  if (window.startsAt !== undefined) {
+    const parsedStartsAtMs = parseTimestamp(window.startsAt);
+    if (
+      parsedStartsAtMs === null ||
+      parsedStartsAtMs > generatedAtMs ||
+      parsedStartsAtMs >= resetsAtMs
+    ) return false;
+    cycleBasis = "starts_at_resets_at";
+    startsAtMs = parsedStartsAtMs;
+    cycleSeconds = (resetsAtMs - startsAtMs) / 1000;
+  } else {
+    const parsedWindowSeconds = finiteNumber(window.windowSeconds);
+    if (parsedWindowSeconds === null || parsedWindowSeconds <= 0) return false;
+    cycleBasis = "window_seconds";
+    cycleSeconds = parsedWindowSeconds;
+    startsAtMs = resetsAtMs - cycleSeconds * 1000;
+    if (!Number.isFinite(startsAtMs) || startsAtMs > generatedAtMs) return false;
+  }
+
+  const remainingMs = resetsAtMs - generatedAtMs;
+  const elapsedMs = generatedAtMs - startsAtMs;
+  const timeRemainingPercent = 100 * remainingMs / (cycleSeconds * 1000);
+  const elapsedPercent = 100 * elapsedMs / (cycleSeconds * 1000);
+  const reservePercentPoints = percentRemaining - timeRemainingPercent;
+  const expectedStatus = Math.abs(reservePercentPoints) <= 1
+    ? "on_pace"
+    : reservePercentPoints < 0
+      ? "ahead"
+      : "behind";
+  if (
+    status !== expectedStatus ||
+    pace.cycleBasis !== cycleBasis ||
+    !equalPaceNumber(pace.cycleSeconds, cycleSeconds) ||
+    !equalPaceNumber(pace.timeRemainingPercent, roundedPace(timeRemainingPercent)) ||
+    !equalPaceNumber(pace.elapsedPercent, roundedPace(elapsedPercent)) ||
+    !equalPaceNumber(pace.reservePercentPoints, roundedPace(reservePercentPoints))
+  ) return false;
+
+  if (elapsedPercent > 0) {
+    if (!equalPaceNumber(pace.burnMultiple, roundedPace(percentUsed / elapsedPercent))) return false;
+  } else if (pace.burnMultiple !== undefined) {
+    return false;
+  }
+
+  const projectedExhaustedAtMs = percentUsed > 0 && elapsedMs > 0
+    ? generatedAtMs + percentRemaining / (percentUsed / elapsedMs)
+    : Number.NaN;
+  if (Number.isFinite(projectedExhaustedAtMs) && !Number.isNaN(new Date(projectedExhaustedAtMs).getTime())) {
+    const parsedProjectionMs = parseTimestamp(pace.projectedExhaustedAt);
+    const expectedConfidence = elapsedPercent < 10 ? "early" : "established";
+    return parsedProjectionMs !== null &&
+      Math.abs(parsedProjectionMs - projectedExhaustedAtMs) <= 1 &&
+      pace.projectionConfidence === expectedConfidence &&
+      pace.projectionBasis === "cycle_average";
+  }
+  return pace.projectedExhaustedAt === undefined &&
+    pace.projectionConfidence === undefined &&
+    pace.projectionBasis === undefined;
+}
+
+function validPace(
+  value: unknown,
+  window: Record<string, unknown>,
+  generatedAtMs: number,
+  requireAuditFields: boolean,
+): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_PACE_STATUSES);
@@ -275,10 +367,15 @@ function validPace(value: unknown): boolean {
       value.cycleSeconds,
     ].every((field) => field === undefined);
   }
-  return value.reason === undefined && (hasProjection || value.projectionBasis === undefined);
+  if (value.reason !== undefined) return false;
+  return !requireAuditFields || validKnownPaceAudit(value, window, generatedAtMs, status);
 }
 
-function parseWindow(value: unknown): QuotaWindowView | null {
+function parseWindow(
+  value: unknown,
+  generatedAtMs: number,
+  requirePaceAudit: boolean,
+): QuotaWindowView | null {
   if (!isRecord(value)) return null;
   const id = exactText(value.id);
   const label = cleanText(value.label);
@@ -299,7 +396,7 @@ function parseWindow(value: unknown): QuotaWindowView | null {
   if (!validOptionalNumber(value.windowSeconds, (number) => number > 0)) return null;
   if (!validOptionalNumber(value.spentUsd, (number) => number >= 0)) return null;
   if (!validOptionalNumber(value.limitUsd, (number) => number >= 0)) return null;
-  if (!validPace(value.pace)) return null;
+  if (!validPace(value.pace, value, generatedAtMs, requirePaceAudit)) return null;
 
   const percentRemaining = value.percentRemaining === undefined
     ? null
@@ -437,6 +534,7 @@ function validRunway(
   allowedBlockers: string[],
   windowsById: ReadonlyMap<string, QuotaWindowView>,
   generatedAtMs: number,
+  schemaVersion: number,
 ): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
@@ -499,10 +597,14 @@ function validRunway(
       Math.abs((projectedExhaustedAtMs - generatedAtMs) / 1000 - usableRunwaySeconds) <= 0.5 &&
       projectionConfidence !== null;
   }
-  return value.usableRunwaySeconds === undefined &&
-    value.projectedExhaustedAt === undefined &&
-    value.limitingWindowId === undefined &&
-    value.projectionBasis === undefined;
+  if (
+    value.usableRunwaySeconds !== undefined ||
+    value.projectedExhaustedAt !== undefined ||
+    value.limitingWindowId !== undefined
+  ) return false;
+  return schemaVersion === 3
+    ? projectionConfidence !== null && value.projectionBasis === "cycle_average"
+    : value.projectionBasis === undefined;
 }
 
 function validSelection(value: unknown, allowedBlockers: string[]): boolean {
@@ -530,6 +632,7 @@ function validEffectiveAvailability(
   unresolvedWindowIds: string[],
   windowsById: ReadonlyMap<string, QuotaWindowView>,
   generatedAtMs: number,
+  schemaVersion: number,
 ): boolean {
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_AVAILABILITY_STATUSES);
@@ -566,7 +669,14 @@ function validEffectiveAvailability(
   }
   const allowedBlockers = [...new Set([...value.boundedBy, ...unresolvedWindowIds])];
   return validEffectivePace(value.pace, requireAuditFields, value.boundedBy) &&
-    validRunway(value.runway, value.boundedBy, allowedBlockers, windowsById, generatedAtMs) &&
+    validRunway(
+      value.runway,
+      value.boundedBy,
+      allowedBlockers,
+      windowsById,
+      generatedAtMs,
+      schemaVersion,
+    ) &&
     validSelection(value.selection, allowedBlockers);
 }
 
@@ -576,6 +686,7 @@ function validQuotaSemantics(
   requireAuditFields: boolean,
   windows: QuotaWindowView[],
   generatedAtMs: number,
+  schemaVersion: number,
 ): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
@@ -603,6 +714,7 @@ function validQuotaSemantics(
         unresolvedWindowIds,
         windowsById,
         generatedAtMs,
+        schemaVersion,
       )
     ) return false;
     scopes.add(scope);
@@ -644,7 +756,9 @@ function validProviderFields(
   if (value.plan !== undefined && cleanText(value.plan, 48) === null) return false;
   if (!validProviderState(value.state, requireFullFields)) return false;
   if (!Array.isArray(value.windows)) return false;
-  const parsedWindows = value.windows.map((window) => parseWindow(window));
+  const parsedWindows = value.windows.map((window) => (
+    parseWindow(window, generatedAtMs, requireFullFields)
+  ));
   if (parsedWindows.some((window) => window === null)) return false;
   if (new Set(parsedWindows.map((window) => window?.id)).size !== parsedWindows.length) return false;
   const providerIsStale = isRecord(value.state) && value.state.stale === true;
@@ -654,6 +768,7 @@ function validProviderFields(
     requireFullFields && !providerIsStale,
     parsedWindows as QuotaWindowView[],
     generatedAtMs,
+    schemaVersion,
   )) return false;
   if (parseCredits(value.credits) === null) return false;
   if (parseAccount(value.account) === null || parseAttempts(value.attempts) === null) return false;
@@ -744,7 +859,11 @@ export function selectActiveProviderQuota(
   const windows: QuotaWindowView[] = [];
   let freshUntilMs = reportFreshUntilMs;
   for (const rawWindow of rawProvider.windows) {
-    const window = parseWindow(rawWindow);
+    const window = parseWindow(
+      rawWindow,
+      report.generatedAtMs,
+      report.schemaVersion === 3 || fullProjection,
+    );
     if (!window) return malformed(provider);
     windows.push(window);
     if (window.resetsAtMs !== null) {
@@ -804,6 +923,11 @@ function compactNumber(value: number): string {
 function compactPositiveNumber(value: number): string {
   const compact = compactNumber(value);
   return value > 0 && Number(compact) === 0 ? "<0.1" : compact;
+}
+
+function compactPercentage(value: number): string {
+  const compact = compactPositiveNumber(value);
+  return value < 100 && Number(compact) === 100 ? ">99.9" : compact;
 }
 
 function formatReset(window: QuotaWindowView, nowMs: number): string {
@@ -951,7 +1075,7 @@ export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.n
     for (const window of view.windows) {
       const remaining = window.percentRemaining === null
         ? "remaining unknown"
-        : `${compactPositiveNumber(window.percentRemaining)}% left`;
+        : `${compactPercentage(window.percentRemaining)}% left`;
       const part = `${window.label} ${remaining} ${formatReset(window, nowMs).replace(/^resets /, "reset ")}`;
       if (!append(part)) return narrow();
     }

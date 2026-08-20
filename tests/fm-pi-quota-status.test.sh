@@ -458,6 +458,17 @@ const tinyPercentView = selectActiveProviderQuota(tinyPercentParsed, "openai-cod
 const tinyPercentText = formatQuotaStatus(tinyPercentView, 400, now);
 assert(tinyPercentText.includes("week <0.1% left"), `small positive quota rounded to zero: ${tinyPercentText}`);
 assert(!tinyPercentText.includes("week 0% left"), `positive quota was presented as exhausted: ${tinyPercentText}`);
+const nearlyFullPercentReport = report(now);
+nearlyFullPercentReport.providers[1].windows[0].percentRemaining = 99.96;
+const nearlyFullPercentParsed = parseQuotaAxiJson(JSON.stringify(nearlyFullPercentReport));
+assert(nearlyFullPercentParsed, "nearly-full percentage fixture did not parse structurally");
+const nearlyFullPercentView = selectActiveProviderQuota(nearlyFullPercentParsed, "openai-codex", { nowMs: now });
+const nearlyFullPercentText = formatQuotaStatus(nearlyFullPercentView, 400, now);
+assert(
+  nearlyFullPercentText.includes("week >99.9% left"),
+  `non-full quota rounded to full: ${nearlyFullPercentText}`,
+);
+assert(!nearlyFullPercentText.includes("| week 100% left"), `non-full quota was presented as full: ${nearlyFullPercentText}`);
 const matchedAccount = selectActiveProviderQuota(parsed, "openai-codex", {
   nowMs: now,
   expectedAccountId: "fixture-codex-account",
@@ -634,14 +645,14 @@ Object.assign(populatedProvider.windows[0], {
   limitUsd: 1,
   pace: {
     status: "behind",
-    timeRemainingPercent: 85,
-    elapsedPercent: 15,
-    reservePercentPoints: 9,
-    burnMultiple: 0.4,
-    projectedExhaustedAt: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    timeRemainingPercent: 85.7143,
+    elapsedPercent: 14.2857,
+    reservePercentPoints: 8.2857,
+    burnMultiple: 0.42,
+    projectedExhaustedAt: new Date(now + 1_353_600_000).toISOString(),
     projectionConfidence: "established",
     projectionBasis: "cycle_average",
-    cycleBasis: "window_seconds",
+    cycleBasis: "starts_at_resets_at",
     cycleSeconds: 7 * 24 * 60 * 60,
   },
 });
@@ -657,11 +668,13 @@ populatedProvider.quotaSemantics = {
     pace: {
       status: "behind",
       behindWindowIds: ["weekly"],
-      worstReservePercentPoints: 9,
+      worstReservePercentPoints: 8.2857,
       worstReserveWindowId: "weekly",
     },
     runway: {
       status: "through_reset",
+      projectionConfidence: "established",
+      projectionBasis: "cycle_average",
     },
     selection: { status: "known", spendPriority: 1 },
   }],
@@ -670,7 +683,20 @@ const fullyPopulatedParsed = parseQuotaAxiJson(JSON.stringify(fullyPopulated));
 assert(fullyPopulatedParsed, "fully-populated quota fixture did not parse structurally");
 assert(
   selectActiveProviderQuota(fullyPopulatedParsed, "openai-codex", { nowMs: now }).kind === "fresh",
-  "valid through-reset runway without projection confidence was rejected",
+  "valid schema-3 through-reset runway was rejected",
+);
+const schema5ThroughResetWithoutConfidence = structuredClone(fullyPopulated);
+schema5ThroughResetWithoutConfidence.schemaVersion = 5;
+delete schema5ThroughResetWithoutConfidence.providers[1].quotaSemantics.effectiveAvailability[0].runway.projectionConfidence;
+delete schema5ThroughResetWithoutConfidence.providers[1].quotaSemantics.effectiveAvailability[0].runway.projectionBasis;
+const schema5ThroughResetParsed = parseQuotaAxiJson(
+  JSON.stringify(schema5ThroughResetWithoutConfidence),
+  { projection: "full" },
+);
+assert(schema5ThroughResetParsed, "schema-5 through-reset fixture did not parse structurally");
+assert(
+  selectActiveProviderQuota(schema5ThroughResetParsed, "openai-codex", { nowMs: now }).kind === "fresh",
+  "valid schema-5 through-reset runway without projection confidence was rejected",
 );
 const invalidPercentUsed = structuredClone(fullyPopulated);
 invalidPercentUsed.providers[1].windows[0].percentUsed = "invalid";
@@ -679,6 +705,10 @@ inconsistentPercentComplement.providers[1].windows[0].percentUsed = 100;
 inconsistentPercentComplement.providers[1].windows[0].percentRemaining = 100;
 const invalidPace = structuredClone(fullyPopulated);
 invalidPace.providers[1].windows[0].pace.reservePercentPoints = "invalid";
+const missingKnownPaceAudit = structuredClone(fullyPopulated);
+missingKnownPaceAudit.providers[1].windows[0].pace = { status: "behind" };
+const inconsistentKnownPace = structuredClone(fullyPopulated);
+inconsistentKnownPace.providers[1].windows[0].pace.reservePercentPoints = 7;
 const invalidQuotaSemantics = structuredClone(fullyPopulated);
 invalidQuotaSemantics.providers[1].quotaSemantics.effectiveAvailability[0].selection.spendPriority = "invalid";
 const invalidPaceRelation = structuredClone(fullyPopulated);
@@ -780,6 +810,8 @@ for (const [malformedReport, description] of [
   [invalidPercentUsed, "invalid percent used"],
   [inconsistentPercentComplement, "inconsistent percentage complement"],
   [invalidPace, "invalid pace field"],
+  [missingKnownPaceAudit, "known pace without audit fields"],
+  [inconsistentKnownPace, "known pace detached from its window"],
   [invalidQuotaSemantics, "invalid quota semantics field"],
   [invalidPaceRelation, "invalid pace status relation"],
   [invalidRunwayRelation, "invalid runway status relation"],
@@ -941,6 +973,39 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
   const writes = [];
   let footer = "BUILTIN_FOOTER";
   const theme = { fg(_color, text) { return `\x1b[2m${text}\x1b[0m`; } };
+  const providerCompositions = new Map();
+  function createProviderComposition(providerId) {
+    return {
+      id: providerId,
+      name: `Fixture ${providerId}`,
+      baseUrl: officialBaseUrls[providerId],
+      auth: {
+        oauth: {
+          isSubscription: providerOptions.subscription !== false,
+          async toAuth(credential) {
+            if (providerOptions.authNever) return new Promise(() => {});
+            if (providerOptions.authDelayMs) await sleep(providerOptions.authDelayMs);
+            if (providerOptions.authError || providerOptions.authUnavailable) {
+              throw new Error("fixture auth failure");
+            }
+            return {
+              apiKey: credential.access,
+              ...(providerOptions.authBaseUrl ? { baseUrl: providerOptions.authBaseUrl } : {}),
+            };
+          },
+        },
+      },
+      getModels() { return []; },
+      stream() {},
+      streamSimple() {},
+    };
+  }
+  function providerComposition(providerId) {
+    if (!providerCompositions.has(providerId)) {
+      providerCompositions.set(providerId, createProviderComposition(providerId));
+    }
+    return providerCompositions.get(providerId);
+  }
   const pi = {
     on(event, handler) {
       const list = handlers.get(event) ?? [];
@@ -955,25 +1020,8 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
     modelRegistry: providerOptions.legacyRegistry
       ? {}
       : {
-          getProvider() {
-            return {
-              auth: {
-                oauth: {
-                  isSubscription: providerOptions.subscription !== false,
-                  async toAuth(credential) {
-                    if (providerOptions.authNever) return new Promise(() => {});
-                    if (providerOptions.authDelayMs) await sleep(providerOptions.authDelayMs);
-                    if (providerOptions.authError || providerOptions.authUnavailable) {
-                      throw new Error("fixture auth failure");
-                    }
-                    return {
-                      apiKey: credential.access,
-                      ...(providerOptions.authBaseUrl ? { baseUrl: providerOptions.authBaseUrl } : {}),
-                    };
-                  },
-                },
-              },
-            };
+          getProvider(providerId) {
+            return providerComposition(providerId);
           },
           isUsingOAuth() {
             return providerOptions.authType !== "api_key";
@@ -1027,6 +1075,9 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
     widgets,
     writes,
     widgetText,
+    replaceProviderComposition(providerId = ctx.model?.provider) {
+      providerCompositions.set(providerId, createProviderComposition(providerId));
+    },
     get footer() { return footer; },
     get widgetWriteCount() { return writes.filter(([kind]) => kind === "widget").length; },
   };
@@ -1209,6 +1260,32 @@ await waitFor(
   "restored official endpoint did not refresh quota",
 );
 await liveReconfiguration.emit("session_shutdown", { reason: "quit" });
+
+const compositionOptions = {};
+const liveComposition = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
+  "openai-codex",
+  "tui",
+  compositionOptions,
+);
+await liveComposition.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => liveComposition.widgetText(400).includes("week 94% left"),
+  "provider-composition fixture did not publish official quota",
+);
+compositionOptions.authDelayMs = 150;
+liveComposition.replaceProviderComposition();
+const replacedCompositionText = liveComposition.widgetText(400);
+assert(
+  replacedCompositionText.includes("refreshing"),
+  `provider composition replacement was not detected: ${replacedCompositionText}`,
+);
+assert(!replacedCompositionText.includes("94%"), "provider composition replacement retained cached quota");
+await waitFor(
+  () => liveComposition.widgetText(400).includes("week 94% left"),
+  "provider composition replacement did not re-resolve quota",
+);
+await liveComposition.emit("session_shutdown", { reason: "quit" });
 
 const authTimeout = makePi(
   createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 40 }),
