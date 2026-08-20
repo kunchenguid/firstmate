@@ -129,7 +129,7 @@ fm_fork_gh_axi_scalar() { # current gh-axi API TOON envelope on stdin
   #     body: <value>
   #     truncated: false
   # Accept only that complete, untruncated one-body shape. A serializer change
-  # then stops refresh instead of turning envelope text into a PR disposition.
+  # then stops refresh instead of turning envelope text into an upstream review disposition.
   local line body='' body_count=0 root_count=0 truncated=''
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in

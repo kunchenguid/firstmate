@@ -713,7 +713,7 @@ test_health_attributes_pipeline_fixes_and_supports_disposition_transition() {
 }
 
 # Active manifest states are the three states produced by supported topic
-# flows: pending/open, rejected-but-retained/rejected, and private without a PR.
+# flows: pending/open, rejected-but-retained/rejected, and private without an upstream review.
 # The integration CLI and tracked-manifest health boundary both reject crossed
 # class/disposition pairs rather than preserving an impossible active state.
 test_manifest_class_disposition_pairs_are_enforced() {
