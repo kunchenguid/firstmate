@@ -28,6 +28,28 @@ TMP_ROOT=$(fm_test_tmproot fm-watch-arm-tests)
 SEED_PID=
 ARM_PID=
 
+watch_arm_case_cleanup() {
+  [ -n "${ARM_PID:-}" ] && kill "$ARM_PID" 2>/dev/null || true
+  [ -n "${SEED_PID:-}" ] && kill "$SEED_PID" 2>/dev/null || true
+  wait "${ARM_PID:-}" 2>/dev/null || true
+  wait "${SEED_PID:-}" 2>/dev/null || true
+  ARM_PID=
+  SEED_PID=
+}
+trap watch_arm_case_cleanup EXIT
+wait_for_marker_file() {  # <path> <pid> <label>
+  local path=$1 pid=$2 label=$3 i=0
+  while [ "$i" -lt 120 ]; do
+    [ -e "$path" ] && return 0
+    is_live_non_zombie "$pid" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  fail "$label"
+}
+
 # Start the real watcher as the singleton holder.
 start_seed_watcher() {  # <state> <fakebin> <watch-out>
   local state=$1 fakebin=$2 out=$3 i
@@ -59,6 +81,18 @@ start_attached_arm() {  # <state> <fakebin> <arm-out> <confirm-timeout>
   done
   grep -qF "watcher: attached pid=$SEED_PID" "$armout" \
     || fail "arm did not attach to the live watcher: $(cat "$armout")"
+}
+
+# Wait until the arm's own forked watcher child holds this home's singleton.
+wait_for_owned_watcher() {  # <state> <arm-pid> <message>
+  local state=$1 arm=$2 message=$3 i=0
+  while [ "$i" -lt 120 ]; do
+    [ -s "$state/.watch.lock/pid" ] && [ -e "$state/.last-watcher-beat" ] && return 0
+    is_live_non_zombie "$arm" || fail "$message (arm exited early)"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "$message"
 }
 
 sha256_file() {  # <path>
@@ -797,17 +831,336 @@ test_downtime_marker_does_not_follow_symlink() {
   pass "watch-arm: downtime marker publication does not follow symlinks"
 }
 
-test_attached_arm_reports_the_delivered_wake
-test_attached_arm_reports_the_delivered_wake_after_drain
-test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
-test_rearm_resurfaces_durable_queue_and_remote_open_decision
-test_marker_publish_failure_retains_recovery_evidence
-test_delivery_gap_wake_is_recovered_once
-test_interrupted_handling_is_redrained_on_rearm
-test_malformed_marker_is_quarantined_once
-test_recovery_consumption_serializes_queue_publication
-test_restart_preserves_recovery_across_reused_pid_lock
-test_markerless_legacy_queue_is_recovered_on_arm
-test_handling_window_close_keeps_the_acknowledgement_valid
-test_moved_generation_acknowledgement_is_self_healing
-test_downtime_marker_does_not_follow_symlink
+test_arm_parks_while_away_mode_owns_supervision() {
+  local dir state fakebin out armout lock_pid arm_pid i status
+  dir=$(make_case afk-park)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  start_seed_watcher "$state" "$fakebin" "$out"
+  lock_pid=$(cat "$state/.watch.lock/pid")
+  date '+%s' > "$state/.afk"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_AFK_POLL=0.1 \
+    "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  ARM_PID=$!
+  arm_pid=$ARM_PID
+  sleep 0.5
+
+  is_live_non_zombie "$ARM_PID" || fail "away-mode arm completed instead of parking"
+  [ ! -s "$armout" ] || fail "parked arm emitted output: $(cat "$armout")"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$lock_pid" ] \
+    || fail "away-mode arm took the watcher singleton away from the daemon's watcher"
+  kill -0 "$lock_pid" 2>/dev/null \
+    || fail "away-mode arm killed the daemon's watcher child"
+
+  rm -f "$state/.afk"
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -qE '^watcher: started|check: rearm-resurface' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qE '^watcher: started|check: rearm-resurface' "$armout" \
+    || fail "parked arm did not resume after away mode ended: $(cat "$armout")"
+
+  if grep -qF 'check: rearm-resurface' "$armout"; then
+    # --restart's TERM to the daemon's watcher always leaves #2065 recovery state
+    # behind, and the same tracked process's fresh cycle can resurface that
+    # recovery wake before this poll ever observes an intermediate
+    # "watcher: started" line - a legitimate race between this test's grep and the
+    # arm's own confirmation loop, not a missed resume. Either way the SAME
+    # tracked pid must be the one that closed the cycle, and it must close
+    # cleanly rather than crash.
+    [ "$ARM_PID" = "$arm_pid" ] || fail "parked arm resumed as a different tracked process"
+    wait "$arm_pid"
+    status=$?
+    [ "$status" -eq 0 ] \
+      || fail "parked arm's resurfaced recovery cycle exited $status instead of delivering cleanly"
+  else
+    if [ "$ARM_PID" != "$arm_pid" ] || ! is_live_non_zombie "$arm_pid"; then
+      fail "parked arm did not resume from the same tracked process"
+    fi
+    kill "$ARM_PID" 2>/dev/null || true
+    wait "$ARM_PID" 2>/dev/null || true
+  fi
+
+  kill "$SEED_PID" 2>/dev/null || true
+  wait "$SEED_PID" 2>/dev/null || true
+  pass "watch-arm: away mode parks the tracked arm and it resumes after return"
+}
+
+test_restart_rechecks_away_mode_before_signaling() {
+  local dir state fakebin out armout lock_pid ready release once real_cat status i
+  dir=$(make_case afk-restart-before-signal)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  ready="$dir/cat.ready"
+  release="$dir/cat.release"
+  once="$dir/cat.once"
+  real_cat=$(command -v cat)
+  start_seed_watcher "$state" "$fakebin" "$out"
+  lock_pid=$SEED_PID
+  printf '%s\n' "$real_cat" > "$fakebin/real-cat-path"
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "${FM_RACE_LOCK_PID:-}" ] && [ ! -e "${FM_RACE_ONCE:-/dev/null}" ]; then
+  : > "$FM_RACE_ONCE"
+  : > "$FM_RACE_READY"
+  while [ ! -e "$FM_RACE_RELEASE" ]; do sleep 0.02; done
+fi
+IFS= read -r real_cat < "${0%/*}/real-cat-path"
+exec "${FM_REAL_CAT:-$real_cat}" "$@"
+SH
+  chmod +x "$fakebin/cat"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_REAL_CAT="$real_cat" \
+    FM_RACE_LOCK_PID="$state/.watch.lock/pid" FM_RACE_ONCE="$once" \
+    FM_RACE_READY="$ready" FM_RACE_RELEASE="$release" \
+    "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  ARM_PID=$!
+  wait_for_marker_file "$ready" "$ARM_PID" "restart did not reach the lock-holder read boundary"
+  date '+%s' > "$state/.afk"
+  : > "$release"
+  i=0
+  while [ "$i" -lt 40 ] && is_live_non_zombie "$ARM_PID"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+
+  is_live_non_zombie "$ARM_PID" || fail "restart completed instead of parking before signaling"
+  [ ! -s "$armout" ] || fail "restart emitted output while parked: $(cat "$armout")"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$lock_pid" ] \
+    || fail "restart replaced the watcher lock after away mode began"
+  kill -0 "$lock_pid" 2>/dev/null \
+    || fail "restart killed the watcher after away mode began"
+
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 30
+  status=$?
+  expect_code 143 "$status" "TERM must stop a parked arm promptly"
+  kill "$lock_pid" 2>/dev/null || true
+  wait "$lock_pid" 2>/dev/null || true
+  pass "watch-arm: restart parks before signaling and remains interruptible"
+}
+
+test_restart_rechecks_away_mode_before_fork() {
+  local dir state fakebin out armout old_pid daemon_pid ready release once real_mktemp i
+  dir=$(make_case afk-restart-before-fork)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  ready="$dir/mktemp.ready"
+  release="$dir/mktemp.release"
+  once="$dir/mktemp.once"
+  real_mktemp=$(command -v mktemp)
+  start_seed_watcher "$state" "$fakebin" "$out"
+  old_pid=$SEED_PID
+  printf '%s\n' "$real_mktemp" > "$fakebin/real-mktemp-path"
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */.watch-arm-output.*)
+    if [ ! -e "${FM_RACE_ONCE:-/dev/null}" ]; then
+      : > "$FM_RACE_ONCE"
+      : > "$FM_RACE_READY"
+      while [ ! -e "$FM_RACE_RELEASE" ]; do sleep 0.02; done
+    fi
+    ;;
+esac
+IFS= read -r real_mktemp < "${0%/*}/real-mktemp-path"
+exec "${FM_REAL_MKTEMP:-$real_mktemp}" "$@"
+SH
+  chmod +x "$fakebin/mktemp"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_REAL_MKTEMP="$real_mktemp" \
+    FM_RACE_ONCE="$once" FM_RACE_READY="$ready" FM_RACE_RELEASE="$release" \
+    "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  ARM_PID=$!
+  wait_for_marker_file "$ready" "$ARM_PID" "restart did not reach the pre-fork boundary"
+  wait "$old_pid" 2>/dev/null || true
+  start_seed_watcher "$state" "$fakebin" "$out"
+  daemon_pid=$SEED_PID
+  date '+%s' > "$state/.afk"
+  : > "$release"
+  i=0
+  while [ "$i" -lt 20 ]; do
+    is_live_non_zombie "$ARM_PID" || fail "restart completed instead of parking before fork"
+    sleep 0.1
+    i=$((i + 1))
+  done
+
+  [ ! -s "$armout" ] || fail "restart emitted output while parked before fork: $(cat "$armout")"
+  if pgrep -P "$ARM_PID" -f 'bin/fm-watch\.sh' >/dev/null 2>&1; then
+    fail "restart forked a watcher child before away mode cleared"
+  fi
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -n "$lock_pid" ]; then
+    [ "$lock_pid" = "$daemon_pid" ] \
+      || fail "restart took the singleton from the daemon watcher before fork"
+    kill -0 "$daemon_pid" 2>/dev/null \
+      || fail "restart disturbed the daemon watcher before fork"
+  fi
+
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  pass "watch-arm: restart parks immediately before watcher fork"
+}
+
+test_attached_arm_stands_down_after_away_mode_delivery() {
+  local dir state fakebin out armout status
+  dir=$(make_case afk-attached-delivery)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  start_seed_watcher "$state" "$fakebin" "$out"
+  start_attached_arm "$state" "$fakebin" "$armout" 1
+
+  date '+%s' > "$state/.afk"
+  printf 'done: fixture finished\n' > "$state/demo.status"
+  wait_for_exit "$SEED_PID" 120
+  wait_for_exit "$ARM_PID" 120
+  status=$?
+
+  grep -q 'reason=attached-delivered-wake' "$state/.watch-cycle-exits.log" 2>/dev/null \
+    || fail "attached arm did not classify the delivered wake before standing down"
+  expect_code 0 "$status" "attached arm must stand down cleanly after its away-mode delivery"
+  grep -q '^watcher: stood-down' "$armout" \
+    || fail "attached arm did not return the stand-down line: $(cat "$armout")"
+  ! grep -qE '^(signal:|stale:|check:|heartbeat)' "$armout" \
+    || fail "attached arm returned its away-mode wake: $(cat "$armout")"
+  grep -q 'demo.status' "$state/.wake-queue" \
+    || fail "attached arm lost the durable away-mode wake"
+
+  pass "watch-arm: an attached arm stands down after an away-mode delivery"
+}
+
+test_owned_arm_stands_down_after_away_mode_delivery_record() {
+  local dir state fakebin armout output_file status
+  dir=$(make_case afk-owned-delivery-record)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 \
+    "$WATCH_ARM" > "$armout" 2>&1 &
+  ARM_PID=$!
+  wait_for_owned_watcher "$state" "$ARM_PID" "delivery-record arm never established its own watcher cycle"
+
+  output_file=
+  for output_file in "$state"/.watch-arm-output.*; do
+    [ -e "$output_file" ] && break
+    output_file=
+  done
+  [ -n "$output_file" ] || fail "owned arm did not expose its child capture"
+  rm -f "$output_file"
+  date '+%s' > "$state/.afk"
+  printf 'done: fixture finished\n' > "$state/demo.status"
+  wait_for_exit "$ARM_PID" 200
+  status=$?
+
+  grep -q 'reason=clean-exit-delivered-wake' "$state/.watch-cycle-exits.log" 2>/dev/null \
+    || fail "owned arm did not classify its delivery-record wake before standing down"
+  expect_code 0 "$status" "owned arm must stand down cleanly after resolving its away-mode delivery record"
+  grep -q '^watcher: stood-down' "$armout" \
+    || fail "owned arm did not return the stand-down line: $(cat "$armout")"
+  ! grep -qE '^(signal:|stale:|check:|heartbeat)' "$armout" \
+    || fail "owned arm returned its delivery-record wake under away mode: $(cat "$armout")"
+  grep -q 'demo.status' "$state/.wake-queue" \
+    || fail "owned arm lost the durable delivery-record wake"
+
+  pass "watch-arm: an owned arm stands down after an away-mode delivery record"
+}
+
+# The adapterless wake path: for a Grok tracked background task or a manual
+# probe there is no adapter to suppress delivery, so the arm's own return value
+# IS the wake. An arm already running when away mode begins must therefore hand
+# back the stand-down line instead of its cycle's reason.
+test_live_arm_stands_down_when_away_mode_begins_mid_cycle() {
+  local dir state fakebin armout status
+  dir=$(make_case afk-live-arm-mid-cycle)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=10 \
+    "$WATCH_ARM" > "$armout" 2>&1 &
+  ARM_PID=$!
+  wait_for_owned_watcher "$state" "$ARM_PID" "arm never established its own watcher cycle"
+
+  # Away mode begins while this arm's watcher child is already live, then a real
+  # captain-relevant status change drives a real wake through that child.
+  date '+%s' > "$state/.afk"
+  printf 'done: fixture finished\n' > "$state/demo.status"
+  wait_for_exit "$ARM_PID" 200
+  status=$?
+
+  grep -q 'reason=actionable-signal' "$state/.watch-cycle-exits.log" 2>/dev/null \
+    || fail "live arm did not classify its away-mode wake before standing down"
+  expect_code 0 "$status" "a live arm must stand down cleanly when away mode begins mid-cycle"
+  grep -q '^watcher: stood-down' "$armout" \
+    || fail "live arm did not stand down after away mode began: $(cat "$armout")"
+  ! grep -qE '^(signal:|stale:|check:|heartbeat)' "$armout" \
+    || fail "live arm handed a wake back to its caller under away mode: $(cat "$armout")"
+  grep -q 'demo.status' "$state/.wake-queue" \
+    || fail "the suppressed wake was not preserved in the durable queue"
+  pass "watch-arm: a live arm stands down instead of returning its wake when away mode begins"
+}
+
+# The same path with away mode off must still return the wake.
+test_live_arm_still_reports_its_wake_with_away_mode_off() {
+  local dir state fakebin armout status
+  dir=$(make_case afk-live-arm-control)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=10 \
+    "$WATCH_ARM" > "$armout" 2>&1 &
+  ARM_PID=$!
+  wait_for_owned_watcher "$state" "$ARM_PID" "control arm never established its own watcher cycle"
+
+  printf 'done: fixture finished\n' > "$state/demo.status"
+  wait_for_exit "$ARM_PID" 200
+  status=$?
+
+  expect_code 0 "$status" "an ordinary arm cycle must still close successfully"
+  grep -q '^signal:' "$armout" \
+    || fail "arm did not report its wake with away mode off: $(cat "$armout")"
+  pass "watch-arm: an ordinary arm still returns its wake when away mode is off"
+
+}
+
+for _watch_arm_test in \
+  test_attached_arm_reports_the_delivered_wake \
+  test_attached_arm_reports_the_delivered_wake_after_drain \
+  test_attached_arm_still_fails_on_a_wake_it_did_not_deliver \
+  test_rearm_resurfaces_durable_queue_and_remote_open_decision \
+  test_marker_publish_failure_retains_recovery_evidence \
+  test_delivery_gap_wake_is_recovered_once \
+  test_interrupted_handling_is_redrained_on_rearm \
+  test_malformed_marker_is_quarantined_once \
+  test_recovery_consumption_serializes_queue_publication \
+  test_restart_preserves_recovery_across_reused_pid_lock \
+  test_markerless_legacy_queue_is_recovered_on_arm \
+  test_downtime_marker_does_not_follow_symlink \
+  test_arm_parks_while_away_mode_owns_supervision \
+  test_restart_rechecks_away_mode_before_signaling \
+  test_restart_rechecks_away_mode_before_fork \
+  test_attached_arm_stands_down_after_away_mode_delivery \
+  test_owned_arm_stands_down_after_away_mode_delivery_record \
+  test_live_arm_stands_down_when_away_mode_begins_mid_cycle \
+  test_live_arm_still_reports_its_wake_with_away_mode_off; do
+  watch_arm_case_cleanup
+  "$_watch_arm_test"
+done
