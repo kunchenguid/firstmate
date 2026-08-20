@@ -173,6 +173,82 @@ test_list() {
   pass "list reports umbrellas and their repos"
 }
 
+# scaffold_epic <home> <umbrella-id> <epic-dir> : make a bare epic dir under the
+# umbrella's plans/ (epic.md + stories/), the shape epic-scaffold produces.
+scaffold_epic() {
+  local home=$1 id=$2 epic=$3
+  local dir="$home/umbrellas/$id/plans/$epic"
+  mkdir -p "$dir/stories"
+  printf -- '---\nepic: %s\n---\n# epic\n' "$epic" > "$dir/epic.md"
+}
+
+test_link_design_symlinks_canonical_no_copy() {
+  # The epic dir must reference the ONE umbrella-root DESIGN.md by symlink, and an
+  # edit to the canonical must show through the link (proving it is not a copy).
+  local home; home=$(make_home linkdesign backend)
+  run_umb "$home" create u --repos backend
+  expect_code 0 "$RC" "create u"
+  scaffold_epic "$home" u ep
+  run_umb "$home" link-design u ep
+  expect_code 0 "$RC" "link-design"
+  local link="$home/umbrellas/u/plans/ep/DESIGN.md"
+  local canon="$home/umbrellas/u/DESIGN.md"
+  [ -L "$link" ] || fail "epic-dir DESIGN.md is not a symlink"
+  # realpath dedup: link and canonical are the SAME file.
+  [ "$link" -ef "$canon" ] || fail "epic-dir DESIGN.md does not dedup to the canonical"
+  printf '\nEDIT-MARKER-42\n' >> "$canon"
+  assert_grep "EDIT-MARKER-42" "$link" "edit to canonical did not show through the link (it is a copy, not a reference)"
+  pass "link-design references the one canonical DESIGN.md by symlink, never a copy"
+}
+
+test_link_design_idempotent() {
+  local home; home=$(make_home linkidem backend)
+  run_umb "$home" create u --repos backend
+  scaffold_epic "$home" u ep
+  run_umb "$home" link-design u ep
+  expect_code 0 "$RC" "first link-design"
+  run_umb "$home" link-design u ep
+  expect_code 0 "$RC" "second link-design is a clean no-op"
+  [ -L "$home/umbrellas/u/plans/ep/DESIGN.md" ] || fail "re-run did not leave a symlink"
+  pass "link-design is idempotent"
+}
+
+test_link_design_refuses_real_copy() {
+  # A real (non-symlink) DESIGN.md in the epic dir is exactly the drift R4 is
+  # about: refuse rather than silently discard possibly-unique captain content.
+  local home; home=$(make_home linkcopy backend)
+  run_umb "$home" create u --repos backend
+  scaffold_epic "$home" u ep
+  printf 'a stale hand-copied design\n' > "$home/umbrellas/u/plans/ep/DESIGN.md"
+  run_umb "$home" link-design u ep
+  expect_code 1 "$RC" "link-design should refuse a real design copy"
+  assert_contains "$OUT" "real file, not a symlink" "wrong refusal message"
+  # The copy is left untouched for the captain to reconcile.
+  assert_grep "a stale hand-copied design" "$home/umbrellas/u/plans/ep/DESIGN.md" "refused run must not touch the copy"
+  pass "link-design refuses a drifting real copy and keeps captain content"
+}
+
+test_link_design_links_decisions_when_present() {
+  local home; home=$(make_home linkdecis backend)
+  run_umb "$home" create u --repos backend
+  printf '# decisions\n' > "$home/umbrellas/u/decisions.md"
+  scaffold_epic "$home" u ep
+  run_umb "$home" link-design u ep
+  expect_code 0 "$RC" "link-design with decisions.md"
+  [ "$home/umbrellas/u/plans/ep/decisions.md" -ef "$home/umbrellas/u/decisions.md" ] \
+    || fail "decisions.md was not linked to the canonical"
+  pass "link-design also symlinks decisions.md when the umbrella carries one"
+}
+
+test_link_design_missing_epic_dir() {
+  local home; home=$(make_home linkmissing backend)
+  run_umb "$home" create u --repos backend
+  run_umb "$home" link-design u nope
+  expect_code 1 "$RC" "link-design should fail when the epic dir is absent"
+  assert_contains "$OUT" "no epic dir" "wrong missing-epic message"
+  pass "link-design fails clearly when the epic dir is absent"
+}
+
 test_create_builds_isolated_worktrees
 test_worktree_bases_on_fresh_default
 test_teardown_keeps_design_removes_worktrees
@@ -182,5 +258,10 @@ test_rollback_on_bad_repo
 test_refuses_duplicate_id
 test_rejects_unsafe_input
 test_list
+test_link_design_symlinks_canonical_no_copy
+test_link_design_idempotent
+test_link_design_refuses_real_copy
+test_link_design_links_decisions_when_present
+test_link_design_missing_epic_dir
 
 echo "# all fm-umbrella tests passed"
