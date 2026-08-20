@@ -6,7 +6,7 @@
 #   fm-fork-topic.sh integrate --id <id> --summary <sentence>
 #     --class <pending|rejected-but-retained|private> --topic <ref>
 #     --retire-when <falsifiable-condition> --path <path-or-prefix>...
-#     [--pr-url <github-pr-url> --pr-disposition <open|rejected>]
+#     [--pr-url <github-pr-or-issue-url> --pr-disposition <open|rejected>]
 #     [--repo <isolated-worktree>]
 #   fm-fork-topic.sh disposition --id <id>
 #     --class rejected-but-retained --pr-disposition rejected

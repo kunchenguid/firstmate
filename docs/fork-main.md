@@ -151,13 +151,17 @@ Every divergence records:
 `superseded` is immediate removal debt and must be empty after an upstream integration.
 
 The upstream review is a pull request or an issue, and the class does not depend on which.
+The fork's contribution order is to state the problem in an issue, discuss it, and open a pull request only after the problem is confirmed.
 Stating the problem as an issue and waiting for it to be confirmed is a real upstream route, so a divergence raised that way is `pending` exactly as one carrying a pull request is.
 The accepted forms are exactly two, `https://github.com/<owner>/<repo>/pull/<number>` and `https://github.com/<owner>/<repo>/issues/<number>`, and nothing else is treated as a route.
 An absent or malformed route is refused for every class but `private`, which is the check that stops a divergence being registered with no upstream story at all.
 
+Classification and validation remain separate.
+The ordinary no-mistakes upstream registration still opens a pull request in its `pr` step, so supporting validation and local adoption while upstream review remains issue-only requires its own change.
+
 `private` is not the place to park work that is merely unraised.
 It records a decision never to propose, so classifying an intended-but-unraised divergence as private would assert an intent the fork does not hold, and the manifest is later read as though it were true.
-A divergence the fork means to raise is registered once its issue exists, which is the order the contribution model asks for anyway.
+An otherwise integration-ready divergence the fork means to raise is registered once its issue exists, which is the order the contribution model asks for anyway.
 
 The field is named `upstream_pr` and the flag is named `--pr-url`, and both now also carry issues.
 That naming is inaccurate and known to be so.
