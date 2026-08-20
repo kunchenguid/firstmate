@@ -18,10 +18,17 @@
 # pulls from the clone into that folder instead. It is as narrow as stage one and
 # never forces, stashes, or discards: it runs only when origin names a git work
 # tree on this machine, only while that folder sits on the same default branch,
-# only as a fast-forward, and only when nothing uncommitted there touches a path
-# the fast-forward would change. Anything else refuses with the concrete reason.
-# An origin that is absent, a bare repository, or a URL on another host is not a
-# folder anyone reads, so the landing simply reports that it ended at the clone.
+# only as a fast-forward, and only when nothing uncommitted, untracked, or
+# gitignored there touches a path the fast-forward would change. Ignored paths
+# count because git's own fast-forward overwrites them without a word, and a
+# folder ignoring a path the clone commits is exactly how personal material would
+# be lost. Anything else refuses with the concrete reason. An origin spelled
+# relative to the clone or with a leading tilde names that same folder, so it is
+# anchored against the clone first, the way seeding anchors the origin it seeds
+# from; a path-shaped origin that cannot be anchored refuses rather than being
+# reported as somewhere else. An origin that is absent, a bare repository, or a
+# URL on another host is not a folder anyone reads, so the landing simply reports
+# that it ended at the clone.
 # Both stages are idempotent, so a repeat run converges instead of refusing.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
@@ -92,7 +99,30 @@ if [ -z "$ORIGIN_URL" ]; then
   echo "landing ended in $PROJ: it has no origin, so this clone is the project's only copy"
   exit 0
 fi
-if ! ORIGIN_PATH=$(fm_project_origin_local_path "$ORIGIN_URL"); then
+# A clone may name its origin the way a person types a path, relative to the clone
+# or with a leading tilde. Anchor those against the clone itself before asking
+# what the origin is, so the landing and bin/fm-home-seed.sh agree about the same
+# value; the shared validator still only ever sees an absolute path.
+ORIGIN_SPELLING=$ORIGIN_URL
+if fm_project_origin_is_path_form "$ORIGIN_URL"; then
+  case $ORIGIN_URL in
+    file://* | /?*) ;;
+    '~') ORIGIN_SPELLING=${HOME:-} ;;
+    '~/'*) ORIGIN_SPELLING=${HOME:+${HOME%/}/${ORIGIN_URL#'~/'}} ;;
+    *) ORIGIN_SPELLING=$( (cd "$PROJ_ABS" && cd -- "$ORIGIN_URL" && pwd -P) 2>/dev/null ) || ORIGIN_SPELLING= ;;
+  esac
+  if [ -z "$ORIGIN_SPELLING" ]; then
+    echo "REFUSED: origin $ORIGIN_URL is spelled as a path but names no folder relative to $PROJ, so the landing cannot reach the project's own folder." >&2
+    echo "The change is safe in $PROJ on $DEFAULT; re-point that origin at the folder's absolute path, then retry." >&2
+    exit 1
+  fi
+fi
+if ! ORIGIN_PATH=$(fm_project_origin_local_path "$ORIGIN_SPELLING"); then
+  if fm_project_origin_is_path_form "$ORIGIN_URL"; then
+    echo "REFUSED: origin $ORIGIN_URL is spelled as a path this landing may not follow, so it cannot reach the project's own folder." >&2
+    echo "The change is safe in $PROJ on $DEFAULT; re-point that origin at the folder's absolute path, then retry." >&2
+    exit 1
+  fi
   echo "landing ended in $PROJ: origin $ORIGIN_URL is not a folder on this machine"
   exit 0
 fi
@@ -160,8 +190,14 @@ CHANGED=()
 while IFS= read -r -d '' changed_path; do
   CHANGED+=("$changed_path")
 done < <(git -C "$ORIGIN_PATH" diff --name-only --no-renames -z "$current" "$target")
+# Ignored paths are asked about too: git's fast-forward overwrites an ignored
+# file in silence, and the folder ignores what its owner keeps to himself.
 if [ "${#CHANGED[@]}" -gt 0 ]; then
-  collisions=$(GIT_LITERAL_PATHSPECS=1 git -C "$ORIGIN_PATH" status --porcelain --untracked-files=all -- "${CHANGED[@]}")
+  collisions=$(GIT_LITERAL_PATHSPECS=1 git -C "$ORIGIN_PATH" status --porcelain --untracked-files=all --ignored=matching -- "${CHANGED[@]}") || {
+    echo "REFUSED: could not read whether $ORIGIN_PATH has uncommitted work on the paths this landing would change." >&2
+    echo "The change is safe in $PROJ on $DEFAULT; nothing in $ORIGIN_PATH was changed." >&2
+    exit 1
+  }
   if [ -n "$collisions" ]; then
     echo "REFUSED: $ORIGIN_PATH has uncommitted work on paths this landing would change:" >&2
     printf '%s\n' "$collisions" >&2
