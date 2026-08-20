@@ -24,6 +24,24 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
+test_crewmate_brief_explains_session_lock_scope() {
+  local kind id rule
+  rule="The fleet lock and bin/fm-session-start.sh are firstmate-only. A lock refusal never makes a crewmate read-only; this isolated worktree remains yours to modify."
+  for kind in ship scout; do
+    id="brief-session-lock-scope-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 \
+        || fail "fm-brief.sh failed to generate the $kind session-lock scope brief"
+    else
+      FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1 \
+        || fail "fm-brief.sh failed to generate the $kind session-lock scope brief"
+    fi
+    assert_grep "$rule" "$BRIEF_HOME/data/$id/brief.md" \
+      "$kind brief omitted the firstmate-only session-lock contract"
+  done
+  pass "fm-brief: ship and scout briefs explain that fleet lock refusal does not make workers read-only"
+}
+
 # The script itself must always parse under the ambient bash. That is Bash 5 in
 # CI and locally, where the issue #958/#1069 parser bug does not fire, so this
 # is a weak guard on its own; test_no_heredoc_in_command_substitution carries
@@ -819,6 +837,7 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_script_parses
+test_crewmate_brief_explains_session_lock_scope
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
