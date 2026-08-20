@@ -156,12 +156,16 @@ const allProviders = [
     windows: [
       { id: "credits", label: "credits", kind: "credits", percentRemaining: 48, resetText: "next month" },
     ],
-    ...(full ? { account: { email: "fixture@example.invalid" } } : {}),
+    ...(full ? {
+      account: { email: "fixture@example.invalid" },
+      attempts: [{ source: "pi:xai", status: "success" }],
+    } : {}),
   }),
   provider("kimi", "Kimi", "api", {
     windows: [
       { id: "weekly", label: "week", kind: "weekly", percentRemaining: 83, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
     ],
+    ...(full ? { attempts: [{ source: "pi:kimi-coding", status: "success" }] } : {}),
   }),
 ];
 const providers = requestedProvider
@@ -259,6 +263,16 @@ function report(now = Date.now()) {
         credits: { remaining: 0, unlimited: false, unit: "credits" },
         state,
       },
+      {
+        provider: "kimi",
+        label: "Kimi",
+        source: "api",
+        windows: [
+          { id: "weekly", label: "week", kind: "weekly", percentRemaining: 83, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString() },
+        ],
+        state,
+        attempts: [{ source: "pi:kimi-coding", status: "success" }],
+      },
     ],
   };
 }
@@ -323,6 +337,57 @@ for (const expectedAccountId of [null, "different-account"]) {
   assert(unverified.kind === "unverified", "unmatched quota account was presented as active quota");
   assert(!formatQuotaStatus(unverified, 200, now).includes("94%"), "unverified account exposed quota percentages");
 }
+const explicitlyUnverifiedAccount = report(now);
+explicitlyUnverifiedAccount.schemaVersion = 5;
+explicitlyUnverifiedAccount.providers[1].account.identityStatus = "unverified";
+const explicitlyUnverifiedParsed = parseQuotaAxiJson(JSON.stringify(explicitlyUnverifiedAccount));
+assert(explicitlyUnverifiedParsed, "explicitly-unverified account fixture did not parse structurally");
+assert(
+  selectActiveProviderQuota(explicitlyUnverifiedParsed, "openai-codex", {
+    nowMs: now,
+    expectedAccountId: "fixture-codex-account",
+  }).kind === "unverified",
+  "explicitly unverified report identity was accepted as active quota",
+);
+const invalidIdentityStatus = report(now);
+invalidIdentityStatus.schemaVersion = 5;
+invalidIdentityStatus.providers[1].account.identityStatus = "maybe";
+const invalidIdentityParsed = parseQuotaAxiJson(JSON.stringify(invalidIdentityStatus));
+assert(invalidIdentityParsed, "invalid-identity fixture did not parse structurally");
+assert(
+  selectActiveProviderQuota(invalidIdentityParsed, "openai-codex", {
+    nowMs: now,
+    expectedAccountId: "fixture-codex-account",
+  }).kind === "malformed",
+  "invalid report identity status was accepted as fresh",
+);
+const verifiedKimiSource = selectActiveProviderQuota(parsed, "kimi-coding", {
+  nowMs: now,
+  expectedSuccessfulSource: "pi:kimi-coding",
+});
+assert(verifiedKimiSource.kind === "fresh", "successful Pi Kimi source was not correlated");
+const failedKimiSource = report(now);
+failedKimiSource.providers[2].attempts[0].status = "failed";
+const failedKimiParsed = parseQuotaAxiJson(JSON.stringify(failedKimiSource));
+assert(failedKimiParsed, "failed Kimi source fixture did not parse structurally");
+assert(
+  selectActiveProviderQuota(failedKimiParsed, "kimi-coding", {
+    nowMs: now,
+    expectedSuccessfulSource: "pi:kimi-coding",
+  }).kind === "unverified",
+  "failed Pi Kimi source was accepted as active quota",
+);
+const invalidKimiAttempt = report(now);
+invalidKimiAttempt.providers[2].attempts[0].status = "maybe";
+const invalidKimiParsed = parseQuotaAxiJson(JSON.stringify(invalidKimiAttempt));
+assert(invalidKimiParsed, "invalid Kimi attempt fixture did not parse structurally");
+assert(
+  selectActiveProviderQuota(invalidKimiParsed, "kimi-coding", {
+    nowMs: now,
+    expectedSuccessfulSource: "pi:kimi-coding",
+  }).kind === "malformed",
+  "invalid Kimi source attempt was accepted as fresh",
+);
 const paddedAccount = report(now);
 paddedAccount.providers[1].account.accountId = " fixture-codex-account ";
 const paddedAccountParsed = parseQuotaAxiJson(JSON.stringify(paddedAccount));
@@ -490,6 +555,7 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
             return providerOptions.authType !== "api_key";
           },
           async getProviderAuth() {
+            if (providerOptions.authDelayMs) await sleep(providerOptions.authDelayMs);
             if (providerOptions.authError) throw new Error("fixture auth failure");
             if (providerOptions.authUnavailable) return undefined;
             const accountId = Object.hasOwn(providerOptions, "accountId")
@@ -570,6 +636,12 @@ await waitFor(
   "model change did not refuse uncorrelated Claude account quota",
 );
 assert(!lifecycle.widgetText(240).includes("72.5%"), "uncorrelated Claude quota was presented as active");
+await lifecycle.emit("model_select", { model: fixtureModel("kimi-coding", "kimi-fixture") });
+await waitFor(
+  () => lifecycle.widgetText(240).includes("week 83% left"),
+  "model change did not correlate the active Pi Kimi source",
+);
+assert(!lifecycle.widgetText(240).includes("account unverified"), "active Pi Kimi quota remained unverified");
 const callsBeforeCadence = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 await sleep(180);
 const callsAfterCadence = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
@@ -585,12 +657,42 @@ await sleep(120);
 const callsAfterShutdown = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 assert(callsAfterShutdown === callsAtShutdown, "shutdown leaked a refresh timer");
 
+const transitionOptions = {};
+const resolvingTransition = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
+  "openai-codex",
+  "tui",
+  transitionOptions,
+);
+await resolvingTransition.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => resolvingTransition.widgetText(400).includes("week 94% left"),
+  "transition fixture did not publish its initial official quota",
+);
+transitionOptions.authDelayMs = 150;
+await resolvingTransition.emit("model_select", {
+  model: fixtureModel("openai-codex", "custom-codex", "https://proxy.example.invalid"),
+});
+assert(
+  resolvingTransition.widgetText(400).includes("refreshing"),
+  `unresolved model target did not render explicitly: ${resolvingTransition.widgetText(400)}`,
+);
+assert(
+  !resolvingTransition.widgetText(400).includes("94%"),
+  "unresolved custom-endpoint model reused cached official quota",
+);
+await waitFor(
+  () => resolvingTransition.widgetText(400).includes("custom endpoint"),
+  "custom-endpoint model did not resolve to unavailable",
+);
+await resolvingTransition.emit("session_shutdown", { reason: "quit" });
+
 for (const reason of ["reload", "new", "resume", "fork"]) {
   lifecycle.ctx.model = fixtureModel("xai", "grok-fixture");
   await lifecycle.emit("session_start", { reason });
   await waitFor(
-    () => lifecycle.widgetText(240).includes("account unverified"),
-    `${reason} did not refresh quota widget with explicit account provenance`,
+    () => lifecycle.widgetText(240).includes("credits 48% left"),
+    `${reason} did not correlate the active Pi xAI source`,
   );
   assert(process.stdout.listenerCount("resize") === baselineResizeListeners, `${reason} changed resize listeners`);
   await lifecycle.emit("session_shutdown", { reason: "reload" });
@@ -646,6 +748,11 @@ const expiring = makePi(createFirstmateQuotaStatusExtension({
 }));
 await expiring.emit("session_start", { reason: "startup" });
 await waitFor(() => expiring.widgetText(400).includes("week 94% left"), "fake clock fixture did not publish fresh quota");
+fakeClock.jump(-2 * 60 * 1000);
+assert(expiring.widgetText(400).includes("stale"), "backward clock shift did not revalidate report freshness");
+assert(!expiring.widgetText(400).includes("94%"), "backward clock shift exposed future-dated quota as fresh");
+fakeClock.jump(2 * 60 * 1000);
+assert(expiring.widgetText(400).includes("week 94% left"), "restored clock did not recover valid fresh quota");
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "fail\n");
 const writesBeforeFailedRefresh = expiring.widgetWriteCount;
 fakeClock.advance(5 * 60 * 1000);

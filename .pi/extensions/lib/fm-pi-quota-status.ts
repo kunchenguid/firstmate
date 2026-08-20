@@ -100,6 +100,8 @@ const QUOTA_WINDOW_KINDS = ["session", "weekly", "monthly", "model", "credits", 
 const QUOTA_CREDIT_UNITS = ["usd", "credits"] as const;
 const QUOTA_PROVIDER_SOURCES = ["oauth", "cli-rpc", "api", "web", "cache", "unavailable"] as const;
 const QUOTA_PROVIDER_STATUSES = ["fresh", "stale", "unavailable", "auth_required", "rate_limited", "error"] as const;
+const QUOTA_IDENTITY_STATUSES = ["verified", "unverified"] as const;
+const QUOTA_ATTEMPT_STATUSES = ["success", "failed", "skipped"] as const;
 
 export function quotaProviderForPiProvider(piProvider: string): string | null {
   return PI_PROVIDER_TO_QUOTA_PROVIDER[piProvider] ?? null;
@@ -177,10 +179,57 @@ function parseCredits(value: unknown): QuotaCreditsView | null | undefined {
   return { remaining, unlimited, unit };
 }
 
+type ParsedAccount = {
+  accountId: string | null;
+  accountIdMalformed: boolean;
+  identityStatus: "verified" | "unverified" | null;
+};
+
+type ParsedAttempt = {
+  source: string;
+  status: "success" | "failed" | "skipped";
+};
+
+function parseAccount(value: unknown): ParsedAccount | null | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) return null;
+  if (value.email !== undefined && typeof value.email !== "string") return null;
+  if (value.organization !== undefined && typeof value.organization !== "string") return null;
+  if (value.accountId !== undefined && typeof value.accountId !== "string") return null;
+  const accountId = value.accountId === undefined ? null : exactText(value.accountId);
+  const accountIdMalformed = value.accountId !== undefined && accountId === null;
+  const identityStatus = value.identityStatus === undefined
+    ? null
+    : exactEnum(value.identityStatus, QUOTA_IDENTITY_STATUSES);
+  if (value.identityStatus !== undefined && identityStatus === null) return null;
+  return { accountId, accountIdMalformed, identityStatus };
+}
+
+function parseAttempts(value: unknown): ParsedAttempt[] | null | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return null;
+  const attempts: ParsedAttempt[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) return null;
+    const source = exactText(entry.source);
+    const status = exactEnum(entry.status, QUOTA_ATTEMPT_STATUSES);
+    if (!source || !status) return null;
+    if (entry.error !== undefined && typeof entry.error !== "string") return null;
+    if (entry.credentialPresent !== undefined && typeof entry.credentialPresent !== "boolean") return null;
+    attempts.push({ source, status });
+  }
+  return attempts;
+}
+
 export function selectActiveProviderQuota(
   report: ParsedQuotaAxiReport,
   piProvider: string,
-  options: { nowMs?: number; freshnessMs?: number; expectedAccountId?: string | null } = {},
+  options: {
+    nowMs?: number;
+    freshnessMs?: number;
+    expectedAccountId?: string | null;
+    expectedSuccessfulSource?: string;
+  } = {},
 ): QuotaView {
   const provider = quotaProviderForPiProvider(piProvider);
   if (!provider) return { kind: "unsupported", provider: cleanText(piProvider, 48) ?? "unknown" };
@@ -256,13 +305,30 @@ export function selectActiveProviderQuota(
   if (rawProvider.plan !== undefined && plan === null) return malformed(provider);
   const credits = parseCredits(rawProvider.credits);
   if (credits === null) return malformed(provider);
+  const account = parseAccount(rawProvider.account);
+  const attempts = parseAttempts(rawProvider.attempts);
+  if (account === null || attempts === null) return malformed(provider);
 
+  if (account?.identityStatus === "unverified") return { kind: "unverified", provider };
+  if (account?.accountIdMalformed) {
+    return options.expectedAccountId !== undefined
+      ? { kind: "unverified", provider }
+      : malformed(provider);
+  }
   if (options.expectedAccountId === null) return { kind: "unverified", provider };
-  if (options.expectedAccountId !== undefined) {
-    const accountId = isRecord(rawProvider.account) ? exactText(rawProvider.account.accountId) : null;
-    if (!accountId || accountId !== options.expectedAccountId) {
-      return { kind: "unverified", provider };
-    }
+  if (
+    options.expectedAccountId !== undefined &&
+    account?.accountId !== options.expectedAccountId
+  ) {
+    return { kind: "unverified", provider };
+  }
+  if (
+    options.expectedSuccessfulSource !== undefined &&
+    !attempts?.some((attempt) => (
+      attempt.source === options.expectedSuccessfulSource && attempt.status === "success"
+    ))
+  ) {
+    return { kind: "unverified", provider };
   }
 
   return {

@@ -52,8 +52,14 @@ export type FirstmateQuotaStatusOptions = {
 
 type ActiveModel = NonNullable<ExtensionContext["model"]>;
 
+type QuotaVerification =
+  | { kind: "account"; accountId: string | null }
+  | { kind: "source"; source: string }
+  | { kind: "unavailable" };
+
 type QuotaTarget =
-  | { kind: "supported"; piProvider: string; activeAccountId: string | null }
+  | { kind: "resolving"; piProvider: string }
+  | { kind: "supported"; piProvider: string; verification: QuotaVerification }
   | { kind: "unsupported"; view: Extract<QuotaView, { kind: "unsupported" }> };
 
 type CompatibleModelRegistry = {
@@ -70,7 +76,7 @@ type ActiveSession = {
   ctx: ExtensionContext;
   model: ActiveModel | undefined;
   generation: number;
-  target: QuotaTarget | null;
+  target: QuotaTarget;
   report: ParsedQuotaAxiReport | null;
   process: QuotaProcess | null;
   refreshInFlight: boolean;
@@ -156,6 +162,15 @@ function activeAccountId(provider: string, apiKey: string | undefined): string |
     if (accountId) return accountId;
   }
   return null;
+}
+
+function quotaVerification(provider: string, apiKey: string | undefined): QuotaVerification {
+  if (provider === "openai-codex") {
+    return { kind: "account", accountId: activeAccountId(provider, apiKey) };
+  }
+  if (provider === "kimi-coding") return { kind: "source", source: "pi:kimi-coding" };
+  if (provider === "xai") return { kind: "source", source: "pi:xai" };
+  return { kind: "unavailable" };
 }
 
 function killProcess(child: ChildProcess, processGroupId: number | null): void {
@@ -276,7 +291,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         : { kind: "unsupported", provider: piProvider };
     }
 
-    function preflightTarget(ctx: ExtensionContext, model: ActiveModel | undefined): QuotaTarget | null {
+    function preflightTarget(ctx: ExtensionContext, model: ActiveModel | undefined): QuotaTarget {
       if (!model) return { kind: "unsupported", view: { kind: "unsupported", provider: "no model" } };
       if (!quotaProviderForPiProvider(model.provider)) {
         return { kind: "unsupported", view: unsupportedProvider(model.provider) };
@@ -299,12 +314,12 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           view: { kind: "unsupported", provider: `${model.provider} (non-subscription auth)` },
         };
       }
-      return null;
+      return { kind: "resolving", piProvider: model.provider };
     }
 
     async function resolveTarget(ctx: ExtensionContext, model: ActiveModel | undefined): Promise<QuotaTarget> {
       const preflight = preflightTarget(ctx, model);
-      if (preflight) return preflight;
+      if (preflight.kind !== "resolving") return preflight;
       if (!model) return { kind: "unsupported", view: { kind: "unsupported", provider: "no model" } };
 
       const registry = ctx.modelRegistry as unknown as CompatibleModelRegistry;
@@ -340,23 +355,26 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       return {
         kind: "supported",
         piProvider: model.provider,
-        activeAccountId: activeAccountId(model.provider, auth.auth.apiKey),
+        verification: quotaVerification(model.provider, auth.auth.apiKey),
       };
     }
 
-    function currentView(session: ActiveSession): QuotaView {
-      if (session.target?.kind === "unsupported") return session.target.view;
-      const piProvider = session.target?.kind === "supported"
-        ? session.target.piProvider
-        : session.model?.provider;
-      if (!piProvider) return { kind: "unsupported", provider: "no model" };
-      if (!session.report) return { kind: "refreshing", provider: piProvider };
-      return selectActiveProviderQuota(session.report, piProvider, {
-        nowMs: now(),
+    function currentView(session: ActiveSession, nowMs = now()): QuotaView {
+      if (session.target.kind === "unsupported") return session.target.view;
+      if (session.target.kind === "resolving") {
+        return { kind: "refreshing", provider: session.target.piProvider };
+      }
+      if (!session.report) return { kind: "refreshing", provider: session.target.piProvider };
+      const verification = session.target.verification;
+      return selectActiveProviderQuota(session.report, session.target.piProvider, {
+        nowMs,
         freshnessMs,
-        expectedAccountId: session.target?.kind === "supported"
-          ? session.target.activeAccountId
-          : undefined,
+        expectedAccountId: verification.kind === "account"
+          ? verification.accountId
+          : verification.kind === "unavailable"
+            ? null
+            : undefined,
+        expectedSuccessfulSource: verification.kind === "source" ? verification.source : undefined,
       });
     }
 
@@ -387,9 +405,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             ? Math.min(boundedComponentWidth, Math.floor(configuredWidth))
             : boundedComponentWidth;
           const renderNowMs = now();
-          const renderView: QuotaView = view.kind === "fresh" && renderNowMs >= view.freshUntilMs
-            ? { kind: "stale", provider: view.provider, label: view.label }
-            : view;
+          const renderView = view.kind === "fresh" ? currentView(session, renderNowMs) : view;
           const plain = formatQuotaStatus(renderView, availableWidth, renderNowMs);
           return plain ? [theme.fg("dim", plain)] : [];
         },
