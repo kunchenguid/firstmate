@@ -158,7 +158,7 @@ ActiveState=active
 SubState=running
 UnitFileState=enabled
 User=fm-ci-runner
-CPUQuotaPerSecUSec=6s
+CPUQuotaPerSecUSec=${FM_TEST_CPU_QUOTA:-6s}
 MemoryMax=infinity
 TasksMax=${FM_TEST_TASKS_MAX:-16854}
 LimitNOFILE=524288
@@ -258,7 +258,7 @@ test_policy_runs_every_family_serially() {
   expected=$(cat <<'EOF'
 lint
 test-run --check-coverage
-test-run --lane portable-parallel-1
+test-run --jobs 2 --lane portable-parallel-1
 test-run --lane portable-parallel-2
 test-run --lane portable-serial
 test-run --family real-herdr-gated --fail-on-gate-skip herdr not found
@@ -266,7 +266,7 @@ EOF
 )
   [ "$(cat "$calls")" = "$expected" ] \
     || fail "Water 7 command policy changed its complete serial order: $(cat "$calls")"
-  pass "the command owner runs lint, coverage, all portable lanes, then real Herdr serially"
+  pass "the command owner runs lint, coverage, portable-parallel-1 with --jobs 2, serial remainder lanes, then real Herdr"
 }
 
 test_policy_runs_pr_fast_lane_before_complete_suite() {
@@ -282,7 +282,7 @@ test_policy_runs_pr_fast_lane_before_complete_suite() {
 lint
 test-run --check-coverage
 test-run --changed --base base-sha --fail-on-gate-skip herdr not found
-test-run --lane portable-parallel-1
+test-run --jobs 2 --lane portable-parallel-1
 test-run --lane portable-parallel-2
 test-run --lane portable-serial
 test-run --family real-herdr-gated --fail-on-gate-skip herdr not found
@@ -307,6 +307,22 @@ test_policy_refuses_semantically_unsafe_systemd_limits() {
     "systemd limit refusal did not name the semantic TasksMax boundary"
   [ ! -e "$calls" ] || fail "unsafe systemd limits reached the test suite"
   pass "the command owner refuses unsafe semantic systemd limits before tests"
+}
+
+test_policy_refuses_a_cpu_quota_below_its_own_concurrency() {
+  local tmp repo fakebin calls out rc
+  tmp=$(fm_test_tmproot fm-ci-water7-cpu)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  make_policy_fixture "$repo" "$fakebin"
+  rc=0
+  out=$(FM_TEST_CPU_QUOTA=1s run_policy_fixture "$repo" "$fakebin" "$calls" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Water 7 command policy accepted CPUQuotaPerSecUSec=1s while running --jobs 2"
+  assert_contains "$out" "CPUQuotaPerSecUSec must be at least 2" \
+    "CPU quota refusal did not name the concurrency boundary the policy depends on"
+  [ ! -e "$calls" ] || fail "a CPU quota below the policy's own concurrency reached the test suite"
+  pass "the command owner refuses a CPU quota that cannot serve its own --jobs 2 lane"
 }
 
 test_policy_refuses_a_missing_test_dependency() {
@@ -390,5 +406,6 @@ test_workflows_are_static_and_water7_only
 test_policy_runs_every_family_serially
 test_policy_runs_pr_fast_lane_before_complete_suite
 test_policy_refuses_semantically_unsafe_systemd_limits
+test_policy_refuses_a_cpu_quota_below_its_own_concurrency
 test_policy_uses_only_bounded_ci_bootstrap
 test_policy_refuses_a_missing_test_dependency

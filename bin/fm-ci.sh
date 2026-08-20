@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# fm-ci.sh - the single command policy for Firstmate's serial Water 7 CI job.
+# fm-ci.sh - the single command policy for Firstmate's one-job Water 7 CI run.
+#
+# Lanes run one after another in that single job. The only concurrency is
+# bounded in-lane --jobs for a lane whose set is proven-isolated; see
+# docs/fm-test-portable-shards.md and docs/verification/ci-portable-parallel-jobs.md.
 #
 # When FM_CI_FAST_LANE_BASE is set by the trusted pull-request workflow, run the
-# conservative diff-scoped test selection before the complete serial merge gate.
+# conservative diff-scoped test selection before the complete merge gate.
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -57,7 +61,9 @@ require_water7_host() {
     *s) cpu=${cpu%s} ;;
     *) die "CPUQuotaPerSecUSec must be expressed in seconds, got ${cpu:-<empty>}" ;;
   esac
-  require_integer_at_least CPUQuotaPerSecUSec "$cpu" 1
+  # Floor tracks this policy's own concurrency: the --jobs 2 lane below needs
+  # two CPU-seconds per second to run its workers, not one.
+  require_integer_at_least CPUQuotaPerSecUSec "$cpu" 2
 
   memory=$(systemd_value MemoryMax)
   if [ "$memory" != infinity ]; then
@@ -168,7 +174,7 @@ run_invariants
 bin/fm-lint.sh
 bin/fm-test-run.sh --check-coverage
 run_pr_fast_lane
-bin/fm-test-run.sh --lane portable-parallel-1
+bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1
 bin/fm-test-run.sh --lane portable-parallel-2
 bin/fm-test-run.sh --lane portable-serial
 bin/fm-test-run.sh --family real-herdr-gated --fail-on-gate-skip 'herdr not found'

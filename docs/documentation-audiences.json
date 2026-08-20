@@ -329,6 +329,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/ci-portable-parallel-jobs.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/dispatch-auth.md",
       "audience": "maintainer-verification"
     },

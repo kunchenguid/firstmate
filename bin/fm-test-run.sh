@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fm-test-run.sh - single owner of Firstmate's behavior-test runner, lane
-# composition for portable CI shards, local --jobs for the proven-isolated set,
+# composition for portable CI shards, bounded --jobs for the proven-isolated set,
 # timing markers, and the complete-regression coverage guard.
 #
 # Selection modes (exactly one of: --all, --family, --changed, --lane,
@@ -59,8 +59,9 @@
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
-# owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a
-# duration-balanced partition of that exact set (see docs/fm-test-portable-shards.md).
+# owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a fixed
+# partition of that exact set, not a rebalance of the current measured durations
+# (see docs/fm-test-portable-shards.md).
 #
 # portable-serial stays strictly serial. Its CI shards (portable-serial-<k>of<n>)
 # split it across separate runners, so two of its stateful scripts still never
@@ -327,9 +328,11 @@ tests/fm-slack-captain-channel.test.sh
 EOF
 }
 
-# Portable parallel shard 1: LPT balance of the proven-isolated set using the
-# current concurrent-proof durations in docs/fm-test-isolation-proof.json.
-# Execution order is longest first so wall-clock stays near the balanced sum.
+# Portable parallel shard 1: fixed partition of the proven-isolated set from the
+# 2026-07-29 LPT assignment plus tests/fm-slack-captain-channel.test.sh, inserted
+# afterwards without a rebalance. Later concurrent-proof refreshes in
+# docs/fm-test-isolation-proof.json restate durations without changing this
+# membership or its listed order, so neither tracks the current durations.
 list_portable_parallel_1() {
   cat <<'EOF'
 tests/fm-x-mode.test.sh
@@ -347,7 +350,7 @@ tests/fm-transition-lib.test.sh
 EOF
 }
 
-# Portable parallel shard 2: the complementary LPT half of the proven set.
+# Portable parallel shard 2: the complementary half of that fixed partition.
 list_portable_parallel_2() {
   cat <<'EOF'
 tests/fm-backend-herdr.test.sh

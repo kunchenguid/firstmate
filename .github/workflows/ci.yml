@@ -44,7 +44,7 @@ jobs:
       - name: Admit suite only below the shared-host load ceiling
         run: bin/fm-ci-load-guard.sh wait --max-load "$FM_CI_MAX_LOAD" --timeout 900 --poll 15
 
-      - name: Run the repository-owned serial CI policy
+      - name: Run the repository-owned CI command policy
         env:
           FM_CI_FAST_LANE_BASE: ${{ github.event.pull_request.base.sha }}
         run: bin/fm-ci.sh

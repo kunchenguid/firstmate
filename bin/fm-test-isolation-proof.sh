@@ -4,7 +4,7 @@
 #
 # This is the single owner of the proven parallel candidate set, the concurrent
 # proof run, and the isolation checks that admitted that set. Production
-# portable CI shards and bounded local fm-test-run.sh --jobs for this exact set
+# portable CI shards and bounded fm-test-run.sh --jobs for this exact set
 # are owned by bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
 #
 # It does NOT:
