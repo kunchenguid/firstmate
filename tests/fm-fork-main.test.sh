@@ -771,7 +771,7 @@ test_manifest_class_disposition_pairs_are_enforced() {
     --pr-url https://github.com/example/firstmate/pull/10 --pr-disposition rejected 2>&1); rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "topic integration accepted pending/rejected"
-  assert_contains "$out" 'pending requires pull-request disposition open' \
+  assert_contains "$out" 'pending requires upstream review disposition open' \
     "topic integration did not name the valid pending pair"
   set +e
   out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id pair \
@@ -780,7 +780,7 @@ test_manifest_class_disposition_pairs_are_enforced() {
     --pr-url https://github.com/example/firstmate/pull/10 --pr-disposition open 2>&1); rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "topic integration accepted rejected-but-retained/open"
-  assert_contains "$out" 'rejected-but-retained requires pull-request disposition rejected' \
+  assert_contains "$out" 'rejected-but-retained requires upstream review disposition rejected' \
     "topic integration did not name the valid rejected pair"
   [ "$(git -C "$candidate" rev-parse HEAD)" = "$before" ] || fail "refused class/disposition pairs moved the candidate"
   [ -z "$(git -C "$candidate" status --porcelain)" ] || fail "refused class/disposition pairs dirtied the candidate"
