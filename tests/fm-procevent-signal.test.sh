@@ -37,6 +37,7 @@ case "${1:-}" in
     if [ "${1:-}" = -o ]; then shift 2; fi
     case "${1:-}" in
       receive)
+        sleep "${FM_FAKE_SIGNAL_RECEIVE_START_DELAY:-0}"
         mkdir "$lock" 2>/dev/null || { printf 'duplicate receive owner\n' >> "$log"; exit 91; }
         trap 'rmdir "$lock" 2>/dev/null || true' EXIT
         while [ ! -s "$queue" ]; do sleep 0.02; done
@@ -135,7 +136,8 @@ reconcile "$H" >/dev/null
 wait_for "$SIGNAL_ROOT/account.lock" || fail "receive did not re-arm"
 MESSAGE="$SIGNAL_ROOT/reply.txt"
 printf 'reply fixture\n' > "$MESSAGE"
-signal "$H" send team "$MESSAGE" > "$SIGNAL_ROOT/send.out" 2> "$SIGNAL_ROOT/send.err" \
+FM_FAKE_SIGNAL_RECEIVE_START_DELAY=0.5 \
+  signal "$H" send team "$MESSAGE" > "$SIGNAL_ROOT/send.out" 2> "$SIGNAL_ROOT/send.err" \
   || fail "supported send ordering failed"
 [ -s "$SIGNAL_ROOT/sent.log" ] || fail "successful send was not recorded"
 assert_contains "$(cat "$SIGNAL_ROOT/sent-body")" "Fixture: reply fixture" "configured label is prepended once"

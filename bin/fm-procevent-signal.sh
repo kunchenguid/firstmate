@@ -191,22 +191,53 @@ validate_routes() {
 }
 
 cmd_source() {
-  local account
-  local -a receive_status
+  local account receive_output receive_status_file receive_pid= receive_rc emit_rc
   ensure_groups_file
   validate_routes || exit 1
   account=$(account_number) || exit 1
-  while :; do
-    "$SCRIPT_DIR/fm-procevent.sh" ready "$SOURCE_ID" >/dev/null || return 1
-    if signal-cli -a "$account" -o json receive -t -1 --max-messages 1 \
-      --ignore-attachments --ignore-stories --ignore-avatars --ignore-stickers 2>/dev/null \
-      | emit_message; then
-      return 0
+  receive_output=$(private_tempfile "${TMPDIR:-/tmp}/fm-signal-receive.XXXXXX") || die "cannot create private receive result"
+  receive_status_file=$(private_tempfile "${TMPDIR:-/tmp}/fm-signal-status.XXXXXX") || {
+    rm -f "$receive_output"
+    die "cannot create private receive status"
+  }
+  cleanup_receive() {
+    if [ -n "$receive_pid" ] && fm_pid_alive "$receive_pid"; then
+      kill "$receive_pid" 2>/dev/null || true
+      wait "$receive_pid" 2>/dev/null || true
     fi
-    receive_status=("${PIPESTATUS[@]}")
+    rm -f "$receive_output" "$receive_status_file"
+  }
+  receive_active() {
+    local process_state
+    process_state=$(LC_ALL=C ps -o stat= -p "$receive_pid" 2>/dev/null) || return 1
+    case "$process_state" in *Z*) return 1 ;; *) return 0 ;; esac
+  }
+  trap cleanup_receive EXIT
+  trap 'cleanup_receive; exit 1' HUP INT TERM
+  while :; do
+    : > "$receive_output"
+    : > "$receive_status_file"
+    (
+      signal-cli -a "$account" -o json receive -t -1 --max-messages 1 \
+        --ignore-attachments --ignore-stories --ignore-avatars --ignore-stickers 2>/dev/null \
+        | emit_message > "$receive_output"
+      printf '%s\t%s\n' "${PIPESTATUS[0]}" "${PIPESTATUS[1]}" > "$receive_status_file"
+    ) &
+    receive_pid=$!
+    sleep 1
+    if receive_active; then
+      "$SCRIPT_DIR/fm-procevent.sh" ready "$SOURCE_ID" >/dev/null || return 1
+    fi
+    wait "$receive_pid" 2>/dev/null || true
+    receive_pid=
     "$SCRIPT_DIR/fm-procevent.sh" unready "$SOURCE_ID" >/dev/null || return 1
-    [ "${receive_status[1]}" -eq 2 ] || return 1
-    [ "${receive_status[0]}" -eq 0 ] || sleep 1
+    IFS=$'\t' read -r receive_rc emit_rc < "$receive_status_file" || return 1
+    case "$receive_rc:$emit_rc" in
+      0:0) cat "$receive_output"; return $? ;;
+      0:2) ;;
+      *:2) sleep 1 ;;
+      *) return 1 ;;
+    esac
   done
 }
 
