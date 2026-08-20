@@ -119,6 +119,10 @@ case "${1:-} ${2:-}" in
     # pane executes the delivered line, and the gate's entire verdict is whether
     # the marker file that line creates appears. Strictly additive - no fixture
     # state changes here, so every other assertion in these suites is unaffected.
+    # This is a pane WRITE, so it honours the send-fail flag exactly as pane
+    # send-text and pane send-keys do; an endpoint a test has made unreachable
+    # must not answer the readiness probe.
+    [ ! -f "$SEND_FAIL" ] || exit 1
     case "${4:-}" in
       "touch /"*)
         delivered=${4#touch }

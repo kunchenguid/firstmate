@@ -153,10 +153,14 @@
 #   fixed /tmp root TASK_TMP uses, with one stderr notice; only a /tmp that also
 #   cannot yield a plain path refuses the spawn. A probe the backend cannot even
 #   deliver refuses on the SEND CHANNEL rather than spending the poll budget and
-#   blaming the pane: a cleared-input failure is terminal on sight, and any other
-#   send failure gets one bounded retry before the endpoint is named. The gate
-#   never sends an interrupt, so it cannot signal work already running in the
-#   pane.
+#   blaming the pane: two CONSECUTIVE send failures name the endpoint, a lone
+#   hiccup between delivered probes does not, and on zellij and cmux - the only
+#   adapters that define it - a reported uncleared input line is terminal on
+#   sight. The gate sends no interrupt of its own, on either gated path. It is
+#   not interrupt-free end to end, though: the zellij and cmux send_text_line
+#   adapters clear their own failed submit with C-c, and gating both first sends
+#   roughly doubles the number of send_text_line calls that can reach that
+#   pre-existing adapter path.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -2311,22 +2315,31 @@ spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
       spawn_send_text_line "$target" "touch $marker" || send_status=$?
       sends=$((sends + 1))
       # A send channel that reports failure is not a pane that will not answer,
-      # and burning the whole budget would report the wrong cause. Status 2 is
-      # the adapters' distinct "input could not be cleared" verdict, terminal on
-      # sight exactly as at the TRACEPARENT send site. Any other failure gets one
-      # bounded retry on the next stride, then refuses naming the channel.
+      # and burning the whole budget would report the wrong cause. Only zellij
+      # and cmux define status 2 as "input could not be cleared" (orca returns 2
+      # for invalid JSON or an ok:false response, which says nothing about the
+      # input line), so that terminal reading is scoped to those two. Every other
+      # failure gets one bounded retry on the next stride.
+      #
+      # The count is CONSECUTIVE, reset by any successful send. A pane eating
+      # leading bytes for many strides is this gate's whole target scenario, and
+      # one transient channel hiccup at its start must not combine with an
+      # unrelated one much later into a send-channel abort - the refusal has to
+      # name the fault that is actually happening.
       if [ "$send_status" -ne 0 ]; then
         send_failures=$((send_failures + 1))
-        if [ "$send_status" -eq 2 ]; then
+        if [ "$send_status" -eq 2 ] && { [ "$BACKEND" = zellij ] || [ "$BACKEND" = cmux ]; }; then
           spawn_ready_cleanup
           echo "error: shell-readiness probe input could not be cleared on $target for task $ID; refusing to send '$about'" >&2
           return 1
         fi
         if [ "$send_failures" -ge 2 ]; then
           spawn_ready_cleanup
-          echo "error: the send channel for task $ID's endpoint $target failed the shell-readiness probe $send_failures times (last status $send_status), so no probe reached the pane; refusing to send '$about' - the endpoint's send path is broken, not its shell" >&2
+          echo "error: the send channel for task $ID's endpoint $target failed the shell-readiness probe $send_failures times in a row (last status $send_status), so probes are no longer reaching the pane; refusing to send '$about' - the endpoint's send path is failing, not its shell" >&2
           return 1
         fi
+      else
+        send_failures=0
       fi
     fi
     if [ -e "$marker" ]; then

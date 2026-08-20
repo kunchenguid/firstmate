@@ -36,7 +36,9 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-first-send)
 #
 # FM_FAKE_SEND_FAIL_STATUS models the other failure mode: a send channel that
 # reports the given exit status and delivers nothing at all, which is what a
-# closed or renumbered pane looks like to the adapters.
+# closed or renumbered pane looks like to the adapters. FM_FAKE_SEND_FAIL_ATTEMPTS
+# narrows that to a list of attempt numbers, which models a channel that hiccups
+# and then recovers rather than one that is simply dead.
 make_lossy_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -83,10 +85,28 @@ case "${1:-}" in
     fi
     text=${args[0]}
     if [ -n "${FM_FAKE_SEND_FAIL_STATUS:-}" ]; then
-      # A send channel that reports failure and delivers nothing. The attempt is
-      # still recorded so a case can count how many the caller made.
-      printf 'send-failed %s\n' "$FM_FAKE_SEND_FAIL_STATUS" >> "${FM_FAKE_DELIVERED:?}"
-      exit "$FM_FAKE_SEND_FAIL_STATUS"
+      # A send channel that reports failure and delivers nothing. Attempts are
+      # numbered on their own counter, so a failed send never advances the
+      # delivery numbering the loss window keys on. With no attempt list every
+      # attempt fails; with one, only the listed attempt numbers do, which is how
+      # a case models a channel that hiccups between delivered probes. The
+      # attempt is recorded either way so a case can count what the caller made.
+      attemptfile="${FM_FAKE_DELIVERY_COUNTFILE:?}.send-attempts"
+      a=0
+      [ -f "$attemptfile" ] && a=$(cat "$attemptfile")
+      a=$((a + 1))
+      printf '%s\n' "$a" > "$attemptfile"
+      fail_this=1
+      if [ -n "${FM_FAKE_SEND_FAIL_ATTEMPTS:-}" ]; then
+        fail_this=0
+        for want in ${FM_FAKE_SEND_FAIL_ATTEMPTS}; do
+          [ "$want" = "$a" ] && fail_this=1
+        done
+      fi
+      if [ "$fail_this" = 1 ]; then
+        printf 'send-failed %s\n' "$FM_FAKE_SEND_FAIL_STATUS" >> "${FM_FAKE_DELIVERED:?}"
+        exit "$FM_FAKE_SEND_FAIL_STATUS"
+      fi
     fi
     countfile="${FM_FAKE_DELIVERY_COUNTFILE:?FM_FAKE_DELIVERY_COUNTFILE unset}"
     seenfile="$countfile.post-treehouse"
@@ -394,7 +414,7 @@ test_broken_send_channel_refuses_on_the_channel_not_the_pane() {
   end=$(date +%s)
   elapsed=$((end - start))
   [ "$status" -ne 0 ] || fail "a send channel that delivered no probe at all still spawned"
-  assert_contains "$out" "send path is broken, not its shell" \
+  assert_contains "$out" "send path is failing, not its shell" \
     "the refusal did not attribute the failure to the send channel"
   assert_not_contains "$out" "never confirmed it can read a command line" \
     "a send-channel failure was reported with the pane-shell timeout message"
@@ -408,27 +428,53 @@ test_broken_send_channel_refuses_on_the_channel_not_the_pane() {
   pass "a failing send channel refuses promptly and names the channel, not the pane"
 }
 
-# Status 2 is the adapters' distinct "input could not be cleared" verdict, which
-# fm-spawn already treats as terminal at the TRACEPARENT send site. It must not be
-# collapsed into the retryable case: a pane whose input cannot be cleared would
-# concatenate the probe onto whatever is already on the line.
-test_uncleared_probe_input_is_terminal() {
+# Status 2 means "input could not be cleared" only on zellij and cmux, which are
+# the adapters that define it. This suite drives the reference tmux backend, where
+# 2 carries no such meaning - orca, for instance, returns it for invalid JSON or an
+# ok:false response - so it must get the ordinary bounded retry and a refusal that
+# does not name a cause the backend never reported.
+test_status_2_is_not_read_as_uncleared_input_on_tmux() {
   local rec id out status
-  id=first-send-uncleared-m2
-  rec=$(make_case uncleared "$id")
+  id=first-send-status2-m2
+  rec=$(make_case status2 "$id")
   read_case "$rec"
 
   out=$(run_spawn "$id" 1 0 FM_FAKE_SEND_FAIL_STATUS=2)
   status=$?
-  [ "$status" -ne 0 ] || fail "an uncleared-input send failure still spawned"
-  assert_contains "$out" "probe input could not be cleared" \
-    "the refusal did not name the uncleared input as the cause"
-  assert_not_contains "$out" "never confirmed it can read a command line" \
-    "an uncleared-input failure was reported with the pane-shell timeout message"
-  assert_not_contains "$out" "spawned $id" "spawn reported success despite uncleared pane input"
-  [ "$(delivered_line_count 'send-failed 2')" = 1 ] \
-    || fail "an uncleared-input failure was retried $(delivered_line_count 'send-failed 2') times instead of being terminal on sight"
-  pass "an uncleared-input send failure is terminal on sight rather than retried"
+  [ "$status" -ne 0 ] || fail "a send channel returning status 2 still spawned"
+  assert_not_contains "$out" "probe input could not be cleared" \
+    "a tmux send failure was blamed on an uncleared input line, which tmux never reports"
+  assert_contains "$out" "send path is failing" \
+    "the refusal did not attribute the failure to the send channel"
+  assert_not_contains "$out" "spawned $id" "spawn reported success despite a failing send channel"
+  [ "$(delivered_line_count 'send-failed 2')" = 2 ] \
+    || fail "status 2 skipped the bounded retry every other backend gets ($(delivered_line_count 'send-failed 2') attempts)"
+  pass "status 2 is read as uncleared input only on the adapters that define it"
+}
+
+# The bounded retry must count CONSECUTIVE failures. This is the gate's own target
+# scenario: a pane eating every probe's leading bytes while the channel itself is
+# merely intermittent. Two hiccups separated by delivered probes must still be
+# refused as a pane-shell timeout, because that is what actually happened - a
+# cumulative counter would abort on the send channel and name the wrong fault.
+test_intermittent_send_hiccups_still_refuse_on_the_pane() {
+  local rec id out status
+  id=first-send-hiccup-n3
+  rec=$(make_case hiccup "$id")
+  read_case "$rec"
+
+  out=$(run_spawn "$id" 1 100000 FM_SPAWN_READY_POLLS=6 \
+    FM_FAKE_SEND_FAIL_STATUS=1 FM_FAKE_SEND_FAIL_ATTEMPTS='1 3')
+  status=$?
+  [ "$status" -ne 0 ] || fail "a pane that never answered a probe still spawned"
+  assert_contains "$out" "never confirmed it can read a command line" \
+    "two non-consecutive send hiccups were reported as a broken send channel instead of an unready pane"
+  assert_not_contains "$out" "send path is failing" \
+    "a channel that delivered probes between two hiccups was declared broken"
+  # Both hiccups really happened, so the case is exercising the path it claims.
+  [ "$(delivered_line_count 'send-failed 1')" = 2 ] \
+    || fail "the fixture produced $(delivered_line_count 'send-failed 1') send hiccups, not the two this case needs"
+  pass "intermittent send hiccups do not turn an unready pane into a send-channel abort"
 }
 
 # The probe root is derived from an INHERITED TMPDIR, so a TMPDIR that cannot
@@ -502,7 +548,8 @@ test_unready_shell_fails_loudly
 test_healthy_shell_pays_one_probe_per_gate
 test_misconfigured_budget_knob_falls_back_to_its_default
 test_broken_send_channel_refuses_on_the_channel_not_the_pane
-test_uncleared_probe_input_is_terminal
+test_status_2_is_not_read_as_uncleared_input_on_tmux
+test_intermittent_send_hiccups_still_refuse_on_the_pane
 test_unusable_tmpdir_falls_back_instead_of_refusing
 test_fixture_bypass_is_explicit
 test_probe_scratch_is_cleaned_up
