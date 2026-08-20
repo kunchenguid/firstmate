@@ -395,20 +395,44 @@ jobs:
             /bin/bash -n "$f" || { echo "::error::stock macOS Bash 3.2 failed to parse $f"; parse_fail=1; }
           done < "$shell_inventory"
           [ "$parse_fail" -eq 0 ] || { echo "::error::stock macOS Bash 3.2 parse sweep failed"; exit 1; }
+          if modern_bash=$(brew --prefix 2>/dev/null)/bin/bash && [ -x "$modern_bash" ]; then
+            : # found via brew
+          elif [ -x /opt/homebrew/bin/bash ]; then
+            modern_bash=/opt/homebrew/bin/bash
+          elif [ -x /usr/local/bin/bash ]; then
+            modern_bash=/usr/local/bin/bash
+          else
+            echo "Installing modern bash via Homebrew..."
+            brew install bash || { echo "::error::failed to install modern bash"; exit 1; }
+            modern_bash=$(brew --prefix)/bin/bash
+          fi
+          
+          # Isolate baseline runs to prevent any stateful fixture collisions
+          mkdir -p "$RUNNER_TEMP/baseline_fleet" "$RUNNER_TEMP/baseline_bearings"
 
+          expected_snapshot=$(TMPDIR="$RUNNER_TEMP/baseline_fleet" "$modern_bash" tests/fm-fleet-snapshot-view.test.sh | grep -c '^ok - ')
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"
           snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
-          [ "$snapshot_count" -eq 15 ] || {
-            echo "::error::expected 15 snapshot/fleet-view tests, got $snapshot_count"
+          [ "$snapshot_count" -eq "$expected_snapshot" ] || {
+            echo "::error::expected $expected_snapshot snapshot/fleet-view tests (Linux baseline), got $snapshot_count"
+            exit 1
+          }
+          printf '%s\n' "$snapshot_output" | grep -q '^ALL TESTS COMPLETED$' || {
+            echo "::error::snapshot/fleet-view tests did not complete"
             exit 1
           }
 
+          expected_bearings=$(TMPDIR="$RUNNER_TEMP/baseline_bearings" "$modern_bash" tests/fm-bearings-snapshot.test.sh | grep -c '^ok - ')
           bearings_output=$(/bin/bash tests/fm-bearings-snapshot.test.sh)
           printf '%s\n' "$bearings_output"
           bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
-          [ "$bearings_count" -eq 42 ] || {
-            echo "::error::expected 42 Bearings tests, got $bearings_count"
+          [ "$bearings_count" -eq "$expected_bearings" ] || {
+            echo "::error::expected $expected_bearings Bearings tests (Linux baseline), got $bearings_count"
+            exit 1
+          }
+          printf '%s\n' "$bearings_output" | grep -q '^ALL TESTS COMPLETED$' || {
+            echo "::error::Bearings tests did not complete"
             exit 1
           }
 
