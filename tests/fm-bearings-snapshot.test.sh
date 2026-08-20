@@ -486,13 +486,14 @@ test_bad_secondmate_homes_never_revive_parent_work() {
       and (.in_flight | map(.id) | all(. != "invalid" and . != "unreadable" and . != "malformed" and . != "timedout"))
       and (.secondmates | any(.[]; .id == "missing" and .provenance == "unknown"
         and .freshness == "unknown" and (.reason | contains("invalid home"))))
-      and ([.secondmates[] | select(.id != "missing")]
+      and ([.secondmates[] | select(.id != "missing" and .id != "malformed")]
         | all(.provenance == "parent-event-fallback" and .freshness == "historical-event"))
+      and (.secondmates | any(.[]; .id == "malformed" and .provenance == "structured-home"
+        and (.reason | contains("unstructured current backlog row"))))
       and (.secondmates | any(.[]; .id == "invalid" and (.reason | contains("marked for"))))
       and (.secondmates | any(.[]; .id == "unreadable" and (.reason | test("invalid home|unreadable"))))
-      and (.secondmates | any(.[]; .id == "malformed" and (.reason | contains("unstructured current backlog row"))))
       and (.secondmates | any(.[]; .id == "timedout" and (.reason | contains("timed out"))))
-  ' >/dev/null || fail "bad home outcomes revived stale work or lacked provenance: $json"
+  ' > /dev/null || fail "bad home outcomes revived stale work or lacked provenance: $json"
   pass "missing, invalid, unreadable, malformed, and timed-out homes stay explicit unknowns"
 }
 
@@ -1705,15 +1706,10 @@ EOF
     .secondmate_current.records[] | select(.id == "sshhip")
     | .current.state == "unknown"
       and (.current.reason | contains("in-flight backlog item has no child metadata: ordinary-orphan"))
-      and .provenance.selected != "structured-home"
-      and .invalidity == null
-      and .active_children == []
-      and .decisions_open == []
-      and .holds == []
-      and .queued == []
-      and .landed == []
-      and .endpoints == []
-  ' >/dev/null || fail "an unknown child masked a simultaneous ordinary orphan: $canonical"
+      and .provenance.selected == "structured-home"
+      and .provenance.summary_valid == false
+      and (.decisions_open | length) > 0
+  ' > /dev/null || fail "an unknown child masked a simultaneous ordinary orphan: $canonical"
   sed '/ordinary-orphan/d' "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
 
@@ -1725,14 +1721,7 @@ EOF
     .secondmate_current.records[] | select(.id == "sshhip")
     | .current.state == "unknown"
       and (.current.reason | contains("live child state has no in-flight backlog item: unreadable-child=unknown"))
-      and .provenance.selected != "structured-home"
-      and .invalidity == null
-      and .active_children == []
-      and .decisions_open == []
-      and .holds == []
-      and .queued == []
-      and .landed == []
-      and .endpoints == []
+      and .provenance.selected == "structured-home"
   ' >/dev/null || fail "an unowned unknown child received partial structured projection: $canonical"
   sed '/## In flight/a\
 - [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)' \
@@ -1813,14 +1802,10 @@ EOF
     .secondmate_current.records[] | select(.id == "hibit")
     | .current.state == "unknown"
       and (.current.reason | contains("in-flight backlog item has no child metadata: dogfood-program"))
-      and .provenance.selected != "structured-home"
-      and .active_children == []
-      and .decisions_open == []
-      and .holds == []
-      and .queued == []
-      and .landed == []
-      and .endpoints == []
-  ' >/dev/null || fail "an unrecognized worker kind no longer stayed strict: $canonical"
+      and .provenance.selected == "structured-home"
+      and .provenance.summary_valid == false
+      and (.active_children | length) > 0
+  ' > /dev/null || fail "an orphan in-flight no longer preserved structured data: $canonical"
   pass "mixed secondmate roles, partial state, and captain readiness project independently"
 }
 
@@ -1894,6 +1879,74 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+# The Doctrine v4 defect: a secondmate home with orphan in-flight rows (backlog
+# marks them in_flight but no child metadata exists) must NOT silently drop its
+# captain-held decisions. Bookkeeping errors about workers say nothing about
+# whether a decision is open. The roll-up must still show the home's captain
+# holds and disclose the inventory issue in omitted[].
+test_orphan_in_flight_does_not_hide_captain_decisions() {
+  local home mate fakebin json canonical
+  home=$(make_home orphan-decisions)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/orphan-decisions-home"
+  make_valid_secondmate_home orphan-mate "$mate"
+  append_secondmate_registry "$home" orphan-mate "$mate"
+  fm_write_secondmate_meta "$home/state/orphan-mate.meta" "$mate" "firstmate:fm-orphan-mate" sample
+  printf 'working [key=old]: old parent activity\n' > "$home/state/orphan-mate.status"
+  mkdir -p "$mate/projects/real-worker"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] orphan-a - Ghost row A has no worker (repo: sample) (kind: ship) (since 2026-08-18)
+- [ ] orphan-b - Ghost row B has no worker (repo: sample) (kind: ship) (since 2026-08-18)
+- [ ] orphan-c - Ghost row C has no worker (repo: sample) (kind: ship) (since 2026-08-18)
+- [ ] real-worker - Active task with a worker (repo: sample) (kind: ship) (since 2026-08-19)
+
+## Queued
+- [ ] captain-decision-a - Choose approach A (repo: sample) (kind: captain) (hold: captain choice pending) (hold-kind: captain)
+- [ ] captain-decision-b - Choose approach B (repo: sample) (kind: captain) (hold: captain choice pending) (hold-kind: captain)
+- [ ] captain-decision-c - Pick deployment target (repo: sample) (kind: captain) (hold: captain approval needed) (hold-kind: captain)
+
+## Done
+- [x] landed-item - Landed work (repo: sample) (kind: ship) (merged 2026-08-17)
+EOF
+  fm_write_meta "$mate/state/real-worker.meta" \
+    "window=firstmate:fm-real-worker" "worktree=$mate/projects/real-worker" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" real-worker busy
+  printf 'working: actively building\n' > "$mate/state/real-worker.status"
+  fakebin=$(make_fakebin "$home")
+
+  # First verify the canonical snapshot preserves the structured data.
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-20T14:00:00Z \
+    FM_SNAPSHOT_NOW_EPOCH=1787400000 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "orphan-mate")
+    | .current.state == "unknown"
+      and .provenance.selected == "structured-home"
+      and .provenance.summary_valid == false
+      and (.current.reason | contains("in-flight backlog item has no child metadata"))
+      and (.decisions_open | length) == 3
+      and all(.decisions_open[]; .verb == "captain-hold")
+      and (.active_children | length) > 0
+      and (.landed | length) > 0
+  ' > /dev/null || fail "canonical snapshot dropped structured data for an orphan-in-flight home: $canonical"
+
+  # Now verify bearings surfaces the captain holds and discloses the issue.
+  json=$(FM_BEARINGS_NOW=2026-08-20T14:00:00Z run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .id == "orphan-mate/captain-decision-a" and .verb == "captain-hold"))
+      and (.decisions_open | any(.[]; .id == "orphan-mate/captain-decision-b" and .verb == "captain-hold"))
+      and (.decisions_open | any(.[]; .id == "orphan-mate/captain-decision-c" and .verb == "captain-hold"))
+      and ([.decisions_open[] | select(.owner == "orphan-mate")] | length) == 3
+      and (.secondmates | any(.[]; .id == "orphan-mate" and .state == "unknown"
+        and (.reason | contains("in-flight backlog item has no child metadata"))))
+      and (.omitted | any(.surface | contains("unaccounted inventory")))
+      and (.omitted | any(.surface | contains("orphan-mate")))
+      and (.landed | any(.[]; .id == "landed-item" and .owner == "orphan-mate"))
+  ' > /dev/null || fail "orphan in-flight hid captain decisions or inventory was not disclosed: $json"
+  pass "orphan in-flight rows do not hide captain-held decisions"
+}
+
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
@@ -1935,3 +1988,4 @@ test_section_caps_and_expansion_flags
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
+test_orphan_in_flight_does_not_hide_captain_decisions
