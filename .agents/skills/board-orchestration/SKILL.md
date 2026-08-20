@@ -70,16 +70,19 @@ A column the captain added that firstmate does not drive is recorded as the boar
 
 ## The events that move a card
 
+`mark`, `pr`, `note`, and `ack` apply only to a task imported from a board, which is the only kind of task that holds a link record.
+An ordinary locally-created task has no board link, so it is never passed to any of them; they refuse it outright rather than degrading, and that refusal is a sign the wrong task id was used.
+
 Only firstmate's own execution events move a card, and each one is a single command run at the moment the event actually happens:
 
-- A worker is dispatched onto the task: `bin/fm-board.sh mark <task-id> in-progress`.
+- A worker is dispatched onto a board-imported task: `bin/fm-board.sh mark <task-id> in-progress`.
 - The worker reports its PR: `bin/fm-board.sh pr <task-id> <pr-url>`, which attaches the PR to the originating issue.
 - Work is blocked: `bin/fm-board.sh note <task-id> "Blocked: <what is needed>"`, alongside the ordinary captain escalation when the blocker needs the captain.
 - A merge is confirmed: `bin/fm-board.sh mark <task-id> done`.
 
-Every one of these degrades to a stale board instead of blocking delivery, and each reports plainly whether the board took the change.
+For a board-imported task, every one of these degrades to a stale board instead of blocking delivery, and each reports plainly whether the board took the change.
 A board that did not take a change is never a reason to delay a dispatch, a PR report, a merge, or cleanup, and it is not a captain escalation on its own.
-`poll` retries an outstanding card move on the next cycle; a blocker note is deliberately not retried, so re-run it if it matters and the captain escalation still stands either way.
+`poll` retries an outstanding card move and an outstanding PR attachment on the next cycle, reporting each as `synced` or `stale`; a blocker note is deliberately not retried, so re-run it if it matters and the captain escalation still stands either way.
 
 ## The board owns intent
 
@@ -93,6 +96,9 @@ Never move a card back to what firstmate expected, and never treat a captain's e
   This never authorizes discarding unlanded work: hard rule 3 stands unchanged, so preserve the branch, report what is on it, and get an explicit captain instruction before anything is discarded.
 - A card the captain moved to Done while work is unfinished is the captain closing the item.
   Stop the worker the same way, preserve the branch, and tell the captain plainly what had not landed.
+- A `foreign` line means a card on the board being polled carries an issue that another configured board already owns.
+  That is a configuration mistake, not an instruction, so the adapter names the owning project and touches neither the card nor the link.
+  Tell the captain which board owns the issue and let them decide which board should carry it; never re-home it by hand.
 - An `error` line means the board could not be read, or answered so implausibly that the adapter refused to act on it.
   Treat it as a board that is temporarily unavailable, let the next cycle reconcile, and never read it as work being withdrawn.
 - A scope edit on a card mid-flight follows the lifecycle rule AGENTS.md section 7 already owns: route it to follow-up work unless it completely invalidates the work being validated.

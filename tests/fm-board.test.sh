@@ -651,6 +651,129 @@ test_a_truncated_read_reconciles_nothing() {
   pass "a page boundary is never mistaken for absence"
 }
 
+test_a_card_an_intake_filter_skips_is_not_a_withdrawal() {
+  local home issue out
+  home=$(new_home a_card_an_intake_filter_skips_is_not_a_withdrawal)
+  ordinary_board "$home"
+  issue=https://github.com/harbour-collective/app/issues/150
+  item "$home" PVTI_a Issue "$issue" Todo firstmate - 'Filtered but plainly there' -
+  board "$home" import harbourlight "$issue" fm-filtered >/dev/null
+  board "$home" mark fm-filtered in-progress >/dev/null
+
+  # The captain narrows the board to one repository after the import, so the
+  # intake repo filter now skips a card that has not moved at all.
+  cat > "$home/config/boards" <<'EOF'
+project = harbourlight
+owner = harbour-collective
+number = 4
+repo = harbour-collective/somewhere-else
+label = firstmate
+EOF
+  out=$(board "$home" poll)
+  assert_not_contains "$out" 'cancelled' "a card the repo filter skips was reported as withdrawn"
+  assert_contains "$out" "linked harbourlight $issue fm-filtered in-progress" \
+    "a card the repo filter skips stopped being reconciled"
+
+  # A card whose type intake does not recognize is still a card on the board.
+  ordinary_board "$home"
+  : > "$home/items"
+  item "$home" PVTI_a ISSUE "$issue" 'In Progress' firstmate - 'Filtered but plainly there' -
+  out=$(board "$home" poll)
+  assert_not_contains "$out" 'cancelled' "a card the type filter skips was reported as withdrawn"
+  assert_contains "$(board "$home" lookup fm-filtered)" "	in-progress	in-progress	" \
+    "a skipped card's record was changed"
+  pass "an intake filter decides what is importable, never what is still on the board"
+}
+
+test_an_issue_another_board_owns_is_skipped_not_re_homed() {
+  local home issue out log
+  home=$(new_home an_issue_another_board_owns_is_skipped_not_re_homed)
+  ordinary_board "$home"
+  cat >> "$home/config/boards" <<'EOF'
+
+project = tidewheel
+owner = personal-account
+number = 91
+EOF
+  issue=https://github.com/harbour-collective/app/issues/160
+  item "$home" PVTI_a Issue "$issue" Todo firstmate - 'The first board owns this' -
+  board "$home" import harbourlight "$issue" fm-owned >/dev/null
+  board "$home" mark fm-owned in-progress >/dev/null
+
+  # Both boards now answer with the same card, which is the misconfiguration.
+  : > "$home/gh.log"
+  out=$(board "$home" poll)
+  assert_contains "$out" "foreign tidewheel $issue harbourlight fm-owned" \
+    "a card another board owns was not reported with the project that owns it"
+  assert_not_contains "$out" 'new tidewheel' "a card another board owns was offered for import"
+  assert_not_contains "$out" 'cancelled' "a card another board owns was read as a withdrawal"
+  assert_not_contains "$(gh_log "$home")" 'item-edit' "polling a card another board owns wrote to a board"
+  assert_contains "$(board "$home" lookup fm-owned)" "harbourlight	$issue" \
+    "the link was re-homed to the board that does not own the issue"
+
+  # And every later event still resolves the board that does own it.
+  : > "$home/gh.log"
+  board "$home" mark fm-owned 'done' >/dev/null
+  log=$(gh_log "$home")
+  assert_contains "$log" '--owner harbour-collective' "a later event stopped resolving the owning board"
+  assert_not_contains "$log" 'personal-account' "a later event reached the board that does not own the issue"
+  pass "an issue another board owns is named and left alone, never silently re-homed"
+}
+
+test_an_outstanding_pr_attachment_is_retried_on_the_next_cycle() {
+  local home issue pr out
+  home=$(new_home an_outstanding_pr_attachment_is_retried_on_the_next_cycle)
+  ordinary_board "$home"
+  issue=https://github.com/harbour-collective/app/issues/170
+  pr=https://github.com/harbour-collective/app/pull/171
+  item "$home" PVTI_a Issue "$issue" Todo firstmate - 'Reports a PR' -
+  board "$home" import harbourlight "$issue" fm-latepr >/dev/null
+
+  out=$(GH_FAIL='issue comment' board "$home" pr fm-latepr "$pr" 2>/dev/null)
+  assert_contains "$out" "stale harbourlight $issue fm-latepr $pr" \
+    "the failed attachment was not reported as a stale board"
+  assert_contains "$(board "$home" lookup fm-latepr)" "$pr	0" \
+    "the failed attachment was not left outstanding for the next cycle"
+
+  : > "$home/gh.log"
+  out=$(board "$home" poll)
+  assert_contains "$out" "synced harbourlight $issue fm-latepr $pr" \
+    "the next cycle did not retry the outstanding PR attachment"
+  assert_contains "$(gh_log "$home")" "issue comment $issue --body Working PR: $pr" \
+    "the retry did not land the PR link on the originating issue"
+  assert_contains "$(board "$home" lookup fm-latepr)" "$pr	1" \
+    "the retried attachment was not recorded as confirmed"
+
+  : > "$home/gh.log"
+  board "$home" poll >/dev/null
+  assert_not_contains "$(gh_log "$home")" 'issue comment' \
+    "a confirmed attachment was posted onto the issue again"
+  pass "an outstanding PR attachment is retried until the issue has it, then left alone"
+}
+
+test_mark_reads_the_board_under_the_limit_it_is_given() {
+  local home issue out rc
+  home=$(new_home mark_reads_the_board_under_the_limit_it_is_given)
+  ordinary_board "$home"
+  issue=https://github.com/harbour-collective/app/issues/180
+  item "$home" PVTI_a Issue "$issue" Todo firstmate - 'On a crowded board' -
+  board "$home" import harbourlight "$issue" fm-crowded >/dev/null
+
+  : > "$home/gh.log"
+  board "$home" mark fm-crowded in-progress >/dev/null
+  assert_contains "$(gh_log "$home")" 'project item-list 4 --owner harbour-collective --limit 200' \
+    "the default card lookup limit changed"
+
+  : > "$home/gh.log"
+  board "$home" mark fm-crowded 'done' --limit 500 >/dev/null
+  assert_contains "$(gh_log "$home")" '--limit 500' "mark ignored the lookup limit it was given"
+
+  out=$(board "$home" mark fm-crowded todo --limit 0 2>&1) && rc=0 || rc=$?
+  expect_code 2 "$rc" "mark accepted a lookup limit of zero"
+  assert_contains "$out" 'positive number' "the refused lookup limit was not explained"
+  pass "mark looks a card up under a limit it exposes, the same way poll does"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_boards_are_configuration_not_convention
@@ -673,3 +796,7 @@ test_a_failed_board_write_never_blocks_delivery
 test_a_failed_board_read_never_blocks_the_cycle
 test_an_empty_board_is_not_taken_as_mass_withdrawal
 test_a_truncated_read_reconciles_nothing
+test_a_card_an_intake_filter_skips_is_not_a_withdrawal
+test_an_issue_another_board_owns_is_skipped_not_re_homed
+test_an_outstanding_pr_attachment_is_retried_on_the_next_cycle
+test_mark_reads_the_board_under_the_limit_it_is_given

@@ -16,11 +16,16 @@
 #   fm-board.sh import <project> <issue-url> <task-id>
 #   fm-board.sh links [<project>]
 #   fm-board.sh lookup <issue-url|task-id>
-#   fm-board.sh mark <task-id> todo|in-progress|done
+#   fm-board.sh mark <task-id> todo|in-progress|done [--limit <n>]
 #   fm-board.sh pr <task-id> <pr-url>
 #   fm-board.sh note <task-id> <text>
 #   fm-board.sh ack <task-id>
 #   fm-board.sh -h | --help
+#
+# `--limit` caps how many cards one board read returns and defaults to 200, on
+# `poll` and on the card lookup `mark` needs. A board carrying more cards than
+# the limit needs it raised: `poll` says so with a `truncated` line, and `mark`
+# cannot find a card sitting past the limit at all.
 #
 # CONFIGURATION - config/boards, local and gitignored (docs/configuration.md
 # owns the operator-facing description). Plain text, one stanza per board, each
@@ -66,6 +71,9 @@
 # a draft card and not a pull request), sits in the configured Todo column, and
 # carries the configured trigger. The label is the authoritative trigger; the
 # optional mention and assignee triggers are additional and off unless set.
+# These are intake filters alone: a card they decline is still a card on the
+# board, recorded as present before any of them runs, so declining to import it
+# is never mistaken for it having left.
 #
 # IDEMPOTENCY. data/board-links.tsv is the durable linkage record and the single
 # thing consulted before an import. It lives in data/, not state/, so it
@@ -89,10 +97,12 @@
 # FAIL SOFT. Every board write degrades to a stale board instead of blocking
 # delivery: `mark`, `pr`, and `note` exit 0 whether or not the write landed,
 # reporting the failure on stderr and leaving `mark` and `pr` retryable. `poll`
-# retries outstanding writes and also exits 0 on a board read failure, reporting
-# it as an `error` line. A read that cannot tell absence from its own limits -
-# a full page, or a board answering with no cards at all while links are open -
-# says so and reconciles nothing rather than guessing. Only a usage or
+# retries both outstanding writes - the card move and the PR attachment - and
+# reports each with the same `synced` or `stale` line, and it also exits 0 on a
+# board read failure, reporting it as an `error` line. A read that cannot tell
+# absence from its own limits - a full page, or a board answering with no cards
+# at all while links are open - says so and reconciles nothing rather than
+# guessing. Only a usage or
 # configuration error exits non-zero, and a refused conflicting relink exits 3.
 #
 # WHO WINS. When the board disagrees with a record, the board is a captain
@@ -101,6 +111,13 @@
 # firstmate's state back over the captain's edit. The one exception is an
 # outstanding write the board has not taken yet, which is retried because the
 # board still shows the value this adapter last confirmed.
+#
+# An issue that a different configured board already owns is a misconfiguration
+# rather than an instruction, so `poll` names it in a `foreign` line carrying the
+# owning project and touches neither the card nor the record. Ownership is never
+# silently re-homed, because every later event would then resolve the wrong
+# board. `import` stays fleet-wide: an issue linked under any project can never
+# be imported a second time under another one.
 #
 # A card that left the board is the captain withdrawing work firstmate is still
 # executing, so `poll` keeps reporting it as `cancelled` until `ack` records that
@@ -134,6 +151,16 @@ BOARDS_FILE="$CONFIG/boards"
 LINKS="$DATA/board-links.tsv"
 GH="${FM_BOARD_GH:-gh}"
 TAB=$'\t'
+# One board read's ceiling, shared by `poll` and the card lookup `mark` needs.
+DEFAULT_LIMIT=200
+MARK_USAGE='usage: fm-board.sh mark <task-id> todo|in-progress|done [--limit <n>]'
+
+limit_valid() {
+  case "${1:-}" in
+    '' | *[!0-9]* | 0) return 1 ;;
+  esac
+  return 0
+}
 
 die() {
   printf 'error: %s\n' "$1" >&2
@@ -312,43 +339,55 @@ links_rows() {
   done < "$LINKS"
 }
 
-links_field() {
-  printf '%s' "$1" | cut -f"$2"
+# A row is seven tab-separated columns and no column is ever empty, so one
+# `read` splits it into named variables without a subprocess per field. The
+# record is kept forever by design, so a scan that forked per field would cost
+# more on every cycle than the one before it.
+LINK_PROJECT=- LINK_ISSUE=- LINK_TASK=- LINK_DESIRED=- LINK_SYNCED=-
+LINK_PR=- LINK_PR_SYNCED=-
+
+link_clear() {
+  LINK_PROJECT=- LINK_ISSUE=- LINK_TASK=- LINK_DESIRED=- LINK_SYNCED=-
+  LINK_PR=- LINK_PR_SYNCED=-
 }
 
-links_by_issue() {
-  local want=$1 row
-  while IFS= read -r row; do
-    [ "$(links_field "$row" 2)" = "$want" ] || continue
-    printf '%s\n' "$row"
-    return 0
+# links_find issue|task <value>: leave the matching record in the LINK_
+# variables and print it, or clear them and return 1. Callers read the
+# variables, so this is never run inside a command substitution.
+links_find() {
+  local by=$1 want=$2 found=
+  while IFS=$TAB read -r LINK_PROJECT LINK_ISSUE LINK_TASK LINK_DESIRED \
+    LINK_SYNCED LINK_PR LINK_PR_SYNCED; do
+    case "$by" in
+      issue) [ "$LINK_ISSUE" = "$want" ] || continue ;;
+      *) [ "$LINK_TASK" = "$want" ] || continue ;;
+    esac
+    found=1
+    break
   done < <(links_rows)
-  return 1
-}
-
-links_by_task() {
-  local want=$1 row
-  while IFS= read -r row; do
-    [ "$(links_field "$row" 3)" = "$want" ] || continue
-    printf '%s\n' "$row"
-    return 0
-  done < <(links_rows)
-  return 1
+  if [ -z "$found" ]; then
+    link_clear
+    return 1
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$LINK_PROJECT" "$LINK_ISSUE" "$LINK_TASK" "$LINK_DESIRED" "$LINK_SYNCED" \
+    "$LINK_PR" "$LINK_PR_SYNCED"
 }
 
 # links_put <project> <issue> <task> <desired> <synced> <pr> <pr_synced>
 # Atomically rewrites the record file, replacing any row for the same issue.
 links_put() {
   local project=$1 issue=$2 task=$3 desired=$4 synced=$5 pr=$6 pr_synced=$7
-  local tmp row
+  local tmp r_project r_issue r_task r_desired r_synced r_pr r_pr_synced
   mkdir -p "$DATA" || die "cannot create $DATA" 1
   tmp=$(umask 077; mktemp "$DATA/.board-links.XXXXXX") || die "cannot write the linkage record" 1
   printf '%s\n' "$LINKS_HEADER" > "$tmp"
-  while IFS= read -r row; do
-    if [ "$(links_field "$row" 2)" = "$issue" ]; then
-      continue
-    fi
-    printf '%s\n' "$row" >> "$tmp"
+  while IFS=$TAB read -r r_project r_issue r_task r_desired r_synced r_pr \
+    r_pr_synced; do
+    [ "$r_issue" != "$issue" ] || continue
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$r_project" "$r_issue" "$r_task" "$r_desired" "$r_synced" "$r_pr" \
+      "$r_pr_synced" >> "$tmp"
   done < <(links_rows)
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$project" "$issue" "$task" "$desired" "$synced" "${pr:--}" "${pr_synced:--}" >> "$tmp"
@@ -490,17 +529,25 @@ board_item_id() {
   return "$rc"
 }
 
-# board_set_status <owner> <number> <status_field> <limit> <issue-url> <option-name>
-# Resolves every node ID the status write needs, then performs it. Any failing
-# step returns non-zero so the caller can leave the write outstanding.
-board_set_status() {
-  local owner=$1 number=$2 status_field=$3 limit=$4 issue=$5 option_name=$6
-  local item_id project_id field_id option_id tmp kind a b want
-  item_id=$(board_item_id "$owner" "$number" "$status_field" "$limit" "$issue") || {
-    warn "$issue is not a card on project $owner/$number"
-    return 1
-  }
-  project_id=$("$GH" project view "$number" --owner "$owner" --format json --jq '.id') || {
+# The project, field, and option node IDs are the same for every card on one
+# board, so they are read once per board and reused by every write in this run.
+# Resolving them per write would turn a cheap cycle into three project reads for
+# each outstanding write it retries.
+BOARD_IDS_KEY=
+BOARD_PROJECT_ID=
+BOARD_FIELD_ID=
+BOARD_OPTIONS=
+
+# board_status_ids <owner> <number> <status_field>: resolve and cache them.
+# A failure caches nothing, so the next write retries the read.
+board_status_ids() {
+  local owner=$1 number=$2 status_field=$3
+  local key project_id field_id options tmp kind a b
+  key="$owner$TAB$number$TAB$status_field"
+  if [ "$BOARD_IDS_KEY" = "$key" ]; then
+    return 0
+  fi
+  project_id=$("$GH" project view "$number" --owner "$owner" --format json --jq '.id' </dev/null) || {
     warn "could not read project $owner/$number"
     return 1
   }
@@ -510,18 +557,17 @@ board_set_status() {
   }
   tmp=$(mktemp) || return 1
   if ! "$GH" project field-list "$number" --owner "$owner" --limit 100 \
-    --format json --jq "$(fields_jq "$status_field")" > "$tmp"; then
+    --format json --jq "$(fields_jq "$status_field")" > "$tmp" </dev/null; then
     rm -f "$tmp"
     warn "could not read the fields of project $owner/$number"
     return 1
   fi
   field_id=''
-  option_id=''
-  want=$(norm_name "$option_name")
-  while IFS=$'\t' read -r kind a b; do
+  options=''
+  while IFS=$TAB read -r kind a b; do
     case "$kind" in
       field) field_id=$a ;;
-      option) if [ "$(norm_name "${b:-}")" = "$want" ]; then option_id=$a; fi ;;
+      option) options="$options$(norm_name "${b:-}")$TAB$a"$'\n' ;;
     esac
   done < "$tmp"
   rm -f "$tmp"
@@ -529,21 +575,62 @@ board_set_status() {
     warn "project $owner/$number has no \"$status_field\" field"
     return 1
   fi
-  if [ -z "$option_id" ]; then
+  BOARD_PROJECT_ID=$project_id
+  BOARD_FIELD_ID=$field_id
+  BOARD_OPTIONS=$options
+  BOARD_IDS_KEY=$key
+  return 0
+}
+
+# board_option_id <option-name>: the cached single-select option id, or fail.
+board_option_id() {
+  local want name id
+  want=$(norm_name "$1")
+  while IFS=$TAB read -r name id; do
+    [ "$name" = "$want" ] || continue
+    printf '%s\n' "$id"
+    return 0
+  done <<< "$BOARD_OPTIONS"
+  return 1
+}
+
+# board_write_status <owner> <number> <status_field> <item-id> <issue-url> <option-name>
+# For a caller that already holds the card's item id, which the board read hands
+# it. Any failing step returns non-zero so the write stays outstanding.
+board_write_status() {
+  local owner=$1 number=$2 status_field=$3 item_id=$4 issue=$5 option_name=$6
+  local option_id
+  board_status_ids "$owner" "$number" "$status_field" || return 1
+  option_id=$(board_option_id "$option_name") || {
     warn "field \"$status_field\" has no \"$option_name\" option"
     return 1
-  fi
-  "$GH" project item-edit --id "$item_id" --project-id "$project_id" \
-    --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null || {
+  }
+  "$GH" project item-edit --id "$item_id" --project-id "$BOARD_PROJECT_ID" \
+    --field-id "$BOARD_FIELD_ID" --single-select-option-id "$option_id" \
+    >/dev/null </dev/null || {
     warn "could not move $issue to \"$option_name\""
     return 1
   }
   return 0
 }
 
+# board_set_status <owner> <number> <status_field> <limit> <issue-url> <option-name>
+# For a caller that holds only the issue URL and has to find its card first.
+board_set_status() {
+  local owner=$1 number=$2 status_field=$3 limit=$4 issue=$5 option_name=$6
+  local item_id
+  item_id=$(board_item_id "$owner" "$number" "$status_field" "$limit" "$issue") || {
+    warn "$issue is not a card on project $owner/$number"
+    return 1
+  }
+  board_write_status "$owner" "$number" "$status_field" "$item_id" "$issue" "$option_name"
+}
+
 # board_comment <issue-url> <body>
+# Runs from inside poll's item loop, so it never inherits the board read on
+# stdin.
 board_comment() {
-  "$GH" issue comment "$1" --body "$2" >/dev/null || {
+  "$GH" issue comment "$1" --body "$2" >/dev/null </dev/null || {
     warn "could not comment on $1"
     return 1
   }
@@ -622,28 +709,30 @@ cmd_boards() {
 cmd_links() {
   local want=${1:-} row
   while IFS= read -r row; do
-    if [ -n "$want" ] && [ "$want" != "$(links_field "$row" 1)" ]; then
-      continue
+    if [ -n "$want" ]; then
+      case "$row" in
+        "$want$TAB"*) ;;
+        *) continue ;;
+      esac
     fi
     printf '%s\n' "$row"
   done < <(links_rows)
 }
 
 cmd_lookup() {
-  local want=${1:?usage: fm-board.sh lookup <issue-url|task-id>} canonical row
+  local want=${1:?usage: fm-board.sh lookup <issue-url|task-id>} canonical
   if canonical=$(issue_canonical "$want"); then
-    row=$(links_by_issue "$canonical") || return 1
+    links_find issue "$canonical" || return 1
   else
-    row=$(links_by_task "$want") || return 1
+    links_find task "$want" || return 1
   fi
-  printf '%s\n' "$row"
 }
 
 cmd_import() {
   local project=${1:?usage: fm-board.sh import <project> <issue-url> <task-id>}
   local raw_issue=${2:?usage: fm-board.sh import <project> <issue-url> <task-id>}
   local task=${3:?usage: fm-board.sh import <project> <issue-url> <task-id>}
-  local issue existing existing_task existing_issue board repo
+  local issue board repo
 
   board=$(board_for "$project")
   repo=$(printf '%s' "$board" | cut -f4)
@@ -653,17 +742,17 @@ cmd_import() {
     die "$issue is not in $repo, the repo configured for board \"$project\""
   fi
 
-  if existing=$(links_by_issue "$issue"); then
-    existing_task=$(links_field "$existing" 3)
-    if [ "$existing_task" = "$task" ]; then
+  # This duplicate check is deliberately fleet-wide rather than scoped to one
+  # board: an issue holds at most one task no matter which board carries it.
+  if links_find issue "$issue" >/dev/null; then
+    if [ "$LINK_TASK" = "$task" ]; then
       printf 'already-linked %s %s %s\n' "$project" "$issue" "$task"
       return 0
     fi
-    die "$issue is already linked to task $existing_task; refusing to relink it to $task" 3
+    die "$issue is already linked to task $LINK_TASK; refusing to relink it to $task" 3
   fi
-  if existing=$(links_by_task "$task"); then
-    existing_issue=$(links_field "$existing" 2)
-    die "task $task is already linked to $existing_issue" 3
+  if links_find task "$task" >/dev/null; then
+    die "task $task is already linked to $LINK_ISSUE" 3
   fi
 
   links_put "$project" "$issue" "$task" todo todo - -
@@ -671,21 +760,48 @@ cmd_import() {
 }
 
 cmd_mark() {
-  local task=${1:?usage: fm-board.sh mark <task-id> todo|in-progress|done}
-  local state=${2:?usage: fm-board.sh mark <task-id> todo|in-progress|done}
-  local row project issue synced pr pr_synced board
+  local task='' state='' limit=$DEFAULT_LIMIT
+  local project issue synced pr pr_synced board
   local owner number status_field todo in_progress done_col column
 
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --limit)
+        [ "$#" -gt 1 ] || die "--limit needs a value"
+        limit=$2
+        shift 2
+        ;;
+      --limit=*)
+        limit=${1#--limit=}
+        shift
+        ;;
+      -*) die "unknown option \"$1\"" ;;
+      *)
+        if [ -z "$task" ]; then
+          task=$1
+        elif [ -z "$state" ]; then
+          state=$1
+        else
+          die "$MARK_USAGE"
+        fi
+        shift
+        ;;
+    esac
+  done
+  if [ -z "$task" ] || [ -z "$state" ]; then
+    die "$MARK_USAGE"
+  fi
+  limit_valid "$limit" || die "--limit must be a positive number"
   case "$state" in
     todo | in-progress | done) ;;
     *) die "unknown board state \"$state\" (use todo, in-progress, or done)" ;;
   esac
-  row=$(links_by_task "$task") || die "task $task is not linked to a board issue"
-  project=$(links_field "$row" 1)
-  issue=$(links_field "$row" 2)
-  synced=$(links_field "$row" 5)
-  pr=$(links_field "$row" 6)
-  pr_synced=$(links_field "$row" 7)
+  links_find task "$task" >/dev/null || die "task $task is not linked to a board issue"
+  project=$LINK_PROJECT
+  issue=$LINK_ISSUE
+  synced=$LINK_SYNCED
+  pr=$LINK_PR
+  pr_synced=$LINK_PR_SYNCED
   board=$(board_for "$project")
   owner=$(printf '%s' "$board" | cut -f2)
   number=$(printf '%s' "$board" | cut -f3)
@@ -696,7 +812,7 @@ cmd_mark() {
   column=$(state_column "$state" "$todo" "$in_progress" "$done_col")
 
   links_put "$project" "$issue" "$task" "$state" "$synced" "$pr" "$pr_synced"
-  if board_set_status "$owner" "$number" "$status_field" 200 "$issue" "$column"; then
+  if board_set_status "$owner" "$number" "$status_field" "$limit" "$issue" "$column"; then
     links_put "$project" "$issue" "$task" "$state" "$state" "$pr" "$pr_synced"
     printf 'synced %s %s %s %s\n' "$project" "$issue" "$task" "$state"
   else
@@ -708,16 +824,16 @@ cmd_mark() {
 cmd_pr() {
   local task=${1:?usage: fm-board.sh pr <task-id> <pr-url>}
   local url=${2:?usage: fm-board.sh pr <task-id> <pr-url>}
-  local row project issue desired synced pr pr_synced
+  local project issue desired synced pr pr_synced
 
   pr_url_valid "$url" || die "\"$url\" is not a pull request URL"
-  row=$(links_by_task "$task") || die "task $task is not linked to a board issue"
-  project=$(links_field "$row" 1)
-  issue=$(links_field "$row" 2)
-  desired=$(links_field "$row" 4)
-  synced=$(links_field "$row" 5)
-  pr=$(links_field "$row" 6)
-  pr_synced=$(links_field "$row" 7)
+  links_find task "$task" >/dev/null || die "task $task is not linked to a board issue"
+  project=$LINK_PROJECT
+  issue=$LINK_ISSUE
+  desired=$LINK_DESIRED
+  synced=$LINK_SYNCED
+  pr=$LINK_PR
+  pr_synced=$LINK_PR_SYNCED
   if [ "$pr" = "$url" ] && [ "$pr_synced" = 1 ]; then
     printf 'already-attached %s %s %s %s\n' "$project" "$issue" "$task" "$url"
     return 0
@@ -736,10 +852,10 @@ cmd_pr() {
 cmd_note() {
   local task=${1:?usage: fm-board.sh note <task-id> <text>}
   local text=${2:?usage: fm-board.sh note <task-id> <text>}
-  local row project issue
-  row=$(links_by_task "$task") || die "task $task is not linked to a board issue"
-  project=$(links_field "$row" 1)
-  issue=$(links_field "$row" 2)
+  local project issue
+  links_find task "$task" >/dev/null || die "task $task is not linked to a board issue"
+  project=$LINK_PROJECT
+  issue=$LINK_ISSUE
   # A note is a point-in-time record, so it is never queued for retry: a blocker
   # posted three cycles late would be noise, and firstmate escalates the blocker
   # to the captain either way.
@@ -753,12 +869,12 @@ cmd_note() {
 
 cmd_ack() {
   local task=${1:?usage: fm-board.sh ack <task-id>}
-  local row project issue pr pr_synced
-  row=$(links_by_task "$task") || die "task $task is not linked to a board issue"
-  project=$(links_field "$row" 1)
-  issue=$(links_field "$row" 2)
-  pr=$(links_field "$row" 6)
-  pr_synced=$(links_field "$row" 7)
+  local project issue pr pr_synced
+  links_find task "$task" >/dev/null || die "task $task is not linked to a board issue"
+  project=$LINK_PROJECT
+  issue=$LINK_ISSUE
+  pr=$LINK_PR
+  pr_synced=$LINK_PR_SYNCED
   # The link stays forever so the issue can never be imported twice; only its
   # active execution state retires.
   links_put "$project" "$issue" "$task" other other "$pr" "$pr_synced"
@@ -771,8 +887,9 @@ poll_board() {
   local board=$1 limit=$2 items=$3
   local project owner number repo label mention assignee status_field todo in_progress done_col
   local id type url status labels assignees title body
-  local canonical row task desired synced pr pr_synced board_state count=0
+  local canonical task desired synced pr pr_synced board_state count=0
   local seen_file trigger column
+  local l_project l_issue l_task l_desired
 
   project=$(printf '%s' "$board" | cut -f1)
   owner=$(printf '%s' "$board" | cut -f2)
@@ -787,24 +904,30 @@ poll_board() {
   done_col=$(printf '%s' "$board" | cut -f11)
 
   seen_file=$(mktemp) || return 1
-  while IFS=$'\t' read -r id type url status labels assignees title body; do
+  while IFS=$TAB read -r id type url status labels assignees title body; do
     [ -n "$id" ] || continue
     count=$((count + 1))
-    # A draft card or a pull request is not a real issue, so it is never intake.
-    [ "$type" = Issue ] || continue
     canonical=$(issue_canonical "$url") || continue
-    if [ "$repo" != - ] && [ "$(issue_repo "$canonical")" != "$repo" ]; then
-      continue
-    fi
+    # Presence on the board is established before any intake filter runs: a card
+    # this cycle declines to import is still a card that has not left, and the
+    # withdrawal scan below reads absence from this file.
     printf '%s\n' "$canonical" >> "$seen_file"
     board_state=$(column_state "$status" "$todo" "$in_progress" "$done_col")
 
-    if row=$(links_by_issue "$canonical"); then
-      task=$(links_field "$row" 3)
-      desired=$(links_field "$row" 4)
-      synced=$(links_field "$row" 5)
-      pr=$(links_field "$row" 6)
-      pr_synced=$(links_field "$row" 7)
+    if links_find issue "$canonical" >/dev/null; then
+      # An issue another configured board already owns is a misconfiguration,
+      # not an instruction. Re-homing it would point every later event at the
+      # wrong board, so this one is named and left entirely alone.
+      if [ "$LINK_PROJECT" != "$project" ]; then
+        printf 'foreign %s %s %s %s\n' \
+          "$project" "$canonical" "$LINK_PROJECT" "$LINK_TASK"
+        continue
+      fi
+      task=$LINK_TASK
+      desired=$LINK_DESIRED
+      synced=$LINK_SYNCED
+      pr=$LINK_PR
+      pr_synced=$LINK_PR_SYNCED
       if [ "$desired" = "$synced" ]; then
         if [ "$board_state" = "$desired" ]; then
           printf 'linked %s %s %s %s\n' "$project" "$canonical" "$task" "$desired"
@@ -812,18 +935,20 @@ poll_board() {
           links_put "$project" "$canonical" "$task" "$board_state" "$board_state" "$pr" "$pr_synced"
           printf 'instruction %s %s %s %s %s %s\n' \
             "$project" "$canonical" "$task" "$desired" "$board_state" "$status"
+          desired=$board_state
+          synced=$board_state
         fi
-        continue
-      fi
       # A write is outstanding. The board still showing the last confirmed value
       # is this adapter's own lag, not a captain edit.
-      if [ "$board_state" = "$desired" ]; then
+      elif [ "$board_state" = "$desired" ]; then
         links_put "$project" "$canonical" "$task" "$desired" "$desired" "$pr" "$pr_synced"
+        synced=$desired
         printf 'linked %s %s %s %s\n' "$project" "$canonical" "$task" "$desired"
       elif [ "$board_state" = "$synced" ]; then
         column=$(state_column "$desired" "$todo" "$in_progress" "$done_col") || column=
-        if [ -n "$column" ] && board_set_status "$owner" "$number" "$status_field" "$limit" "$canonical" "$column"; then
+        if [ -n "$column" ] && board_write_status "$owner" "$number" "$status_field" "$id" "$canonical" "$column"; then
           links_put "$project" "$canonical" "$task" "$desired" "$desired" "$pr" "$pr_synced"
+          synced=$desired
           printf 'synced %s %s %s %s\n' "$project" "$canonical" "$task" "$desired"
         else
           printf 'stale %s %s %s %s\n' "$project" "$canonical" "$task" "$desired"
@@ -832,11 +957,29 @@ poll_board() {
         links_put "$project" "$canonical" "$task" "$board_state" "$board_state" "$pr" "$pr_synced"
         printf 'instruction %s %s %s %s %s %s\n' \
           "$project" "$canonical" "$task" "$desired" "$board_state" "$status"
+        desired=$board_state
+        synced=$board_state
+      fi
+      # An outstanding PR attachment is retried exactly like an outstanding card
+      # move, because `pr` promised the next cycle would reconcile it.
+      if [ "$pr" != - ] && [ "$pr_synced" != 1 ]; then
+        if board_comment "$canonical" "Working PR: $pr"; then
+          links_put "$project" "$canonical" "$task" "$desired" "$synced" "$pr" 1
+          printf 'synced %s %s %s %s\n' "$project" "$canonical" "$task" "$pr"
+        else
+          printf 'stale %s %s %s %s\n' "$project" "$canonical" "$task" "$pr"
+        fi
       fi
       continue
     fi
 
-    # Not linked yet: intake needs the Todo column and an explicit trigger.
+    # Not linked yet, so from here on this is intake alone. A draft card or a
+    # pull request is not a real issue, and an issue outside the configured repo
+    # is not this board's work to take.
+    [ "$type" = Issue ] || continue
+    if [ "$repo" != - ] && [ "$(issue_repo "$canonical")" != "$repo" ]; then
+      continue
+    fi
     [ "$board_state" = todo ] || continue
     trigger=
     if list_has "$labels" "$label"; then
@@ -861,28 +1004,25 @@ poll_board() {
   elif [ "$count" -eq 0 ] && [ -n "$(cmd_links "$project")" ]; then
     printf 'error %s the board returned no cards while links are open\n' "$project"
   else
-    while IFS= read -r row; do
-      [ "$(links_field "$row" 1)" = "$project" ] || continue
-      canonical=$(links_field "$row" 2)
-      if grep -Fqx -- "$canonical" "$seen_file"; then
+    while IFS=$TAB read -r l_project l_issue l_task l_desired _ _ _; do
+      [ "$l_project" = "$project" ] || continue
+      if grep -Fqx -- "$l_issue" "$seen_file"; then
         continue
       fi
-      desired=$(links_field "$row" 4)
       # Leaving the board after Done is archiving, and an acknowledged
       # withdrawal is already reconciled; neither is an open instruction.
-      case "$desired" in
+      case "$l_desired" in
         todo | in-progress) ;;
         *) continue ;;
       esac
-      task=$(links_field "$row" 3)
-      printf 'cancelled %s %s %s %s\n' "$project" "$canonical" "$task" "$desired"
+      printf 'cancelled %s %s %s %s\n' "$project" "$l_issue" "$l_task" "$l_desired"
     done < <(links_rows)
   fi
   rm -f "$seen_file"
 }
 
 cmd_poll() {
-  local want='' limit=200 board items project owner number status_field
+  local want='' limit=$DEFAULT_LIMIT board items project owner number status_field
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --limit)
@@ -901,9 +1041,7 @@ cmd_poll() {
         ;;
     esac
   done
-  case "$limit" in
-    '' | *[!0-9]* | 0) die "--limit must be a positive number" ;;
-  esac
+  limit_valid "$limit" || die "--limit must be a positive number"
   if [ -n "$want" ]; then
     board_for "$want" >/dev/null
   fi
