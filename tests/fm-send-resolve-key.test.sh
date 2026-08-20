@@ -197,6 +197,40 @@ test_colon_first_key_position_is_answerable() {
   pass "fm-send --resolve-key: a colon-first stated key is open under that key and answerable"
 }
 
+# A firstmate wait marker may carry an open key while the worker
+# is idle. A consumer environment whose configurable resolution verb collides
+# with "paused" must not make fm-send's full fold reject a key that the normal
+# wake-drain fold still lists as open.
+test_paused_carried_key_remains_answerable() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/paused-carried-key"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home paused-carried-key)
+  fm_write_meta "$home/state/t10.meta" "window=sess:fm-t10" "kind=ship"
+  printf 'needs-decision [key=dwr395-draft-grid]: choose the draft grid\n' > "$home/state/t10.status"
+  printf 'paused [key=dwr395-draft-grid]: awaiting captain decision before continuing\n' \
+    >> "$home/state/t10.status"
+
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=dwr395-draft-grid]' >/dev/null \
+    || fail "precondition: wake drain should keep the paused decision open: $out"
+
+  FM_CLASSIFY_RESOLVE_VERB=paused run_send "$fb" "$home" "$log" t10 \
+    --resolve-key dwr395-draft-grid "use the compact grid"
+  rc=$?
+  expect_code 0 "$rc" \
+    "a pause marker must not make fm-send refuse a key still listed by wake drain"
+  grep -F 'resolved [key=dwr395-draft-grid]: answered: use the compact grid' \
+    "$home/state/t10.status" >/dev/null \
+    || fail "fm-send did not append the explicit close after the paused marker"
+
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the explicit answer did not close the paused decision: $out"
+  fi
+  pass "fm-send --resolve-key: a paused carried key remains answerable across fold environments"
+}
+
 test_answer_starts_work_never_orphans() {
   local dir fb log home rc out
   dir="$TMP_ROOT/starts-work"; mkdir -p "$dir"
@@ -499,6 +533,7 @@ test_flag_misuse_refuses() {
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_colon_first_key_position_is_answerable
+test_paused_carried_key_remains_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
 test_not_open_key_refuses_before_send
