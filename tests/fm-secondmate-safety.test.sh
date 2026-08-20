@@ -1156,6 +1156,9 @@ test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin() {
   pass "remote-backed subhome seeding validates existing destination origins"
 }
 
+# Which origin spellings are filesystem paths is bin/fm-project-origin-lib.sh's
+# to say, and bin/fm-home-seed.sh asks it before anchoring one, so a change to
+# that library is a change to what this case covers.
 test_home_seed_resolves_relative_source_origins() {
   local home subhome subhome_abs expected out actual
   home="$TMP_ROOT/relative-origin-home"
