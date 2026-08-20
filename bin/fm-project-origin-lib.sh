@@ -195,3 +195,30 @@ fm_project_origin_local_path() { # <url>; prints the filesystem path, or 1 when 
   esac
   printf '%s\n' "$path"
 }
+
+# A clone can name a filesystem origin the way a person types a path: relative to
+# the clone, or spelled with a leading tilde. Neither is a value this file may
+# accept, because a transported origin must resolve the same way on every machine,
+# but a caller holding the clone the origin belongs to CAN anchor such a spelling
+# before asking. This answers "is this origin spelled as a path at all", by the
+# same rule bin/fm-home-seed.sh's normalize_origin_url uses when it anchors an
+# origin it seeds from, so both owners classify the same value the same way: a
+# colon only makes an origin scp-like when it precedes the first slash.
+fm_project_origin_is_path_form() { # <url>; 0 when the origin names a filesystem path
+  local url=${1-} prefix
+  case $url in
+    '') return 1 ;;
+    file://*) return 0 ;;
+    *://*) return 1 ;;
+  esac
+  case $url in
+    *:*)
+      prefix=${url%%:*}
+      case $prefix in
+        */*) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  return 0
+}
