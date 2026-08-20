@@ -62,26 +62,11 @@ harness_path_name() {
   return 1
 }
 
-harness_interpreter_script_name() {
-  local args=$1 token name
-  local -a words=()
-  read -r -a words <<< "$args"
-  for token in "${words[@]:1}"; do
-    case "$token" in
-      ''|-*) continue ;;
-    esac
-    name=$(harness_path_name "$token" 2>/dev/null || true)
-    [ -n "$name" ] && { printf '%s\n' "$name"; return 0; }
-    return 1
-  done
-  return 1
-}
-
 # Layer 1: walk the parent chain and match the command name. Prints the
 # innermost harness ancestor's verdict, or "unknown" when no harness ancestor
 # is visible within the walk depth (or before FM_HARNESS_ANCESTRY_BOUNDARY).
 detect_ancestry() {
-  local pid=$$ comm args argv0 name
+  local pid=$$ comm argv0 name
   for _ in 1 2 3 4 5 6 7 8; do
     if [ -n "${FM_HARNESS_ANCESTRY_BOUNDARY:-}" ] && [ "$pid" = "$FM_HARNESS_ANCESTRY_BOUNDARY" ]; then
       break
@@ -92,25 +77,15 @@ detect_ancestry() {
       echo cursor
       return
     fi
-    case "$(basename -- "$comm")" in
-      *claude*) echo claude; return ;;
-      *codex*) echo codex; return ;;
-      *opencode*) echo opencode; return ;;
-      *grok*) echo grok; return ;;
-      kimi) echo kimi; return ;;
-      # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
-      # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
-      # name carries the version and CHANGES on every auto-update. Match the stable
-      # prefix rather than any exact name. Deliberately anchored, never *muse*, so
-      # unrelated commands (musescore, amuse) cannot be misread as this harness.
-      muse|muse-bin-*) echo muse; return ;;
-      pi-signed) echo pi; return ;;
-      pi) echo pi; return ;;
-      node*|python*)
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
-        name=$(harness_interpreter_script_name "$args")
-        [ -n "$name" ] && { echo "$name"; return; }
-    esac
+    name=$(harness_path_name "$comm" 2>/dev/null || true)
+    [ -n "$name" ] || name=$(harness_path_name "$argv0" 2>/dev/null || true)
+    if [ -n "$name" ]; then
+      case "$name" in
+        pi|pi-signed) echo pi ;;
+        *) echo "$name" ;;
+      esac
+      return
+    fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
       break

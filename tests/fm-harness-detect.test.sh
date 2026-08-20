@@ -33,7 +33,7 @@ probe_under() {
   local anc=$1
   shift
   env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u CLAUDECODE -u PI_CODING_AGENT \
-    -u FM_PI_HARNESS -u GROK_AGENT "$@" \
+    -u FM_PI_HARNESS -u GROK_AGENT FM_HARNESS_ANCESTRY_BOUNDARY=$$ "$@" \
     "$anc" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\""
 }
 
@@ -80,20 +80,49 @@ test_cursor_ancestry_detects_cursor_even_with_inherited_claudecode() {
   pass "cursor ancestry detects cursor even when only a foreign CLAUDECODE marker is present"
 }
 
-test_interpreter_argument_substring_does_not_establish_ancestry() {
-  local out
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "skip: python3 not found for interpreter ancestry boundary test"
-    return 0
+test_non_harness_basename_falls_back_to_markers() {
+  local name out
+  for name in codex-helper my-claude-wrapper; do
+    out=$(probe_under "$(make_named_ancestor "$name")" CLAUDECODE=1)
+    [ "$out" = claude ] \
+      || fail "non-harness basename '$name' must fall back to CLAUDECODE, got '$out'"
+  done
+  pass "non-harness command basenames do not establish ancestry identity"
+}
+
+test_interpreter_arguments_do_not_establish_ancestry() {
+  local out module_dir node_dir
+  if command -v python3 >/dev/null 2>&1; then
+    module_dir="$TMP_ROOT/python-module"
+    mkdir -p "$module_dir"
+    printf '%s\n' \
+      'import os, subprocess' \
+      'print(subprocess.check_output([os.environ["HARNESS"]], env=os.environ, text=True), end="")' \
+      > "$module_dir/codex.py"
+    out=$(cd "$module_dir" && env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT \
+      -u FM_PI_HARNESS -u GROK_AGENT CLAUDECODE=1 \
+      FM_HARNESS_ANCESTRY_BOUNDARY=$$ HARNESS="$HARNESS" python3 -m codex)
+    [ "$out" = claude ] \
+      || fail "python -m codex must fall back to CLAUDECODE, got '$out'"
+  else
+    echo "skip: python3 not found for interpreter module ancestry test"
   fi
-  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT \
-    -u FM_PI_HARNESS -u GROK_AGENT CLAUDECODE=1 \
-    FM_HARNESS_ANCESTRY_BOUNDARY=$$ HARNESS="$HARNESS" \
-    python3 -c 'import os, subprocess; print(subprocess.check_output([os.environ["HARNESS"]], env=os.environ, text=True), end="")' \
-    /work/codex-tools/run.py)
-  [ "$out" = claude ] \
-    || fail "a python argument containing codex must not establish codex ancestry, got '$out'"
-  pass "interpreter arguments require an executable boundary before ancestry wins"
+  if command -v node >/dev/null 2>&1; then
+    node_dir="$TMP_ROOT/node-script"
+    mkdir -p "$node_dir"
+    printf '%s\n' \
+      'const cp = require("child_process");' \
+      'process.stdout.write(cp.execFileSync(process.env.HARNESS, {env: process.env, encoding: "utf8"}));' \
+      > "$node_dir/codex"
+    out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT \
+      -u FM_PI_HARNESS -u GROK_AGENT CLAUDECODE=1 \
+      FM_HARNESS_ANCESTRY_BOUNDARY=$$ HARNESS="$HARNESS" node "$node_dir/codex")
+    [ "$out" = claude ] \
+      || fail "node script arguments must fall back to CLAUDECODE, got '$out'"
+  else
+    echo "skip: node not found for interpreter script ancestry test"
+  fi
+  pass "interpreter arguments do not establish ancestry identity"
 }
 
 # --- 2. Markers remain the fallback when no harness ancestry is visible ------
@@ -141,6 +170,7 @@ test_pi_signed_refinement_survives_ancestry_detection() {
 test_codex_ancestry_outranks_inherited_cursor_markers
 test_codex_ancestry_outranks_inherited_claudecode
 test_cursor_ancestry_detects_cursor_even_with_inherited_claudecode
-test_interpreter_argument_substring_does_not_establish_ancestry
+test_non_harness_basename_falls_back_to_markers
+test_interpreter_arguments_do_not_establish_ancestry
 test_markers_remain_fallback_without_harness_ancestry
 test_pi_signed_refinement_survives_ancestry_detection
