@@ -37,6 +37,8 @@ case "${1:-}" in
     if [ "${1:-}" = -o ]; then shift 2; fi
     case "${1:-}" in
       receive)
+        printf '%s\n' "$PPID" > "$root/receive-parent"
+        sleep "${FM_FAKE_SIGNAL_RECEIVE_START_DELAY:-0}"
         mkdir "$lock" 2>/dev/null || { printf 'duplicate receive owner\n' >> "$log"; exit 91; }
         trap 'rmdir "$lock" 2>/dev/null || true' EXIT
         while [ ! -s "$queue" ]; do sleep 0.02; done
@@ -96,12 +98,22 @@ wait_for() {
 cleanup_sources() {
   local home
   for home in "$SIGNAL_ROOT/home" "$SIGNAL_ROOT/failure" "$SIGNAL_ROOT/validation" \
-    "$SIGNAL_ROOT/rearm-failure" "$SIGNAL_ROOT/invalid-config"; do
+    "$SIGNAL_ROOT/rearm-failure" "$SIGNAL_ROOT/invalid-config" "$SIGNAL_ROOT/foreign"; do
     [ -d "$home" ] || continue
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   done
 }
 trap cleanup_sources EXIT
+
+assert_runner_owned_receive() {
+  local home=$1 claim_pid source_pid source_parent
+  wait_for "$SIGNAL_ROOT/receive-parent" || fail "restored receive process did not start"
+  claim_pid=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/signal-account.claim")
+  IFS= read -r source_pid < "$SIGNAL_ROOT/receive-parent"
+  source_parent=$(ps -o ppid= -p "$source_pid" 2>/dev/null | tr -d '[:space:]')
+  [ "$source_parent" = "$claim_pid" ] || fail "receive was not foreground-owned by the generic runner"
+  [ -f "$home/state/procevent/signal-account.ready" ] || fail "restored runner did not publish generation-bound readiness"
+}
 
 H="$SIGNAL_ROOT/home"
 new_home "$H"
@@ -120,6 +132,21 @@ fi
 [ -d "$SIGNAL_ROOT/account.lock" ] || fail "foreign readiness calls disturbed the live receive"
 pass "only the owning runner generation can change source readiness"
 
+HFOREIGN="$SIGNAL_ROOT/foreign"
+new_home "$HFOREIGN"
+printf 'foreign fixture\n' > "$SIGNAL_ROOT/foreign-message"
+cli_count_before=$(wc -l < "$SIGNAL_ROOT/cli.log" | tr -d ' ')
+if signal "$HFOREIGN" send team "$SIGNAL_ROOT/foreign-message" \
+  > "$SIGNAL_ROOT/foreign.out" 2> "$SIGNAL_ROOT/foreign.err"; then
+  fail "a foreign home sent while another home owned the Signal source"
+fi
+assert_grep 'error: Signal account is active in another home' "$SIGNAL_ROOT/foreign.err" \
+  "foreign-home account access fails with a sanitized adapter error"
+cli_count_after=$(wc -l < "$SIGNAL_ROOT/cli.log" | tr -d ' ')
+[ "$cli_count_before" = "$cli_count_after" ] || fail "foreign-home refusal reached signal-cli"
+[ -d "$SIGNAL_ROOT/account.lock" ] || fail "foreign-home refusal disturbed the owning receive"
+pass "a foreign home cannot access Signal while another runner owns the account"
+
 PATH="$FAKEBIN:$PATH" FM_FAKE_SIGNAL_ROOT="$SIGNAL_ROOT" \
   signal-cli listAccounts > "$SIGNAL_ROOT/old-order.out" &
 old_pid=$!
@@ -135,15 +162,18 @@ reconcile "$H" >/dev/null
 wait_for "$SIGNAL_ROOT/account.lock" || fail "receive did not re-arm"
 MESSAGE="$SIGNAL_ROOT/reply.txt"
 printf 'reply fixture\n' > "$MESSAGE"
-signal "$H" send team "$MESSAGE" > "$SIGNAL_ROOT/send.out" 2> "$SIGNAL_ROOT/send.err" \
+rm -f "$SIGNAL_ROOT/receive-parent"
+FM_FAKE_SIGNAL_RECEIVE_START_DELAY=0.5 \
+  signal "$H" send team "$MESSAGE" > "$SIGNAL_ROOT/send.out" 2> "$SIGNAL_ROOT/send.err" \
   || fail "supported send ordering failed"
 [ -s "$SIGNAL_ROOT/sent.log" ] || fail "successful send was not recorded"
 assert_contains "$(cat "$SIGNAL_ROOT/sent-body")" "Fixture: reply fixture" "configured label is prepended once"
 assert_not_contains "$(cat "$SIGNAL_ROOT/cli.log")" "reply fixture" "message content never reaches a CLI argv record"
 [ "$(cat "$SIGNAL_ROOT/send.out")" = "sent: Signal message" ] || fail "send did not emit only its sanitized success status"
 [ ! -s "$SIGNAL_ROOT/send.err" ] || fail "successful send exposed unexpected stderr"
-[ -d "$SIGNAL_ROOT/account.lock" ] || fail "successful send returned before receive became active"
-pass "send retires before account access, keeps content private, and restores listening"
+assert_runner_owned_receive "$H"
+wait_for "$SIGNAL_ROOT/account.lock" || fail "successful send did not eventually restore receive"
+pass "send restores a bounded generation-owned foreground receive"
 
 signal "$H" retire team >/dev/null
 printf 'Fixture: already attributed\n' > "$MESSAGE"
@@ -159,15 +189,17 @@ signal "$HFAIL" arm team >/dev/null
 reconcile "$HFAIL" >/dev/null
 wait_for "$SIGNAL_ROOT/account.lock" || fail "failure fixture receive did not acquire account"
 printf 'failure fixture\n' > "$MESSAGE"
-if FM_FAKE_SIGNAL_FAIL=1 signal "$HFAIL" send team "$MESSAGE" \
+rm -f "$SIGNAL_ROOT/receive-parent"
+if FM_FAKE_SIGNAL_FAIL=1 FM_FAKE_SIGNAL_RECEIVE_START_DELAY=0.5 signal "$HFAIL" send team "$MESSAGE" \
   > "$SIGNAL_ROOT/failure.out" 2> "$SIGNAL_ROOT/failure.err"; then
   fail "failed fake send unexpectedly succeeded"
 fi
 [ ! -s "$SIGNAL_ROOT/failure.out" ] || fail "failed send exposed unexpected stdout"
 assert_grep 'error: Signal send failed or timed out' "$SIGNAL_ROOT/failure.err" "failed send reports a sanitized adapter error"
 assert_not_contains "$(cat "$SIGNAL_ROOT/failure.out" "$SIGNAL_ROOT/failure.err")" "private-cli" "failed signal-cli output stays private"
-[ -d "$SIGNAL_ROOT/account.lock" ] || fail "failed send returned before receive became active"
-pass "failed send reports failure while preserving future receive liveness"
+assert_runner_owned_receive "$HFAIL"
+wait_for "$SIGNAL_ROOT/account.lock" || fail "failed send did not eventually restore receive"
+pass "failed send restores a bounded generation-owned foreground receive"
 
 signal "$HFAIL" retire team >/dev/null
 signal "$H" retire team >/dev/null
@@ -206,7 +238,13 @@ after_spoof=$(find "$H/state/procevent-inbox" -type f -name '*.result' -print 2>
 [ "$before_spoof" = "$after_spoof" ] || fail "a direct message spoofing group metadata in its body was captured"
 pass "direct messages cannot spoof the configured group id via an embedded Id: line"
 
+owner_before=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/signal-account.claim")
 signal "$H" arm team >/dev/null
+owner_after=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/signal-account.claim")
+[ "$owner_before" = "$owner_after" ] || fail "an identical Signal arm replaced its active owner"
+FM_HOME="$H" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-procevent.sh" wait-ready signal-account 1 >/dev/null \
+  || fail "an identical Signal arm invalidated active readiness"
 signal "$H" arm ops >/dev/null
 reconcile "$H" >/dev/null
 if grep -q 'duplicate' "$SIGNAL_ROOT/cli.log"; then fail "repeated lifecycle operations created duplicate owners"; fi

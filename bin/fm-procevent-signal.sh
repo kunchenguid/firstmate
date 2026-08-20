@@ -96,6 +96,55 @@ lifecycle_lock() {
   printf '%s/signal/account.lock\n' "$STATE"
 }
 
+signal_registration_matches_locked() {
+  local registration adapter argc heading program command extra
+  registration="$(fm_procevent_registry_dir "$STATE")/$SOURCE_ID.source"
+  [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
+  {
+    IFS= read -r adapter \
+      && IFS= read -r argc \
+      && IFS= read -r heading \
+      && IFS= read -r program \
+      && IFS= read -r command \
+      && ! IFS= read -r extra
+  } < "$registration" || return 1
+  [ "$adapter" = adapter=signal ] \
+    && [ "$argc" = argc=2 ] \
+    && [ "$heading" = argv: ] \
+    && [ "$program" = "$SCRIPT_DIR/fm-procevent-signal.sh" ] \
+    && [ "$command" = source ]
+}
+
+signal_account_accessible() {
+  local claim status=0
+  fm_procevent_source_lock_acquire "$SOURCE_ID" || return 1
+  claim=$(fm_procevent_claim_path "$SOURCE_ID")
+  if [ -e "$claim" ] || [ -L "$claim" ]; then
+    if [ ! -f "$claim" ] || [ -L "$claim" ] \
+      || ! fm_procevent_claim_load_locked "$SOURCE_ID" 2>/dev/null; then
+      status=1
+    elif [ "$FM_PROCEVENT_CLAIM_HOME" != "$FM_HOME" ]; then
+      status=2
+    fi
+  fi
+  fm_procevent_source_lock_release "$SOURCE_ID" || status=1
+  return "$status"
+}
+
+signal_account_access_error() {
+  case "$1" in
+    2) die "Signal account is active in another home" ;;
+    *) die "cannot verify Signal account ownership" ;;
+  esac
+}
+
+require_signal_account_access() {
+  local status
+  signal_account_accessible
+  status=$?
+  [ "$status" -eq 0 ] || signal_account_access_error "$status"
+}
+
 account_from_output() {
   awk '
     /^Number:[[:space:]]*[^[:space:]]+/ { count++; value = $2 }
@@ -106,6 +155,7 @@ account_from_output() {
 account_number() {
   local output account
   positive_int "$SEND_TIMEOUT" || die "FM_SIGNAL_COMMAND_TIMEOUT must be a positive integer"
+  require_signal_account_access
   output=$(private_tempfile "${TMPDIR:-/tmp}/fm-signal-accounts.XXXXXX") || die "cannot create private account result"
   if ! fm_run_timed "$SEND_TIMEOUT" signal-cli listAccounts >"$output" 2>/dev/null; then
     rm -f "$output"
@@ -198,6 +248,7 @@ cmd_source() {
   validate_routes || exit 1
   account=$(account_number) || exit 1
   while :; do
+    require_signal_account_access
     "$SCRIPT_DIR/fm-procevent.sh" ready "$SOURCE_ID" >/dev/null || return 1
     if signal-cli -a "$account" -o json receive -t -1 --max-messages 1 \
       --ignore-attachments --ignore-stories --ignore-avatars --ignore-stickers 2>/dev/null \
@@ -212,11 +263,17 @@ cmd_source() {
 }
 
 cmd_arm_locked() {
-  local selector=$1
+  local selector=$1 status=0
   validate_routes || die "Signal group configuration is invalid"
   group_id "$selector" >/dev/null
-  "$SCRIPT_DIR/fm-procevent.sh" register signal "$SOURCE_ID" -- \
-    "$SCRIPT_DIR/fm-procevent-signal.sh" source || return 1
+  fm_procevent_source_lock_acquire "$SOURCE_ID" || die "cannot lock Signal receive source"
+  if ! signal_registration_matches_locked \
+    && ! fm_procevent_registration_publish_locked "$STATE" signal "$SOURCE_ID" \
+      "$SCRIPT_DIR/fm-procevent-signal.sh" source; then
+    status=1
+  fi
+  fm_procevent_source_lock_release "$SOURCE_ID" || status=1
+  [ "$status" -eq 0 ] || die "cannot register Signal receive source"
   printf 'armed: Signal source\n'
 }
 
@@ -249,7 +306,7 @@ cmd_retire() {
 }
 
 cmd_send_locked() {
-  local selector=$1 message=${2:--} group label account raw prefixed
+  local selector=$1 message=${2:--} group label account raw prefixed ownership_status
   [ "$message" = - ] || { [ -f "$message" ] && [ ! -L "$message" ] || die "message file is not a regular file"; }
   validate_routes || die "Signal group configuration is invalid"
   group=$(group_id "$selector") || exit 1
@@ -277,6 +334,12 @@ if not body.startswith(prefix):
 sys.stdout.buffer.write(body)
 ' >"$prefixed" || { rm -f "$raw" "$prefixed"; die "cannot prefix Signal message"; }
   rm -f "$raw"
+  signal_account_accessible
+  ownership_status=$?
+  if [ "$ownership_status" -ne 0 ]; then
+    rm -f "$prefixed"
+    signal_account_access_error "$ownership_status"
+  fi
   # shellcheck disable=SC2016
   if ! fm_run_timed "$SEND_TIMEOUT" bash -c \
     'signal-cli -a "$1" send -g "$2" --message-from-stdin <"$3"' \
@@ -289,7 +352,7 @@ sys.stdout.buffer.write(body)
 }
 
 cmd_send() {
-  local selector=${1-} message=${2:--} lock send_rc=0 staged=
+  local selector=${1-} message=${2:--} lock send_rc=0 staged= ownership_status
   validate_selector "$selector"
   if [ "$message" = - ]; then
     staged=$(private_tempfile "${TMPDIR:-/tmp}/fm-signal-input.XXXXXX") || die "cannot create private Signal message"
@@ -300,6 +363,13 @@ cmd_send() {
   mkdir -p "${lock%/*}" || die "cannot create Signal lifecycle state"
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock Signal lifecycle"
+    signal_account_accessible
+    ownership_status=$?
+    if [ "$ownership_status" -ne 0 ]; then
+      [ -z "$staged" ] || rm -f "$staged"
+      fm_lock_release "$lock"
+      signal_account_access_error "$ownership_status"
+    fi
     restore_source() {
       local status=$?
       trap - EXIT
