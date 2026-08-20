@@ -325,6 +325,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/telegram-miniapp.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/tmux-backend.md",
       "audience": "operator-current"
     },
