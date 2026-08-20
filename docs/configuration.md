@@ -645,7 +645,9 @@ That adapter, and only that adapter, retries the one exact transient response a 
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 0 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so re-arm a live board once to adopt this retry policy.
 The optional Signal adapter (`bin/fm-procevent-signal.sh`) is inert unless a home-local `config/signal-groups` file exists.
-The adapter requires exactly one local `signal-cli` account and refuses ambiguous multi-account state.
+The adapter requires exactly one `signal-cli` account provisioned beneath the effective `state/signal/data` directory and refuses ambiguous multi-account state.
+Create that private state boundary with `install -d -m 700 "$FM_HOME/state/signal" "$FM_HOME/state/signal/data"`.
+Provision that account through signal-cli's supported linking flow while passing `--data-dir "$FM_HOME/state/signal/data"` on every provisioning command; the adapter never reads signal-cli's global data directory.
 Create the empty routing file with `install -m 600 /dev/null "$FM_HOME/config/signal-groups"` after ensuring the home-local `config/` directory exists, then add private rows through an editor that preserves its mode.
 The adapter refuses a routing file whose mode is not `0600`.
 Each non-comment row in that private file is `selector<TAB>Signal group id<TAB>display label`, and the selector is the only identifier used in the adapter's commands.
@@ -653,7 +655,8 @@ Use `bin/fm-procevent-signal.sh arm <selector>` to register a nonterminal receiv
 All configured selectors share one account-scoped receive source, which routes each structured inbound message by its authenticated group id.
 The adapter retires the receive source before every `signal-cli` account or send operation and restores it after success or failure.
 The adapter prefixes outbound content with the configured display label and colon exactly once, so each group can use its own private attribution label.
-The group mapping, account identifiers, message content, and captured Signal state remain home-local and are never printed in normal adapter output.
+The group mapping, account identifiers, message content, credentials, and captured Signal state remain home-local and are never printed in normal adapter output.
+Account and group identifiers are omitted from signal-cli process arguments, and outbound group and message values enter signal-cli only through its JSON-RPC standard input.
 
 The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action at most once before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs.

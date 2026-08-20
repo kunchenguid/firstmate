@@ -13,6 +13,7 @@
 # Selectors resolve through the private, gitignored config/signal-groups file.
 # Its tab-separated rows are selector<TAB>Signal group id<TAB>display label.
 # Message content is read from a file or stdin and is never a process argument.
+# Signal account state is isolated under the effective state/signal/data directory.
 # The receive source is nonterminal and is owned by fm-procevent.sh.
 # Readiness uses the accepted time-based boundary documented in docs/architecture.md.
 set -u
@@ -27,6 +28,8 @@ SEND_TIMEOUT=${FM_SIGNAL_COMMAND_TIMEOUT:-30}
 SOURCE_ID=signal-account
 SIGNAL_STATE_DIR="$STATE/signal"
 PRIVATE_TEMP_DIR="$SIGNAL_STATE_DIR/tmp"
+SIGNAL_DATA_DIR="$SIGNAL_STATE_DIR/data"
+SIGNAL_CLI=(signal-cli --data-dir "$SIGNAL_DATA_DIR")
 
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
@@ -60,24 +63,29 @@ trap 'exit_on_signal 130' INT
 trap 'exit_on_signal 143' TERM
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 positive_int() { case "${1-}" in ''|*[!0-9]*) return 1 ;; 0) return 1 ;; *) return 0 ;; esac }
 
+ensure_private_directory() {
+  local directory=$1
+  if [ -e "$directory" ] || [ -L "$directory" ]; then
+    [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  else
+    (umask 077; mkdir -p "$directory") || return 1
+  fi
+  chmod 700 "$directory"
+}
+
+ensure_signal_data_dir() {
+  ensure_private_directory "$SIGNAL_STATE_DIR" \
+    && ensure_private_directory "$SIGNAL_DATA_DIR"
+}
+
 private_tempfile() {
   local target=$1 prefix=$2 file
-  if [ -e "$SIGNAL_STATE_DIR" ] || [ -L "$SIGNAL_STATE_DIR" ]; then
-    [ -d "$SIGNAL_STATE_DIR" ] && [ ! -L "$SIGNAL_STATE_DIR" ] || return 1
-  else
-    (umask 077; mkdir -p "$SIGNAL_STATE_DIR") || return 1
-  fi
-  chmod 700 "$SIGNAL_STATE_DIR" || return 1
-  if [ -e "$PRIVATE_TEMP_DIR" ] || [ -L "$PRIVATE_TEMP_DIR" ]; then
-    [ -d "$PRIVATE_TEMP_DIR" ] && [ ! -L "$PRIVATE_TEMP_DIR" ] || return 1
-  else
-    (umask 077; mkdir -p "$PRIVATE_TEMP_DIR") || return 1
-  fi
-  chmod 700 "$PRIVATE_TEMP_DIR" || return 1
+  ensure_private_directory "$SIGNAL_STATE_DIR" || return 1
+  ensure_private_directory "$PRIVATE_TEMP_DIR" || return 1
   file=$(umask 077; mktemp "$PRIVATE_TEMP_DIR/$prefix.XXXXXX") || return 1
   PRIVATE_TEMPFILES+=("$file")
   chmod 600 "$file" || return 1
@@ -99,35 +107,6 @@ source_id() {
 ensure_groups_file() {
   [ -f "$GROUPS_FILE" ] && [ ! -L "$GROUPS_FILE" ] || die "Signal is not configured"
   [ "$(fm_pr_file_mode "$GROUPS_FILE")" = 600 ] || die "Signal group configuration must have mode 0600"
-}
-
-group_id() {
-  local selector=$1 value
-  validate_selector "$selector"
-  ensure_groups_file
-  value=$(awk -F '\t' -v selector="$selector" '
-    $0 !~ /^[[:space:]]*(#|$)/ && NF == 3 && $1 == selector { count++; value = $2 }
-    END { if (count == 1) print value; else exit 1 }
-  ' "$GROUPS_FILE" 2>/dev/null) || die "Signal group selector is not configured"
-  case "$value" in
-    ''|*[!A-Za-z0-9+/=_-]*) die "Signal group configuration is invalid" ;;
-  esac
-  printf '%s\n' "$value"
-}
-
-display_label() {
-  local selector=$1 value
-  validate_selector "$selector"
-  ensure_groups_file
-  value=$(awk -F '\t' -v selector="$selector" '
-    $0 !~ /^[[:space:]]*(#|$)/ && NF == 3 && $1 == selector { count++; value = $3 }
-    END { if (count == 1) print value; else exit 1 }
-  ' "$GROUPS_FILE" 2>/dev/null) || die "Signal group selector is not configured"
-  case "$value" in
-    ''|*[$'\t\r\n']*) die "Signal display label is invalid" ;;
-  esac
-  [ "${#value}" -le 64 ] || die "Signal display label is too long"
-  printf '%s\n' "$value"
 }
 
 lifecycle_lock() {
@@ -190,12 +169,13 @@ account_from_output() {
   ' "$1"
 }
 
-account_number() {
-  local target=$1 output discovered
+validate_single_account() {
+  local output discovered
   positive_int "$SEND_TIMEOUT" || die "FM_SIGNAL_COMMAND_TIMEOUT must be a positive integer"
   require_signal_account_access
+  ensure_signal_data_dir || die "cannot create private Signal data state"
   private_tempfile output fm-signal-accounts || die "cannot create private account result"
-  if ! fm_run_timed "$SEND_TIMEOUT" signal-cli listAccounts >"$output" 2>/dev/null; then
+  if ! fm_run_timed "$SEND_TIMEOUT" "${SIGNAL_CLI[@]}" listAccounts >"$output" 2>/dev/null; then
     rm -f "$output"
     die "Signal account discovery failed or timed out"
   fi
@@ -210,20 +190,41 @@ account_number() {
       ;;
     *) die "Signal account discovery returned no usable account" ;;
   esac
-  printf -v "$target" '%s' "$discovered"
 }
 
-emit_message() {
-  SIGNAL_GROUPS_FILE="$GROUPS_FILE" python3 -c '
+signal_routes() {
+  local mode=$1 selector=${2-} message_file=${3-}
+  SIGNAL_GROUPS_FILE="$GROUPS_FILE" SIGNAL_ROUTE_MODE="$mode" \
+    SIGNAL_SELECTOR="$selector" FM_SIGNAL_MESSAGE="$message_file" python3 -c '
 import json
 import os
 import re
+import stat
 import sys
 
+mode = os.environ["SIGNAL_ROUTE_MODE"]
+if mode == "emit":
+    try:
+        document = json.load(sys.stdin.buffer)
+        message = document["envelope"]["dataMessage"]
+        inbound_group = message["groupInfo"]["groupId"]
+        inbound_body = message["message"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        raise SystemExit(2)
+    if not isinstance(inbound_group, str) or not isinstance(inbound_body, str) or not inbound_body:
+        raise SystemExit(2)
+
 groups = {}
-selectors = set()
+selectors = {}
 try:
     with open(os.environ["SIGNAL_GROUPS_FILE"], "rb") as source:
+        opened = os.fstat(source.fileno())
+        linked = os.lstat(os.environ["SIGNAL_GROUPS_FILE"])
+        if (not stat.S_ISREG(opened.st_mode)
+                or stat.S_ISLNK(linked.st_mode)
+                or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
+                or stat.S_IMODE(opened.st_mode) != 0o600):
+            raise SystemExit(3)
         for raw in source:
             line = raw.rstrip(b"\n")
             if not line.strip() or line.lstrip().startswith(b"#"):
@@ -245,28 +246,51 @@ try:
                 raise SystemExit(3)
             if selector in selectors or group in groups:
                 raise SystemExit(3)
-            selectors.add(selector)
+            selectors[selector] = (group, label)
             groups[group] = selector
 except OSError:
     raise SystemExit(3)
 if not groups:
     raise SystemExit(3)
-if os.environ.get("SIGNAL_VALIDATE_ONLY") == "1":
+if mode == "validate":
     raise SystemExit(0)
-
-try:
-    document = json.load(sys.stdin.buffer)
-    message = document["envelope"]["dataMessage"]
-    group = message["groupInfo"]["groupId"]
-    body = message["message"]
-except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-    raise SystemExit(2)
-if not isinstance(group, str) or not isinstance(body, str) or not body:
-    raise SystemExit(2)
-selector = groups.get(group)
+selector = os.environ.get("SIGNAL_SELECTOR", "")
+if mode == "selector":
+    raise SystemExit(0 if selector in selectors else 4)
+if mode == "prefix":
+    route = selectors.get(selector)
+    if route is None:
+        raise SystemExit(4)
+    try:
+        with open(os.environ["FM_SIGNAL_MESSAGE"], "rb") as source:
+            body = source.read()
+    except OSError:
+        raise SystemExit(4)
+    label = route[1].encode()
+    if not body.startswith(label + b":"):
+        body = label + b": " + body
+    sys.stdout.buffer.write(body)
+    raise SystemExit(0)
+if mode == "request":
+    route = selectors.get(selector)
+    if route is None:
+        raise SystemExit(4)
+    try:
+        with open(os.environ["FM_SIGNAL_MESSAGE"], "rb") as source:
+            body = source.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise SystemExit(4)
+    json.dump({"jsonrpc": "2.0", "method": "send", "params": {
+        "groupId": route[0], "message": body}, "id": "fm-send"}, sys.stdout,
+        ensure_ascii=True, separators=(",", ":"))
+    sys.stdout.write("\n")
+    raise SystemExit(0)
+if mode != "emit":
+    raise SystemExit(3)
+selector = groups.get(inbound_group)
 if selector is None:
     raise SystemExit(2)
-body_bytes = body.encode()
+body_bytes = inbound_body.encode()
 sys.stdout.write("schema=fm-signal.v1\n")
 sys.stdout.write("selector=" + selector + "\n")
 sys.stdout.write("body-bytes=" + str(len(body_bytes)) + "\n\n")
@@ -276,19 +300,48 @@ sys.stdout.buffer.write(body_bytes)
 }
 
 validate_routes() {
-  SIGNAL_VALIDATE_ONLY=1 emit_message </dev/null
+  ensure_groups_file
+  signal_routes validate </dev/null
+}
+
+validate_route_selector() {
+  signal_routes selector "$1" </dev/null
+}
+
+emit_message() {
+  signal_routes emit
+}
+
+json_rpc_send_succeeded() {
+  FM_SIGNAL_RESPONSE="$1" python3 -c '
+import json
+import os
+
+matched = 0
+try:
+    with open(os.environ["FM_SIGNAL_RESPONSE"], encoding="utf-8") as source:
+        for line in source:
+            document = json.loads(line)
+            if document.get("id") != "fm-send":
+                continue
+            matched += 1
+            if "error" in document or "result" not in document:
+                raise SystemExit(1)
+except (OSError, UnicodeDecodeError, ValueError, AttributeError):
+    raise SystemExit(1)
+raise SystemExit(0 if matched == 1 else 1)
+'
 }
 
 cmd_source() {
-  local account
   local -a receive_status
   ensure_groups_file
   validate_routes || exit 1
-  account_number account || exit 1
+  validate_single_account || exit 1
   while :; do
     require_signal_account_access
     "$SCRIPT_DIR/fm-procevent.sh" ready "$SOURCE_ID" >/dev/null || return 1
-    if signal-cli -a "$account" -o json receive -t -1 --max-messages 1 \
+    if "${SIGNAL_CLI[@]}" -o json receive -t -1 --max-messages 1 \
       --ignore-attachments --ignore-stories --ignore-avatars --ignore-stickers 2>/dev/null \
       | emit_message; then
       return 0
@@ -303,7 +356,7 @@ cmd_source() {
 cmd_arm_locked() {
   local selector=$1 status=0
   validate_routes || die "Signal group configuration is invalid"
-  group_id "$selector" >/dev/null
+  validate_route_selector "$selector" || die "Signal group selector is not configured"
   fm_procevent_source_lock_acquire "$SOURCE_ID" || die "cannot lock Signal receive source"
   if ! signal_registration_matches_locked \
     && ! fm_procevent_registration_publish_locked "$STATE" signal "$SOURCE_ID" \
@@ -344,13 +397,12 @@ cmd_retire() {
 }
 
 cmd_send_locked() {
-  local selector=$1 message=${2:--} group label account raw prefixed ownership_status
+  local selector=$1 message=${2:--} raw prefixed request response ownership_status
   [ "$message" = - ] || { [ -f "$message" ] && [ ! -L "$message" ] || die "message file is not a regular file"; }
   validate_routes || die "Signal group configuration is invalid"
-  group=$(group_id "$selector") || exit 1
-  label=$(display_label "$selector") || exit 1
+  validate_route_selector "$selector" || die "Signal group selector is not configured"
   cmd_retire_locked "$selector" >/dev/null || die "could not retire Signal receive source"
-  account_number account || exit 1
+  validate_single_account || exit 1
   private_tempfile raw fm-signal-raw || die "cannot create private Signal message"
   if [ "$message" = - ]; then
     cat >"$raw" || { rm -f "$raw"; die "cannot read Signal message"; }
@@ -359,33 +411,27 @@ cmd_send_locked() {
   fi
   [ -s "$raw" ] || { rm -f "$raw"; die "Signal message is empty"; }
   private_tempfile prefixed fm-signal-message || { rm -f "$raw"; die "cannot create private Signal message"; }
-  SIGNAL_DISPLAY_LABEL="$label" FM_SIGNAL_RAW="$raw" python3 -c '
-import os
-import sys
-
-with open(os.environ["FM_SIGNAL_RAW"], "rb") as source:
-    body = source.read()
-label = os.environ["SIGNAL_DISPLAY_LABEL"].encode()
-prefix = label + b":"
-if not body.startswith(prefix):
-    body = label + b": " + body
-sys.stdout.buffer.write(body)
-' >"$prefixed" || { rm -f "$raw" "$prefixed"; die "cannot prefix Signal message"; }
+  FM_SIGNAL_RAW="$raw" signal_routes prefix "$selector" "$raw" >"$prefixed" \
+    || { rm -f "$raw" "$prefixed"; die "cannot prefix Signal message"; }
   rm -f "$raw"
+  private_tempfile request fm-signal-request || { rm -f "$prefixed"; die "cannot create private Signal request"; }
+  signal_routes request "$selector" "$prefixed" >"$request" \
+    || { rm -f "$prefixed" "$request"; die "cannot create private Signal request"; }
+  private_tempfile response fm-signal-response \
+    || { rm -f "$prefixed" "$request"; die "cannot create private Signal response"; }
   signal_account_accessible
   ownership_status=$?
   if [ "$ownership_status" -ne 0 ]; then
-    rm -f "$prefixed"
+    rm -f "$prefixed" "$request" "$response"
     signal_account_access_error "$ownership_status"
   fi
-  # shellcheck disable=SC2016
-  if ! fm_run_timed "$SEND_TIMEOUT" bash -c \
-    'signal-cli -a "$1" send -g "$2" --message-from-stdin <"$3"' \
-    _ "$account" "$group" "$prefixed" >/dev/null 2>&1; then
-    rm -f "$prefixed"
+  if ! fm_run_timed "$SEND_TIMEOUT" bash -c '"$@" <&3' \
+    _ "${SIGNAL_CLI[@]}" jsonRpc --receive-mode=manual 3<"$request" >"$response" 2>/dev/null \
+    || ! json_rpc_send_succeeded "$response"; then
+    rm -f "$prefixed" "$request" "$response"
     die "Signal send failed or timed out"
   fi
-  rm -f "$prefixed"
+  rm -f "$prefixed" "$request" "$response"
   printf 'sent: Signal message\n'
 }
 

@@ -36,6 +36,17 @@ log="$root/cli.log"
 queue="$root/queue"
 list_count_file="$root/list-count"
 printf '%s\n' "$*" >> "$log"
+if [ "${1:-}" = --data-dir ]; then
+  data_dir=$2
+  shift 2
+  [ "$data_dir" = "$FM_HOME/state/signal/data" ] || exit 97
+  if [ "$(uname)" = Darwin ]; then
+    data_mode=$(stat -f %Lp "$data_dir" 2>/dev/null)
+  else
+    data_mode=$(stat -c %a "$data_dir" 2>/dev/null)
+  fi
+  [ -d "$data_dir" ] && [ "$data_mode" = 700 ] || exit 97
+fi
 case "${1:-}" in
   listAccounts)
     while [ -e "$lock" ]; do sleep 0.02; done
@@ -47,9 +58,8 @@ case "${1:-}" in
     if [ "${FM_FAKE_SIGNAL_FAIL_LIST_AT:-0}" = "$list_count" ]; then exit 96; fi
     printf '%s\n' "${FM_FAKE_SIGNAL_ACCOUNT_OUTPUT:-Number: +10000000000 (aci: 11111111-2222-3333-4444-555555555555)}"
     ;;
-  -a)
+  -o)
     shift 2
-    if [ "${1:-}" = -o ]; then shift 2; fi
     case "${1:-}" in
       receive)
         printf '%s\n' "$PPID" > "$root/receive-parent"
@@ -62,6 +72,40 @@ case "${1:-}" in
         mv "$queue.next" "$queue"
         printf '%s\n' "$row"
         ;;
+      *) exit 94 ;;
+    esac
+    ;;
+  jsonRpc)
+    [ ! -e "$lock" ] || exit 92
+    "$FM_REAL_PYTHON3" -c '
+import json
+import os
+import sys
+
+document = json.load(sys.stdin)
+if document.get("jsonrpc") != "2.0" or document.get("method") != "send" or document.get("id") != "fm-send":
+    raise SystemExit(98)
+params = document.get("params")
+if not isinstance(params, dict) or not isinstance(params.get("groupId"), str) or not isinstance(params.get("message"), str):
+    raise SystemExit(98)
+with open(os.path.join(os.environ["FM_FAKE_SIGNAL_ROOT"], "sent-group"), "w", encoding="utf-8") as target:
+    target.write(params["groupId"])
+with open(os.path.join(os.environ["FM_FAKE_SIGNAL_ROOT"], "sent-body"), "w", encoding="utf-8") as target:
+    target.write(params["message"])
+' || exit $?
+    sleep "${FM_FAKE_SIGNAL_SEND_DELAY:-0}"
+    printf '%s\n' '{"jsonrpc":"2.0","method":"receive","params":{"fixture":"private-cli-metadata-fixture"}}'
+    printf 'private-cli-error-fixture\n' >&2
+    if [ "${FM_FAKE_SIGNAL_FAIL:-0}" = 1 ]; then
+      printf '%s\n' '{"jsonrpc":"2.0","error":{"code":-1,"message":"fixture"},"id":"fm-send"}'
+    else
+      printf 'sent bytes=%s\n' "$(wc -c < "$root/sent-body" | tr -d ' ')" >> "$root/sent.log"
+      printf '%s\n' '{"jsonrpc":"2.0","result":{"timestamp":1},"id":"fm-send"}'
+    fi
+    ;;
+  -a)
+    shift 2
+    case "${1:-}" in
       send)
         [ ! -e "$lock" ] || exit 92
         group=
@@ -110,6 +154,12 @@ reconcile() {
 wait_for() {
   local file=$1 tries=${2:-100}
   for _ in $(seq 1 "$tries"); do [ -e "$file" ] && return 0; sleep 0.02; done
+  return 1
+}
+
+wait_for_absent() {
+  local file=$1 tries=${2:-100}
+  for _ in $(seq 1 "$tries"); do [ ! -e "$file" ] && return 0; sleep 0.02; done
   return 1
 }
 
@@ -222,6 +272,8 @@ perl -e 'setpgrp(0, 0) or exit 125; exec @ARGV; exit 125' \
     > "$SIGNAL_ROOT/interrupted-send.out" 2> "$SIGNAL_ROOT/interrupted-send.err" &
 interrupted_pid=$!
 wait_for_private_temp "$HINT" 'fm-signal-message.*' || fail "send interruption fixture never created its private temporary"
+wait_for_private_temp "$HINT" 'fm-signal-request.*' || fail "send interruption fixture never created its private request"
+wait_for_private_temp "$HINT" 'fm-signal-response.*' || fail "send interruption fixture never created its private response"
 kill -TERM -"$interrupted_pid" 2>/dev/null || true
 wait "$interrupted_pid" 2>/dev/null || true
 assert_no_private_temps "$HINT"
@@ -277,7 +329,10 @@ FM_FAKE_SIGNAL_RECEIVE_START_DELAY=0.5 \
   || fail "supported send ordering failed"
 [ -s "$SIGNAL_ROOT/sent.log" ] || fail "successful send was not recorded"
 assert_contains "$(cat "$SIGNAL_ROOT/sent-body")" "Fixture: reply fixture" "configured label is prepended once"
+assert_contains "$(cat "$SIGNAL_ROOT/sent-group")" "group-fixture-id" "configured group is delivered through JSON-RPC stdin"
 assert_not_contains "$(cat "$SIGNAL_ROOT/cli.log")" "reply fixture" "message content never reaches a CLI argv record"
+assert_not_contains "$(cat "$SIGNAL_ROOT/cli.log")" "group-fixture-id" "group identifier never reaches a CLI argv record"
+assert_not_contains "$(cat "$SIGNAL_ROOT/cli.log")" "+10000000000" "account identifier never reaches a CLI argv record"
 [ "$(cat "$SIGNAL_ROOT/send.out")" = "sent: Signal message" ] || fail "send did not emit only its sanitized success status"
 [ ! -s "$SIGNAL_ROOT/send.err" ] || fail "successful send exposed unexpected stderr"
 assert_runner_owned_receive "$H"
@@ -318,6 +373,17 @@ reconcile "$H" >/dev/null
 sleep 0.2
 [ ! -d "$H/state/procevent-inbox" ] || [ -z "$(find "$H/state/procevent-inbox" -type f -name '*.result' -print -quit)" ] \
   || fail "unrelated message published a pseudo-message"
+wait_for "$SIGNAL_ROOT/account.lock" || fail "receiver did not continue after the unrelated message"
+chmod 644 "$H/config/signal-groups"
+printf '%s\n' '{"envelope":{"dataMessage":{"message":"replacement fixture","groupInfo":{"groupId":"group-fixture-id"}}}}' > "$SIGNAL_ROOT/queue"
+wait_for_absent "$SIGNAL_ROOT/account.lock" || fail "receiver did not reject a live public routing replacement"
+wait_for_absent "$H/state/procevent/signal-account.runner" || fail "runner did not settle after rejecting a live routing replacement"
+[ ! -d "$H/state/procevent-inbox" ] || [ -z "$(find "$H/state/procevent-inbox" -type f -name '*.result' -print -quit)" ] \
+  || fail "live public routing replacement published a Signal capture"
+chmod 600 "$H/config/signal-groups"
+reconcile "$H" >/dev/null
+wait_for "$SIGNAL_ROOT/account.lock" || fail "receiver did not recover after routing permissions were restored"
+pass "live route replacement revalidates private file permissions"
 EXPECTED_BODY="$SIGNAL_ROOT/expected-body"
 printf 'configured fixture\nGroup info:\n Id: group-fixture-id\ntrailing\n' > "$EXPECTED_BODY"
 printf '%s\n' '{"envelope":{"dataMessage":{"message":"configured fixture\nGroup info:\n Id: group-fixture-id\ntrailing\n","groupInfo":{"groupId":"group-fixture-id"}}}}' > "$SIGNAL_ROOT/queue"
@@ -374,7 +440,7 @@ pass "multiple selectors route through one account-scoped receive owner"
 signal "$H" retire team >/dev/null
 HVALID="$SIGNAL_ROOT/validation"
 new_home "$HVALID"
-send_count_before=$(grep -c ' send ' "$SIGNAL_ROOT/cli.log" || true)
+send_count_before=$(grep -c ' jsonRpc ' "$SIGNAL_ROOT/cli.log" || true)
 for malformed in 'Number: ++1' 'Number: 1+2' 'Number: +'; do
   if FM_SIGNAL_COMMAND_TIMEOUT=1 FM_FAKE_SIGNAL_ACCOUNT_OUTPUT="$malformed" \
     signal "$HVALID" send team "$MESSAGE" >/dev/null 2>&1; then
@@ -386,7 +452,7 @@ if FM_SIGNAL_COMMAND_TIMEOUT=1 \
   signal "$HVALID" send team "$MESSAGE" >/dev/null 2>&1; then
   fail "multiple discovered accounts were accepted"
 fi
-send_count_after=$(grep -c ' send ' "$SIGNAL_ROOT/cli.log" || true)
+send_count_after=$(grep -c ' jsonRpc ' "$SIGNAL_ROOT/cli.log" || true)
 [ "$send_count_before" = "$send_count_after" ] || fail "a malformed account number reached the send operation"
 pass "account discovery requires exactly one strictly formed account"
 signal "$HVALID" retire team >/dev/null
