@@ -35,6 +35,7 @@ The tier names say what the pass does with an entry:
 - `aging` - it must re-prove itself: an entry whose age is greater than or equal to 30 days since its last-reinforced date is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
 - `perishable` - it is stored expecting disposal: an entry whose age is greater than or equal to 7 days since its last-reinforced date is stale, and its prose must name a checkable expiry condition, such as a backlog id, a version floor, or a dated expectation.
   An admitted durable entry that cannot name a checkable expiry condition is not `perishable` and must be stored as `aging`.
+  An entry's reference to its own pending fix is itself a checkable expiry condition; stripping it to save bytes leaves a claim that outlives its fix with nothing to test it against.
   Omission is reserved for non-durable material or facts already owned elsewhere.
 
 Marking rules:
@@ -135,7 +136,8 @@ Every test must hold for a candidate:
 - Editable source: this home owns the memory file and may relocate the entry; a read-only shared entry is routed to its primary owner instead.
 - Durable: not `perishable`, not stale, and expected to remain true for months.
 - Eligible by authority: only a non-pinned, dated `aging` entry that is not pending offload may be autonomously relocated to an already-existing allowed owner, while a `pinned` entry may be proposed only for explicit, per-item captain-approved relocation and can never be archived or autonomously offloaded for budget relief.
-- Conditional: a one-line nameable trigger exists, and a session that never touches that trigger runs no risk from omitting the fact.
+- Conditional: a one-line nameable trigger exists, that trigger fires at the moment the fact is needed, and a session that never touches that trigger runs no risk from omitting the fact.
+  Knowledge needed during recovery, supervision, or failure handling is not covered by a trigger that fires only at intake, planning, or dispatch, and vice versa.
 - Fat enough to matter: roughly 50 estimated tokens or more, handled largest-first, because consolidation handles smaller entries.
 - A destination below fits the entry's privacy and visibility.
 - Not already preserved by a stronger owner, which the consolidation counterweight already handles as ordinary curation rather than offload.
