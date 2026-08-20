@@ -29,6 +29,18 @@
 #     dispatch as before). A direct-PR story on a no-mistakes-prod-only repo is
 #     WARNED, never failed: that mode fits only an internal-only surface, and the
 #     mode stays firstmate's overridable call at dispatch (never a hard lock);
+#   - no story BODY smuggles a SECOND repo (one story = one repo = one dispatchable
+#     unit: a crewmate spawns in ONE worktree, so a two-repo story cannot dispatch -
+#     it must be split into per-repo stories linked by `depends:`). A body that names
+#     a registered repo other than its own `repo:` is a heuristic finding: a bare
+#     mention (the author may reference a dependency benignly) is WARNED, while a
+#     mention on a line that also carries a deliverable verb (touch, change, modify,
+#     update, edit, add, wire, implement, build, ship, patch, create) - i.e. the body
+#     assigns work to that second repo - is a hard FAIL. Consume/depend/produce are
+#     NOT deliverable verbs: a well-split consumer story legitimately names the repo
+#     it depends on. FM_EPIC_LINT_MULTIREPO tunes strictness: `off` disables the
+#     check, `warn` downgrades every cross-repo finding to a warning, `strict`
+#     upgrades every mention to a hard fail, and the default layers as described;
 #   - every `depends:` id names a real story in the epic, with no dependency cycle;
 #   - each story's plan/brief pointer (the backtick path in its `## Implementation
 #     plan` section) RESOLVES relative to the epic dir. A still-templated pointer
@@ -59,6 +71,17 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="${FM_PROJECTS_REG:-$DATA/projects.md}"
 PROJECT_MODE_BIN="${FM_PROJECT_MODE_BIN:-$FM_ROOT/bin/fm-project-mode.sh}"
+
+# Cross-repo (one story = one repo) detection strictness. Default (empty) layers:
+# a bare mention of another repo WARNS, a mention with a deliverable verb FAILS.
+# off disables it; warn never fails; strict fails on any mention.
+MULTIREPO="${FM_EPIC_LINT_MULTIREPO:-}"
+
+# Deliverable verbs: naming a second repo NEXT TO one of these means the body
+# assigns WORK to that repo (a hard FAIL). consume/depend/produce are deliberately
+# excluded - a split consumer story legitimately names the repo it depends on.
+DELIVERABLE_VERBS='touch touches touching change changes changing modify modifies modifying update updates updating edit edits editing add adds adding wire wires wiring implement implements implementing build builds building ship ships shipping patch patches patching create creates creating'
+VERB_RE="(^|[^a-z])(${DELIVERABLE_VERBS// /|})([^a-z]|\$)"
 
 # shellcheck source=bin/fm-epic-lint-lib.sh
 . "$FM_ROOT/bin/fm-epic-lint-lib.sh"
@@ -154,6 +177,49 @@ else
   done
 fi
 
+# All registered repo names, to detect a story BODY that references a repo other
+# than its own `repo:` (one story = one repo = one dispatchable unit).
+registered_repos=()
+if [ "$MULTIREPO" != off ]; then
+  while IFS= read -r rr; do [ -n "$rr" ] && registered_repos+=("$rr"); done \
+    < <(fm_registered_repos "$REG")
+fi
+
+# scan_body_repos <story-file> <own-repo>: print one line per OTHER registered repo
+# the body references, as "WARN <repo>" (bare mention) or "FAIL <repo>" (mention on
+# a line that also carries a deliverable verb). Own repo and frontmatter are skipped.
+# Matching is case-insensitive and word-bounded so `svc` does not match `service`.
+scan_body_repos() {
+  local sf=$1 own=$2 others=""
+  local r
+  for r in "${registered_repos[@]}"; do
+    [ "$r" = "$own" ] || others="$others $r"
+  done
+  [ -n "$others" ] || return 0
+  awk -v repos="$others" -v verbs="$VERB_RE" '
+    NR==1 && $0!="---" { plain=1 }        # no frontmatter: whole file is body
+    NR==1 { if (!plain) { infm=1; next } }
+    infm && $0=="---" { infm=0; next }
+    infm { next }
+    {
+      low=tolower($0)
+      hasverb=(low ~ verbs)
+      n=split(repos, R, " ")
+      for (i=1;i<=n;i++) {
+        r=R[i]; if (r=="") continue
+        lr=tolower(r)
+        pat="(^|[^a-z0-9_-])" lr "([^a-z0-9_-]|$)"
+        if (low ~ pat) {
+          orig[lr]=r
+          if (hasverb) verdict[lr]="FAIL"
+          else if (verdict[lr]!="FAIL") verdict[lr]="WARN"
+        }
+      }
+    }
+    END { for (k in verdict) print verdict[k] " " orig[k] }
+  ' "$sf"
+}
+
 # --- stories ----------------------------------------------------------------
 # Parallel arrays keep this Bash 3.2-safe (macOS stock bash has no associative
 # arrays), matching bin/fm-umbrella-promote.sh.
@@ -248,6 +314,29 @@ for sf in "$STORIES_DIR"/*.md; do
       "") add "story $base: delivery: is empty" ;;
       *) add "story $base: delivery \"$sdelivery\" must be no-mistakes, direct-PR, or local-only" ;;
     esac
+  fi
+
+  # One story = one repo: flag a body that references a SECOND registered repo.
+  # A bare mention WARNS; a mention with a deliverable verb FAILS. The strictness
+  # knob (FM_EPIC_LINT_MULTIREPO) can force every finding up to fail or down to warn.
+  if [ "$MULTIREPO" != off ] && [ "${#registered_repos[@]}" -gt 0 ]; then
+    own_repo="$(fm_frontmatter_get "$sf" repo)"
+    if [ -n "$own_repo" ]; then
+      while IFS=' ' read -r verdict xrepo; do
+        [ -n "$xrepo" ] || continue
+        fail_it=0
+        case "$MULTIREPO" in
+          strict) fail_it=1 ;;
+          warn) fail_it=0 ;;
+          *) [ "$verdict" = FAIL ] && fail_it=1 ;;
+        esac
+        if [ "$fail_it" -eq 1 ]; then
+          add "story $base: body assigns work to a second repo \"$xrepo\" (its repo: is \"$own_repo\") - one story = one repo = one dispatchable unit (a worker spawns in ONE worktree); split it into per-repo stories linked by depends:"
+        else
+          warn "story $base: body references repo \"$xrepo\" but its repo: is \"$own_repo\" - if this is a real cross-repo change, split it into per-repo stories linked by depends: (one story = one repo); an incidental mention is fine"
+        fi
+      done < <(scan_body_repos "$sf" "$own_repo")
+    fi
   fi
 
   # depends: [] or [a, b] - strip brackets, split on comma, collect ids.
