@@ -702,6 +702,22 @@ test_out_of_band_close_is_repairable_before_teardown() {
     fail "a refused repair still satisfied the completion gate"
   fi
 
+  # The identity is taken, so re-holding it must refuse, and it must refuse for the
+  # true reason: this live row can still have the captain's decision repaired onto it.
+  if run_decisions "$home" hold "$id" submission \
+    --title "Choose the sample submission" --reason "captain submission choice pending" --repo sample \
+    > "$home/live-hold.out" 2> "$home/live-hold.err"; then
+    fail "re-holding a live decision closed with no recorded captain answer was accepted"
+  fi
+  assert_no_grep "already durably resolved" "$home/live-hold.err" \
+    "the refusal claimed an unanswered live decision was durably resolved"
+  assert_grep "closed with no recorded captain answer" "$home/live-hold.err" \
+    "the refusal did not report that the decision was closed with no captain answer"
+  assert_grep "use repair" "$home/live-hold.err" \
+    "the refusal did not point at repair, the supported way to record the missing answer"
+  assert_no_grep "use a new decision key" "$home/live-hold.err" \
+    "the refusal told the operator a fresh decision key would resolve the answerless close"
+
   printf 'Declined: do not submit the sample full run upstream.\n' > "$home/submission-decision.txt"
   run_decisions "$home" repair "$id" submission --decision-file "$home/submission-decision.txt" >/dev/null \
     || fail "repair could not record the missing durable resolution"
@@ -719,6 +735,16 @@ test_out_of_band_close_is_repairable_before_teardown() {
     > "$home/drifted-repair.out" 2> "$home/drifted-repair.err"; then
     fail "repair retry overwrote the recorded captain decision"
   fi
+
+  # Once the answer really is recorded, the true message must survive the correction.
+  if run_decisions "$home" hold "$id" submission \
+    --title "Choose the sample submission" --reason "captain submission choice pending" --repo sample \
+    > "$home/resolved-hold.out" 2> "$home/resolved-hold.err"; then
+    fail "re-holding a durably resolved decision key was accepted"
+  fi
+  assert_grep "already durably resolved" "$home/resolved-hold.err" \
+    "a genuinely resolved decision no longer reports that it is durably resolved"
+
   run_teardown "$home" "$id" >/dev/null 2> "$home/teardown.err" \
     || fail "teardown still refused after the decision was repaired: $(cat "$home/teardown.err")"
   pass "a decision closed outside the script is repairable and then clears teardown"
@@ -875,6 +901,8 @@ test_archived_decision_without_an_answer_still_fails_the_gate() {
     "the refusal did not report that backlog retention had archived the record"
   assert_grep "recorded decision inventory of $id" "$home/archived-hold.err" \
     "the refusal omitted the inventory consequence for a key this origin has recorded"
+  assert_no_grep "use repair" "$home/archived-hold.err" \
+    "the refusal pointed at repair for a row the archive cannot have an answer written onto"
   assert_no_grep "$hold" "$home/data/backlog.md" \
     "the refused hold recreated a live backlog row for the archived decision"
 

@@ -509,20 +509,26 @@ command_hold() {
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
     existing_body=$(show_field "$show" body)
-    # An archived row always renders done, so a close that never recorded the
-    # captain's answer must not be reported as a decision the captain resolved.
-    if [ "$archived" = 1 ] && [ "$state" = "done" ] && ! body_has_resolution_record "$existing_body"; then
-      # verify refuses this origin for either reason, so the consequence is stated
-      # whenever one of them holds and omitted when neither does.
-      inventoried=''
-      if list_has_key "$(meta_value "$STATE/$origin.meta" decision_keys)" "$key"; then
-        inventoried=", and $key stays in the recorded decision inventory of $origin, so verify keeps refusing this origin"
-      elif origin_has_open_decision "$origin" "$key"; then
-        inventoried=", and $origin still carries an open structured decision for $key, so verify keeps refusing this origin"
-      fi
-      fail "captain decision $id was closed with no recorded captain answer and then archived by backlog \
+    # A close that never recorded the captain's answer must not be reported as a
+    # decision the captain resolved, whether retention has filed the row or not.
+    if [ "$state" = "done" ] && ! body_has_resolution_record "$existing_body"; then
+      if [ "$archived" = 1 ]; then
+        # verify refuses this origin for either reason, so the consequence is stated
+        # whenever one of them holds and omitted when neither does.
+        inventoried=''
+        if list_has_key "$(meta_value "$STATE/$origin.meta" decision_keys)" "$key"; then
+          inventoried=", and $key stays in the recorded decision inventory of $origin, so verify keeps refusing this origin"
+        elif origin_has_open_decision "$origin" "$key"; then
+          inventoried=", and $origin still carries an open structured decision for $key, so verify keeps refusing this origin"
+        fi
+        fail "captain decision $id was closed with no recorded captain answer and then archived by backlog \
 retention into $(fm_tasks_axi_archive_path "$FM_HOME"), which tasks-axi cannot rewrite; neither repair \
 nor a fresh hold on this decision key can record the missing answer$inventoried"
+      fi
+      # The row is still live, so the captain's actual decision can still be written
+      # onto it, and a fresh key would leave this one answerless.
+      fail "captain decision $id was closed with no recorded captain answer; the record is still in \
+$(fm_tasks_axi_backlog_path "$FM_HOME"), so use repair to record the captain decision that was made"
     fi
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
