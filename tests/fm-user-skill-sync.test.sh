@@ -372,6 +372,57 @@ test_codex_home_separator_spelling_converges() {
   pass "odd CODEX_HOME separator spelling still links correctly and converges"
 }
 
+test_unreadable_managed_root_refuses() {
+  local home out rc
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "unreadable managed roots refuse (skipped: running as root bypasses permissions)"
+    return 0
+  fi
+
+  home=$(new_home)
+  make_skill "$home/.agents/skills" alpha body
+  make_skill "$home/.gemini/skills" alpha body
+  chmod 000 "$home/.gemini/skills"
+  set +e
+  out=$(run_sync "$home" --apply 2>&1)
+  rc=$?
+  set -e
+  chmod 755 "$home/.gemini/skills"
+  [ "$rc" -ne 0 ] || fail "unreadable managed skill root was reported as converged"
+  assert_contains "$out" "cannot inspect managed skill root" "unreadable root refusal lacked diagnosis"
+  [ -d "$home/.gemini/skills/alpha" ] || fail "refused run mutated the unreadable root"
+
+  home=$(new_home)
+  make_skill "$home/.agents/skills" alpha body
+  make_skill "$home/.gemini/skills" alpha body
+  chmod 000 "$home/.gemini"
+  set +e
+  out=$(run_sync "$home" --apply 2>&1)
+  rc=$?
+  set -e
+  chmod 755 "$home/.gemini"
+  [ "$rc" -ne 0 ] || fail "unreadable managed skill parent was reported as converged"
+  assert_contains "$out" "cannot inspect managed skill parent" "unreadable parent refusal lacked diagnosis"
+  [ -d "$home/.gemini/skills/alpha" ] || fail "refused run mutated the unreadable parent tree"
+  pass "an unreadable managed root refuses instead of claiming convergence"
+}
+
+test_mode_only_difference_names_permission_bits() {
+  local home out
+  home=$(new_home)
+  make_skill "$home/.agents/skills" alpha body
+  make_skill "$home/.gemini/skills" alpha body
+  chmod 700 "$home/.gemini/skills/alpha/sub"
+
+  out=$(expect_failure "$home" "mode-only difference" --apply)
+
+  assert_contains "$out" "permission bits differ" "mode-only refusal did not name permission bits"
+  assert_contains "$out" "/sub" "mode-only refusal did not name the differing entry"
+  assert_contains "$out" "700" "mode-only refusal did not report the differing modes"
+  [ -d "$home/.gemini/skills/alpha" ] || fail "refused run mutated the differing duplicate"
+  pass "a permission-bit-only difference is diagnosed as such"
+}
+
 test_remote_routes_through_registered_home() {
   local home fakebin argv encoded decoded home_encoded remote_home
   home=$(new_home)
@@ -420,4 +471,6 @@ test_non_default_modes_migrate_and_converge
 test_restrictive_umask_migration_converges
 test_control_character_nested_name_refuses
 test_codex_home_separator_spelling_converges
+test_unreadable_managed_root_refuses
+test_mode_only_difference_names_permission_bits
 test_remote_routes_through_registered_home

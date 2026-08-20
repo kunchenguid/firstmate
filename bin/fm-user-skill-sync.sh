@@ -11,8 +11,10 @@
 # is the default; --apply is the only mutation switch. A conflict, unsafe or
 # broken link, special file, malformed skill directory, unexpected root entry,
 # overlapping managed roots, or ambiguous tree refuses the whole run before any
-# mutation. Skill trees may contain directories and regular files only and must
-# include SKILL.md, and no nested name may carry a control character. A
+# mutation. An existing managed root that cannot be listed is refused rather
+# than read as empty, so convergence is never claimed for a root this run could
+# not inspect. Skill trees may contain directories and regular files only and
+# must include SKILL.md, and no nested name may carry a control character. A
 # duplicate is verified only when its tree matches the retained copy in
 # structure, bytes, and permission bits, and the canonical copy is established
 # mode-faithfully so that proof holds under any umask. Managed roots are
@@ -304,6 +306,8 @@ for parent in \
   "$CODEX_ROOT"; do
   [ ! -L "$parent" ] || die "managed skill parent must not be a link: $parent"
   [ ! -e "$parent" ] || [ -d "$parent" ] || die "managed skill parent is not a directory: $parent"
+  [ ! -d "$parent" ] || { [ -r "$parent" ] && [ -x "$parent" ]; } \
+    || die "cannot inspect managed skill parent; fix its permissions and rerun: $parent"
 done
 
 # The operator command owns user homes only. Refuse a synthetic HOME or
@@ -341,20 +345,53 @@ tree_mode_listing() {
         mode = $1
         sub(/^[^ ]* /, "")
         if (index($0, prefix) == 1) { $0 = substr($0, length(prefix) + 1) }
-        print mode " " $0
+        if ($0 == "") { $0 = "." }
+        print $0 "\t" mode
       }' \
     | LC_ALL=C sort
 }
 
+# The two listings hold the same paths in the same order because diff -qr has
+# already proven the structures match, so the first differing line names the
+# entry whose permission bits disagree.
+mode_mismatch_summary() {
+  printf '%s\n' "$1" > "$TMP/mode-a"
+  printf '%s\n' "$2" > "$TMP/mode-b"
+  awk -F '\t' '
+    NR == FNR { path[FNR] = $1; mode[FNR] = $2; next }
+    $2 != mode[FNR] { printf "%s (%s vs %s)\n", path[FNR], mode[FNR], $2; exit }
+  ' "$TMP/mode-a" "$TMP/mode-b"
+}
+
 # Fails closed: an unreadable tree, a failing stat, or an empty listing refuses
 # the equality that would otherwise authorize removing the last copy.
+# TREE_DIFFERENCE carries the reason so the caller can name what actually
+# differs instead of reporting every mismatch as a content conflict.
+TREE_DIFFERENCE=
 trees_equivalent() {
-  local a=$1 b=$2 listing_a listing_b
-  diff -qr "$a" "$b" >/dev/null 2>&1 || return 1
-  listing_a=$(tree_mode_listing "$a") || return 1
-  listing_b=$(tree_mode_listing "$b") || return 1
-  [ -n "$listing_a" ] && [ -n "$listing_b" ] || return 1
-  [ "$listing_a" = "$listing_b" ]
+  local a=$1 b=$2 listing_a listing_b mismatch
+  TREE_DIFFERENCE=
+  if ! diff -qr "$a" "$b" >/dev/null 2>&1; then
+    TREE_DIFFERENCE='tree structure or file contents differ'
+    return 1
+  fi
+  if ! listing_a=$(tree_mode_listing "$a"); then
+    TREE_DIFFERENCE="cannot inspect permission bits under $a"
+    return 1
+  fi
+  if ! listing_b=$(tree_mode_listing "$b"); then
+    TREE_DIFFERENCE="cannot inspect permission bits under $b"
+    return 1
+  fi
+  if [ -z "$listing_a" ] || [ -z "$listing_b" ]; then
+    TREE_DIFFERENCE='permission-bit inspection returned nothing'
+    return 1
+  fi
+  [ "$listing_a" != "$listing_b" ] || return 0
+  mismatch=$(mode_mismatch_summary "$listing_a" "$listing_b")
+  [ -n "$mismatch" ] || mismatch='listings disagree'
+  TREE_DIFFERENCE="permission bits differ: $mismatch"
+  return 1
 }
 
 validate_skill_tree() {
@@ -394,6 +431,8 @@ scan_root() {
   fi
   [ ! -e "$root" ] || [ -d "$root" ] || die "managed skill root is not a directory: $root"
   [ -d "$root" ] || return 0
+  { [ -r "$root" ] && [ -x "$root" ] && ls -A -- "$root" >/dev/null 2>&1; } \
+    || die "cannot inspect managed skill root; fix its permissions and rerun: $root"
   for entry in "$root"/* "$root"/.[!.]* "$root"/..?*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     name=${entry##*/}
@@ -469,7 +508,8 @@ while IFS= read -r name; do
   while IFS=$'\t' read -r inv_name kind path role; do
     [ "$inv_name" = "$name" ] || continue
     if [ "$kind" = real ] && [ "$path" != "$baseline" ]; then
-      trees_equivalent "$baseline" "$path" || die "conflicting skill trees for '$name': $baseline and $path"
+      trees_equivalent "$baseline" "$path" \
+        || die "conflicting skill trees for '$name' ($TREE_DIFFERENCE): $baseline and $path"
     fi
   done < "$INVENTORY"
 
@@ -531,7 +571,8 @@ remove_verified_duplicate() {
     verify_link_to_canonical "$path" "$name"
   elif [ -d "$path" ]; then
     validate_skill_tree "$path"
-    trees_equivalent "$canonical" "$path" || die "duplicate changed after preflight: $path"
+    trees_equivalent "$canonical" "$path" \
+      || die "duplicate changed after preflight ($TREE_DIFFERENCE): $path"
   else
     die "duplicate changed type after preflight: $path"
   fi
