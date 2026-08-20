@@ -112,6 +112,7 @@ fi
 ORIGIN_SPELLING=$ORIGIN_URL
 ORIGIN_ANCHORED=
 if fm_project_origin_is_path_form "$ORIGIN_URL"; then
+  # shellcheck disable=SC2088 # The tilde is a literal prefix in a value read from git config, not a path this script writes, so these branches match and expand it rather than let the shell do it.
   case $ORIGIN_URL in
     file://* | /?*) ;;
     '~') ORIGIN_SPELLING=${HOME:-}; ORIGIN_ANCHORED=1 ;;

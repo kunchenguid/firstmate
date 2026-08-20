@@ -149,6 +149,7 @@ not_path_form() {
 path_form '/Users/captain/JobSearch'
 path_form 'file:///Users/captain/JobSearch'
 path_form '../JobSearch'
+# shellcheck disable=SC2088 # The tilde is a literal prefix in a value read from git config, not a path this test writes, so it is classified unexpanded.
 path_form '~/JobSearch'
 path_form 'JobSearch'
 path_form './my:folder/JobSearch'
