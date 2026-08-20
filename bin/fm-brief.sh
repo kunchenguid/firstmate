@@ -54,6 +54,17 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout scaffolds both carry a test-selection ladder: cover the changed
+# files first, then the runner's own family/lane/changed-file scoping, and only
+# then the whole suite as deliberate full regression. It is stated repo-agnostically
+# because the caller-supplied repo string cannot identify the project, so the block
+# sends the worker to that repo's own contributor docs and runner --help for the
+# concrete tiers. It also requires the declared-external-wait line BEFORE a long run
+# rather than after, since an undeclared wait reads as a wedge and a steer sent to a
+# sleeping worker queues instead of arriving.
+# When writing a task's done-check, name the narrowest test command that proves the
+# change, or name none; never prescribe a full-suite or full-lane run as the worker's
+# iteration loop, because that is the cost the ladder above exists to avoid.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -298,6 +309,27 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Test-selection ladder, shared by ship and scout scaffolds. Repo-agnostic on
+# purpose: the caller-supplied repo string cannot identify which project this
+# brief is for, so the block teaches the worker to find that project's own
+# tiers rather than naming one project's runner or family labels.
+IFS= read -r -d '' TEST_SELECTION <<EOF || true
+# Tests: run the narrowest selection that answers your question
+Choose the test selection deliberately BEFORE the first run, and climb a tier only when the cheaper one cannot answer the question you are asking:
+
+1. The test files that cover the files you changed - usually seconds.
+2. The runner's own scoping: a family, lane, tag, suite, package, or changed-file selection - usually minutes.
+3. The whole suite - deliberate full regression only, and say in your report why the narrower tiers were not enough.
+
+Find those tiers before you run anything: read the repo's contributor documentation (\`CONTRIBUTING.md\`, \`AGENTS.md\`) and the test runner's own \`--help\` once, then name the selection you chose.
+The gap between tiers is large - a full suite is routinely an order of magnitude more expensive than the selection that would have answered the same question - and a full run you abandon and restart from scratch pays that cost twice.
+Reaching for the whole suite because you have not looked for the narrower path is the default this section exists to prevent.
+
+Any run long enough that you would sit and wait on it is a bounded wait: append \`$PAUSED_VERB: {what you are waiting on}\` BEFORE you start it, not after it finishes.
+A long silent run is indistinguishable from a wedged worker, and a steer sent to a sleeping worker QUEUES instead of arriving, so an undeclared wait can outlast firstmate's attempt to redirect you.
+EOF
+TEST_SELECTION=${TEST_SELECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -346,6 +378,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$TEST_SELECTION
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -487,6 +521,8 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$TEST_SELECTION
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

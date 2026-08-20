@@ -895,6 +895,34 @@ test_paused_examples_include_long_local_processes() {
   pass "fm-brief.sh: paused examples list long local processes as the first example"
 }
 
+test_ship_and_scout_include_test_selection_ladder() {
+  local home id brief
+  home="$TMP_ROOT/test-selection-ladder-home"
+  mkdir -p "$home/data"
+
+  # Ship
+  id="brief-test-selection-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Choose the test selection deliberately BEFORE the first run" "$brief" \
+    "ship brief lost the test-selection ladder intro"
+  assert_grep "3. The whole suite - deliberate full regression only" "$brief" \
+    "ship brief lost the test-selection whole-suite tier"
+  assert_grep "Reaching for the whole suite because you have not looked for the narrower path" "$brief" \
+    "ship brief lost the test-selection cost rationale"
+
+  # Scout
+  id="brief-test-selection-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Choose the test selection deliberately BEFORE the first run" "$brief" \
+    "scout brief lost the test-selection ladder intro"
+  assert_grep "3. The whole suite - deliberate full regression only" "$brief" \
+    "scout brief lost the test-selection whole-suite tier"
+
+  pass "fm-brief.sh: test-selection ladder is present in ship and scout briefs"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -919,4 +947,5 @@ test_scaffold_tokens_match_spawn_guard_expectations
 test_ship_base_verification_before_branching
 test_scout_does_not_assert_false_detached_head
 test_paused_examples_include_long_local_processes
+test_ship_and_scout_include_test_selection_ladder
 
