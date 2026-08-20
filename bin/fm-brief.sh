@@ -461,7 +461,7 @@ If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durab
 Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
-Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+Record durable project knowledge however small the change; skip it however large the change if there is none.
 
 $DOD
 EOF

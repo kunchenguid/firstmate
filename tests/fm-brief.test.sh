@@ -368,6 +368,10 @@ test_ship_project_memory_wording() {
     "project-memory contract lost pointer-over-copy guidance"
   assert_grep "lacks \`## Maintaining this file\`, add that short self-governance section" "$brief" \
     "project-memory contract lost the self-governance add-in-same-pass rule"
+  assert_grep "Record durable project knowledge however small the change; skip it however large the change if there is none." "$brief" \
+    "project-memory contract lost the substance-only recording criterion"
+  assert_no_grep "trivial" "$brief" \
+    "project-memory contract reintroduced an effort-based (trivial-task) decision criterion"
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
