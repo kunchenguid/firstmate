@@ -365,6 +365,74 @@ SH
   pass "fm-teardown: exact tmux cleanup preserves invalid and prefix-matched neighbors while removing only the recorded target"
 }
 
+# A treehouse pool slot is a reusable lease. Under pool churn, the slot recorded in
+# state/<id>.meta can already have been returned and re-leased to another live task,
+# and teardown's next steps delete the checked-out branch and hard-reset the
+# worktree. Aiming that at a recycled slot destroys another crewmate's work, so a
+# worktree carrying a DIFFERENT task's fm/<id> branch must be refused - including
+# under --force, which authorizes discarding this task's own work, never another's.
+init_branch_worktree() {  # <dir> <branch>
+  local dir=$1 branch=$2
+  git -C "$dir" init -q .
+  git -C "$dir" config user.email test@example.com
+  git -C "$dir" config user.name test
+  git -C "$dir" config commit.gpgsign false
+  : > "$dir/seed"
+  git -C "$dir" add -A
+  git -C "$dir" commit -qm seed
+  git -C "$dir" checkout -q -b "$branch"
+}
+
+test_recycled_pool_slot_refuses_other_task_branch() {
+  local dir id=slotfix-a rc
+
+  # The recorded worktree now holds ANOTHER task's branch: must refuse, no mutation.
+  dir=$(make_case recycled-slot)
+  init_branch_worktree "$dir/worktree" "fm/other-live-task"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "recycled pool slot: teardown must refuse another task's workspace"
+  grep -q "belongs to task 'other-live-task'" "$dir/stderr" \
+    || fail "recycled pool slot: refusal must name the conflicting task: $(cat "$dir/stderr")"
+  [ "$(git -C "$dir/worktree" rev-parse --abbrev-ref HEAD)" = "fm/other-live-task" ] \
+    || fail "recycled pool slot: the other task's branch was mutated"
+  assert_present "$dir/worktree/seed" "recycled pool slot: worktree changed before refusal"
+
+  # The worktree carrying this task's OWN branch is not a conflict and must proceed
+  # past the identity gate (proving the refusal is targeted, not a blanket block).
+  dir=$(make_case own-slot)
+  init_branch_worktree "$dir/worktree" "fm/$id"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  set -e
+  grep -q "belongs to task" "$dir/stderr" \
+    && fail "own slot: teardown must not refuse the task's own workspace: $(cat "$dir/stderr")"
+
+  # A detached HEAD is how a landed task legitimately ends; it is not proof of a
+  # mismatch and must not be turned into a refusal.
+  dir=$(make_case detached-slot)
+  init_branch_worktree "$dir/worktree" "fm/$id"
+  git -C "$dir/worktree" checkout -q --detach
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  set -e
+  grep -q "belongs to task" "$dir/stderr" \
+    && fail "detached slot: a detached HEAD must not be treated as a foreign workspace: $(cat "$dir/stderr")"
+
+  pass "fm-teardown: a recycled pool slot holding another task's branch is refused before any mutation"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_metadata_lock_serializes_destructive_cleanup
@@ -372,3 +440,4 @@ test_supported_backend_endpoint_records_validate
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup
+test_recycled_pool_slot_refuses_other_task_branch

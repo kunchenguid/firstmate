@@ -86,6 +86,13 @@ read_settle_record() {
   IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS <<EOF
 $1
 EOF
+  # fm-spawn records the CANONICAL physical worktree path (bin/fm-wake-lib.sh's
+  # fm_canonical_path), so the recorded pointer and the path its isolation guard
+  # validated are never two spellings of one directory. Fixture paths live under
+  # $TMPDIR, which is itself symlinked on macOS (/var -> /private/var), so assert
+  # against the same canonical form rather than the raw fixture string.
+  WT_DIR_CANON=$(realpath "$WT_DIR" 2>/dev/null || printf '%s' "$WT_DIR")
+  STALE_DIR_CANON=$(realpath "$STALE_DIR" 2>/dev/null || printf '%s' "$STALE_DIR")
 }
 
 run_settle_spawn() {
@@ -113,9 +120,9 @@ test_single_stale_first_read_is_not_accepted() {
   status=$?
   expect_code 0 "$status" "spawn should succeed once the pane settles"
   assert_contains "$out" "spawned $id" "spawn did not report success"
-  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+  assert_grep "worktree=$WT_DIR_CANON" "$HOME_DIR/state/$id.meta" \
     "meta did not record the settled worktree"
-  assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
+  assert_no_grep "worktree=$STALE_DIR_CANON" "$HOME_DIR/state/$id.meta" \
     "meta wrongly recorded the transient stale path as the worktree"
   pass "a single transient stale pane_current_path read is not accepted as the worktree"
 }
@@ -135,7 +142,7 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   end=$(date +%s)
   elapsed=$((end - start))
   expect_code 0 "$status" "spawn should succeed when the pane is already settled"
-  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+  assert_grep "worktree=$WT_DIR_CANON" "$HOME_DIR/state/$id.meta" \
     "meta did not record the already-settled worktree"
   [ "$elapsed" -le 5 ] || fail "already-settled pane took ${elapsed}s to confirm - expected close to the single inter-poll sleep"
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
