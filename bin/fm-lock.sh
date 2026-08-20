@@ -6,8 +6,9 @@
 # ordinary commands.
 # A legacy bare numeric record remains valid and keeps the ancestry-only path.
 # An identity-matched reparented session refreshes the PID under the same
-# acquisition lock used here; a different identity with a live PID keeps the
-# existing competing-session refusal and wording.
+# acquisition lock used here; any other case falls back to the ancestry test, so
+# a live PID outside this session's ancestry keeps the existing competing-session
+# refusal and wording.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u

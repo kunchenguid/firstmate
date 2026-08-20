@@ -154,6 +154,45 @@ SH
   chmod +x "$dir/bin/fm-watch-arm.sh"
 }
 
+# Run <script-body> inside a fake-claude session detached from this suite's own
+# process tree. The launcher exits immediately, so the tree is reparented to init
+# and neither the ancestry walk nor the hosted-identity check can escape into the
+# session running this suite - which is itself a live harness and would otherwise
+# host these fixtures. Returns once the body has recorded its exit code.
+run_detached_claude() {  # <dir> <script-body>
+  local dir=$1 body=$2 i=0
+  rm -f "$dir/state/detached.rc" "$dir/state/detached.out"
+  {
+    cat <<'SH'
+#!/usr/bin/env bash
+i=0
+while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+rc=0
+{
+SH
+    printf '%s\n' "$body"
+    cat <<'SH'
+} > "$FM_HOME/state/detached.out" 2>&1 || rc=$?
+printf '%s\n' "$rc" > "$FM_HOME/state/detached.rc"
+SH
+  } > "$dir/detached.sh"
+  chmod +x "$dir/detached.sh"
+  FM_HOME="$dir" bash -c '"$0" "$1" &' "$FAKE_CLAUDE" "$dir/detached.sh"
+  i=0
+  while [ "$i" -lt 400 ] && [ ! -s "$dir/state/detached.rc" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/state/detached.rc" ] || fail "the detached fixture session never finished"
+}
+
+detached_rc() {
+  tr -d '[:space:]' < "$1/state/detached.rc"
+}
+
 epoch_outcome() {
   sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$1/state/.claude-autoarm-epoch" 2>/dev/null || true
 }
@@ -212,11 +251,13 @@ test_identity_matched_reparented_session_refreshes_and_arms() {
   "$FAKE_CLAUDE" -c 'sleep 60; :' &
   old=$!
   printf '%s\nharness=claude\nsession=reparented-session\n' "$old" > "$dir/state/.lock"
-  out=$(printf '%s\n' '{"session_id":"reparented-session"}' \
-    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
-        printf "%s\n" "$$" > "$FM_HOME/state/expected-refreshed-pid"
-        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
-      ' 2>&1); status=$?
+  run_detached_claude "$dir" '
+    printf "%s\n" "$$" > "$FM_HOME/state/expected-refreshed-pid"
+    printf "%s\n" "{\"session_id\":\"reparented-session\"}" \
+      | "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+  '
+  status=$(detached_rc "$dir")
+  out=$(cat "$dir/state/detached.out")
   expected=$(cat "$dir/state/expected-refreshed-pid")
   refreshed=$(sed -n '1p' "$dir/state/.lock")
   kill "$old" 2>/dev/null || true
@@ -602,11 +643,13 @@ test_fm_lock_status_agrees_with_identity_reparent_and_refreshes_pid() {
   "$FAKE_CLAUDE" -c 'sleep 60; :' &
   old=$!
   printf '%s\nharness=claude\nsession=same-session\n' "$old" > "$dir/state/.lock"
-  out=$(FM_HOME="$dir" FM_SESSION_HARNESS=claude FM_SESSION_ID=same-session \
-    "$FAKE_CLAUDE" -c '
-      printf "%s\n" "$$" > "$FM_HOME/state/expected-refreshed-pid"
-      "$FM_HOME/bin/fm-lock.sh" status
-    ' 2>&1); status=$?
+  run_detached_claude "$dir" '
+    export FM_SESSION_HARNESS=claude FM_SESSION_ID=same-session
+    printf "%s\n" "$$" > "$FM_HOME/state/expected-refreshed-pid"
+    "$FM_HOME/bin/fm-lock.sh" status
+  '
+  status=$(detached_rc "$dir")
+  out=$(cat "$dir/state/detached.out")
   expected=$(cat "$dir/state/expected-refreshed-pid")
   refreshed=$(sed -n '1p' "$dir/state/.lock")
   kill "$old" 2>/dev/null || true
@@ -625,8 +668,12 @@ test_fm_lock_refuses_different_live_identity_with_existing_wording() {
   "$FAKE_CLAUDE" -c 'sleep 60; :' &
   old=$!
   printf '%s\nharness=claude\nsession=owner-session\n' "$old" > "$dir/state/.lock"
-  out=$(FM_HOME="$dir" FM_SESSION_HARNESS=claude FM_SESSION_ID=other-session \
-    "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-lock.sh"' 2>&1); status=$?
+  run_detached_claude "$dir" '
+    export FM_SESSION_HARNESS=claude FM_SESSION_ID=other-session
+    "$FM_HOME/bin/fm-lock.sh"
+  '
+  status=$(detached_rc "$dir")
+  out=$(cat "$dir/state/detached.out")
   owner_after=$(sed -n '1p' "$dir/state/.lock")
   record_after=$(sed -n '2,3p' "$dir/state/.lock")
   kill "$old" 2>/dev/null || true

@@ -290,7 +290,7 @@ That inertness result is scoped to the builds it exercised: it did not establish
 The secondmate-home scope and manual-repair wake path were measured with Claude Code 2.1.207 on 2026-07-12, when a native background completion re-invoked the idle model with no human input.
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
 Current session-lock records carry the verified harness and a stable session identity after a numeric PID first line.
-Matching identities own across process reparenting and atomically refresh that PID, while different live identities remain competing sessions.
+Matching identities own across process reparenting and atomically refresh that PID, while a live recorded owner outside this session's contiguous ancestry remains a competing session.
 When either identity is unavailable, `bin/fm-session-lock-lib.sh` retains the prior whole-contiguous-ancestry decision, so the Stop auto-arm reaches a legacy lock owner wherever that owner sits: the outermost PID of Claude Code's multi-level `bg-spare` hook worker chain, or an inner PID when a harness-named daemon parents the session.
 Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
 `tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table, covers every structured identity and fallback branch, and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
@@ -338,6 +338,10 @@ $ ps -o pid=,ppid=,comm=,args= -p 73706,73776
 ```
 
 This establishes Claude's hook `session_id` as the usable identifier only when SessionStart persists it through `CLAUDE_ENV_FILE`; Claude does not otherwise place it in an ordinary tool environment.
+The evidence above covers `source=startup` and the background-host chain only.
+It does NOT establish that `session_id` is preserved across `/clear` or `/compact`, which Claude routes through their own SessionStart sources and which re-publish an identity for the SAME live process.
+So identity is used only to GRANT ownership: on any mismatch the decision falls back to the unchanged contiguous-ancestry test, which still owns the lock for that re-identified process and still refuses a live owner outside this ancestry, and ownership won that way re-publishes the current identity into the record.
+The same bridge exports the identity into every ordinary command of the owning session, so a nested session of the same harness inherits it; `fm_current_session_identity` therefore refuses an identity whenever a live session of that harness hosts this one beyond its own contiguous run, and that nested session is judged by ancestry alone.
 The transcript basename is the same identity, not a second identity source.
 Because the identifier is available on both required surfaces in the actual background-host chain, the weaker same-installation background-host fallback was not implemented.
 The portable regression is `tests/fm-sessionstart-nudge.test.sh`, and the identity match, PID refresh, legacy fallback, dead-PID recovery, and competing-live-session refusal are covered by `tests/fm-session-lock-ancestry.test.sh` and `tests/fm-claude-stop-autoarm.test.sh`.

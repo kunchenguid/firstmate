@@ -15,12 +15,13 @@
 #     this Stop hook also reads the same payload field directly.
 #     A matching structured identity owns across process reparenting and
 #     refreshes the recorded PID under the session-lock acquisition lock.
-#     A legacy lock or an unavailable identity retains the ancestry walk.
+#     A legacy lock, an unavailable identity, or a changed identity retains the
+#     ancestry walk, so an in-process re-identification keeps its owner.
 #     When the recorded owner fails the shared harness-liveness predicate, the
 #     hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A different live identity, missing lock, malformed lock, or
-#     unresolved ancestry remains inert, so a competing session never arms or
-#     rewakes.
+#     ownership. A live owner outside this ancestry, missing lock, malformed
+#     lock, or unresolved ancestry remains inert, so a competing session never
+#     arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
