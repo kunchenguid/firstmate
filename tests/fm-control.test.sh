@@ -599,6 +599,10 @@ test_resume_is_refused_with_its_reason() {
   expect_code 2 "$rc" "resume should be refused"
   assert_contains "$out" "not deterministic across the verified adapters" \
     "the refusal should explain why resume is excluded"
+  assert_contains "$out" "codex prints a thread id that is not a verified resume handle" \
+    "the refusal should describe Codex's actual printed identifier"
+  assert_not_contains "$out" "codex and grok need a session id" \
+    "the refusal must not call Codex's thread id a session id"
   assert_contains "$out" "relaunch" "the refusal should point at the deterministic alternative"
   pass "fm-control: resume is refused with the determinism reason and the alternative"
 }

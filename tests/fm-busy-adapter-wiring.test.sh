@@ -30,12 +30,26 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  send-keys)
+    case " $* " in
+      *' -l '*) printf '%s\n' "${@: -1}" > "$FM_FAKE_TMUX_LAUNCH" ;;
+    esac
+    exit 0
+    ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_CODEX_VERSION:-codex-cli 0.145.0}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/codex"
   printf '%s\n' "$fakebin"
 }
 
@@ -66,6 +80,7 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_TMUX_LAUNCH="$home/tmux-launch" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -78,7 +93,11 @@ EOF
 }
 
 classify() {  # <harness> <id> <state-dir>
-  fm_busy_classify tmux fake:w "$1" "$2" "$3"
+  if [ -n "${FAKEBIN_DIR:-}" ]; then
+    PATH="$FAKEBIN_DIR:$PATH" fm_busy_classify tmux fake:w "$1" "$2" "$3"
+  else
+    fm_busy_classify tmux fake:w "$1" "$2" "$3"
+  fi
 }
 
 # drive_pi_ext <ext-path> <mode>: load the generated Pi extension in a plain
@@ -310,21 +329,63 @@ test_claude_hooks_stale_incarnation_harmless() {
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
-test_codex_unverified_until_a_semantic_source_exists() {
+test_codex_owning_appserver_wiring() {
   local rec id=busy-cx-1 out state
+  FM_FAKE_CODEX_VERSION='codex-cli 0.145.0'
+  export FM_FAKE_CODEX_VERSION
   rec=$(make_spawn_case codex-unverified codex "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
-  expect_code 0 $? "codex spawn should succeed: $out"
+  expect_code 1 $? "unobservable codex spawn must refuse: $out"
   state="$HOME_DIR/state"
   assert_absent "$state/$id.busy-gen" "codex must not arm a busy contract with no verified semantic source"
   assert_absent "$WT_DIR/.codex/hooks.json" "codex must not install unverified busy hooks"
-  assert_contains "$out" 'spawned '"$id"' harness=codex' "codex spawn did not complete normally"
+  assert_contains "$out" 'refusing an unobservable Codex worker' \
+    "unobservable Codex refusal did not name the missing owning client"
   out=$(classify codex "$id" "$state")
   [ "$out" = "unknown codex-unverified" ] || fail "codex must classify 'unknown codex-unverified', got '$out'"
-  out=$(fm_busy_classify tmux fake:w codex "$id" "$state" '• Working (6s • esc to interrupt)')
+  out=$(PATH="$FAKEBIN_DIR:$PATH" fm_busy_classify tmux fake:w codex "$id" "$state" '• Working (6s • esc to interrupt)')
   [ "$out" = "unknown codex-unverified" ] || fail "codex must not fall back to footer text, got '$out'"
-  pass "codex classifies unknown until a semantic source is verified, never idle or footer-matched"
+
+  id=busy-cx-2
+  FM_FAKE_CODEX_VERSION='codex-cli 0.147.0'
+  rec=$(make_spawn_case codex-verified codex "$id")
+  read_case_record "$rec"
+  out=$(FM_BUSY_CODEX_TURN_DEADLINE_SECS=60 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "verified codex spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  assert_present "$state/$id.busy-gen" "verified Codex did not arm its busy generation"
+  assert_absent "$WT_DIR/.codex/hooks.json" "app-server wiring must not overwrite project hook files"
+  out=$(classify codex "$id" "$state")
+  [ "$out" = "unknown codex-launch-pending" ] \
+    || fail "a launch without protocol evidence must stay unknown, got '$out'"
+  assert_contains "$(cat "$HOME_DIR/tmux-launch")" 'fm-codex-appserver-client.mjs' \
+    "Codex launch omitted the owning app-server client"
+  assert_not_contains "$(cat "$HOME_DIR/tmux-launch")" 'hooks.UserPromptSubmit=' \
+    "Codex launch retained the incomplete hook source beside the app-server owner"
+  assert_contains "$(cat "$HOME_DIR/tmux-launch")" '--deadline-secs 60' \
+    "Codex app-server client omitted its deadline"
+  assert_contains "$(cat "$HOME_DIR/tmux-launch")" '--generation ' \
+    "Codex app-server client omitted generation binding"
+  assert_contains "$(cat "$HOME_DIR/tmux-launch")" "$(cat "$state/$id.busy-gen")" \
+    "Codex app-server client is not bound to the armed generation"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --current-gen \
+    --source codex-appserver --event turn-started --deadline-secs 60
+  out=$(classify codex "$id" "$state")
+  [ "$out" = "busy codex-appserver" ] \
+    || fail "the protocol turn open must classify busy, got '$out'"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle --current-gen \
+    --source codex-appserver --event turn-completed
+  out=$(classify codex "$id" "$state")
+  [ "$out" = "idle codex-appserver" ] \
+    || fail "the joined protocol and process success must classify idle, got '$out'"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" unknown --current-gen \
+    --source codex-appserver --event timeout
+  out=$(classify codex "$id" "$state")
+  [ "$out" = "unknown codex-timeout" ] || fail "Codex timeout must surface concretely, got '$out'"
+  pass "Codex wiring is version-gated, owning-client-only, generation-bound, and deadline-bound"
+  FM_FAKE_CODEX_VERSION='codex-cli 0.145.0'
 }
 
 test_kimi_and_grok_install_no_unverified_wiring() {
@@ -349,6 +410,6 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
-test_codex_unverified_until_a_semantic_source_exists
+test_codex_owning_appserver_wiring
 
 echo "all fm-busy-adapter-wiring tests passed"

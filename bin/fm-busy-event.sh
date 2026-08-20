@@ -6,15 +6,19 @@
 # Subcommands:
 #
 #   arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
+#       [--deadline-secs N | --deadline-at EPOCH]
 #       Mint a fresh incarnation gen token, write the gen sidecar, and seed
 #       the record at seq=1 (default: busy, source fm-spawn, event
 #       launch-brief - the launch prompt IS a submitted turn). Prints the
 #       minted gen on stdout so the caller can embed it into adapter wiring.
 #       Arming again replaces the previous incarnation: late events carrying
 #       the old gen are rejected as stale from then on.
+#       Deadline options are valid only for a busy record. --deadline-secs
+#       computes an absolute deadline at this writer; --deadline-at preserves
+#       an authoritative deadline already computed by the lifecycle owner.
 #
 #   apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen)
-#         --source S --event E
+#         --source S --event E [--deadline-secs N | --deadline-at EPOCH]
 #       Append one lifecycle event: validate the gen against the armed
 #       sidecar, advance seq under the lock, atomically replace the record.
 #       Adapter wiring passes the exact --gen embedded at arm time, so a
@@ -37,8 +41,8 @@ set -u
 usage() {
   cat >&2 <<'EOF'
 usage:
-  fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
-  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
+  fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E] [--deadline-secs N | --deadline-at EPOCH]
+  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E [--deadline-secs N | --deadline-at EPOCH]
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
 See the header comment for the full contract.
 EOF
@@ -67,6 +71,9 @@ GEN=
 USE_CURRENT_GEN=0
 SOURCE=
 EVENT=
+DEADLINE_SECS=
+DEADLINE_AT=
+DEADLINE=none
 if [ "$CMD" = apply ]; then
   NEW_STATE=${1:-}
   case "$NEW_STATE" in busy|idle|unknown) shift ;; *) usage ;; esac
@@ -82,6 +89,8 @@ while [ $# -gt 0 ]; do
     --current-gen) USE_CURRENT_GEN=1; shift ;;
     --source) SOURCE=${2:-}; shift 2 || usage ;;
     --event) EVENT=${2:-}; shift 2 || usage ;;
+    --deadline-secs) DEADLINE_SECS=${2:-}; shift 2 || usage ;;
+    --deadline-at) DEADLINE_AT=${2:-}; shift 2 || usage ;;
     *) usage ;;
   esac
 done
@@ -89,6 +98,18 @@ if [ "$CMD" != retire ]; then
   case "$NEW_STATE" in busy|idle|unknown) : ;; *) usage ;; esac
   fm_busy_token_valid "$SOURCE" || { echo "error: invalid --source" >&2; exit 1; }
   fm_busy_token_valid "$EVENT" || { echo "error: invalid --event" >&2; exit 1; }
+fi
+if [ -n "$DEADLINE_SECS" ] && [ -n "$DEADLINE_AT" ]; then
+  usage
+fi
+if [ -n "$DEADLINE_SECS" ]; then
+  case "$DEADLINE_SECS" in ''|0|0*|*[!0-9]*) usage ;; esac
+  [ "$NEW_STATE" = busy ] || usage
+  DEADLINE=$(( $(date +%s) + DEADLINE_SECS ))
+elif [ -n "$DEADLINE_AT" ]; then
+  case "$DEADLINE_AT" in ''|0|0*|*[!0-9]*) usage ;; esac
+  [ "$NEW_STATE" = busy ] || usage
+  DEADLINE=$DEADLINE_AT
 fi
 
 REC=$(fm_busy_record_path "$STATE" "$ID")
@@ -121,8 +142,8 @@ lock_release() { rmdir "$LOCK" 2>/dev/null || true; }
 write_record() {  # <gen> <seq>
   local tmp
   tmp="$REC.tmp.$$"
-  printf 'v1 gen=%s seq=%s state=%s source=%s event=%s ts=%s\n' \
-    "$1" "$2" "$NEW_STATE" "$SOURCE" "$EVENT" "$(date +%s)" > "$tmp" || return 1
+  printf 'v1 gen=%s seq=%s state=%s source=%s event=%s ts=%s deadline=%s\n' \
+    "$1" "$2" "$NEW_STATE" "$SOURCE" "$EVENT" "$(date +%s)" "$DEADLINE" > "$tmp" || return 1
   mv -f "$tmp" "$REC"
 }
 
@@ -193,6 +214,7 @@ if [ "$CMD" = retire ]; then
   exit 0
 fi
 OLD_SEQ=0
+old_line=
 if [ -f "$REC" ]; then
   old_line=$(head -n 1 "$REC" 2>/dev/null || true)
   case "$old_line" in

@@ -122,7 +122,15 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  cat > "$fb/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_CODEX_VERSION:-codex-cli 0.145.0}"
+fi
+exit 0
+SH
   chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/codex"
   printf '%s\n' "$fb"
 }
 
@@ -170,8 +178,10 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_CODEX_VERSION='codex-cli 0.145.0'
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_CODEX_VERSION
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -805,6 +815,58 @@ test_no_run_busy_pane() {
   pass "no run + a busy semantic record reads working, attributed to its source"
 }
 
+test_codex_appserver_states_end_to_end() {
+  reset_fakes
+  local d gen out
+  d=$(new_case codex-deadline-states)
+  make_repo_on_branch "$d/wt" fm/codex-deadline-states
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/codex-state.meta" \
+    "window=fm:fm-codex-state" "worktree=$d/wt" "kind=ship" "harness=codex"
+  FM_FAKE_CODEX_VERSION='codex-cli 0.147.0'
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" codex-state \
+    --state unknown --source codex-appserver --event launch-pending)
+
+  out=$(run_crew_state "$d" codex-state)
+  assert_contains "$out" "state: unknown" "Codex without protocol evidence must stay unknown"
+  assert_contains "$out" "codex-launch-pending" "the unknown launch must name its missing evidence"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" codex-state busy --gen "$gen" \
+    --source codex-appserver --event turn-started --deadline-secs 60
+  out=$(run_crew_state "$d" codex-state)
+  assert_contains "$out" "state: working" "a deadline-bound real Codex open must read working"
+  assert_contains "$out" "harness busy (codex-appserver)" "the Codex working verdict must name its semantic source"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" codex-state idle --gen "$gen" \
+    --source codex-appserver --event turn-completed
+  printf 'done: Codex turn completed successfully\n' > "$d/state/codex-state.status"
+  out=$(run_crew_state "$d" codex-state)
+  assert_contains "$out" "state: done" "joined Codex success must permit the successful status result"
+  assert_contains "$out" "source: status-log" "a successfully closed Codex turn must fall through to its result"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" codex-state busy --gen "$gen" \
+    --source codex-appserver --event turn-started --deadline-secs 60
+  sed -E 's/deadline=[0-9]+$/deadline=1/' "$d/state/codex-state.busy-state" \
+    > "$d/state/codex-state.busy-state.expired"
+  mv "$d/state/codex-state.busy-state.expired" "$d/state/codex-state.busy-state"
+  out=$(run_crew_state "$d" codex-state)
+  assert_contains "$out" "state: unknown" "a Codex turn with no terminal by its deadline must surface"
+  assert_contains "$out" "codex-deadline-expired" "the surfaced Codex turn must name deadline expiry"
+  assert_not_contains "$out" "source: status-log" "an expired open must not manufacture completion from a stale log"
+
+  FM_FAKE_TMUX_MISSING=1
+  out=$(run_crew_state "$d" codex-state)
+  assert_contains "$out" "state: unknown" "a dead Codex endpoint with no run must surface unknown"
+  assert_contains "$out" "backend target gone" "a dead Codex endpoint must name its lost target"
+  FM_FAKE_TMUX_MISSING=0
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" codex-state unknown --gen "$gen" \
+    --source codex-appserver --event timeout
+  out=$(run_crew_state "$d" codex-state)
+  assert_contains "$out" "codex-timeout" "an owning-client timeout must stay concrete"
+
+  pass "fm-crew-state distinguishes Codex launch, working, success, timeout, expiry, and dead states"
+}
+
 # A converted adapter must NOT read working from rendered footer text: the
 # redesign removed that dependency, so a pane painting "esc to interrupt" with
 # no semantic record is unknown, never working and never silently idle.
@@ -1433,6 +1495,7 @@ test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
+test_codex_appserver_states_end_to_end
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture

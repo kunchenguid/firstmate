@@ -1311,6 +1311,8 @@ test_teardown_missing_busy_sidecar_completes() {
   write_meta "$case_dir" local-only ship
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$case_dir/state" task-x1)
   printf 'busy_gen=%s\n' "$gen" >> "$case_dir/state/task-x1.meta"
+  printf 'v1 outcome=success event=turn-completed\n' \
+    > "$case_dir/state/task-x1.codex-appserver-result"
   rm -f "$case_dir/state/task-x1.busy-gen"
 
   set +e
@@ -1321,6 +1323,8 @@ test_teardown_missing_busy_sidecar_completes() {
   expect_code 0 "$rc" "missing-busy-sidecar: teardown should treat the incarnation as already retired"
   assert_absent "$case_dir/state/task-x1.busy-state" \
     "missing-busy-sidecar: teardown left the orphan busy record"
+  assert_absent "$case_dir/state/task-x1.codex-appserver-result" \
+    "missing-busy-sidecar: teardown left the Codex terminal receipt"
   assert_absent "$case_dir/state/task-x1.meta" \
     "missing-busy-sidecar: teardown remained incomplete"
   pass "teardown completes when an exact busy-state sidecar is already absent"

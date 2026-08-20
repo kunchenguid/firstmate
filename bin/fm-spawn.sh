@@ -154,6 +154,12 @@
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
+#     __CODEXCLIENT__ absolute path to Firstmate's owning app-server client
+#     __STATE__       absolute path to this home's state directory
+#     __TASKID__      canonical task id
+#     __BUSYGEN__     armed semantic busy-state generation
+#     __TASKTMP__     short /tmp/fm-<id> path for bounded app-server stderr
+#     __CODEXDEADLINE__ per-turn deadline duration in seconds
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
@@ -1116,7 +1122,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__CODEXCLIENT__ --state-dir __STATE__ --task-id __TASKID__ --generation __BUSYGEN__ --cwd __WORKTREE__ --task-tmp __TASKTMP__ --turn-ended __TURNEND__ --deadline-secs __CODEXDEADLINE__ __MODELFLAG____EFFORTFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -2311,17 +2317,27 @@ if [ "$KIND" != secondmate ]; then
   # opens, so neither is armed here.
   BUSY_GEN=
   case "$HARNESS" in
-    codex*)
-      if fm_busy_codex_semantic_source; then
-        echo "error: codex semantic busy-state wiring is not implemented; extend the probe only together with verified wiring" >&2
-        exit 1
-      fi
-      ;;
-  esac
-  case "$HARNESS" in
     claude*|opencode*|pi|pi-signed)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
+        exit 1
+      }
+      [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
+      ;;
+    codex*)
+      fm_busy_codex_appserver_observable || {
+        echo "error: Codex app-server owning client is unavailable for the installed Codex version; refusing an unobservable Codex worker" >&2
+        exit 1
+      }
+      case "$FM_BUSY_CODEX_TURN_DEADLINE_SECS" in
+        ''|0|0*|*[!0-9]*)
+          echo "error: invalid Codex turn deadline: $FM_BUSY_CODEX_TURN_DEADLINE_SECS" >&2
+          exit 1
+          ;;
+      esac
+      BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID" \
+        --state unknown --source codex-appserver --event launch-pending) || {
+        echo "error: failed to arm the Codex app-server busy-state contract for $ID" >&2
         exit 1
       }
       [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
@@ -2445,16 +2461,6 @@ export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
-      ;;
-    codex*)
-      # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
-      # probes and the evidence). Neither Codex path is usable on the
-      # installed binary: a pane worker's turns are not observable through
-      # the app-server protocol, and its lifecycle hooks did not fire for a
-      # firstmate-launched worker. Codex therefore classifies unknown with
-      # an explicit reason rather than falling back to idle, and no busy
-      # wiring is installed. The turn-end NOTIFICATION marker still rides
-      # the launch command via -c notify=[...] and __TURNEND__.
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
@@ -2712,12 +2718,21 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+sq_state=$(shell_quote "$STATE_REAL")
+sq_tasktmp=$(shell_quote "$TASK_TMP")
+sq_codex_client=$(shell_quote "$FM_ROOT/bin/fm-codex-appserver-client.mjs")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
+LAUNCH=${LAUNCH//__CODEXCLIENT__/$sq_codex_client}
+LAUNCH=${LAUNCH//__STATE__/$sq_state}
+LAUNCH=${LAUNCH//__TASKID__/$ID}
+LAUNCH=${LAUNCH//__BUSYGEN__/${BUSY_GEN:-}}
+LAUNCH=${LAUNCH//__TASKTMP__/$sq_tasktmp}
+LAUNCH=${LAUNCH//__CODEXDEADLINE__/$FM_BUSY_CODEX_TURN_DEADLINE_SECS}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}

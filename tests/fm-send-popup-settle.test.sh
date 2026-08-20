@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# fm-send pre-submit popup-settle selection (the codex `$<skill>` fix).
+# fm-send pre-submit settle selection, including Codex `$<skill>` compatibility.
 #
 # Some TUIs open a completion popup when the composer's first character triggers
-# it: codex (and others) for a leading `/` slash command, and codex specifically
-# for a leading `$<skill>` invocation (e.g. `$no-mistakes`). Submitting before the
-# popup settles lets it swallow the Enter, so the line never submits. fm-send
-# absorbs this by pausing `settle` seconds AFTER typing and BEFORE the (retried)
-# Enter - the first sleep fm_tmux_submit_core makes. These tests pin the
-# settle-SELECTION matrix hermetically (stubbed tmux + sleep, no real agent):
+# it for a leading `/` slash command. Submitting before the popup settles lets it
+# swallow the Enter, so the line never submits. The owning Codex app-server client
+# accepts `$<skill>` as ordinary text without a popup, but fm-send preserves its
+# Codex-scoped pacing. These tests pin the settle-SELECTION matrix hermetically
+# (stubbed tmux + sleep, no real agent):
 #
 #   /...            -> 1.2  (universal; `/` only starts a command, never plain text)
-#   $... to codex   -> 1.2  (scoped: codex opens a `$<skill>` popup)
+#   $... to codex   -> 1.2  (scoped compatibility pacing)
 #   $... to claude  -> 0.3  (NOT codex: `$` commonly starts plain text "$5", "$HOME")
 #   $... explicit   -> 0.3  (session:window target has no meta -> harness unknown
 #                            -> non-codex safe default)
@@ -21,8 +20,7 @@
 # fm-send's own post-submit FM_SEND_SETTLE pause. So tail-vs-head matters: this
 # suite asserts on the HEAD sleep, distinct from fm-send-settle.test.sh which pins
 # the TAIL (post-submit) pause. The retried Enter in fm_tmux_submit_core remains the
-# real safety net; this settle is only the optimization that lets the popup clear so
-# the first Enter lands.
+# real safety net; this settle remains a compatibility optimization.
 #
 # Every case below passes a LITERAL `$<skill>` / `$price` message in single quotes
 # on purpose - the whole point is to send an unexpanded `$...` line to the agent -
@@ -109,7 +107,7 @@ first_settle() {  # <expected> <label> <harness|--explicit> <message> [selector-
   pass "fm-send popup-settle: $label -> ${expected}s"
 }
 
-# Codex `$<skill>` gets the long settle so its `$` popup clears (the fix).
+# Codex `$<skill>` retains the long compatibility settle.
 first_settle 1.2 'codex $skill -> long settle' codex '$no-mistakes'
 
 # The same Codex `$<skill>` path must work when the target is addressed by exact

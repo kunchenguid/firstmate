@@ -35,7 +35,7 @@
 #      backend is refused rather than performed blind.
 #
 # `resume` is deliberately NOT a verb. It is not deterministic across the
-# verified adapters: codex and grok resume only from a session id printed at
+# verified adapters: codex and grok require an adapter-specific id printed at
 # exit, opencode resumes the most recent session for the cwd with --continue,
 # and claude, pi, pi-signed, and kimi have no verified pane-resume contract at
 # all. `relaunch` covers the same need deterministically for every adapter,
@@ -205,6 +205,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
     claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
+    codex) printf '%s\n' "$state/$id.codex-appserver-result" ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     grok)

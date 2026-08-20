@@ -26,7 +26,8 @@
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
 # Slash commands, and codex `$...` skill invocations resolved through harness
-# meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
+# meta, get a longer pre-Enter settle; the owning Codex client accepts the latter
+# as ordinary input without a completion popup.
 #
 # From-firstmate marker: when the resolved target is a task selector whose meta
 # records kind=secondmate, the text uses the live-charter-compatible
@@ -481,7 +482,7 @@ fm_send_feed_resolved_holds() {  # <answer-text>
 }
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
-# scope the codex `$<skill>` popup-settle below. A task selector carries
+# scope the codex `$<skill>` pre-Enter settle below. A task selector carries
 # meta; an explicit backend-target escape hatch has none, so its harness is
 # unknown and treated as non-codex (the safe default that keeps the fast path).
 # The target's BACKEND comes from selector meta, from matching an explicit target
@@ -542,14 +543,14 @@ else
       exit 1
     fi
   fi
-  # Slash commands open a completion popup in some TUIs (verified on codex);
+  # Slash commands open a completion popup in some TUIs;
   # submitting too fast selects nothing, so give the popup time to settle before
-  # the (retried) Enter. Codex opens the same kind of popup for a `$<skill>`
-  # invocation, so a `$...` message to a codex target gets the same settle. That
-  # `$` case is scoped to codex on purpose: unlike `/`, a leading `$` commonly
-  # starts ordinary text ("$5/month", "$HOME"), so a universal `$` rule would
-  # needlessly slow plain text to claude/opencode/pi. The target backend's
-  # verified submit retry still backs the settle up either way.
+  # the (retried) Enter. Preserve the same Codex-scoped pacing for `$<skill>`
+  # input even though the owning app-server client accepts it as ordinary text
+  # without a popup. Unlike `/`, a leading `$` commonly starts ordinary text
+  # ("$5/month", "$HOME"), so a universal `$` rule would needlessly slow plain
+  # text to claude/opencode/pi. The target backend's verified submit retry still
+  # backs the settle up either way.
   case "$*" in
     /*) settle=1.2 ;;
     \$*)

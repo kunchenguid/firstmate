@@ -210,27 +210,18 @@ A project-level `.claude/settings.json` only takes effect when Claude Code's pro
 After those settings are loaded, hook command resolution is still cwd-sensitive because Claude Code runs commands through `/bin/sh` against the session's current cwd; keep the tracked commands anchored through `"$CLAUDE_PROJECT_DIR"/bin/...` and see `docs/turnend-guard.md` for the verified Stop-hook details.
 Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on every Stop and foregrounds `bin/fm-watch-arm.sh` when the home is eligible and still needs supervision, and its exit-2 `asyncRewake` rewake is the wake; the model drains and handles wakes but never runs a routine re-arm command.
 
-## codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
+## codex (VERIFIED; owning app-server client live-verified 2026-08-15 on codex-cli 0.147.0)
 
 | Fact | Value |
 |---|---|
-| Busy state | Unknown until a semantic source is live-verified: the app-server turn lifecycle is unreachable for a pane worker, and project lifecycle hooks did not fire for a firstmate-launched worker. |
-| Exit command | `/quit` (slash popup needs about 1 second between text and Enter; the shared submit path used by `fm-control` handles it) |
-| Interrupt | single Escape |
-| Skill invocation | `$<skill>` (e.g. `$no-mistakes`); `/<skill>` is claude-only and codex rejects it as "Unrecognized command" |
+| Busy state | Firstmate owns one foreground `codex app-server` child process group per turn and its bidirectional protocol pipes. It publishes busy only after `thread/status/changed(active)` and `turn/started`, and idle only after `turn/completed(completed)` agrees with a clean child exit. The child `exit` event records the process result, disables every later group signal, and resolves without waiting for inherited pipe closure. Failed, interrupted, timed-out, incomplete, or disagreeing results publish a concrete unknown verdict. Older, unreadable, prerelease, or noncanonical versions remain `unknown codex-unverified`; later canonical stable versions must still complete the protocol handshake before publishing a positive verdict. |
+| Exit command | `/quit` |
+| Interrupt | single Escape, routed by the owning client to `turn/interrupt` |
+| Skill invocation | `$<skill>` (e.g. `$no-mistakes`) is sent as ordinary turn input through the app-server protocol |
 
-A `$<skill>` invocation opens a `$`-autocomplete (skill) popup, the same hazard as the `/` slash popup: submitting too fast lets the popup swallow the Enter, so the invocation never lands.
-`fm-send` handles it the same way it handles `/` - it gives the popup a longer settle (1.2s) between typing and the first Enter, with the target backend's submit retry as the safety net - but the `$` settle is scoped to `harness=codex`, read from the target metadata for exact task ids or legacy `fm-<id>` labels.
-That scope matters because, unlike `/`, a leading `$` commonly starts ordinary text (`$5/month`, `$HOME`), so a universal `$` rule would needlessly slow plain steers to claude/opencode/pi; only a codex target receiving a `$...` message gets the popup-settle.
-An explicit `session:window` target has no meta, so its harness is unknown and treated as non-codex (the safe fast-path default).
-This is why the validation trigger (`$no-mistakes`) to a codex crew now lands on the first Enter instead of biting the popup.
-
-Directory trust dialog on first run per repo root: "Do you trust the contents of this directory?"
-Accept with Enter.
-The decision persists for the repo, so later worktrees of the same project skip it.
-
-Resume after exit with `codex resume <session-id>`.
-The session id is printed on quit.
+The owning client has no autocomplete or directory-trust dialog.
+It resumes its app-server thread across turns while the pane remains live, and prints the thread id when it exits.
+An explicit absolute turn deadline is the only turn hang detector; on expiry the client requests interruption, then sends TERM and KILL only to the process group it created for that turn.
 
 **Primary-session guard fact (verified 2026-07-08, codex-cli 0.142.1).**
 The firstmate PRIMARY's own `.codex/hooks.json` registers a Stop hook that pipes Codex's Stop payload to `bin/fm-turnend-guard.sh`.

@@ -19,6 +19,23 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-busy-state)
 EV="$ROOT/bin/fm-busy-event.sh"
+CODEX_FAKEBIN="$TMP_ROOT/codex-fakebin"
+CODEX_OVERRIDE="$TMP_ROOT/codex-override"
+mkdir -p "$CODEX_FAKEBIN"
+cat > "$CODEX_FAKEBIN/codex" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_FAKE_CODEX_VERSION:-codex-cli 0.145.0}"
+SH
+chmod +x "$CODEX_FAKEBIN/codex"
+cat > "$CODEX_OVERRIDE" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_FAKE_CODEX_OVERRIDE_VERSION:-codex-cli 0.145.0}"
+SH
+chmod +x "$CODEX_OVERRIDE"
+PATH="$CODEX_FAKEBIN:$PATH"
+export PATH
+FM_FAKE_CODEX_VERSION='codex-cli 0.145.0'
+export FM_FAKE_CODEX_VERSION
 
 new_state_dir() {  # <name>
   local d="$TMP_ROOT/$1/state"
@@ -248,16 +265,64 @@ Ctrl+c:cancel')
 
 # --- kimi verification gate -----------------------------------------------------
 
-test_codex_unverified_gate() {
+test_codex_appserver_gate_and_deadline() {
   local state gen out
   state=$(new_state_dir codex-gate)
-  gen=$("$EV" arm "$state" t1)
-  "$EV" apply "$state" t1 busy --gen "$gen" --source codex-hook --event user-prompt-submit
+  gen=$("$EV" arm "$state" t1 --state unknown --source codex-appserver --event launch-pending)
   out=$(fm_busy_classify tmux w1 codex t1 "$state")
   [ "$out" = "unknown codex-unverified" ] || fail "unverified codex must classify unknown, got '$out'"
   [ -z "$(fm_busy_sources_for_harness codex)" ] \
     || fail "codex must trust no semantic source until one is verified"
-  pass "codex classifies unknown until a semantic source passes its verification gate"
+
+  FM_FAKE_CODEX_VERSION='codex-cli 00.147.0'
+  fm_busy_codex_appserver_observable \
+    && fail "a Codex version with a non-canonical major component must stay unverified"
+
+  FM_FAKE_CODEX_VERSION='codex-cli 0.147.00'
+  fm_busy_codex_appserver_observable \
+    && fail "a Codex version with a non-canonical patch component must stay unverified"
+
+  FM_FAKE_CODEX_VERSION='codex-cli 0.147.0-beta.1'
+  out=$(fm_busy_classify tmux w1 codex t1 "$state")
+  [ "$out" = "unknown codex-unverified" ] || fail "unexpected version syntax must stay unverified, got '$out'"
+
+  FM_FAKE_CODEX_VERSION='codex-cli 0.147.0'
+  fm_busy_codex_appserver_observable || fail "canonical Codex 0.147.0 must pass the app-server gate"
+
+  FM_FAKE_CODEX_VERSION='codex-cli 0.145.0'
+  FM_FAKE_CODEX_OVERRIDE_VERSION='codex-cli 0.147.0' \
+    FM_CODEX_BIN="$CODEX_OVERRIDE" fm_busy_codex_appserver_observable \
+    || fail "the version gate did not inspect the FM_CODEX_BIN client will launch"
+  FM_FAKE_CODEX_VERSION='codex-cli 0.147.0'
+  FM_FAKE_CODEX_OVERRIDE_VERSION='codex-cli 0.145.0' \
+    FM_CODEX_BIN="$CODEX_OVERRIDE" fm_busy_codex_appserver_observable \
+    && fail "the version gate accepted a different PATH binary than the FM_CODEX_BIN launch target"
+
+  "$EV" apply "$state" t1 busy --gen "$gen" --source codex-appserver --event turn-started
+  out=$(fm_busy_classify tmux w1 codex t1 "$state")
+  [ "$out" = "unknown codex-deadline-missing" ] \
+    || fail "an app-server busy record without a deadline must surface unknown, got '$out'"
+
+  "$EV" apply "$state" t1 busy --gen "$gen" --source codex-appserver \
+    --event turn-started --deadline-secs 30
+  out=$(fm_busy_classify tmux w1 codex t1 "$state")
+  [ "$out" = "busy codex-appserver" ] || fail "deadline-bound Codex turn must classify busy, got '$out'"
+
+  sed -E 's/deadline=[0-9]+$/deadline=1/' "$state/t1.busy-state" > "$state/t1.busy-state.expired"
+  mv "$state/t1.busy-state.expired" "$state/t1.busy-state"
+  out=$(fm_busy_classify tmux w1 codex t1 "$state")
+  [ "$out" = "unknown codex-deadline-expired" ] \
+    || fail "an expired Codex turn must surface unknown, got '$out'"
+
+  "$EV" apply "$state" t1 unknown --gen "$gen" --source codex-appserver --event timeout
+  out=$(fm_busy_classify tmux w1 codex t1 "$state")
+  [ "$out" = "unknown codex-timeout" ] \
+    || fail "the owning client timeout must stay concrete, got '$out'"
+
+  FM_FAKE_CODEX_VERSION='codex-cli 1.0.0'
+  fm_busy_codex_appserver_observable || fail "a strict later Codex version must pass the from-0.147.0 gate"
+  FM_FAKE_CODEX_VERSION='codex-cli 0.145.0'
+  pass "Codex app-server gating is strict and every verified open turn is deadline-bound"
 }
 
 test_kimi_unverified_gate() {
@@ -395,7 +460,7 @@ test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
-test_codex_unverified_gate
+test_codex_appserver_gate_and_deadline
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides

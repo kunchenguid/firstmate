@@ -14,7 +14,7 @@
 # Record file: state/<id>.busy-state - exactly one line, atomically replaced
 # by bin/fm-busy-event.sh (the only writer):
 #
-#   v1 gen=<token> seq=<uint> state=<busy|idle|unknown> source=<token> event=<token> ts=<epoch>
+#   v1 gen=<token> seq=<uint> state=<busy|idle|unknown> source=<token> event=<token> ts=<epoch> deadline=<epoch|none>
 #
 # Gen sidecar: state/<id>.busy-gen - one token minted when the task's busy
 # wiring is armed (fm-spawn, or a documented recovery re-arm). Every event
@@ -31,8 +31,7 @@
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
-#   codex-hook, codex-appserver  reserved: Codex, gated by
-#                    fm_busy_codex_semantic_source
+#   codex-appserver  Firstmate's owning app-server protocol client
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
@@ -76,17 +75,23 @@
 # cleared. See fm_busy_cursor_turn_state for the fold. Cursor's rendered
 # `ctrl+c to stop` footer is deliberately not a state source here.
 #
-# Codex negotiation (fm_busy_codex_appserver_observable,
-# fm_busy_codex_hooks_verified): the approved contract prefers Codex's
-# app-server turn lifecycle with capability negotiation, and sanctions its
-# stable lifecycle hooks as the intermediate. Neither is usable on the
-# installed binary, so Codex classifies unknown codex-unverified rather than
-# falling back to idle, and fm-spawn installs no Codex busy wiring.
+# Codex negotiation (fm_busy_codex_appserver_observable): Firstmate launches
+# bin/fm-codex-appserver-client.mjs as the client that owns both the protocol
+# connection and one app-server process group per turn. The client publishes a
+# positive busy record only after matching turn/started plus
+# thread/status/changed(active), and publishes idle only after a matching
+# turn/completed(completed) plus clean child exit. Every open record keeps the
+# deadline field introduced by the earlier deadline-aware hook repair, so a
+# crashed supervisor still degrades to codex-deadline-expired rather than
+# preserving stale busy. Hooks are no longer a Codex state source because they
+# omit API-error and manual-interrupt terminals.
 # docs/verification/supervision.md owns the evidence for both probes.
 #
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
 
 FM_BUSY_LIB_VERSION=v1
+FM_BUSY_CODEX_TURN_DEADLINE_SECS=${FM_BUSY_CODEX_TURN_DEADLINE_SECS:-28800}
+FM_BUSY_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)
 
 # Standalone-Kimi verification gate. Empty means no installed Kimi version
 # has passed live verification, so every standalone Kimi task classifies
@@ -112,38 +117,49 @@ fm_busy_kimi_verified() {
   [ -n "$FM_BUSY_KIMI_VERIFIED_VERSIONS" ]
 }
 
-# fm_busy_codex_appserver_observable: capability/version negotiation for the
-# Codex app-server turn lifecycle. Returns 0 only when a pane worker's turns
-# are observable through the app-server protocol on the installed binary.
-# codex-cli 0.145.0 verdict (live, 2026-07-28): NOT observable. The v2
-# protocol does define the needed turn lifecycle (turn/started plus a
-# turn/completed status of completed, interrupted, failed, or inProgress),
-# but an interactive TUI worker neither starts nor attaches to the
-# app-server daemon, and `codex app-server daemon start` refuses outside the
-# managed standalone install, so no client can observe a pane worker's turns.
+# fm_busy_codex_version_supported: strict version negotiation for the first
+# app-server release exercised end to end by this adapter. Unexpected,
+# prerelease, noncanonical, unreadable, or older output fails closed. A later
+# stable version may enter the client, but its initialize/thread/turn handshake
+# must still succeed before any positive busy verdict is published. The gate
+# reads FM_CODEX_BIN when set so it verifies the same executable the client
+# launches rather than whichever codex happens to resolve first on PATH.
+fm_busy_codex_version_supported() {
+  local codex_bin version major minor patch
+  codex_bin=${FM_CODEX_BIN:-codex}
+  version=$("$codex_bin" --version 2>/dev/null) || return 1
+  if [[ ! "$version" =~ ^codex-cli[[:space:]]+(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+    return 1
+  fi
+  major=${BASH_REMATCH[1]}
+  minor=${BASH_REMATCH[2]}
+  patch=${BASH_REMATCH[3]}
+  if [ "$major" -gt 0 ]; then
+    return 0
+  fi
+  [ "$major" -eq 0 ] || return 1
+  if [ "$minor" -gt 147 ]; then
+    return 0
+  fi
+  [ "$minor" -eq 147 ] && [ "$patch" -ge 0 ]
+}
+
+# fm_busy_codex_appserver_observable: 0 only when the owning client and its
+# local runtime prerequisites are available for a supported Codex version.
+# This is a launch-capability gate, not a positive turn verdict: only the live
+# protocol client may publish one of those.
 fm_busy_codex_appserver_observable() {
-  return 1
+  fm_busy_codex_version_supported || return 1
+  command -v node >/dev/null 2>&1 || return 1
+  [ -n "$FM_BUSY_LIB_DIR" ] || return 1
+  [ -x "$FM_BUSY_LIB_DIR/fm-codex-appserver-client.mjs" ]
 }
 
-# fm_busy_codex_hooks_verified: the sanctioned intermediate - Codex's stable
-# hooks engine (UserPromptSubmit to open a turn, Stop and SessionEnd to close
-# it). Returns 0 only once those hooks are live-verified to fire for a
-# firstmate-launched worker. codex-cli 0.145.0 verdict (live, 2026-07-28):
-# NOT verified. Firstmate-written project hooks under <worktree>/.codex/
-# never fired in an interactive pane whose directory trust was granted, nor
-# under `codex exec`, in either case with --dangerously-bypass-hook-trust,
-# while global hooks fired in the same runs. Codex additionally exposes no
-# StopFailure hook, so an API-error turn end would need separate coverage
-# even after the discovery problem is solved.
-fm_busy_codex_hooks_verified() {
-  return 1
-}
-
-# fm_busy_codex_semantic_source: 0 when ANY verified Codex semantic source
-# exists. fm-spawn arms and wires Codex only behind this gate, and the
-# classifier reports unknown codex-unverified until it opens.
+# fm_busy_codex_semantic_source: the ONE Codex source resolver. Hooks are not
+# an alternative arm: every Codex worker state read passes through the owning
+# app-server client or stays unknown codex-unverified.
 fm_busy_codex_semantic_source() {
-  fm_busy_codex_appserver_observable || fm_busy_codex_hooks_verified
+  fm_busy_codex_appserver_observable
 }
 
 fm_busy_record_path() {  # <state-dir> <id>
@@ -188,7 +204,7 @@ fm_busy_sources_for_harness() {  # <harness>
     claude*) adapter=claude-hook ;;
     codex*)
       fm_busy_codex_semantic_source || { printf ''; return 0; }
-      adapter='codex-hook codex-appserver'
+      adapter=codex-appserver
       ;;
     opencode*) adapter=opencode-plugin ;;
     pi|pi-signed) adapter=pi-ext ;;
@@ -219,7 +235,7 @@ fm_busy_source_trusted() {  # <harness> <source>
 #   gen-mismatch a record from a stale incarnation
 fm_busy_record_read() {  # <state-dir> <id>
   local state=$1 id=$2 rec gen line extra ver f
-  local r_gen='' r_seq='' r_state='' r_source='' r_event='' r_ts=''
+  local r_gen='' r_seq='' r_state='' r_source='' r_event='' r_ts='' r_deadline=none
   rec=$(fm_busy_record_path "$state" "$id")
   if [ ! -f "$rec" ]; then
     printf 'missing'
@@ -249,6 +265,7 @@ fm_busy_record_read() {  # <state-dir> <id>
       source=*) r_source=${f#source=} ;;
       event=*) r_event=${f#event=} ;;
       ts=*) r_ts=${f#ts=} ;;
+      deadline=*) r_deadline=${f#deadline=} ;;
       *) printf 'malformed'; return 1 ;;
     esac
   done
@@ -257,12 +274,13 @@ fm_busy_record_read() {  # <state-dir> <id>
   fm_busy_token_valid "$r_event" || { printf 'malformed'; return 1; }
   case "$r_seq" in ''|*[!0-9]*) printf 'malformed'; return 1 ;; esac
   case "$r_ts" in ''|*[!0-9]*) printf 'malformed'; return 1 ;; esac
+  case "$r_deadline" in none) : ;; ''|*[!0-9]*) printf 'malformed'; return 1 ;; esac
   case "$r_state" in busy|idle|unknown) : ;; *) printf 'malformed'; return 1 ;; esac
   if [ "$r_gen" != "$gen" ]; then
     printf 'gen-mismatch'
     return 1
   fi
-  printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
+  printf '%s %s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq" "$r_deadline"
 }
 
 # ---------------------------------------------------------------------------
@@ -839,7 +857,7 @@ fm_busy_grok_tail_busy() {
 # if available, else reports unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
-  local out rc r_state r_source native log
+  local out rc r_state r_source r_event r_deadline native log now
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then
@@ -877,7 +895,32 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     r_state=${out%% *}
     out=${out#* }
     r_source=${out%% *}
+    out=${out#* }
+    r_event=${out%% *}
     if fm_busy_source_trusted "$harness" "$r_source"; then
+      case "$harness:$r_state" in
+        codex*:busy)
+          r_deadline=${out##* }
+          if [ "$r_deadline" = none ]; then
+            printf 'unknown codex-deadline-missing'
+            return 0
+          fi
+          now=$(date +%s 2>/dev/null) || {
+            printf 'unknown codex-deadline-unreadable'
+            return 0
+          }
+          if [ "$now" -ge "$r_deadline" ]; then
+            printf 'unknown codex-deadline-expired'
+            return 0
+          fi
+          ;;
+        codex*:unknown)
+          if [ "$r_source" = codex-appserver ]; then
+            printf 'unknown codex-%s' "$r_event"
+            return 0
+          fi
+          ;;
+      esac
       printf '%s %s' "$r_state" "$r_source"
     else
       printf 'unknown source-mismatch'
