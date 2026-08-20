@@ -23,6 +23,21 @@
 # It NEVER merges: the captain / configured merge authority merges. It only opens
 # (or re-reports) PRs and records their URLs.
 #
+# Ship gates (G-ship-1/2): before opening ANY ship PR, the epic must be COMPLETE
+# and VALIDATED, so a premature or un-validated run cannot deliver a half-epic:
+#   - completeness: every `kind: ship` story in the epic dir whose `repo:` names
+#     this project has landed on epic/<slug> - proven by a commit on the epic
+#     branch (subject/body or a merged branch name) that references the story's
+#     numbered short-id (e.g. epflow-06). A missing story refuses, naming it.
+#   - no-mistakes-green: the whole-epic no-mistakes gate passed at THIS exact
+#     epic tip. Evidence surface is <epic-dir>/no-mistakes-green - whitespace-
+#     delimited lines each carrying a green epic sha (a trailing "# <project>
+#     <date>" comment is free). Binding the proof to the sha means an epic that
+#     advances past its green run re-refuses until re-validated. Absent or
+#     unreadable evidence fails closed (refuse), never silent-open.
+# Both gates are read-only and run under --dry-run too. --allow-incomplete is the
+# single, logged bypass for both, for a deliberate partial or unvalidated ship.
+#
 # Single, idempotent, re-runnable command. The 2-PR sequence is driven by live
 # git truth, not stored state, so re-running always does the next right thing:
 #   - staging does not yet contain the epic  -> ensure the staging test-vehicle PR.
@@ -41,12 +56,14 @@
 # (or a path), same as bin/fm-epic-branch.sh.
 #
 # Usage:
-#   fm-epic-ship.sh <epic-slug> <project> [--dry-run]
+#   fm-epic-ship.sh <epic-slug> <project> [--dry-run] [--allow-incomplete]
 #   fm-epic-ship.sh -h | --help
 #
 # --dry-run performs every read-only check for real but prints the mutating
 # gh-axi / git commands instead of running them, so the flow is exercisable
 # without a live remote.
+# --allow-incomplete is the single, logged bypass of the completeness and
+# no-mistakes-green ship gates (a deliberate partial or unvalidated ship).
 #
 # Overrides (mechanical/test seams, same style as bin/fm-project-mode.sh):
 #   FM_PROJECT_MODE_BIN  path to fm-project-mode.sh (default $FM_ROOT/bin/…).
@@ -67,6 +84,7 @@ GIT_NET_TIMEOUT="${FM_EPIC_GIT_TIMEOUT:-60}"
 . "$FM_ROOT/bin/fm-timeout-lib.sh"
 
 DRY_RUN=0
+ALLOW_INCOMPLETE=0
 
 die() { echo "error: $*" >&2; exit 1; }
 say() { echo "$*"; }
@@ -76,10 +94,11 @@ usage() {  # <exit-code> (default 2); code 0 prints to stdout for --help
   [ "$code" -eq 0 ] && out=/dev/stdout
   cat > "$out" <<'EOF'
 usage:
-  fm-epic-ship.sh <epic-slug> <project> [--dry-run]   ship an epic via the 2-PR gitflow
+  fm-epic-ship.sh <epic-slug> <project> [--dry-run] [--allow-incomplete]
   fm-epic-ship.sh -h | --help
 
-Opens the epic gitflow pull requests for one repo and reports their URLs:
+Ships an epic via the 2-PR gitflow: opens the epic gitflow pull requests for one
+repo and reports their URLs.
   - staging declared:  epic/<slug> -> staging (test vehicle) first; then, once
                        that PR has merged, epic/<slug> -> production (delivery).
   - no staging:        a single epic/<slug> -> production PR.
@@ -87,6 +106,11 @@ Conflict with staging cuts resolve-epic/<slug> from staging for the test vehicle
 keeping epic/<slug> clean for the production PR. Idempotent and re-runnable; NEVER
 merges (the captain / merge authority merges). --dry-run prints the mutating
 gh-axi / git commands instead of running them.
+
+Before opening any PR, the epic must be COMPLETE (every kind:ship story for this
+repo landed on epic/<slug>) and no-mistakes-GREEN at the current epic tip, else
+it refuses. --allow-incomplete is the single, logged bypass for both gates (a
+deliberate partial or unvalidated ship).
 EOF
   exit "$code"
 }
@@ -196,6 +220,12 @@ ensure_pr() {
     printf '%s|%s\n' "$role" "$url"
     return 0
   fi
+  # About to open a NEW PR: gate the epic first. Placed here (not in create_pr,
+  # and after the ahead-count / already-open checks above) so an idempotent
+  # re-report never re-gates, and so ship_gate's die exits this subshell for the
+  # caller's `|| exit 1` to catch (a bare `x=$(...)` under set -e does not
+  # reliably propagate a subshell die through the command substitution).
+  ship_gate
   title="Epic $SLUG: $role ($head -> $base)"
   body="Automated $role PR for epic \`$SLUG\` (bin/fm-epic-ship.sh).
 
@@ -235,6 +265,95 @@ record_ship() {  # <role> <head> <base> <url>
   printf '%s\n' "$line" >> "$dir/ships.md"
 }
 
+# --- ship gates: epic completeness + no-mistakes-green (G-ship-1/2) ----------
+# Enforced at the create_pr choke point so idempotent re-reports of an already
+# open PR are never re-gated. Every check is read-only and runs under --dry-run.
+
+# story_shortid <full-id>: the "<letters>-<digits>" numbered token a story's
+# commits and branch carry (epflow-06-ship-... -> epflow-06); the full id when
+# it does not match that shape.
+story_shortid() { printf '%s\n' "$1" | grep -oE '^[a-z]+-[0-9]+' || printf '%s\n' "$1"; }
+
+# ship_story_shortids <epic-dir> <project>: the numbered short-id of every
+# `kind: ship` story in the epic whose `repo:` names this project (a story with
+# no repo is included, conservatively). One per line.
+ship_story_shortids() {
+  local dir=$1 project=$2 base f id
+  base=$(basename "$project")
+  [ -d "$dir/stories" ] || return 0
+  for f in "$dir"/stories/*.md; do
+    [ -f "$f" ] || continue
+    id=$(awk -v proj="$project" -v projbase="$base" '
+      NR==1 && $0!="---" {exit}      # not a frontmatter file
+      NR>1  && $0=="---" {exit}      # end of frontmatter
+      $1=="id:"   {id=$2}
+      $1=="kind:" {kind=$2}
+      $1=="repo:" {repo=$2}
+      END {
+        if (kind!="ship") exit
+        if (repo!="" && repo!=proj && repo!=projbase) exit
+        if (id!="") print id
+      }' "$f")
+    [ -n "$id" ] && story_shortid "$id"
+  done
+}
+
+# completeness_gate <clone> <epic-dir> <epic-sha>: refuse (naming them) when any
+# kind:ship story for this repo is absent from the epic branch history.
+completeness_gate() {
+  local clone=$1 dir=$2 sha=$3 token missing="" logtxt
+  logtxt=$(git -C "$clone" log --format='%s%n%b' "$sha" 2>/dev/null || true)
+  while read -r token; do
+    [ -n "$token" ] || continue
+    printf '%s\n' "$logtxt" | grep -qE "(^|[^A-Za-z0-9])$token([^A-Za-z0-9]|\$)" \
+      || missing="$missing $token"
+  done < <(ship_story_shortids "$dir" "$PROJECT")
+  [ -z "$missing" ] || die "epic \"$SLUG\" is INCOMPLETE for $PROJECT: no commit on $EPIC_BRANCH references story:$missing.
+Land the missing stories on $EPIC_BRANCH first, or pass --allow-incomplete to ship a deliberate partial epic (logged)."
+}
+
+# green_gate <epic-dir> <epic-sha>: refuse unless the epic dir records that the
+# whole-epic no-mistakes gate passed at THIS exact epic tip. Fail-closed on an
+# absent or unreadable evidence surface.
+green_gate() {
+  local dir=$1 sha=$2
+  local gf="$dir/no-mistakes-green"
+  if [ -f "$gf" ] && grep -qE "(^|[[:space:]])$sha([[:space:]]|\$)" "$gf"; then
+    return 0
+  fi
+  die "epic \"$SLUG\" has no no-mistakes-green evidence for $EPIC_BRANCH tip $sha ($PROJECT).
+Run the whole-epic no-mistakes gate and record its green tip in $gf, or pass --allow-incomplete to ship without it (logged)."
+}
+
+# log_bypass: durable trace of a --allow-incomplete ship in the epic's ships.md.
+log_bypass() {
+  local dir date line
+  date=$(date -u +%Y-%m-%d)
+  line="- $date: BYPASS --allow-incomplete ship of epic $SLUG [$PROJECT] (completeness + no-mistakes-green gates skipped)"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "[dry-run] record to epic ships.md: $line" >&2
+    return 0
+  fi
+  dir=$(find_epic_dir) || return 0
+  printf '%s\n' "$line" >> "$dir/ships.md"
+}
+
+# ship_gate: enforce completeness + no-mistakes-green before any PR is opened.
+# --allow-incomplete is the single, logged bypass. Read-only; --dry-run exercises
+# it too. Relies on the epic branch fetched into EPIC_SHA before the ship flow.
+ship_gate() {
+  if [ "$ALLOW_INCOMPLETE" -eq 1 ]; then
+    say "warn: --allow-incomplete: skipping epic-completeness and no-mistakes-green gates for $PROJECT (deliberate partial/unvalidated ship of epic $SLUG)." >&2
+    log_bypass
+    return 0
+  fi
+  local dir
+  dir=$(find_epic_dir) \
+    || die "cannot locate the epic dir for slug \"$SLUG\" under $DATA/plans to verify completeness/green; pass --allow-incomplete to ship without the gates (logged)."
+  completeness_gate "$CLONE" "$dir" "$EPIC_SHA"
+  green_gate "$dir" "$EPIC_SHA"
+}
+
 # --- resolve-epic (staging conflict path) -----------------------------------
 # Cut resolve-epic/<slug> from staging on origin, idempotent and never-clobber,
 # same discipline as bin/fm-epic-branch.sh create.
@@ -258,6 +377,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help|help) usage 0 ;;
     --dry-run) DRY_RUN=1 ;;
+    --allow-incomplete) ALLOW_INCOMPLETE=1 ;;
     -*) die "unknown option: $1" ;;
     *)
       if [ -z "$SLUG" ]; then SLUG=$1
@@ -291,7 +411,7 @@ fetch_branch "$CLONE" "$PRODUCTION" "refs/fm-epic-ship/base-$PRODUCTION" >/dev/n
 # ============================================================================
 if [ -z "${STAGING:-}" ]; then
   # Epic (head) and production (base) refs were both fetched above.
-  result=$(ensure_pr "$CLONE" "$EPIC_BRANCH" "$PRODUCTION" "delivery")
+  result=$(ensure_pr "$CLONE" "$EPIC_BRANCH" "$PRODUCTION" "delivery") || exit 1
   url=${result#*|}
   if [ "$url" = none ]; then
     say "$PROJECT: nothing to ship - $EPIC_BRANCH is already in $PRODUCTION."
@@ -309,7 +429,7 @@ STAGING_SHA=$(fetch_branch "$CLONE" "$STAGING" "refs/fm-epic-ship/base-$STAGING"
 # Has the staging test vehicle merged? -> staging contains the epic work.
 if git -C "$CLONE" merge-base --is-ancestor "$EPIC_SHA" "$STAGING_SHA"; then
   # Stage 2: delivery to production.
-  result=$(ensure_pr "$CLONE" "$EPIC_BRANCH" "$PRODUCTION" "delivery")
+  result=$(ensure_pr "$CLONE" "$EPIC_BRANCH" "$PRODUCTION" "delivery") || exit 1
   url=${result#*|}
   if [ "$url" = none ]; then
     say "$PROJECT: nothing to ship - $EPIC_BRANCH is already in $PRODUCTION."
@@ -338,7 +458,7 @@ else
   fi
 fi
 
-result=$(ensure_pr "$CLONE" "$STAGING_HEAD" "$STAGING" "staging test vehicle")
+result=$(ensure_pr "$CLONE" "$STAGING_HEAD" "$STAGING" "staging test vehicle") || exit 1
 url=${result#*|}
 if [ "$url" = none ]; then
   say "$PROJECT: nothing to ship to $STAGING from $STAGING_HEAD."
