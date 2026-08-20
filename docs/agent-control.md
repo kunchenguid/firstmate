@@ -32,7 +32,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
-| `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
+| `relaunch` | Replace the running agent with a new one in the same worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The replacement's own published endpoint exists, and the durable record names the harness that is actually running. Readiness is reported separately as `ready=confirmed` when its agent was observed running and `ready=starting` when it had not registered one yet. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -69,7 +69,11 @@ It is not deterministic across the verified adapters: codex and grok resume only
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
-5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which keeps the recorded worktree instead of acquiring one, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+   It adopts the recorded endpoint when that endpoint is still there, and creates a replacement in the recorded worktree when the backend proves it gone; a created replacement carries its own endpoint identity, which the launch publishes.
+6. **Read readiness from the endpoint the launch published**, identified by this transaction's own id, never from the handle the previous agent ran under.
+   A retired endpoint is authoritatively absent, so watching it answers "missing" for as long as anyone waits - a wrong answer no timeout can correct, and one that used to report a healthy recovery as a lost one.
+   `FM_CONTROL_LAUNCH_WAIT` therefore bounds how long the command watches, not how long the replacement is allowed to take: expiry with the endpoint present reports an unfinished start, and only an absent endpoint is a failure.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
@@ -98,7 +102,9 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   zellij, orca, and cmux are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
-- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free, or positively absent, and the endpoint the replacement will run in has its shell in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+- A replacement that is in place but has not registered an agent yet is reported as still starting rather than as a failure, because the two are indistinguishable from outside and only one of them is worth acting on.
+  Reporting it as a failure invites a second relaunch onto an agent that is already coming up, or a teardown of work that is exactly where it belongs.
 
 ## Capability matrix
 
@@ -119,4 +125,5 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 - `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-relaunch-missing-endpoint.test.sh` - recovery when the endpoint was destroyed outside teardown, including that readiness is read from the replacement's own endpoint and that an unfinished start is not reported as a failure.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

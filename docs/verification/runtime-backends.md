@@ -414,6 +414,40 @@ That suite kills the pane's own process, so the endpoint is absent for the same 
 The backend-independent half - that the worktree assertion still refuses a replacement placed anywhere else - is pinned deterministically in `tests/fm-spawn-relaunch.test.sh`, which can model a backend that ignores the requested directory where a real Herdr will not.
 The tmux side of the same placement path is pinned in `tests/fm-relaunch-missing-endpoint.test.sh`.
 
+### Relaunch replacement identity and readiness
+
+A created replacement carries its OWN pane id, so the recorded endpoint the previous agent ran under is not the endpoint the replacement runs in.
+The retired pane stays authoritatively absent, which is why a readiness poll aimed at it can never succeed on this backend and its verdict does not depend on how long the poll is willing to wait.
+Checked on 2026-08-20 against Herdr 0.8.2, driving the real `bin/fm-control.sh` relaunch against a real claude in an isolated `bin/fm-herdr-lab.sh` session, with the recorded pane killed for real first.
+
+Watching the recorded endpoint, at the default 90s window:
+
+```text
+relaunch: endpoint fm-lab-relaunch90-26764-19849:w1:p3 is provably absent (backend: herdr); creating a replacement
+error: the replacement agent for repro90 did not come up within 90s (endpoint reads 'missing')
+error: repro90 was relaunched on claude but no running agent could be confirmed; its work is preserved at .../case/wt
+```
+
+The replacement was healthy throughout that 90s: `herdr_pane_id=w1:p4`, its `foreground_cwd` the recorded worktree, and `agent get w1:p4` reporting `agent_status: blocked`.
+
+Watching the endpoint the launch published, same scenario and same window:
+
+```text
+relaunched repro90 harness=claude ... endpoint=fm-lab-relaunch90-16888-3000:w1:p4 worktree=.../case/wt ready=confirmed
+```
+
+Claude registered an agent with Herdr within about 6-18s of the launch across these runs, so 90s was never the binding constraint.
+A window deliberately set below that start time is what an unfinished start looks like, and it is reported as one rather than as a failure:
+
+```text
+$ FM_CONTROL_LAUNCH_WAIT=1 bin/fm-control.sh repro90slow relaunch --note ...
+relaunched repro90slow harness=claude ... endpoint=fm-lab-relaunch90s-45166-1180:w1:p4 ... ready=starting
+notice: repro90slow's replacement is in place at fm-lab-relaunch90s-45166-1180:w1:p4 with its work at .../case/wt, and had not finished starting after 1s; a harness can take longer than that to come up, so read its current state with bin/fm-crew-state.sh repro90slow rather than relaunching it again or tearing it down
+```
+
+`agent get` on that pane answered `agent_not_found` as the command returned and `agent_status: blocked` 25s later, so the window really was shorter than the start.
+The backend-independent half - that readiness follows the published endpoint, that an unfinished start is not a failure, and that a replacement whose own endpoint is gone still fails - is pinned deterministically in `tests/fm-relaunch-missing-endpoint.test.sh`.
+
 ### Per-home and presentation topology
 
 Per-home behavior is owned by:

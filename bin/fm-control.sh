@@ -32,10 +32,14 @@
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent).
 #   relaunch   Transactionally replace the running agent with a new one, in the
-#              SAME endpoint and SAME worktree, on the same or a newly chosen
-#              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. With no explicit axis, a secondmate re-resolves its
-#              durable config/secondmate-harness pin (harness plus its optional
+#              SAME worktree, on the same or a newly chosen harness/model/
+#              effort - so switching harness is one ordinary use of this verb.
+#              The endpoint is reused when it is still there; when the recorded
+#              one is provably gone, the launch owner creates a replacement and
+#              publishes it, and every postcondition here is then read from
+#              that published endpoint rather than the retired one.
+#              With no explicit axis, a secondmate re-resolves its durable
+#              config/secondmate-harness pin (harness plus its optional
 #              model and effort tokens) exactly as any other respawn does, while
 #              a ship or scout keeps the exact adapter already recorded for it.
 #              A prefixed raw-command basename cannot reconstruct its launch
@@ -50,6 +54,11 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#              The final line carries ready=confirmed when the replacement's
+#              agent was observed running, and ready=starting when the
+#              replacement is in place but had not registered one yet. Both are
+#              successful relaunches; only ready=confirmed asserts a running
+#              agent.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -87,7 +96,17 @@
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
-#   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
+#   FM_CONTROL_LAUNCH_WAIT       how long to watch a replacement for its agent
+#                                before reporting it as still starting (90).
+#                                This is NOT a deadline the replacement must
+#                                meet: what it would have to bound is harness
+#                                cold start - binary and runtime load, config
+#                                and credential resolution, a first model
+#                                handshake - on an unknown machine under
+#                                unknown load, which no constant here can do.
+#                                So expiry reports what was observed rather than
+#                                declaring a failure, and this knob decides only
+#                                how long the command stands and watches.
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
 set -eu
 
@@ -503,6 +522,8 @@ BRIEF_PRIOR="$JOURNAL.brief-prior"
 NOTE_FILE="$JOURNAL.note"
 RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
+RELAUNCH_REPLACEMENT_PLACED=0
+RELAUNCH_READY=
 RELAUNCH_TX=
 RELAUNCH_BRIEF=
 PRIOR_HARNESS=$HARNESS
@@ -584,6 +605,13 @@ relaunch_rollback() {
       if [ "$RELAUNCH_AGENT_CONFIRMED" = 1 ]; then
         journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-agent-confirmed" || true
         echo "error: $ID's replacement is running on $TARGET_HARNESS, but transaction completion could not be persisted; its published record was retained for reconciliation" >&2
+      elif [ "$RELAUNCH_REPLACEMENT_PLACED" = 1 ]; then
+        # The replacement endpoint exists and bin/fm-spawn.sh proved its shell
+        # is in the recorded worktree before publishing it. Saying no agent
+        # could be confirmed would be true only of the agent and read as true
+        # of the work.
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=none-replacement-placed" || true
+        echo "error: $ID's replacement is in place at $T and was still starting, but transaction completion could not be persisted; its published record was retained for reconciliation" >&2
       elif [ "$RELAUNCH_META_PUBLISHED" = 1 ] \
          || { [ -n "$RELAUNCH_TX" ] \
               && [ "$(fm_meta_get "$META" control_relaunch_tx)" = "$RELAUNCH_TX" ]; }; then
@@ -771,6 +799,34 @@ record_note() {
   esac
 }
 
+# adopt_replacement_endpoint: point every postcondition read after the launch at
+# the endpoint the replacement was actually launched at.
+#
+# The endpoint this script resolved at startup is the one the PREVIOUS agent
+# ran in, and a relaunch does not always reuse it. When the recorded endpoint
+# is provably gone, bin/fm-spawn.sh --relaunch creates a replacement instead of
+# adopting one, and on a backend whose endpoints carry their own identity (a
+# herdr pane) that replacement has a NEW identity, which the launch publishes.
+# Keeping the startup value after that means watching a retired endpoint: it is
+# authoritatively absent, so it classifies 'missing' on every poll for as long
+# as anyone is willing to wait, and the readiness probe answers "did not come
+# up" about an agent that is coming up correctly a few characters away.
+#
+# The published record is adopted only when it carries THIS transaction's id,
+# which bin/fm-spawn.sh writes as control_relaunch_tx, so a record left by
+# anything other than this launch is never mistaken for the replacement's.
+adopt_replacement_endpoint() {
+  local tx
+  tx=$(fm_meta_get "$META" control_relaunch_tx)
+  [ "$tx" = "$RELAUNCH_TX" ] \
+    || die "task $ID's record does not carry this relaunch's transaction id, so the endpoint its replacement was launched at cannot be identified; the published record was retained for reconciliation"
+  fm_backend_validate_task_endpoint "$META" "$ID" \
+    || die "task $ID's replacement was launched but the endpoint its record now names does not pass endpoint validation; the published record was retained for reconciliation"
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = "$BACKEND" ] \
+    || die "task $ID's replacement was published on backend '$FM_BACKEND_VALIDATED_BACKEND', not the '$BACKEND' this relaunch verified; refusing to read a postcondition across a backend change"
+  T=$FM_BACKEND_VALIDATED_TARGET
+}
+
 do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
@@ -829,14 +885,47 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
-  state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
-    die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
-  }
-  RELAUNCH_AGENT_CONFIRMED=1
+  adopt_replacement_endpoint
 
-  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  # Readiness, read from the replacement's OWN endpoint.
+  #
+  # Expiry here is not a verdict. The three outcomes are genuinely different
+  # facts about the replacement, and only one of them is a failure:
+  #
+  #   alive   - its agent is running. The only state that asserts that.
+  #   dead    - the endpoint is there, its shell is in the recorded worktree
+  #             (bin/fm-spawn.sh proved that before publishing it), and no
+  #             agent has registered in it yet. A harness that has not finished
+  #             starting looks exactly like this, and so does one that never
+  #             will; what is certain either way is that the endpoint and the
+  #             work are both where they belong, so this is reported as an
+  #             unfinished start rather than a stranded task.
+  #   missing - the endpoint the replacement was launched at is gone. Nothing
+  #             is coming up there. This is the failure.
+  #
+  # Collapsing the middle case into the last one is what made a healthy
+  # recovery read as a lost one, and the operator's natural responses to that
+  # - relaunching again onto an agent that is already starting, or tearing the
+  # task down - are both worse than doing nothing.
+  if state=$(wait_agent_state "$LAUNCH_WAIT" alive); then
+    RELAUNCH_AGENT_CONFIRMED=1
+    RELAUNCH_READY=confirmed
+  else
+    case "$state" in
+      dead)
+        RELAUNCH_REPLACEMENT_PLACED=1
+        RELAUNCH_READY=starting
+        ;;
+      *)
+        die "the replacement agent for $ID is not at the endpoint it was launched at: $T reads '$state' after ${LAUNCH_WAIT}s"
+        ;;
+    esac
+  fi
+
+  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result" "ready=$RELAUNCH_READY"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT ready=$RELAUNCH_READY"
+  [ "$RELAUNCH_READY" = confirmed ] || echo "notice: $ID's replacement is in place at $T with its work at $WT, and had not finished starting after ${LAUNCH_WAIT}s; a harness can take longer than that to come up, so read its current state with bin/fm-crew-state.sh $ID rather than relaunching it again or tearing it down" >&2
 }
 
 # --- verbs ------------------------------------------------------------------
