@@ -135,7 +135,11 @@
 # same two reads in that order. Every write stays on task_show, because the
 # archive is a record tasks-axi cannot rewrite, and a
 # mutation path that cannot reach its target says so instead of reporting the
-# record as absent. bin/fm-tasks-axi-lib.sh owns the archived read itself.
+# record as absent. An archive this home could not open establishes no absence at
+# all, so a read that gates a write - the identity check in `hold` and the origin
+# ownership check both paths run first - refuses on it rather than treating an
+# unread file as an empty one. bin/fm-tasks-axi-lib.sh owns the archived read
+# itself.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -248,10 +252,16 @@ task_show_archived() {  # <id>
 }
 
 # The durable record wherever it now lives. Read-only callers use this; anything
-# that goes on to mutate must still resolve its target through task_show.
+# that goes on to mutate must still resolve its target through task_show. Its
+# failure statuses are task_show_archived's, so a caller that must not act on an
+# unproven absence can tell 1 (both files read, genuinely absent) from 2 (the
+# archive could not be read, so absence was never established).
 # tasks-axi prints its NOT_FOUND block on stdout, so the live miss is captured and
-# dropped here: an archived hit must yield the archived record alone, and a total
-# miss nothing at all, rather than leaving the noise for a caller to tolerate.
+# dropped here: an archived hit yields the archived record alone, and a total miss
+# nothing at all. That is defensive hardening rather than a behavior change - no
+# caller can observe the difference today, because show_field only reads indented
+# `  <field>: ` lines and the miss block has none - so the captured value stops
+# depending on that accident.
 task_show_durable() {  # <id>
   local show
   if show=$(task_show "$1"); then
@@ -286,10 +296,24 @@ show_field() {  # <show-output> <field>
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
 }
 
+# 0 owned here, 1 no local or durable trace of it, 2 the archive could not be read
+# so the last of the three sources was never consulted and absence is unproven.
 origin_exists_here() {  # <origin-id>
+  local status=0
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
-  task_show_durable "$1" >/dev/null 2>&1
+  task_show_durable "$1" >/dev/null 2>&1 || status=$?
+  return "$status"
+}
+
+# The one origin-ownership refusal, which never reports an origin as foreign on
+# the strength of an archive this home could not open.
+require_origin_here() {  # <origin-id>
+  local origin=$1 status=0
+  origin_exists_here "$origin" || status=$?
+  [ "$status" -eq 0 ] && return 0
+  [ "$status" -eq 1 ] && fail "origin $origin is not owned by the active home $FM_HOME"
+  fail "$(absent_decision_message "$origin" 'origin'), so its ownership by the active home $FM_HOME could not be established"
 }
 
 list_has_key() {  # <comma-list> <key>
@@ -476,7 +500,7 @@ command_id() {
 }
 
 command_hold() {
-  local origin=${1:-} key=${2:-} title='' reason='' repo='' id show='' found=0 archived=0 state kind existing_title existing_body inventoried body
+  local origin=${1:-} key=${2:-} title='' reason='' repo='' id show='' found=0 archived=0 archive_status=0 state kind existing_title existing_body inventoried body
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -494,15 +518,23 @@ command_hold() {
   validate_one_line reason "$reason"
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
   require_tasks_axi
-  origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
+  require_origin_here "$origin"
   id=$(hold_id "$origin" "$key")
   # The identity check spans the archive so a decision retention has already filed
   # is recognised as taken, instead of being recreated as a colliding live row.
+  # This is the one read on this path that gates a WRITE, so an archive it could
+  # not open is never taken for an absent identity: creating on an unproven
+  # absence is exactly the collision this check exists to prevent.
   if show=$(task_show "$id"); then
     found=1
-  elif show=$(task_show_archived "$id"); then
-    found=1
-    archived=1
+  else
+    show=$(task_show_archived "$id") || archive_status=$?
+    if [ "$archive_status" -eq 0 ]; then
+      found=1
+      archived=1
+    elif [ "$archive_status" -ne 1 ]; then
+      fail "$(absent_decision_message "$id" 'captain decision'), so this identity cannot be created without risking a collision with a record retention already filed"
+    fi
   fi
   if [ "$found" = 1 ]; then
     state=$(show_field "$show" state)
@@ -567,7 +599,7 @@ command_complete() {
     [ -f "$meta" ] || fail "task metadata disappeared while recording completion"
   fi
   require_tasks_axi
-  origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
+  require_origin_here "$origin"
   if [ "$#" -eq 1 ] && [ "$1" = --none ]; then
     supplied=''
   else

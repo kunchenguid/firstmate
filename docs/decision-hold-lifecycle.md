@@ -89,6 +89,7 @@ Plural blocker-readiness and mixed-home projection verification date: 2026-07-22
 Unrouted close-path verification date: 2026-08-13.
 Answer-time closure verification date: 2026-08-16.
 Cross-origin answer-time closure verification date: 2026-08-19.
+Backlog-retention archive verification date: 2026-08-20.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -100,6 +101,14 @@ A declined decision closes with a recorded answer, satisfies `verify`, leaves Be
 A hold closed by a direct `tasks-axi done` reproduces the shape that fails `verify` and blocks teardown, and `repair` with a captain decision file clears both.
 An unanswered decision still blocks completion and teardown, and neither `decline` nor `repair` can close a hold that is still actively held or supply an answer with a missing or empty decision file.
 `repair` also refuses a closed captain-kind task that was never held for the captain.
+
+Seven further regressions cover decisions that backlog retention has archived out of the active backlog.
+An answered decision keeps satisfying the gate after retention files it, an identical close retry stays idempotent against the archived record, and a different answer is still rejected.
+An archived decision closed with no recorded captain answer still refuses `verify`, teardown, and `repair`, so presence in the archive is never accepted as proof that the captain answered.
+The archived and live answerless-close refusals stay distinguishable: only the live one points at `repair`, because only a live row can still have the missing answer written onto it.
+The consequence that an origin stays refused is stated only when the key is in its recorded inventory or carries an open structured decision, and omitted when neither holds.
+An archive this home cannot open is reported as unreadable rather than as absence, and `hold` refuses to create an identity on that unproven absence rather than risking a collision with a record retention already filed.
+The archived record alone decides the `repair` verdict for a retained decision.
 
 Three answer-time closure regressions run against the published poll response shape, with synthetic `sample` identities.
 A bound source whose origin exposes six holds captures one review carrying five structured choices plus one freeform message, and the runner feeds it through a fixture adapter that is not the review adapter at all, so what is proven is that any bound channel with an `answers` command gets closure rather than that one channel is wired specially.
@@ -130,6 +139,13 @@ ok - a channel source with no decision binding closes nothing
 ok - an any-origin bound source closes full-identity holds across origins
 ok - the answer path keeps every guard the unrouted close path already had
 ok - the chat channel feeds the same keyed-answer intake a captured review does
+ok - an answered decision keeps satisfying the gate after retention archives it
+ok - an archived decision with no captain answer keeps the gate shut
+ok - an uninventoried archived decision is refused without a false inventory consequence
+ok - the archived record alone decides the repair verdict for a retained decision
+ok - an unreadable archive is reported as unreadable rather than as absence
+ok - an unreadable archive refuses to create a hold rather than colliding with the archive
+ok - an open structured decision carries its own stated consequence in the refusal
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
@@ -157,7 +173,7 @@ $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 
 $ bin/fm-doc-audience-check.sh
-fm-doc-audience-check: ok surfaces=68 local_links=253
+fm-doc-audience-check: ok surfaces=69 local_links=256
 
 $ git diff --check
 (no output)

@@ -965,11 +965,16 @@ test_archived_unanswered_hold_outside_the_inventory_states_no_false_consequence(
   pass "an uninventoried archived decision is refused without a false inventory consequence"
 }
 
-# The durable read consults the active backlog first, and tasks-axi reports that
-# live miss on stdout. An archived hit must therefore yield the archived record
-# alone: every verdict the script reaches about a retained decision has to be
-# decided by that record, with no live-miss diagnostic mixed into it.
-test_archived_record_alone_drives_the_durable_read() {
+# Once retention has filed the record, the archived row alone has to decide what
+# `repair` says about it: the idempotent attestation is reached by reading the
+# resolution block off that row, and a captain decision the row does not carry is
+# still rejected. Neither the operator's stdout nor stderr carries the live-backlog
+# miss the durable read passes through on its way there.
+# The concatenation this asserts against is unreachable through any public path
+# today, because show_field reads only indented `  <field>: ` lines and the miss
+# block has none; dropping the miss inside task_show_durable is defensive
+# hardening, so this asserts the archived-record verdict rather than that drop.
+test_archived_record_decides_the_repair_verdict() {
   local home id hold out err
   home=$(make_home archived-durable-read)
   id=sample-durable-read-review
@@ -1013,7 +1018,7 @@ test_archived_record_alone_drives_the_durable_read() {
   fi
   assert_grep "records a different captain decision" "$home/drifted-repair.err" \
     "repair did not compare the supplied decision against the archived record"
-  pass "an archived hit drives the durable read with no live-miss diagnostic in it"
+  pass "the archived record alone decides the repair verdict for a retained decision"
 }
 
 # An archive this home could not read proves nothing about what it holds. The gate
@@ -1070,6 +1075,81 @@ test_unreadable_archive_is_reported_as_unreadable_rather_than_absence() {
   run_decisions "$home" verify "$id" >/dev/null \
     || fail "the gate kept refusing an answered decision after its archive became readable again"
   pass "an unreadable archive is reported as unreadable rather than as absence"
+}
+
+# `hold` is the one path that turns a lookup into a WRITE, so an archive it could
+# not open must refuse rather than create. Treating an unread file as an empty one
+# would add a live row for an identity retention has already filed, which is the
+# collision the archive-spanning identity check exists to prevent. The same rule
+# covers the origin-ownership read that runs before it.
+test_unreadable_archive_refuses_to_create_a_colliding_hold() {
+  local home id hold archive before rc=0 orphan_rc=0
+  home=$(make_home unreadable-archive-write)
+  id=sample-unreadable-write-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample unreadable write" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the unreadable-write origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample unreadable write\n\nOne captain choice was raised.\n' \
+    > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample) \
+    || fail "could not register the unreadable-write hold"
+  printf 'Place the sample control on the left.\n' > "$home/placement-decision.txt"
+  run_decisions "$home" answer "$id" placement --decision-file "$home/placement-decision.txt" >/dev/null \
+    || fail "could not record the captain answer on the placement decision"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  assert_no_grep "$hold" "$home/data/backlog.md" \
+    "retention did not remove the answered decision from the active backlog"
+
+  archive="$home/data/done-archive.md"
+  before=$(cat "$home/data/backlog.md")
+  chmod 000 "$archive" || fail "could not take read permission off the archive"
+  if [ -r "$archive" ]; then
+    # A user who can read a mode-000 file cannot stage this fixture at all.
+    chmod 644 "$archive"
+    pass "skipped: this user reads the archive regardless of its mode"
+    return 0
+  fi
+  run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample \
+    > "$home/unreadable-hold.out" 2> "$home/unreadable-hold.err" || rc=$?
+  # An origin with no local trace at all is resolved through the same archive, so
+  # it must not be reported as foreign on the strength of a file never opened.
+  run_decisions "$home" hold sample-unknown-origin placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample \
+    > "$home/unreadable-origin.out" 2> "$home/unreadable-origin.err" || orphan_rc=$?
+  chmod 644 "$archive"
+
+  expect_code 1 "$rc" "an unreadable archive did not refuse the re-hold"
+  assert_grep "could not be read" "$home/unreadable-hold.err" \
+    "the refusal did not report that the done archive could not be read"
+  assert_no_grep "and its done archive" "$home/unreadable-hold.err" \
+    "the refusal claimed the identity was absent from an archive it never read"
+  assert_no_grep "$hold" "$home/data/backlog.md" \
+    "an unreadable archive let the hold recreate a live row that collides with the archived one"
+  [ "$before" = "$(cat "$home/data/backlog.md")" ] \
+    || fail "the refused hold changed the active backlog"
+
+  expect_code 1 "$orphan_rc" "an unreadable archive did not refuse an unresolvable origin"
+  assert_grep "could not be read" "$home/unreadable-origin.err" \
+    "the origin check did not report that the done archive could not be read"
+  assert_no_grep "is not owned by the active home" "$home/unreadable-origin.err" \
+    "the origin check called an origin foreign on the strength of an archive it never read"
+
+  # Nothing was wrong with the identity itself: with the archive readable again the
+  # same re-hold is refused for the true reason, which is that it is already resolved.
+  if run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample \
+    > "$home/readable-hold.out" 2> "$home/readable-hold.err"; then
+    fail "re-holding a durably resolved archived decision was accepted"
+  fi
+  assert_grep "already durably resolved" "$home/readable-hold.err" \
+    "a readable archive stopped reporting the resolved identity for what it is"
+  pass "an unreadable archive refuses to create a hold rather than colliding with the archive"
 }
 
 # The recorded inventory is not the only thing that keeps an origin refused: an
@@ -1683,6 +1763,7 @@ test_chat_channel_feeds_the_same_keyed_answer_intake
 test_archived_answer_still_satisfies_the_completion_gate
 test_archived_decision_without_an_answer_still_fails_the_gate
 test_archived_unanswered_hold_outside_the_inventory_states_no_false_consequence
-test_archived_record_alone_drives_the_durable_read
+test_archived_record_decides_the_repair_verdict
 test_unreadable_archive_is_reported_as_unreadable_rather_than_absence
+test_unreadable_archive_refuses_to_create_a_colliding_hold
 test_archived_unanswered_hold_states_the_open_structured_decision_consequence
