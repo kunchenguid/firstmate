@@ -101,6 +101,9 @@ Never move a card back to what firstmate expected, and never treat a captain's e
   Tell the captain which board owns the issue and let them decide which board should carry it; never re-home it by hand.
 - An `error` line means the board could not be read, or answered so implausibly that the adapter refused to act on it.
   Treat it as a board that is temporarily unavailable, let the next cycle reconcile, and never read it as work being withdrawn.
+- A `truncated` line means the board filled the read's card ceiling, so a card past it was never seen.
+  Everything that read did report still stands, but no withdrawal is reported from that board on this cycle, because absence cannot be told apart from the ceiling.
+  Re-run `poll` for that board with a higher `--limit`, and if it stays truncated tell the captain the board has outgrown the default read; the same ceiling applies to the card lookup `mark` needs, so a card sitting past it cannot be moved either.
 - A scope edit on a card mid-flight follows the lifecycle rule AGENTS.md section 7 already owns: route it to follow-up work unless it completely invalidates the work being validated.
   A board edit does not create a second, competing rule for that.
 
