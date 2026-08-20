@@ -2,9 +2,12 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 export const DEFAULT_QUOTA_FRESHNESS_MS = 6 * 60 * 1000;
 
+export type QuotaWindowKind = "session" | "weekly" | "monthly" | "model" | "credits" | "unknown";
+
 export type QuotaWindowView = {
   id: string;
   label: string;
+  kind: QuotaWindowKind;
   percentRemaining: number | null;
   resetsAtMs: number | null;
   resetText: string | null;
@@ -13,7 +16,7 @@ export type QuotaWindowView = {
 export type QuotaCreditsView = {
   remaining: number | null;
   unlimited: boolean | null;
-  unit: string | null;
+  unit: "usd" | "credits" | null;
 };
 
 export type FreshQuotaView = {
@@ -80,6 +83,17 @@ function parseTimestamp(value: unknown): number | null {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
+function cleanEnum<T extends string>(value: unknown, allowed: readonly T[]): T | null {
+  const cleaned = cleanText(value, 48);
+  if (!cleaned || !allowed.includes(cleaned as T)) return null;
+  return cleaned as T;
+}
+
+const QUOTA_WINDOW_KINDS = ["session", "weekly", "monthly", "model", "credits", "unknown"] as const;
+const QUOTA_CREDIT_UNITS = ["usd", "credits"] as const;
+const QUOTA_PROVIDER_SOURCES = ["oauth", "cli-rpc", "api", "web", "cache", "unavailable"] as const;
+const QUOTA_PROVIDER_STATUSES = ["fresh", "stale", "unavailable", "auth_required", "rate_limited", "error"] as const;
+
 export function quotaProviderForPiProvider(piProvider: string): string | null {
   const normalized = piProvider.trim().toLowerCase();
   return PI_PROVIDER_TO_QUOTA_PROVIDER[normalized] ?? null;
@@ -118,7 +132,8 @@ function parseWindow(value: unknown): QuotaWindowView | null {
   if (!isRecord(value)) return null;
   const id = cleanText(value.id);
   const label = cleanText(value.label);
-  if (!id || !label) return null;
+  const kind = cleanEnum(value.kind, QUOTA_WINDOW_KINDS);
+  if (!id || !label || !kind) return null;
 
   let percentRemaining: number | null = null;
   if (value.percentRemaining !== undefined) {
@@ -134,7 +149,7 @@ function parseWindow(value: unknown): QuotaWindowView | null {
   const resetText = value.resetText === undefined ? null : cleanText(value.resetText);
   if (value.resetText !== undefined && resetText === null) return null;
 
-  return { id, label, percentRemaining, resetsAtMs, resetText };
+  return { id, label, kind, percentRemaining, resetsAtMs, resetText };
 }
 
 function parseCredits(value: unknown): QuotaCreditsView | null | undefined {
@@ -151,7 +166,7 @@ function parseCredits(value: unknown): QuotaCreditsView | null | undefined {
     if (typeof value.unlimited !== "boolean") return null;
     unlimited = value.unlimited;
   }
-  const unit = value.unit === undefined ? null : cleanText(value.unit, 24);
+  const unit = value.unit === undefined ? null : cleanEnum(value.unit, QUOTA_CREDIT_UNITS);
   if (value.unit !== undefined && unit === null) return null;
   return { remaining, unlimited, unit };
 }
@@ -185,9 +200,16 @@ export function selectActiveProviderQuota(
   }
 
   const label = cleanText(rawProvider.label);
-  if (!label || !isRecord(rawProvider.state)) return malformed(provider);
-  const status = cleanText(rawProvider.state.status, 32);
-  if (typeof rawProvider.state.stale !== "boolean" || !status) return malformed(provider);
+  const source = cleanEnum(rawProvider.source, QUOTA_PROVIDER_SOURCES);
+  if (!label || !source || !isRecord(rawProvider.state)) return malformed(provider);
+  const status = cleanEnum(rawProvider.state.status, QUOTA_PROVIDER_STATUSES);
+  const sourcesTried = rawProvider.state.sourcesTried;
+  if (
+    typeof rawProvider.state.stale !== "boolean" ||
+    !status ||
+    !Array.isArray(sourcesTried) ||
+    sourcesTried.some((entry) => cleanText(entry) === null)
+  ) return malformed(provider);
   if (rawProvider.state.stale || status === "stale") {
     return { kind: "stale", provider, label };
   }

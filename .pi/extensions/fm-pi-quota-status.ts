@@ -210,6 +210,12 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       }), { placement: "belowEditor" });
     }
 
+    function cancelProcess(session: ActiveSession): void {
+      if (session.process) session.process.cancel();
+      session.process = null;
+      session.refreshPending = false;
+    }
+
     async function refresh(session: ActiveSession): Promise<void> {
       if (active !== session) return;
       const selected = selectActiveProviderQuota(
@@ -218,6 +224,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         { nowMs: now(), freshnessMs },
       );
       if (selected.kind === "unsupported") {
+        cancelProcess(session);
         render(session, selected);
         return;
       }
@@ -264,9 +271,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (session.refreshTimer !== null) timers.clearInterval(session.refreshTimer);
       session.refreshTimer = null;
       clearExpiry(session);
-      if (session.process) session.process.cancel();
-      session.process = null;
-      session.refreshPending = false;
+      cancelProcess(session);
       session.ctx.ui.setWidget(WIDGET_KEY, undefined);
       if (active === session) active = null;
     }

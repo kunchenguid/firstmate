@@ -54,6 +54,11 @@ case "$mode" in
     sleep 30
     exit 0
     ;;
+  delayed_fail)
+    printf '%s\n' "$$" >> "${FM_QUOTA_TEST_PIDS:?}"
+    node -e 'setTimeout(() => process.exit(0), 200)'
+    exit 1
+    ;;
   stale)
     FM_QUOTA_TEST_STALE=1 exec node "${FM_QUOTA_TEST_FIXTURE:?}"
     ;;
@@ -251,6 +256,36 @@ malformed.providers[1].windows[0].percentRemaining = 101;
 const malformedParsed = parseQuotaAxiJson(JSON.stringify(malformed));
 assert(malformedParsed, "malformed provider fixture should remain structurally parseable");
 assert(selectActiveProviderQuota(malformedParsed, "openai-codex", { nowMs: now }).kind === "malformed", "bad percentage was accepted");
+const missingWindowKind = report(now);
+delete missingWindowKind.providers[1].windows[0].kind;
+const unknownWindowKind = report(now);
+unknownWindowKind.providers[1].windows[0].kind = "annual";
+const unknownCreditUnit = report(now);
+unknownCreditUnit.providers[1].credits.unit = "bananas";
+const missingProviderSource = report(now);
+delete missingProviderSource.providers[1].source;
+const unknownProviderSource = report(now);
+unknownProviderSource.providers[1].source = "tunnel";
+const unknownProviderStatus = report(now);
+unknownProviderStatus.providers[1].state.status = "maybe";
+const missingSourcesTried = report(now);
+delete missingSourcesTried.providers[1].state.sourcesTried;
+for (const [malformedReport, description] of [
+  [missingWindowKind, "missing window kind"],
+  [unknownWindowKind, "unknown window kind"],
+  [unknownCreditUnit, "unknown credit unit"],
+  [missingProviderSource, "missing provider source"],
+  [unknownProviderSource, "unknown provider source"],
+  [unknownProviderStatus, "unknown provider status"],
+  [missingSourcesTried, "missing state sources"],
+]) {
+  const structurallyParsed = parseQuotaAxiJson(JSON.stringify(malformedReport));
+  assert(structurallyParsed, `${description} fixture should remain structurally parseable`);
+  assert(
+    selectActiveProviderQuota(structurallyParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+    `${description} was accepted as fresh`,
+  );
+}
 assert(selectActiveProviderQuota(parsed, "custom-proxy", { nowMs: now }).kind === "unsupported", "unsupported provider was not isolated");
 const ansiReport = report(now);
 ansiReport.providers[1].label = "Co\x1b[31mdex";
@@ -464,6 +499,30 @@ await statusCase("stale", "stale");
 await statusCase("overflow", "unavailable", { maxOutputBytes: 128 });
 await statusCase("success", "unavailable", { command: "quota-axi-definitely-missing" });
 
+const pidsBeforeUnsupportedRace = (await readFile(process.env.FM_QUOTA_TEST_PIDS, "utf8")).trim().split(/\s+/).filter(Boolean).length;
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "delayed_fail\n");
+const unsupportedRace = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 1_000,
+  width: () => 200,
+}));
+await unsupportedRace.emit("session_start", { reason: "startup" });
+await waitFor(async () => {
+  const pids = (await readFile(process.env.FM_QUOTA_TEST_PIDS, "utf8")).trim().split(/\s+/).filter(Boolean);
+  return pids.length > pidsBeforeUnsupportedRace;
+}, "delayed failure fixture did not start");
+await unsupportedRace.emit("model_select", { model: { provider: "custom-proxy", id: "unsupported-model" } });
+await waitFor(
+  () => unsupportedRace.widgetText(200).includes("unavailable for custom-proxy"),
+  "model change did not publish the unsupported-provider view",
+);
+await sleep(350);
+assert(
+  unsupportedRace.widgetText(200).includes("unavailable for custom-proxy"),
+  `an obsolete process result replaced the unsupported-provider view: ${unsupportedRace.widgetText(200)}`,
+);
+await unsupportedRace.emit("session_shutdown", { reason: "quit" });
+
 // Timeout and replacement cleanup kill the complete fake process group.
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "slow\n");
 const slow = makePi(createFirstmateQuotaStatusExtension({
@@ -476,6 +535,7 @@ await waitFor(() => slow.widgetText(200).includes("unavailable"), "slow quota pr
 await slow.emit("session_shutdown", { reason: "quit" });
 
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "slow\n");
+const pidsBeforeReplacement = (await readFile(process.env.FM_QUOTA_TEST_PIDS, "utf8")).trim().split(/\s+/).filter(Boolean).length;
 const replacement = makePi(createFirstmateQuotaStatusExtension({
   refreshMs: 60_000,
   timeoutMs: 5_000,
@@ -484,7 +544,7 @@ const replacement = makePi(createFirstmateQuotaStatusExtension({
 await replacement.emit("session_start", { reason: "startup" });
 await waitFor(async () => {
   const pids = (await readFile(process.env.FM_QUOTA_TEST_PIDS, "utf8")).trim().split(/\s+/).filter(Boolean);
-  return pids.length >= 2;
+  return pids.length > pidsBeforeReplacement;
 }, "replacement fixture did not launch its slow process");
 await replacement.emit("session_shutdown", { reason: "new" });
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
