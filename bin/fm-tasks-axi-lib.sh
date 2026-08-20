@@ -17,7 +17,7 @@
 # back to manual mutation when the tool is not compatible.
 #
 # This file is the single owner of FM_TASKS_AXI_MIN. bin/fm-bootstrap.sh turns a
-# failing check into the operator-facing MISSING diagnostic.
+# failing check into the operator-facing UPGRADE diagnostic.
 #
 # COMPATIBILITY VERDICT REUSE. fm_tasks_axi_compatible costs three tasks-axi
 # subprocesses, and one session start needs the same verdict twice: once in

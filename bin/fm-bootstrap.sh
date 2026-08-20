@@ -6,6 +6,7 @@
 #          exits 0.
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
+#                 "UPGRADE: <tool> (installed: <version>, required: <min>, upgrade: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
@@ -50,12 +51,13 @@
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
-#          no-mistakes is also MISSING when its installed version is older than
+#          no-mistakes is also UPGRADE when its installed version is older than
 #          1.31.2.
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
 #          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
-#          build below its floor reports MISSING like no-mistakes, so the operator
-#          is asked to upgrade rather than silently running an older tool.
+#          build below its floor reports UPGRADE with both versions and the
+#          upgrade command, so the operator sees exactly what changed and what to
+#          run, rather than the MISSING line that implies the tool is absent.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). A compatible tasks-axi default backend is silent.
@@ -828,6 +830,27 @@ tool_version_at_least() {  # <tool> <min-version>
   [ "$patch" -ge "$min_patch" ]
 }
 
+# Extract the installed major.minor.patch version string from a tool's --version
+# output using the same parse rules as tool_version_at_least. Prints the version
+# on stdout and returns 0 when a valid triple is found, or prints nothing and
+# returns 1 for absent or unparseable output.
+tool_installed_version() {  # <tool>
+  local tool=$1 output parts major minor patch extra
+  command -v "$tool" >/dev/null 2>&1 || return 1
+  output=$("$tool" --version 2>/dev/null) || return 1
+  parts=$(printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
+  IFS=' ' read -r major minor patch extra <<< "$parts"
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
+  printf '%s\n' "$major.$minor.$patch"
+}
+
+# Emit the UPGRADE diagnostic for a tool that is installed but below a version
+# floor. The caller has already confirmed the tool is present and below floor.
+below_floor_diagnostic() {  # <tool> <installed-version> <required-version>
+  local tool=$1 installed=$2 required=$3
+  echo "UPGRADE: $tool (installed: $installed, required: $required, upgrade: $(install_cmd "$tool"))"
+}
+
 x_mode_write_if_changed() {
   local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
   parent=${dest%/*}
@@ -1149,19 +1172,29 @@ detect_local_tools() {
     echo "MISSING: treehouse (install: $(install_cmd treehouse))"
   fi
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
-    echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+    local nm_ver
+    nm_ver=$(tool_installed_version no-mistakes) || nm_ver=unknown
+    below_floor_diagnostic no-mistakes "$nm_ver" "$NO_MISTAKES_MIN"
   fi
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
-    echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
+    local gha_ver
+    gha_ver=$(tool_installed_version gh-axi) || gha_ver=unknown
+    below_floor_diagnostic gh-axi "$gha_ver" "$GH_AXI_MIN"
   fi
   if command -v lavish-axi >/dev/null 2>&1 && ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
-    echo "MISSING: lavish-axi (install: $(install_cmd lavish-axi))"
+    local la_ver
+    la_ver=$(tool_installed_version lavish-axi) || la_ver=unknown
+    below_floor_diagnostic lavish-axi "$la_ver" "$LAVISH_AXI_MIN"
   fi
   if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
-    echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"
+    local qa_ver
+    qa_ver=$(tool_installed_version quota-axi) || qa_ver=unknown
+    below_floor_diagnostic quota-axi "$qa_ver" "$FM_QUOTA_AXI_MIN"
   fi
   if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
-    echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
+    local ta_ver
+    ta_ver=$(tool_installed_version tasks-axi) || ta_ver=unknown
+    below_floor_diagnostic tasks-axi "$ta_ver" "$FM_TASKS_AXI_MIN"
   fi
 }
 

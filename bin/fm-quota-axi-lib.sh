@@ -6,7 +6,7 @@
 # constants in bin/fm-bootstrap.sh.
 #
 # This file is the single owner of that version number. bin/fm-bootstrap.sh
-# turns a failing check into the operator-facing MISSING diagnostic, which is
+# turns a failing check into the operator-facing UPGRADE diagnostic, which is
 # what keeps an older build from reaching a dispatch intake at all.
 
 FM_QUOTA_AXI_MIN=0.1.29
