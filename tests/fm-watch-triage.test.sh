@@ -1966,19 +1966,14 @@ test_heartbeat_no_change_absorbed() {
   # absorbed heartbeat itself rather than assuming one cycle produced it.
   i=0
   while [ "$i" -lt 200 ]; do
-    [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] && break
+    streak=$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)
+    [ "$streak" -ge 1 ] && break
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
     i=$((i + 1))
   done
   [ ! -s "$out" ] || fail "no-change heartbeat printed a wake reason: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "no-change heartbeat enqueued a durable wake record"
-  while [ "$i" -lt 100 ]; do
-    streak=$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)
-    [ "$streak" -ge 1 ] && break
-    sleep 0.1
-    i=$((i + 1))
-  done
   [ "$streak" -ge 1 ] || fail "heartbeat backoff streak did not advance while absorbing"
   reap "$pid"
   pass "a heartbeat with no captain-relevant change is absorbed and backs off the cadence"
