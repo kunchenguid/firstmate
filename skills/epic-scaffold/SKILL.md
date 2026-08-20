@@ -78,11 +78,16 @@ Every `stories/<id>.md` file starts with exactly this YAML frontmatter and nothi
     depends: []             # ids of stories that must land first, or [] for none
     kind: ship              # ship (produces a PR) or scout (produces a report); defaults to ship
     gate: false             # true only on the one contract-gate story that must land before its dependents
+    delivery: no-mistakes   # OPTIONAL: no-mistakes | direct-PR | local-only; omit to resolve the mode at dispatch
     ---
 
-Do not use `story:`, `phase:`, or any other key in place of these seven.
+Do not use `story:`, `phase:`, or any other key in place of the seven required keys; the only allowed optional key is `delivery:`, and it may be omitted.
 A missing `id:`, a `pr_base:` that is not the epic branch, or an `epic:` that does not match `epic.md` is exactly what produced orphan tasks and a doubled epic before this pipeline existed.
 The promotion engine derives each backlog id, `[<epic>]` tag, and repo straight from `id:`/`epic:`/`repo:` (and reads `kind:`, defaulting to `ship`), so that part of the frontmatter IS the contract - get it right here and the backlog matches by construction; `depends:` and `gate:` drive the review gate and dispatch ordering.
+The optional `delivery:` records the story's intended delivery mode when it is known at authoring time, so the author's intent is captured once instead of re-decided by judgment at dispatch.
+Omit it and firstmate resolves the mode at dispatch from the repo's registered posture, exactly as before.
+`fm-epic-lint` validates a present value against those three modes and warns (never fails) when a `no-mistakes-prod-only` repo's story is marked `direct-PR`, since that mode fits only an internal-only surface.
+The mode stays overridable by an explicit captain instruction at dispatch - it is never a hard lock.
 
 ## Output
 
