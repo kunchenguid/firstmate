@@ -66,6 +66,21 @@ test_codex_ancestry_outranks_inherited_claudecode() {
   pass "codex ancestry outranks an inherited CLAUDECODE"
 }
 
+test_known_vendor_basenames_outrank_inherited_cursor_markers() {
+  local name expected out
+  for name in codex-aarch64-a kimi-code; do
+    case "$name" in
+      codex-aarch64-a) expected=codex ;;
+      kimi-code) expected=kimi ;;
+    esac
+    out=$(probe_under "$(make_named_ancestor "$name")" \
+      CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent)
+    [ "$out" = "$expected" ] \
+      || fail "verified basename '$name' must detect '$expected' under inherited Cursor markers, got '$out'"
+  done
+  pass "known versioned vendor basenames outrank inherited Cursor markers"
+}
+
 test_cursor_ancestry_detects_cursor_even_with_inherited_claudecode() {
   # A real cursor install-tree shape: the versioned executable identifies by
   # both its name and its install path (tests/fm-cursor-harness.test.sh pins
@@ -179,6 +194,7 @@ test_pi_signed_refinement_survives_ancestry_detection() {
 
 test_codex_ancestry_outranks_inherited_cursor_markers
 test_codex_ancestry_outranks_inherited_claudecode
+test_known_vendor_basenames_outrank_inherited_cursor_markers
 test_cursor_ancestry_detects_cursor_even_with_inherited_claudecode
 test_non_harness_basename_falls_back_to_markers
 test_harness_path_component_does_not_establish_ancestry

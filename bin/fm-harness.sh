@@ -49,6 +49,14 @@ harness_path_name() {
       printf '%s\n' "$base"
       return 0
       ;;
+    codex-aarch64-a)
+      printf 'codex\n'
+      return 0
+      ;;
+    kimi-code)
+      printf 'kimi\n'
+      return 0
+      ;;
     muse-bin-*)
       printf 'muse\n'
       return 0
