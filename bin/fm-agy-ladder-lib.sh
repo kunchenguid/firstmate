@@ -17,6 +17,10 @@
 # that last quarter of Opus 4.6 is reserved for the captain on explicit request
 # and automatic dispatch never touches it. Rungs 2 and 3 exhaust to 0.
 #
+# This file gates LAUNCHES. bin/fm-agy-descent-lib.sh applies the same rule, in
+# both directions, to a worker already running, by putting each candidate rung
+# to the gate below rather than keeping rungs or floors of its own.
+#
 # The authoritative statement of the policy is the captain-private
 # config/crew-dispatch.json "_ladder_note"; this file is its enforcement, not a
 # second copy of it. The rung order and the floors are restated here because a
@@ -68,7 +72,12 @@
 # licence to descend. Absence is resolved by direction of travel:
 #
 #   - Climbing or staying at the top needs no evidence. Rung 1 is the ladder's
-#     first choice anyway, and no rung sits above it to exhaust.
+#     first choice anyway, and no rung sits above it to exhaust. That is a rule
+#     about STARTING there. Moving an already-running worker back UP is a
+#     different move - it spends the reserve rather than merely declining to
+#     descend - so bin/fm-agy-descent-lib.sh requires positive evidence for it,
+#     plus hysteresis, and it reaches that decision by asking this gate about
+#     each candidate rung rather than by keeping a floor of its own.
 #   - DESCENDING needs positive evidence. A lower rung is refused unless every
 #     rung above it has a current reading that proves it exhausted. Descending
 #     is exactly the move the policy exists to constrain, so an unknown rung

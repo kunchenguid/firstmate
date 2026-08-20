@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-agy-live-descent.test.sh - the regression for moving an ALREADY
-# RUNNING agy worker down the ladder when its rung crosses its floor.
+# RUNNING agy worker along the ladder: down when its rung crosses its floor, and
+# back up when a rung above it has reset clear of that floor.
 #
 # The launch gate (tests/fm-agy-ladder-enforcement.test.sh) covers a worker
 # being STARTED. It cannot cover the failure this suite exists for: on
@@ -25,6 +26,13 @@
 #   6. The per-poll evaluation is silent and free for a healthy fleet, escalates
 #      once rather than every minute, and refuses instead of acting whenever the
 #      durable record and the running worker disagree.
+#   7. Climbing back up obeys the SAME floor: a running worker returns into the
+#      free three quarters of rung 1 and never into the captain's reserved
+#      quarter, and unlike a launch it needs positive evidence to move at all.
+#   8. The climb's hysteresis holds. A rung oscillating across its boundary must
+#      move the worker nowhere, which is the failure that kept this half out of
+#      the descent's own change; both the dead band and the dwell are asserted
+#      by driving a reading across the line and back repeatedly.
 #
 # WHAT THIS SUITE DOES NOT PROVE. The picker's shape is a VENDOR fact, and the
 # fixtures below are real agy 1.1.16 output captured in an isolated lab
@@ -213,6 +221,9 @@ export FM_AGY_INFLIGHT_TTL=300
 export FM_AGY_LADDER_INFLIGHT_MARGIN=1
 export FM_AGY_DESCENT_INTERVAL=60
 export FM_AGY_DESCENT_GRACE=900
+export FM_AGY_CLIMB=on
+export FM_AGY_CLIMB_MARGIN=10
+export FM_AGY_CLIMB_DWELL=300
 
 RUNG1='Claude Opus 4.6 (Thinking)'
 RUNG2='Gemini 3.1 Pro (High)'
@@ -223,6 +234,15 @@ NOW=$(date +%s)
 record() {  # <state-dir> <display-model> <percent> <reset-window>
   mkdir -p "$1"
   fm_agy_quota_observe "$2 | ctx: 3.0% | quota: $3% ($4)" "$1"
+}
+
+# record_at: the same reading, stamped at an explicit instant. The climb's dwell
+# is measured in multiples of the reading ceiling, so every evaluation that
+# waits one out has to carry its evidence forward with it; a wall-clock reading
+# would age out underneath the test and it would pass for the wrong reason.
+record_at() {  # <state-dir> <display-model> <percent> <reset-window> <now>
+  mkdir -p "$1"
+  fm_agy_quota_observe "$2 | ctx: 3.0% | quota: $3% ($4)" "$1" "$5"
 }
 
 fresh_state() {
@@ -548,8 +568,10 @@ test_a_spent_ladder_escalates_exactly_once() {
 
   out=$(fm_agy_descent_tick "$state" "$NOW")
   assert_contains "$out" "refused wedged" "a spent ladder must be refused and reported"
-  assert_contains "$out" "no lower model on the ladder can be shown to be available" \
-    "the refusal must say what it could not prove"
+  assert_contains "$out" "no lower rung can be shown to be available" \
+    "the refusal must say what it could not prove downwards"
+  assert_contains "$out" "no rung above it has reset clear of its own floor" \
+    "the refusal must say it looked upwards too, so a spent ladder is not confused with an unclimbed one"
 
   # The condition persists, so a second evaluation must NOT wake anyone again.
   rm -f "$state/.agy-descent-last"
@@ -777,7 +799,334 @@ test_the_model_command_carries_exactly_one_enter() {
   pass "fm_agy_descent_switch: the model command carries exactly one Enter, so no retry commits a selection"
 }
 
-# --- 7. The watcher actually calls it ---------------------------------------
+# --- 7. Climbing back up ----------------------------------------------------
+#
+# The other half of the captain's rule, and the half that needed hysteresis. A
+# bare "rung 1 is above its floor" trigger would hand a worker back and forth
+# between models every time a hovering rung crossed the line, so the contracts
+# here are the dead band, the dwell, and the fact that neither of them is a
+# second floor: the reserved quarter is refused by exactly the gate that refuses
+# a launch into it.
+
+# climb_tick: one evaluation at <now>, with the readings this test wants carried
+# forward to that instant and the rate limiter cleared so the evaluation is not
+# skipped for the interval rather than for the reason under test.
+climb_tick() {  # <state-dir> <now> [<rung1-percent>] [<rung2-percent>] [<rung3-percent>]
+  local state=$1 at=$2
+  [ -z "${3:-}" ] || record_at "$state" "$RUNG1" "$3" '3h 41m' "$at"
+  [ -z "${4:-}" ] || record_at "$state" "$RUNG2" "$4" '3h 37m' "$at"
+  [ -z "${5:-}" ] || record_at "$state" "$RUNG3" "$5" '4h 59m' "$at"
+  rm -f "$state/.agy-descent-last"
+  fm_agy_descent_tick "$state" "$at"
+}
+
+# climb_worker: a live agy worker recorded on, and rendered on, <row>.
+climb_worker() {  # <state-dir> <id> <ladder-display> <picker-row>
+  meta "$1" "$2" "$3"
+  FAKE_STICKY=0
+  fake_worker_start "$1" "$4"
+}
+
+test_a_reset_rung_climbs_the_worker_back_and_records_it() {
+  local state out t
+  state=$(fresh_state climb-back)
+  climb_worker "$state" returner "$RUNG2" 'Gemini 3.1 Pro'
+
+  # Rung 1 has reset well clear of the captain's quarter. One reading is not
+  # enough on its own - that is the dwell - so the first evaluation is silent.
+  t=$NOW
+  out=$(climb_tick "$state" "$t" 100.0 94.6)
+  [ -z "$out" ] || fail "a single reading must never authorize a climb, got: $out"
+  [ "$(fm_meta_get "$state/returner.meta" model)" = "$RUNG2" ] \
+    || fail "nothing may move inside the dwell"
+
+  t=$((t + FM_AGY_CLIMB_DWELL))
+  out=$(climb_tick "$state" "$t" 100.0 94.6)
+  assert_contains "$out" "climbed returner" "a rung held clear for the dwell must climb the worker back"
+  assert_contains "$out" "$RUNG2 -> $RUNG1" "the climb must name both ends"
+
+  # The picker really was walked upwards to rung 1's own row, rather than the
+  # outcome being asserted from the plan alone.
+  [ "$(fake_selection)" = 'Claude Opus 4.6 (Thinking)' ] \
+    || fail "the walk must have left the picker on rung 1's row; got '$(fake_selection)'"
+  [ "$(fake_settled)" = "$RUNG1" ] \
+    || fail "the selection must have been committed to rung 1; got '$(fake_settled)'"
+  [ "$(fm_meta_get "$state/returner.meta" model)" = "$RUNG1" ] \
+    || fail "the task's durable record must now name rung 1"
+
+  # And the worker is where it belongs, so the next evaluation says nothing.
+  out=$(climb_tick "$state" "$((t + 120))" 100.0 94.6)
+  [ -z "$out" ] || fail "a worker already back on rung 1 must be silent, got: $out"
+  FAKE_MODE=static
+  pass "fm_agy_descent_tick: a rung that has reset clear of its floor climbs the worker back and records it"
+}
+
+test_the_climb_never_reaches_into_the_captains_reserve() {
+  local state out t pct
+
+  # The floor exactly, just under it, and two figures above it but still inside
+  # the dead band. Each is held far longer than the dwell, so what refuses is
+  # the policy and never a wait that had not finished.
+  for pct in 25.0 24.9 30.0 34.9; do
+    state=$(fresh_state "climb-reserve-$pct")
+    climb_worker "$state" reserved "$RUNG2" 'Gemini 3.1 Pro'
+    t=$NOW
+    for _ in 1 2 3 4; do
+      out=$(climb_tick "$state" "$t" "$pct" 94.6)
+      [ -z "$out" ] || fail "rung 1 at $pct% must never climb a running worker, got: $out"
+      t=$((t + FM_AGY_CLIMB_DWELL))
+    done
+    [ "$(fm_meta_get "$state/reserved.meta" model)" = "$RUNG2" ] \
+      || fail "the worker must still be recorded on rung 2 with rung 1 at $pct%"
+    [ -z "$(fake_settled)" ] \
+      || fail "nothing may be selected with rung 1 at $pct%; it settled on '$(fake_settled)'"
+  done
+
+  # The contrast, so the refusals above are about the reserve and not about a
+  # climb that never fires: the same worker, one notch higher, does climb.
+  state=$(fresh_state climb-reserve-clear)
+  climb_worker "$state" cleared "$RUNG2" 'Gemini 3.1 Pro'
+  t=$NOW
+  out=$(climb_tick "$state" "$t" 35.0 94.6)
+  [ -z "$out" ] || fail "the dwell must still apply at the edge of the band, got: $out"
+  out=$(climb_tick "$state" "$((t + FM_AGY_CLIMB_DWELL))" 35.0 94.6)
+  assert_contains "$out" "climbed cleared" \
+    "the first figure clear of the floor by the whole margin must climb"
+  FAKE_MODE=static
+  pass "fm_agy_climb: the captain's reserved quarter is refused to a running worker by the same floor that refuses a launch"
+}
+
+test_an_unread_rung_above_is_never_climbed_into() {
+  local state out t
+  state=$(fresh_state climb-unread)
+  climb_worker "$state" blind "$RUNG2" 'Gemini 3.1 Pro'
+
+  t=$NOW
+  for _ in 1 2 3 4; do
+    out=$(climb_tick "$state" "$t" '' 94.6)
+    [ -z "$out" ] || fail "a rung with no reading at all must never climb a worker, got: $out"
+    t=$((t + FM_AGY_CLIMB_DWELL))
+  done
+  [ "$(fm_meta_get "$state/blind.meta" model)" = "$RUNG2" ] \
+    || fail "an unread rung 1 must leave the durable record alone"
+
+  # ...and that same absence really does authorize a LAUNCH at the top of the
+  # ladder. Without this the assertions above could be passing because absence
+  # refuses everything, rather than because a climb demands positive evidence.
+  fm_agy_ladder_check "$RUNG1" "$state" "$t" >/dev/null \
+    || fail "the launch gate must still allow rung 1 with no reading, or this test proves nothing"
+  FAKE_MODE=static
+  pass "fm_agy_climb: climbing needs positive evidence even where launching does not"
+}
+
+test_a_rung_hovering_at_its_boundary_never_flaps_the_worker() {
+  local state out t i pct
+  state=$(fresh_state climb-hover)
+  climb_worker "$state" steady "$RUNG2" 'Gemini 3.1 Pro'
+
+  # Rung 1 crosses the climb line and falls back under it, over and over, for
+  # six times the dwell. Under a bare threshold every one of those crossings is
+  # a model switch on a live worker mid-task. Under the dead band plus the
+  # dwell it must be none of them, because the timer is destroyed each time the
+  # condition lapses and so never reaches the dwell at all.
+  t=$NOW
+  i=0
+  while [ "$i" -lt 12 ]; do
+    if [ $((i % 2)) -eq 0 ]; then pct=40.0; else pct=30.0; fi
+    out=$(climb_tick "$state" "$t" "$pct" 94.6)
+    [ -z "$out" ] || fail "a rung hovering at the boundary must move nothing (step $i, rung 1 at $pct%), got: $out"
+    t=$((t + FM_AGY_CLIMB_DWELL))
+    i=$((i + 1))
+  done
+
+  [ "$(fm_meta_get "$state/steady.meta" model)" = "$RUNG2" ] \
+    || fail "the hovering rung must have left the durable record on rung 2"
+  [ -z "$(fake_settled)" ] \
+    || fail "the hovering rung must have committed nothing; it settled on '$(fake_settled)'"
+  [ "$(fake_phase)" = composer ] \
+    || fail "the worker must never have been taken into the picker at all; phase is '$(fake_phase)'"
+
+  # And the hold is the hysteresis doing its job rather than a climb that never
+  # works: the SAME rung, at the SAME percentage it kept crossing to, moves the
+  # worker as soon as it stops falling back.
+  out=$(climb_tick "$state" "$t" 40.0 94.6)
+  [ -z "$out" ] || fail "the first steady evaluation is still inside the dwell, got: $out"
+  t=$((t + FM_AGY_CLIMB_DWELL))
+  out=$(climb_tick "$state" "$t" 40.0 94.6)
+  assert_contains "$out" "climbed steady" \
+    "a rung that stops hovering and holds for the dwell must climb the worker back"
+  FAKE_MODE=static
+  pass "fm_agy_climb: a rung oscillating across its boundary holds the worker, and holding it steady moves it"
+}
+
+test_a_worker_on_a_spent_rung_climbs_instead_of_being_reported_stuck() {
+  local state out t
+  state=$(fresh_state climb-from-spent)
+  climb_worker "$state" stranded "$RUNG2" 'Gemini 3.1 Pro'
+
+  # Rung 2 is dead and rung 1 has reset. Descending to rung 3 is correctly
+  # refused - rung 1 is not exhausted, so rung 3 is not the highest available
+  # rung - and before the climb existed this worker was reported stuck on a
+  # spent ladder while the top of that ladder sat free.
+  t=$NOW
+  out=$(climb_tick "$state" "$t" 100.0 0.0 100.0)
+  [ -z "$out" ] || fail "a climb merely waiting out its dwell is a bounded wait, not a refusal to report, got: $out"
+
+  t=$((t + FM_AGY_CLIMB_DWELL))
+  out=$(climb_tick "$state" "$t" 100.0 0.0 100.0)
+  assert_contains "$out" "climbed stranded" "a worker on a spent rung must be climbed to the rung that reset"
+  assert_contains "$out" "$RUNG2 -> $RUNG1" "the move must be to rung 1, not down to rung 3"
+  assert_not_contains "$out" "descended" "nothing may descend while a rung above is available"
+  [ "$(fm_meta_get "$state/stranded.meta" model)" = "$RUNG1" ] \
+    || fail "the durable record must follow the worker up"
+  FAKE_MODE=static
+  pass "fm_agy_descent_tick: a spent rung with a reset rung above it climbs rather than escalating as a spent ladder"
+}
+
+test_a_spent_ladder_is_still_reported_when_nothing_above_has_reset() {
+  # The counterpart to the test above: the bounded-wait suppression must not
+  # have made a genuinely spent ladder silent.
+  local state out
+  state=$(fresh_state climb-still-spent)
+  climb_worker "$state" wedged "$RUNG2" 'Gemini 3.1 Pro'
+  out=$(climb_tick "$state" "$NOW" 0.0 0.0 0.0)
+  assert_contains "$out" "refused wedged" "a ladder with nothing left anywhere must still be reported"
+  assert_not_contains "$out" "climbed" "nothing may climb into a spent rung"
+  FAKE_MODE=static
+  pass "fm_agy_descent_tick: suppressing a pending climb did not silence a genuinely spent ladder"
+}
+
+test_a_failed_climb_is_reported_once_and_not_retried_every_minute() {
+  local state out t
+  state=$(fresh_state climb-failed)
+  climb_worker "$state" balky "$RUNG2" 'Gemini 3.1 Pro'
+  # The navigation keys do nothing, so the walk cannot land on rung 1's row.
+  FAKE_STICKY=1
+
+  t=$((NOW + FM_AGY_CLIMB_DWELL))
+  out=$(climb_tick "$state" "$NOW" 100.0 94.6)
+  [ -z "$out" ] || fail "the dwell must not be skipped, got: $out"
+  out=$(climb_tick "$state" "$t" 100.0 94.6)
+  assert_contains "$out" "refused balky" "a climb that missed its target must be reported"
+  assert_not_contains "$out" "climbed" "nothing may be committed after a missed walk"
+  [ -z "$(fake_settled)" ] || fail "a missed climb must commit nothing; it selected '$(fake_settled)'"
+  [ "$(fake_phase)" = composer ] \
+    || fail "a missed climb must leave the worker out of the picker; phase is '$(fake_phase)'"
+
+  # The rung is still climbable, so a retry loop here would drive the modal
+  # picker into a live pane once a minute for an optimisation. It must not.
+  printf 'composer' > "$FAKE_DIR/phase"
+  out=$(climb_tick "$state" "$((t + FM_AGY_CLIMB_DWELL))" 100.0 94.6)
+  [ -z "$out" ] || fail "a failed climb must not be retried while the rung stays climbable, got: $out"
+  [ "$(fake_phase)" = composer ] \
+    || fail "a failed climb must not reopen the picker; phase is '$(fake_phase)'"
+
+  # Once the rung stops being climbable the episode is over, so a later reset
+  # is attempted again rather than suppressed forever.
+  t=$((t + 2 * FM_AGY_CLIMB_DWELL))
+  out=$(climb_tick "$state" "$t" 20.0 94.6)
+  [ -z "$out" ] || fail "a lapsed rung must be silent, got: $out"
+  FAKE_STICKY=0
+  out=$(climb_tick "$state" "$((t + FM_AGY_CLIMB_DWELL))" 100.0 94.6)
+  [ -z "$out" ] || fail "the dwell restarts with the rung, got: $out"
+  out=$(climb_tick "$state" "$((t + 2 * FM_AGY_CLIMB_DWELL))" 100.0 94.6)
+  assert_contains "$out" "climbed balky" "a fresh episode must be attempted again"
+  FAKE_MODE=static
+  pass "fm_agy_descent_tick: a failed climb is reported once and left alone until the rung lapses and returns"
+}
+
+test_the_captains_override_holds_a_worker_down_and_says_nothing() {
+  local state out
+  state=$(fresh_state climb-override)
+  climb_worker "$state" pinned "$RUNG2" 'Gemini 3.1 Pro'
+
+  out=$(FM_AGY_LADDER_OVERRIDE='captain: keep this one on gemini' \
+    climb_tick "$state" "$NOW" 100.0 94.6)
+  [ -z "$out" ] || fail "an override inside the dwell must be silent, got: $out"
+  out=$(FM_AGY_LADDER_OVERRIDE='captain: keep this one on gemini' \
+    climb_tick "$state" "$((NOW + FM_AGY_CLIMB_DWELL))" 100.0 94.6)
+  [ -z "$out" ] || fail "a pinned worker on a slower rung is what the captain asked for, so it must not wake them, got: $out"
+  [ "$(fm_meta_get "$state/pinned.meta" model)" = "$RUNG2" ] \
+    || fail "an overridden worker must not be climbed"
+
+  # The downward side of the same override still speaks, so silence here is a
+  # deliberate asymmetry and not the override having stopped being honoured.
+  state=$(fresh_state climb-override-down)
+  climb_worker "$state" pinned "$RUNG1" 'Claude Opus 4.6 (Thinking)'
+  out=$(FM_AGY_LADDER_OVERRIDE='captain: finish this run on opus' \
+    climb_tick "$state" "$NOW" 0.0 94.6)
+  assert_contains "$out" "override pinned" "a pinned worker below its floor must still be reported"
+  FAKE_MODE=static
+  pass "fm_agy_descent_tick: the override holds a worker down silently and still speaks when it holds one below its floor"
+}
+
+test_the_climb_can_be_turned_off_on_its_own() {
+  local state out
+  state=$(fresh_state climb-off)
+  climb_worker "$state" grounded "$RUNG2" 'Gemini 3.1 Pro'
+
+  out=$(FM_AGY_CLIMB=off climb_tick "$state" "$NOW" 100.0 94.6)
+  [ -z "$out" ] || fail "the disabled climb must do nothing, got: $out"
+  out=$(FM_AGY_CLIMB=off climb_tick "$state" "$((NOW + FM_AGY_CLIMB_DWELL))" 100.0 94.6)
+  [ -z "$out" ] || fail "the disabled climb must still do nothing after the dwell, got: $out"
+  [ "$(fm_meta_get "$state/grounded.meta" model)" = "$RUNG2" ] \
+    || fail "FM_AGY_CLIMB=off must leave the worker where it is"
+
+  # ...while the descent it shares a tick with is untouched, so the two halves
+  # really are separately controllable.
+  state=$(fresh_state climb-off-descent)
+  climb_worker "$state" sinking "$RUNG1" 'Claude Opus 4.6 (Thinking)'
+  out=$(FM_AGY_CLIMB=off climb_tick "$state" "$NOW" 0.0 94.6)
+  assert_contains "$out" "descended sinking" "FM_AGY_CLIMB=off must not disable the descent"
+  FAKE_MODE=static
+  pass "fm_agy_descent_tick: FM_AGY_CLIMB=off disables the climb alone"
+}
+
+test_the_dwell_timer_belongs_to_the_rung_not_to_a_worker() {
+  # The condition is a property of the RUNG, so a worker that arrives on rung 2
+  # after the timer started must inherit it rather than begin a clock of its own
+  # - otherwise a long-lived worker and a fresh one on the same rung would climb
+  # at different moments on the same evidence.
+  #
+  # Asserted through the decision, not through the tick: the picker simulator
+  # renders one pane for the whole home, so two simulated workers cannot be
+  # switched independently and a two-worker tick would be testing the fixture.
+  local state
+  state=$(fresh_state climb-shared)
+
+  record_at "$state" "$RUNG1" 100.0 '3h 41m' "$NOW"
+  fm_agy_climb_dwell_tick "$state" "$NOW"
+  [ -f "$state/.agy-climb-since-1" ] \
+    || fail "a rung clear of its margin must start one timer for the rung"
+  [ "$(cat "$state/.agy-climb-since-1")" = "$NOW" ] \
+    || fail "the timer must be stamped when the condition began"
+
+  # A later evaluation must not restart it, which is what makes the wait a real
+  # dwell rather than something that resets under whoever asks.
+  record_at "$state" "$RUNG1" 100.0 '3h 41m' "$((NOW + 60))"
+  fm_agy_climb_dwell_tick "$state" "$((NOW + 60))"
+  [ "$(cat "$state/.agy-climb-since-1")" = "$NOW" ] \
+    || fail "an already-running timer must not be restarted by a later evaluation"
+  ! fm_agy_climb_target 2 "$state" "$((NOW + 60))" >/dev/null \
+    || fail "the dwell must not be satisfied 60s in"
+
+  # The timer is keyed by rung alone, so any worker asking at the same instant
+  # gets the same answer whenever it arrived.
+  [ "$(fm_agy_climb_target 2 "$state" "$((NOW + FM_AGY_CLIMB_DWELL))")" = 1 ] \
+    || fail "a worker on rung 2 must be told to climb once the rung's own timer has run"
+  [ "$(fm_agy_climb_target 3 "$state" "$((NOW + FM_AGY_CLIMB_DWELL))")" = 1 ] \
+    || fail "a worker on rung 3 must be told the same, from the same timer"
+
+  # And the timer is destroyed the moment the condition lapses, so the next
+  # crossing starts from zero instead of resuming a part-served wait.
+  record_at "$state" "$RUNG1" 20.0 '3h 41m' "$((NOW + FM_AGY_CLIMB_DWELL))"
+  fm_agy_climb_dwell_tick "$state" "$((NOW + FM_AGY_CLIMB_DWELL))"
+  [ ! -f "$state/.agy-climb-since-1" ] \
+    || fail "a lapsed condition must destroy the timer, not pause it"
+  pass "fm_agy_climb_dwell_tick: the dwell timer belongs to the rung, is never restarted early, and is destroyed when the condition lapses"
+}
+
+# --- 8. The watcher actually calls it ---------------------------------------
 
 test_the_watcher_runs_the_evaluation() {
   # The library is worthless if nothing invokes it, and a suite that only drives
@@ -818,4 +1167,14 @@ test_the_evaluation_can_be_turned_off
 test_a_crossed_floor_moves_the_worker_and_records_it
 test_a_walk_that_does_not_land_on_the_target_commits_nothing
 test_the_model_command_carries_exactly_one_enter
+test_a_reset_rung_climbs_the_worker_back_and_records_it
+test_the_climb_never_reaches_into_the_captains_reserve
+test_an_unread_rung_above_is_never_climbed_into
+test_a_rung_hovering_at_its_boundary_never_flaps_the_worker
+test_a_worker_on_a_spent_rung_climbs_instead_of_being_reported_stuck
+test_a_spent_ladder_is_still_reported_when_nothing_above_has_reset
+test_a_failed_climb_is_reported_once_and_not_retried_every_minute
+test_the_captains_override_holds_a_worker_down_and_says_nothing
+test_the_climb_can_be_turned_off_on_its_own
+test_the_dwell_timer_belongs_to_the_rung_not_to_a_worker
 test_the_watcher_runs_the_evaluation

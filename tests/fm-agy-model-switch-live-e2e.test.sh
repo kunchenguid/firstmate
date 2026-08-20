@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-agy-model-switch-live-e2e.test.sh - the LIVE guard for the in-session
-# agy model switch the live ladder descent is built on.
+# agy model switch both halves of the live ladder are built on: the descent that
+# moves a worker down a spent rung, and the climb that moves it back up.
 #
 # WHY THIS EXISTS SEPARATELY. tests/fm-agy-live-descent.test.sh pins the picker
 # classifier and the walk arithmetic against captured agy output, with no

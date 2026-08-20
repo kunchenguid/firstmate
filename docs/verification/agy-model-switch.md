@@ -1,8 +1,9 @@
 # agy in-session model switch - verification record
 
-Evidence backing the live ladder descent in `bin/fm-agy-descent-lib.sh`, which
-moves an ALREADY RUNNING agy worker down a rung by driving agy's own `/model`
-command into its pane.
+Evidence backing live ladder movement in `bin/fm-agy-descent-lib.sh`, which
+moves an ALREADY RUNNING agy worker between rungs - down when its own rung
+crosses its floor, and back up when a rung above it has reset - by driving agy's
+own `/model` command into its pane.
 
 Everything below is a VENDOR fact: the shape of a command agy owns and a picker
 agy draws. None of it is inferable from firstmate's own code, and all of it can
@@ -169,6 +170,72 @@ The codeword is the proof that matters: the worker recovered it from a message
 it had never been able to answer while wedged, so the conversation survived the
 switch rather than being rebuilt after it.
 
+## Climbing back up, against a real worker
+
+Captured 2026-08-20 against agy 1.1.16 in a disposable Herdr lab session, with a
+real worker, a real conversation, and the real picker walk. Only two things were
+supplied: the pane transport, routed through `bin/fm-herdr-lab.sh` so the live
+default session could not be reached, and the quota READINGS - no real account
+can be made to hover at 25%, so the boundary has to be driven.
+
+The run refuses to start unless the live account puts rung 1 clear of the
+captain's quarter by the whole margin, so the evidence below can never have been
+produced by spending the reserve. It was at 38.9% remaining.
+
+Rung 1 at or below its floor never moves the worker:
+
+```
+=== (b) rung 1 at or below its 25% floor must NOT climb a running worker ===
+rung 1 held at 25.0% for 4 evaluations (300s apart): no output, worker untouched
+rung 1 held at 24.9% for 4 evaluations (300s apart): no output, worker untouched
+rung 1 held at 10.0% for 4 evaluations (300s apart): no output, worker untouched
+ok - (b) a worker on rung 2 does NOT climb while rung 1 is at or below its 25% floor (footer still: Gemini 3.1 Pro (High))
+```
+
+A rung driven across the boundary never flaps the worker. This is the case that
+kept the climb out of the descent's own change, so it is driven twelve times
+across an hour of evaluated time rather than argued:
+
+```
+=== (c) a rung driven across the boundary repeatedly must NOT flap the worker ===
+crossing 0: rung 1 at 40.0% (climb line is 35.0%) -> no move
+crossing 1: rung 1 at 30.0% (climb line is 35.0%) -> no move
+...
+crossing 11: rung 1 at 30.0% (climb line is 35.0%) -> no move
+ok - (c) 12 boundary crossings over 3600s of driven time moved the worker nowhere (footer still: Gemini 3.1 Pro (High))
+```
+
+And a rung held clear of its floor climbs the worker back, with its conversation
+and context window intact:
+
+```
+=== (a) rung 1 held clear of its floor climbs the worker back, conversation intact ===
+first steady evaluation at rung 1 = 41.0%: silent, the dwell has not run
+tick output: climbed live Gemini 3.1 Pro (High) -> Claude Opus 4.6 (Thinking)
+ok - the evaluation climbed the worker from rung 2 to rung 1
+ok - the live worker is now running on rung 1
+ok - the durable record followed the worker up to rung 1
+ok - the worker returned 46656-BMILC-MF - the codeword FM-CLIMB-65664 reversed, a string never rendered before it answered - so its conversation survived the climb
+ok - the worker answered on rung 1 and stayed there
+
+context window BEFORE the climb: Gemini 3.1 Pro (High) | ctx: 0.0% | quota: 97.9% (4h 4m)
+context window AFTER  the climb: Claude Opus 4.6 (Thinking) | ctx: 8.7% | quota: 38.8% (4h 27m)
+```
+
+The recall asks for the codeword REVERSED rather than repeated, on purpose. The
+codeword itself is still in the pane's own scrollback from when it was given, so
+a "repeat it" match could be satisfied by that echo; `46656-BMILC-MF` had never
+been rendered anywhere before the worker produced it. The context window moving
+from 0.0% to 8.7% is the second, independent signal - a rebuilt conversation
+would read empty.
+
+Nothing in this section needs its own live refresh on an agy upgrade. The only
+VENDOR facts a climb depends on are the picker, the walk, and the two
+confirmation signals, and those are identical in both directions and already
+guarded below. Everything the climb adds on top - the floor, the dead band, the
+dwell, and the refusals - is firstmate's own logic with no agy in it, and is
+pinned in `tests/fm-agy-live-descent.test.sh`, which runs everywhere.
+
 ## The refusals, against real workers
 
 Both were driven against live panes, and neither touched the worker.
@@ -218,5 +285,9 @@ ok - the worker keeps its conversation across the switch and answers on the new 
 ```
 
 The guard deliberately moves between rungs 2 and 3 and never onto rung 1: the
-reserved quarter of Opus 4.6 is what the descent protects, and a test must not
-be the thing that spends it.
+reserved quarter of Opus 4.6 is what the descent protects, and a routine test
+must not be the thing that spends it. The climb evidence above did reach rung 1,
+because a climb INTO rung 1 is the behaviour the captain ruled on and there is
+no way to demonstrate it elsewhere - and it refused to run at all until the live
+account put rung 1 clear of the floor by the whole margin, so it drew on the
+free three quarters and never on the reserve.

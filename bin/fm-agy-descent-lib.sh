@@ -87,13 +87,18 @@
 # refused outright rather than silently saturated to something the captain did
 # not ask for.
 #
-# CLIMBING BACK UP IS DELIBERATELY NOT HERE. The captain's ladder rule also
-# says work climbs back the moment a rung above resets. That is a separate
-# change, not an oversight: it is not the failure this file fixes, it needs
-# hysteresis this file does not (a rung hovering at its floor would otherwise
-# flap a worker between models), and climbing INTO rung 1 mid-task starts
-# spending the very reserve the descent protects, which needs its own decision.
-# Descending is the safety half and lands first.
+# CLIMBING BACK UP IS THE OTHER HALF, AND IT IS HERE NOW. The captain's ladder
+# rule is two-directional - exhaust a rung, descend exactly one, climb back the
+# moment the rung above resets - and only the descending half landed first,
+# because that is the safety half. The climb needed two things the descent did
+# not: hysteresis, or a rung hovering at its floor would flap a worker between
+# models mid-task; and a ruling, because climbing INTO rung 1 mid-task starts
+# spending the very reserve the descent exists to protect. The captain ruled on
+# 2026-08-20: a running worker climbs back "as soon as rung 1 is above its 25%
+# floor with hysteresis to stop flapping - so it climbs into the free three
+# quarters, never into your reserve". The reserved quarter therefore keeps
+# exactly the protection the descent gave it, and the space above it is where a
+# running worker is allowed to return to. See the climbing-back section below.
 #
 # DOES THIS GENERALISE TO OTHER PROVIDERS? The shape does; nothing else here
 # does, and the difference matters because the same failure has now happened on
@@ -403,6 +408,227 @@ fm_agy_descent_needed() {  # <rung> <state-dir> [<now>]
   return 1
 }
 
+# --- climbing back up -------------------------------------------------------
+#
+# THE OTHER HALF OF THE CAPTAIN'S RULE. A worker moved down for its own safety
+# must not stay down after the rung above it has reset. Everything below reuses
+# the machinery already in this file - the same evidence, the same gate, the
+# same guarded walk, the same refuse-and-escalate posture. Only the trigger is
+# new.
+#
+# THE FLOOR IS THE SAME FLOOR. There is no second reading, no second floor, and
+# no second notion of exhaustion. Each climb candidate is put to
+# fm_agy_ladder_check exactly as a launch would be, so rung 1 is refused at or
+# below the captain's reserved quarter for a RUNNING worker for precisely the
+# reason it is refused for a new one. That is the captain's 2026-08-20 ruling in
+# code: the free three quarters are where a running worker may return to, the
+# reserved quarter is not, and FM_AGY_LADDER_OVERRIDE remains the only way past
+# it in either direction.
+#
+# ABSENCE REFUSES HERE, WHICH IS NOT WHAT IT DOES AT A LAUNCH. The launch gate
+# lets rung 1 START with no reading at all, because the top of the ladder is its
+# first choice anyway and refusing would stall the fleet. A climb is the
+# opposite case: it moves a worker that is already working INTO the rung whose
+# reserve this file exists to protect, so it is a move the policy constrains,
+# and the ladder's own asymmetry says a constrained move needs positive
+# evidence. fm_agy_climb_clears_margin supplies that by refusing an unknown rung
+# outright rather than reading absence as headroom.
+#
+# HYSTERESIS, IN TWO PARTS, BECAUSE A BARE THRESHOLD FLAPS. The descent fires at
+# or below the floor. If the climb fired at anything above it, a rung sitting on
+# the line would hand a worker back and forth between models mid-task, and each
+# crossing costs a guarded modal walk into a live pane. Both parts are dead
+# bands, and both are derived rather than picked:
+#
+#   FM_AGY_CLIMB_MARGIN, the gap in percentage points between the two triggers.
+#   Descend at or below the floor, climb only at floor + margin, so the band
+#   between them belongs to whichever side the worker is already on. Ten points
+#   is the figure for three independent reasons:
+#     - Quota falls monotonically inside a reset window (the freshness rule in
+#       bin/fm-agy-quota-lib.sh turns on exactly that), so the only thing that
+#       RAISES a rung is its window rolling over, which restores it toward 100%.
+#       A rung a hair above its floor is one on its way DOWN, not one that has
+#       reset - and the captain's rule names the reset as the trigger.
+#     - A dead band has to be wider than the movement it must not react to. The
+#       largest change in the reserved figure that is not consumption is the
+#       headroom the launch gate holds back for launches in flight, at
+#       FM_AGY_LADDER_INFLIGHT_MARGIN (one point) each, so ten points absorbs a
+#       burst of ten concurrent launches without bookkeeping alone crossing it.
+#     - It has to stay small enough to be worth having. Rung 1's usable band
+#       above the captain's quarter is 75 points, so ten of them withhold the
+#       last 13% of a reset window and the worker climbs back for the rest.
+#
+#   FM_AGY_CLIMB_DWELL, how long the condition must hold before it is acted on.
+#   A margin rejects a reading that hovers; it does not reject one that jumps
+#   the band and falls straight back. This defaults to FM_AGY_QUOTA_MAX_AGE for
+#   the same reason FM_AGY_INFLIGHT_TTL does: that is this fleet's one
+#   definition of how long a single reading is allowed to speak for, so
+#   requiring the condition to outlive it means no climb is ever authorized by
+#   one reading. At the default cadence that is five consecutive evaluations
+#   agreeing. The timer is per RUNG rather than per worker, because the
+#   condition is a property of the rung and every worker below it deserves the
+#   same answer; and it is reset the instant the condition lapses, so a rung
+#   oscillating across the line accumulates no dwell at all and every worker
+#   below it simply holds.
+#
+# THE DWELL IS NOT SKIPPED FOR AN URGENT CLIMB. A worker whose own rung is spent
+# is stalled, and making it wait out the dwell to be rescued is a real cost. It
+# waits anyway: one rule with no exception is worth more than those minutes, and
+# the exception would apply exactly when the evidence is least settled.
+#
+# THE OVERRIDE IS SILENT ON THIS SIDE. A worker the captain pinned with
+# FM_AGY_LADDER_OVERRIDE is not climbed, exactly as it is not descended. The
+# descent SAYS so, because a pinned worker below its floor is spending the
+# reserve and the captain should hear about it. A pinned worker on a slower rung
+# than it could have is not a harm - it is what they asked for - so this side
+# says nothing rather than waking them about it.
+#
+# AND NOT HAVING CLIMBED IS NEVER ESCALATED ON ITS OWN. The descent escalates a
+# worker it could never interrupt, because sitting below the floor is the harm
+# this whole file exists to stop. Still being on rung 2 is not a harm; it is a
+# slower model. Only a climb that was ATTEMPTED and failed is reported, and it
+# is then not retried until the rung stops being climbable, so a refusal cannot
+# turn into a modal walk into a live pane every minute.
+
+# FM_AGY_CLIMB: `off` disables the climb half only, leaving the descent as the
+# whole of live enforcement. FM_AGY_DESCENT=off still disables the entire
+# evaluation, this half included, because it turns the tick itself off.
+FM_AGY_CLIMB=${FM_AGY_CLIMB:-on}
+
+# Percentage points a rung must stand clear of its own floor before a running
+# worker is moved back onto it. Derived above; changing it changes how far a
+# rung must have reset to be worth returning to.
+FM_AGY_CLIMB_MARGIN=${FM_AGY_CLIMB_MARGIN:-10}
+
+# Seconds the margin must hold continuously before the climb is acted on.
+# Defaulted to the reading ceiling so the two definitions of "long enough to
+# believe" cannot drift apart, exactly as FM_AGY_INFLIGHT_TTL is.
+FM_AGY_CLIMB_DWELL=${FM_AGY_CLIMB_DWELL:-$FM_AGY_QUOTA_MAX_AGE}
+
+fm_agy_climb_mark() {  # <state-dir> <name>
+  printf '%s' "$1/.agy-climb-$2"
+}
+
+fm_agy_climb_clear_task() {  # <state-dir> <id>
+  rm -f "$(fm_agy_climb_mark "$1" "failed-$2")" 2>/dev/null || true
+}
+
+# fm_agy_climb_clears_margin: 0 only when <rung> has a CURRENT reading putting it
+# FM_AGY_CLIMB_MARGIN points clear of its own floor, after the same in-flight
+# headroom the launch gate reserves. An unknown rung refuses; see the asymmetry
+# note above.
+fm_agy_climb_clears_margin() {  # <rung> <state-dir> [<now>]
+  local rung=$1 state_dir=$2 now=${3:-}
+  local display floor reading percent in_flight effective
+  display=$(fm_agy_ladder_display "$rung") || return 1
+  floor=$(fm_agy_ladder_floor "$rung") || return 1
+  reading=$(fm_agy_quota_read "$display" "$state_dir" "$now")
+  case "$reading" in
+    unknown|'') return 1 ;;
+  esac
+  percent=${reading%% *}
+  fm_agy_is_number "$percent" || return 1
+  in_flight=$(fm_agy_inflight_count "$rung" "$state_dir" "$now")
+  effective=$(fm_agy_ladder_reserved "$percent" "$in_flight")
+  awk -v p="$effective" -v f="$floor" -v m="$FM_AGY_CLIMB_MARGIN" \
+    'BEGIN { exit !(p >= f + m) }'
+}
+
+fm_agy_climb_dwell_path() {  # <state-dir> <rung>
+  printf '%s/.agy-climb-since-%s' "$1" "$2"
+}
+
+# fm_agy_climb_dwell_tick: advance every rung's dwell timer once for the whole
+# home. A rung clear of its margin has its timer STARTED if one is not already
+# running; a rung that is not has its timer removed outright, which is what
+# makes an oscillating rung accumulate nothing. Called once per evaluation,
+# before any worker is considered, so workers on the same rung read one shared
+# answer instead of each starting a clock of its own.
+#
+# The rungs are walked through fm_agy_ladder_display rather than counted, so the
+# ladder's length stays owned by bin/fm-agy-ladder-lib.sh.
+fm_agy_climb_dwell_tick() {  # <state-dir> <now>
+  local state_dir=$1 now=$2 rung=1 path
+  while fm_agy_ladder_display "$rung" >/dev/null 2>&1; do
+    path=$(fm_agy_climb_dwell_path "$state_dir" "$rung")
+    if fm_agy_climb_clears_margin "$rung" "$state_dir" "$now"; then
+      if [ ! -f "$path" ]; then
+        printf '%s' "$now" > "$path" 2>/dev/null || true
+      fi
+    else
+      rm -f "$path" 2>/dev/null || true
+    fi
+    rung=$((rung + 1))
+  done
+}
+
+# fm_agy_climb_dwelt: 0 when <rung>'s timer has been running for at least
+# FM_AGY_CLIMB_DWELL. No timer at all means the condition is not holding now,
+# which is a refusal rather than an elapsed wait.
+fm_agy_climb_dwelt() {  # <rung> <state-dir> <now>
+  local path stamp
+  path=$(fm_agy_climb_dwell_path "$2" "$1")
+  [ -f "$path" ] || return 1
+  stamp=$(cat "$path" 2>/dev/null || true)
+  case "$stamp" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ $(($3 - stamp)) -ge "$FM_AGY_CLIMB_DWELL" ]
+}
+
+# fm_agy_climb_admits: 0 when <candidate> is a rung a running worker could be
+# returned to on the CURRENT evidence - the gate authorizes it at all (strict
+# exhaustion, and its own floor), and it stands clear of that floor by the
+# margin. The dwell is deliberately not part of this: that is a question about
+# time, and the two callers below ask this one for different reasons.
+fm_agy_climb_admits() {  # <candidate> <state-dir> <now>
+  local display
+  display=$(fm_agy_ladder_display "$1") || return 1
+  fm_agy_ladder_check "$display" "$2" "$3" >/dev/null 2>&1 || return 1
+  fm_agy_climb_clears_margin "$1" "$2" "$3"
+}
+
+# fm_agy_climb_target: the rung a worker currently on <rung> should be moved
+# back up to, or a failure when there is none.
+#
+# HIGHEST FIRST, so the answer is the ladder's own "highest available rung" and
+# not merely one step.
+fm_agy_climb_target() {  # <rung> <state-dir> [<now>]
+  local rung=$1 state_dir=$2 now=${3:-} candidate=1
+  [ "$FM_AGY_CLIMB" != off ] || return 1
+  [ -n "$now" ] || now=$(date +%s)
+  while [ "$candidate" -lt "$rung" ]; do
+    if fm_agy_climb_admits "$candidate" "$state_dir" "$now" \
+      && fm_agy_climb_dwelt "$candidate" "$state_dir" "$now"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+    candidate=$((candidate + 1))
+  done
+  return 1
+}
+
+# fm_agy_climb_pending: 0 when a rung above <rung> is already clear of its
+# margin and is only waiting out the dwell.
+#
+# This exists so a refusal cannot say something untrue. A worker on a spent rung
+# with nowhere to descend to is told the ladder has nowhere to put it - and
+# while a rung above it is sitting clear and merely counting down, that sentence
+# is false and the wake is spurious, because the wait resolves on its own.
+fm_agy_climb_pending() {  # <rung> <state-dir> [<now>]
+  local rung=$1 state_dir=$2 now=${3:-} candidate=1
+  [ "$FM_AGY_CLIMB" != off ] || return 1
+  [ -n "$now" ] || now=$(date +%s)
+  while [ "$candidate" -lt "$rung" ]; do
+    if fm_agy_climb_admits "$candidate" "$state_dir" "$now" \
+      && ! fm_agy_climb_dwelt "$candidate" "$state_dir" "$now"; then
+      return 0
+    fi
+    candidate=$((candidate + 1))
+  done
+  return 1
+}
+
 # --- the guarded walk -------------------------------------------------------
 
 # fm_agy_descent_capture: a bounded plain-text read of the worker's pane.
@@ -552,7 +778,8 @@ fm_agy_descent_switch() {  # <backend> <target> <label> <ladder-display>
 # One line per outcome on stdout, and nothing at all in the ordinary case where
 # every live agy worker is on a healthy rung:
 #
-#   descended <id> <from> -> <to>   the worker was moved and confirmed
+#   descended <id> <from> -> <to>   the worker was moved down and confirmed
+#   climbed <id> <from> -> <to>     the worker was moved back up and confirmed
 #   refused <id> <reason>           it was not, and the captain needs to know
 #   override <id> <reason>          the captain's own override is holding it
 #
@@ -587,6 +814,7 @@ fm_agy_descent_tick() {  # <state-dir> [<now>]
   local state_dir=$1 now=${2:-}
   local meta id harness model rung target_rung target_display backend endpoint
   local label verdict text footer below stamp reason any=1
+  local direction spent climb_failed moved
 
   [ "$FM_AGY_DESCENT" != off ] || return 0
   [ -d "$state_dir" ] || return 0
@@ -611,6 +839,11 @@ fm_agy_descent_tick() {  # <state-dir> [<now>]
   # own floor and the rungs above it are read from that single reading.
   fm_agy_quota_poll "$state_dir" "$now" || true
 
+  # Then advance the per-rung climb timers once, on that one reading, before any
+  # worker is looked at. Doing it here rather than per worker is what makes two
+  # workers on the same rung share one answer.
+  fm_agy_climb_dwell_tick "$state_dir" "$now"
+
   for meta in "$state_dir"/*.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -623,33 +856,89 @@ fm_agy_descent_tick() {  # <state-dir> [<now>]
     backend=$(fm_backend_of_meta "$meta")
     label="fm-$id"
 
-    if ! fm_agy_descent_needed "$rung" "$state_dir" "$now"; then
-      fm_agy_descent_clear_task "$state_dir" "$id"
-      continue
+    # WHERE DOES THE LADDER SAY THIS WORKER BELONGS? Up is asked first, and that
+    # order is load-bearing rather than a preference. A worker whose own rung is
+    # spent has two possible answers, and before the climb existed only one of
+    # them was reachable: with rung 2 dead and rung 1 reset, descending to rung 3
+    # is refused - correctly, because rung 1 is not exhausted and so rung 3 is
+    # not the highest available rung - and the worker was reported stuck on a
+    # spent ladder while the top of that ladder sat free. Asking upwards first
+    # resolves that case instead of escalating it.
+    spent=0
+    if fm_agy_descent_needed "$rung" "$state_dir" "$now"; then
+      spent=1
     fi
 
-    below=$(fm_agy_descent_mark "$state_dir" "below-$id")
-    if [ ! -f "$below" ]; then
-      printf '%s' "$now" > "$below" 2>/dev/null || true
-      stamp=$now
+    direction=
+    target_rung=
+    climb_failed=$(fm_agy_climb_mark "$state_dir" "failed-$id")
+    if target_rung=$(fm_agy_climb_target "$rung" "$state_dir" "$now"); then
+      direction=up
     else
-      stamp=$(cat "$below" 2>/dev/null || true)
-      case "$stamp" in ''|*[!0-9]*) stamp=$now ;; esac
+      # The rung stopped being climbable, so any earlier failure to reach it
+      # belongs to a finished episode and must not suppress the next attempt.
+      rm -f "$climb_failed" 2>/dev/null || true
+    fi
+    if [ "$direction" = up ] && [ -f "$climb_failed" ]; then
+      # Already attempted and refused while this rung has been climbable.
+      # Retrying would drive the modal picker into a live pane every minute for
+      # an optimisation, so it waits for the rung to lapse and come back.
+      direction=
+      target_rung=
+    fi
+    if [ -z "$direction" ] && [ "$spent" = 1 ]; then
+      if target_rung=$(fm_agy_descent_target "$rung" "$state_dir" "$now"); then
+        direction=down
+      else
+        target_rung=
+      fi
     fi
 
-    # The captain's own escape. A worker they deliberately put past the ladder
-    # is not quietly dragged off it; the override's use is printed here for the
-    # same reason the launch gate prints it.
-    if [ -n "${FM_AGY_LADDER_OVERRIDE:-}" ]; then
-      fm_agy_descent_escalate_once "$state_dir" "$id" \
-        && printf 'override %s %s is below its floor but FM_AGY_LADDER_OVERRIDE=%s is holding it there\n' \
-          "$id" "$model" "$FM_AGY_LADDER_OVERRIDE"
+    if [ -z "$direction" ] && [ "$spent" = 0 ]; then
+      # On a healthy rung with nowhere better to be: the ordinary case, silent,
+      # and the end of whatever episode this worker was in.
+      fm_agy_descent_clear_task "$state_dir" "$id"
+      fm_agy_climb_clear_task "$state_dir" "$id"
       continue
     fi
 
-    if ! target_rung=$(fm_agy_descent_target "$rung" "$state_dir" "$now"); then
+    # The below-the-floor clock is the DESCENT's, and only a worker actually
+    # below its floor starts one. A worker merely waiting to climb is not on a
+    # clock, because not having climbed yet is not a harm to time out.
+    below=$(fm_agy_descent_mark "$state_dir" "below-$id")
+    stamp=$now
+    if [ "$spent" = 1 ]; then
+      if [ ! -f "$below" ]; then
+        printf '%s' "$now" > "$below" 2>/dev/null || true
+      else
+        stamp=$(cat "$below" 2>/dev/null || true)
+        case "$stamp" in ''|*[!0-9]*) stamp=$now ;; esac
+      fi
+    fi
+
+    # The captain's own escape, honoured in BOTH directions: a worker they
+    # deliberately put past the ladder is not quietly dragged off it either way.
+    # Only the downward case is printed, and for the reason the launch gate
+    # prints it - a pinned worker below its floor is spending the reserve. A
+    # pinned worker on a slower rung than it could have is what they asked for,
+    # so that case stays silent rather than waking them about it.
+    if [ -n "${FM_AGY_LADDER_OVERRIDE:-}" ]; then
+      if [ "$spent" = 1 ]; then
+        fm_agy_descent_escalate_once "$state_dir" "$id" \
+          && printf 'override %s %s is below its floor but FM_AGY_LADDER_OVERRIDE=%s is holding it there\n' \
+            "$id" "$model" "$FM_AGY_LADDER_OVERRIDE"
+      fi
+      continue
+    fi
+
+    if [ -z "$direction" ]; then
+      # A climb that is only waiting out its dwell is a bounded wait that clears
+      # on its own, and while one is running the refusal below would be untrue.
+      if fm_agy_climb_pending "$rung" "$state_dir" "$now"; then
+        continue
+      fi
       fm_agy_descent_escalate_once "$state_dir" "$id" \
-        && printf 'refused %s %s is at or below its floor and no lower model on the ladder can be shown to be available; the ladder is spent\n' \
+        && printf 'refused %s %s is at or below its floor and the ladder has nowhere to move it: no lower rung can be shown to be available, and no rung above it has reset clear of its own floor\n' \
           "$id" "$model"
       continue
     fi
@@ -664,7 +953,11 @@ fm_agy_descent_tick() {  # <state-dir> [<now>]
     case "${verdict%% *}" in
       idle) ;;
       *)
-        if [ $((now - stamp)) -ge "$FM_AGY_DESCENT_GRACE" ]; then
+        # A busy worker is retried on the next evaluation in both directions.
+        # Only the downward case is ever escalated for never settling, because
+        # only that one leaves a worker below its floor; a climb that has not
+        # happened yet costs a slower model, which is not worth a wake.
+        if [ "$spent" = 1 ] && [ $((now - stamp)) -ge "$FM_AGY_DESCENT_GRACE" ]; then
           fm_agy_descent_escalate_once "$state_dir" "$id" \
             && printf 'refused %s has been on %s below its floor for %ss without ever being safely interruptible (%s), so it was never moved to %s\n' \
               "$id" "$model" "$((now - stamp))" "${verdict:-unreadable}" "$target_display"
@@ -684,11 +977,23 @@ fm_agy_descent_tick() {  # <state-dir> [<now>]
       continue
     fi
 
+    # The SAME guarded walk in both directions. It is one mechanism, and the
+    # direction only decides which word the outcome is reported under - which
+    # also means the climb inherits the one-Enter rule that stops the shared
+    # submit helper's retry committing a row nobody chose.
     if reason=$(fm_agy_descent_switch "$backend" "$endpoint" "$label" "$target_display"); then
       printf 'model=%s\n' "$target_display" >> "$meta" 2>/dev/null || true
       fm_agy_descent_clear_task "$state_dir" "$id"
-      printf 'descended %s %s -> %s\n' "$id" "$model" "$target_display"
+      fm_agy_climb_clear_task "$state_dir" "$id"
+      if [ "$direction" = up ]; then moved=climbed; else moved=descended; fi
+      printf '%s %s %s -> %s\n' "$moved" "$id" "$model" "$target_display"
     else
+      # A failed climb is reported once and then left alone until the rung stops
+      # being climbable; a failed descent keeps retrying, because reaching a
+      # safe rung matters more than the cost of trying again.
+      if [ "$direction" = up ]; then
+        : > "$climb_failed" 2>/dev/null || true
+      fi
       fm_agy_descent_escalate_once "$state_dir" "$id" \
         && printf 'refused %s could not be moved from %s to %s: %s\n' \
           "$id" "$model" "$target_display" "$reason"
