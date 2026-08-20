@@ -101,25 +101,35 @@ fm_harness_basename_name() {  # <path>
   return 1
 }
 
-# Print the first verified harness name that appears anywhere in string $1, or
-# return 1.
+# Print the exact harness name carried by an ARGV token $1, or return 1.
 #
-# This NAMES a match one of the rules below already made; it never decides one,
-# and it is only ever handed the one string that match was made against - the
-# reported command basename. Over a whole argument string it would outrank the
-# token that actually matched and name a harness by table order instead: in
-# `node /opt/tools/codex/cli.js --config /etc/claude/x.toml` the first name it
-# reaches is claude. Every other rule therefore names its own match from the exact
-# path or basename that decided it.
-#
-# The name is what scopes FM_SESSION_LAUNCH_MARKERS below to the harness whose
-# marker was actually verified, so a rule that matched cannot lend its verdict to
-# a different harness's marker.
-fm_harness_name_in() {  # <string>
-  local text=$1 name
+# A whole path component, as fm_harness_path_name reads it, except that `pi` and
+# `pi-signed` must be the token's own basename. FM_HARNESS_RE anchors those two
+# names as `^pi$` and `^pi-signed$` because they are too short and too ordinary
+# to survive an unanchored reading, and a two-character interior component is
+# exactly where that bites: `/home/pi` is the default home directory on Raspberry
+# Pi OS, so `node /home/pi/app.js` would otherwise be a verified Pi harness, and
+# as a recycled recorded holder it would refuse a real session its own home.
+# The command path and argv[0] rule above reads those names as components too and
+# is deliberately left alone here; this anchoring covers only the argv tokens,
+# which the rule this replaced could never match for these two names at all.
+fm_harness_argv_path_name() {  # <path>
+  local path=$1 base name
+  [ -n "$path" ] || return 1
+  base=${path##*/}
   for name in "${FM_HARNESS_NAMES[@]}"; do
-    case "$text" in
-      *"$name"*) printf '%s' "$name"; return 0 ;;
+    case "$name" in
+      pi|pi-signed)
+        if [ "$base" = "$name" ]; then
+          printf '%s' "$name"
+          return 0
+        fi
+        ;;
+      *)
+        case "/$path/" in
+          */"$name"/*) printf '%s' "$name"; return 0 ;;
+        esac
+        ;;
     esac
   done
   return 1
@@ -142,27 +152,29 @@ fm_harness_name_in() {  # <string>
 #      token is a flag.
 #   5. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 #
-# FM_HARNESS_KIND names WHICH harness matched, alongside the FM_HARNESS_IS_CLAUDE
-# flag the ancestry walk needs. Both are globals every call clobbers, so a caller
-# that needs the kind of a particular pid must capture it at the point of the
-# match: fm_harness_pid_kind below is that capture, and reading the global after
-# any other matcher call has run in between reads the wrong process's kind.
+# Rules 3 and 4 read an ARGUMENT LIST, which is data the process was handed rather
+# than the program it is running, so they identify a recorded pid for the ancestry
+# walk and the liveness predicate and they carry no weight in the cohort's
+# acceptance decision. fm_harness_exec_kind below is that stricter reading, and
+# the difference between the two is stated there.
+#
+# This answers WHETHER, not WHICH. FM_HARNESS_IS_CLAUDE is the one thing it also
+# reports, because the ancestry walk needs it to know when to keep climbing a
+# nested worker chain; it is a global every call clobbers. Which harness a
+# particular pid IS belongs to fm_harness_exec_kind below, which reads only
+# executable identity and is the only naming the cohort proof may act on.
 FM_HARNESS_IS_CLAUDE=0
-FM_HARNESS_KIND=
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name script rest
   FM_HARNESS_IS_CLAUDE=0
-  FM_HARNESS_KIND=
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
-    FM_HARNESS_KIND=$(fm_harness_name_in "$base" || true)
     return 0
   fi
   argv0=${args%% *}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
-    FM_HARNESS_KIND=$name
     return 0
   fi
   # Bare interpreter (e.g. node, python) that reports its OWN name as the exec
@@ -191,6 +203,17 @@ fm_harness_process_matches() {  # <comm> <args>
   # mechanism exists to remove. Both outputs are derived from the token that
   # matched and never from the whole argv, so a harness name sitting elsewhere in
   # the arguments can neither name the kind nor raise the Claude flag.
+  #
+  # Two limits of this rule are known and stated rather than left implied. It
+  # reads EVERY token before that flag rather than the script token alone, so a
+  # positional path argument can decide the verdict and this rule and the
+  # MainThread branch disagree on identical argv: `node /srv/app/server.js
+  # /opt/claude/agent.json` is Claude here and is nothing there. And the component
+  # it needs is an exact one, so a real npm layout whose package directory is
+  # `claude-code` or `opencode-ai` rather than the bare harness name is not
+  # identified at all. Both bound identification for the ancestry walk and the
+  # liveness predicate only; neither can reach the cohort's acceptance decision,
+  # which fm_harness_exec_kind below settles from executable identity alone.
   case "$comm" in
     *node*|*python*)
       rest=${args#* }
@@ -205,9 +228,8 @@ fm_harness_process_matches() {  # <comm> <args>
           case "$script" in
             -*) break ;;
           esac
-          if name=$(fm_harness_path_name "$script"); then
+          if name=$(fm_harness_argv_path_name "$script"); then
             case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
-            FM_HARNESS_KIND=$name
             return 0
           fi
         done
@@ -230,7 +252,9 @@ fm_harness_process_matches() {  # <comm> <args>
   # So the branch REFUSES to identify anything as soon as that first token is a
   # flag, rather than trying to work out where the flags end. An interpreter that
   # reports its own name is decided by the rule above, which stops at the first
-  # flag in the same way but reads whole path components rather than a basename.
+  # flag in the same way but reads every token up to it, by whole path component
+  # rather than by basename. Neither reading reaches the cohort's acceptance
+  # decision, which fm_harness_exec_kind settles from executable identity alone.
   #
   # The refusal gives up the inferred `node --enable-source-maps .../bin/codex`
   # shape on purpose: the alternative is an allowlist of value-taking interpreter
@@ -248,7 +272,6 @@ fm_harness_process_matches() {  # <comm> <args>
         */*)
           if name=$(fm_harness_basename_name "$script"); then
             case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
-            FM_HARNESS_KIND=$name
             return 0
           fi
           ;;
@@ -260,26 +283,54 @@ fm_harness_process_matches() {  # <comm> <args>
   # locate its own harness in the ancestry, so every session start refuses the
   # fleet lock as read-only and the park can never arm.
   if fm_cursor_process_matches "$comm" "$args" "$argv0"; then
-    FM_HARNESS_KIND=cursor
     return 0
   fi
   return 1
 }
 
-# Print the verified harness name pid $1 is running as, or return 1 when it is
-# not a live harness. Always call it through a command substitution, which is the
-# capture the FM_HARNESS_KIND note above requires.
+# Print the harness name that the EXECUTABLE IDENTITY of command name $1 with
+# argument string $2 names, or return 1.
+#
+# The strict reading, and the only one the cohort proof below is allowed to use:
+# the reported command name's own basename is exactly a verified harness name, or
+# a whole path component of that command name or of argv[0] is. An argument list
+# is never read here.
+#
+# The cohort needs identity, and an argument list does not carry identity. A
+# launch marker proves a LAUNCH relationship and nothing more, so a codex session
+# the captain started from inside a Claude session carries a truthful CLAUDE_PID
+# naming that Claude holder. The evidence for that pair and for the rehosted
+# Claude background session the marker path exists to accept is otherwise
+# identical - same marker, same value, same container, holder outside the asking
+# ancestry in both - and the process name is the only thing that differs. So the
+# name has to be the thing the acceptance turns on, and it has to come from what
+# the process IS rather than from a path it was handed on its command line.
+fm_harness_exec_kind() {  # <comm> <args>
+  local comm=$1 args=$2 base name
+  base=${comm##*/}
+  for name in "${FM_HARNESS_NAMES[@]}"; do
+    if [ "$base" = "$name" ]; then
+      printf '%s' "$name"
+      return 0
+    fi
+  done
+  fm_harness_path_name "$comm" && return 0
+  fm_harness_path_name "${args%% *}"
+}
+
+# Print the harness name live pid $1 is running as under that strict reading, or
+# return 1. Always call it through a command substitution.
 fm_harness_pid_kind() {  # <pid>
-  local pid=$1 comm args
+  local pid=$1 comm args kind
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args" || return 1
-  [ -n "$FM_HARNESS_KIND" ] || return 1
-  printf '%s\n' "$FM_HARNESS_KIND"
+  kind=$(fm_harness_exec_kind "$comm" "$args") || return 1
+  [ -n "$kind" ] || return 1
+  printf '%s\n' "$kind"
 }
 
 # Walk the current process ancestry (up to 16 hops) and print this session's
@@ -469,6 +520,28 @@ fm_session_tty_of_pid() {  # <pid>
 # by ancestry alone and a session the harness rehosted outside its own process
 # tree still refuses its own home and degrades that session start to read-only.
 # That is the unfixed half of the defect for those adapters, not a fixed one.
+#
+# The same unfixed half reaches Claude itself whenever a Claude session's own
+# executable identity does not name it, because fm_harness_exec_kind is what
+# opens the marker path and it reads only the command name and argv[0]. Two
+# shapes lose the accept path and land on the ancestry-only verdict: a
+# node-hosted launch identified only by its script argument, `node
+# /path/to/claude/cli.js`, and an npm install reporting comm `MainThread` with
+# the harness named nowhere but in argv. That is the fail-closed direction rather
+# than a regression, because the alternative accepts a different harness that
+# merely inherited the marker, but it is a real limit and not a closed one.
+#
+# One recognition limit sits underneath all of that and is stated rather than
+# fixed here: an npm layout whose package directory is `claude-code` rather than
+# `claude` is identified by no rule in this file at all, so such a session cannot
+# resolve a harness ancestry, fm_session_lock_owned_by_self returns false, and the
+# session start degrades to read-only against its own home - the exact
+# false-refusal lockout this mechanism exists to remove. Fixing it here would mean
+# inventing the command name, argv[0] and bin shape of an install nobody has
+# observed, which is the same guess this file refuses for a marker row. The
+# opt-in guard in docs/verification/runtime-backends.md reports the command name
+# and argv it actually observes for every installed harness, so a real npm install
+# produces the evidence a later fix needs.
 #
 # Why leaving it that way is safe rather than merely incomplete: a row is
 # consulted only when the asking session and the holder are both the harness that

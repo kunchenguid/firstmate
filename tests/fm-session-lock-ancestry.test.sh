@@ -35,6 +35,10 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # from a session that is not the harness whose marker is in the environment.
 ln -s /bin/bash "$FAKEBIN/codex"
 NAMED_CODEX="$FAKEBIN/codex"
+# A bare interpreter name, so a fixture can be identified as a harness by its
+# script argument alone and by nothing about its own executable.
+ln -s /bin/bash "$FAKEBIN/node"
+NAMED_NODE="$FAKEBIN/node"
 
 # --- unit layer: identity behind a deterministic process table ---------------
 
@@ -241,7 +245,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$pid:$field:${FM_TEST_ARGV_SHAPE:-claudecli}" in
-  770:comm=:pyconfig) printf '%s\n' python3 ;;
+  770:comm=:pyconfig|770:comm=:pisensors) printf '%s\n' python3 ;;
   770:comm=:*) printf '%s\n' node ;;
   770:args=:claudecli) printf '%s\n' 'node /path/to/claude/cli.js' ;;
   770:args=:codexcli) printf '%s\n' 'node /opt/tools/codex/cli.js' ;;
@@ -252,6 +256,9 @@ case "$pid:$field:${FM_TEST_ARGV_SHAPE:-claudecli}" in
   770:args=:pyconfig) printf '%s\n' 'python3 /srv/app.py --config /etc/claude/x.toml' ;;
   770:args=:flagged) printf '%s\n' 'node --experimental-foo /path/to/claude/cli.js' ;;
   770:args=:dotcomponent) printf '%s\n' 'node /srv/app/server.js /home/u/.claude/hooks.json' ;;
+  770:args=:pihome) printf '%s\n' 'node /home/pi/app.js' ;;
+  770:args=:pisensors) printf '%s\n' 'python3 /home/pi/sensors/read.py' ;;
+  770:args=:piscript) printf '%s\n' 'node /opt/tools/pi' ;;
   770:args=:bare) printf '%s\n' 'node' ;;
   770:ppid=:*) printf '%s\n' 1 ;;
   *:comm=:*) printf '%s\n' bash ;;
@@ -271,13 +278,21 @@ SH
       || fail "$shape: a node-hosted harness session could not recognize its own lock"
   done
 
-  # The kind must come from the token that matched, not from the table order of
-  # the names: a codex install carrying a claude-shaped flag value is codex.
-  kind=$(FM_TEST_ARGV_SHAPE=codexthenclaudearg lib_eval "$fakebin" 'fm_harness_pid_kind 770' | tr -d '[:space:]')
-  [ "$kind" = codex ] || fail \
-    "a codex install whose arguments also mention claude reported harness kind '$kind', so the kind is decided by table order rather than by what matched"
-  kind=$(FM_TEST_ARGV_SHAPE=claudecli lib_eval "$fakebin" 'fm_harness_pid_kind 770' | tr -d '[:space:]')
-  [ "$kind" = claude ] || fail "a node-hosted claude install reported harness kind '$kind'"
+  # `pi` and `pi-signed` are anchored names, so they carry a verdict here only as
+  # the token's own basename. `/home/pi` is the Raspberry Pi OS default home, so an
+  # interior-component reading would turn ordinary node and python services into
+  # verified Pi harnesses and wedge a real session out of its own home.
+  FM_TEST_ARGV_SHAPE=piscript lib_eval "$fakebin" 'fm_harness_pid_alive 770' \
+    || fail "a script named exactly pi was not identified as the Pi harness"
+
+  # Identification here never carries the cohort's acceptance decision: an
+  # argument list is data the process was handed, not the program it is running,
+  # so none of these shapes names a harness kind.
+  for shape in claudecli codexcli codexthenclaudearg; do
+    if kind=$(FM_TEST_ARGV_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_kind 770'); then
+      fail "$shape: a harness named only in an argument list was typed as '$kind' for the cohort's acceptance decision"
+    fi
+  done
 
   # Nothing at or after the first flag may decide the verdict, because a flag's
   # value is a path that can be named anything at all, and a component that merely
@@ -288,7 +303,7 @@ SH
   # alternative is an allowlist of value-taking interpreter flags that would rot
   # silently as vendors add them. Do not restore a whole-argv match to make it
   # pass; teach it a shape only from a real release that reports it.
-  for shape in hookarg transcriptarg requirepath pyconfig flagged dotcomponent bare; do
+  for shape in hookarg transcriptarg requirepath pyconfig flagged dotcomponent pihome pisensors bare; do
     if FM_TEST_ARGV_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 770'; then
       fail "$shape: an interpreter argument at or after the first flag carried a harness verdict"
     fi
@@ -300,6 +315,84 @@ SH
     fi
   done
   pass "session-lock: a bare interpreter is identified from the argv path components before the first flag"
+}
+
+# The cohort's acceptance decision is typed from EXECUTABLE identity alone: the
+# reported command name's own basename, or a whole path component of that command
+# name or of argv[0]. A launch marker proves a launch relationship rather than
+# identity, so a codex session started from inside a Claude session carries a
+# truthful CLAUDE_PID naming that holder; the process name is the only thing that
+# separates it from the rehosted Claude session the marker path exists to accept,
+# so an argument list may not decide it.
+#
+# Every shape below is identified for the ancestry walk exactly as it was. What
+# this case pins is which of them may open the marker path.
+test_acceptance_typing_comes_only_from_executable_identity() {
+  local dir fakebin shape kind
+  dir="$TMP_ROOT/acceptance-typing"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_EXEC_SHAPE:-nativepath}" in
+  780:comm=:nativepath) printf '%s\n' 2.1.220 ;;
+  780:args=:nativepath) printf '%s\n' '/home/u/.local/share/claude/versions/2.1.220 --resume' ;;
+  780:comm=:binentry) printf '%s\n' claude ;;
+  780:args=:binentry) printf '%s\n' '/usr/local/bin/claude' ;;
+  780:comm=:codexname) printf '%s\n' codex ;;
+  780:args=:codexname) printf '%s\n' 'codex' ;;
+  780:comm=:mainthread) printf '%s\n' MainThread ;;
+  780:args=:mainthread) printf '%s\n' 'node /home/u/.nvm/versions/node/v24.16.0/bin/codex' ;;
+  780:comm=:*) printf '%s\n' node ;;
+  780:args=:nodehosted) printf '%s\n' 'node /path/to/claude/cli.js' ;;
+  780:args=:positional) printf '%s\n' 'node /srv/app/server.js /opt/claude/agent.json' ;;
+  780:args=:hookflag) printf '%s\n' 'node /srv/app/server.js --hooks /home/u/.claude/hooks.json' ;;
+  780:args=:pihome) printf '%s\n' 'node /home/pi/app.js' ;;
+  780:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=:*) printf '%s\n' 780 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  # A harness whose own executable names it may open the marker path: Claude
+  # Code's version-named native install through its install path, and an ordinary
+  # harness-named bin entry through its basename.
+  for shape in nativepath binentry; do
+    kind=$(FM_TEST_EXEC_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_kind 780' | tr -d '[:space:]')
+    [ "$kind" = claude ] || fail "$shape: a real Claude install typed as '$kind' rather than claude, so its own accept path is closed"
+  done
+  kind=$(FM_TEST_EXEC_SHAPE=codexname lib_eval "$fakebin" 'fm_harness_pid_kind 780' | tr -d '[:space:]')
+  [ "$kind" = codex ] || fail "a codex-named executable typed as '$kind' rather than codex"
+
+  # A harness named nowhere but in an argument list stays identified, and still
+  # gets no accept path. That is the fail-closed direction and it is deliberate:
+  # the alternative accepts a different harness that merely inherited the marker.
+  for shape in nodehosted mainthread positional; do
+    FM_TEST_EXEC_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 780' \
+      || fail "$shape: the shape this case is about stopped being identified at all, so it no longer tests the acceptance narrowing"
+    if kind=$(FM_TEST_EXEC_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_kind 780'); then
+      fail "$shape: a harness named only in an argument list was typed as '$kind', so an inherited launch marker could be believed for it"
+    fi
+  done
+
+  # A shape that is no harness at all names nothing either way.
+  for shape in hookflag pihome; do
+    if FM_TEST_EXEC_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_kind 780'; then
+      fail "$shape: an unrelated interpreted program was typed for the cohort's acceptance decision"
+    fi
+  done
+  pass "session-lock: cohort acceptance is typed from executable identity and never from an argument list"
 }
 
 test_harness_beyond_a_gap_never_owns_the_lock() {
@@ -859,14 +952,16 @@ SH
 # appended to a subshell copy of COHORT_PIDS and discarded, leaving a live
 # harness-named process behind after the suite exits. The holder pid is published
 # in COHORT_HOLDER_PID rather than printed.
-cross_harness_fixture() {  # <dir> <asker-bin>
+cross_harness_fixture() {  # <dir> <asker-bin> [<asker-script>]
   local dir=$1 asker_bin=$2 holder
+  local script=${3:-$dir/asker.sh}
   make_cohort_fixture "$dir"
+  mkdir -p "$(dirname -- "$script")"
   # The asker runs the check and then the REAL acquisition as its own children, so
   # the ancestry walk starts below it exactly as a hook's does. It is started from
   # this suite, whose shell is not a harness, so its harness ancestry is itself
   # alone - the shape the cross-harness ask actually has.
-  cat > "$dir/asker.sh" <<'SH'
+  cat > "$script" <<'SH'
 #!/usr/bin/env bash
 set -u
 printf '%s\n' "$$" > "$FM_FIX/asker-pid"
@@ -874,13 +969,13 @@ bash "$FM_FIX/check.sh"
 FM_HOME="$FM_FIX" "$FM_FIX_ROOT/bin/fm-lock.sh" > "$FM_FIX/lock.out" 2>&1
 printf '%s\n' "$?" > "$FM_FIX/lock.rc"
 SH
-  chmod +x "$dir/asker.sh"
+  chmod +x "$script"
   start_cohort_holder "$dir" HERDR_ENV=1 HERDR_PANE_ID=fixture-pane
   holder=$COHORT_HOLDER_PID
   printf '%s\n' "$holder" > "$dir/state/.lock"
   "${COHORT_ENV_ARGV[@]}" FM_FIX="$dir" FM_FIX_LIB="$LIB" FM_FIX_HOLDER="$holder" \
     FM_FIX_ROOT="$ROOT" CLAUDE_PID="$holder" HERDR_ENV=1 HERDR_PANE_ID=fixture-pane \
-    "$asker_bin" "$dir/asker.sh"
+    "$asker_bin" "$script"
 }
 
 test_a_different_harness_never_believes_an_inherited_launch_marker() {
@@ -912,6 +1007,46 @@ test_a_different_harness_never_believes_an_inherited_launch_marker() {
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$holder" ] || fail \
     "acquisition wrote the codex pid over a live claude holder: got $(cat "$dir/state/.lock"), holder $holder, asker $asker"
   pass "session-lock: a different harness never believes a launch marker it merely inherited"
+}
+
+# The third asker on the same fixture: a Claude session identified ONLY by its
+# script argument. It is a harness for the ancestry walk and it carries the same
+# inherited marker naming the same live holder, so the only thing refusing it is
+# that its own executable names no harness. This is the fail-closed half of the
+# acceptance narrowing, and the case below shows the identical fixture converging
+# once the asker's own executable does name it.
+test_a_session_named_only_in_argv_gets_no_accept_path() {
+  local dir holder asker
+  dir="$TMP_ROOT/cohort-argv-named"
+  cross_harness_fixture "$dir" "$NAMED_NODE" "$dir/claude/cli.js"
+  holder=$COHORT_HOLDER_PID
+  asker=$(tr -d '[:space:]' < "$dir/asker-pid")
+
+  # Divergence: the asker IS a resolved harness ancestry, the marker IS present
+  # and DOES name the holder, and co-location holds, so the refusal can only come
+  # from the acceptance typing.
+  assert_contains " $(cohort_field "$dir" ancestry)" " $asker " \
+    "the argv-named asker was not identified as a harness at all, so this case tests the ancestry walk rather than the acceptance typing"$'\n'"$(cohort_report "$dir")"
+  [ "$(cohort_field "$dir" launcher_self)" = "$holder" ] || fail \
+    "the fixture did not carry an inherited marker naming the holder, so its refusal proves nothing"$'\n'"$(cohort_report "$dir")"
+  [ "$(cohort_field "$dir" container_self)" = "$(cohort_field "$dir" container_holder)" ] || fail \
+    "the fixture lost the co-location this case AND-s the relationship with"$'\n'"$(cohort_report "$dir")"
+  [ "$(cohort_field "$dir" kind_holder)" = claude ] || fail \
+    "the fixture holder did not resolve as a claude harness"$'\n'"$(cohort_report "$dir")"
+  [ "$(printf '%s' "$(cohort_field "$dir" kind_self)" | tr -d '[:space:]')" = NONE ] || fail \
+    "the argv-named asker was typed for acceptance after all, so this fixture no longer reproduces the narrowing"$'\n'"$(cohort_report "$dir")"
+
+  [ "$(cohort_field "$dir" owned)" = no ] || fail \
+    "a session named only in its argument list opened the marker accept path"$'\n'"$(cohort_report "$dir")"
+  [ "$(cohort_field "$dir" competes)" = yes ] || fail \
+    "a live claude holder was not treated as a competing session by an argv-named asker"$'\n'"$(cohort_report "$dir")"
+  [ "$(tr -d '[:space:]' < "$dir/lock.rc")" = 1 ] || fail \
+    "acquisition did not refuse: rc=$(cat "$dir/lock.rc") out=$(cat "$dir/lock.out")"
+  assert_contains "$(cat "$dir/lock.out")" "another live firstmate session holds the lock" \
+    "acquisition refused for some reason other than the competing live session"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$holder" ] || fail \
+    "acquisition wrote the argv-named pid over a live claude holder: got $(cat "$dir/state/.lock"), holder $holder, asker $asker"
+  pass "session-lock: a session named only in its argument list gets no launch-marker accept path"
 }
 
 test_the_same_harness_still_converges_on_the_identical_fixture() {
@@ -1306,6 +1441,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_node_main_thread_identity_comes_only_from_the_script_path
 test_bare_interpreter_identity_stops_at_the_first_flag
+test_acceptance_typing_comes_only_from_executable_identity
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home
@@ -1314,6 +1450,7 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock
 test_rehosted_session_owns_the_lock_it_cannot_reach
 test_launching_session_owns_a_lock_naming_the_session_it_started
 test_a_different_harness_never_believes_an_inherited_launch_marker
+test_a_session_named_only_in_argv_gets_no_accept_path
 test_the_same_harness_still_converges_on_the_identical_fixture
 test_colocated_session_without_a_launch_relationship_is_refused
 test_related_session_in_another_container_is_refused

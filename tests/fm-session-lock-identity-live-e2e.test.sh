@@ -147,6 +147,7 @@ SKIPPED=
 UNEXERCISED=
 MARKERS=
 KINDS=
+TYPED=0
 
 # Every primary-capable adapter this repo has verified. muse is crewmate-only and
 # never holds a home's session lock, so it is deliberately out of scope here.
@@ -236,43 +237,57 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor; do
     "SESSION-LOCK IDENTITY DRIFT: a resumed $harness $version did not go back to blocking acquisition, so a live session of this harness would lose its own home."
 
   # The cross-harness refusal rests on one input this guard is the only thing that
-  # can check against a real release: which harness the classifier says this
-  # process IS. A launch marker is consulted only when the asking session and the
-  # holder are both the harness that row was verified for, so a release that
-  # reports the wrong kind - or two releases that report the SAME kind - would
-  # silently reopen the path where one harness believes another's inherited
-  # marker. The refusal decision itself is pinned portably in
-  # tests/fm-session-lock-ancestry.test.sh; what needs a real release is this.
+  # can check against a real release: which harness this release's EXECUTABLE
+  # IDENTITY names. A launch marker is consulted only when the asking session and
+  # the holder are both the harness that row was verified for, so two releases
+  # that answer with the SAME kind would reopen the path where one harness
+  # believes another's inherited marker. The refusal decision itself is pinned
+  # portably in tests/fm-session-lock-ancestry.test.sh; what needs a real release
+  # is this.
+  #
+  # An empty answer is not drift. Acceptance typing deliberately reads only the
+  # command name and argv[0], so a release whose harness name appears nowhere but
+  # in its argument list is identified for ancestry and liveness and still has no
+  # accept path, which is the fail-closed outcome the library records as a limit.
+  # Report it, because that is the observation a later fix would need.
   kind=$(probe "fm_harness_pid_kind $pid" 2>/dev/null | tr -d '[:space:]')
-  [ -n "$kind" ] || fail \
-    "SESSION-LOCK IDENTITY DRIFT: $harness $version is identified as a harness but the classifier cannot name WHICH harness it is, so its launch-marker scoping cannot be applied. Observed process name '$comm'; observed argv '$args'."
-  # A wrapper legitimately reports its own verified name rather than the label
-  # this loop launched it under - Pi's signed wrapper is exactly that - so a
-  # mismatch here is reported rather than failed. What must hold is that two
-  # DIFFERENT harnesses do not answer with the same kind, because then either
-  # would believe the other's inherited marker.
-  [ "$kind" = "$harness" ] || \
-    note "$harness $version reports harness kind '$kind' rather than '$harness', which is what its launch-marker scoping will use"
-  conflict=
-  for seen in $KINDS; do
-    [ "${seen#*:}" = "$kind" ] || continue
-    # pi and pi-signed are one harness with one engine pid, so they are allowed to
-    # answer alike; any other repeat is two harnesses that cannot be told apart.
-    case "${seen%%:*} $harness" in
-      "pi pi-signed"|"pi-signed pi") continue ;;
-    esac
-    conflict=${seen%%:*}
-    break
-  done
-  [ -z "$conflict" ] || fail \
-    "SESSION-LOCK IDENTITY DRIFT: $harness $version reports the same harness kind '$kind' as $conflict, so the two cannot be told apart and either would believe a launch marker the other exported. Observed process name '$comm'; observed argv '$args'."
-  KINDS="$KINDS $harness:$kind"
+  if [ -z "$kind" ]; then
+    note "$harness $version: executable identity names no harness, so the launch-marker accept path stays closed for it and its session-lock verdict is decided by process ancestry alone"
+  else
+    # A wrapper legitimately reports its own verified name rather than the label
+    # this loop launched it under - Pi's signed wrapper is exactly that - so a
+    # mismatch here is reported rather than failed. What must hold is that two
+    # DIFFERENT harnesses do not answer with the same kind, because then either
+    # would believe the other's inherited marker.
+    [ "$kind" = "$harness" ] || \
+      note "$harness $version reports harness kind '$kind' rather than '$harness', which is what its launch-marker scoping will use"
+    conflict=
+    for seen in $KINDS; do
+      [ "${seen#*:}" = "$kind" ] || continue
+      # pi and pi-signed are one harness with one engine pid, so they are allowed
+      # to answer alike; any other repeat is two harnesses that cannot be told
+      # apart.
+      case "${seen%%:*} $harness" in
+        "pi pi-signed"|"pi-signed pi") continue ;;
+      esac
+      conflict=${seen%%:*}
+      break
+    done
+    [ -z "$conflict" ] || fail \
+      "SESSION-LOCK IDENTITY DRIFT: $harness $version reports the same harness kind '$kind' as $conflict, so the two cannot be told apart and either would believe a launch marker the other exported. Observed process name '$comm'; observed argv '$args'."
+    KINDS="$KINDS $harness:$kind"
+    TYPED=$((TYPED + 1))
+  fi
 
+  # The raw observation, recorded for every installed harness rather than only on
+  # failure, because a shape this file's rules do not yet identify is exactly the
+  # evidence a later fix needs and inference is not allowed to stand in for it.
+  note "$harness $version: comm='$comm' argv='$args' acceptance-kind='${kind:-none}'"
   if marker=$(descendant_marker "$pid" "$harness"); then
     MARKERS="$MARKERS $harness=$marker"
-    note "$harness $version: comm='$comm', a descendant carries this harness's own launch marker naming pid $marker"
+    note "$harness $version: a descendant carries this harness's own launch marker naming pid $marker"
   else
-    note "$harness $version: comm='$comm', no descendant of a bare launch carried a launch marker verified for $harness"
+    note "$harness $version: no descendant of a bare launch carried a launch marker verified for $harness"
   fi
 
   "$REAL_TMUX" -L "$SOCKET" kill-window -t "identity:$harness" >/dev/null 2>&1 || true
@@ -283,12 +298,12 @@ done
 [ "$CHECKED" -gt 0 ] || fail \
   "no verified harness was exercised here, so this run proved nothing; install at least one harness that stays running in a bare pty launch before trusting a pass"
 
-# Distinctness needs two kinds to compare, so say plainly when only one was
-# available rather than letting a one-harness machine read as having checked it.
-if [ "$CHECKED" -ge 2 ]; then
-  pass "session-lock identity: the $CHECKED exercised harnesses each report their own distinct harness kind, so neither can believe the other's inherited launch marker"
+# Distinctness needs two acceptance kinds to compare, so say plainly when fewer
+# were available rather than letting that read as having checked it.
+if [ "$TYPED" -ge 2 ]; then
+  pass "session-lock identity: the $TYPED exercised harnesses that name themselves by executable identity each report a distinct harness kind, so neither can believe the other's inherited launch marker"
 else
-  note "unchecked: the cross-harness kind distinctness that scopes launch markers needs two exercised harnesses, and only $CHECKED was exercised here (kinds observed:$KINDS)"
+  note "unchecked: the cross-harness kind distinctness that scopes launch markers needs two harnesses that name themselves by executable identity, and only $TYPED did here (kinds observed:$KINDS)"
 fi
 
 [ -z "$SKIPPED" ] || note "unverified on this machine (not installed):$SKIPPED"
