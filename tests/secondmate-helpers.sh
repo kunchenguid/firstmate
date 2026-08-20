@@ -14,7 +14,10 @@
 # FM_FAKE_TMUX_WINDOW, capture-pane echoes FM_FAKE_TMUX_CAPTURE) plus a fake
 # treehouse (durable lease of FM_FAKE_TREEHOUSE_HOME, recording the lease holder
 # to FM_FAKE_TREEHOUSE_LEASE_FILE; `return` removes the target and lease unless
-# FM_FAKE_TREEHOUSE_RETURN_FAIL is set). Echoes the fakebin dir.
+# FM_FAKE_TREEHOUSE_RETURN_FAIL is set). Setting FM_FAKE_TREEHOUSE_MANAGED makes
+# `return` match its managed inventory by string the way the real treehouse does,
+# accepting only that exact spelling and refusing any other spelling of the same
+# directory in treehouse's own wording. Echoes the fakebin dir.
 make_fake_tmux() {
   local dir=$1 fakebin capture
   fakebin=$(fm_fakebin "$dir")
@@ -88,6 +91,10 @@ case "${1:-}" in
       shift
     done
     [ -z "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-}" ] || exit 17
+    if [ -n "${FM_FAKE_TREEHOUSE_MANAGED:-}" ] && [ "$target" != "$FM_FAKE_TREEHOUSE_MANAGED" ]; then
+      printf 'worktree %s is not managed by treehouse\n' "$target" >&2
+      exit 1
+    fi
     [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && rm -f "$FM_FAKE_TREEHOUSE_LEASE_FILE"
     [ -n "$target" ] && rm -rf -- "$target"
     exit 0

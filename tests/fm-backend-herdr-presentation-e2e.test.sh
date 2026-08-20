@@ -29,15 +29,15 @@ REAL_TREEHOUSE=$(command -v treehouse)
 # That difference is a real product gap tracked as its own task. Skipping keeps
 # it visible rather than adapting these fixtures to whatever the local release
 # happens to do, which would print a green tick over a live defect.
-# bin/fm-install-herdr.sh stays the single owner of the pin, so read the number
-# from there instead of repeating it here. An unreadable pin or an unreadable
-# installed version is a loud failure and never a silent skip, because a skip
-# nobody can trust would quietly disable this whole lane. The required Herdr CI
-# lane also asserts the pin before it runs any suite, so a skip here cannot hide
-# a mispinned runner.
-HERDR_SUITE_PIN=$(sed -n 's/^FM_HERDR_CI_VERSION=\([0-9][0-9.]*\)$/\1/p' "$ROOT/bin/fm-install-herdr.sh" | head -1)
+# bin/fm-install-herdr.sh stays the single owner of the pin, so ask it for the
+# number through its --required-version interface instead of repeating it here or
+# reading its source. An unreadable pin or an unreadable installed version is a
+# loud failure and never a silent skip, because a skip nobody can trust would
+# quietly disable this whole lane. The required Herdr CI lane also asserts the pin
+# before it runs any suite, so a skip here cannot hide a mispinned runner.
+HERDR_SUITE_PIN=$("$ROOT/bin/fm-install-herdr.sh" --required-version 2>/dev/null) || HERDR_SUITE_PIN=
 [ -n "$HERDR_SUITE_PIN" ] \
-  || { echo "not ok - could not read the exact Herdr pin from bin/fm-install-herdr.sh" >&2; exit 1; }
+  || { echo "not ok - could not read the exact Herdr pin from bin/fm-install-herdr.sh --required-version" >&2; exit 1; }
 HERDR_SUITE_VERSION=$("$REAL_HERDR" --version 2>/dev/null | awk '{print $2; exit}')
 [ -n "$HERDR_SUITE_VERSION" ] \
   || { echo "not ok - could not read the installed Herdr version from $REAL_HERDR" >&2; exit 1; }

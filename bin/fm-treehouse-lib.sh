@@ -41,15 +41,23 @@
 #       Fails and prints nothing when <recorded-path> is not an existing
 #       directory.
 #
+#   fm_treehouse_is_unmanaged_refusal <output>
+#       True when the output is treehouse refusing a path only because that exact
+#       spelling is absent from its managed inventory. That is the one failure an
+#       alternative spelling explains away; every other failure says something
+#       real about the worktree and must reach the operator.
+#
 #   fm_treehouse_return_force <cd-dir> <recorded-path> [treehouse-bin]
 #       Run `treehouse return --force` from <cd-dir> (empty means the current
 #       directory), trying each spelling until one is accepted, and print the
 #       accepted attempt's output. On total failure returns 1 and reports the
 #       first attempt's output, the one describing the caller's own recorded
-#       path; an intermediate spelling's refusal is dropped because it describes
-#       a path the caller never recorded. [treehouse-bin] defaults to
-#       `treehouse` and exists for a caller that must bypass a PATH wrapper,
-#       such as a test with an instrumented fake.
+#       path, as the headline, followed by any later attempt's output that is not
+#       an unmanaged-path refusal. A later spelling's own refusal is dropped
+#       because it describes a path the caller never recorded, but a later
+#       spelling's genuinely different failure is the real cause and is kept.
+#       [treehouse-bin] defaults to `treehouse` and exists for a caller that must
+#       bypass a PATH wrapper, such as a test with an instrumented fake.
 set -u
 
 fm_treehouse_physical_dir() { # <path>
@@ -93,9 +101,13 @@ $candidates
 EOF
 }
 
+fm_treehouse_is_unmanaged_refusal() { # <output>
+  printf '%s\n' "${1:-}" | grep -Fq 'is not managed by treehouse'
+}
+
 fm_treehouse_return_force() { # <cd-dir> <recorded-path> [treehouse-bin]
   local cd_dir=${1:-} recorded=${2:-} bin=${3:-treehouse}
-  local spellings spelling out first_out='' first_seen=0
+  local spellings spelling out first_out='' first_seen=0 other_out=''
 
   [ -n "$recorded" ] || return 1
   [ -n "$cd_dir" ] || cd_dir=.
@@ -112,11 +124,14 @@ fm_treehouse_return_force() { # <cd-dir> <recorded-path> [treehouse-bin]
     if [ "$first_seen" -eq 0 ]; then
       first_out=$out
       first_seen=1
+    elif [ -n "$out" ] && ! fm_treehouse_is_unmanaged_refusal "$out"; then
+      other_out="$other_out$out"$'\n'
     fi
   done <<EOF
 $spellings
 EOF
 
   [ -n "$first_out" ] && printf '%s\n' "$first_out" >&2
+  [ -n "$other_out" ] && printf '%s' "$other_out" >&2
   return 1
 }

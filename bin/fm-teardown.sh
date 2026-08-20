@@ -68,8 +68,10 @@
 # therefore tries each spelling that provably names the same directory, in the order
 # owned by bin/fm-treehouse-lib.sh, before spending the lock patience window below.
 # Only a spelling that resolves to the identical physical directory is ever tried, so
-# reconciliation can never return a different worktree, and a total failure still
-# reports the recorded path's own refusal rather than an alternative spelling's.
+# reconciliation can never return a different worktree. A total failure headlines the
+# recorded path's own refusal, then still reports any alternative spelling's failure
+# that is not merely an unmanaged-path refusal, so a real cause found under the
+# spelling treehouse does manage never hides behind the refusal of the one it does not.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -1081,7 +1083,7 @@ teardown_treehouse_note_spelling() { # <label> <used> <recorded>
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
   local out lock attempt=0 max_retries lock_desc
-  local recorded=$dir spelling first_out='' first_seen=0 lock_hit=0
+  local recorded=$dir spelling first_out='' first_seen=0 other_out='' lock_hit=0
 
   # Try every spelling that provably names this same directory before spending
   # the lock patience window on any one of them, because treehouse matches its
@@ -1103,6 +1105,8 @@ teardown_treehouse_return() {
     if [ "$first_seen" -eq 0 ]; then
       first_out=$out
       first_seen=1
+    elif [ -n "$out" ] && ! fm_treehouse_is_unmanaged_refusal "$out"; then
+      other_out="$other_out$out"$'\n'
     fi
     if treehouse_return_is_index_lock_error "$out"; then
       teardown_treehouse_note_spelling "$label" "$spelling" "$recorded"
@@ -1115,9 +1119,12 @@ $(fm_treehouse_path_spellings "$recorded" || printf '%s\n' "$recorded")
 EOF
 
   if [ "$lock_hit" -eq 0 ]; then
-    # Report the recorded path's own failure; a refusal aimed at an alternative
-    # spelling describes a path the caller never recorded.
+    # Headline the recorded path's own failure, since a refusal aimed at an
+    # alternative spelling describes a path the caller never recorded. Anything an
+    # alternative spelling failed with for a different reason is the real cause,
+    # so keep it too rather than pointing the operator at a spelling mismatch.
     [ -n "$first_out" ] && printf '%s\n' "$first_out" >&2
+    [ -n "$other_out" ] && printf '%s' "$other_out" >&2
     return 1
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2

@@ -324,6 +324,61 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   pass "home seeding returns rejected acquired homes through treehouse"
 }
 
+# The seed records the acquired home by its resolved physical path while treehouse
+# holds the spelling its as-written root produces, so on a host whose home is a
+# symlink the two name one directory and differ as strings. Treehouse matches its
+# inventory by string, so without reconciliation the rollback return is refused as
+# unmanaged and the durable lease leaks silently behind a warning. The fake here
+# manages only the $HOME-rooted spelling, so a return that lands proves the
+# rollback reconciled the two rather than that the fake accepts anything.
+test_home_seed_rollback_return_reconciles_symlinked_home_spelling() {
+  local home pool pool_phys home_link acquired acquired_abs managed
+  local fakebin log lease err returns
+  home="$TMP_ROOT/dash-spelling-home"
+  pool="$TMP_ROOT/dash-spelling-pool"
+  err="$TMP_ROOT/dash-spelling.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state" "$pool"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-spelling-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+
+  # A symlinked home whose target holds the pool, the shape of this host. The link
+  # points at a sibling directory so the fixture holds no self-referential loop.
+  pool_phys=$(cd "$pool" && pwd -P)
+  home_link="$TMP_ROOT/dash-spelling-home-link"
+  ln -s "$pool_phys" "$home_link"
+  acquired="$pool_phys/dash-spelling-acquired-home"
+  git clone --quiet "$ROOT" "$acquired"
+  acquired_abs=$(cd "$acquired" && pwd -P)
+  managed="$home_link/dash-spelling-acquired-home"
+  [ "$managed" != "$acquired_abs" ] \
+    || fail "precondition: the fixture's two spellings must differ as strings"
+  printf 'other\n' > "$acquired/.fm-secondmate-home"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/dash-spelling-fake")
+  log="$TMP_ROOT/dash-spelling-fake/tmux.log"
+  lease="$TMP_ROOT/dash-spelling-fake/lease"
+
+  if PATH="$fakebin:$PATH" HOME="$home_link" FM_HOME="$home" \
+    FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" FM_FAKE_TREEHOUSE_MANAGED="$managed" \
+    FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
+    fail "seed reused an acquired home marked for another secondmate"
+  fi
+  grep -F 'already marked for other' "$err" >/dev/null \
+    || fail "seed did not explain acquired marked-home rejection"
+  grep -F 'lease may still be held' "$err" >/dev/null \
+    && fail "seed rollback reported a leaked lease instead of reconciling the two spellings"
+  returns=$(grep -F 'treehouse return --force' "$log" | sed 's/^treehouse return --force //')
+  [ "$(printf '%s\n' "$returns" | sed -n 1p)" = "$acquired_abs" ] \
+    || fail "seed rollback did not try its own recorded spelling first"
+  [ "$(printf '%s\n' "$returns" | sed -n 2p)" = "$managed" ] \
+    || fail "seed rollback did not try treehouse's own \$HOME-rooted spelling next"
+  [ ! -f "$lease" ] \
+    || fail "seed rollback left the durable lease held after the reconciled return"
+  pass "home seed rollback returns a physically recorded home by treehouse's own \$HOME-rooted spelling"
+}
+
 test_home_seed_warns_when_acquired_home_return_fails() {
   local home acquired acquired_abs fakebin log err lease
   home="$TMP_ROOT/dash-return-fail-home"
@@ -2964,6 +3019,7 @@ test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
 test_home_seed_uses_treehouse_acquired_home
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
+test_home_seed_rollback_return_reconciles_symlinked_home_spelling
 test_home_seed_warns_when_acquired_home_return_fails
 test_home_seed_does_not_return_unsafe_acquired_home
 test_home_seed_rolls_back_failed_clone

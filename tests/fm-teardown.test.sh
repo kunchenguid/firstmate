@@ -57,6 +57,7 @@
 # mimic that string matching instead of accepting any path.
 #   (z)  recorded physical path, pool holds the $HOME spelling -> ALLOW  (reconciled)
 #   (aa) no pool spelling manages the worktree at all          -> REFUSE as recorded
+#   (ab) managed spelling fails for its own reason             -> REFUSE, real cause kept
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -379,7 +380,9 @@ SH
 # (unset means it manages nothing) and refuses every other spelling of the same
 # directory in treehouse's own wording. Each requested path is appended to
 # FM_FAKE_TREEHOUSE_LOG so a test can assert which spellings were tried, and in
-# what order.
+# what order. FM_FAKE_TREEHOUSE_MANAGED_FAIL makes the managed spelling fail with
+# that text instead of succeeding, the shape of a worktree treehouse does manage
+# but cannot return for a reason of its own.
 add_pool_spelling_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
@@ -395,6 +398,10 @@ if [ "${1:-}" = return ]; then
   done
   [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$wt" >> "$FM_FAKE_TREEHOUSE_LOG"
   if [ -n "${FM_FAKE_TREEHOUSE_MANAGED:-}" ] && [ "$wt" = "$FM_FAKE_TREEHOUSE_MANAGED" ]; then
+    if [ -n "${FM_FAKE_TREEHOUSE_MANAGED_FAIL:-}" ]; then
+      echo "$FM_FAKE_TREEHOUSE_MANAGED_FAIL" >&2
+      exit 1
+    fi
     echo "Worktree returned to pool."
     exit 0
   fi
@@ -2185,6 +2192,38 @@ test_unmanaged_worktree_return_reports_the_recorded_path() {
   pass "a genuinely unmanaged worktree still fails, reported as the recorded path"
 }
 
+test_managed_spelling_real_failure_is_not_hidden_by_the_recorded_refusal() {
+  local case_dir rc home_link recorded managed
+  case_dir=$(make_case managed-spelling-real-failure)
+  home_link=$(make_symlinked_home "$case_dir" managed-spelling-real-failure)
+  recorded="$(cd "$case_dir" && pwd -P)/wt"
+  managed="$home_link/wt"
+
+  write_physical_meta "$case_dir"
+  land_shippable_commit "$case_dir"
+  add_pool_spelling_treehouse "$case_dir"
+
+  set +e
+  # The recorded spelling is refused as unmanaged, then the spelling treehouse does
+  # manage fails for a reason of its own. That second text is the actual cause.
+  FM_FAKE_TREEHOUSE_MANAGED="$managed" \
+  FM_FAKE_TREEHOUSE_MANAGED_FAIL='fatal: could not reset pool worktree' \
+  FM_FAKE_TREEHOUSE_LOG='' \
+    run_teardown --home "$home_link" "$case_dir" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "managed-spelling-real-failure: a failing return must still fail teardown"
+  assert_grep "fatal: could not reset pool worktree" "$case_dir/stderr" \
+    "managed-spelling-real-failure: the real cause under the managed spelling was swallowed by the recorded path's refusal"
+  assert_grep "worktree $recorded is not managed by treehouse" "$case_dir/stderr" \
+    "managed-spelling-real-failure: the recorded path's own refusal must stay the headline"
+  assert_not_contains "$(cat "$case_dir/stderr")" "worktree $managed is not managed" \
+    "managed-spelling-real-failure: reported an alternative spelling's own refusal"
+  pass "an alternative spelling's genuinely different failure survives the recorded path's refusal"
+}
+
 test_parked_own_run_is_aborted_before_teardown() {
   local case_dir rc head
   case_dir=$(make_case parked-run-abort)
@@ -2769,6 +2808,7 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_symlinked_home_pool_spelling_is_reconciled_on_return
 test_unmanaged_worktree_return_reports_the_recorded_path
+test_managed_spelling_real_failure_is_not_hidden_by_the_recorded_refusal
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
