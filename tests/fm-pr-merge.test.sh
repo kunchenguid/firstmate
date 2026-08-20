@@ -46,7 +46,7 @@ MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 
 # Build a fresh sandbox for one test case: a state dir with a task meta and a
-# fakebin with a gh-axi mock that records how it was invoked. Echoes the case dir.
+# fakebin with gh and gh-axi mocks that record how they were invoked. Echoes the case dir.
 make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
@@ -75,6 +75,7 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
@@ -235,6 +236,7 @@ test_records_pr_and_head_before_merging() {
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
   : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
@@ -248,9 +250,9 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr= was not recorded"
   assert_grep 'pr_head=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
     "records-before-merge: pr_head= was not recorded"
-  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-    || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
-  pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+  grep -qxF 'pr merge 9 --repo example/repo --squash --match-head-commit deadbeefcafefeed0000000000000000deadbeef' "$case_dir/gh.log" \
+    || fail "records-before-merge: guarded gh pr merge was not invoked with the recorded head"
+  pass "fm-pr-merge records pr= and pr_head= before guarded GitHub merge"
 }
 
 test_records_expected_head_without_worktree() {
@@ -258,6 +260,7 @@ test_records_expected_head_without_worktree() {
   case_dir=$(make_case records-without-worktree)
   add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
   : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/11 \
@@ -269,9 +272,57 @@ test_records_expected_head_without_worktree() {
   expect_code 0 "$rc" "records-without-worktree: fm-pr-merge should succeed"
   assert_grep 'pr_head=cccccccccccccccccccccccccccccccccccccccc' "$case_dir/state/task-x1.meta" \
     "records-without-worktree: pr_head= was not recorded"
-  grep -qxF 'pr merge 11 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-    || fail "records-without-worktree: eligible PR was not merged"
+  grep -qxF 'pr merge 11 --repo example/repo --squash --match-head-commit cccccccccccccccccccccccccccccccccccccccc' "$case_dir/gh.log" \
+    || fail "records-without-worktree: eligible PR was not merged with its expected head"
   pass "fm-pr-merge records and verifies the head without a local worktree"
+}
+
+test_expected_head_reaches_merge_boundary() {
+  local case_dir rc
+  case_dir=$(make_case merge-boundary-head)
+  mkdir -p "$case_dir/wt"
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    exit 0
+    ;;
+  "pr merge")
+    printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+    case " $* " in
+      *' --match-head-commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa '*)
+        echo 'error: head changed before merge' >&2
+        exit 1
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/12 \
+    --expected-head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merge-boundary-head: GitHub should reject a head changed after recording"
+  grep -qxF 'pr merge 12 --repo example/repo --squash --match-head-commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$case_dir/gh.log" \
+    || fail "merge-boundary-head: expected head did not reach GitHub merge"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "merge-boundary-head: unguarded gh-axi merge was invoked"
+  pass "fm-pr-merge enforces the expected head at GitHub's merge boundary"
 }
 
 test_expected_head_refuses_stale_pr() {
@@ -856,6 +907,7 @@ test_github_still_forwards_sha_arg() {
 
 test_records_pr_and_head_before_merging
 test_records_expected_head_without_worktree
+test_expected_head_reaches_merge_boundary
 test_expected_head_refuses_stale_pr
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded

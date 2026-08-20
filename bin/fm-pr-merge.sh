@@ -261,7 +261,12 @@ case "$PROVIDER" in
     if ! caller_has_merge_method "$@"; then
       merge_args=(--squash)
     fi
-    gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+    head_args=()
+    if [ -n "$EXPECTED_HEAD" ]; then
+      head_args=(--match-head-commit "$EXPECTED_HEAD")
+    fi
+    gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+      "${merge_args[@]+"${merge_args[@]}"}" "$@" "${head_args[@]+"${head_args[@]}"}"
     ;;
   gitlab)
     gitlab_verify_mergeable || exit 1
