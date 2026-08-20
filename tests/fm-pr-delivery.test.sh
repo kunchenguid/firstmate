@@ -168,6 +168,60 @@ test_unrecorded_branch_cannot_impersonate_task() {
   pass "unrecorded branches cannot impersonate delivery tasks"
 }
 
+test_closed_pr_state_retires_before_reopen() {
+  local home fixture out delivered
+  home=$(make_world reopen)
+  fixture="$TMP_ROOT/fix-reopen"
+  setup_project "$home" "$fixture"
+  write_open "$fixture" acme/alpha '[{"number":32,"url":"https://github.com/acme/alpha/pull/32","headRefName":"fm/reopen32","headRefOid":"reopen","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/alpha 32 '{"number":32,"url":"https://github.com/acme/alpha/pull/32","headRefName":"fm/reopen32","headRefOid":"reopen","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  fm_write_meta "$home/state/reopen32.meta" \
+    'window=fm-reopen32' "worktree=$home/projects/reopen32" 'project=alpha' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/32'
+
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
+    || fail "initial eligible PR did not wake delivery"
+  delivered=$(find "$home/state/pr-delivery/delivered" -type f -name '*.delivered' -print -quit)
+  [ -n "$delivered" ] || fail "initial delivery did not persist its fingerprint"
+  write_open "$fixture" acme/alpha '[]'
+  run_delivery "$home" "$fixture" _scan-locked 1 >/dev/null
+  [ ! -e "$delivered" ] || fail "closed PR retained its delivered fingerprint"
+  write_open "$fixture" acme/alpha '[{"number":32,"url":"https://github.com/acme/alpha/pull/32","headRefName":"fm/reopen32","headRefOid":"reopen","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
+    || fail "reopened unchanged PR did not wake delivery"
+  pass "closed PR state retires before unchanged reopen"
+}
+
+test_ambiguous_pr_task_binding_holds_delivery() {
+  local home fixture out
+  home=$(make_world ambiguous-task)
+  fixture="$TMP_ROOT/fix-ambiguous-task"
+  setup_project "$home" "$fixture"
+  write_open "$fixture" acme/alpha '[{"number":33,"url":"https://github.com/acme/alpha/pull/33","headRefName":"fm/ambiguous33","headRefOid":"ambiguous","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/alpha 33 '{"number":33,"url":"https://github.com/acme/alpha/pull/33","headRefName":"fm/ambiguous33","headRefOid":"ambiguous","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  fm_write_meta "$home/state/a-stale.meta" \
+    'window=fm-a-stale' "worktree=$home/projects/a-stale" 'project=alpha' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/33'
+  fm_write_meta "$home/state/z-current.meta" \
+    'window=fm-z-current' "worktree=$home/projects/z-current" 'project=alpha' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' \
+    'pr=https://github.com/acme/alpha/pull/33'
+
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  [ -z "$out" ] || fail "ambiguous PR task metadata became merge-eligible"
+  run_delivery "$home" "$fixture" show | grep -Fq 'ambiguous-task' \
+    || fail "ambiguous PR task metadata did not produce a hold"
+  rm "$home/state/a-stale.meta"
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
+    || fail "single remaining task did not clear the ambiguity hold"
+  pass "ambiguous PR task metadata holds delivery"
+}
+
 test_review_issue_then_clearance() {
   local home fixture out
   home=$(make_world review)
@@ -739,6 +793,8 @@ test_post_wake_commit_failure_preserves_observation() {
 test_discovery_without_secondmate
 test_accelerate_refuses_symlinked_delivery_state
 test_unrecorded_branch_cannot_impersonate_task
+test_closed_pr_state_retires_before_reopen
+test_ambiguous_pr_task_binding_holds_delivery
 test_review_issue_then_clearance
 test_migration_hold_clears
 test_base_branch_race

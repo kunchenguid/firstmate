@@ -240,31 +240,29 @@ EOF
 }
 
 task_for_pr_url() { # <url> <project>
-  local url=$1 project=$2 line task
+  local url=$1 project=$2 line task found=
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
       "$url"$'\t'*)
         task=${line#*$'\t'}
         if task_matches_project "$task" "$project"; then
-          printf '%s\n' "$task"
-          return 0
+          [ -z "$found" ] || return 2
+          found=$task
         fi
         ;;
     esac
   done <<EOF
 ${TASK_BY_PR:-}
 EOF
-  return 1
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
 }
 
 match_task() { # <url> <project>
   local url=$1 project=$2 task
-  if task=$(task_for_pr_url "$url" "$project"); then
-    printf '%s\n' "$task"
-    return 0
-  fi
-  return 1
+  task=$(task_for_pr_url "$url" "$project") || return $?
+  printf '%s\n' "$task"
 }
 
 task_hold_reason() { # <task-id>
@@ -396,8 +394,8 @@ classify_pr_json() { # <repo> <pr-json-object>
     }'
 }
 
-reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_detail
-  local classified=$1 task=${2:-}
+reason_for_pr() { # <classified-json> <task-id-or-empty> <task-match-status> -> reason_code reason_detail
+  local classified=$1 task=${2:-} task_status=${3:-0}
   local state checks review mergeable unresolved review_requests conversation_requests reviews_truncated comments_truncated evidence_changed hold
   state=$(printf '%s' "$classified" | jq -r '.state')
   checks=$(printf '%s' "$classified" | jq -r '.checks')
@@ -437,6 +435,11 @@ reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_d
     REASON_DETAIL='PR evidence changed during capture; defer to next cycle'
     return 0
   fi
+  if [ "$task_status" -eq 2 ]; then
+    REASON_CODE='ambiguous-task'
+    REASON_DETAIL='multiple recorded task metadata files match this PR'
+    return 0
+  fi
   if [ -z "$task" ]; then
     REASON_CODE='no-task'
     REASON_DETAIL='no recorded pr= meta match'
@@ -471,6 +474,49 @@ delivered_path() { # <repo> <number>
 accelerate_path() { # <url>
   local url=$1
   printf '%s/%s.marker\n' "$ACCELERATE_DIR" "$(sha256_text "$url")"
+}
+
+pr_is_listed() { # <number> <numbers...>
+  local number=$1 listed
+  shift
+  for listed in "$@"; do
+    [ "$listed" = "$number" ] && return 0
+  done
+  return 1
+}
+
+retire_absent_pr_state() { # <repo> <open-numbers...>
+  local repo=$1 key path base number marker marker_url retained= line row_repo row_number
+  shift
+  key=$(repo_state_key "$repo")
+  for path in "$FINGERPRINT_DIR/$key-"*.fp "$DELIVERED_DIR/$key-"*.delivered; do
+    [ -f "$path" ] && [ ! -L "$path" ] || continue
+    base=${path##*/}
+    number=${base#"$key-"}
+    number=${number%%.*}
+    pr_is_listed "$number" "$@" || rm -f "$path" || return 1
+  done
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    row_repo=${line%%$'\t'*}
+    row_number=${line#*$'\t'}
+    row_number=${row_number%%$'\t'*}
+    if [ "$row_repo" = "$repo" ] && ! pr_is_listed "$row_number" "$@"; then
+      continue
+    fi
+    retained="${retained}${line}"$'\n'
+  done <<EOF
+${QUEUE_ROWS:-}
+EOF
+  QUEUE_ROWS=$retained
+  for marker in "$ACCELERATE_DIR"/*.marker; do
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    marker_url=$(read_fingerprint "$marker" 2>/dev/null || true)
+    fm_pr_url_parse "$marker_url" || continue
+    [ "$FM_PR_PROVIDER" = github ] || continue
+    [ "$FM_PR_OWNER/$FM_PR_REPO" = "$repo" ] || continue
+    pr_is_listed "$FM_PR_NUMBER" "$@" || rm -f "$marker" || return 1
+  done
 }
 
 pr_cursor_path() { # <repo>
@@ -635,14 +681,14 @@ write_blocked_queue() {
 
 process_pr_record() { # <repo> <project> <pr-json> <deadline> -> sets ACTIONABLE
   local repo=$1 project=$2 pr_json=$3 deadline=$4
-  local classified num url head task fp_path delivered marker_fp new_fp accel_path
+  local classified num url head task task_rc=0 fp_path delivered marker_fp new_fp accel_path
   [ "$(date +%s)" -lt "$deadline" ] || return 3
   classified=$(classify_pr_json "$repo" "$pr_json") || return 0
   num=$(printf '%s' "$classified" | jq -r '.number')
   url=$(printf '%s' "$classified" | jq -r '.url')
   head=$(printf '%s' "$classified" | jq -r '.head')
-  task=$(match_task "$url" "$project" 2>/dev/null || true)
-  reason_for_pr "$classified" "$task"
+  task=$(match_task "$url" "$project" 2>/dev/null) || task_rc=$?
+  reason_for_pr "$classified" "$task" "$task_rc"
   if [ "$REASON_CODE" = eligible ]; then
     queue_remove_row "$repo" "$num"
   else
@@ -717,6 +763,7 @@ scan_repo() { # <project> <repo> <deadline>
     write_pr_cursor "$repo" "$num" || return 1
     [ -z "${ACTIONABLE:-}" ] || return 0
   done
+  retire_absent_pr_state "$repo" "${numbers[@]}" || return 1
   return 0
 }
 
@@ -821,7 +868,7 @@ accelerate() { # <url>
     return 2
   }
   ensure_dirs || return 1
-  : > "$(accelerate_path "$url")"
+  write_fingerprint "$(accelerate_path "$url")" "$url"
 }
 
 mode=${1:-scan}
