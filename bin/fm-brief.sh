@@ -111,6 +111,7 @@ else
 fi
 if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
   STATE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
+  FM_STATE_OVERRIDE=$STATE
 else
   STATE="$FM_HOME/state"
 fi
@@ -204,6 +205,11 @@ else
   REPO=${POS[1]}
 fi
 
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-brief-lib.sh
+. "$SCRIPT_DIR/fm-brief-lib.sh"
+
 BRIEF="$DATA/$ID/brief.md"
 # A re-scaffold is a real need (a corrected base ref, a changed delivery mode), and
 # a bare refusal does not remove that need - it only pushes the operator into an
@@ -212,53 +218,54 @@ BRIEF="$DATA/$ID/brief.md"
 # governs, so the worker follows whichever copy it read last. --replace is the
 # supported path, and it archives the superseded brief instead of destroying the
 # filled-in task text that made hand-editing look safer than regenerating.
-if [ -e "$BRIEF" ] || [ -L "$BRIEF" ]; then
-  if [ -L "$BRIEF" ] || [ ! -f "$BRIEF" ]; then
-    echo "error: existing brief must be a regular file, not a symlink or other file type: $BRIEF" >&2
-    exit 1
-  fi
-  if [ "$REPLACE" -eq 0 ]; then
-    echo "error: $BRIEF already exists; pass --replace to regenerate it (the superseded brief is archived, never appended to)" >&2
-    exit 1
-  fi
-  n=1
-  while [ -e "$DATA/$ID/brief.superseded-$n.md" ] || [ -L "$DATA/$ID/brief.superseded-$n.md" ]; do n=$((n + 1)); done
-  ARCHIVED="$DATA/$ID/brief.superseded-$n.md"
-fi
 mkdir -p "$DATA/$ID"
 STAGE_DIR=$(mktemp -d "$DATA/$ID/.brief-stage.XXXXXX")
 STAGED="$STAGE_DIR/brief.md"
 ARCHIVE_STAGED=
+BRIEF_LOCK=$(fm_brief_publication_lock_path "$STATE" "$ID")
+BRIEF_LOCK_HELD=0
 
 cleanup_staged_brief() {
+  if [ "${BRIEF_LOCK_HELD:-0}" -eq 1 ]; then
+    BRIEF_LOCK_HELD=0
+    fm_lock_release "$BRIEF_LOCK"
+  fi
   [ -z "${STAGED:-}" ] || rm -f -- "$STAGED"
   [ -z "${ARCHIVE_STAGED:-}" ] || rm -f -- "$ARCHIVE_STAGED"
   [ -z "${STAGE_DIR:-}" ] || rmdir "$STAGE_DIR" 2>/dev/null || true
 }
 trap cleanup_staged_brief EXIT
 
-replace_staged_brief() {
-  case "${OSTYPE:-}" in
-    darwin*)
-      perl -e 'rename($ARGV[0], $ARGV[1]) or die "error: cannot replace $ARGV[1]: $!\n"' -- "$1" "$2" || return 1
-      ;;
-    linux*) mv -fT -- "$1" "$2" ;;
-    *) echo "error: unsupported platform for no-follow brief replacement: ${OSTYPE:-unknown}" >&2; return 1 ;;
-  esac
-}
-
 publish_brief() {
   local detail=$1
+  fm_lock_acquire_wait "$BRIEF_LOCK"
+  BRIEF_LOCK_HELD=1
+  ARCHIVED=
+  if [ -e "$BRIEF" ] || [ -L "$BRIEF" ]; then
+    if [ -L "$BRIEF" ] || [ ! -f "$BRIEF" ]; then
+      echo "error: existing brief must be a regular file, not a symlink or other file type: $BRIEF" >&2
+      return 1
+    fi
+    if [ "$REPLACE" -eq 0 ]; then
+      echo "error: $BRIEF already exists; pass --replace to regenerate it (the superseded brief is archived, never appended to)" >&2
+      return 1
+    fi
+    n=1
+    while [ -e "$DATA/$ID/brief.superseded-$n.md" ] || [ -L "$DATA/$ID/brief.superseded-$n.md" ]; do n=$((n + 1)); done
+    ARCHIVED="$DATA/$ID/brief.superseded-$n.md"
+  fi
   if [ -n "$ARCHIVED" ]; then
     ARCHIVE_STAGED="$STAGE_DIR/brief.superseded.md"
     cp -p -- "$BRIEF" "$ARCHIVE_STAGED"
-    replace_staged_brief "$ARCHIVE_STAGED" "$ARCHIVED"
+    fm_brief_replace_staged "$ARCHIVE_STAGED" "$ARCHIVED"
     ARCHIVE_STAGED=
   fi
-  replace_staged_brief "$STAGED" "$BRIEF"
+  fm_brief_replace_staged "$STAGED" "$BRIEF"
   STAGED=
   rmdir "$STAGE_DIR"
   STAGE_DIR=
+  BRIEF_LOCK_HELD=0
+  fm_lock_release "$BRIEF_LOCK"
   if [ -n "$ARCHIVED" ]; then
     echo "scaffolded: $BRIEF ($detail; replaced, superseded brief archived at $ARCHIVED)"
   else

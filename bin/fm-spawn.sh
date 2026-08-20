@@ -153,7 +153,7 @@
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
-#     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __BRIEF__    absolute path to the task's immutable launch-brief snapshot
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -244,6 +244,10 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-brief-lib.sh
+. "$SCRIPT_DIR/fm-brief-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
@@ -676,6 +680,8 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+BRIEF_SNAPSHOT=
+BRIEF_SNAPSHOT_RETAIN=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -786,6 +792,9 @@ spawn_abort_cleanup() {
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
+  fi
+  if [ "$BRIEF_SNAPSHOT_RETAIN" -ne 1 ] && [ -n "$BRIEF_SNAPSHOT" ]; then
+    rm -f -- "$BRIEF_SNAPSHOT" 2>/dev/null || true
   fi
   return "$status"
 }
@@ -1646,6 +1655,30 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+BRIEF_SOURCE=$BRIEF
+BRIEF_SNAPSHOT="$STATE/$ID.launch-brief.md"
+fm_brief_snapshot "$BRIEF_SOURCE" "$BRIEF_SNAPSHOT" || exit 1
+BRIEF=$BRIEF_SNAPSHOT
+
+duplicate_brief_recovery_guidance() {
+  if [ "$KIND" != secondmate ] || [ "$BRIEF_SOURCE" != "$PROJ_ABS/data/charter.md" ]; then
+    echo "regenerate it with bin/fm-brief.sh --replace (which archives the superseded brief) instead of appending a second copy" >&2
+    return
+  fi
+  if fm_secondmate_parent_record_parse "$PROJ_ABS/.fm-secondmate-parent"; then
+    case "$FM_SECONDMATE_PARENT_ROUTE" in
+      local)
+        echo "regenerate the parent charter with bin/fm-brief.sh --replace, then rerun bin/fm-home-seed.sh from the parent home to republish $PROJ_ABS/data/charter.md instead of appending a second copy" >&2
+        return
+        ;;
+      remote)
+        echo "regenerate the parent charter with bin/fm-brief.sh --replace, then rerun bin/fm-remote-home-seed.sh from the parent home to republish $PROJ_ABS/data/charter.md instead of appending a second copy" >&2
+        return
+        ;;
+    esac
+  fi
+  echo "regenerate the parent charter with bin/fm-brief.sh --replace, then republish $PROJ_ABS/data/charter.md with its route's bin/fm-home-seed.sh or bin/fm-remote-home-seed.sh instead of appending a second copy" >&2
+}
 
 # This guard is deliberately signature-based rather than refusing any repeated
 # heading. The duplication arose because bin/fm-brief.sh refused the re-scaffold,
@@ -1697,9 +1730,9 @@ DUP_SECTIONS=$(awk '
   }
 ' "$BRIEF" | sort | sed 's/^/  /')
 if [ -n "$DUP_SECTIONS" ]; then
-  echo "error: $BRIEF repeats these sections, so which copy governs is undefined:" >&2
+  echo "error: $BRIEF_SOURCE repeats these sections, so which copy governs is undefined:" >&2
   echo "$DUP_SECTIONS" >&2
-  echo "regenerate it with bin/fm-brief.sh --replace (which archives the superseded brief) instead of appending a second copy" >&2
+  duplicate_brief_recovery_guidance
   exit 1
 fi
 
@@ -1720,7 +1753,7 @@ if [ "$KIND" = ship ]; then
   PROJ_NAME=$(basename "$PROJ_ABS")
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_MODE" ]; then
-    echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
+    echo "warning: $BRIEF_SOURCE records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
   elif [ "$BRIEF_MODE" != "$MODE" ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
     exit 1
@@ -2149,6 +2182,7 @@ EOF
     ;;
 esac
 fi
+BRIEF_SNAPSHOT_RETAIN=1
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \

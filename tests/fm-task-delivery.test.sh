@@ -254,6 +254,57 @@ EOF
   pass "fm-spawn: legitimate task headings clear the scaffold-signature guard"
 }
 
+test_secondmate_duplicate_guidance_names_the_charter_publisher() {
+  local rec home proj fakebin route sm brief out status
+  rec=$(make_home secondmate-duplicate-guidance)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  for route in local remote; do
+    sm="$TMP_ROOT/secondmate-duplicate-guidance-$route"
+    mkdir -p "$sm/bin" "$sm/data" "$sm/state" "$sm/config" "$sm/projects"
+    printf '# Firstmate\n' > "$sm/AGENTS.md"
+    printf '%s\n' "delivery-charter-$route" > "$sm/.fm-secondmate-home"
+    if [ "$route" = local ]; then
+      printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" \
+        > "$sm/.fm-secondmate-parent"
+    else
+      printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=test-host\n' \
+        > "$sm/.fm-secondmate-parent"
+    fi
+    brief="$sm/data/charter.md"
+    cat > "$brief" <<'EOF'
+# Charter
+Original charter.
+
+# Operating model
+Original operating model.
+
+# Charter
+Appended charter.
+
+# Operating model
+Appended operating model.
+EOF
+
+    out=$(FM_SKIP_SECONDMATE_INHERIT=1 run_spawn "$home" "$fakebin" \
+      "delivery-charter-$route" "$sm" claude --secondmate)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$route secondmate with a duplicated charter should exit non-zero"
+    assert_contains "$out" "data/charter.md" \
+      "$route secondmate recovery did not name the charter actually launched"
+    case "$route" in
+      local)
+        assert_contains "$out" "bin/fm-home-seed.sh" \
+          "local secondmate recovery did not name the local charter publisher" ;;
+      remote)
+        assert_contains "$out" "bin/fm-remote-home-seed.sh" \
+          "remote secondmate recovery did not name the remote charter publisher" ;;
+    esac
+  done
+  pass "fm-spawn: duplicated secondmate charters name their route publisher"
+}
+
 test_spawn_notices_a_rigor_downgrade_against_the_registry() {
   local rec home proj fakebin out label mode registry expect registered n=0
   while IFS='|' read -r label registry mode expect registered; do
@@ -380,6 +431,7 @@ test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_refuses_an_appended_scaffold_signature
 test_spawn_accepts_legitimate_repeated_task_headings
+test_secondmate_duplicate_guidance_names_the_charter_publisher
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract

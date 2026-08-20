@@ -42,7 +42,14 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
+  new-window)
+    if [ -n "${FM_FAKE_MUTATE_BRIEF:-}" ]; then
+      printf 'You are a crewmate.\n\n# Definition of done\nDelivery contract: mode=direct-PR\n' \
+        > "$FM_FAKE_MUTATE_BRIEF"
+    fi
+    exit 0
+    ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -90,7 +97,8 @@ make_spawn_case() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
-  fm_git_worktree "$proj" "$wt" "wt-$name"
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false \
+    fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
@@ -129,6 +137,7 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
+    FM_FAKE_MUTATE_BRIEF="${FM_TEST_MUTATE_BRIEF:-}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -165,9 +174,32 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/state/$id.launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
+}
+
+test_spawn_launches_the_validated_brief_snapshot() {
+  local rec id brief out status launch snapshot
+  id=profile-brief-snapshot-z1a
+  rec=$(make_spawn_case profile-brief-snapshot claude "$id")
+  read_case_record "$rec"
+  brief="$HOME_DIR/data/$id/brief.md"
+  printf 'You are a crewmate.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' > "$brief"
+
+  out=$(FM_TEST_MUTATE_BRIEF="$brief" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn should retain the brief generation it validated"
+  launch=$(cat "$LAUNCH_LOG")
+  snapshot="$HOME_DIR/state/$id.launch-brief.md"
+  assert_contains "$launch" "< '$snapshot'" \
+    "spawn launch did not read from its immutable brief snapshot"
+  assert_grep 'Delivery contract: mode=no-mistakes' "$snapshot" \
+    "spawn snapshot did not preserve the validated delivery contract"
+  assert_grep 'Delivery contract: mode=direct-PR' "$brief" \
+    "the fixture did not replace the mutable brief after validation"
+  pass "spawn validates and launches one immutable brief snapshot"
 }
 
 test_non_cursor_launch_clears_inherited_cursor_markers() {
@@ -210,8 +242,8 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$id.pi-ext.ts'" \
     "relative FM_STATE_OVERRIDE leaked into Pi's cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$id/brief.md'" \
-    "relative FM_DATA_OVERRIDE leaked into the cross-process brief path"
+  assert_contains "$launch" "< '$home_real/state/$id.launch-brief.md'" \
+    "relative FM_STATE_OVERRIDE leaked into the cross-process brief snapshot path"
   pass "relative home overrides ignore CDPATH and become absolute before spawn launch construction"
 }
 
@@ -239,8 +271,8 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$relative_id.pi-ext.ts'" \
     "relative FM_HOME leaked into Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
-    "relative FM_HOME leaked into the default cross-process brief path"
+  assert_contains "$launch" "< '$home_real/state/$relative_id.launch-brief.md'" \
+    "relative FM_HOME leaked into the default cross-process brief snapshot path"
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
@@ -259,8 +291,8 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$absolute_id.pi-ext.ts'" \
     "absolute FM_HOME spelling changed in Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$absolute_id/brief.md'" \
-    "absolute FM_HOME spelling changed in the default cross-process brief path"
+  assert_contains "$launch" "< '$linked_home/state/$absolute_id.launch-brief.md'" \
+    "absolute FM_HOME spelling changed in the default cross-process brief snapshot path"
   pass "FM_HOME defaults resolve relative paths and preserve absolute spellings"
 }
 
@@ -287,8 +319,8 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$id.pi-ext.ts'" \
     "absolute FM_STATE_OVERRIDE spelling changed in Pi's cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$id/brief.md'" \
-    "absolute FM_DATA_OVERRIDE spelling changed in the cross-process brief path"
+  assert_contains "$launch" "< '$linked_home/state/$id.launch-brief.md'" \
+    "absolute FM_STATE_OVERRIDE spelling changed in the cross-process brief snapshot path"
   pass "absolute override spellings are preserved in spawn launch paths"
 }
 
@@ -827,6 +859,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_profile_defaults
+test_spawn_launches_the_validated_brief_snapshot
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths

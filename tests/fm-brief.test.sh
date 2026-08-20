@@ -856,6 +856,48 @@ test_replace_regenerates_in_place_and_archives_the_superseded_brief() {
   pass "fm-brief.sh: --replace regenerates in place and archives the superseded brief"
 }
 
+test_concurrent_replacements_preserve_every_superseded_brief() {
+  local home id brief shim barrier real_cat p1 p2 rc1 rc2 mode_count
+  home="$TMP_ROOT/rescaffold-concurrent-home"
+  shim="$TMP_ROOT/rescaffold-concurrent-bin"
+  barrier="$TMP_ROOT/rescaffold-concurrent-barrier"
+  mkdir -p "$home/data" "$shim" "$barrier"
+  real_cat=$(command -v cat)
+  id="brief-rescaffold-concurrent"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+
+  printf '%s\n' \
+    '#!/bin/sh' \
+    ': > "$FM_TEST_BARRIER/$$"' \
+    'while [ "$(find "$FM_TEST_BARRIER" -type f | wc -l | tr -d " ")" -lt 2 ]; do sleep 0.01; done' \
+    'exec "$FM_TEST_REAL_CAT" "$@"' > "$shim/cat"
+  chmod +x "$shim/cat"
+
+  FM_TEST_BARRIER="$barrier" FM_TEST_REAL_CAT="$real_cat" PATH="$shim:$PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --replace >/dev/null 2>&1 &
+  p1=$!
+  FM_TEST_BARRIER="$barrier" FM_TEST_REAL_CAT="$real_cat" PATH="$shim:$PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only --replace >/dev/null 2>&1 &
+  p2=$!
+  wait "$p1"; rc1=$?
+  wait "$p2"; rc2=$?
+  expect_code 0 "$rc1" "the first concurrent --replace should succeed"
+  expect_code 0 "$rc2" "the second concurrent --replace should succeed"
+
+  assert_present "$home/data/$id/brief.superseded-1.md" \
+    "concurrent replacement lost the first superseded brief"
+  assert_present "$home/data/$id/brief.superseded-2.md" \
+    "concurrent replacement reused and overwrote the first archive slot"
+  mode_count=$(grep -h '^Delivery contract: mode=' \
+    "$brief" \
+    "$home/data/$id/brief.superseded-1.md" \
+    "$home/data/$id/brief.superseded-2.md" | sort -u | wc -l | tr -d ' ')
+  [ "$mode_count" -eq 3 ] \
+    || fail "concurrent replacements did not preserve all three brief generations"
+  pass "fm-brief.sh: concurrent replacements serialize archive publication"
+}
+
 test_replace_validates_before_archiving() {
   local home id brief before out status escaped
   home="$TMP_ROOT/rescaffold-validation-home"
@@ -1144,6 +1186,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_rescaffold_refuses_by_default_and_changes_nothing
 test_replace_regenerates_in_place_and_archives_the_superseded_brief
+test_concurrent_replacements_preserve_every_superseded_brief
 test_replace_validates_before_archiving
 test_replace_generation_failure_preserves_live_brief
 test_replace_rejects_non_regular_live_briefs
