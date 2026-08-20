@@ -119,6 +119,34 @@ Work remaining: the two live acceptance runs, operator-driven after merge - one 
 offloading a selected test class to Azure end to end, and one validation cell driven from
 dispatch through `close`.
 
+First live cell attempt, 2026-08-20 (`azv-36b2726cbcf3`, task `r4-cell-acceptance`, head
+`c094cc38`, `validation-standard`): submit, dispatch, boot, review, and the full four-shard
+behavior round all executed, and the run reached its test gate carrying a complete shard round
+rather than the empty receipt set that used to strand every multi-attempt cell. The gate was a
+genuinely red test step (host-coupled units that cannot pass inside a Linux cell: passwordless
+sudo, tmux window creation, Keychain approval markers), the operator answered `approve`, and
+attempt 2 then ended without an authenticated result marker. The cell took the retain lane:
+compute zero, worktree disk and evidence retained, control reservation released.
+
+That attempt exposed two blockers that stand between this lane and its acceptance sentence, and
+neither is the receipts strand:
+
+1. `respond` does not answer a gate. It reports success and starts a new attempt, but the guest
+   re-publishes the byte-identical previous result: attempt 2's `result.json` matched attempt 1
+   exactly (sha256 prefix `330ddea31bfbbb05` both times, `run.log` identical at 3056 bytes, same
+   `run_id`, same `needs-decision`, same gate), after which the control command reported Failed.
+   The runtime bundle carried no-mistakes v1.48.0, so this is not the v1.41.2-era behavior. Until
+   the operator action reaches the in-cell pipeline, a parked cell can only be retained, and an
+   unchanged republished result should be refused as a non-answer rather than surfacing as a
+   generic failure.
+2. The sealed suite is not Linux-clean, so every cell run parks. Shard 2 failed on host-coupled
+   units that cannot pass inside a Linux cell (passwordless sudo, tmux window creation, Keychain
+   approval markers), alongside 377 passing units. Until those units skip loudly off macOS, no
+   intent reaches a green test step here.
+
+So the receipts fix is exercised live up to the gate, which is exactly what used to be
+impossible, and `close` stays unproven: the acceptance sentence below is not yet met.
+
 Acceptance: a no-mistakes run offloads a test class to Azure and returns a real verdict; and,
 separately, one validation cell reaches `close` with its worktree disk released.
 
