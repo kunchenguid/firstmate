@@ -178,3 +178,20 @@ fm_project_origin_safe() { # <url>; 0 when the URL is an accepted clone URL
   esac
   return 0
 }
+
+# A `local-only` project's canonical copy is a folder on this machine rather than
+# a forge, so its clones carry a filesystem origin. This answers "is this origin a
+# repository this machine can reach as a path", which is what the guarded landing
+# path in bin/fm-merge-local.sh needs before it may pull a landed change back into
+# that folder. It decides on the URL's form alone and never touches the filesystem,
+# so the caller still proves the path is a git work tree it may write to.
+fm_project_origin_local_path() { # <url>; prints the filesystem path, or 1 when the origin is not local
+  local url=${1-} path
+  fm_project_origin_safe "$url" || return 1
+  case $url in
+    file:///?*) path=${url#file://} ;;
+    /?*) path=$url ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$path"
+}

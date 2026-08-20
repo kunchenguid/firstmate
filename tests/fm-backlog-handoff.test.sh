@@ -1280,6 +1280,40 @@ EOF
 # Registry lines may carry parentheticals in the summary before the structured
 # (home: ...) field (e.g. "(id is legacy)"). The home extractor must still find
 # the field; the old ^[^(]* regex treated those entries as home-less.
+# A local-only project's work is a secondmate's work like any other. The helper
+# never reads a project's delivery mode, and this pins that: the only thing that
+# should ever stop a handoff is a fleet-level safety refusal, not the mode the
+# project happens to ship through.
+test_local_only_item_hands_off() {
+  local home="$TMP_ROOT/local-only-main"
+  local sub="$TMP_ROOT/local-only-sub"
+  setup_homes "$home" "$sub"
+  printf '%s\n' '- JobSearch [local-only +yolo] - the cycle (added 2026-07-29)' > "$home/data/projects.md"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] keep-remote - stays here (repo: alpha)
+- [ ] cv-rebuild - rebuild the lab CV (repo: JobSearch)
+  The folder is the only copy; it lands through the guarded local path.
+
+## Done
+EOF
+
+  local expected_block
+  expected_block=$(extract_item_block "$home/data/backlog.md" cv-rebuild)
+
+  FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design cv-rebuild >/dev/null \
+    || fail "handoff refused a local-only project's item"
+
+  local dest_block
+  dest_block=$(extract_item_block "$sub/data/backlog.md" cv-rebuild)
+  assert_block_equals "local-only item block mismatch after handoff" "$expected_block" "$dest_block"
+  assert_no_grep 'cv-rebuild' "$home/data/backlog.md" "local-only item stayed in the main backlog"
+  assert_grep 'repo: JobSearch' "$sub/data/backlog.md" "the item lost its project on the way across"
+  assert_grep 'keep-remote' "$home/data/backlog.md" "an unrelated item was moved with it"
+  pass "a local-only project's queued item hands off to a secondmate"
+}
+
 test_registry_home_with_pre_home_parentheses() {
   local home="$TMP_ROOT/reg-parens-main"
   local sub="$TMP_ROOT/reg-parens-sub"
@@ -1344,6 +1378,7 @@ EOF
   pass "registry entry without (home: ...) fails cleanly with has no home"
 }
 
+test_local_only_item_hands_off
 test_handoff_wakes_live_local_receiver
 test_failed_wake_retries_when_the_item_is_already_present
 test_known_receiver_failure_remains_retryable_after_grace
