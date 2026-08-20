@@ -26,6 +26,20 @@
 #     operator investigates. Verified replies render into this pane;
 #     verified leg-summary bundle declarations land into the local home
 #     worktree by fast-forward only, else the bundle is kept and reported.
+#   - CHAIN TIP ATTESTATION: whenever that verification ADVANCES the tip, the
+#     helper records it on the CONTROLLER-owned worker record through
+#     `compartment-chain-tip` - its own lifecycle verb, never the message
+#     lane. The release authority reads the anchor only from there and
+#     refuses without it, so this is what lets a compartment exit through the
+#     ordinary release path instead of `surrender`. The command attests
+#     without verifying, so it is driven from inside the helper, strictly
+#     after the local proof; a monotonicity refusal freezes the lane like a
+#     chain break, an already-released refusal closes the lane quietly only
+#     once the held tip is read back and found both non-contradicting AND
+#     reproduced by this chain (the controller checks its release proof
+#     before its monotonicity rule, so a fork can arrive wearing the released
+#     string, and monotonicity alone never catches a divergence beneath the
+#     held tip), and any other refusal warns and retries under backoff.
 #   - CHILD RELAY: verified child-spawn and attach requests land under
 #     state/<id>.cloud-childreq/ and are validated, spent, or refused by
 #     bin/fm-secondmate-cloud-monitor.py child-relay (design B.5 steps 2-5).
@@ -359,12 +373,25 @@ if value.get("more") is True:
   done
 }
 
-process_mailbox() {
-  local worktree
+process_mailbox() {  # <assignment>
+  local assignment=$1 worktree
   worktree=$(cat "$WORKTREE_FILE" 2>/dev/null) || worktree=
-  python3 "$HELPER" process-mailbox \
-    --task "$ID" --mailbox "$MAILBOX" --state-file "$STATE_FILE" \
-    --worktree "$worktree" --childreq "$CHILDREQ"
+  (
+    # The persisted environment carries the allowlisted FM_AZURE_* identity
+    # every lifecycle command needs to build its controller environment, so
+    # the chain tip recording below needs it too; sourced in this subshell
+    # only, exactly as the collect, relay, and child-relay passes do. No
+    # provider call is made - `compartment-chain-tip` only takes the
+    # controller lock and writes one field on the worker record.
+    # shellcheck source=/dev/null
+    . "$CLOUD_ENV" 2>/dev/null || true
+    env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      python3 "$HELPER" process-mailbox \
+      --task "$ID" --mailbox "$MAILBOX" --state-file "$STATE_FILE" \
+      --worktree "$worktree" --childreq "$CHILDREQ" \
+      --task-generation "$GENERATION" --assignment-generation "$assignment" \
+      --lifecycle-bin "$LIFECYCLE" --controller "$CONTROLLER"
+  )
   # Exit 3 (chain break) already rendered its loud refusal; the sticky
   # marker freezes relay in both directions from the next loop check.
   return 0
@@ -487,7 +514,7 @@ while :; do
     echo "secondmate $ID: OUTBOX CHAIN BREAK recorded at $CHAIN_BREAK; relay frozen in both directions until an operator investigates (files retained)"
   elif [ "$status" = assigned ] && [ -n "$assignment" ]; then
     collect_mailbox "$assignment"
-    process_mailbox
+    process_mailbox "$assignment"
     # The child relay runs BEFORE the outbound relay so a refusal, an
     # acceptance, an attach announcement or a child's terminal status written
     # this iteration reaches the compartment on this iteration - a delivered

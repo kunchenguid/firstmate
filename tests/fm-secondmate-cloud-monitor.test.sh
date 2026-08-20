@@ -10,10 +10,13 @@ set -u
 # inbox routing, and the fm-spawn secondmate gate behind
 # FM_SPAWN_SECONDMATE_CLOUD.
 #
-# The lifecycle CLI is a FIXTURE here (argv captured, canned JSON returned,
-# blob transfers modeled against a local store directory): the real
-# fm-worker-lifecycle.sh message lane lands in a sibling PR, and the real
-# wrapper must never run Azure operations from a test. The chain the monitor
+# The lifecycle CLI is a FIXTURE for the lanes that would reach Azure (argv
+# captured, canned JSON returned, blob transfers modeled against a local store
+# directory), because the real wrapper must never run Azure operations from a
+# test. `compartment-chain-tip` reaches no provider - it takes the controller
+# lock and writes one field - so it is additionally driven through the REAL
+# bin/fm-worker-lifecycle.sh against a real controller document, and the
+# fixture models its gates and refusal texts. The chain the monitor
 # verifies is REAL: every outbox fixture is produced by the real
 # bin/fm-secondmate-session.py against the store, so the real producer feeds
 # the real verifier and a contract drift between them goes red here.
@@ -115,6 +118,69 @@ case "$command" in
     else
       printf '{"fetched":[],"skipped":[],"cursor":null,"more":false}\n'
     fi
+    ;;
+  compartment-chain-tip)
+    # Models bin/fm-worker-lifecycle.py command_compartment_chain_tip against
+    # the fixture controller document: the same assignment gates, the same
+    # monotonicity rules, the same refusal texts. The REAL CLI's own gates are
+    # exercised by the real-lifecycle unit below and by
+    # tests/fm-worker-authority-secondmate.test.sh; this seam exists so the
+    # monitor's classification of each refusal can be driven on demand.
+    if [ -n "${FM_FIXTURE_CHAIN_TIP_REFUSAL:-}" ]; then
+      printf 'ELASTIC WORKER REFUSED: %s\n' "$FM_FIXTURE_CHAIN_TIP_REFUSAL" >&2
+      exit 2
+    fi
+    python3 - "${FM_FIXTURE_CONTROLLER:?}" "$@" <<'PY'
+import json, sys
+path = sys.argv[1]
+flags = sys.argv[2:]
+values = {}
+for index in range(0, len(flags) - 1, 1):
+    if flags[index].startswith("--"):
+        values[flags[index]] = flags[index + 1]
+task = values["--task"]
+generation = values["--task-generation"]
+assignment = values["--assignment-generation"]
+sequence = int(values["--sequence"])
+digest = values["--chain-digest"]
+
+def refuse(text):
+    print("ELASTIC WORKER REFUSED: " + text, file=sys.stderr)
+    raise SystemExit(2)
+
+if sequence < 1:
+    refuse("compartment chain tip sequence must be a positive integer")
+if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+    refuse("compartment chain tip digest must be an exact lowercase SHA-256 binding")
+with open(path, encoding="utf-8") as handle:
+    state = json.load(handle)
+key = "{}@{}".format(task, generation)
+item = (state.get("queue") or {}).get(key)
+if item is None or item.get("status") != "assigned":
+    refuse("compartment chain tip requires one exact assigned task generation")
+if item.get("role") != "secondmate":
+    refuse("compartment chain tip is owned by secondmate compartments only")
+worker = (state.get("workers") or {}).get(str(item.get("slot")))
+if worker is None or worker.get("queue_key") != key:
+    refuse("compartment chain tip task has no exact durable worker owner")
+if worker.get("assignment_generation") != assignment:
+    refuse("compartment chain tip assignment generation is not exact")
+if worker.get("release_proof") is not None:
+    refuse("released work cannot record a compartment chain tip")
+current = worker.get("verified_chain_tip")
+if isinstance(current, dict) and isinstance(current.get("sequence"), int):
+    held = current["sequence"]
+    if sequence < held:
+        refuse("compartment chain tip refuses to rewind from sequence {} to {}".format(held, sequence))
+    if sequence == held and current.get("chain_digest") != digest:
+        refuse("compartment chain tip sequence {} already recorded a different digest".format(sequence))
+worker["verified_chain_tip"] = {
+    "sequence": sequence, "chain_digest": digest, "recorded_at": "fixture",
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(state, handle)
+print("recorded compartment chain tip {} for {}".format(sequence, task))
+PY
     ;;
   *)
     echo "fixture: unsupported lifecycle command $command" >&2
@@ -270,6 +336,10 @@ if status == "assigned":
     state["queue"][key]["slot"] = 3
     state["workers"]["3"] = {
         "slot": 3, "role": "secondmate", "assignment_generation": assignment,
+        # queue_key and release_proof are what compartment-chain-tip binds a
+        # tip to one exact live assignment, so the fixture world carries the
+        # same durable worker shape the real controller writes.
+        "queue_key": key, "release_proof": None,
         "bindings": {"repository_generation": base},
     }
 with open(path, "w", encoding="utf-8") as handle:
@@ -341,6 +411,8 @@ start_monitor() {
     FM_SECONDMATE_MONITOR_INTERVAL_SECONDS=1 \
     FM_FIXTURE_LIFECYCLE_LOG="$LC_LOG" FM_FIXTURE_STORE="$STORE" \
     FM_FIXTURE_SPAWN_LOG="$SP_LOG" \
+    FM_FIXTURE_CONTROLLER="$STATE_DIR/azure-workers/controller.json" \
+    FM_FIXTURE_CHAIN_TIP_REFUSAL="${FM_FIXTURE_CHAIN_TIP_REFUSAL:-}" \
     FM_FIXTURE_SPAWN_CONTROLLER="$STATE_DIR/azure-workers/controller.json" \
     "$MONITOR" "$ID" "$GEN" >> "$PANE_LOG" 2>&1 &
   MONITOR_PID=$!
@@ -721,6 +793,13 @@ PY
 
 spawn_invocations() { grep -c $'\x1f' "$SP_LOG" 2>/dev/null | tr -d '[:space:]'; }
 
+# inbox_has <pattern> - a PREDICATE over the delivered inbox, re-evaluated on
+# every call. `wait_for ... grep -q <pattern> <(inbox_messages)` looks
+# equivalent and is not: the process substitution is set up once at call time,
+# so the retry loop re-greps an already-exhausted fd and the check can only
+# succeed on its first attempt.
+inbox_has() { inbox_messages | grep -q "$1"; }
+
 # craft_landed_request <resign|asis> <python-mutation> - take the REAL landed
 # child request, mutate it, and re-land it. "resign" recomputes the self digest
 # over the mutated payload, which is what a hostile or drifted producer would
@@ -855,6 +934,546 @@ test_regenesis_chain_refuses_via_durable_tip() {
   pass "a wiped-and-reminted chain refuses via the durable tip and delivers nothing"
 }
 
+# --- the controller-owned chain tip (the release authority's anchor) ----------
+#
+# bin/fm-worker-authority.py reads the verified chain tip ONLY from the
+# controller-owned worker record and REFUSES when it is absent, naming
+# `surrender` as the sanctioned exit. These units own the monitor half of that
+# contract: the tip is attested exactly when local verification ADVANCES it,
+# never before verification, never twice for the same pair, and each refusal
+# class lands on its decided semantics.
+
+# One process-mailbox pass with the tip recording lane wired, which is what
+# the bash monitor always does. run_helper deliberately stays unwired so the
+# units that predate this lane keep exercising it exactly as they did.
+run_helper_recording() {  # [assignment]
+  env FM_FIXTURE_LIFECYCLE_LOG="$LC_LOG" FM_FIXTURE_STORE="$STORE" \
+    FM_FIXTURE_CONTROLLER="$STATE_DIR/azure-workers/controller.json" \
+    FM_FIXTURE_CHAIN_TIP_REFUSAL="${FM_FIXTURE_CHAIN_TIP_REFUSAL:-}" \
+    python3 "$ROOT/bin/fm-secondmate-cloud-monitor.py" process-mailbox \
+    --task "$ID" --mailbox "$STATE_DIR/$ID.cloud-mailbox" \
+    --state-file "$STATE_DIR/$ID.cloud-secondmate-state.json" --worktree "$LANDING" \
+    --childreq "$CHILDREQ" \
+    --task-generation "$GEN" --assignment-generation "${1:-$ASSIGNMENT}" \
+    --lifecycle-bin "$LIFECYCLE_FIXTURE" \
+    --controller "${FM_TEST_TIP_CONTROLLER:-$STATE_DIR/azure-workers/controller.json}"
+}
+
+# The tip an INDEPENDENT re-derivation of the collected mailbox proves,
+# computed from the chain contract itself rather than from anything the
+# monitor wrote, printed as "<sequence> <chain_digest>". This is the
+# ground truth every recorded tip below is compared against. With an
+# argument it prints the chain state at THAT sequence instead of the last,
+# which is what a genuinely non-contradicting held tip has to carry.
+mailbox_chain_tip() {  # [sequence]
+  python3 - "$STATE_DIR/$ID.cloud-mailbox" "${1:-0}" <<'PY'
+import hashlib, json, pathlib, re, sys
+mailbox = pathlib.Path(sys.argv[1])
+want = int(sys.argv[2])
+entries = {}
+for path in sorted(mailbox.iterdir()):
+    match = re.fullmatch(r"([0-9]{8})-([0-9a-f]{64})\.json", path.name)
+    if match:
+        entries[int(match.group(1))] = path
+total = len(entries)
+want = total if want <= 0 else want
+assert 1 <= want <= total or total == 0, "sequence {} is not in a {}-entry chain".format(want, total)
+chain = "0" * 64
+for sequence in range(1, want + 1):
+    message = json.loads(entries[sequence].read_text(encoding="utf-8"))
+    unsigned = {k: v for k, v in message.items() if k not in ("content_sha256", "chain_digest")}
+    body = json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    content = hashlib.sha256(body).hexdigest()
+    chain = hashlib.sha256((chain + content).encode()).hexdigest()
+print("{} {}".format(want if total else 0, chain))
+PY
+}
+
+# The tip the CONTROLLER document carries for this compartment's worker,
+# printed the same way; empty when the record carries none.
+recorded_worker_tip() {  # [controller-path]
+  python3 - "${1:-$STATE_DIR/azure-workers/controller.json}" <<'PY'
+import json, sys
+try:
+    state = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(0)
+tip = ((state.get("workers") or {}).get("3") or {}).get("verified_chain_tip")
+if isinstance(tip, dict):
+    print("{} {}".format(tip.get("sequence"), tip.get("chain_digest")))
+PY
+}
+
+chain_tip_invocations() { grep_lc $'^compartment-chain-tip\x1f'; }
+
+# A PREDICATE, not a substitution. wait_for re-runs its argv on every retry,
+# so any `$(...)` or `<(...)` in the arguments is evaluated ONCE at call time
+# and the loop then re-tests a frozen value (or an exhausted fd) - a liveness
+# check that can only ever succeed on its first attempt.
+worker_tip_recorded() { [ -n "$(recorded_worker_tip)" ]; }
+
+monitor_state_field() {  # <python-expression over `state`>
+  python3 - "$STATE_DIR/$ID.cloud-secondmate-state.json" "$1" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+value = eval(sys.argv[2], {"state": state})  # noqa: S307 - test-local expression
+print("" if value is None else value)
+PY
+}
+
+# one_verified_leg - a real wall-ended runner leg, so the chain the tip is
+# taken from is produced by the real producer.
+one_verified_leg() {
+  run_guest_leg FM_SECONDMATE_LEG_SECONDS=2 >/dev/null 2>&1 \
+    || fail "the guest wall leg did not exit cleanly"
+  collect_store_into_mailbox
+}
+
+# verified_chain_of_two - a real closed leg, whose chain is a reply plus its
+# leg summary. Units that need a held tip strictly BELOW the proved one need a
+# proved sequence above 1.
+verified_chain_of_two() {
+  put_guest_inbox '{"kind":"fm.secondmate-message/v1","text":"chain turn"}' >/dev/null
+  put_guest_inbox '{"kind":"fm.secondmate-control/v1","action":"close"}' >/dev/null
+  run_guest_leg >/dev/null 2>&1 || fail "the guest leg did not exit cleanly"
+  collect_store_into_mailbox
+}
+
+# force_tip_retry_due - bring the durable backoff deadline forward, so a unit
+# can exercise the retry without sleeping through it.
+force_tip_retry_due() {
+  python3 - "$STATE_DIR/$ID.cloud-secondmate-state.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    state = json.load(handle)
+error = state.get("chain_tip_error")
+assert isinstance(error, dict), "there is no durable chain tip error to bring forward"
+error["next_attempt_at"] = 0
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+
+# build_real_controller <name> <assigned|released> <none|rewind|belowfork|clean>
+#
+# A REAL controller document for this compartment, minted through the real
+# lifecycle module's own environment()/empty_state() so load_state and
+# verify_state accept it. Prints the document path. <phase> sets the release
+# proof; <held> sets the tip the record already carries:
+#   none      - no tip at all
+#   rewind    - past this chain's sequence, which the controller's own
+#               monotonicity rule already calls a contradiction
+#   belowfork - BELOW this chain's sequence with a digest this chain does not
+#               reproduce: monotonicity alone accepts it, which is exactly the
+#               hole the reproduction check closes
+#   clean     - below this chain's sequence carrying the digest this chain
+#               ACTUALLY reproduces there, so it is genuinely non-contradicting
+build_real_controller() {
+  local name=$1 phase=$2 held=$3 home reproduced
+  home="$WORLD/$name-home"
+  mkdir -p "$home/state/azure-workers"
+  # A "clean" control must be clean for the real reason: the held digest has
+  # to be the one the proved chain reproduces at that sequence, not merely a
+  # lower sequence number.
+  reproduced=$(mailbox_chain_tip 1)
+  reproduced=${reproduced##* }
+  env FM_HOME="$home" FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_DEPLOYMENT_GENERATION=dep-one FM_AZURE_OWNER_TAG=owner \
+    FM_AZURE_NAMING_PREFIX=fmtest \
+    python3 - "$ROOT/bin/fm-worker-lifecycle.py" "$home/state/azure-workers/controller.json" \
+    "$ID" "$GEN" "$ASSIGNMENT" "$phase" "$held" "$reproduced" <<'PY' >/dev/null \
+    || fail "the real controller fixture could not be built"
+import importlib.util, json, sys
+module_path, out_path, task, generation, assignment, phase, held, reproduced = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("controller", module_path)
+controller = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(controller)
+env = controller.environment()
+state = controller.empty_state(env)
+key = "{}@{}".format(task, generation)
+state["queue"][key] = {
+    "task": task, "task_generation": generation, "status": "assigned",
+    "role": "secondmate", "slot": 3, "assignment_generation": assignment,
+}
+worker = {
+    "slot": 3, "role": "secondmate", "assignment_generation": assignment,
+    "queue_key": key, "release_proof": None,
+}
+if phase == "released":
+    worker["release_proof"] = {"schema": "fm.worker-release/v2", "receipts": []}
+if held == "rewind":
+    worker["verified_chain_tip"] = {"sequence": 5, "chain_digest": "d" * 64}
+elif held == "belowfork":
+    worker["verified_chain_tip"] = {"sequence": 1, "chain_digest": "d" * 64}
+elif held == "clean":
+    assert len(reproduced) == 64, "the clean control needs the digest this chain reproduces"
+    worker["verified_chain_tip"] = {"sequence": 1, "chain_digest": reproduced}
+state["workers"]["3"] = worker
+with open(out_path, "w", encoding="utf-8") as handle:
+    json.dump(state, handle, sort_keys=True, separators=(",", ":"))
+PY
+  printf '%s\n' "$home/state/azure-workers/controller.json"
+}
+
+# run_real_cli_recording <controller> - one process-mailbox pass whose
+# recording lane is the REAL bin/fm-worker-lifecycle.sh against that real
+# controller document. No provider call happens: compartment-chain-tip only
+# takes the controller lock and writes one field.
+run_real_cli_recording() {  # <controller>
+  local controller=$1 home
+  home=${controller%/state/azure-workers/controller.json}
+  env FM_HOME="$home" FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_DEPLOYMENT_GENERATION=dep-one FM_AZURE_OWNER_TAG=owner \
+    FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_AZURE_WORKER_STATE_DIR="$home/state/azure-workers" \
+    python3 "$ROOT/bin/fm-secondmate-cloud-monitor.py" process-mailbox \
+    --task "$ID" --mailbox "$STATE_DIR/$ID.cloud-mailbox" \
+    --state-file "$STATE_DIR/$ID.cloud-secondmate-state.json" --worktree "$LANDING" \
+    --childreq "$CHILDREQ" --task-generation "$GEN" \
+    --assignment-generation "$ASSIGNMENT" \
+    --lifecycle-bin "$ROOT/bin/fm-worker-lifecycle.sh" \
+    --controller "$controller" 2>&1
+}
+
+test_verified_advance_records_the_tip_with_the_exact_argv() {
+  make_world tip-argv
+  one_verified_leg
+  local out tip sequence digest expected line
+  out=$(run_helper_recording) || fail "the verified chain did not process: $out"
+  tip=$(mailbox_chain_tip)
+  sequence=${tip%% *}
+  digest=${tip##* }
+  [ "$sequence" -ge 1 ] || fail "the fixture chain is empty, so there is no tip to record"
+  # THE GOLDEN ARGV: exactly the flags bin/fm-worker-lifecycle.py's
+  # compartment-chain-tip parser declares, carrying the sequence and digest an
+  # independent re-derivation of the mailbox proves.
+  expected=$(printf 'compartment-chain-tip\x1f--task\x1f%s\x1f--task-generation\x1f%s\x1f--assignment-generation\x1f%s\x1f--sequence\x1f%s\x1f--chain-digest\x1f%s' \
+    "$ID" "$GEN" "$ASSIGNMENT" "$sequence" "$digest")
+  line=$(grep $'^compartment-chain-tip\x1f' "$LC_LOG" | sed -n 1p)
+  [ "$line" = "$expected" ] || fail "the chain tip argv is not the exact contract:
+got:      $(printf '%s' "$line" | tr '\037' '|')
+expected: $(printf '%s' "$expected" | tr '\037' '|')"
+  # NOT THE MESSAGE LANE: compartment-chain-tip is its own verb, outside the
+  # claim-exempt carve whose invariant is that the message ops write no
+  # lifecycle state.
+  [ "$(grep -c $'^message-[a-z]*\x1f.*--chain-digest' "$LC_LOG" 2>/dev/null | tr -d '[:space:]')" = 0 ] \
+    || fail "the chain tip was routed through the claim-exempt message lane"
+  [ "$(recorded_worker_tip)" = "$tip" ] \
+    || fail "the controller worker record does not carry the verified tip: $(recorded_worker_tip) vs $tip"
+  assert_contains "$out" "recorded verified chain tip" "the recording was not announced in the pane: $out"
+  pass "a verified advance records the tip on the controller worker record with the exact argv"
+}
+
+test_recorded_tip_equals_what_the_local_verifier_proved() {
+  make_world tip-truth
+  one_verified_leg
+  run_helper_recording >/dev/null || fail "the verified chain did not process"
+  local truth
+  truth=$(mailbox_chain_tip)
+  # Three independent statements of the same tip must agree: the local
+  # verifier's durable state, the controller-owned record, and a re-derivation
+  # from the mailbox that shares no code with either.
+  [ "$(monitor_state_field 'state["verified_tip"]["sequence"]') $(monitor_state_field 'state["verified_tip"]["chain_digest"]')" = "$truth" ] \
+    || fail "the monitor's durable verified tip differs from the re-derived chain"
+  [ "$(monitor_state_field 'state["recorded_chain_tip"]["sequence"]') $(monitor_state_field 'state["recorded_chain_tip"]["chain_digest"]')" = "$truth" ] \
+    || fail "the recorded pair differs from the re-derived chain"
+  [ "$(recorded_worker_tip)" = "$truth" ] \
+    || fail "the controller record differs from the re-derived chain"
+  pass "the recorded (sequence, digest) is exactly what the local verifier proved"
+}
+
+test_unchanged_tip_is_not_re_recorded_and_an_advance_is() {
+  make_world tip-idempotent
+  one_verified_leg
+  run_helper_recording >/dev/null || fail "the first pass did not process"
+  [ "$(chain_tip_invocations)" = 1 ] || fail "the first verified advance did not record a tip"
+  run_helper_recording >/dev/null || fail "the second pass did not process"
+  run_helper_recording >/dev/null || fail "the third pass did not process"
+  [ "$(chain_tip_invocations)" = 1 ] \
+    || fail "an unchanged tip was re-recorded ($(chain_tip_invocations) invocations for one tip)"
+  # A genuine ADVANCE is recorded again: a second real leg extends the chain.
+  local before after
+  before=$(mailbox_chain_tip)
+  one_verified_leg
+  after=$(mailbox_chain_tip)
+  [ "$before" != "$after" ] || fail "the second leg did not extend the chain, so there is no advance to test"
+  run_helper_recording >/dev/null || fail "the advancing pass did not process"
+  [ "$(chain_tip_invocations)" = 2 ] \
+    || fail "an advanced tip was not recorded ($(chain_tip_invocations) invocations)"
+  [ "$(recorded_worker_tip)" = "$after" ] || fail "the controller record did not advance with the chain"
+  pass "an unchanged tip is skipped and only a genuine advance records again"
+}
+
+test_refused_chain_verification_records_no_tip() {
+  make_world tip-after-verify
+  # A chain of at least two entries, so dropping one leaves a real gap.
+  put_guest_inbox '{"kind":"fm.secondmate-message/v1","text":"first turn"}' >/dev/null
+  put_guest_inbox '{"kind":"fm.secondmate-control/v1","action":"close"}' >/dev/null
+  run_guest_leg >/dev/null 2>&1 || fail "the guest leg did not exit cleanly"
+  collect_store_into_mailbox
+  # ATTACK: a blob is dropped, so the chain does not verify. The tip command
+  # attests WITHOUT verifying, so a refused mailbox must never reach it.
+  local dropped out
+  dropped=$(first_matching "$STATE_DIR/$ID.cloud-mailbox" '00000001-*.json')
+  [ -n "$dropped" ] || fail "the fixture chain has no first entry to drop"
+  [ -n "$(first_matching "$STATE_DIR/$ID.cloud-mailbox" '00000002-*.json')" ] \
+    || fail "the fixture chain is too short for a gap to exist after the drop"
+  rm "$STATE_DIR/$ID.cloud-mailbox/$dropped"
+  out=$(run_helper_recording)
+  [ $? -eq 3 ] || fail "a gapped chain verified instead of refusing: $out"
+  [ "$(chain_tip_invocations)" = 0 ] \
+    || fail "a gapped chain attested a tip it never verified"
+  [ -z "$(recorded_worker_tip)" ] || fail "the controller record carries a tip from a gapped mailbox"
+  # THE SUBSTITUTION CASE, which is what the ordering exists for: the names
+  # (and therefore the whole chain arithmetic over them) are intact while the
+  # bodies are forged. Only verification tells these apart, so a monitor that
+  # attested first would report a tip for a mailbox it goes on to refuse.
+  make_world tip-after-verify-tampered
+  put_guest_inbox '{"kind":"fm.secondmate-message/v1","text":"authentic"}' >/dev/null
+  put_guest_inbox '{"kind":"fm.secondmate-control/v1","action":"close"}' >/dev/null
+  run_guest_leg >/dev/null 2>&1 || fail "the guest leg did not exit cleanly"
+  collect_store_into_mailbox
+  python3 - "$STATE_DIR/$ID.cloud-mailbox" <<'PY'
+import json, pathlib, sys
+mailbox = pathlib.Path(sys.argv[1])
+first = sorted(mailbox.glob("00000001-*.json"))[0]
+message = json.loads(first.read_text())
+message["text"] = "forged reply"
+first.write_text(json.dumps(message, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+PY
+  out=$(run_helper_recording)
+  [ $? -eq 3 ] || fail "a substituted body verified instead of refusing: $out"
+  [ "$(chain_tip_invocations)" = 0 ] \
+    || fail "a tip was attested for a mailbox whose bodies were substituted"
+  [ -z "$(recorded_worker_tip)" ] || fail "the controller record carries a tip from a tampered mailbox"
+  pass "a refused chain verification attests no tip at all, gapped or substituted"
+}
+
+test_monotonicity_refusal_freezes_the_lane_like_a_chain_break() {
+  make_world tip-fork
+  put_guest_inbox '{"kind":"fm.secondmate-message/v1","text":"disputed turn"}' >/dev/null
+  put_guest_inbox '{"kind":"fm.secondmate-control/v1","action":"close"}' >/dev/null
+  run_guest_leg >/dev/null 2>&1 || fail "the guest leg did not exit cleanly"
+  collect_store_into_mailbox
+  local out
+  # The controller holds a different digest at this sequence: its record and
+  # this monitor's own proof disagree about the chain, which no later pass can
+  # repair.
+  out=$(FM_FIXTURE_CHAIN_TIP_REFUSAL='compartment chain tip sequence 2 already recorded a different digest' run_helper_recording)
+  [ $? -eq 3 ] || fail "a monotonicity refusal did not freeze the lane: $out"
+  assert_contains "$out" "refuses the tip this monitor verified" "the freeze does not explain itself: $out"
+  assert_contains "$out" "already recorded a different digest" "the freeze does not carry the controller's own reason: $out"
+  assert_present "$STATE_DIR/$ID.cloud-mailbox/.chain-break" "the monotonicity refusal left no sticky marker"
+  assert_not_contains "$out" "disputed turn" "a disputed chain was relayed anyway"
+  [ "$(monitor_state_field 'state["delivered_sequence"]')" = 0 ] \
+    || fail "a disputed chain advanced the delivered sequence"
+  [ "$(monitor_state_field 'state["chain_tip_error"]["fatal"]')" = True ] \
+    || fail "the fatal refusal was not recorded durably"
+  pass "a monotonicity refusal freezes the lane like a chain break and relays nothing"
+}
+
+test_already_released_refusal_closes_the_tip_lane_benignly() {
+  make_world tip-released
+  put_guest_inbox '{"kind":"fm.secondmate-message/v1","text":"late turn"}' >/dev/null
+  put_guest_inbox '{"kind":"fm.secondmate-control/v1","action":"close"}' >/dev/null
+  run_guest_leg >/dev/null 2>&1 || fail "the guest leg did not exit cleanly"
+  collect_store_into_mailbox
+  local out
+  out=$(FM_FIXTURE_CHAIN_TIP_REFUSAL='released work cannot record a compartment chain tip' run_helper_recording) \
+    || fail "a benign end-of-life refusal failed the pass: $out"
+  assert_absent "$STATE_DIR/$ID.cloud-mailbox/.chain-break" "an already-released worker froze the lane"
+  assert_contains "$out" "chain tip recording is closed" "the benign close was not announced: $out"
+  assert_contains "$out" "late turn" "a released worker stopped ordinary delivery"
+  [ -n "$(monitor_state_field 'state["chain_tip_closed"]["reason"]')" ] \
+    || fail "the close was not recorded durably"
+  # The lane stays closed: a later pass makes no further attempt.
+  out=$(FM_FIXTURE_CHAIN_TIP_REFUSAL='released work cannot record a compartment chain tip' run_helper_recording) \
+    || fail "the second pass failed: $out"
+  [ "$(chain_tip_invocations)" = 1 ] \
+    || fail "the closed tip lane kept calling the controller ($(chain_tip_invocations) invocations)"
+  pass "an already-released refusal closes the tip lane quietly and never freezes the compartment"
+}
+
+test_ownership_refusal_warns_backs_off_and_retries_without_freezing() {
+  make_world tip-transient
+  one_verified_leg
+  local out refusal warnings
+  # A moved assignment is what a re-spawn does to a HEALTHY compartment (a
+  # resume preserves the assignment generation and bumps cloud_generation).
+  # It must never wedge the lane; a later pass carries the current assignment.
+  refusal='compartment chain tip assignment generation is not exact'
+  : > "$WORLD/tip-warnings.log"
+  out=$(FM_FIXTURE_CHAIN_TIP_REFUSAL="$refusal" run_helper_recording) \
+    || fail "an ownership refusal failed the pass: $out"
+  printf '%s\n' "$out" >> "$WORLD/tip-warnings.log"
+  assert_contains "$out" "the controller refused the verified chain tip" "the warning is not loud: $out"
+  assert_contains "$out" "retrying in" "the warning does not say when it retries: $out"
+  assert_absent "$STATE_DIR/$ID.cloud-mailbox/.chain-break" "an ownership refusal froze the lane"
+  [ "$(monitor_state_field 'state["chain_tip_error"]["fatal"]')" = False ] \
+    || fail "an ownership refusal was recorded as fatal"
+  [ "$(monitor_state_field 'state["chain_tip_error"]["attempts"]')" = 1 ] \
+    || fail "the first refused attempt was not counted durably"
+  [ -z "$(monitor_state_field 'state["recorded_chain_tip"]')" ] \
+    || fail "a refused tip was recorded as landed"
+  # BACKOFF: every attempt takes the controller lock, so an immediate second
+  # pass must not call the CLI again at all.
+  out=$(FM_FIXTURE_CHAIN_TIP_REFUSAL="$refusal" run_helper_recording) \
+    || fail "the backed-off pass failed: $out"
+  printf '%s\n' "$out" >> "$WORLD/tip-warnings.log"
+  [ "$(chain_tip_invocations)" = 1 ] \
+    || fail "a backed-off pass still took the controller lock ($(chain_tip_invocations) invocations)"
+  # Once the backoff elapses the same call is retried, and the identical
+  # refusal is recorded durably rather than reprinted.
+  force_tip_retry_due
+  out=$(FM_FIXTURE_CHAIN_TIP_REFUSAL="$refusal" run_helper_recording) \
+    || fail "the retry pass failed: $out"
+  printf '%s\n' "$out" >> "$WORLD/tip-warnings.log"
+  [ "$(chain_tip_invocations)" = 2 ] || fail "the refused tip was not retried once its backoff elapsed"
+  [ "$(monitor_state_field 'state["chain_tip_error"]["attempts"]')" = 2 ] \
+    || fail "the retried attempt was not counted durably"
+  warnings=$(grep -c 'the controller refused the verified chain tip' "$WORLD/tip-warnings.log" | tr -d '[:space:]')
+  [ "$warnings" = 1 ] \
+    || fail "an identical repeated refusal was reprinted $warnings times instead of recorded once"
+  # And once ownership settles, the same tip lands and the error clears.
+  force_tip_retry_due
+  run_helper_recording >/dev/null || fail "the settled pass failed"
+  [ "$(recorded_worker_tip)" = "$(mailbox_chain_tip)" ] || fail "the retry never landed the tip"
+  [ -z "$(monitor_state_field 'state["chain_tip_error"]')" ] || fail "a landed tip left its error behind"
+  pass "an ownership refusal warns once, backs off the controller lock, and retries instead of freezing"
+}
+
+test_released_worker_holding_a_contradicting_tip_still_freezes() {
+  make_world tip-released-fork
+  verified_chain_of_two
+  # THE ORDERING HOLE THIS CLOSES, proven against the REAL CLI:
+  # command_compartment_chain_tip checks the release proof BEFORE its
+  # monotonicity block, so a RELEASED worker answers a genuine rewind with
+  # "released work cannot record a compartment chain tip" - the benign string.
+  # Classifying on the string alone would close the lane and keep relaying a
+  # chain the controller's own record contradicts.
+  local real_controller out
+  real_controller=$(build_real_controller tip-released-fork released rewind)
+  out=$(run_real_cli_recording "$real_controller")
+  [ $? -eq 3 ] || fail "a released worker holding a contradicting tip did not freeze: $out"
+  # The real CLI really did answer with the benign string, and the readback is
+  # what turned it back into a freeze.
+  assert_contains "$out" "released work cannot record a compartment chain tip" \
+    "the real CLI did not produce the released refusal, so this no longer pins the ordering hole: $out"
+  assert_contains "$out" "cannot be the tip this monitor verified" "the freeze does not explain itself: $out"
+  assert_present "$STATE_DIR/$ID.cloud-mailbox/.chain-break" "the released fork left no sticky marker"
+  [ "$(monitor_state_field 'state["chain_tip_error"]["fatal"]')" = True ] \
+    || fail "the released fork was not recorded as fatal"
+  [ -z "$(monitor_state_field 'state["chain_tip_closed"]')" ] \
+    || fail "a contradicting held tip still closed the lane benignly"
+  pass "a released worker whose held tip contradicts this chain freezes, though the CLI calls it benign"
+}
+
+test_released_worker_holding_a_below_tip_fork_still_freezes() {
+  make_world tip-released-belowfork
+  verified_chain_of_two
+  # CASE E, which the controller's monotonicity rule alone NEVER catches: the
+  # held tip sits strictly BELOW the proved sequence, so no rewind and no
+  # same-sequence fork exists, and a longer chain that diverges BENEATH the
+  # held tip would be attested as an ordinary lagging record. Same
+  # preconditions as the rewind case (released worker, monitor state lost),
+  # and without the reproduction check the forgery closes benignly AND relays.
+  local real_controller out held
+  real_controller=$(build_real_controller tip-released-belowfork released belowfork)
+  held=$(mailbox_chain_tip 1)
+  [ "${held##* }" != "$(printf 'd%.0s' $(seq 1 64))" ] \
+    || fail "the below-tip control accidentally planted the digest this chain reproduces"
+  out=$(run_real_cli_recording "$real_controller")
+  [ $? -eq 3 ] || fail "a held tip below the proved sequence with a digest this chain does not reproduce was accepted: $out"
+  assert_contains "$out" "released work cannot record a compartment chain tip" \
+    "the real CLI did not produce the released refusal, so this no longer pins the ordering hole: $out"
+  assert_contains "$out" "does not reproduce it" "the freeze does not name the reproduction failure: $out"
+  assert_present "$STATE_DIR/$ID.cloud-mailbox/.chain-break" "the below-tip fork left no sticky marker"
+  assert_not_contains "$out" "chain turn" "a chain the held tip contradicts beneath the tip was relayed"
+  [ -z "$(monitor_state_field 'state["chain_tip_closed"]')" ] \
+    || fail "a below-tip fork closed the tip lane benignly"
+  [ "$(monitor_state_field 'state["delivered_sequence"]')" = 0 ] \
+    || fail "a below-tip fork advanced the delivered sequence"
+  pass "a held tip below the proved sequence that this chain does not reproduce freezes, not closes"
+}
+
+test_released_worker_with_no_contradicting_tip_closes_benignly() {
+  make_world tip-released-clean
+  verified_chain_of_two
+  # The same released refusal from the same real CLI, with a GENUINELY
+  # non-contradicting held tip: below the proved sequence AND carrying the
+  # digest this chain actually reproduces there. A lower sequence number alone
+  # is not a clean control - that is the below-tip fork above.
+  local real_controller out held
+  real_controller=$(build_real_controller tip-released-clean released clean)
+  held=$(mailbox_chain_tip 1)
+  assert_contains "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["workers"]["3"]["verified_chain_tip"]["chain_digest"])' "$real_controller")" \
+    "${held##* }" "the clean control does not carry the digest this chain reproduces at sequence 1"
+  out=$(run_real_cli_recording "$real_controller") \
+    || fail "a benign end-of-life refusal failed the pass: $out"
+  assert_contains "$out" "chain tip recording is closed" "the benign close was not announced: $out"
+  assert_absent "$STATE_DIR/$ID.cloud-mailbox/.chain-break" "an ordinary released worker froze the lane"
+  # The durable record carries the real CLI's own refusal text, which is what
+  # pins the released marker string against the real command rather than
+  # against this suite's fixture.
+  assert_contains "$(monitor_state_field 'state["chain_tip_closed"]["reason"]')" \
+    "released work cannot record a compartment chain tip" \
+    "the real CLI did not produce the released refusal, so the marker string is unpinned"
+  pass "a released worker whose held tip cannot contradict this chain closes the lane quietly"
+}
+
+test_unreadable_controller_never_closes_the_tip_lane() {
+  make_world tip-released-unreadable
+  one_verified_leg
+  local out
+  # The released string with NO readable controller document: agreement
+  # cannot be proved, and closing on faith would silently downgrade this
+  # compartment to surrender for good. It must fall to the retry class.
+  out=$(FM_TEST_TIP_CONTROLLER="$WORLD/absent-controller.json" \
+    FM_FIXTURE_CHAIN_TIP_REFUSAL='released work cannot record a compartment chain tip' \
+    run_helper_recording) || fail "the unreadable-controller pass failed: $out"
+  assert_absent "$STATE_DIR/$ID.cloud-mailbox/.chain-break" "an unreadable controller froze the lane"
+  [ -z "$(monitor_state_field 'state["chain_tip_closed"]')" ] \
+    || fail "the tip lane closed without reading the held tip back"
+  assert_contains "$out" "could not be read back" "the unreadable readback was not explained: $out"
+  [ "$(monitor_state_field 'state["chain_tip_error"]["fatal"]')" = False ] \
+    || fail "an unreadable controller was recorded as fatal"
+  pass "a released refusal with an unreadable controller retries instead of closing on faith"
+}
+
+test_monitor_pass_records_the_tip_end_to_end() {
+  make_world tip-monitor
+  put_guest_inbox '{"kind":"fm.secondmate-message/v1","text":"monitor turn"}' >/dev/null
+  put_guest_inbox '{"kind":"fm.secondmate-control/v1","action":"close"}' >/dev/null
+  run_guest_leg >/dev/null 2>&1 || fail "the guest leg did not exit cleanly"
+  start_monitor
+  wait_for "the chain tip recorded through the monitor" \
+    grep -q $'^compartment-chain-tip\x1f' "$LC_LOG"
+  wait_for "the controller record to carry the tip" worker_tip_recorded
+  stop_monitor
+  [ "$(recorded_worker_tip)" = "$(mailbox_chain_tip)" ] \
+    || fail "the monitor recorded a tip other than the one it verified: $(recorded_worker_tip) vs $(mailbox_chain_tip)"
+  assert_grep 'recorded verified chain tip' "$PANE_LOG" "the monitor pane never reported the recording"
+  pass "the whole monitor pass records the verified tip the release authority reads"
+}
+
+test_chain_tip_argv_is_accepted_by_the_real_lifecycle_cli() {
+  make_world tip-real-cli
+  one_verified_leg
+  # The fixture above models the command; this proves the MONITOR'S OWN ARGV
+  # is the argv the real bin/fm-worker-lifecycle.sh parses and honours. No
+  # provider call happens: compartment-chain-tip only takes the controller
+  # lock and writes one field.
+  local real_controller out
+  real_controller=$(build_real_controller tip-real-cli assigned none)
+  out=$(run_real_cli_recording "$real_controller") \
+    || fail "the real lifecycle CLI refused the monitor's chain tip argv: $out"
+  assert_contains "$out" "recorded verified chain tip" "the real CLI recorded nothing: $out"
+  [ "$(recorded_worker_tip "$real_controller")" = "$(mailbox_chain_tip)" ] \
+    || fail "the real controller document does not carry the verified tip: $(recorded_worker_tip "$real_controller")"
+  pass "the monitor's chain tip argv is accepted and honoured by the real lifecycle CLI"
+}
+
 # --- the child relay (design B.5 steps 2-5) -----------------------------------
 
 test_valid_child_request_spawns_with_the_exact_parent_pair() {
@@ -862,8 +1481,7 @@ test_valid_child_request_spawns_with_the_exact_parent_pair() {
   emit_child_intent '{"kind":"ship","brief":"ship the compartment child","model":"gpt-5","effort":"high"}'
   start_monitor
   wait_for "the child spawn" test -s "$SP_LOG"
-  wait_for "the acceptance delivered into the inbox" \
-    grep -q 'FIRSTMATE ACCEPTED' <(inbox_messages)
+  wait_for "the acceptance delivered into the inbox" inbox_has 'FIRSTMATE ACCEPTED'
   stop_monitor
   local self_digest child argv env_line
   self_digest=$(python3 - "$CHILDREQ" <<'PY'
@@ -2231,6 +2849,19 @@ test_stale_leg1_reclaim_refuses_when_assignment_moved
 test_stale_leg1_reclaim_replays_under_same_assignment
 test_rewound_mailbox_refuses_via_durable_tip
 test_regenesis_chain_refuses_via_durable_tip
+test_verified_advance_records_the_tip_with_the_exact_argv
+test_recorded_tip_equals_what_the_local_verifier_proved
+test_unchanged_tip_is_not_re_recorded_and_an_advance_is
+test_refused_chain_verification_records_no_tip
+test_monotonicity_refusal_freezes_the_lane_like_a_chain_break
+test_already_released_refusal_closes_the_tip_lane_benignly
+test_ownership_refusal_warns_backs_off_and_retries_without_freezing
+test_released_worker_holding_a_contradicting_tip_still_freezes
+test_released_worker_holding_a_below_tip_fork_still_freezes
+test_released_worker_with_no_contradicting_tip_closes_benignly
+test_unreadable_controller_never_closes_the_tip_lane
+test_monitor_pass_records_the_tip_end_to_end
+test_chain_tip_argv_is_accepted_by_the_real_lifecycle_cli
 test_fm_send_routes_cloud_secondmate_into_the_compartment_inbox
 test_fm_send_prefers_controller_current_assignment
 test_fm_send_local_secondmate_path_is_unchanged

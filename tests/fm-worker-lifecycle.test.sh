@@ -72,6 +72,13 @@ for marker in (
     "--confirm-orphan-children", "reparented_to", "orphaned_children",
     "compartment_projection",
     "command_compartment_chain_tip", "verified_chain_tip", "refuses to rewind",
+    # The compartment monitor CLASSIFIES this command's refusals by their text
+    # (bin/fm-secondmate-cloud-monitor.py): the two fork markers freeze the
+    # relay lane, the released marker closes it. Editing this command and
+    # running only its owning suite must give that signal locally rather than
+    # leaving it to the cross-suite CI run.
+    "already recorded a different digest",
+    "released work cannot record a compartment chain tip",
 ):
     assert marker in controller, marker
 assert 'shape.add_argument("--required"' not in controller
