@@ -57,6 +57,27 @@ FM_REMOTE_JOB_TIMEOUT=${FM_REMOTE_JOB_TIMEOUT:-360}
 FM_REMOTE_JOB_WAIT_GRACE=${FM_REMOTE_JOB_WAIT_GRACE:-30}
 FM_REMOTE_JOB_POLL_SECONDS=${FM_REMOTE_JOB_POLL_SECONDS:-0.05}
 FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
+# A worker proves readiness with a heartbeat no older than this. It is a
+# protocol constant rather than an environment tunable because the prober and
+# the worker must agree on it, and the launchd worker inherits only HOME and
+# FM_ROOT_OVERRIDE - an override the caller could set and the worker could not
+# see is exactly the drift this window must not have.
+FM_REMOTE_JOB_READY_MAX_AGE_SECONDS=10
+FM_REMOTE_JOB_OWNERSHIP_WAIT_SECONDS=
+FM_REMOTE_JOB_READY_WAIT_SECONDS=
+
+# Readiness is a chain of waits, so each link is derived from the freshness
+# window below it rather than chosen independently. A replacement cannot take
+# ownership until a killed predecessor's surviving heartbeat has aged out of
+# that window, so the ownership wait must outlast it. Readiness cannot arrive
+# before ownership does, so the readiness wait must outlast that in turn.
+# Deriving upward from one stated window is what keeps a change to the window
+# from silently making the waits above it too short to observe a healthy start.
+fm_remote_job_derive_readiness_bounds() {
+  FM_REMOTE_JOB_OWNERSHIP_WAIT_SECONDS=$((FM_REMOTE_JOB_READY_MAX_AGE_SECONDS * 2))
+  FM_REMOTE_JOB_READY_WAIT_SECONDS=$((FM_REMOTE_JOB_OWNERSHIP_WAIT_SECONDS + FM_REMOTE_JOB_READY_MAX_AGE_SECONDS))
+}
+fm_remote_job_derive_readiness_bounds
 # shellcheck disable=SC2034 # Shared protocol constant consumed by the worker and sourcing callers.
 FM_REMOTE_JOB_PREEMPTED_EXIT=76
 FM_REMOTE_JOB_OPERATOR_PATH=
@@ -69,6 +90,8 @@ FM_REMOTE_JOB_STDERR=
 FM_REMOTE_JOB_EXIT=
 FM_REMOTE_JOB_ERROR=
 FM_REMOTE_JOB_REPAIRED=0
+FM_REMOTE_JOB_LAUNCH_PID=
+FM_REMOTE_JOB_READY_OBSERVED=
 
 fm_remote_job_die() {
   printf 'error: %s\n' "$1" >&2
@@ -881,16 +904,114 @@ fm_remote_job_probe() { # <account-home>; a fresh worker heartbeat or active job
   mtime=$(fm_remote_job_path_mtime "$ready" 2>/dev/null || true)
   case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
   now=$(date +%s)
-  [ $((now - mtime)) -le 10 ]
+  [ $((now - mtime)) -le "$FM_REMOTE_JOB_READY_MAX_AGE_SECONDS" ]
 }
 
+fm_remote_job_worker_log_path() { # <account-home>; the worker's own diagnostics
+  local account_home=$1
+  if [ "$(fm_remote_job_platform)" = darwin ]; then
+    fm_remote_job_launchagent_paths "$account_home"
+    printf '%s\n' "$FM_REMOTE_JOB_LAUNCH_AGENT_LOG"
+  else
+    printf '%s\n' "$FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log"
+  fi
+}
+
+fm_remote_job_worker_last_diagnostic() { # <account-home>; last line the worker reported
+  local account_home=$1 log line last=
+  log=$(fm_remote_job_worker_log_path "$account_home") || return 1
+  [ -f "$log" ] && [ ! -L "$log" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|' ') continue ;; esac
+    last=$line
+  done < <(tail -c 4096 -- "$log" 2>/dev/null)
+  [ -n "$last" ] || return 1
+  printf '%s\n' "${last#remote-job-worker: }"
+}
+
+# What the readiness wait can actually see, rendered for a human. The worker
+# reports its own terminal failures - quarantined ownership, an ownership it
+# could not reclaim, an identity it could not publish - and without this they
+# were discarded in favour of "did not report ready".
+fm_remote_job_readiness_observation() { # <remote-root> <account-home>
+  local root=$1 account_home=$2 lock ready mtime now age observed diagnostic
+  observed=
+  fm_remote_job_prepare_state "$account_home" || {
+    printf 'the worker state directory is unavailable\n'
+    return 0
+  }
+  lock=$(fm_remote_job_worker_lock_path)
+  ready=$(fm_remote_job_worker_ready_path)
+  if [ -e "$lock/quarantine" ] || [ -L "$lock/quarantine" ]; then
+    observed="worker ownership is quarantined"
+  elif [ ! -d "$lock" ]; then
+    observed="no worker holds ownership"
+  fi
+  if [ -f "$ready" ] && [ ! -L "$ready" ]; then
+    mtime=$(fm_remote_job_path_mtime "$ready" 2>/dev/null || true)
+    case "$mtime" in
+      ''|*[!0-9]*) observed="${observed:+$observed; }the readiness heartbeat is unreadable" ;;
+      *)
+        now=$(date +%s)
+        age=$((now - mtime))
+        if [ "$age" -le "$FM_REMOTE_JOB_READY_MAX_AGE_SECONDS" ]; then
+          observed="${observed:+$observed; }a fresh heartbeat ${age}s old"
+        else
+          observed="${observed:+$observed; }the last heartbeat was ${age}s ago, past the ${FM_REMOTE_JOB_READY_MAX_AGE_SECONDS}s freshness window"
+        fi
+        ;;
+    esac
+  else
+    observed="${observed:+$observed; }no readiness heartbeat was ever published"
+  fi
+  if ! fm_remote_job_worker_identity_matches "$root" "$account_home"; then
+    observed="${observed:+$observed; }no worker is running the code at $root"
+  fi
+  diagnostic=$(fm_remote_job_worker_last_diagnostic "$account_home" 2>/dev/null || true)
+  [ -z "$diagnostic" ] || observed="${observed:+$observed; }the worker reported: $diagnostic"
+  printf '%s\n' "${observed:-nothing observable changed}"
+}
+
+# A worker that has already given up will never become ready, so waiting out
+# the rest of the budget only delays the report. The launched worker tree
+# exiting without leaving a heartbeat is that proof: its supervisor stands down
+# only for another live owner, which would be heartbeating, or after refusing
+# to keep restarting a child that cannot serve. Quarantined ownership is not
+# proof on its own - a replacement clears a recoverable quarantine on its way
+# up - so it is reported as an observation rather than acted on here. launchd
+# keeps its own worker alive, so there is no launch pid to watch on darwin and
+# the wait runs its full deadline there.
+fm_remote_job_readiness_failed_for_good() { # <account-home>
+  local account_home=$1
+  case "${FM_REMOTE_JOB_LAUNCH_PID:-}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$FM_REMOTE_JOB_LAUNCH_PID" 2>/dev/null && return 1
+  fm_remote_job_probe "$account_home" && return 1
+  return 0
+}
+
+# Bounded by a deadline in seconds rather than a count of sleeps, because the
+# per-poll cost is unbounded - the identity check alone runs several git
+# invocations - so an iteration count buys a different amount of waiting on
+# every machine. Returns 2 when it observed a terminal failure and retrying the
+# start cannot help.
 fm_remote_job_wait_for_probe() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 i=0
-  while [ "$i" -lt 200 ]; do
-    fm_remote_job_probe "$account_home" && fm_remote_job_worker_identity_matches "$root" "$account_home" && return 0
-    i=$((i + 1))
+  local root=$1 account_home=$2 deadline
+  FM_REMOTE_JOB_READY_OBSERVED=
+  deadline=$(( $(date +%s) + FM_REMOTE_JOB_READY_WAIT_SECONDS ))
+  while :; do
+    if fm_remote_job_probe "$account_home" && fm_remote_job_worker_identity_matches "$root" "$account_home"; then
+      return 0
+    fi
+    if fm_remote_job_readiness_failed_for_good "$account_home"; then
+      FM_REMOTE_JOB_READY_OBSERVED=$(fm_remote_job_readiness_observation "$root" "$account_home")
+      return 2
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || break
     sleep 0.1
   done
+  FM_REMOTE_JOB_READY_OBSERVED=$(fm_remote_job_readiness_observation "$root" "$account_home")
   return 1
 }
 
@@ -966,13 +1087,15 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
   pid=$!
   set +m
   case "$pid" in ''|*[!0-9]*) FM_REMOTE_JOB_ERROR="could not start the remote job worker"; return 1 ;; esac
+  FM_REMOTE_JOB_LAUNCH_PID=$pid
   FM_REMOTE_JOB_REPAIRED=1
 }
 
 fm_remote_job_ensure_worker() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 platform uid identity_matches=0
+  local root=$1 account_home=$2 platform uid identity_matches=0 ready_status
   FM_REMOTE_JOB_ERROR=
   FM_REMOTE_JOB_REPAIRED=0
+  FM_REMOTE_JOB_LAUNCH_PID=
   root=$(fm_remote_job_canonical_existing_dir "$root") || {
     FM_REMOTE_JOB_ERROR="configured remote root is unavailable or unsafe"
     return 1
@@ -1007,21 +1130,31 @@ fm_remote_job_ensure_worker() { # <remote-root> <account-home>
   else
     fm_remote_job_start_linux_worker "$root" "$account_home" || return 1
   fi
-  fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
-  if [ "$platform" = darwin ]; then
-    fm_remote_job_reload_launchagent "$account_home" "$uid" || return 1
-    FM_REMOTE_JOB_REPAIRED=1
-    fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
-  else
-    # A replaced Linux supervisor can lose its first ownership race while the
-    # prior supervisor finishes releasing the shared worker lock. Retry the
-    # idempotent start once, matching the bounded recovery already used above
-    # for launchd, before reporting a startup failure.
-    fm_remote_job_start_linux_worker "$root" "$account_home" || return 1
-    FM_REMOTE_JOB_REPAIRED=1
-    fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
-  fi
+  fm_remote_job_wait_for_probe "$root" "$account_home"
+  ready_status=$?
+  case "$ready_status" in
+    0) return 0 ;;
+    # The worker tree exited rather than losing a startup race, so starting it
+    # again would only reproduce the same refusal. Report what was seen instead
+    # of spending a second full wait on it.
+    2) ;;
+    *)
+      if [ "$platform" = darwin ]; then
+        fm_remote_job_reload_launchagent "$account_home" "$uid" || return 1
+        FM_REMOTE_JOB_REPAIRED=1
+        fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
+      else
+        # A replaced Linux supervisor can lose its first ownership race while
+        # the prior supervisor finishes releasing the shared worker lock. Retry
+        # the idempotent start once, matching the bounded recovery already used
+        # above for launchd, before reporting a startup failure.
+        fm_remote_job_start_linux_worker "$root" "$account_home" || return 1
+        FM_REMOTE_JOB_REPAIRED=1
+        fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
+      fi
+      ;;
+  esac
   # shellcheck disable=SC2034 # Sourceable API consumed by the entrypoint and remote doctor.
-  FM_REMOTE_JOB_ERROR="remote job worker did not report ready after startup"
+  FM_REMOTE_JOB_ERROR="remote job worker did not report ready within ${FM_REMOTE_JOB_READY_WAIT_SECONDS}s: ${FM_REMOTE_JOB_READY_OBSERVED:-nothing observable changed}"
   return 1
 }

@@ -116,7 +116,7 @@ worker_lock_recent() {
   mtime=$(fm_remote_job_path_mtime "$WORKER_LOCK" 2>/dev/null || true)
   case "$mtime" in ''|*[!0-9]*) return 0 ;; esac
   now=$(date +%s)
-  [ $((now - mtime)) -le 10 ]
+  [ $((now - mtime)) -le "$FM_REMOTE_JOB_READY_MAX_AGE_SECONDS" ]
 }
 
 worker_quarantined_execution_stopped() { # <account-home>
@@ -144,8 +144,9 @@ worker_recover_quarantine() { # <account-home>
 }
 
 worker_acquire_lock() {
-  local account_home=$1 attempt=0
-  while [ "$attempt" -lt 150 ]; do
+  local account_home=$1 deadline
+  deadline=$(( $(date +%s) + FM_REMOTE_JOB_OWNERSHIP_WAIT_SECONDS ))
+  while :; do
     if (umask 077; mkdir "$WORKER_LOCK") 2>/dev/null; then
       WORKER_LOCK_HELD=1
       worker_publish_lock_owner || return 1
@@ -158,7 +159,7 @@ worker_acquire_lock() {
     fi
     if fm_remote_job_lock_owner_matches_process "$account_home"; then return 2; fi
     if fm_remote_job_probe "$account_home" || worker_lock_recent; then
-      attempt=$((attempt + 1))
+      [ "$(date +%s)" -lt "$deadline" ] || return 1
       sleep 0.1
       continue
     fi
@@ -166,7 +167,6 @@ worker_acquire_lock() {
     rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" || return 1
     rmdir "$WORKER_LOCK" || return 1
   done
-  return 1
 }
 
 worker_publish_quarantine() {

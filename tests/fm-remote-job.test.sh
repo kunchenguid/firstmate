@@ -621,4 +621,72 @@ wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
 RECOVERY_WORKER_PID=
 pass "quarantine clears only after recorded execution has stopped"
 
+# The readiness wait used to sample a fixed count of times and then report only
+# that time had run out, so a worker that had already refused to start burned
+# two full budgets before the caller learned nothing. These pin that the wait
+# reports what it observed, stops once readiness has become impossible, and
+# still fails when a worker genuinely never becomes ready.
+READY_HOME="$TMP_ROOT/readiness-account"
+READY_STATE="$TMP_ROOT/readiness-jobs"
+READY_JOB="$READY_STATE/jobs/job-readiness"
+mkdir -p "$READY_HOME" "$READY_STATE/jobs" "$READY_STATE/logs" \
+  "$READY_STATE/worker.lock" "$READY_JOB/.claim"
+chmod 700 "$READY_HOME" "$READY_STATE" "$READY_STATE/jobs" "$READY_STATE/logs" \
+  "$READY_STATE/worker.lock" "$READY_JOB" "$READY_JOB/.claim"
+sleep 60 &
+READY_BLOCKER_PID=$!
+printf 'active execution could not be confirmed stopped\n' > "$READY_STATE/worker.lock/quarantine"
+printf 'running\n' > "$READY_JOB/state"
+printf '%s\n' "$READY_BLOCKER_PID" > "$READY_JOB/.claim/supervisor"
+chmod 600 "$READY_STATE/worker.lock/quarantine" "$READY_JOB/state" "$READY_JOB/.claim/supervisor"
+READY_START=$(date +%s)
+FM_REMOTE_JOB_STATE_ROOT="$READY_STATE" fm_remote_job_ensure_worker "$REMOTE_ROOT" "$READY_HOME" \
+  && fail "ensure reported a ready worker while ownership was quarantined"
+READY_ELAPSED=$(( $(date +%s) - READY_START ))
+case "$FM_REMOTE_JOB_ERROR" in
+  *"ownership is quarantined"*) ;;
+  *) fail "the readiness failure did not report the quarantined ownership it observed: $FM_REMOTE_JOB_ERROR" ;;
+esac
+[ "$READY_ELAPSED" -lt "$FM_REMOTE_JOB_READY_WAIT_SECONDS" ] \
+  || fail "the wait burned its full budget on a worker that had already refused to start"
+kill "$READY_BLOCKER_PID" 2>/dev/null || true
+wait "$READY_BLOCKER_PID" 2>/dev/null || true
+pass "the readiness wait reports the terminal refusal it observed instead of only elapsed time"
+
+# The wait must still fail when nothing is wrong except that no worker ever
+# becomes ready, so the observation above cannot have been bought by weakening
+# the assertion itself.
+STUCK_ROOT="$TMP_ROOT/stuck-root"
+STUCK_HOME="$TMP_ROOT/stuck-account"
+STUCK_STATE="$TMP_ROOT/stuck-jobs"
+cp -R "$REMOTE_ROOT" "$STUCK_ROOT"
+mkdir -p "$STUCK_HOME" "$STUCK_STATE"
+printf '#!/bin/bash\nexit 0\n' > "$STUCK_ROOT/bin/fm-remote-job-worker.sh"
+chmod +x "$STUCK_ROOT/bin/fm-remote-job-worker.sh"
+FM_REMOTE_JOB_STATE_ROOT="$STUCK_STATE" fm_remote_job_ensure_worker "$STUCK_ROOT" "$STUCK_HOME" \
+  && fail "ensure reported success for a worker that never published readiness"
+case "$FM_REMOTE_JOB_ERROR" in
+  *"no readiness heartbeat was ever published"*) ;;
+  *) fail "the readiness failure did not report the missing heartbeat: $FM_REMOTE_JOB_ERROR" ;;
+esac
+pass "a worker that never becomes ready still fails the readiness wait"
+
+# Every wait above the freshness window is derived from it, so widening the
+# window widens them rather than leaving a wait shorter than what it waits on.
+READY_BASE_OWNERSHIP=$FM_REMOTE_JOB_OWNERSHIP_WAIT_SECONDS
+READY_BASE_WAIT=$FM_REMOTE_JOB_READY_WAIT_SECONDS
+READY_BASE_WINDOW=$FM_REMOTE_JOB_READY_MAX_AGE_SECONDS
+FM_REMOTE_JOB_READY_MAX_AGE_SECONDS=$((READY_BASE_WINDOW * 3))
+fm_remote_job_derive_readiness_bounds
+[ "$FM_REMOTE_JOB_OWNERSHIP_WAIT_SECONDS" -gt "$READY_BASE_OWNERSHIP" ] \
+  && [ "$FM_REMOTE_JOB_READY_WAIT_SECONDS" -gt "$READY_BASE_WAIT" ] \
+  || fail "the readiness waits did not scale with the freshness window they wait on"
+[ "$FM_REMOTE_JOB_OWNERSHIP_WAIT_SECONDS" -gt "$FM_REMOTE_JOB_READY_MAX_AGE_SECONDS" ] \
+  || fail "ownership acquisition gives up before a predecessor heartbeat can age out"
+[ "$FM_REMOTE_JOB_READY_WAIT_SECONDS" -gt "$FM_REMOTE_JOB_OWNERSHIP_WAIT_SECONDS" ] \
+  || fail "the readiness wait gives up before ownership acquisition can finish"
+FM_REMOTE_JOB_READY_MAX_AGE_SECONDS=$READY_BASE_WINDOW
+fm_remote_job_derive_readiness_bounds
+pass "readiness bounds derive from the freshness window instead of standing alone"
+
 echo "ALL TESTS PASSED"
