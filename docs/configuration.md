@@ -24,6 +24,13 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Local knowledge search (bin/fm-search.sh)
+
+Default repository-root ripgrep skips gitignored `data/`, `state/`, and `config/` plus hidden `.agents/skills/`, so a search from the operational home can miss the private corpus while still matching tracked non-hidden files.
+`bin/fm-search.sh` is the optional read-only local search helper that includes that corpus together with ordinary tracked project text.
+It does not index, copy, or network the corpus, and it is not a delivery gate.
+Run it from the operational home root; the script header and `--help` own its `rg` prerequisite, flags, secret-path exclusions, and ripgrep exit status.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.

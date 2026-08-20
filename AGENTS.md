@@ -54,6 +54,7 @@ Each secondmate has a persistent isolated `FM_HOME`, including its own state, ba
 `bin/fm-send.sh` fails closed unless `FM_HOME` is explicit, so a steer cannot silently resolve against another home.
 
 Tracked files hold shared instructions and tooling; `data/` holds durable private fleet records; `state/` holds volatile runtime records and append-only status events; `config/` holds local operating choices; and `projects/` contains clones that are read-only to firstmate except under hard rule 1's concrete captain-approved project operation exception.
+To search that private and hidden corpus, use `bin/fm-search.sh`; docs/configuration.md "Local knowledge search" and the script's header and `--help` own it.
 
 ```
 AGENTS.md            this file (CLAUDE.md is a symlink to it)

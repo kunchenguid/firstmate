@@ -165,7 +165,7 @@ family_for_basename() {
     fm-ci-load-guard.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|fm-daily.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
-    fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
+    fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-search.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|fm-macos-scope.test.sh|\
     fm-model-telemetry.test.sh|fm-model-usage.test.sh|fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-ci-water7.test.sh|fm-install-chrome.test.sh|\
@@ -1011,7 +1011,7 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       ;;
     bin/fm-lint.sh|bin/fm-install-shellcheck.sh|\
-    bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
+    bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-search.sh|bin/fm-crew-state.sh|\
     bin/fm-unadvanceable-work.sh|bin/fm-record-contradictions-lib.sh|\
     bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
