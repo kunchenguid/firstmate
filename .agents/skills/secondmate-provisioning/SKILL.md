@@ -13,7 +13,7 @@ metadata:
 
 Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
-Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
+Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:` and secondmates are idle by default.
 
 ## Routing table
 
@@ -150,8 +150,11 @@ Run `bin/fm-home-seed.sh validate` when checking registry integrity; its header 
 Seeding is transactional.
 If validation, cloning, no-mistakes initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
 
-Secondmate project lists may include `no-mistakes` and `direct-PR` projects only.
-`local-only` projects stay with the main firstmate.
+This section is the single owner of which projects a secondmate route may carry.
+A local route may carry any registered delivery mode, including `local-only`.
+Seeding always clones from the project's own origin, so a secondmate's clone is a sibling of this home's clone rather than a copy of it; the `project-management` skill owns where a `local-only` project's canonical copy lives, and seeding refuses with the concrete gap named when that project has no origin to seed from.
+A `local-only` project's crewmates then ship the ordinary `local-only` way, and the secondmate lands approved work under the same merge authority as any other mode through `bin/fm-merge-local.sh`, whose header owns that landing's stages, guards, and refusals.
+A whole-home remote route is the one exclusion: its host can neither clone a folder that exists only on this machine nor receive a landing into it, so `bin/fm-remote-home-seed.sh` refuses a `local-only` project and that work stays on a local route.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 
 ## Record intake for an existing or inherited domain
@@ -201,7 +204,7 @@ It is idempotent; an item already in the secondmate backlog is skipped.
 After a successful move it warns for any moved key that still owes a public relay reply bound to `main/<key>`, because that binding no longer names the home owning the work; rebind the commitment to `secondmate:<id>` through the `fmx-respond` promised-final procedure, which owns those commands.
 That same rule governs routing generally: a Relay-linked request whose work goes to a secondmate cannot use the home-local mention link at all and needs a promised-final commitment bound to that secondmate's home.
 It refuses any destination that is not a genuine seeded firstmate home with safe operational directories and a matching `.fm-secondmate-home` marker, so a move can never land in a project.
-Do not hand off `local-only` items.
+A project's delivery mode never decides whether its item may move, so a `local-only` project's work hands off like any other.
 
 ## Recovery
 
