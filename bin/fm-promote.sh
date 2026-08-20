@@ -2,10 +2,13 @@
 # Promote a scout task to a ship task in place: the crewmate keeps its window,
 # worktree, and loaded context; only the contract changes. Flips kind= to ship in
 # state/<task-id>.meta so fm-teardown.sh applies the full ship-task teardown protection
-# again. After promoting, send the crewmate its ship instructions via fm-send.sh
-# (inventory scratch state, reset to a clean default-branch base, carry over only
-# intended fix changes, create branch fm/<task-id>, implement, then report done
-# according to this task's delivery mode).
+# again. After promoting, send the crewmate its ship instructions via fm-send.sh.
+# This header is the single owner of those instructions; AGENTS.md section 7 keeps only
+# the trigger that sends you here. The promoted worker must inventory scratch state,
+# reset to a clean default-branch base, carry over only intended fix changes, leaving
+# scratch commits and debug edits behind, turn any bug it reproduced into the
+# regression test, create branch fm/<task-id>, implement, then report done according to
+# this task's delivery mode.
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just

@@ -45,6 +45,17 @@ State all five of these elements in one concise, evidence-first escalation:
 
 Do not relay reviewer labels or gate output as if they settled the decision.
 
+## Delivering the decision to the worker
+
+This section is the single owner of how a settled ask-user decision reaches the worker; `AGENTS.md` section 7 keeps only the authority boundary and the trigger that loads this skill.
+
+Send the same worker one exact decision naming the decision key, the step, the action, the affected finding IDs, any instructions the Fix needs, and the exact response command to run.
+Pass `fm-send`'s `--resolve-key` so the worker's open decision record closes at answer time rather than waiting on a later status line (contract: `bin/fm-send.sh` header).
+Require the matching `resolved` event before treating the decision as landed.
+Forbid `--yes`, which would silently bypass the authority check and any required captain escalation.
+Require the worker to process every synchronous return until the run completes or raises a genuinely new escalation, so a decision never stalls one gate short of the outcome.
+Resume fleet supervision immediately once the decision lands.
+
 ## Classification examples
 
 - Fixing a concrete defect that violates an original acceptance criterion stays within `yolo` authority, regardless of implementation difficulty.
