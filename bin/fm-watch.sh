@@ -35,9 +35,10 @@
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
-#                          turn completes). Past that bound, a declared external
-#                          wait or verified captain-held transfer uses the long
-#                          pause recheck cadence; every other pane goes through
+#                          turn completes). Past that bound, a declared wait still
+#                          selected by docs/architecture.md's current-state and
+#                          liveness precedence uses the long pause recheck cadence;
+#                          every other pane goes through
 #                          the same wedge timer and surfaces with the identical
 #                          "stale: ..." reason, escalation count, and
 #                          demand-deep-inspection marker, for human inspection
@@ -150,8 +151,9 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
-# A busy pane is unconditional proof of liveness with no built-in duration bound,
-# so a hung foreground call can remain hidden even while its rendered busy
+# The busy classifier supplies activity evidence for ordinary wedge triage, not
+# an agent-liveness verdict, and has no built-in duration bound.
+# A hung foreground call can therefore remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
 # may go with no completed turn: once its task's
 # state/<id>.turn-ended marker (or, before any turn has completed, the task's
@@ -160,20 +162,22 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
 # non-busy stale - so it escalates via the existing stale reason, escalation
 # counter, and demand-deep-inspection marker for human inspection only, never an
-# automatic interrupt, signal, or restart - unless the crew declared the wait
-# itself, which takes the long pause cadence instead. A completed turn touches
+# automatic interrupt, signal, or restart - unless a declared wait survives the
+# earlier current-state and liveness reconciliation and takes the long pause
+# cadence instead. A completed turn touches
 # turn-ended and resets the age. Set generously above any legitimate interval
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
-# A crew that declared a pause is idling on a known external wait, so its stale
-# pane is absorbed rather than wedge-escalated.
+# A crew whose declared pause remains trusted is idling on a known external wait,
+# so its stale pane is absorbed rather than wedge-escalated.
 # A captain-held crew uses the same bounded cadence, because the hold is tracked
 # elsewhere rather than ended by this pane. Both re-surface once for a recheck every
 # PAUSE_RESURFACE_SECS - far longer than the wedge threshold, but finite so a
 # forgotten hold cannot rot invisibly.
 # A confidently dead agent is the one case that breaks the declaration (nothing is
-# left to end that wait), so it surfaces for reconciliation instead; an unreadable
-# or ambiguous liveness read is a measurement gap and keeps the bounded cadence.
+# left to end that wait), so it surfaces once per death episode before returning to
+# the bounded cadence; an unreadable or ambiguous liveness read is a measurement
+# gap and keeps the bounded cadence.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
@@ -367,11 +371,10 @@ handle_paused_stale() {  # <window> <task> <hash>
 # 0 when the declared-pause cadence took the pane, 1 when the wedge timer did.
 #
 # A busy pane past BUSY_TURN_MAX_SECS is normally a wedge suspect because a hung
-# foreground call can hide behind a busy signature. A `paused:` declaration or
-# verified captain-held transfer instead identifies that live foreground call as
-# the expected external wait. The caller has already confirmed liveness through
-# the busy verdict, so this exception does not suppress undeclared wedges or
-# alter the separate non-busy classification. handle_paused_stale keeps the
+# foreground call can hide behind a busy signature. The declared-pause precedence
+# is owned by docs/architecture.md; the caller passes its reconciled class so only
+# a declaration still selected after current run-step and liveness reconciliation
+# can identify that foreground call as the expected wait. handle_paused_stale keeps the
 # exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS. Away mode
 # remains daemon-owned and receives the undecorated wake identity for its own
 # classification.
@@ -425,9 +428,9 @@ pause_declaration_liveness() {  # <window>
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # A current run-step supersedes the older declaration. Otherwise the declaration
-# classifies the pane and pause_declaration_liveness decides whether it still holds,
-# so a confidently dead agent surfaces for reconciliation while every other
-# liveness read keeps the bounded cadence.
+# classifies the pane and pause_declaration_liveness decides whether it still holds.
+# A confidently dead agent returns dead until this death episode is recorded as
+# surfaced, then returns paused; every other liveness read keeps the bounded cadence.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last death_surface_file agent_alive line state source
   key=${win//:/_}
@@ -1192,11 +1195,12 @@ EOF
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
           #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
-          #   - paused: the crew declared an external wait or a captain hold that
-          #     its liveness read does not contradict, so absorb on the long
-          #     PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
+          #   - paused: the crew declared an external wait or a captain hold whose
+          #     liveness read does not contradict it, or whose current death episode
+          #     was already surfaced, so absorb on the long PAUSE_RESURFACE_SECS
+          #     cadence instead of wedge-escalating;
           #   - none/dead: no running pipeline, no exact busy verdict, and either no
-          #     declared pause or a declared pause whose agent is confidently dead.
+          #     declared pause or a new confidently dead-agent episode.
           #     Surface immediately so firstmate inspects the inconclusive state
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to
@@ -1241,7 +1245,8 @@ EOF
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping,
         # unless a genuinely busy pane has gone too long with no completed turn -
         # then route it through busy_turn_bound_check, which hands the crossed
-        # bound to the same wedge timer unless the crew declared the wait itself.
+        # bound to the same wedge timer unless earlier reconciliation retained the
+        # declared wait.
         paused_bound=1
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
           busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" "$pause_class" && paused_bound=0
