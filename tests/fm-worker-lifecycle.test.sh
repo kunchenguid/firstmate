@@ -66,6 +66,9 @@ for marker in (
     "--confirm-discard-unlanded",
     "REVIEWED_CONTROL_SKU_FAMILY", "command_capacity_reserve_shape",
     "fm.worker-authority/v1", "authority-receipt", "fm.worker-execution/v1",
+    "roll_daily_baseline", "daily_bound_refusal", "idle_deallocate_due",
+    "daily_cost_baseline", "FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE", "idle_deallocated_at",
+    "record_daily_override_use", "last_steer_at",
 ):
     assert marker in controller, marker
 assert 'shape.add_argument("--required"' not in controller
@@ -93,6 +96,11 @@ for marker in (
     "commissioning path no longer bypasses cumulative actual or forecast admission",
     "No capacity reservation creates an always-on worker pool",
     "Every acceptance leg needs a positive control", "warm-idle target is zero",
+    "FM_AZURE_WORKER_DAILY_BOUND_USD",
+    "idle-deallocate stops compute cost unattended; the ordinary release stays human-driven",
+    "backstop on RECORDED spend",
+    "an ungated reserve lane could quietly burn past the bound",
+    "no power-on lane exists",
 ):
     assert marker in doc, marker
 assert "hosted form service" in doc and "force-delete" in doc
@@ -1697,12 +1705,17 @@ shared_shape_cli() {
   fence=$(printf shape-fence | shasum -a 256 | awk '{print $1}')
   state_file="$home/state/azure-workers/controller.json"
   run_shape() {
+    # The C3 daily bound is deliberately pinned out of the way: this unit
+    # exercises the CUMULATIVE budget lane (its 1499 pressure step must reach
+    # capacity_admission's own refusal), and the daily bound over the same
+    # reserve entrances has its own dedicated units.
     env \
       FM_HOME="$home" \
       FM_AZURE_SUBSCRIPTION_ID="$SUB" \
       FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
       FM_AZURE_OWNER_TAG=owner \
       FM_AZURE_NAMING_PREFIX=fmtest \
+      FM_AZURE_WORKER_DAILY_BOUND_USD=100000 \
       FM_WORKER_PROVIDER_COMMAND="python3 $provider" \
       FIXTURE_STATE="$fixture" \
       "$WRAPPER" "$@"
@@ -4379,6 +4392,736 @@ PY
   pass "inventory stays three named blob reads; the carve is pinned in code, doc, and wrapper"
 }
 
+daily_bound_and_idle_matrix() {
+  local tmp
+  fm_test_tmproot_into tmp fm-worker-daily-matrix
+  python3 - "$CONTROLLER" "$tmp" <<'PY' || fail "daily bound / idle deallocate matrix failed"
+import copy
+import datetime as dt
+import importlib.util
+import os
+import sys
+
+spec = importlib.util.spec_from_file_location("lifecycle_daily", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+tmp = sys.argv[2]
+
+# --- environment() parsing: absent means the default 100; an explicit zero,
+# negative, or non-numeric value refuses LOUDLY instead of meaning unbounded.
+os.environ.update({
+    "FM_HOME": tmp,
+    "FM_AZURE_SUBSCRIPTION_ID": "11111111-1111-4111-8111-111111111111",
+    "FM_AZURE_DEPLOYMENT_GENERATION": "dep-one",
+    "FM_AZURE_OWNER_TAG": "owner",
+    "FM_AZURE_NAMING_PREFIX": "fmtest",
+})
+for name in (
+    "FM_AZURE_WORKER_DAILY_BOUND_USD", "FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE",
+    "FM_AZURE_WORKER_IDLE_RELEASE_SECONDS",
+):
+    os.environ.pop(name, None)
+parsed = module.environment()
+assert parsed["daily_bound_usd"] == 100.0
+assert parsed["daily_bound_override"] is None
+assert parsed["idle_release_seconds"] == 14400
+for bad in ("0", "-5", "abc", "nan", "inf", ""):
+    os.environ["FM_AZURE_WORKER_DAILY_BOUND_USD"] = bad
+    try:
+        module.environment()
+    except module.LifecycleError as exc:
+        assert "FM_AZURE_WORKER_DAILY_BOUND_USD" in str(exc), (bad, exc)
+    else:
+        raise AssertionError("daily bound {} was accepted".format(bad or "empty"))
+os.environ["FM_AZURE_WORKER_DAILY_BOUND_USD"] = "250"
+os.environ["FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE"] = "2099-01-01"
+assert module.environment()["daily_bound_usd"] == 250.0
+assert module.environment()["daily_bound_override"] == "2099-01-01"
+del os.environ["FM_AZURE_WORKER_DAILY_BOUND_USD"]
+del os.environ["FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE"]
+for bad in ("599", "604801", "abc", "4h"):
+    os.environ["FM_AZURE_WORKER_IDLE_RELEASE_SECONDS"] = bad
+    try:
+        module.environment()
+    except module.LifecycleError as exc:
+        # Non-numeric values refuse through the loud LifecycleError lane,
+        # never a raw ValueError traceback.
+        assert "FM_AZURE_WORKER_IDLE_RELEASE_SECONDS" in str(exc), (bad, exc)
+    else:
+        raise AssertionError("idle release seconds {} was accepted".format(bad))
+os.environ["FM_AZURE_WORKER_IDLE_RELEASE_SECONDS"] = "600"
+assert module.environment()["idle_release_seconds"] == 600
+del os.environ["FM_AZURE_WORKER_IDLE_RELEASE_SECONDS"]
+
+# --- baseline roll: relative times only, never a hardcoded wall-clock date.
+T0 = module.now_utc()
+T1 = T0 + dt.timedelta(days=1)
+day0 = module.utc_day(T0)
+day1 = module.utc_day(T1)
+assert day0 != day1
+state = {}
+day, spend = module.daily_spend_evidence(state, 50.0, T0)
+assert day == day0 and spend == 0.0
+assert state["daily_cost_baseline"] == {"utc_day": day0, "actual_usd_at_day_start": 50.0}
+day, spend = module.daily_spend_evidence(state, 80.0, T0)
+assert spend == 30.0
+assert state["daily_cost_baseline"]["actual_usd_at_day_start"] == 50.0
+day, spend = module.daily_spend_evidence(state, 80.0, T1)
+assert day == day1 and spend == 0.0
+assert state["daily_cost_baseline"] == {"utc_day": day1, "actual_usd_at_day_start": 80.0}
+# A downward ACM revision clamps at zero rather than going negative.
+assert module.daily_spend_evidence(state, 70.0, T1)[1] == 0.0
+# Unreadable actual: no spend evidence, and the good baseline is not clobbered.
+kept = copy.deepcopy(state["daily_cost_baseline"])
+assert module.daily_spend_evidence(state, None, T1)[1] is None
+assert module.daily_spend_evidence(state, True, T1)[1] is None
+assert state["daily_cost_baseline"] == kept
+
+# --- the bound refusal: exact day, spend, and bound; override for the exact
+# current day only; unreadable actual fails closed.
+denv = {"daily_bound_usd": 100.0, "daily_bound_override": None}
+state = {"daily_cost_baseline": {"utc_day": day0, "actual_usd_at_day_start": 50.0}}
+refusal, override_day = module.daily_bound_refusal(denv, state, 160.0, now=T0)
+assert override_day is None
+assert refusal == (
+    "daily spend bound: day {} recorded spend 110.00 USD reached the 100.00 USD "
+    "daily bound; new compute and reservations (create/resume/capacity-reserve) "
+    "are refused, wind-down stays allowed; "
+    "set FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE={} to admit past the bound "
+    "for this day only".format(day0, day0)
+), refusal
+assert module.daily_bound_refusal(denv, state, 149.99, now=T0) == (None, None)
+right = dict(denv, daily_bound_override=day0)
+refusal, override_day = module.daily_bound_refusal(right, state, 160.0, now=T0)
+assert refusal is None and override_day == day0
+# The CHECK never records override use - only record_daily_override_use does,
+# after the admission decision, so a later cumulative refusal cannot leave a
+# false "used" claim behind.
+assert "daily_bound_override_used" not in state, state["daily_bound_override_used"]
+module.record_daily_override_use(right, state, 160.0, day0, now=T0)
+assert state["daily_bound_override_used"]["utc_day"] == day0
+assert state["daily_bound_override_used"]["recorded_day_spend_usd"] == 110.0
+assert state["daily_bound_override_used"]["bound_usd"] == 100.0
+wrong = dict(denv, daily_bound_override=day1)
+refusal, override_day = module.daily_bound_refusal(wrong, state, 160.0, now=T0)
+assert refusal is not None and override_day is None
+assert "FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE={} does not name today".format(day1) in refusal
+refusal, override_day = module.daily_bound_refusal(denv, state, None, now=T0)
+assert refusal is not None and "unreadable" in refusal and override_day is None
+
+# --- scaffolding for planner-level scenarios (the classification matrix's
+# exact-resource construction).
+penv = {
+    "max_workers": 16, "planning_hours": 3500.0, "policy_phase": "commissioning",
+    "commissioning_ceiling_usd": 1500.0, "steady_target_usd": 1000.0,
+    "admission_hours": 24.0, "cooldown_seconds": 300, "warm_idle": 0,
+    "idle_release_seconds": 14400, "daily_bound_usd": 100.0, "daily_bound_override": None,
+    "deployment_generation": "dep", "owner": "owner",
+}
+def build_assigned(slot):
+    build_state = {
+        "queue": {}, "workers": {}, "completed_worker_seconds": 0.0,
+        "cleanup_refusals": [], "next_assignment": 1, "pending_actions": {},
+        "capacity_reservations": {},
+    }
+    item = {
+        "schema": module.REQUEST_SCHEMA, "task": "task-idle", "task_generation": "gen-idle",
+        "repository_generation": "repo-gen", "home_binding": "1" * 64,
+        "account_binding": "2" * 64, "worktree_binding": "3" * 64,
+        "repository_binding": "4" * 64, "owner_kind": "primary", "role": "author",
+        "eligible": True, "discretionary": True, "status": "assigned",
+        "enqueued_at": module.iso_utc(T0 - dt.timedelta(days=2)),
+    }
+    worker = module.create_worker_record(penv, build_state, slot, item, 10.0)
+    tags = module.expected_tags(worker)
+    resources = {}
+    for kind in module.REQUIRED_RESOURCE_KINDS:
+        resources[kind] = {
+            "id": "/slot/{}/{}".format(slot, kind), "immutable_id": "immutable-" + kind,
+            "tags": dict(tags),
+        }
+    resources["vm"]["power_state"] = "VM running"
+    resources["nic"]["attached_to"] = resources["vm"]["id"]
+    for kind in ("os-disk", "task-disk", "account-disk"):
+        resources[kind]["attached_to"] = resources["vm"]["id"]
+    cloud = {"slot": slot, "resources": resources}
+    worker["resources"] = {
+        kind: module.resource_identity(value) for kind, value in resources.items()
+    }
+    worker["cloud_instance_id"] = resources["vm"]["immutable_id"]
+    worker["phase"] = "assigned"
+    worker["assigned_at"] = module.iso_utc(T0 - dt.timedelta(days=2))
+    item["slot"] = slot
+    item["assignment_generation"] = worker["assignment_generation"]
+    build_state["workers"][str(slot)] = worker
+    build_state["queue"][worker["queue_key"]] = item
+    inventory = {
+        "metrics": {"actual_usd": 10.0, "forecast_usd": 20.0},
+        "workers": [cloud], "capacity_reservations": [], "conflicts": [],
+    }
+    return build_state, worker, item, cloud, inventory
+
+# --- idle deallocate: provable end-of-task signals only, at the threshold and
+# never before, never with a claim, never on already-dark compute.
+istate, worker, item, cloud, inventory = build_assigned(1)
+assert module.idle_deallocate_due(penv, istate, worker, cloud, now=T0) is False  # never executed
+worker["last_execution_at"] = module.iso_utc(T0 - dt.timedelta(seconds=14399))
+assert module.idle_deallocate_due(penv, istate, worker, cloud, now=T0) is False  # not yet due
+worker["last_execution_at"] = module.iso_utc(T0 - dt.timedelta(seconds=14400))
+assert module.idle_deallocate_due(penv, istate, worker, cloud, now=T0) is True   # exactly due
+action = module.next_reconcile_action(penv, istate, inventory, now=T0)
+assert action["type"] == "deallocate" and action.get("idle_release") is True, action
+claimed = copy.deepcopy(istate)
+claimed["pending_actions"]["1"] = {"type": "execute", "slot": 1}
+assert module.next_reconcile_action(penv, claimed, inventory, now=T0) is None
+finished = copy.deepcopy(istate)
+finished["queue"][worker["queue_key"]]["status"] = "releasing"
+assert module.idle_deallocate_due(
+    penv, finished, finished["workers"]["1"], cloud, now=T0) is False
+dark_cloud = copy.deepcopy(cloud)
+dark_cloud["resources"]["vm"]["power_state"] = "VM deallocated"
+assert module.idle_deallocate_due(penv, istate, worker, dark_cloud, now=T0) is False
+dark_inventory = dict(inventory, workers=[dark_cloud])
+assert module.next_reconcile_action(penv, istate, dark_inventory, now=T0) is None
+
+# --- steer counts as recency: a worker steered minutes ago is being actively
+# driven and must NOT be deallocated, however old its last execution is;
+# an old steer does not shield it.
+worker["last_execution_at"] = module.iso_utc(T0 - dt.timedelta(seconds=50000))
+worker["last_steer_at"] = module.iso_utc(T0 - dt.timedelta(seconds=60))
+assert module.idle_deallocate_due(penv, istate, worker, cloud, now=T0) is False
+assert module.next_reconcile_action(penv, istate, inventory, now=T0) is None
+worker["last_steer_at"] = module.iso_utc(T0 - dt.timedelta(seconds=15000))
+assert module.idle_deallocate_due(penv, istate, worker, cloud, now=T0) is True
+del worker["last_steer_at"]
+
+# --- override use is an EFFECT, recorded only when admission actually admits:
+# bound tripped + override named + cumulative admission refusing must leave no
+# durable "used" claim behind.
+create_metrics = {
+    "actual_usd": 1499.0, "forecast_usd": 1499.0,
+    "regional_limit_vcpus": 128, "regional_used_vcpus": 2,
+    "specialized_active_vcpus": 0, "specialized_active_by_family": {},
+    "family_limit_vcpus": {family: 10 for _, family in module.SKU_PLAN.values()},
+    "family_used_vcpus": {family: 0 for _, family in module.SKU_PLAN.values()},
+    "family_free_vcpus": {family: 10 for _, family in module.SKU_PLAN.values()},
+    "sku_hourly_usd": {sku: 0.25 for sku, _ in module.SKU_PLAN.values()},
+}
+create_inventory = {
+    "metrics": create_metrics, "workers": [], "capacity_reservations": [], "conflicts": [],
+}
+oenv = dict(penv, daily_bound_override=day0)
+create_state = {
+    "queue": {}, "workers": {}, "completed_worker_seconds": 0.0,
+    "cleanup_refusals": [], "next_assignment": 1, "pending_actions": {},
+    "capacity_reservations": {},
+    "daily_cost_baseline": {"utc_day": day0, "actual_usd_at_day_start": 0.0},
+}
+queued = {
+    "schema": module.REQUEST_SCHEMA, "task": "task-bound", "task_generation": "gen-bound",
+    "repository_generation": "repo-gen", "home_binding": "6" * 64,
+    "account_binding": "7" * 64, "worktree_binding": "8" * 64,
+    "repository_binding": "9" * 64, "owner_kind": "primary", "role": "author",
+    "eligible": True, "discretionary": True, "status": "queued",
+    "enqueued_at": module.iso_utc(T0),
+}
+create_state["queue"][module.request_key("task-bound", "gen-bound")] = queued
+refused_create = module.next_reconcile_action(oenv, create_state, create_inventory, now=T0)
+assert refused_create["type"] == "admission-refused", refused_create
+assert "daily spend bound" not in refused_create["reason"], refused_create["reason"]
+assert "daily_bound_override_used" not in create_state, create_state["daily_bound_override_used"]
+# With cumulative room the same override admits, the action carries the day,
+# and the use is recorded as an effect.
+create_metrics["actual_usd"] = 500.0
+create_metrics["forecast_usd"] = 500.0
+admitted_create = module.next_reconcile_action(oenv, create_state, create_inventory, now=T0)
+assert admitted_create["type"] == "create", admitted_create
+assert admitted_create.get("daily_bound_override") == day0
+assert create_state["daily_bound_override_used"]["utc_day"] == day0
+
+# --- the cooldown stamp: a release-proved worker whose VM is ALREADY dark but
+# whose cooldown_started_at is null gets stamped once at first observation, so
+# delete-compute becomes due after cooldown_seconds instead of never
+# (live: slot 1, d2-probe-20260819).
+cstate, cworker, citem, ccloud, cinventory = build_assigned(2)
+cworker["release_proof"] = {"proof_digest": "5" * 64}
+cworker["released_at"] = module.iso_utc(T0 - dt.timedelta(hours=1))
+cworker["phase"] = "release-proved"
+cworker["cooldown_started_at"] = None
+citem["status"] = "releasing"
+ccloud["resources"]["vm"]["power_state"] = "VM deallocated"
+cinventory = dict(cinventory, workers=[ccloud])
+assert module.next_reconcile_action(penv, cstate, cinventory, now=T0) is None
+assert cworker["cooldown_started_at"] == module.iso_utc(T0), cworker["cooldown_started_at"]
+assert module.next_reconcile_action(penv, cstate, cinventory, now=T0) is None
+assert cworker["cooldown_started_at"] == module.iso_utc(T0)
+later = T0 + dt.timedelta(seconds=penv["cooldown_seconds"] + 1)
+due = module.next_reconcile_action(penv, cstate, cinventory, now=later)
+assert due is not None and due["type"] == "delete-compute", due
+assert due["release_proof_digest"] == "5" * 64
+PY
+  pass "daily bound refuses exactly, override binds to the exact day, idle deallocate gates on provable signals, and the cooldown stamp lands once"
+}
+
+daily_bound_cli() {
+  local tmp provider fixture home attempt result
+  for attempt in 1 2; do
+    fm_test_tmproot_into tmp fm-worker-daily-cli
+    provider="$tmp/provider.py"
+    fixture="$tmp/provider-state.json"
+    home="$tmp/home"
+    mkdir -p "$home"
+    write_fixture_provider "$provider"
+    set +e
+    env \
+      FM_HOME="$home" \
+      FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+      FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+      FM_AZURE_OWNER_TAG=owner \
+      FM_AZURE_NAMING_PREFIX=fmtest \
+      FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0 \
+      FM_WORKER_PROVIDER_COMMAND="python3 $provider" \
+      FIXTURE_STATE="$fixture" \
+      FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS=1 \
+      python3 - "$WRAPPER" "$fixture" <<'PY'
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+wrapper, fixture_path = sys.argv[1:]
+env = dict(os.environ)
+
+def today():
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+
+DAY = today()
+YESTERDAY = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).strftime("%Y-%m-%d")
+
+def day_guard():
+    # A UTC midnight crossing mid-unit makes every day-bound expectation
+    # ambiguous; exit 99 so the harness reruns once on a fresh fixture.
+    if today() != DAY:
+        sys.exit(99)
+
+def run(*args, check=True, overrides=None):
+    call_env = dict(env)
+    call_env.update(overrides or {})
+    result = subprocess.run([wrapper] + list(args), env=call_env, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and result.returncode != 0:
+        day_guard()
+        raise AssertionError("{} failed: {}".format(args, result.stderr))
+    return result
+
+def binding(number):
+    return format(number, "064x")
+
+def request(number):
+    run(
+        "request", "--task", "task-{}".format(number), "--task-generation", "gen-{}".format(number),
+        "--home-binding", binding(1000 + number), "--account-binding", binding(2000 + number),
+        "--worktree-binding", binding(3000 + number), "--repository-binding", binding(4000 + number),
+        "--repository-generation", "repo-{}".format(number), "--owner-kind", "primary", "--eligible",
+    )
+
+def controller_state():
+    return json.loads((Path(env["FM_HOME"]) / "state/azure-workers/controller.json").read_text())
+
+def fixture_state():
+    return json.loads(Path(fixture_path).read_text())
+
+def set_actual(value):
+    fixture = fixture_state()
+    fixture["metrics"]["actual_usd"] = value
+    fixture["metrics"]["forecast_usd"] = value
+    Path(fixture_path).write_text(json.dumps(fixture, sort_keys=True, separators=(",", ":")))
+
+def release(number):
+    state = controller_state()
+    item = state["queue"]["task-{}@gen-{}".format(number, number)]
+    worker = state["workers"][str(item["slot"])]
+    proof = {
+        "schema": "fm.worker-release/v2", "home_binding": worker["bindings"]["home_binding"],
+        "task": "task-{}".format(number), "task_generation": "gen-{}".format(number),
+        "assignment_generation": worker["assignment_generation"],
+        "account_binding": worker["bindings"]["account_binding"],
+        "worktree_binding": worker["bindings"]["worktree_binding"],
+        "repository_binding": worker["bindings"]["repository_binding"],
+        "repository_generation": worker["bindings"]["repository_generation"],
+        "cloud_instance_id": worker["cloud_instance_id"], "resources": worker["resources"],
+        "authorities": {},
+    }
+    for offset, authority in enumerate(("endpoint", "report", "landing", "account", "worktree"), 5):
+        receipt = {
+            "schema": "fm.worker-authority/v1", "authority": authority,
+            "task": proof["task"], "task_generation": proof["task_generation"],
+            "assignment_generation": proof["assignment_generation"], "verdict": "proved",
+            "evidence_digest": binding(offset * 1000 + number),
+        }
+        receipt["receipt_digest"] = hashlib.sha256(
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        proof["authorities"][authority] = receipt
+    canonical = json.dumps(proof, sort_keys=True, separators=(",", ":")).encode()
+    proof["proof_digest"] = hashlib.sha256(canonical).hexdigest()
+    path = Path(env["FM_HOME"]) / "proof-{}.json".format(number)
+    path.write_text(json.dumps(proof, sort_keys=True, separators=(",", ":")))
+    run("release", "--task", proof["task"], "--task-generation", proof["task_generation"],
+        "--proof-file", str(path))
+
+# 1. First reconcile of the day snapshots the baseline at the fixture's 100.
+request(1)
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+day_guard()
+baseline = controller_state()["daily_cost_baseline"]
+assert baseline == {"utc_day": DAY, "actual_usd_at_day_start": 100.0}, baseline
+
+# 2. Recorded day spend of 200 crosses the default 100 bound: a new create is
+# refused with the EXACT string naming the day, the spend, and the bound.
+set_actual(300.0)
+request(2)
+plan = json.loads(run("reconcile", "--apply", "--json",
+                      "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]).stdout)
+day_guard()
+refused = [entry for entry in plan["actions"] if entry["type"] == "admission-refused"]
+assert refused, plan["actions"]
+expected = (
+    "daily spend bound: day {} recorded spend 200.00 USD reached the 100.00 USD "
+    "daily bound; new compute and reservations (create/resume/capacity-reserve) "
+    "are refused, wind-down stays allowed; "
+    "set FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE={} to admit past the bound "
+    "for this day only".format(DAY, DAY)
+)
+assert refused[0]["reason"] == expected, refused[0]["reason"]
+assert len(controller_state()["workers"]) == 1, "the bound built capacity anyway"
+assert plan["status"]["daily_bound_tripped"] is True, plan["status"]
+
+# 3. Wind-down is never blocked by the tripped bound: release, deallocate,
+# delete-compute, and reset all still plan and apply.
+release(1)
+plan = json.loads(run("reconcile", "--apply", "--json",
+                      "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]).stdout)
+day_guard()
+types = [entry["type"] for entry in plan["actions"]]
+for wind_down in ("deallocate", "delete-compute", "reset"):
+    assert wind_down in types, (wind_down, types)
+assert types[-1] == "admission-refused", types
+assert controller_state()["workers"] == {}, "wind-down did not complete under the bound"
+assert fixture_state()["workers"] == {}, "cloud capacity survived wind-down under the bound"
+
+# 4. A wrong-day override still refuses, loudly naming the mismatch.
+wrong = json.loads(run(
+    "reconcile", "--json",
+    overrides={"FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE": YESTERDAY},
+).stdout)
+day_guard()
+assert wrong["actions"][0]["type"] == "admission-refused"
+assert "FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE={} does not name today".format(
+    YESTERDAY) in wrong["actions"][0]["reason"], wrong["actions"][0]["reason"]
+
+# 5. The exact-current-day override admits, is printed loudly, is carried on
+# the action, and is recorded durably.
+overridden = run("reconcile", "--apply",
+                 "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"],
+                 overrides={"FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE": DAY})
+day_guard()
+assert "DAILY BOUND OVERRIDE" in overridden.stdout, overridden.stdout
+state = controller_state()
+assert len(state["workers"]) == 1
+assert state["daily_bound_override_used"]["utc_day"] == DAY, state.get("daily_bound_override_used")
+status = run("status")
+assert "DAILY BOUND OVERRIDE USED" in status.stdout, status.stdout
+status_json = json.loads(run("status", "--json").stdout)
+assert status_json["daily_bound_override_used"]["utc_day"] == DAY
+assert status_json["daily_bound_usd"] == 100.0
+
+# 6. Resume is compute-resuming, so the same bound guards it: refuse without
+# the override, admit loudly with it.
+slot = str(controller_state()["queue"]["task-2@gen-2"]["slot"])
+fixture = fixture_state()
+for kind in ("vm", "nic", "os-disk"):
+    fixture["workers"][slot]["resources"].pop(kind)
+Path(fixture_path).write_text(json.dumps(fixture, sort_keys=True, separators=(",", ":")))
+blocked = run("resume", "--task", "task-2", "--task-generation", "gen-2",
+              "--repository-binding", binding(4002),
+              "--confirm-resume", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"],
+              check=False)
+day_guard()
+assert blocked.returncode == 2, (blocked.returncode, blocked.stderr)
+assert "daily spend bound: day {} recorded spend 200.00 USD".format(DAY) in blocked.stderr, blocked.stderr
+assert controller_state()["workers"][slot]["cloud_generation"] == 1
+resumed = run("resume", "--task", "task-2", "--task-generation", "gen-2",
+              "--repository-binding", binding(4002),
+              "--confirm-resume", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"],
+              overrides={"FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE": DAY})
+day_guard()
+assert "DAILY BOUND OVERRIDE" in resumed.stdout, resumed.stdout
+assert controller_state()["workers"][slot]["cloud_generation"] == 2
+
+# 6b. Specialized reservations are the runner's AUTOMATIC lane, so the exact
+# same bound gates capacity-reserve and capacity-reserve-shape with the exact
+# same string; the exact-day override admits and records; capacity-release is
+# wind-down and is never blocked.
+fence = "a" * 64
+blocked_reserve = json.loads(run(
+    "capacity-reserve", "--reservation-id", "azr-daily0000001", "--fence-binding", fence,
+    "--role", "validation", "--sku", "Standard_D4as_v7", "--sku-family", "StandardDasv7Family",
+    "--vcpus", "4", "--amount-usd", "25",
+    "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]).stdout)
+day_guard()
+assert blocked_reserve["status"] == "queued", blocked_reserve
+assert blocked_reserve["reason"] == expected, blocked_reserve["reason"]
+blocked_shape = json.loads(run(
+    "capacity-reserve-shape", "--shape-id", "shape-daily", "--fence-binding", fence,
+    "--constituent",
+    "reservation-id=azr-daily0000002,role=validation,sku=Standard_D4as_v7,"
+    "sku-family=StandardDasv7Family,vcpus=4,amount-usd=25",
+    "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]).stdout)
+day_guard()
+assert blocked_shape["status"] == "queued", blocked_shape
+assert blocked_shape["reason"] == expected, blocked_shape["reason"]
+reserved = json.loads(run(
+    "capacity-reserve", "--reservation-id", "azr-daily0000001", "--fence-binding", fence,
+    "--role", "validation", "--sku", "Standard_D4as_v7", "--sku-family", "StandardDasv7Family",
+    "--vcpus", "4", "--amount-usd", "25",
+    "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"],
+    overrides={"FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE": DAY}).stdout)
+day_guard()
+assert reserved["status"] == "reserved", reserved
+assert reserved["daily_bound_override"] == DAY, reserved
+assert controller_state()["daily_bound_override_used"]["utc_day"] == DAY
+run("capacity-release", "--reservation-id", "azr-daily0000001", "--fence-binding", fence,
+    "--cleanup-receipt", "b" * 64,
+    "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+day_guard()
+assert controller_state()["capacity_reservations"]["azr-daily0000001"]["status"] == "released", (
+    "capacity-release was blocked by the tripped daily bound")
+
+# 7. The durable baseline rolls when the observed UTC day changes: a stale
+# yesterday baseline is re-snapshotted at the current actual, so the new day
+# starts at zero recorded spend.
+state_file = Path(env["FM_HOME"]) / "state/azure-workers/controller.json"
+state = controller_state()
+state["daily_cost_baseline"] = {"utc_day": YESTERDAY, "actual_usd_at_day_start": 0.0}
+state_file.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")))
+run("reconcile", "--json")
+day_guard()
+rolled = controller_state()["daily_cost_baseline"]
+assert rolled == {"utc_day": DAY, "actual_usd_at_day_start": 300.0}, rolled
+
+# 8. Explicit zero, negative, or non-numeric bound values refuse loudly.
+for bad in ("0", "-1", "unbounded"):
+    broken = run("status", overrides={"FM_AZURE_WORKER_DAILY_BOUND_USD": bad}, check=False)
+    assert broken.returncode == 2 and "FM_AZURE_WORKER_DAILY_BOUND_USD" in broken.stderr, (
+        bad, broken.returncode, broken.stderr)
+PY
+    result=$?
+    set -e
+    if [ "$result" -eq 0 ]; then
+      pass "daily bound refuses new compute exactly, keeps wind-down flowing, and admits only through the exact-day override"
+      return 0
+    fi
+    if [ "$result" -ne 99 ]; then
+      fail "daily bound CLI exercise failed"
+    fi
+    # exit 99: UTC midnight crossed mid-unit; retry once on a fresh fixture.
+    echo "# daily bound CLI attempt $attempt crossed UTC midnight; retrying on a fresh fixture" >&2
+  done
+  fail "daily bound CLI exercise crossed UTC midnight twice"
+}
+
+idle_deallocate_cli() {
+  local tmp provider fixture home
+  fm_test_tmproot_into tmp fm-worker-idle-cli
+  provider="$tmp/provider.py"
+  fixture="$tmp/provider-state.json"
+  home="$tmp/home"
+  mkdir -p "$home"
+  write_fixture_provider "$provider"
+  env \
+    FM_HOME="$home" \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+    FM_AZURE_OWNER_TAG=owner \
+    FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0 \
+    FM_AZURE_WORKER_IDLE_RELEASE_SECONDS=600 \
+    FM_WORKER_PROVIDER_COMMAND="python3 $provider" \
+    FIXTURE_STATE="$fixture" \
+    FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS=1 \
+    python3 - "$WRAPPER" "$fixture" <<'PY' || fail "idle deallocate CLI exercise failed"
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+wrapper, fixture_path = sys.argv[1:]
+env = dict(os.environ)
+
+def run(*args, check=True):
+    result = subprocess.run([wrapper] + list(args), env=env, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and result.returncode != 0:
+        raise AssertionError("{} failed: {}".format(args, result.stderr))
+    return result
+
+def binding(number):
+    return format(number, "064x")
+
+def request(number):
+    run(
+        "request", "--task", "task-{}".format(number), "--task-generation", "gen-{}".format(number),
+        "--home-binding", binding(1000 + number), "--account-binding", binding(2000 + number),
+        "--worktree-binding", binding(3000 + number), "--repository-binding", binding(4000 + number),
+        "--repository-generation", "repo-{}".format(number), "--owner-kind", "primary", "--eligible",
+    )
+
+state_file = None
+def controller_state():
+    return json.loads(state_file.read_text())
+
+def fixture_state():
+    return json.loads(Path(fixture_path).read_text())
+
+def stamp(seconds_ago):
+    value = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=seconds_ago)
+    return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def set_last_execution(slot, seconds_ago):
+    state = controller_state()
+    state["workers"][slot]["last_execution_at"] = stamp(seconds_ago)
+    state_file.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")))
+
+state_file = Path(env["FM_HOME"]) / "state/azure-workers/controller.json"
+
+# An assigned worker whose recorded execution finished long ago.
+request(1)
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+state = controller_state()
+slot = str(state["queue"]["task-1@gen-1"]["slot"])
+generation = state["workers"][slot]["assignment_generation"]
+run("execute", "--task", "task-1", "--task-generation", "gen-1",
+    "--assignment-generation", generation, "--wall-seconds", "60",
+    "--confirm-execute", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"],
+    "--", "/usr/bin/true")
+assert controller_state()["workers"][slot]["last_execution_at"]
+
+# Boundary: below the threshold nothing is deallocated.
+set_last_execution(slot, 60)
+plan = json.loads(run("reconcile", "--apply", "--json",
+                      "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]).stdout)
+assert not [entry for entry in plan["actions"] if entry["type"] == "deallocate"], plan["actions"]
+assert "deallocated" not in fixture_state()["workers"][slot]["resources"]["vm"]["power_state"].lower()
+
+# A recent steer counts as recency: a worker being actively driven is never
+# deallocated, however old its last execution.
+state = controller_state()
+state["workers"][slot]["last_execution_at"] = stamp(4000)
+state["workers"][slot]["last_steer_at"] = stamp(30)
+state_file.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")))
+plan = json.loads(run("reconcile", "--apply", "--json",
+                      "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]).stdout)
+assert not [entry for entry in plan["actions"] if entry["type"] == "deallocate"], plan["actions"]
+assert "deallocated" not in fixture_state()["workers"][slot]["resources"]["vm"]["power_state"].lower()
+state = controller_state()
+del state["workers"][slot]["last_steer_at"]
+state_file.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")))
+
+# A non-numeric idle threshold refuses through the loud lane, never a raw
+# traceback.
+env_bad = dict(env, FM_AZURE_WORKER_IDLE_RELEASE_SECONDS="abc")
+broken = subprocess.run([wrapper, "status"], env=env_bad, text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+assert broken.returncode == 2, (broken.returncode, broken.stderr)
+assert "FM_AZURE_WORKER_IDLE_RELEASE_SECONDS" in broken.stderr, broken.stderr
+assert "Traceback" not in broken.stderr, broken.stderr
+
+# Past the threshold the planner deallocates unattended - dark compute, never
+# a machine-minted release - and marks the worker durably.
+set_last_execution(slot, 4000)
+applied = run("reconcile", "--apply", "--json",
+              "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+plan = json.loads(applied.stdout)
+idle_actions = [entry for entry in plan["actions"] if entry["type"] == "deallocate"]
+assert idle_actions and idle_actions[0].get("idle_release") is True, plan["actions"]
+assert "deallocated" in fixture_state()["workers"][slot]["resources"]["vm"]["power_state"].lower()
+state = controller_state()
+assert state["workers"][slot]["phase"] == "deallocated"
+assert state["workers"][slot]["idle_deallocated_at"]
+assert state["workers"][slot]["release_proof"] is None, "idle deallocate minted a release"
+assert state["queue"]["task-1@gen-1"]["status"] == "assigned", "idle deallocate completed the task"
+
+# Status LOUDLY lists the idle-deallocated worker until a human releases it.
+status_json = json.loads(run("status", "--json").stdout)
+listed = status_json["idle_deallocated_workers"]
+assert listed and listed[0]["slot"] == int(slot) and listed[0]["task"] == "task-1", listed
+status_text = run("status").stdout
+assert "IDLE-DEALLOCATED WORKER" in status_text and "RELEASE IT PROPERLY" in status_text, status_text
+
+# Already-dark compute is not deallocated again.
+repeat = json.loads(run("reconcile", "--apply", "--json",
+                        "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]).stdout)
+assert not [entry for entry in repeat["actions"] if entry["type"] == "deallocate"], repeat["actions"]
+
+# A worker with no recorded execution is never idle-deallocated, however old.
+request(2)
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+state = controller_state()
+slot2 = str(state["queue"]["task-2@gen-2"]["slot"])
+state["workers"][slot2]["assigned_at"] = stamp(90000)
+state["workers"][slot2].pop("last_execution_at", None)
+state_file.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")))
+plan = json.loads(run("reconcile", "--apply", "--json",
+                      "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]).stdout)
+assert not [entry for entry in plan["actions"] if entry["type"] == "deallocate"], plan["actions"]
+assert "deallocated" not in fixture_state()["workers"][slot2]["resources"]["vm"]["power_state"].lower()
+
+# The ordinary human-driven release path still owns destruction afterwards.
+state = controller_state()
+worker = state["workers"][slot]
+proof = {
+    "schema": "fm.worker-release/v2", "home_binding": worker["bindings"]["home_binding"],
+    "task": "task-1", "task_generation": "gen-1",
+    "assignment_generation": worker["assignment_generation"],
+    "account_binding": worker["bindings"]["account_binding"],
+    "worktree_binding": worker["bindings"]["worktree_binding"],
+    "repository_binding": worker["bindings"]["repository_binding"],
+    "repository_generation": worker["bindings"]["repository_generation"],
+    "cloud_instance_id": worker["cloud_instance_id"], "resources": worker["resources"],
+    "authorities": {},
+}
+for offset, authority in enumerate(("endpoint", "report", "landing", "account", "worktree"), 5):
+    receipt = {
+        "schema": "fm.worker-authority/v1", "authority": authority,
+        "task": proof["task"], "task_generation": proof["task_generation"],
+        "assignment_generation": proof["assignment_generation"], "verdict": "proved",
+        "evidence_digest": binding(offset * 1000 + 1),
+    }
+    receipt["receipt_digest"] = hashlib.sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    proof["authorities"][authority] = receipt
+canonical = json.dumps(proof, sort_keys=True, separators=(",", ":")).encode()
+proof["proof_digest"] = hashlib.sha256(canonical).hexdigest()
+proof_path = Path(env["FM_HOME"]) / "proof-1.json"
+proof_path.write_text(json.dumps(proof, sort_keys=True, separators=(",", ":")))
+run("release", "--task", "task-1", "--task-generation", "gen-1", "--proof-file", str(proof_path))
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+state = controller_state()
+assert slot not in state["workers"], "the released idle worker was not reset"
+assert state["queue"]["task-1@gen-1"]["status"] == "complete"
+assert json.loads(run("status", "--json").stdout)["idle_deallocated_workers"] == []
+PY
+  pass "idle workers deallocate unattended at the threshold, are loudly listed, and still exit through the ordinary release"
+}
+
 static_contract
 classification_and_admission_matrix
 azure_provider_refusal_matrix
@@ -4401,5 +5144,8 @@ secondmate_role_bounds
 message_lane_provider_contract
 message_lane_claim_exemption
 message_lane_static_contract
+daily_bound_and_idle_matrix
+daily_bound_cli
+idle_deallocate_cli
 
 echo "# fm-worker-lifecycle.test.sh: all assertions passed"

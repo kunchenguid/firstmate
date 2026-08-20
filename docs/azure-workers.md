@@ -102,6 +102,12 @@ Budget pressure never deallocates, deletes, duplicates, or terminates active or 
 During commissioning only, when the fresh resource group's Cost Management forecast model reports the exact insufficient-training-data refusal while actual spend is readable, the operator may set `FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST=1` so the readable actual substitutes as the conservative forecast; any other unreadable cost telemetry still refuses admission.
 It blocks new discretionary author and specialized capacity and allows only ordinary idle cleanup.
 
+A separate DAILY spend bound sits on top of the cumulative limits: once the day's recorded spend reaches `FM_AZURE_WORKER_DAILY_BOUND_USD` (default 100; an explicit zero, negative, or non-numeric value refuses loudly rather than meaning unbounded), every lane that commits new money refuses with the exact day, spend, and bound: the compute-creating and compute-resuming provider actions (`create`, `resume`) AND new specialized reservation admissions (`capacity-reserve`, `capacity-reserve-shape`), because the disposable runner reserves automatically and an ungated reserve lane could quietly burn past the bound with no human anywhere.
+Cost Management reports only month-to-date actual, so day spend is computed honestly as current actual minus a durable `daily_cost_baseline` snapshotted under the fleet lock on the first observation of each new UTC day; an unreadable actual fails the bound closed.
+The bound is a backstop on RECORDED spend - the actual lags hours - so the real same-day protectors remain the per-mutation cumulative admission and the idle deallocate path below; the bound guarantees a day cannot keep admitting new compute after the recorded number crosses it.
+Wind-down is never blocked: releases, `capacity-release`, deallocates, compute deletions, resets, and the claim-exempt message lane stay allowed while the bound is tripped; `execute` on an already-assigned worker stays allowed because that capacity is already held and billing, and for the same reason a lineage re-admission of an already-reserved shape constituent is already-held accounting and skips the gate.
+The only way past a tripped bound is the explicit operator override `FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE=<utc-day>` naming the exact current UTC day; it admits for that day only, is printed loudly by reconcile and resume, is carried on the admitted action and reserve output, and is recorded durably in `daily_bound_override_used` - only after the admission decision actually went the override's way - and shown in status.
+
 Example specialized reservation flow (the disposable runner performs this automatically):
 
 ```sh
@@ -178,6 +184,15 @@ After deallocation it deletes the named execute and bootstrap Run Commands and m
 Reset then conditionally deletes the result, request, global reservation, released account disk, task disk, identity, role, and container.
 The default cooldown is 300 seconds and may be configured from zero through 1,800 seconds.
 The default and currently required warm-idle target is zero.
+A release-proved worker whose VM is already dark but whose `cooldown_started_at` is null - the operator-side deallocate that surrender's dark-compute gate requires never stamps the field - gets the stamp durably on the planner's first observation, so the cooldown clock starts instead of restarting forever and `delete-compute` becomes due.
+
+An ASSIGNED worker whose task provably ended is not left billing until its TTL fires: when its newest durable activity stamp - the last recorded execution AND the last recorded steer both count as recency - is more than `FM_AZURE_WORKER_IDLE_RELEASE_SECONDS` old (default 14,400 - the four hours wkr-04 idled - floor 600), its queue item is still `assigned`, no pending provider action claims the slot, and the VM is still running, reconcile plans an automatic DEALLOCATE.
+Idle deallocation is deliberately NOT a release or reset: releasing requires authority receipts a machine cannot mint, while deallocation is reversible at the VM level and stops the compute spend, which is what the cost guard needs.
+The boundary is: idle-deallocate stops compute cost unattended; the ordinary release stays human-driven.
+Be honest about what it means for the assignment: an idle-deallocated ASSIGNED worker is operationally terminal for that assignment - `execute` cannot run on deallocated compute, `resume` requires the VM to be absent, and no power-on lane exists - so release (or surrender) is the exit.
+Compartment operators whose workers must legitimately outlive the default must raise `FM_AZURE_WORKER_IDLE_RELEASE_SECONDS`; in particular the pending secondmate monitor renews legs at 14,400 seconds, exactly the default threshold, so a deployment relying on renewal-at-threshold races the deallocate and must run with the knob above its renewal cadence.
+Status output loudly lists every idle-deallocated worker still awaiting its proper release, and the ordinary authority-receipt/release (or surrender) flow then proceeds exactly as for any dark worker.
+A worker with no recorded execution at all is never idle-deallocated - nothing in controller state proves its task ended - and its per-VM TTL schedule remains the backstop.
 
 When compatible queued work exists, reconcile may skip the idle wait after deallocation, but it still deletes disposable compute and completes the exact released reset first.
 The next assignment receives a new assignment generation, a new cloud VM/NIC/OS generation, a new user-assigned identity, a new provider-account disk, a new task disk, and a new container binding.
@@ -256,6 +271,9 @@ Supported policy changes are deliberately narrow:
 - `FM_AZURE_WORKER_STEADY_TARGET_USD` changes the post-stabilization target between $500 and $1,500.
 - `FM_AZURE_WORKER_ADMISSION_HOURS` changes the one-through-168-hour reservation interval.
 - `FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS` changes the zero-through-1,800-second cleanup delay.
+- `FM_AZURE_WORKER_DAILY_BOUND_USD` changes the daily recorded-spend bound; unset means the default 100, and zero, negative, or non-numeric values refuse loudly instead of meaning unbounded.
+- `FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE=<utc-day>` is the one explicit operator override past a tripped daily bound, valid only for the exact current UTC day, always printed and durably recorded when used.
+- `FM_AZURE_WORKER_IDLE_RELEASE_SECONDS` changes the idle-deallocate threshold between 600 and 604,800 seconds (default 14,400).
 - `FM_AZURE_WORKER_MAX` may lower the software cap but may never exceed sixteen.
 - `--required` admits already-authorized recovery or landing demand through cost pressure, but never through unreadable telemetry, quota, identity, or cleanup proofs.
 
