@@ -295,6 +295,14 @@ assert_no_grep() {
   ! grep -F -- "$1" "$2" >/dev/null || fail "$3"
 }
 
+# assert_line_in_file <expected-text> <file> <msg>: the file must contain a
+# line that is byte-identical to <expected-text>.  Uses awk instead of
+# grep -Fx so it works on macOS where grep's pattern-size limit is ~2KB.
+assert_line_in_file() {
+  awk -v rc=1 'NR==FNR { expected=$0; next } $0 == expected { rc=0 } END { exit rc }' \
+    <(printf '%s\n' "$1") "$2" >/dev/null || fail "$3"
+}
+
 # assert_absent <path> <msg>: path must not exist.
 assert_absent() {
   [ ! -e "$1" ] || fail "$2"
