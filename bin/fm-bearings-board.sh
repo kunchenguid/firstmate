@@ -71,6 +71,11 @@ validate_payload() {  # <data.json>
     def slug($max): type == "string" and test("^[A-Za-z0-9._-]{1," + ($max | tostring) + "}$");
     def repo_marker: has("repo") and (.repo == null or (.repo | type == "string"));
     def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
+    def optional_https_url($name):
+      (has($name) | not)
+      or (.[$name]
+        | type == "string"
+          and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
     def call_item:
       type == "object"
       and (.key | slug(128))
@@ -86,7 +91,7 @@ validate_payload() {  # <data.json>
       and (optional_string("about"))
       and (optional_string("decide"))
       and (optional_string("detail"))
-      and (optional_string("pr_url"))
+      and (optional_https_url("pr_url"))
       and (optional_string("freeform_hint"))
       and ((has("allow_freeform") | not) or (.allow_freeform | type == "boolean"))
       and ((has("recommend_value") | not)
@@ -99,7 +104,7 @@ validate_payload() {  # <data.json>
     def landed_item:
       type == "object" and repo_marker and (.id | nonempty_string)
       and (.what | nonempty_string) and (.owner | nonempty_string)
-      and optional_string("pr_url");
+      and optional_https_url("pr_url");
     def charted_item:
       type == "object" and repo_marker and (.id | slug(128))
       and (.title | nonempty_string) and (.reason | type == "string")

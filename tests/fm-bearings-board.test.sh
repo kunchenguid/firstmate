@@ -164,6 +164,22 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a non-boolean renderer field was accepted"
 
+  write_valid_payload "$data"
+  jq '.captains_call[1].pr_url = "javascript:alert(1)"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a non-HTTPS Captain’s Call PR URL was accepted"
+
+  write_valid_payload "$data"
+  jq '.landed = [{
+    "id": "sample-landed",
+    "repo": "sample",
+    "what": "Landed work",
+    "owner": "firstmate",
+    "pr_url": "data:text/html,unsafe"
+  }]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a non-HTTPS Landed PR URL was accepted"
+
   assert_absent "$board" "a refused payload still produced a board"
   pass "build refuses malformed payloads before touching the board"
 }
