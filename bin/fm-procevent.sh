@@ -917,7 +917,7 @@ cmd_unready() {
 }
 
 cmd_wait_ready() {
-  local id=${1-} timeout=${2-} attempts i=0 marker marker_token marker_identity stable_token= stable=0 state current_identity
+  local id=${1-} timeout=${2-} attempts i=0 marker marker_token marker_identity stable_token='' stable=0 state current_identity
   [ "$#" -eq 2 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   positive_int "$timeout" || die "timeout must be a positive integer"

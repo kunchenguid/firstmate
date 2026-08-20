@@ -375,7 +375,7 @@ sys.stdout.buffer.write(body)
 }
 
 cmd_send() {
-  local selector=${1-} message=${2:--} lock send_rc=0 staged= ownership_status
+  local selector=${1-} message=${2:--} lock send_rc=0 staged='' ownership_status
   validate_selector "$selector"
   if [ "$message" = - ]; then
     private_tempfile staged "${TMPDIR:-/tmp}/fm-signal-input.XXXXXX" || die "cannot create private Signal message"
@@ -386,6 +386,7 @@ cmd_send() {
   mkdir -p "${lock%/*}" || die "cannot create Signal lifecycle state"
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock Signal lifecycle"
+    # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
     interrupt_send() {
       local status=$1
       trap - EXIT HUP INT TERM
@@ -403,6 +404,7 @@ cmd_send() {
       fm_lock_release "$lock"
       signal_account_access_error "$ownership_status"
     fi
+    # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
     restore_source() {
       local status=$?
       trap - EXIT
