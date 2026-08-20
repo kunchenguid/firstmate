@@ -18,8 +18,18 @@
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
-# Detection layers: verified environment markers first, then process ancestry.
-# Record each newly verified env marker here.
+# Detection layers: process ancestry first, then verified environment markers
+# as the fallback when no harness ancestor is visible. Ancestry wins because
+# markers are inheritable: a child session keeps the parent harness's markers
+# unless something clears them, while the innermost harness-named ancestor is
+# positional truth about which harness is actually running this process tree
+# (observed live 2026-08-20: a codex primary carrying inherited CURSOR_AGENT/
+# CURSOR_INVOKED_AS detected as cursor and was handed the wrong supervision
+# protocol). Record each newly verified env marker here.
+# FM_HARNESS_ANCESTRY_BOUNDARY=<pid> is a test seam: the ancestry walk stops
+# when it reaches that pid, so the test suite's verdicts cannot depend on
+# which real harness happens to be running the suite. If it ever leaks into a
+# real session, detection merely degrades to the marker fallback.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,51 +40,15 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 
-detect_own() {
-  # Layer 1: environment markers for verified harnesses.
-  # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
-  # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
-  # multiplexer's stored environment can silently misidentify one of them before
-  # ancestry is consulted. This is a precedence hazard, not evidence that
-  # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
-  # Cursor is checked BEFORE claude, deliberately. cursor-agent does NOT clear
-  # an inherited CLAUDECODE, so a cursor worker launched from a claude primary
-  # carries BOTH markers and whichever is tested first wins. Cursor's own
-  # markers are unambiguous when present, so ordering them first is what makes
-  # the verdict correct; bin/fm-spawn.sh additionally clears the foreign markers
-  # at the launch boundary. Both are kept: the launch sanitization only covers
-  # sessions fm-spawn started, while this ordering also covers a cursor session
-  # a human started by hand. Verified live on cursor-agent 2026.08.11-e8db854:
-  # CURSOR_INVOKED_AS=cursor-agent is set on the agent process itself, and
-  # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
-  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
-  [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
-  [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
-  if [ "${PI_CODING_AGENT:-}" = "true" ]; then
-    if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
-    return
-  fi
-  # grok set GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
-  # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so the marker
-  # is unambiguous WHEN PRESENT - but it is not guaranteed present. A grok 1.0.0
-  # hook process carries GROK_HOOK_EVENT, GROK_HOOK_NAME, GROK_SESSION_ID, and
-  # GROK_WORKSPACE_ROOT with no GROK_AGENT at all (verified from the live process
-  # environment of a wedged grok 1.0.0 Stop hook, 2026-08-07). Treat this marker as
-  # a fast path only; the ancestry walk below is what actually guarantees grok is
-  # identified, and any rule that must be RELIABLE under grok has to test the hook
-  # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
-  [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # muse (Muse Code) publishes no harness-identity marker of its own. The only
-  # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
-  # a per-session log PATH rather than an identity, and its export to tool
-  # subprocesses is unverified (verified: muse 0.1.0-R708.1), so muse is detected
-  # by ancestry alone below. Do NOT promote MUSE_CURRENT_SESSION_LOG to a marker
-  # without verifying it reaches children AND that it cannot survive in a
-  # multiplexer's stored environment, which is the precedence hazard above.
-  # Layer 2: walk the parent chain and match the command name.
+# Layer 1: walk the parent chain and match the command name. Prints the
+# innermost harness ancestor's verdict, or "unknown" when no harness ancestor
+# is visible within the walk depth (or before FM_HARNESS_ANCESTRY_BOUNDARY).
+detect_ancestry() {
   local pid=$$ comm args argv0
   for _ in 1 2 3 4 5 6 7 8; do
+    if [ -n "${FM_HARNESS_ANCESTRY_BOUNDARY:-}" ] && [ "$pid" = "$FM_HARNESS_ANCESTRY_BOUNDARY" ]; then
+      break
+    fi
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
     if fm_cursor_process_matches "$comm" '' "$argv0"; then
@@ -111,6 +85,61 @@ detect_own() {
       break
     fi
   done
+  echo unknown
+}
+
+detect_own() {
+  local anc
+  anc=$(detect_ancestry)
+  if [ "$anc" != unknown ]; then
+    # Same-family refinement only: ancestry cannot express pi-signed (the walk
+    # maps a pi-signed ancestor to pi), so the session's own Pi markers refine
+    # the verdict. A FOREIGN marker never overrides a concrete ancestry match.
+    if [ "$anc" = pi ] && [ "${PI_CODING_AGENT:-}" = "true" ] && [ "${FM_PI_HARNESS:-}" = pi-signed ]; then
+      echo pi-signed
+    else
+      echo "$anc"
+    fi
+    return
+  fi
+  # Layer 2 fallback: environment markers for verified harnesses, consulted
+  # only when ancestry shows no harness (a detached/reparented hook process,
+  # a walk deeper than the depth cap, an exotic launcher).
+  # Cursor is checked BEFORE claude, deliberately. cursor-agent does NOT clear
+  # an inherited CLAUDECODE, so a cursor worker launched from a claude primary
+  # carries BOTH markers and whichever is tested first wins. Cursor's own
+  # markers are unambiguous when present, so ordering them first is what makes
+  # the verdict correct; bin/fm-spawn.sh additionally clears the foreign markers
+  # at the launch boundary. Both are kept: the launch sanitization only covers
+  # sessions fm-spawn started, while this ordering also covers a cursor session
+  # a human started by hand. Verified live on cursor-agent 2026.08.11-e8db854:
+  # CURSOR_INVOKED_AS=cursor-agent is set on the agent process itself, and
+  # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
+  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
+  [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
+  if [ "${PI_CODING_AGENT:-}" = "true" ]; then
+    if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
+    return
+  fi
+  # grok set GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
+  # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so the marker
+  # is unambiguous WHEN PRESENT - but it is not guaranteed present. A grok 1.0.0
+  # hook process carries GROK_HOOK_EVENT, GROK_HOOK_NAME, GROK_SESSION_ID, and
+  # GROK_WORKSPACE_ROOT with no GROK_AGENT at all (verified from the live process
+  # environment of a wedged grok 1.0.0 Stop hook, 2026-08-07). Treat this marker as
+  # a fallback only; the ancestry walk above is what actually guarantees grok is
+  # identified, and any rule that must be RELIABLE under grok has to test the hook
+  # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
+  [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # muse (Muse Code) publishes no harness-identity marker of its own. The only
+  # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
+  # a per-session log PATH rather than an identity, and its export to tool
+  # subprocesses is unverified (verified: muse 0.1.0-R708.1), so muse is detected
+  # by ancestry alone above. Do NOT promote MUSE_CURRENT_SESSION_LOG to a marker
+  # without verifying it reaches children AND that it cannot survive in a
+  # multiplexer's stored environment, which is the inheritance hazard the
+  # ancestry-first ordering exists to close.
   echo unknown
 }
 

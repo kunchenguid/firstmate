@@ -15,8 +15,10 @@
 #      requires Cursor's own name or install tree in the path or argv[0].
 #   2. An unrelated `node`/`agent` pane classifies `other`, which the liveness
 #      callers fold into `ambiguous` - NEVER `dead`.
-#   3. Cursor's env marker outranks an inherited CLAUDECODE, because cursor does
-#      not clear it and whichever marker is tested first wins.
+#   3. In the marker fallback (no harness ancestry visible), cursor's env
+#      marker outranks an inherited CLAUDECODE, because cursor does not clear
+#      it and whichever marker is tested first wins. Ancestry-vs-marker
+#      precedence itself is pinned by tests/fm-harness-detect.test.sh.
 #   4. The transcript fold brackets a turn: a trailing turn_ended is idle, a
 #      later role:user is busy, and an unresolvable binding is unknown.
 #   5. Cursor is a crewmate/scout adapter only and refuses a secondmate launch.
@@ -177,20 +179,24 @@ test_tmux_classifies_cursor_pane_without_inferring_dead() {
 
 test_cursor_marker_outranks_inherited_claudecode() {
   local out
+  # These are marker-fallback assertions: FM_HARNESS_ANCESTRY_BOUNDARY stops
+  # the ancestry walk at this test shell so the harness actually running the
+  # suite can never leak into the verdict (same isolation as
+  # tests/fm-harness-detect.test.sh).
   # This is the exact hazard: cursor does NOT clear an inherited CLAUDECODE, so
   # a cursor worker under a claude primary carries both markers.
-  out=$(CLAUDECODE=1 CURSOR_AGENT=1 "$HARNESS")
+  out=$(CLAUDECODE=1 CURSOR_AGENT=1 FM_HARNESS_ANCESTRY_BOUNDARY=$$ "$HARNESS")
   [ "$out" = cursor ] || fail "CLAUDECODE + CURSOR_AGENT must detect cursor, got '$out'"
-  out=$(CLAUDECODE=1 CURSOR_INVOKED_AS=cursor-agent "$HARNESS")
+  out=$(CLAUDECODE=1 CURSOR_INVOKED_AS=cursor-agent FM_HARNESS_ANCESTRY_BOUNDARY=$$ "$HARNESS")
   [ "$out" = cursor ] || fail "CLAUDECODE + CURSOR_INVOKED_AS must detect cursor, got '$out'"
   # Both cursor markers stand alone, and neither steals a plain claude session.
-  out=$(env -u CLAUDECODE CURSOR_AGENT=1 "$HARNESS")
+  out=$(env -u CLAUDECODE CURSOR_AGENT=1 FM_HARNESS_ANCESTRY_BOUNDARY=$$ "$HARNESS")
   [ "$out" = cursor ] || fail "CURSOR_AGENT alone must detect cursor, got '$out'"
-  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 "$HARNESS")
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_HARNESS_ANCESTRY_BOUNDARY=$$ "$HARNESS")
   [ "$out" = claude ] || fail "CLAUDECODE alone must still detect claude, got '$out'"
   # A CURSOR_* variable that is not the invocation identity proves nothing.
   out=$(env -u CURSOR_AGENT CLAUDECODE=1 CURSOR_API_ENDPOINT=https://example \
-        CURSOR_INVOKED_AS=something-else "$HARNESS")
+        CURSOR_INVOKED_AS=something-else FM_HARNESS_ANCESTRY_BOUNDARY=$$ "$HARNESS")
   [ "$out" = claude ] \
     || fail "an unrelated CURSOR_* setting must not claim the cursor identity, got '$out'"
   pass "fm-harness.sh: cursor's marker outranks an inherited CLAUDECODE"
@@ -212,7 +218,10 @@ process.stdout.write(result.stdout);
 process.stderr.write(result.stderr);
 process.exit(result.status === null ? 1 : result.status);
 JS
-  out=$(node "$helper" "$HARNESS")
+  # The boundary stops the walk at this test shell AFTER it has examined and
+  # rejected the node lookalike, so a real harness hosting the suite cannot
+  # supply the cursor verdict this case exists to rule out.
+  out=$(FM_HARNESS_ANCESTRY_BOUNDARY=$$ node "$helper" "$HARNESS")
   [ "$out" != cursor ] \
     || fail "a node script merely containing cursor-agent in its filename must not identify as cursor"
   pass "fm-harness.sh: cursor-like node script names do not establish ancestry identity"
