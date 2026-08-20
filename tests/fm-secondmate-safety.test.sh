@@ -655,8 +655,8 @@ test_home_seed_refuses_projectful_reused_charter_for_projectless_home() {
   fi
   grep -F 'existing charter brief' "$err" >/dev/null \
     || fail "project-less charter refusal did not name the stale charter conflict"
-  grep -F 'fm-brief.sh stale --secondmate --no-projects' "$err" >/dev/null \
-    || fail "project-less charter refusal did not explain how to re-scaffold"
+  grep -F 'fm-brief.sh stale --secondmate --no-projects --replace' "$err" >/dev/null \
+    || fail "project-less charter refusal did not explain the supported replacement path"
   cmp -s "$stale_brief_before" "$stale_brief" \
     || fail "project-less charter refusal changed the reused charter"
   assert_absent "$stale_sub/.fm-secondmate-home" "project-less charter refusal wrote a home marker"

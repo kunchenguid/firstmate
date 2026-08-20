@@ -794,7 +794,7 @@ refuse_projectful_projectless_charter() {
     return 0
   fi
   printf 'error: cannot seed project-less secondmate home because existing charter brief at %s conflicts with --no-projects\n' "$brief" >&2
-  printf 'error: re-scaffold it with fm-brief.sh %s --secondmate --no-projects or remove the stale brief before seeding\n' "$id" >&2
+  printf 'error: re-scaffold it with fm-brief.sh %s --secondmate --no-projects --replace or remove the stale brief before seeding\n' "$id" >&2
   return 1
 }
 
