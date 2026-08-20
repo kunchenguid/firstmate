@@ -50,8 +50,8 @@
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
 # Two worker-behavior contracts are generated from measured cost rather than left
-# to firstmate to retype per task: ship and scout rules forbid waiting in a
-# foreground blocking "sleep" and name the correct alternatives, and every
+# to firstmate to retype per task: every scaffold forbids waiting in a foreground
+# blocking "sleep" and names the correct alternatives, and every
 # document-producing scaffold (scout report, secondmate detailed answer) requires
 # writing the deliverable incrementally, section by section, straight to its file.
 # Ship tasks include a project-memory section so durable project-intrinsic
@@ -221,6 +221,8 @@ You are in an isolated firstmate home. The local \`AGENTS.md\` is your job descr
 $PROJECT_CLONES_NOTE
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
+When you wait on a crewmate or on a background job of your own, never sit in a foreground blocking \`sleep\`: from outside it is indistinguishable from a stall, and it burns the very context the wait was meant to protect.
+Prefer a harness-tracked background job whose completion resumes or notifies you; otherwise poll briefly and do other useful work between checks; otherwise record the thing as unverified and move on, and declare a wait you can neither shorten nor abandon with \`$PAUSED_VERB: {why}\` below.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
@@ -346,7 +348,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    and it burns the very context the wait was meant to protect.
    To wait on your own background job, prefer a harness-tracked background job whose completion
    resumes or notifies you; otherwise poll briefly and do other useful work between checks;
-   otherwise record the thing as unverified and move on.
+   otherwise record the thing as unverified and move on - never for a wait your Definition of done
+   requires: declare it under rule 4 with \`$PAUSED_VERB: {why}\` instead.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -470,7 +473,8 @@ $RULE1
    and it burns the very context the wait was meant to protect.
    To wait on your own background job, prefer a harness-tracked background job whose completion
    resumes or notifies you; otherwise poll briefly and do other useful work between checks;
-   otherwise record the thing as unverified and move on.
+   otherwise record the thing as unverified and move on - never for a wait your Definition of done
+   requires: declare it under rule 4 with \`$PAUSED_VERB: {why}\` instead.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
