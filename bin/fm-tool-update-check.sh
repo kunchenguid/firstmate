@@ -149,6 +149,7 @@ real_epoch() { date +%s; }
 
 FINDINGS=
 DEADLINE=0
+INCOMPLETE_REPORTED=0
 
 # Each finding is flattened to a single line here, because the whole report must
 # stay one line for the wake record.
@@ -164,6 +165,34 @@ emit() {
 
 budget_exhausted() {
   [ "$(real_epoch)" -ge "$DEADLINE" ]
+}
+
+# True while the sweep budget still has room for another probe. When it does not,
+# it records once which tool the sweep did not finish, so a sweep that cannot
+# finish says so rather than being killed by the watcher with nothing printed.
+budget_allows() {
+  local name=$1
+  budget_exhausted || return 0
+  if [ "$INCOMPLETE_REPORTED" -eq 0 ]; then
+    INCOMPLETE_REPORTED=1
+    emit "check incomplete: the time budget ran out before $name"
+  fi
+  return 1
+}
+
+# The bound for one probe: the probe bound, cut down to whatever the sweep
+# budget has left, so no probe can run past the end of the sweep. Never below
+# one second, because fm_run_timed treats a non-positive bound as no bound.
+probe_bound() {
+  local left
+  left=$((DEADLINE - $(real_epoch)))
+  if [ "$left" -lt 1 ]; then
+    printf '1\n'
+  elif [ "$left" -lt "$PROBE_SECS" ]; then
+    printf '%s\n' "$left"
+  else
+    printf '%s\n' "$PROBE_SECS"
+  fi
 }
 
 # First dotted number in the text, so "herdr 0.8.2" and "v1.46.0" both work.
@@ -203,8 +232,20 @@ commit_phrase() {
 
 CONFIG_PROBLEM=
 
+# jq can check that an announce_pattern is a non-empty single-line string, but
+# only grep can say whether it compiles as an extended regular expression. A
+# pattern grep refuses would silently disable that tool's update source, which is
+# the exact failure this script exists to prevent, so it is a registry problem
+# reported with the tool named.
+announce_pattern_usable() {
+  local pattern=$1 status
+  printf '%s' '' | grep -qE -- "$pattern" 2>/dev/null
+  status=$?
+  [ "$status" -le 1 ]
+}
+
 config_validate() {
-  local problem status
+  local problem status name announce
   if ! command -v jq >/dev/null 2>&1; then
     CONFIG_PROBLEM='jq is required to read the watched tool registry'
     return 1
@@ -248,6 +289,13 @@ config_validate() {
     CONFIG_PROBLEM=$problem
     return 1
   fi
+  while IFS=$FIELD_SEP read -r name _ _ announce _; do
+    [ -n "$announce" ] || continue
+    if ! announce_pattern_usable "$announce"; then
+      CONFIG_PROBLEM="tool $name announce_pattern is not a usable extended regular expression"
+      return 1
+    fi
+  done < <(config_records)
   CONFIG_PROBLEM=
   return 0
 }
@@ -298,12 +346,12 @@ path_hits() {
 probe_output() {
   local path=$1
   shift
-  fm_run_timed "$PROBE_SECS" "$path" "$@" 2>&1
+  fm_run_timed "$(probe_bound)" "$path" "$@" 2>&1
 }
 
 command_findings() {
   local name=$1 command_name=$2 args_joined=$3 announce=$4 announce_args=$5
-  local hit out version matched announce_out
+  local hit out version matched announce_out status
   local resolved_path='' resolved_version='' resolved_out=''
   local best_path='' best_version='' unreadable='' hits=''
 
@@ -350,8 +398,15 @@ EOF
       announce_out=$(probe_output "$resolved_path" $announce_args)
     fi
     if [ -n "$announce_out" ]; then
-      matched=$(printf '%s' "$announce_out" | grep -oE -- "$announce" 2>/dev/null | head -n 1)
-      [ -z "$matched" ] || emit "$name update available: $matched"
+      # Not a pipeline, so grep's own status is still readable here: a pattern
+      # grep cannot use is a check failure, never read as nothing to announce.
+      matched=$(grep -oE -- "$announce" <<< "$announce_out" 2>/dev/null)
+      status=$?
+      if [ "$status" -gt 1 ]; then
+        emit "$name check failed: announce_pattern is not a usable extended regular expression"
+      elif [ -n "$matched" ]; then
+        emit "$name update available: $(printf '%s\n' "$matched" | head -n 1)"
+      fi
     fi
   fi
 
@@ -373,10 +428,20 @@ EOF
 
 # --- git probes -------------------------------------------------------------
 
-# Read-only throughout: nothing here writes to the watched repository.
+# One bounded read-only git probe, cut down to whatever the sweep budget has
+# left so a slow repository or remote cannot outlast the sweep.
+git_probe() {
+  local repo=$1
+  shift
+  fm_run_timed "$(probe_bound)" git -C "$repo" "$@"
+}
+
+# Read-only throughout: nothing here writes to the watched repository. Every
+# probe consults the sweep budget first, because this is the one tool kind that
+# issues several probes in a row, two of them over the network.
 git_findings() {
   local name=$1 repo=$2 remote=$3 branch=$4
-  local status remote_sha local_sha local_label count short
+  local status remote_sha local_sha local_label count short bound
 
   if ! command -v git >/dev/null 2>&1; then
     emit "$name check failed: git is not installed"
@@ -386,20 +451,23 @@ git_findings() {
     emit "$name check failed: $repo is not a directory"
     return 0
   fi
-  if ! fm_run_timed "$PROBE_SECS" git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+  budget_allows "$name" || return 0
+  if ! git_probe "$repo" rev-parse --git-dir >/dev/null 2>&1; then
     emit "$name check failed: $repo is not a git repository"
     return 0
   fi
 
   if [ -z "$branch" ]; then
-    branch=$(fm_run_timed "$PROBE_SECS" git -C "$repo" symbolic-ref --short "refs/remotes/$remote/HEAD" 2>/dev/null)
+    budget_allows "$name" || return 0
+    branch=$(git_probe "$repo" symbolic-ref --short "refs/remotes/$remote/HEAD" 2>/dev/null)
     branch=${branch#"$remote/"}
   fi
   if [ -z "$branch" ]; then
     # A clone made with --single-branch, or one that never ran remote set-head,
     # has no local record of the remote's default branch. Ask the remote itself
     # rather than reporting a check failure the operator cannot act on.
-    branch=$(fm_run_timed "$PROBE_SECS" git -C "$repo" ls-remote --symref "$remote" HEAD 2>/dev/null \
+    budget_allows "$name" || return 0
+    branch=$(git_probe "$repo" ls-remote --symref "$remote" HEAD 2>/dev/null \
       | awk '$1 == "ref:" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
   fi
   if [ -z "$branch" ]; then
@@ -407,10 +475,19 @@ git_findings() {
     return 0
   fi
 
-  remote_sha=$(fm_run_timed "$PROBE_SECS" git -C "$repo" ls-remote "$remote" "refs/heads/$branch" 2>/dev/null)
+  budget_allows "$name" || return 0
+  bound=$(probe_bound)
+  remote_sha=$(fm_run_timed "$bound" git -C "$repo" ls-remote "$remote" "refs/heads/$branch" 2>/dev/null)
   status=$?
   if [ "$status" -eq 124 ]; then
-    emit "$name check failed: $remote did not answer within ${PROBE_SECS}s"
+    emit "$name check failed: $remote did not answer within ${bound}s"
+    return 0
+  fi
+  if [ "$status" -ne 0 ]; then
+    # The probe itself failed, so nothing at all is known about the branch. An
+    # offline host and a deleted branch are different problems, and reporting a
+    # missing branch here would name a cause that was never established.
+    emit "$name check failed: $remote could not be reached or read from $repo"
     return 0
   fi
   remote_sha=$(printf '%s\n' "$remote_sha" | awk 'NR == 1 { print $1 }')
@@ -419,9 +496,10 @@ git_findings() {
     return 0
   fi
 
-  if local_sha=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch" 2>/dev/null) && [ -n "$local_sha" ]; then
+  budget_allows "$name" || return 0
+  if local_sha=$(git_probe "$repo" rev-parse --verify --quiet "refs/heads/$branch" 2>/dev/null) && [ -n "$local_sha" ]; then
     local_label="local $branch"
-  elif local_sha=$(git -C "$repo" rev-parse --verify --quiet HEAD 2>/dev/null) && [ -n "$local_sha" ]; then
+  elif local_sha=$(git_probe "$repo" rev-parse --verify --quiet HEAD 2>/dev/null) && [ -n "$local_sha" ]; then
     local_label='local HEAD'
   else
     emit "$name check failed: $repo has no commit to compare"
@@ -430,13 +508,14 @@ git_findings() {
 
   [ "$local_sha" != "$remote_sha" ] || return 0
 
-  if git -C "$repo" cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+  budget_allows "$name" || return 0
+  if git_probe "$repo" cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
     # The local copy may be ahead of, or diverged from, the remote branch; only
     # commits it does not have yet are an available update.
-    if git -C "$repo" merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+    if git_probe "$repo" merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
       return 0
     fi
-    count=$(git -C "$repo" rev-list --count "$local_sha..$remote_sha" 2>/dev/null)
+    count=$(git_probe "$repo" rev-list --count "$local_sha..$remote_sha" 2>/dev/null)
     case "$count" in
       ''|*[!0-9]*|0) count= ;;
     esac
@@ -516,10 +595,7 @@ action_check() {
   else
     while IFS=$FIELD_SEP read -r name command_name args_joined announce announce_args repo remote branch; do
       [ -n "$name" ] || continue
-      if budget_exhausted; then
-        emit "check incomplete: the time budget ran out before $name"
-        break
-      fi
+      budget_allows "$name" || break
       [ -z "$command_name" ] || command_findings "$name" "$command_name" "$args_joined" "$announce" "$announce_args"
       [ -z "$repo" ] || git_findings "$name" "$repo" "$remote" "$branch"
     done < <(config_records)
@@ -543,17 +619,50 @@ action_check() {
   return 0
 }
 
+# The home is embedded already resolved, because the watcher runs the shim from
+# its own working directory and a relative spelling would send the check to a
+# different home, or to none at all.
 shim_content() {
+  local home=$1
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     '# Auto-generated by fm-tool-update-check.sh - watched tool update poll shim.' \
     '# The watcher validates these bytes, then dispatches the trusted check script.' \
-    "export FM_HOME=$(printf '%q' "$FM_HOME")" \
+    "export FM_HOME=$(printf '%q' "$home")" \
     "exec $(printf '%q' "$SCRIPT_DIR/fm-tool-update-check.sh") check"
 }
 
+# Write the shim the way this repo writes its other trusted check shim: the
+# guards run before anything is written, so a symlink at the shim path is
+# refused instead of followed, and the bytes arrive by rename so the watcher
+# never reads a half-written shim and rejects it as unauthenticated.
+shim_write() {
+  local want=$1 device tmp
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  device=$(fm_pr_file_device "$STATE") || return 1
+  [ -n "$device" ] || return 1
+  fm_pr_regular_destination_on_device_or_absent "$CHECK_SHIM" "$device" || return 1
+  if [ -e "$CHECK_SHIM" ] && [ "$(fm_pr_file_mode "$CHECK_SHIM")" = 700 ] \
+    && [ "$(cat "$CHECK_SHIM" 2>/dev/null)" = "$want" ]; then
+    return 0
+  fi
+  tmp=$(umask 077; mktemp "$STATE/.fm-tool-updates-check.XXXXXX" 2>/dev/null) || return 1
+  if ! printf '%s\n' "$want" > "$tmp" \
+    || ! chmod 0700 "$tmp" \
+    || ! fm_pr_private_file_valid "$tmp" 700 "$device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! fm_pr_regular_destination_on_device_or_absent "$CHECK_SHIM" "$device" \
+    || ! mv -f -- "$tmp" "$CHECK_SHIM"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  fm_pr_private_file_valid "$CHECK_SHIM" 700 "$device"
+}
+
 action_arm() {
-  local want
+  local want home
   if [ ! -f "$CONFIG" ]; then
     printf 'fm-tool-update-check: no watched tool registry at %s\n' "$CONFIG" >&2
     return 1
@@ -563,12 +672,21 @@ action_arm() {
     return 1
   fi
   mkdir -p "$STATE" || return 1
-  want=$(shim_content)
-  if [ ! -f "$CHECK_SHIM" ] || [ "$(cat "$CHECK_SHIM" 2>/dev/null)" != "$want" ]; then
-    printf '%s\n' "$want" > "$CHECK_SHIM" || return 1
-  fi
-  chmod 0700 "$CHECK_SHIM" || return 1
-  FM_HOME="$FM_HOME" "$REGISTER_BIN" "$CHECK_ID" >/dev/null || {
+  case "$FM_HOME" in
+    /*) home=$FM_HOME ;;
+    *)
+      home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || {
+        printf 'fm-tool-update-check: cannot resolve FM_HOME %s\n' "$FM_HOME" >&2
+        return 1
+      }
+      ;;
+  esac
+  want=$(shim_content "$home")
+  shim_write "$want" || {
+    printf 'fm-tool-update-check: could not write %s\n' "$CHECK_SHIM" >&2
+    return 1
+  }
+  FM_HOME="$home" "$REGISTER_BIN" "$CHECK_ID" >/dev/null || {
     printf 'fm-tool-update-check: could not register %s\n' "$CHECK_SHIM" >&2
     return 1
   }

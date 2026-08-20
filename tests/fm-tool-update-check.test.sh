@@ -47,14 +47,44 @@ SH
   chmod 0755 "$dir/$command_name"
 }
 
+# make_slow_copy <dir> <command> <seconds>: a copy that answers far too late, so a
+# case can spend the sweep budget the way a hung tool would.
+make_slow_copy() {
+  local dir=$1 command_name=$2 seconds=$3
+  mkdir -p "$dir"
+  cat > "$dir/$command_name" <<SH
+#!/usr/bin/env bash
+sleep $seconds
+printf 'herdr 0.8.2\n'
+SH
+  chmod 0755 "$dir/$command_name"
+}
+
+# make_counting_copy <dir> <command> <version-output> <log>: the same copy, which
+# also appends one line to <log> every time it runs, so a case can assert how
+# many times the check actually probed it.
+make_counting_copy() {
+  local dir=$1 command_name=$2 text=$3 log=$4
+  mkdir -p "$dir"
+  cat > "$dir/$command_name" <<SH
+#!/usr/bin/env bash
+printf 'probed\n' >> '$log'
+printf '%s\n' '$text'
+SH
+  chmod 0755 "$dir/$command_name"
+}
+
 write_config() {
   local home=$1
   shift
   printf '%s\n' "$*" > "$home/config/watched-tools.json"
 }
 
-# Only the fixture directories, plus the directories the check itself needs, so
-# a real tool of the same name on the captain's PATH can never join the fixture.
+# The fixture directories first, then the ambient PATH, which the check needs
+# because it shells out to ordinary tools such as jq, git, date, grep, stat, and
+# timeout. What keeps a tool installed on this host out of a fixture is the
+# synthetic command name, not this PATH, so every case watches a command name
+# that cannot exist here.
 fixture_path() {
   printf '%s:%s\n' "$1" "$PATH"
 }
@@ -124,20 +154,26 @@ test_identical_versions_are_silent() {
   pass "two copies of the same version are not skew"
 }
 
-test_one_copy_reached_twice_is_not_skew() {
-  local home dir link out
+test_one_copy_reached_twice_is_probed_once() {
+  local home dir link out log probes
   # A single install reachable through two PATH entries must not read as two
   # installs, or a symlinked bin directory would report skew against itself.
+  # Silence alone does not prove that, because two answers of the same version
+  # are silent too, so count the probes: the one install must be asked once.
   home=$(make_home one-copy)
   dir="$TMP_ROOT/one-copy/real/bin"
   link="$TMP_ROOT/one-copy/linked-bin"
-  make_copy "$dir" "$TOOL" 'herdr 0.8.2'
+  log="$TMP_ROOT/one-copy/probes.log"
+  make_counting_copy "$dir" "$TOOL" 'herdr 0.8.2' "$log"
   ln -s "$dir" "$link"
   write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
   out="$home/out.txt"
+  : > "$log"
   run_check "$home" "$(fixture_path "$dir:$link")" "$out"
   [ ! -s "$out" ] || fail "one copy reached through two PATH entries reported a finding: $(cat "$out")"
-  pass "one copy reached through two PATH entries is one install"
+  probes=$(wc -l < "$log" | tr -d ' ')
+  [ "$probes" = 1 ] || fail "one install reached through two PATH entries was probed $probes times, so the two entries were not recognized as one install"
+  pass "one copy reached through two PATH entries is probed once as one install"
 }
 
 test_unreadable_version_is_a_failure_not_a_pass() {
@@ -224,6 +260,28 @@ SH
   pass "an announcement carried by another command is read from that command"
 }
 
+test_unusable_announce_pattern_is_reported_not_read_as_silence() {
+  local home dir out status
+  # A pattern the search cannot use answers exactly like a tool with nothing to
+  # announce, which is the silently dead update source this check exists to
+  # prevent. It is a registry problem, so it is reported with the tool named.
+  home=$(make_home bad-pattern)
+  dir="$TMP_ROOT/bad-pattern/bin"
+  make_copy "$dir" no-mistakes-fixture 'no-mistakes version v1.46.0'
+  write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","announce_pattern":"A new version of no-mistakes is available: ([^ ]+ -> [^ ]+"}]}'
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  assert_contains "$(cat "$out")" "tool no-mistakes announce_pattern is not a usable extended regular expression" "a pattern that cannot be used was read as nothing to announce"
+
+  # Arming refuses the same registry rather than arming a check with a source
+  # that can never fire.
+  status=0
+  FM_HOME="$home" "$CHECK" arm >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "arm with an unusable announce_pattern exit"
+  assert_absent "$home/state/tool-updates.check.sh" "arm registered a check whose announcement source cannot fire"
+  pass "an announce_pattern that cannot be used is reported instead of read as silence"
+}
+
 test_quiet_tool_with_announce_pattern_is_silent() {
   local home dir out
   home=$(make_home announce-quiet)
@@ -298,7 +356,10 @@ test_default_branch_is_asked_of_the_remote_when_the_clone_has_no_record() {
   work=$(git_fixture git-symref-repo)
   git -C "$work" remote set-head origin --delete >/dev/null 2>&1
   git -C "$work" reset -q --hard HEAD~2
-  assert_absent "$work/.git/refs/remotes/origin/HEAD" "the fixture still records the remote's default branch locally"
+  # Ask git what it knows rather than looking for a loose ref file, which never
+  # exists under a non-loose ref backend and would make this vacuous there.
+  ! git -C "$work" symbolic-ref --quiet refs/remotes/origin/HEAD >/dev/null 2>&1 \
+    || fail "the fixture still records the remote's default branch locally"
   write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\"}}]}"
   out="$home/out.txt"
   run_check "$home" "$PATH" "$out"
@@ -333,6 +394,59 @@ test_unusable_git_source_is_reported() {
   run_check "$home" "$PATH" "$out"
   assert_contains "$(cat "$out")" "firstmate check failed" "an unusable git source was not reported"
   pass "an unusable git source is reported as a check failure"
+}
+
+test_unreadable_remote_is_not_reported_as_a_missing_branch() {
+  local home work out report
+  # A remote that cannot be reached at all and a branch that was deleted are
+  # different problems with different repairs. Reporting the first as the second
+  # wakes firstmate with a diagnosis that is simply wrong, so the report must
+  # name only what the probe established.
+  home=$(make_home git-unreadable)
+  work=$(git_fixture git-unreadable-repo)
+  rm -rf "$TMP_ROOT/git-unreadable-repo.git"
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+  run_check "$home" "$PATH" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "firstmate check failed" "a remote that could not be read was not reported"
+  assert_contains "$report" "origin could not be reached or read" "the report does not name the condition the probe actually found"
+  assert_not_contains "$report" "has no branch" "a remote that could not be read was reported as a deleted branch"
+  pass "a remote that cannot be read is reported as unreadable, not as a missing branch"
+}
+
+test_missing_branch_on_a_readable_remote_is_still_reported() {
+  local home work out
+  # The other side of the case above: the remote answers, and it really does not
+  # have the watched branch, so that must still be reported as a missing branch.
+  home=$(make_home git-no-branch)
+  work=$(git_fixture git-no-branch-repo)
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"release\"}}]}"
+  out="$home/out.txt"
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "firstmate check failed: origin has no branch release" "a branch the remote does not have was not reported as missing"
+  pass "a branch a readable remote does not have is still reported as missing"
+}
+
+test_git_probes_stop_when_the_sweep_budget_is_gone() {
+  local home work slow out report
+  # The git probes are the several-in-a-row case, two of them over the network,
+  # so they are the ones that can push a sweep past the watcher's own timeout and
+  # leave it killed with nothing printed at all. Here the tool's command probe
+  # spends the whole budget, so its git probes must not start: the sweep says
+  # which tool it did not finish instead of quietly running on.
+  home=$(make_home git-budget)
+  work=$(git_fixture git-budget-repo)
+  git -C "$work" reset -q --hard HEAD~2
+  slow="$TMP_ROOT/git-budget/bin"
+  make_slow_copy "$slow" "$TOOL" 30
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"command\":\"$TOOL\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$slow")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
+  report=$(cat "$out")
+  assert_contains "$report" "check incomplete: the time budget ran out before firstmate" "a sweep with no budget left did not say which tool it did not finish"
+  assert_not_contains "$report" "commits behind" "the git probes ran after the sweep budget was already gone"
+  pass "git probes stop and name their tool once the sweep budget is gone"
 }
 
 # --- registry and reporting contract ----------------------------------------
@@ -507,6 +621,55 @@ test_arm_registers_the_check_and_disarm_removes_it() {
   pass "arm registers a trusted check and disarm removes every trace"
 }
 
+test_arm_refuses_a_symlink_at_the_shim_path() {
+  local home dir target mode status
+  # A stale or hostile symlink at the shim path must be refused rather than
+  # followed: following it would write the shim body into a file someone else
+  # owns and then make that file executable.
+  home=$(make_home arm-symlink)
+  dir="$TMP_ROOT/arm-symlink/bin"
+  make_copy "$dir" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  target="$TMP_ROOT/arm-symlink/not-the-shim.txt"
+  printf 'a file the shim must not touch\n' > "$target"
+  mode=$(stat -c %a "$target" 2>/dev/null || stat -f %Lp "$target")
+  ln -s "$target" "$home/state/tool-updates.check.sh"
+
+  status=0
+  FM_HOME="$home" "$CHECK" arm >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "arm over a symlink exit"
+  [ "$(cat "$target")" = 'a file the shim must not touch' ] || fail "arm followed the symlink and overwrote its target"
+  [ "$(stat -c %a "$target" 2>/dev/null || stat -f %Lp "$target")" = "$mode" ] || fail "arm changed the mode of the symlink's target"
+  assert_absent "$home/state/tool-updates.check-trust" "arm registered a shim it refused to write"
+  pass "a symlink at the shim path is refused instead of followed"
+}
+
+test_arm_resolves_a_relative_home_into_the_shim() {
+  local home stale fresh out status
+  # The watcher runs the shim from its own working directory, so a relative home
+  # has to be resolved before it is persisted. Otherwise the shim reads whatever
+  # sits under the watcher's directory, finds no registry, and stays silent for
+  # good.
+  home=$(make_home arm-relative)
+  stale="$TMP_ROOT/arm-relative/mise/bin"
+  fresh="$TMP_ROOT/arm-relative/local/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+
+  status=0
+  (cd "$TMP_ROOT" && FM_HOME=arm-relative "$CHECK" arm >/dev/null 2>&1) || status=$?
+  expect_code 0 "$status" "arm with a relative home exit"
+
+  out="$home/out.txt"
+  status=0
+  (cd / && env -u FM_HOME PATH="$(fixture_path "$stale:$fresh")" FM_TOOL_UPDATE_INTERVAL=0 \
+    "$home/state/tool-updates.check.sh" >"$out" 2>&1) || status=$?
+  expect_code 0 "$status" "shim run from another directory exit"
+  assert_contains "$(cat "$out")" "herdr update not in effect" "the shim read a different home than the one it was armed for"
+  pass "a relative home is resolved before it is persisted into the shim"
+}
+
 test_armed_check_wakes_the_watcher_with_the_skew_report() {
   local home stale fresh out err status
   # End to end through the real watcher: the armed check must reach it as a
@@ -537,17 +700,21 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
 test_path_skew_is_reported_from_every_copy
 test_newest_copy_first_on_path_is_silent
 test_identical_versions_are_silent
-test_one_copy_reached_twice_is_not_skew
+test_one_copy_reached_twice_is_probed_once
 test_unreadable_version_is_a_failure_not_a_pass
 test_missing_command_is_reported
 test_announced_update_is_reported_from_the_tool_itself
 test_announcement_is_read_from_a_second_command
+test_unusable_announce_pattern_is_reported_not_read_as_silence
 test_quiet_tool_with_announce_pattern_is_silent
 test_commits_behind_origin_are_reported
 test_default_branch_is_detected_when_branch_is_omitted
 test_default_branch_is_asked_of_the_remote_when_the_clone_has_no_record
 test_current_and_ahead_repositories_are_silent
 test_unusable_git_source_is_reported
+test_unreadable_remote_is_not_reported_as_a_missing_branch
+test_missing_branch_on_a_readable_remote_is_still_reported
+test_git_probes_stop_when_the_sweep_budget_is_gone
 test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
@@ -555,4 +722,6 @@ test_an_overlong_report_says_it_was_cut
 test_probes_are_skipped_between_intervals
 test_invalid_environment_and_action_refuse
 test_arm_registers_the_check_and_disarm_removes_it
+test_arm_refuses_a_symlink_at_the_shim_path
+test_arm_resolves_a_relative_home_into_the_shim
 test_armed_check_wakes_the_watcher_with_the_skew_report
