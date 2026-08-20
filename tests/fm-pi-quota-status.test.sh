@@ -119,6 +119,10 @@ const generatedAt = new Date(now - (process.env.FM_QUOTA_TEST_STALE === "1" ? 60
 const full = process.env.FM_QUOTA_TEST_FULL === "1";
 const requestedProvider = process.env.FM_QUOTA_TEST_PROVIDER || "";
 const reset = (milliseconds) => new Date(now + milliseconds).toISOString();
+const configuredCodexReset = Number(process.env.FM_QUOTA_TEST_FIRST_RESET_MS);
+const codexFirstResetMs = Number.isFinite(configuredCodexReset) && configuredCodexReset > 0
+  ? configuredCodexReset
+  : 6 * 24 * 60 * 60 * 1000;
 const provider = (provider, label, source, fields) => ({
   provider,
   ...fields,
@@ -142,7 +146,7 @@ const allProviders = [
   provider("codex", "Codex", "oauth", {
     plan: "pro",
     windows: [
-      { id: "weekly", label: "week", kind: "weekly", percentRemaining: 94, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
+      { id: "weekly", label: "week", kind: "weekly", percentRemaining: 94, resetsAt: reset(codexFirstResetMs) },
       { id: "model:spark:5h", label: "GPT-5.3-Codex-Spark session", kind: "model", percentRemaining: 100, resetsAt: reset(5 * 60 * 60 * 1000) },
       { id: "model:spark:7d", label: "GPT-5.3-Codex-Spark week", kind: "model", percentRemaining: 100, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
     ],
@@ -219,6 +223,7 @@ const {
   runQuotaAxiJson,
 } = extensionModule;
 const {
+  createQuotaStatusFormatter,
   formatQuotaStatus,
   parseQuotaAxiJson,
   quotaProviderForPiProvider,
@@ -389,6 +394,21 @@ for (const expected of [
   assert(full.includes(expected), `complete format omitted ${expected}: ${full}`);
 }
 assert(visibleWidth(full) <= 400, "complete format exceeded its width");
+let formattedWindowIterations = 0;
+const countedFormattingView = {
+  ...codex,
+  windows: new Proxy(codex.windows, {
+    get(target, property, receiver) {
+      if (property === Symbol.iterator) formattedWindowIterations += 1;
+      return Reflect.get(target, property, receiver);
+    },
+  }),
+};
+const cachedFormatter = createQuotaStatusFormatter();
+const firstCachedFormat = cachedFormatter(countedFormattingView, 400, now);
+const secondCachedFormat = cachedFormatter(countedFormattingView, 400, now);
+assert(firstCachedFormat === secondCachedFormat, "cached formatter changed stable quota output");
+assert(formattedWindowIterations === 1, "stable footer redraw reprocessed every quota window");
 const tinyCreditReport = report(now);
 tinyCreditReport.providers[1].credits.remaining = 0.04;
 const tinyCreditParsed = parseQuotaAxiJson(JSON.stringify(tinyCreditReport));
@@ -525,8 +545,12 @@ const beforeReset = selectActiveProviderQuota(resettingParsed, "openai-codex", {
 assert(beforeReset.kind === "fresh", "quota became stale before its supplied window reset");
 assert(beforeReset.freshUntilMs === now + 60_000, "window reset did not bound quota freshness");
 const afterReset = selectActiveProviderQuota(resettingParsed, "openai-codex", { nowMs: now + 60_000 });
-assert(afterReset.kind === "stale", "post-reset quota percentage remained fresh");
-assert(!formatQuotaStatus(afterReset, 200, now + 60_000).includes("94%"), "post-reset quota exposed old percentages");
+assert(afterReset.kind === "fresh", "one reset window hid its still-fresh siblings");
+assert(afterReset.windows.length === 2, "expired quota window was not removed independently");
+const afterResetText = formatQuotaStatus(afterReset, 400, now + 60_000);
+assert(!afterResetText.includes("week 94%"), "post-reset quota exposed the expired percentage");
+assert(afterResetText.includes("GPT-5.3-Codex-Spark session 100% left"), "post-reset quota hid a fresh sibling window");
+assert(afterResetText.includes("plan pro") && afterResetText.includes("credits 0"), "post-reset quota hid fresh metadata");
 assert(parseQuotaAxiJson("{broken") === null, "malformed JSON was accepted");
 const malformed = report(now);
 malformed.providers[1].windows[0].percentRemaining = 101;
@@ -597,8 +621,6 @@ populatedProvider.quotaSemantics = {
     },
     runway: {
       status: "through_reset",
-      projectionConfidence: "established",
-      projectionBasis: "cycle_average",
     },
     selection: { status: "known", spendPriority: 1 },
   }],
@@ -607,7 +629,7 @@ const fullyPopulatedParsed = parseQuotaAxiJson(JSON.stringify(fullyPopulated));
 assert(fullyPopulatedParsed, "fully-populated quota fixture did not parse structurally");
 assert(
   selectActiveProviderQuota(fullyPopulatedParsed, "openai-codex", { nowMs: now }).kind === "fresh",
-  "valid known quota fields were rejected",
+  "valid through-reset runway without projection confidence was rejected",
 );
 const invalidPercentUsed = structuredClone(fullyPopulated);
 invalidPercentUsed.providers[1].windows[0].percentUsed = "invalid";
@@ -1293,6 +1315,40 @@ class FakeClock {
   }
 }
 
+const siblingStart = Date.now();
+const siblingClock = new FakeClock(siblingStart);
+process.env.FM_QUOTA_TEST_NOW_MS = String(siblingStart);
+process.env.FM_QUOTA_TEST_FIRST_RESET_MS = String(60_000);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  siblingStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const independentlyExpiring = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => siblingClock.nowMs,
+  timers: siblingClock.timers,
+}));
+await independentlyExpiring.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => independentlyExpiring.widgetText(400).includes("week 94% left"),
+  "independent-expiry fixture did not publish its first window",
+);
+const writesBeforeWindowReset = independentlyExpiring.widgetWriteCount;
+siblingClock.advance(60_000);
+assert(independentlyExpiring.widgetWriteCount > writesBeforeWindowReset, "window reset did not republish quota");
+const siblingText = independentlyExpiring.widgetText(400);
+assert(!siblingText.includes("week 94%"), "reset quota window remained visible as fresh");
+assert(siblingText.includes("GPT-5.3-Codex-Spark session 100% left"), "reset quota window hid a fresh sibling");
+assert(siblingText.includes("plan pro") && siblingText.includes("credits 0"), "window reset hid quota metadata");
+await independentlyExpiring.emit("session_shutdown", { reason: "quit" });
+assert(siblingClock.tasks.size === 0, "independent window expiry leaked a timer");
+delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
 const fakeStart = Date.now();
 const fakeClock = new FakeClock(fakeStart);
 process.env.FM_QUOTA_TEST_NOW_MS = String(fakeStart);
@@ -1331,6 +1387,10 @@ fakeClock.jump(60 * 1000);
 assert(expiring.widgetWriteCount === writesBeforeDelayedExpiry, "fake clock unexpectedly ran the delayed expiry callback");
 assert(expiring.widgetText(400).includes("quota-axi failed"), "expired cached quota hid the latest refresh failure");
 assert(!expiring.widgetText(400).includes("94%"), "rendering presented expired quota values as fresh");
+fakeClock.jump(-60 * 1000);
+assert(expiring.widgetText(400).includes("quota-axi failed"), "backward clock shift resurrected an expired refresh outcome");
+assert(!expiring.widgetText(400).includes("94%"), "backward clock shift resurrected expired quota values");
+fakeClock.jump(60 * 1000);
 fakeClock.advance(0);
 assert(expiring.widgetWriteCount > writesBeforeDelayedExpiry, "expiry callback did not republish the failed refresh view");
 await expiring.emit("session_shutdown", { reason: "quit" });

@@ -6,8 +6,8 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+  createQuotaStatusFormatter,
   DEFAULT_QUOTA_FRESHNESS_MS,
-  formatQuotaStatus,
   parseQuotaAxiJson,
   quotaProviderForPiProvider,
   revalidateFreshQuotaView,
@@ -384,6 +384,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
   const watchAuthDirectory: AuthDirectoryWatcher = options.watchAuthDirectory ?? (
     (path, watchOptions, listener) => watch(path, watchOptions, listener)
   );
+  const formatStatus = createQuotaStatusFormatter();
 
   type BoundedAuthResult =
     | { kind: "ok"; auth: ResolvedOAuthAuth }
@@ -656,9 +657,16 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         session.quota.piProvider !== session.target.piProvider ||
         session.quota.credentialRevision !== session.target.credentialRevision
       ) return null;
-      return session.quota.view.kind === "fresh"
-        ? revalidateFreshQuotaView(session.quota.view, nowMs)
-        : session.quota.view;
+      const cached = session.quota.view;
+      if (cached.kind !== "fresh") return cached;
+      const revalidated = revalidateFreshQuotaView(cached, nowMs);
+      if (
+        revalidated.kind === "fresh" ||
+        nowMs >= cached.reportFreshUntilMs
+      ) {
+        session.quota.view = revalidated;
+      }
+      return revalidated;
     }
 
     function currentView(session: ActiveSession, nowMs = now()): QuotaView {
@@ -670,7 +678,9 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (!selected) return { kind: "refreshing", provider: session.target.piProvider };
       if (!session.lastFailure) return selected;
       if (selected.kind === "fresh") {
-        return { ...selected, refreshFailure: session.lastFailure };
+        return selected.refreshFailure === session.lastFailure
+          ? selected
+          : { ...selected, refreshFailure: session.lastFailure };
       }
       return selected.kind === "stale"
         ? processFailureView(session.lastFailure, session.target.piProvider)
@@ -740,6 +750,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         timer = timers.setTimeout(() => {
           if (active !== session || session.expiryTimer !== timer) return;
           session.expiryTimer = null;
+          cachedQuotaView(session, view.freshUntilMs);
           render(session);
         }, Math.max(0, view.freshUntilMs - now()));
         session.expiryTimer = timer;
@@ -754,7 +765,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             : boundedComponentWidth;
           const renderNowMs = now();
           const renderView = view.kind === "fresh" ? currentView(session, renderNowMs) : view;
-          const plain = formatQuotaStatus(renderView, availableWidth, renderNowMs);
+          const plain = formatStatus(renderView, availableWidth, renderNowMs);
           return plain ? [theme.fg("dim", plain)] : [];
         },
         invalidate() {},
@@ -869,10 +880,13 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         } else if (result.kind !== "cancelled") {
           const cached = cachedQuotaView(session, now());
           session.lastFailure = result.kind;
-          if (cached?.kind !== "fresh") session.quota = null;
-          render(session, cached?.kind === "fresh"
-            ? undefined
-            : processFailureView(result.kind, completedProvider));
+          if (cached?.kind === "fresh" && session.quota) {
+            session.quota.view = { ...cached, refreshFailure: result.kind };
+            render(session);
+          } else {
+            session.quota = null;
+            render(session, processFailureView(result.kind, completedProvider));
+          }
         }
       } finally {
         if (session.operationAbort === operationAbort) session.operationAbort = null;

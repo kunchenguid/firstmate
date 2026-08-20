@@ -28,6 +28,7 @@ export type FreshQuotaView = {
   credits: QuotaCreditsView | null;
   generatedAtMs: number;
   freshnessTimestampMs: number;
+  reportFreshUntilMs: number;
   freshUntilMs: number;
   refreshFailure?: QuotaFailureReason | null;
 };
@@ -192,9 +193,23 @@ function isFreshAt(generatedAtMs: number, freshUntilMs: number, nowMs: number): 
 }
 
 export function revalidateFreshQuotaView(view: FreshQuotaView, nowMs = Date.now()): QuotaView {
-  return isFreshAt(view.freshnessTimestampMs, view.freshUntilMs, nowMs)
-    ? view
-    : { kind: "stale", provider: view.provider, label: view.label };
+  if (!isFreshAt(view.freshnessTimestampMs, view.reportFreshUntilMs, nowMs)) {
+    return { kind: "stale", provider: view.provider, label: view.label };
+  }
+  if (nowMs < view.freshUntilMs) return view;
+
+  let freshUntilMs = view.reportFreshUntilMs;
+  const windows = view.windows.filter((window) => {
+    if (window.resetsAtMs === null) return true;
+    if (window.resetsAtMs <= nowMs) return false;
+    freshUntilMs = Math.min(freshUntilMs, window.resetsAtMs);
+    return true;
+  });
+  return {
+    ...view,
+    windows,
+    freshUntilMs,
+  };
 }
 
 function validOptionalNumber(
@@ -487,7 +502,7 @@ function validRunway(
   return value.usableRunwaySeconds === undefined &&
     value.projectedExhaustedAt === undefined &&
     value.limitingWindowId === undefined &&
-    projectionConfidence !== null;
+    value.projectionBasis === undefined;
 }
 
 function validSelection(value: unknown, allowedBlockers: string[]): boolean {
@@ -666,8 +681,8 @@ export function selectActiveProviderQuota(
     ? requestedFreshnessMs
     : DEFAULT_QUOTA_FRESHNESS_MS;
   let freshnessTimestampMs = report.generatedAtMs;
-  let freshUntilMs = report.generatedAtMs + freshnessMs;
-  if (!isFreshAt(report.generatedAtMs, freshUntilMs, nowMs)) {
+  let reportFreshUntilMs = report.generatedAtMs + freshnessMs;
+  if (!isFreshAt(report.generatedAtMs, reportFreshUntilMs, nowMs)) {
     return { kind: "stale", provider, label: null };
   }
 
@@ -719,24 +734,23 @@ export function selectActiveProviderQuota(
     const refreshedAtMs = parseTimestamp(rawProvider.state.refreshedAt);
     if (refreshedAtMs === null) return malformed(provider);
     freshnessTimestampMs = Math.max(freshnessTimestampMs, refreshedAtMs);
-    freshUntilMs = Math.min(freshUntilMs, refreshedAtMs + freshnessMs);
-    if (!isFreshAt(freshnessTimestampMs, freshUntilMs, nowMs)) {
+    reportFreshUntilMs = Math.min(reportFreshUntilMs, refreshedAtMs + freshnessMs);
+    if (!isFreshAt(freshnessTimestampMs, reportFreshUntilMs, nowMs)) {
       return { kind: "stale", provider, label };
     }
   }
 
   if (!Array.isArray(rawProvider.windows)) return malformed(provider);
   const windows: QuotaWindowView[] = [];
+  let freshUntilMs = reportFreshUntilMs;
   for (const rawWindow of rawProvider.windows) {
     const window = parseWindow(rawWindow);
     if (!window) return malformed(provider);
     windows.push(window);
+    if (window.resetsAtMs !== null) {
+      freshUntilMs = Math.min(freshUntilMs, window.resetsAtMs);
+    }
   }
-  for (const window of windows) {
-    if (window.resetsAtMs === null) continue;
-    freshUntilMs = Math.min(freshUntilMs, window.resetsAtMs);
-  }
-  if (nowMs >= freshUntilMs) return { kind: "stale", provider, label };
 
   const plan = rawProvider.plan === undefined ? null : cleanText(rawProvider.plan, 48);
   if (rawProvider.plan !== undefined && plan === null) return malformed(provider);
@@ -777,6 +791,7 @@ export function selectActiveProviderQuota(
     credits: credits ?? null,
     generatedAtMs: report.generatedAtMs,
     freshnessTimestampMs,
+    reportFreshUntilMs,
     freshUntilMs,
   }, nowMs);
 }
@@ -873,7 +888,7 @@ function fitExplicitNarrow(
 }
 
 export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.now()): string {
-  const safeWidth = Math.max(0, Math.floor(width));
+  const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
   if (safeWidth === 0) return "";
 
   if (view.kind === "refreshing") {
@@ -912,19 +927,66 @@ export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.n
     return truncateToWidth("Quota: unavailable (malformed data)", safeWidth, "…");
   }
 
-  const heading = view.plan ? `Quota ${view.label} (plan ${view.plan})` : `Quota ${view.label}`;
-  const windowParts = view.windows.map((window) => {
-    const remaining = window.percentRemaining === null
-      ? "remaining unknown"
-      : `${compactNumber(window.percentRemaining)}% left`;
-    return `${window.label} ${remaining} ${formatReset(window, nowMs).replace(/^resets /, "reset ")}`;
-  });
-  const fullParts = [heading, ...(windowParts.length > 0 ? windowParts : ["no quota windows"])];
-  if (view.credits) fullParts.push(formatCredits(view.credits));
-  if (view.refreshFailure) {
-    fullParts.push(`refresh unavailable (${FAILURE_TEXT[view.refreshFailure].long})`);
+  const narrow = () => fitExplicitNarrow(
+    view.label,
+    view.windows.length,
+    safeWidth,
+    view.refreshFailure,
+  );
+  let full = view.plan ? `Quota ${view.label} (plan ${view.plan})` : `Quota ${view.label}`;
+  let fullWidth = visibleWidth(full);
+  const append = (part: string): boolean => {
+    const partWidth = visibleWidth(part);
+    if (fullWidth + 3 + partWidth > safeWidth) return false;
+    full += ` | ${part}`;
+    fullWidth += 3 + partWidth;
+    return true;
+  };
+  if (fullWidth > safeWidth) return narrow();
+
+  if (view.windows.length === 0) {
+    if (!append("no quota windows")) return narrow();
+  } else {
+    for (const window of view.windows) {
+      const remaining = window.percentRemaining === null
+        ? "remaining unknown"
+        : `${compactNumber(window.percentRemaining)}% left`;
+      const part = `${window.label} ${remaining} ${formatReset(window, nowMs).replace(/^resets /, "reset ")}`;
+      if (!append(part)) return narrow();
+    }
   }
-  const full = fullParts.join(" | ");
-  if (visibleWidth(full) <= safeWidth) return full;
-  return fitExplicitNarrow(view.label, view.windows.length, safeWidth, view.refreshFailure);
+  if (view.credits && !append(formatCredits(view.credits))) return narrow();
+  if (
+    view.refreshFailure &&
+    !append(`refresh unavailable (${FAILURE_TEXT[view.refreshFailure].long})`)
+  ) return narrow();
+  return full;
+}
+
+export function createQuotaStatusFormatter(maxEntriesPerView = 8) {
+  const entryLimit = Number.isFinite(maxEntriesPerView)
+    ? Math.max(1, Math.floor(maxEntriesPerView))
+    : 8;
+  const cache = new WeakMap<QuotaView, Map<string, string>>();
+  return (view: QuotaView, width: number, nowMs = Date.now()): string => {
+    const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
+    const timeBucket = view.kind === "fresh" && Number.isFinite(nowMs)
+      ? Math.floor(nowMs / 60_000)
+      : 0;
+    const key = `${safeWidth}:${timeBucket}`;
+    let entries = cache.get(view);
+    const cached = entries?.get(key);
+    if (cached !== undefined) return cached;
+    const formatted = formatQuotaStatus(view, safeWidth, nowMs);
+    if (!entries) {
+      entries = new Map();
+      cache.set(view, entries);
+    }
+    if (entries.size >= entryLimit) {
+      const oldest = entries.keys().next().value;
+      if (oldest !== undefined) entries.delete(oldest);
+    }
+    entries.set(key, formatted);
+    return formatted;
+  };
 }
