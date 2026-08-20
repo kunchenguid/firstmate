@@ -332,3 +332,14 @@ assert_absent() {
 assert_present() {
   [ -e "$1" ] || fail "$2"
 }
+
+# dead_pid: a pid that looks plausible and is provably not running, for tests
+# that must exercise the "this process is gone" path rather than a validation
+# rejection.
+dead_pid() {
+  local p=999999
+  while kill -0 "$p" 2>/dev/null; do
+    p=$((p + 1))
+  done
+  printf '%s\n' "$p"
+}

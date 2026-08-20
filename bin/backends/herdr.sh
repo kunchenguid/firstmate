@@ -1175,6 +1175,35 @@ fm_backend_herdr_pid_is_bare_shell() {  # <ps-bin> <pid>
   return 1
 }
 
+# fm_backend_herdr_foreground_pids: the pids of <target>'s foreground processes,
+# one per line, read from herdr's own pane process-info. Unlike
+# fm_backend_herdr_pane_idle_shell_sample this makes no idle-shell claim and
+# applies no proof contract - it answers "what is running in this pane" for
+# supervision's progress measurement, and the caller treats a failed read as no
+# measurement. See fm_backend_agent_root_pids in bin/fm-backend.sh.
+fm_backend_herdr_foreground_pids() {  # <target>
+  local target=$1 session pane info out
+  session=${target%%:*}
+  pane=${target#*:}
+  [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
+  # Parsed inline rather than through fm_backend_herdr_target_ready because that
+  # path calls fm_backend_herdr_server_ensure, which STARTS a herdr server as a
+  # side effect - correct before an operation that is about to use the pane,
+  # wrong for a passive probe, exactly as fm_backend_target_exists documents.
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  out=$(printf '%s' "$info" | jq -er --arg pane "$pane" '
+    select(.result.type == "pane_process_info")
+    | select(.result.process_info.pane_id == $pane)
+    | .result.process_info.foreground_processes
+    | select(type == "array")
+    | .[].pid
+    | select(type == "number" and . > 1)
+    | floor
+  ' 2>/dev/null) || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
 # fm_backend_herdr_pane_idle_shell_pid: print the shell pid of <pane-id> only
 # when the exact pane provably holds one lone idle recognized shell: pane
 # process-info agrees on the pane id, the shell pid is both the foreground

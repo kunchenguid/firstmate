@@ -239,6 +239,21 @@ fm_backend_tmux_foreground_comms() {  # <target>
       done
 }
 
+# fm_backend_tmux_foreground_pids: the pids of <target>'s tty foreground process
+# group, one per line. Same kernel anchor as fm_backend_tmux_foreground_comms
+# (pgid == tpgid) with the pid kept instead of the name; see
+# fm_backend_agent_root_pids in bin/fm-backend.sh for why supervision needs it.
+# Returns 1 when the pane tty or the process table cannot be read.
+fm_backend_tmux_foreground_pids() {  # <target>
+  local target=$1 tty out
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  [ -n "$tty" ] || return 1
+  out=$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid= 2>/dev/null) || return 1
+  out=$(printf '%s\n' "$out" | awk '$2 == $3 && $1 != "" { print $1 }')
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
 fm_backend_tmux_foreground_argv0s() {  # <target>
   local target=$1 tty pid pgid tpgid comm args argv0
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0

@@ -307,10 +307,3 @@ hash_text() {
   fi
 }
 
-dead_pid() {
-  local p=999999
-  while kill -0 "$p" 2>/dev/null; do
-    p=$((p + 1))
-  done
-  printf '%s\n' "$p"
-}

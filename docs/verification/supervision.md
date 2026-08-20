@@ -205,6 +205,54 @@ tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
 
+## Progress probe
+
+Supervision's wedge decision is made from a measurement of the pane's own process subtree ([`bin/fm-progress-lib.sh`](../../bin/fm-progress-lib.sh)), not from the absence of rendered change.
+The two thresholds below are set from readings taken on 2026-08-20 against real herdr panes in an isolated lab session, herdr 0.8.2 on macOS, using the shipped probe over the production spans.
+
+| Pane | Reading 1 | Reading 2 | Measured | Verdict |
+| --- | --- | --- | --- | --- |
+| Claude 2.1.228 mid-turn, rendering a long reply | `71960 00:08 0:01.52 40.9 claude` | (per-poll) | 3-10% of a core, sustained across 18 polls | `progressing` every poll |
+| Claude 2.1.228 stopped at an empty composer | `71960 06:16 0:15.39 16.6 claude` | `71960 17:56 0:17.50 0.0 claude` | +2.09s of CPU over 685s = 0% of a core | `stalled` |
+| A `sleep 110`-and-poll CI waiter | one `sleep` pid | a different `sleep` pid | 0% of a core, subtree membership changed | `progressing subtree-changed` at each rollover, every ~107s |
+
+Those numbers are what the defaults are for.
+`FM_PROGRESS_CPU_MIN_PCT=2` sits inside the order of magnitude that separates a stopped Claude worker at 0.3% of a core from a working one at 3-10%.
+It is set toward the low end of that gap on purpose: a false `progressing` only restores the absorb the watcher would have made anyway, while a false `stalled` would be a brand new false alarm - and a new alarm that cries wolf is the failure this whole change exists to end.
+The per-harness margins are narrower than that gap on both sides, which is why they are measured rather than assumed; see the live table below.
+`FM_PROGRESS_MIN_SPAN_SECS=180` is below `FM_STALE_ESCALATE_SECS=240` so a baseline taken when the wedge timer starts is mature when it fires, and `FM_PROGRESS_STALL_SPAN_SECS=600` buys the new busy-pane alarm ten minutes of measured nothing while still surfacing six times sooner than `FM_BUSY_TURN_MAX_SECS`.
+
+The CI-waiter row is why the CPU signal is not alone: `ps -o time=` reports a process's own utime plus stime and never the CPU of children it already reaped, so a worker whose turn is a series of short commands can measure 0% while working.
+Its subtree membership changes every time it spawns or reaps one, and every sample is compared against the same baseline rather than the previous sample, so one poll that catches a transient child clears the whole span.
+Claude also runs `caffeinate -i -t 300` inside its own foreground group while a turn is in flight; its exit after a turn ends is a genuine membership change that rolls the baseline forward once, which delays a stopped-worker verdict by at most one span rather than defeating it.
+
+Where each harness's idle and mid-turn states fall against the threshold is a vendor fact a release can change - a TUI that repaints a clock while idle is all it would take - so it is guarded live rather than assumed.
+Run twice on 2026-08-20 against every installed harness, because a single run of a timing measurement overstates its own precision:
+
+| Harness | Version | Idle at an empty composer | Mid-turn |
+| --- | --- | --- | --- |
+| agy | 1.1.16 | 0-1% of a core (0.27s, 0.59s over 45s) | 123-138% (55.42s, 62.22s over 45s) |
+| Claude | 2.1.228 (Claude Code) | 0-1% of a core (0.31s, 0.46s over 45s) | 4-5% (2.30s, 2.09s over 45s) |
+
+Codex, OpenCode, Pi, Grok, Kimi, muse, and Cursor were not installed on that host and are reported unverified by the guard rather than passed over.
+Claude is much the tighter of the two: its mid-turn 4-5% is only about twice the 2% threshold, and its idle reached 1% on the second run, so its whole separation is roughly 4x rather than the order of magnitude the production-span readings above show.
+That is the cost of the short guard span and is the conservative direction for a pass - a 45s window is noisier than the 180s and 600s production uses, so a harness that separates here separates there.
+It is also the reason the relationship is guarded rather than assumed: Claude is the harness a release could most plausibly move across the line.
+
+```sh
+FM_PROGRESS_PROBE_LIVE=1 tests/fm-progress-probe-live-e2e.test.sh
+```
+
+That guard drives every installed verified harness on real panes, fails naming the harness and version if idle ever measures at or above the threshold (which would make a stopped worker invisible again) or if mid-turn measures below it (which would restore the false wedge escalations), reports an absent harness explicitly, and refuses to pass having checked nothing.
+Refresh this table from its output after a harness upgrade.
+
+Deterministic entry points:
+
+```sh
+tests/fm-progress-lib.test.sh
+tests/fm-watch-progress.test.sh
+```
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Claude's replacement Stop-owned path revalidated on 2026-07-24 and Cursor's stop-hook park validated on 2026-08-13.

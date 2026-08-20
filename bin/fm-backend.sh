@@ -793,6 +793,34 @@ fm_backend_busy_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_agent_root_pids: the pids of <target>'s foreground processes, one
+# per line, as the roots of the pane's process subtree. Prints nothing and
+# returns 1 when this backend has no per-pane pid source or the read fails.
+#
+# Exists for supervision's positive progress measurement (bin/fm-progress-lib.sh),
+# which needs a process to measure accumulated CPU on rather than a rendered tail
+# to compare bytes of. It reports the FOREGROUND process specifically, the same
+# anchor the tmux liveness probe uses, so a harness-named process left running in
+# the background of an otherwise idle pane cannot lend that pane its CPU; the
+# progress library walks the ppid graph down from here to reach the tool calls
+# the harness spawns.
+#
+# tmux and herdr are the two backends with a per-pane pid source. Zellij exposes
+# no per-pane pid at all (bin/backends/zellij.sh), and neither Orca nor cmux
+# surfaces one, so all three return 1 and their panes probe `unknown` - which
+# every caller treats as "no measurement", preserving the behavior those backends
+# already had rather than inventing a verdict for them.
+fm_backend_agent_root_pids() {  # <backend> <target>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_foreground_pids "$@" ;;
+    herdr) fm_backend_herdr_foreground_pids "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_composer_state: classify the composer/input area of <target> as
 # empty|pending|pending-unproven|unknown for callers that need a pre-submit
 # input guard, a submit acknowledgement, or a launch-readiness check. It is

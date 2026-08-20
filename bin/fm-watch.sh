@@ -105,6 +105,11 @@ mkdir -p "$STATE"
 # just the dispatch.
 # shellcheck source=bin/fm-agy-descent-lib.sh
 . "$SCRIPT_DIR/fm-agy-descent-lib.sh"
+# Positive progress measurement. Pane staleness is an ABSENCE of rendered change
+# and cannot tell a long turn from a wedge; this library measures the pane's own
+# process subtree instead and is the one owner of that contract.
+# shellcheck source=bin/fm-progress-lib.sh
+. "$SCRIPT_DIR/fm-progress-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -229,6 +234,31 @@ window_is_busy() {  # <window> <tail40>
   [ "${verdict%% *}" = busy ]
 }
 
+# window_progress: the positive progress verdict for <window> - "progressing",
+# "stalled", or "unknown" - followed by the reading that produced it. Resolves
+# the pane's foreground pids through the backend, then hands them to the one
+# owner of the measurement (bin/fm-progress-lib.sh).
+#
+# <min-span-secs> is the caller's, not the library's, because the two consumers
+# are asking different questions at different costs: the wedge gate only needs
+# enough span to avoid escalating over a gap between tool calls, while the
+# busy-pane stall path is raising a NEW alarm and buys its confidence with a
+# much longer window of measured nothing.
+#
+# A backend with no per-pane pid source, a pane that has gone away, or any read
+# failure yields "unknown", which every caller treats as no measurement.
+window_progress() {  # <window> <min-span-secs>
+  local w=$1 span=$2 key pids
+  key=$(printf '%s' "$w" | tr ':/.' '___')
+  if ! pids=$(fm_backend_agent_root_pids "$(window_backend "$w")" "$w" 2>/dev/null); then
+    printf 'unknown no-pid-source'
+    return 0
+  fi
+  [ -n "$pids" ] || { printf 'unknown no-pid-source'; return 0; }
+  # shellcheck disable=SC2086 # one pid per line, deliberately word-split into args
+  fm_progress_probe "$STATE" "$key" "$span" $pids
+}
+
 window_kind() {
   local w=$1 meta kind
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
@@ -305,6 +335,36 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # line that an active run/busy pane outranked).
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+  local progress supp_file supp_age
+  # Measure BEFORE reading the timer, on every poll, not only at the instant the
+  # timer would fire: the baseline has to mature alongside the timer for a
+  # verdict to exist when it fires, and each poll is another chance to catch the
+  # transient child a short-command worker spawns. This is the one call that
+  # turns "nothing rendered" into a question about whether work is happening.
+  progress=$(window_progress "$win" "$FM_PROGRESS_MIN_SPAN_SECS")
+  supp_file="$STATE/.progress-suppressed-$(printf '%s' "$win" | tr ':/.' '___')"
+  if [ "${progress%% *}" = progressing ]; then
+    # Positive evidence of work. Restart the wedge window rather than escalating,
+    # so a genuinely wedged worker is still caught within STALE_ESCALATE_SECS of
+    # the moment its progress actually stops.
+    date +%s > "$since_file"
+    [ -e "$supp_file" ] || date +%s > "$supp_file"
+    supp_age=$(age_of "$supp_file")
+    if [ "$supp_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
+      # Bounded, like every other absorb in this file: measured progress is not a
+      # licence to stay silent forever, because a process spinning in a tight loop
+      # accumulates CPU too. Surface once per long cadence WITH the reading, so
+      # the inspection starts from evidence instead of from an unexplained alarm.
+      reason="stale: $win (idle, but measured working for ${supp_age}s - $progress; long-cadence recheck, not a wedge)"
+      fm_wake_append stale "$win" "$reason" || exit 1
+      date +%s > "$supp_file"
+      wake "$reason"
+      return 0
+    fi
+    triage_log "absorbed $label (measured progress: $progress): $win"
+    return 0
+  fi
+  rm -f "$supp_file"
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -316,9 +376,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+        reason="stale: $win (idle ${age}s, possible wedge, escalation $n, progress $progress)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, progress $progress, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
@@ -326,6 +386,45 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fi
       ;;
   esac
+}
+
+# busy_stall_check: the case the rendered-tail detector could not see at all.
+#
+# A pane whose harness reports a turn in flight is exempt from stale detection
+# entirely - a busy signature is liveness - so a worker stopped mid-turn by a
+# provider session limit sits at an empty composer with a stale "working" status
+# and raises nothing until FM_BUSY_TURN_MAX_SECS, an hour later. It never fires
+# its turn-end hook, so the semantic contract keeps reporting busy; nothing about
+# the pane changes; and its own status log keeps claiming work in progress.
+#
+# The subtree measurement reads that worker for what it is: a claimed turn that
+# has accumulated no CPU and spawned nothing for FM_PROGRESS_STALL_SPAN_SECS.
+# Only a positive `stalled` verdict may raise this wake - `unknown` raises
+# nothing, so no backend gains an alarm it cannot substantiate - and the wake
+# demands inspection, never an automatic interrupt, signal, or restart.
+#
+# A worker that declared the wait itself keeps the long declared-pause cadence,
+# exactly as busy_turn_bound_check honors it.
+busy_stall_check() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 key progress surfaced_file surfaced_age reason
+  progress=$(window_progress "$win" "$FM_PROGRESS_STALL_SPAN_SECS")
+  [ "${progress%% *}" = stalled ] || return 1
+  if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+    handle_paused_stale "$win" "$task" "$h"
+    return 0
+  fi
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  surfaced_file="$STATE/.busy-stall-surfaced-$key"
+  surfaced_age=$(age_of "$surfaced_file")
+  if [ "$surfaced_age" -lt "$PAUSE_RESURFACE_SECS" ]; then
+    triage_log "absorbed busy stall (already surfaced ${surfaced_age}s ago): $win"
+    return 0
+  fi
+  reason="stale: $win (reports a turn in flight but is not working - $progress; the worker never ended its turn, so check for a stopped harness or a provider session limit)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  date +%s > "$surfaced_file"
+  wake "$reason"
+  return 0
 }
 
 # busy_turn_over_age: 0 iff <task>'s latest completed-turn marker is at least
@@ -410,7 +509,11 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+    "$STATE/.progress-suppressed-$key" "$STATE/.busy-stall-surfaced-$key"
+  # A pane whose supervision bookkeeping restarts measures from now, not from a
+  # baseline recorded before whatever just resumed it.
+  fm_progress_reset "$STATE" "$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -1248,6 +1351,13 @@ EOF
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
           busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
         else
+          # A busy pane sitting on ONE unchanged frame is the shape a worker
+          # stopped mid-turn takes - it still reports a turn in flight because it
+          # never got to end one. Measure it rather than waiting out
+          # BUSY_TURN_MAX_SECS; only a positive stalled verdict wakes anyone.
+          if [ "$busy_now" -eq 0 ] && [ "$n" -ge 2 ]; then
+            busy_stall_check "$w" "$task" "$h" || true
+          fi
           rm -f "$ssf" "$ewf"
           [ "$busy_now" -eq 0 ] && rm -f "$STATE/.terminal-mtime-$key" "$STATE/.terminal-resurfaced-$key"
         fi
