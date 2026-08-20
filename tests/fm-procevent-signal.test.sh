@@ -20,10 +20,16 @@ root=${FM_FAKE_SIGNAL_ROOT:?}
 lock="$root/account.lock"
 log="$root/cli.log"
 queue="$root/queue"
+list_count_file="$root/list-count"
 printf '%s\n' "$*" >> "$log"
 case "${1:-}" in
   listAccounts)
     while [ -e "$lock" ]; do sleep 0.02; done
+    list_count=0
+    [ ! -f "$list_count_file" ] || IFS= read -r list_count < "$list_count_file"
+    list_count=$((list_count + 1))
+    printf '%s\n' "$list_count" > "$list_count_file"
+    if [ "${FM_FAKE_SIGNAL_FAIL_LIST_AT:-0}" = "$list_count" ]; then exit 96; fi
     printf '%s\n' "${FM_FAKE_SIGNAL_ACCOUNT_OUTPUT:-Number: +10000000000 (aci: 11111111-2222-3333-4444-555555555555)}"
     ;;
   -a)
@@ -49,8 +55,10 @@ case "${1:-}" in
             *) shift ;;
           esac
         done
-        if [ "${FM_FAKE_SIGNAL_FAIL:-0}" = 1 ]; then exit 93; fi
         body=$(cat)
+        printf 'private-cli-metadata-fixture\n'
+        printf 'private-cli-error-fixture\n' >&2
+        if [ "${FM_FAKE_SIGNAL_FAIL:-0}" = 1 ]; then exit 93; fi
         printf 'sent group=%s bytes=%s\n' "$group" "${#body}" >> "$root/sent.log"
         printf '%s\n' "$body" > "$root/sent-body"
         ;;
@@ -87,7 +95,8 @@ wait_for() {
 
 cleanup_sources() {
   local home
-  for home in "$SIGNAL_ROOT/home" "$SIGNAL_ROOT/failure" "$SIGNAL_ROOT/validation"; do
+  for home in "$SIGNAL_ROOT/home" "$SIGNAL_ROOT/failure" "$SIGNAL_ROOT/validation" \
+    "$SIGNAL_ROOT/rearm-failure" "$SIGNAL_ROOT/invalid-config"; do
     [ -d "$home" ] || continue
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   done
@@ -100,6 +109,16 @@ new_home "$H"
 signal "$H" arm team >/dev/null
 reconcile "$H" >/dev/null
 wait_for "$SIGNAL_ROOT/account.lock" || fail "receive did not acquire the fake account"
+if FM_HOME="$H" FM_ROOT_OVERRIDE="$ROOT" FM_PROCEVENT_READY_TOKEN=wrong-generation \
+  "$ROOT/bin/fm-procevent.sh" ready signal-account >/dev/null 2>&1; then
+  fail "a foreign runner generation marked the Signal source ready"
+fi
+if FM_HOME="$H" FM_ROOT_OVERRIDE="$ROOT" FM_PROCEVENT_READY_TOKEN=wrong-generation \
+  "$ROOT/bin/fm-procevent.sh" unready signal-account >/dev/null 2>&1; then
+  fail "a foreign runner generation cleared Signal readiness"
+fi
+[ -d "$SIGNAL_ROOT/account.lock" ] || fail "foreign readiness calls disturbed the live receive"
+pass "only the owning runner generation can change source readiness"
 
 PATH="$FAKEBIN:$PATH" FM_FAKE_SIGNAL_ROOT="$SIGNAL_ROOT" \
   signal-cli listAccounts > "$SIGNAL_ROOT/old-order.out" &
@@ -116,12 +135,15 @@ reconcile "$H" >/dev/null
 wait_for "$SIGNAL_ROOT/account.lock" || fail "receive did not re-arm"
 MESSAGE="$SIGNAL_ROOT/reply.txt"
 printf 'reply fixture\n' > "$MESSAGE"
-signal "$H" send team "$MESSAGE" >/dev/null || fail "supported send ordering failed"
+signal "$H" send team "$MESSAGE" > "$SIGNAL_ROOT/send.out" 2> "$SIGNAL_ROOT/send.err" \
+  || fail "supported send ordering failed"
 [ -s "$SIGNAL_ROOT/sent.log" ] || fail "successful send was not recorded"
 assert_contains "$(cat "$SIGNAL_ROOT/sent-body")" "Fixture: reply fixture" "configured label is prepended once"
 assert_not_contains "$(cat "$SIGNAL_ROOT/cli.log")" "reply fixture" "message content never reaches a CLI argv record"
-wait_for "$SIGNAL_ROOT/account.lock" || fail "successful send did not restore receive"
-pass "send retires before account access, keeps content off argv, and re-arms"
+[ "$(cat "$SIGNAL_ROOT/send.out")" = "sent: Signal message" ] || fail "send did not emit only its sanitized success status"
+[ ! -s "$SIGNAL_ROOT/send.err" ] || fail "successful send exposed unexpected stderr"
+[ -d "$SIGNAL_ROOT/account.lock" ] || fail "successful send returned before receive became active"
+pass "send retires before account access, keeps content private, and restores listening"
 
 signal "$H" retire team >/dev/null
 printf 'Fixture: already attributed\n' > "$MESSAGE"
@@ -137,10 +159,14 @@ signal "$HFAIL" arm team >/dev/null
 reconcile "$HFAIL" >/dev/null
 wait_for "$SIGNAL_ROOT/account.lock" || fail "failure fixture receive did not acquire account"
 printf 'failure fixture\n' > "$MESSAGE"
-if FM_FAKE_SIGNAL_FAIL=1 signal "$HFAIL" send team "$MESSAGE" >/dev/null 2>&1; then
+if FM_FAKE_SIGNAL_FAIL=1 signal "$HFAIL" send team "$MESSAGE" \
+  > "$SIGNAL_ROOT/failure.out" 2> "$SIGNAL_ROOT/failure.err"; then
   fail "failed fake send unexpectedly succeeded"
 fi
-wait_for "$SIGNAL_ROOT/account.lock" || fail "failed send did not restore receive"
+[ ! -s "$SIGNAL_ROOT/failure.out" ] || fail "failed send exposed unexpected stdout"
+assert_grep 'error: Signal send failed or timed out' "$SIGNAL_ROOT/failure.err" "failed send reports a sanitized adapter error"
+assert_not_contains "$(cat "$SIGNAL_ROOT/failure.out" "$SIGNAL_ROOT/failure.err")" "private-cli" "failed signal-cli output stays private"
+[ -d "$SIGNAL_ROOT/account.lock" ] || fail "failed send returned before receive became active"
 pass "failed send reports failure while preserving future receive liveness"
 
 signal "$HFAIL" retire team >/dev/null
@@ -203,10 +229,40 @@ HVALID="$SIGNAL_ROOT/validation"
 new_home "$HVALID"
 send_count_before=$(grep -c ' send ' "$SIGNAL_ROOT/cli.log" || true)
 for malformed in 'Number: ++1' 'Number: 1+2' 'Number: +'; do
-  if FM_FAKE_SIGNAL_ACCOUNT_OUTPUT="$malformed" signal "$HVALID" send team "$MESSAGE" >/dev/null 2>&1; then
+  if FM_SIGNAL_COMMAND_TIMEOUT=1 FM_FAKE_SIGNAL_ACCOUNT_OUTPUT="$malformed" \
+    signal "$HVALID" send team "$MESSAGE" >/dev/null 2>&1; then
     fail "malformed account output was accepted: $malformed"
   fi
 done
+if FM_SIGNAL_COMMAND_TIMEOUT=1 \
+  FM_FAKE_SIGNAL_ACCOUNT_OUTPUT=$'Number: +10000000000\nNumber: +20000000000' \
+  signal "$HVALID" send team "$MESSAGE" >/dev/null 2>&1; then
+  fail "multiple discovered accounts were accepted"
+fi
 send_count_after=$(grep -c ' send ' "$SIGNAL_ROOT/cli.log" || true)
 [ "$send_count_before" = "$send_count_after" ] || fail "a malformed account number reached the send operation"
-pass "account discovery accepts only one leading plus and nonempty digits"
+pass "account discovery requires exactly one strictly formed account"
+signal "$HVALID" retire team >/dev/null
+
+HCONFIG="$SIGNAL_ROOT/invalid-config"
+new_home "$HCONFIG"
+printf 'duplicate\tgroup-fixture-id\tDuplicate\n' >> "$HCONFIG/config/signal-groups"
+cli_count_before=$(wc -l < "$SIGNAL_ROOT/cli.log" | tr -d ' ')
+if signal "$HCONFIG" arm team >/dev/null 2>&1; then
+  fail "arm accepted an invalid unselected routing row"
+fi
+cli_count_after=$(wc -l < "$SIGNAL_ROOT/cli.log" | tr -d ' ')
+[ "$cli_count_before" = "$cli_count_after" ] || fail "invalid routing configuration reached signal-cli"
+pass "arm validates the complete routing table before registration"
+
+HREARM="$SIGNAL_ROOT/rearm-failure"
+new_home "$HREARM"
+printf '0\n' > "$SIGNAL_ROOT/list-count"
+if FM_SIGNAL_COMMAND_TIMEOUT=1 FM_FAKE_SIGNAL_FAIL_LIST_AT=2 \
+  signal "$HREARM" send team "$MESSAGE" > "$SIGNAL_ROOT/rearm.out" 2> "$SIGNAL_ROOT/rearm.err"; then
+  fail "send succeeded after its restored source failed account discovery"
+fi
+assert_grep 'sent: Signal message' "$SIGNAL_ROOT/rearm.out" "the outbound send completed before restoration failed"
+assert_grep 'error: could not restore Signal receive source: team' "$SIGNAL_ROOT/rearm.err" "failed readiness is reported without private state"
+assert_not_contains "$(cat "$SIGNAL_ROOT/rearm.out" "$SIGNAL_ROOT/rearm.err")" "private-cli" "signal-cli output stays private"
+pass "send fails closed unless the restored runner reaches receive"

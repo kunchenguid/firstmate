@@ -96,7 +96,10 @@ lifecycle_lock() {
 }
 
 account_from_output() {
-  awk '/^Number:[[:space:]]*[^[:space:]]+/ { print $2; exit }' "$1"
+  awk '
+    /^Number:[[:space:]]*[^[:space:]]+/ { count++; value = $2 }
+    END { if (count == 1) print value; else exit 1 }
+  ' "$1"
 }
 
 account_number() {
@@ -107,7 +110,10 @@ account_number() {
     rm -f "$output"
     die "Signal account discovery failed or timed out"
   fi
-  account=$(account_from_output "$output")
+  account=$(account_from_output "$output") || {
+    rm -f "$output"
+    die "Signal account discovery requires exactly one account"
+  }
   rm -f "$output"
   case "$account" in
     +[0-9]*)
@@ -127,27 +133,37 @@ import sys
 
 groups = {}
 selectors = set()
-with open(os.environ["SIGNAL_GROUPS_FILE"], "rb") as source:
-    for raw in source:
-        line = raw.rstrip(b"\n")
-        if not line.strip() or line.lstrip().startswith(b"#"):
-            continue
-        parts = line.split(b"\t")
-        if len(parts) != 3:
-            raise SystemExit(2)
-        try:
-            selector = parts[0].decode("ascii")
-            group = parts[1].decode("ascii")
-        except UnicodeDecodeError:
-            raise SystemExit(2)
-        if not re.fullmatch(r"[A-Za-z0-9._-]{1,48}", selector):
-            raise SystemExit(2)
-        if not re.fullmatch(r"[A-Za-z0-9+/=_-]+", group):
-            raise SystemExit(2)
-        if selector in selectors or group in groups:
-            raise SystemExit(2)
-        selectors.add(selector)
-        groups[group] = selector
+try:
+    with open(os.environ["SIGNAL_GROUPS_FILE"], "rb") as source:
+        for raw in source:
+            line = raw.rstrip(b"\n")
+            if not line.strip() or line.lstrip().startswith(b"#"):
+                continue
+            parts = line.split(b"\t")
+            if len(parts) != 3:
+                raise SystemExit(3)
+            try:
+                selector = parts[0].decode("ascii")
+                group = parts[1].decode("ascii")
+                label = parts[2].decode()
+            except UnicodeDecodeError:
+                raise SystemExit(3)
+            if not re.fullmatch(r"[A-Za-z0-9._-]{1,48}", selector):
+                raise SystemExit(3)
+            if not re.fullmatch(r"[A-Za-z0-9+/=_-]+", group):
+                raise SystemExit(3)
+            if not label or "\r" in label or len(label) > 64:
+                raise SystemExit(3)
+            if selector in selectors or group in groups:
+                raise SystemExit(3)
+            selectors.add(selector)
+            groups[group] = selector
+except OSError:
+    raise SystemExit(3)
+if not groups:
+    raise SystemExit(3)
+if os.environ.get("SIGNAL_VALIDATE_ONLY") == "1":
+    raise SystemExit(0)
 
 try:
     document = json.load(sys.stdin.buffer)
@@ -170,24 +186,33 @@ sys.stdout.buffer.write(body_bytes)
 '
 }
 
+validate_routes() {
+  SIGNAL_VALIDATE_ONLY=1 emit_message </dev/null
+}
+
 cmd_source() {
   local account
   local -a receive_status
   ensure_groups_file
+  validate_routes || exit 1
   account=$(account_number) || exit 1
   while :; do
+    "$SCRIPT_DIR/fm-procevent.sh" ready "$SOURCE_ID" >/dev/null || return 1
     if signal-cli -a "$account" -o json receive -t -1 --max-messages 1 \
       --ignore-attachments --ignore-stories --ignore-avatars --ignore-stickers 2>/dev/null \
       | emit_message; then
       return 0
     fi
     receive_status=("${PIPESTATUS[@]}")
+    "$SCRIPT_DIR/fm-procevent.sh" unready "$SOURCE_ID" >/dev/null || return 1
+    [ "${receive_status[1]}" -eq 2 ] || return 1
     [ "${receive_status[0]}" -eq 0 ] || sleep 1
   done
 }
 
 cmd_arm_locked() {
   local selector=$1
+  validate_routes || die "Signal group configuration is invalid"
   group_id "$selector" >/dev/null
   "$SCRIPT_DIR/fm-procevent.sh" register signal "$SOURCE_ID" -- \
     "$SCRIPT_DIR/fm-procevent-signal.sh" source || return 1
@@ -225,6 +250,7 @@ cmd_retire() {
 cmd_send_locked() {
   local selector=$1 message=${2:--} group label account raw prefixed
   [ "$message" = - ] || { [ -f "$message" ] && [ ! -L "$message" ] || die "message file is not a regular file"; }
+  validate_routes || die "Signal group configuration is invalid"
   group=$(group_id "$selector") || exit 1
   label=$(display_label "$selector") || exit 1
   cmd_retire_locked "$selector" >/dev/null || die "could not retire Signal receive source"
@@ -253,11 +279,12 @@ sys.stdout.buffer.write(body)
   # shellcheck disable=SC2016
   if ! fm_run_timed "$SEND_TIMEOUT" bash -c \
     'signal-cli -a "$1" send -g "$2" --message-from-stdin <"$3"' \
-    _ "$account" "$group" "$prefixed"; then
+    _ "$account" "$group" "$prefixed" >/dev/null 2>&1; then
     rm -f "$prefixed"
     die "Signal send failed or timed out"
   fi
   rm -f "$prefixed"
+  printf 'sent: Signal message\n'
 }
 
 cmd_send() {
@@ -276,7 +303,8 @@ cmd_send() {
       local status=$?
       trap - EXIT
       if ! (cmd_arm_locked "$selector") >/dev/null 2>&1 \
-        || ! "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1; then
+        || ! "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 \
+        || ! "$SCRIPT_DIR/fm-procevent.sh" wait-ready "$SOURCE_ID" "$SEND_TIMEOUT" >/dev/null 2>&1; then
         printf 'error: could not restore Signal receive source: %s\n' "$selector" >&2
         status=1
       fi

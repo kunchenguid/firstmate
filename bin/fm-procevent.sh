@@ -9,6 +9,9 @@
 #   fm-procevent.sh start <source-id>
 #   fm-procevent.sh reconcile
 #   fm-procevent.sh classify <result-file>
+#   fm-procevent.sh ready <source-id>
+#   fm-procevent.sh unready <source-id>
+#   fm-procevent.sh wait-ready <source-id> <timeout-seconds>
 #   fm-procevent.sh handled <source-id> <sequence>
 #   fm-procevent.sh retire <source-id> [--if-absent|--if-matches <adapter> -- <argv>...|--if-owner <registration-token>]
 #   fm-procevent.sh sweep-home [--preflight]
@@ -47,6 +50,13 @@
 #            start a runner for any registered source that has no live owner.
 #            This is liveness repair only - it never discovers results by
 #            polling the source, because the child blocks on the source itself.
+# ready      Mark the current runner generation ready after its adapter reaches
+#            the blocking source operation. Only the source process inheriting
+#            that generation's private token can mark it.
+# unready    Clear that marker while the same generation backs off or restarts
+#            its blocking operation.
+# wait-ready Wait a bounded number of seconds for the registered source's live
+#            owner to publish and retain that generation-bound ready marker.
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
 #            the first time for that exact source-and-sequence generation and
@@ -176,6 +186,8 @@ EXTENSION_LIFECYCLE_LOCK="$REG/.extension-binding-lifecycle.lock"
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
 
+positive_int() { case "${1-}" in ''|*[!0-9]*) return 1 ;; 0) return 1 ;; *) return 0 ;; esac }
+
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
 extension_lifecycle_lock_acquire() {
@@ -301,6 +313,7 @@ adapter_self_announcing() {  # <adapter>
 
 source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
+ready_file()   { printf '%s/%s.ready\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
 
 # Let the source's own adapter apply and acknowledge one captured result. See
@@ -666,15 +679,19 @@ cmd_start() {
     if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
       && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
       && [ "$FM_PROCEVENT_CLAIM_PID" = "$CLAIM_PID" ] \
-      && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$CLAIM_TOKEN" ] \
-      && [ "$FM_PROCEVENT_CLAIM_TERMINAL" = terminal ]; then
-      fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
-      return 0
+      && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$CLAIM_TOKEN" ]; then
+      rm -f -- "$(ready_file "$CLAIM_ID")"
+      if [ "$FM_PROCEVENT_CLAIM_TERMINAL" = terminal ]; then
+        fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
+        return 0
+      fi
     fi
     fm_procevent_claim_release_locked "$CLAIM_ID" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" 2>/dev/null || true
     fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
   }
   trap release_start_claim EXIT
+  FM_PROCEVENT_READY_TOKEN=$CLAIM_TOKEN
+  export FM_PROCEVENT_READY_TOKEN
   local runner inbox reservation_dir
   if [ "$extension_owner" -eq 1 ]; then
     fm_procevent_extension_staging_prepare "$STATE" \
@@ -852,6 +869,101 @@ EOF
   fi
 }
 
+cmd_ready() {
+  local id=${1-} token=${FM_PROCEVENT_READY_TOKEN-} marker tmp status=1 current_identity
+  [ "$#" -eq 1 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  [ -n "$token" ] || die "ready requires a runner generation"
+  marker=$(ready_file "$id")
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  if fm_procevent_claim_load_locked "$id" 2>/dev/null \
+    && [ "$FM_PROCEVENT_CLAIM_HOME" = "$FM_HOME" ] \
+    && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$token" ] \
+    && [ "$FM_PROCEVENT_CLAIM_TERMINAL" = active ] \
+    && fm_procevent_claim_state_locked "$id" \
+    && current_identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null) \
+    && [ "$current_identity" = "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ]; then
+    tmp=$(umask 077; mktemp "$REG/.ready.XXXXXX") || tmp=
+    if [ -n "$tmp" ] \
+      && printf '%s\t%s\n' "$token" "$FM_PROCEVENT_CLAIM_REG_IDENTITY" > "$tmp" \
+      && chmod 0600 "$tmp" \
+      && mv -f -- "$tmp" "$marker"; then
+      status=0
+    else
+      [ -z "$tmp" ] || rm -f -- "$tmp"
+    fi
+  fi
+  fm_procevent_source_lock_release "$id"
+  [ "$status" -eq 0 ] || die "cannot mark source ready: $id"
+  printf 'ready: %s\n' "$id"
+}
+
+cmd_unready() {
+  local id=${1-} token=${FM_PROCEVENT_READY_TOKEN-} status=1
+  [ "$#" -eq 1 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  [ -n "$token" ] || die "unready requires a runner generation"
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  if fm_procevent_claim_load_locked "$id" 2>/dev/null \
+    && [ "$FM_PROCEVENT_CLAIM_HOME" = "$FM_HOME" ] \
+    && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$token" ] \
+    && fm_procevent_claim_state_locked "$id" \
+    && rm -f -- "$(ready_file "$id")"; then
+    status=0
+  fi
+  fm_procevent_source_lock_release "$id"
+  [ "$status" -eq 0 ] || die "cannot clear source readiness: $id"
+  printf 'unready: %s\n' "$id"
+}
+
+cmd_wait_ready() {
+  local id=${1-} timeout=${2-} attempts i=0 marker marker_token marker_identity stable_token= stable=0 state current_identity
+  [ "$#" -eq 2 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  positive_int "$timeout" || die "timeout must be a positive integer"
+  attempts=$((timeout * 10))
+  marker=$(ready_file "$id")
+  while [ "$i" -lt "$attempts" ]; do
+    marker_token=
+    marker_identity=
+    fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+    if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ] \
+      && [ -f "$marker" ] && [ ! -L "$marker" ]; then
+      fm_procevent_claim_state_locked "$id"
+      state=$?
+      if [ "$state" -eq 0 ]; then
+        IFS=$'\t' read -r marker_token marker_identity < "$marker" || marker_token=
+        current_identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null || true)
+        if [ "$marker_token" != "$FM_PROCEVENT_CLAIM_TOKEN" ] \
+          || [ "$marker_identity" != "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ] \
+          || [ "$current_identity" != "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ] \
+          || [ "$FM_PROCEVENT_CLAIM_HOME" != "$FM_HOME" ]; then
+          marker_token=
+        fi
+      fi
+    fi
+    fm_procevent_source_lock_release "$id"
+    if [ -n "$marker_token" ]; then
+      if [ "$marker_token" = "$stable_token" ]; then
+        stable=$((stable + 1))
+      else
+        stable_token=$marker_token
+        stable=1
+      fi
+      if [ "$stable" -ge 2 ]; then
+        printf 'ready: %s\n' "$id"
+        return 0
+      fi
+    else
+      stable_token=
+      stable=0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  die "source did not become ready: $id"
+}
+
 # Retire a source this runner owns because its adapter classified the captured
 # result terminal. Ownership is re-proved, the registration is dropped, and this
 # runner's own claim is released under ONE source-lock hold, so no concurrent
@@ -872,7 +984,10 @@ retire_owned_terminal_source() {  # <source-id>
     && [ "$current_identity" = "$CLAIM_REG_IDENTITY" ] \
     && fm_procevent_claim_mark_terminal_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN"; then
     if rm -f -- "$registration" && [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
-      fm_procevent_claim_release_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" || status=1
+      rm -f -- "$(ready_file "$id")" || status=1
+      [ "$status" -ne 0 ] \
+        || fm_procevent_claim_release_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" \
+        || status=1
     else
       status=1
     fi
@@ -962,6 +1077,7 @@ cmd_reconcile() {
             && rm -f -- "$(source_file "$id")" \
             && [ ! -e "$(source_file "$id")" ] \
             && [ ! -L "$(source_file "$id")" ] \
+            && rm -f -- "$(ready_file "$id")" \
             && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
             stopped=$((stopped + 1))
           else
@@ -1186,6 +1302,7 @@ cmd_retire() {
   fi
   rm -f -- "$(source_file "$id")"
   rm -f -- "$(runner_file "$id")"
+  rm -f -- "$(ready_file "$id")"
   fm_procevent_source_lock_release "$id"
   # A retired source produces no further answer, so drop any decision binding it
   # carried. Generic and idempotent: the binding owner is asked to forget this
@@ -1453,6 +1570,9 @@ case "${1-}" in
   _start)             shift; cmd_start "$@" ;;
   reconcile)          shift; cmd_reconcile "$@" ;;
   classify)           shift; cmd_classify "$@" ;;
+  ready)              shift; cmd_ready "$@" ;;
+  unready)            shift; cmd_unready "$@" ;;
+  wait-ready)         shift; cmd_wait_ready "$@" ;;
   handled)            shift; cmd_handled "$@" ;;
   retire)             shift; cmd_retire "$@" ;;
   sweep-home)         shift; cmd_sweep_home "$@" ;;
