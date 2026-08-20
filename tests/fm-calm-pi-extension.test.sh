@@ -1591,12 +1591,13 @@ TS
     i=0
     while [ "$i" -lt 240 ]; do
       pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" 2>/dev/null || true)
-      printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE" && break
+      if printf '%s\n' "$pane" | grep -Fq "CAPTAIN_ANSWER_$label" \
+        && printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE"; then
+        break
+      fi
       sleep 0.05
       i=$((i + 1))
     done
-    printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE" \
-      || fail "Pi follow-up $label case never rendered the monitoring processing result"
     captain_answer_rows=$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)
     [ "$captain_answer_rows" -eq 1 ] \
       || fail "Pi follow-up $label case rendered $captain_answer_rows captain answer rows instead of exactly one"
@@ -2860,7 +2861,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_wait restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait error_count_before error_count export_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -3188,6 +3189,8 @@ JSON
   do
     kind=${fixture%%|*}
     needle=${fixture#*|}
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$active_before_snapshot"
+    error_count_before=$(grep -Fc " Error:" "$active_before_snapshot" || true)
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-inject-e2e $kind"
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
     active_wait=0
@@ -3199,7 +3202,18 @@ JSON
     grep -F '"role":"user"' "$session_file" |
       grep -Fq "$needle" \
       || fail "current operational kind $kind did not retain user-role delivery while Calm was active"
-    sleep 0.1
+    active_wait=0
+    while [ "$active_wait" -lt 120 ]; do
+      tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$active_hidden_snapshot"
+      error_count=$(grep -Fc " Error:" "$active_hidden_snapshot" || true)
+      if [ "$error_count" -gt "$error_count_before" ] &&
+        ! grep -Fq "/calm-inject-e2e" "$active_hidden_snapshot" &&
+        ! grep -Fq "escape to interrupt" "$active_hidden_snapshot"; then
+        break
+      fi
+      sleep 0.05
+      active_wait=$((active_wait + 1))
+    done
   done
   node - "$session_file" <<'JS' || fail "native Pi did not preserve every exact current operational kind"
 const fs = require("node:fs");
@@ -3282,8 +3296,9 @@ JS
     sleep 0.05
     export_wait=$((export_wait + 1))
   done
-  grep -Fq '</html>' "$export_file" 2>/dev/null \
-    || fail "/export did not complete while calm mode was on"
+  if [ ! -s "$export_file" ] || ! grep -Fq '</html>' "$export_file" 2>/dev/null; then
+    fail "/export did not complete while calm mode was on"
+  fi
   node - "$export_file" <<'JS' || fail "calm-mode HTML export lost tool data or persisted synthetic provenance"
 const html = require("node:fs").readFileSync(process.argv[2], "utf8");
 const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);
@@ -3299,10 +3314,8 @@ if (!serialized.includes("firstmate-synthetic-input") || !serialized.includes("/
 const synthetic = entries.find((entry) => entry.type === "custom_message" && entry.customType === "firstmate-synthetic-input");
 if (!synthetic || synthetic.display) process.exit(1);
 JS
-  # The rendered-DOM pass needs a real browser; hosts without one (like the
-  # shared CI runner) skip only this block, matching the pi/tmux skip pattern,
-  # while the serialized-export assertions above stay authoritative everywhere.
-  if chrome=$(find_chrome); then
+  chrome=$(find_chrome) \
+    || fail "Chrome or Chromium is required for rendered export DOM assertions"
   "$chrome" \
     --headless=new \
     --disable-gpu \
@@ -3310,7 +3323,7 @@ JS
     --user-data-dir="$TMP_ROOT/chrome-profile" \
     --virtual-time-budget=2000 \
     --dump-dom \
-    "file://$export_file" >"$export_dom" 2>/dev/null &
+    "file://$export_file" >"$export_dom" 2>"$TMP_ROOT/chrome.stderr" &
   chrome_pid=$!
   chrome_wait=0
   while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_wait" -lt 100 ]; do
@@ -3321,7 +3334,7 @@ JS
   kill "$chrome_pid" 2>/dev/null || true
   wait "$chrome_pid" 2>/dev/null || true
   grep -Fq '</html>' "$export_dom" 2>/dev/null \
-    || fail "could not render calm-mode HTML export DOM"
+    || fail "could not render calm-mode HTML export DOM: $(cat "$TMP_ROOT/chrome.stderr")"
   node - "$export_dom" <<'JS' || fail "rendered export DOM violated the Calm conversation boundary"
 const dom = require("node:fs").readFileSync(process.argv[2], "utf8");
 const messages = dom.match(/<div id="messages">([\s\S]*?)<\/main>/)?.[1];
@@ -3336,9 +3349,6 @@ for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_A
 }
 if (!tree.includes("firstmate-synthetic-input") || !tree.includes("/tmp/probe.status")) process.exit(1);
 JS
-  else
-    echo "skip: Chrome or Chromium not found for rendered export DOM assertions"
-  fi
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s

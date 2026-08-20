@@ -477,7 +477,7 @@ test_scenario_c() {
 test_scenario_d_max_defer() {
   reset_state
   afk_enter "$STATE_DIR"
-  local log_start=0
+  local log_start=0 waited=0
   [ ! -f "$STATE_DIR/.supervise-daemon.log" ] || log_start=$(wc -l < "$STATE_DIR/.supervise-daemon.log")
   # Persistent-pending composer: type real text and never submit it, so every
   # composer read is genuinely "pending" against the real herdr binary.
@@ -505,7 +505,13 @@ test_scenario_d_max_defer() {
 
   echo "needs-decision: pick A or B" > "$STATE_DIR/fake-c1.status"
 
-  sleep 12
+  # Water 7 can spend longer than one housekeeping interval scheduling the
+  # real Herdr-backed daemon under the serial suite load. Poll the same
+  # durable oracle within a bounded window instead of sampling it once.
+  while [ "$waited" -lt 30 ] && [ ! -s "$STATE_DIR/.subsuper-inject-wedged" ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
 
   [ -s "$STATE_DIR/.subsuper-inject-wedged" ] \
     || fail "Scenario D: a persistently pending real herdr composer never raised the max-defer wedge alarm"

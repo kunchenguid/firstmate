@@ -168,7 +168,7 @@ family_for_basename() {
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|fm-macos-scope.test.sh|\
     fm-model-telemetry.test.sh|fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
-    fm-ci-water7.test.sh|\
+    fm-ci-water7.test.sh|fm-install-chrome.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
@@ -963,7 +963,7 @@ families_for_changed_path() {
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
       ;;
-    bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)
+    bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-install-chrome.sh|bin/fm-herdr-ci-cleanup.sh)
       printf '%s\n' pure-contract-unit
       # Pin or cleanup changes also select the real-Herdr family so the required
       # lane's contract coverage re-runs.

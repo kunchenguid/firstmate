@@ -125,6 +125,7 @@ make_policy_fixture() {
   cp "$ROOT/bin/fm-ci.sh" "$repo/bin/fm-ci.sh"
   cp "$ROOT/bin/fm-backend.sh" "$repo/bin/fm-backend.sh"
   cp "$ROOT/bin/backends/herdr.sh" "$repo/bin/backends/herdr.sh"
+  cp "$ROOT/bin/fm-install-chrome.sh" "$repo/bin/fm-install-chrome.sh"
   cp "$ROOT/bin/fm-composer-lib.sh" "$repo/bin/fm-composer-lib.sh"
   cp "$ROOT/bin/fm-transition-lib.sh" "$repo/bin/fm-transition-lib.sh"
   chmod +x "$repo/bin/fm-ci.sh"
@@ -145,6 +146,7 @@ SH
 printf 'test-run %s\n' "$*" >> "$FM_CI_CALLS"
 printf 'SHELL=%s|HERDR_SESSION=%s|FM_HERDR_LAB_PROTECTED_SESSION=%s\n' \
   "${SHELL:-}" "${HERDR_SESSION:-}" "${FM_HERDR_LAB_PROTECTED_SESSION:-}" >> "$FM_CI_SUITE_ENV"
+printf 'FM_CHROME_BIN=%s\n' "${FM_CHROME_BIN:-}" >> "$FM_CI_SUITE_ENV"
 SH
   chmod +x "$repo"/bin/*.sh
 
@@ -194,7 +196,14 @@ SH
 printf 'herdr\n' >> "$FM_CI_INSTALL_CALLS"
 install -m 0755 "$FM_TEST_INSTALL_FIXTURES/herdr" "$1/herdr"
 SH
-  chmod +x "$repo/bin/fm-install-shellcheck.sh" "$repo/bin/fm-install-herdr.sh"
+cat > "$repo/bin/fm-install-chrome.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'chrome\n' >> "$FM_CI_INSTALL_CALLS"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$1/chrome"
+chmod +x "$1/chrome"
+printf '%s/chrome\n' "$1"
+SH
+  chmod +x "$repo/bin/fm-install-shellcheck.sh" "$repo/bin/fm-install-herdr.sh" "$repo/bin/fm-install-chrome.sh"
   cat > "$fakebin/git" <<'SH'
 #!/usr/bin/env bash
 case "$1 ${2:-}" in
@@ -203,7 +212,7 @@ case "$1 ${2:-}" in
   *) exec /usr/bin/git "$@" ;;
 esac
 SH
-  for command_name in tmux rg tasks-axi treehouse; do
+  for command_name in tmux rg tasks-axi treehouse dpkg-deb; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$command_name"
   done
   chmod +x "$fakebin"/*
@@ -214,6 +223,7 @@ run_policy_fixture() {
   # Scrub the ambient Herdr selection so the fixture proves what the policy
   # itself hands the suite, not what the developer's shell happened to export.
   env -u HERDR_SESSION -u FM_HERDR_LAB_PROTECTED_SESSION \
+    -u FM_CHROME_BIN \
     PATH="$fakebin:$PATH" \
     FM_CI_CALLS="$calls" \
     FM_CI_SUITE_ENV="$calls.suite-env" \
@@ -349,7 +359,12 @@ test_policy_uses_only_bounded_ci_bootstrap() {
 
   suite_env=$(sort -u < "$calls.suite-env")
   expected_shell=$(command -v bash)
-  [ "$suite_env" = "SHELL=$expected_shell|HERDR_SESSION=|FM_HERDR_LAB_PROTECTED_SESSION=fm-ci-water7" ] \
+  expected_suite_env=$(cat <<EOF
+FM_CHROME_BIN=$(dirname "$calls")/fm-ci-tools/chrome
+SHELL=$expected_shell|HERDR_SESSION=|FM_HERDR_LAB_PROTECTED_SESSION=fm-ci-water7
+EOF
+)
+  [ "$suite_env" = "$expected_suite_env" ] \
     || fail "the suite did not inherit the usable Bash shell and explicit dedicated protected controller: $suite_env"
 
   tmp=$(fm_test_tmproot fm-ci-water7-installers)
@@ -366,7 +381,8 @@ test_policy_uses_only_bounded_ci_bootstrap() {
     || fail "Water 7 command policy did not bootstrap its pinned tools"
   install_calls=$(cat "$calls.install")
   [ "$install_calls" = "shellcheck
-herdr" ] || fail "bounded bootstrap did not use exactly the two tracked installers: $install_calls"
+herdr
+chrome" ] || fail "bounded bootstrap did not use exactly the three tracked installers: $install_calls"
   pass "the command owner only starts its explicit dedicated controller when down"
 }
 

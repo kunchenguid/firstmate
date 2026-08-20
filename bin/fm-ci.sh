@@ -106,7 +106,7 @@ $hits"
 
 ensure_tools() {
   local command_name required status tool_dir
-  for command_name in bash git tmux jq python3 curl tar node npm rg tasks-axi treehouse systemctl; do
+  for command_name in bash git tmux jq python3 curl tar node npm rg tasks-axi treehouse systemctl dpkg-deb; do
     require_command "$command_name"
   done
   SHELL=$(command -v bash)
@@ -129,6 +129,10 @@ ensure_tools() {
   fi
   [ "$(herdr --version 2>/dev/null | awk '{ print $2; exit }')" = 0.7.4 ] \
     || die 'Herdr 0.7.4 bootstrap failed'
+
+  FM_CHROME_BIN=$(bin/fm-install-chrome.sh "$tool_dir")
+  export FM_CHROME_BIN
+  [ -x "$FM_CHROME_BIN" ] || die 'user-space Chrome bootstrap failed'
 
   fm_backend_source herdr || die 'could not load the repository-owned Herdr backend'
   fm_backend_herdr_server_ensure "$FM_CI_HERDR_SESSION" \

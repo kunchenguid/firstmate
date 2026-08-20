@@ -25,6 +25,7 @@ type InteractiveModePresentation = {
     addToHistory?(text: string): void;
   };
   getMarkdownThemeWithSettings(): UserMessageConstructorArgs[1];
+  getMarkdownTransformers?(): UserMessageConstructorArgs[3];
   getUserMessageText(message: UserMessageLike): string;
   outputPad: number;
 };
@@ -104,8 +105,9 @@ export function installCalmOperationalUserLayout(): void {
       markdownTheme: UserMessageConstructorArgs[1],
       outputPad: number,
       hasLeadingSpacer: boolean,
+      markdownTransformers: UserMessageConstructorArgs[3],
     ) {
-      super(text, markdownTheme, outputPad);
+      super(text, markdownTheme, outputPad, markdownTransformers);
       this.hasLeadingSpacer = hasLeadingSpacer;
     }
 
@@ -136,6 +138,7 @@ export function installCalmOperationalUserLayout(): void {
       this.getMarkdownThemeWithSettings(),
       this.outputPad,
       this.chatContainer.children.length > 0,
+      this.getMarkdownTransformers?.() ?? [],
     );
     this.chatContainer.addChild(component);
     if (options?.populateHistory) this.editor.addToHistory?.(text);
