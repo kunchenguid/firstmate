@@ -229,7 +229,7 @@ Retirement is executed on the configured host and refuses while the remote home 
 It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`; it never stops the shared session or removes a sibling secondmate's workspace or panes.
 SSH exit 255 preserves both the route and local records because completion is unknown.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
-No generic remote delete or write surface exists: remote writes are confined to inherited allowlist files and backlog handoff scratch files, and remote home removal is reachable only through guarded secondmate retirement.
+No generic remote delete or write surface exists: remote writes are confined to inherited allowlist files, backlog handoff scratch files, and the explicitly routed user-skill convergence described under [user skill layout](configuration.md#user-skill-layout), which still defaults to a read-only plan and requires `--apply`; remote home removal is reachable only through guarded secondmate retirement.
 
 ## Verification
 
