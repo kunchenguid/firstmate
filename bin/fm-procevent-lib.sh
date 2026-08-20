@@ -148,8 +148,13 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"
-  } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$dest"; then
-    return 0
+  } > "$tmp" && chmod 0600 "$tmp"; then
+    if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$tmp" "$dest"; then
+      rm -f -- "$tmp" && return 0
+    fi
+    if mv -f -- "$tmp" "$dest"; then
+      return 0
+    fi
   fi
   rm -f -- "$tmp"
   return 1
