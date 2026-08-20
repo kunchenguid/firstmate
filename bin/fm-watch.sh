@@ -375,9 +375,10 @@ handle_paused_stale() {  # <window> <task> <hash>
 # exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS. Away mode
 # remains daemon-owned and receives the undecorated wake identity for its own
 # classification.
-busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
-  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
-  if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file> [pause-class]
+  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 pause_class=${6:-}
+  if ! afk_present && [ "$pause_class" != working ] \
+    && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
@@ -1062,29 +1063,33 @@ EOF
     fi
     pause_class=
     pause_liveness=
-    if [ "$kind" != secondmate ] && status_is_paused_or_captain_held "$last"; then
+    if [ "$kind" != secondmate ] && status_is_paused_or_captain_held "$last" && ! afk_present; then
       pause_liveness=$(pause_declaration_liveness "$w")
       [ "$pause_liveness" != alive ] || rm -f "$STATE/.paused-rechecked-$key"
-      if [ "$pause_liveness" = dead ]; then
-        pause_class=$(pause_state_class "$w" "$task" "$pause_liveness")
-        case "$pause_class" in
-          working)
-            clear_pause_state "$w"
-            ;;
-          paused)
+      pause_class=$(pause_state_class "$w" "$task" "$pause_liveness")
+      case "$pause_class" in
+        working)
+          clear_pause_state "$w"
+          ;;
+        paused)
+          if [ "$pause_liveness" = dead ]; then
             handle_paused_stale "$w" "$task" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
             continue
-            ;;
-          dead)
-            surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)" death
-            ;;
-          *)
-            surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
-            ;;
-        esac
-      fi
+          fi
+          ;;
+        dead)
+          surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)" death
+          ;;
+        *)
+          surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
+          ;;
+      esac
     fi
     if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      if afk_present; then
+        surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
+        continue
+      fi
       if [ -z "$pause_class" ]; then
         if status_is_paused_or_captain_held "$last"; then
           pause_class=$(pause_state_class "$w" "$task" "$pause_liveness")
@@ -1098,11 +1103,7 @@ EOF
           triage_log "absorbed capture failure (provably working): $w"
           ;;
         paused)
-          if afk_present; then
-            surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
-          else
-            handle_paused_stale "$w" "$task" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
-          fi
+          handle_paused_stale "$w" "$task" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
           ;;
         dead)
           surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)" death
@@ -1243,7 +1244,7 @@ EOF
         # bound to the same wedge timer unless the crew declared the wait itself.
         paused_bound=1
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
+          busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" "$pause_class" && paused_bound=0
         else
           rm -f "$ssf" "$ewf"
         fi
@@ -1260,7 +1261,7 @@ EOF
       echo 0 > "$cf"
       paused_bound=1
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
+        busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" "$pause_class" && paused_bound=0
       else
         rm -f "$ssf" "$ewf"
       fi

@@ -1340,6 +1340,10 @@ TMUX
       TOTAL_TRIAGE_CASE_ERROR="$name capture failure recorded $wakes stale wakes instead of one"
       return 1
     fi
+    if [ "$afk" = 1 ] && ! grep -Fx "stale: $window" "$out" >/dev/null; then
+      TOTAL_TRIAGE_CASE_ERROR="$name capture failure did not hand off a plain stale identity"
+      return 1
+    fi
     return 0
   fi
   if ! wait_for_live_triage_verdict "$pid" "$state" "$verdict" "$baseline"; then
@@ -1375,7 +1379,7 @@ test_window_triage_records_every_capture_failure_verdict() {
     errors="$errors; $TOTAL_TRIAGE_CASE_ERROR"
   fi
   if ! capture_failure_totality_case afk-working ship 1 \
-    'state: working · source: run-step · validating (running)' working; then
+    'state: working · source: run-step · validating (running)' surfaced; then
     errors="$errors; $TOTAL_TRIAGE_CASE_ERROR"
   fi
   [ -z "$errors" ] || fail "total window-triage failures${errors}"
@@ -2591,6 +2595,23 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
   touch -t 200001010000 "$state/review-scout.meta"
   # No pre-seeded .hash-<key>: a live harness footer ticks, so every poll lands
   # on the changed-hash branch - the review scout's real masking condition.
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 100 \
+    || { reap "$pid"; fail "an authoritative run stayed on pause cadence past the busy-turn bound"; }
+  [ ! -e "$state/.paused-$key" ] \
+    || { reap "$pid"; fail "an authoritative run retained the older declared-pause cadence"; }
+  [ "$(queued_stale_wakes "$state" "$window")" -eq 0 ] \
+    || { reap "$pid"; fail "an authoritative run surfaced while returning to wedge tracking"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional authoritative-run stop"
+  : > "$out"
 
   # Phase A: past the bound, with the wedge threshold set as low as it goes, the
   # declared pause is absorbed on the long cadence and never starts a wedge.
