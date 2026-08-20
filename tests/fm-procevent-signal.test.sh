@@ -10,7 +10,9 @@ set -u
 
 SIGNAL_ROOT=$(fm_test_tmproot fm-procevent-signal)
 FAKEBIN="$SIGNAL_ROOT/fakebin"
-mkdir -p "$FAKEBIN"
+SIGNAL_TMP="$SIGNAL_ROOT/private-tmp"
+INTERRUPT_ROOT="$SIGNAL_ROOT/interruption-cli"
+mkdir -p "$FAKEBIN" "$SIGNAL_TMP" "$INTERRUPT_ROOT"
 export FM_PROCEVENT_CLAIM_ROOT="$SIGNAL_ROOT/claims"
 
 cat > "$FAKEBIN/signal-cli" <<'SH'
@@ -25,6 +27,7 @@ printf '%s\n' "$*" >> "$log"
 case "${1:-}" in
   listAccounts)
     while [ -e "$lock" ]; do sleep 0.02; done
+    sleep "${FM_FAKE_SIGNAL_LIST_DELAY:-0}"
     list_count=0
     [ ! -f "$list_count_file" ] || IFS= read -r list_count < "$list_count_file"
     list_count=$((list_count + 1))
@@ -58,6 +61,7 @@ case "${1:-}" in
           esac
         done
         body=$(cat)
+        sleep "${FM_FAKE_SIGNAL_SEND_DELAY:-0}"
         printf 'private-cli-metadata-fixture\n'
         printf 'private-cli-error-fixture\n' >&2
         if [ "${FM_FAKE_SIGNAL_FAIL:-0}" = 1 ]; then exit 93; fi
@@ -80,12 +84,13 @@ new_home() {
 
 signal() {
   FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$1/config" \
-    PATH="$FAKEBIN:$PATH" FM_FAKE_SIGNAL_ROOT="$SIGNAL_ROOT" \
+    PATH="$FAKEBIN:$PATH" TMPDIR="$SIGNAL_TMP" FM_FAKE_SIGNAL_ROOT="$SIGNAL_ROOT" \
     "$ROOT/bin/fm-procevent-signal.sh" "${@:2}"
 }
 
 reconcile() {
-  FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" PATH="$FAKEBIN:$PATH" FM_FAKE_SIGNAL_ROOT="$SIGNAL_ROOT" \
+  FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" PATH="$FAKEBIN:$PATH" TMPDIR="$SIGNAL_TMP" \
+    FM_FAKE_SIGNAL_ROOT="$SIGNAL_ROOT" \
     "$ROOT/bin/fm-procevent.sh" reconcile
 }
 
@@ -98,12 +103,27 @@ wait_for() {
 cleanup_sources() {
   local home
   for home in "$SIGNAL_ROOT/home" "$SIGNAL_ROOT/failure" "$SIGNAL_ROOT/validation" \
-    "$SIGNAL_ROOT/rearm-failure" "$SIGNAL_ROOT/invalid-config" "$SIGNAL_ROOT/foreign"; do
+    "$SIGNAL_ROOT/rearm-failure" "$SIGNAL_ROOT/invalid-config" "$SIGNAL_ROOT/foreign" \
+    "$SIGNAL_ROOT/interruption"; do
     [ -d "$home" ] || continue
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   done
 }
 trap cleanup_sources EXIT
+
+wait_for_private_temp() {
+  local pattern=$1
+  for _ in $(seq 1 100); do
+    find "$SIGNAL_TMP" -type f -name "$pattern" -print -quit | grep -q . && return 0
+    sleep 0.02
+  done
+  return 1
+}
+
+assert_no_private_temps() {
+  [ -z "$(find "$SIGNAL_TMP" -type f -name 'fm-signal-*' -print -quit)" ] \
+    || fail "interrupted Signal operation retained a private temporary"
+}
 
 assert_runner_owned_receive() {
   local home=$1 claim_pid source_pid source_parent
@@ -117,6 +137,50 @@ assert_runner_owned_receive() {
 
 H="$SIGNAL_ROOT/home"
 new_home "$H"
+
+HINT="$SIGNAL_ROOT/interruption"
+new_home "$HINT"
+INTERRUPT_FIFO="$SIGNAL_ROOT/interrupted-input"
+mkfifo "$INTERRUPT_FIFO"
+FM_HOME="$HINT" FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$HINT/config" \
+  PATH="$FAKEBIN:$PATH" TMPDIR="$SIGNAL_TMP" FM_FAKE_SIGNAL_ROOT="$SIGNAL_ROOT" \
+  "$ROOT/bin/fm-procevent-signal.sh" send team - < "$INTERRUPT_FIFO" \
+  > "$SIGNAL_ROOT/interrupted-stdin.out" 2> "$SIGNAL_ROOT/interrupted-stdin.err" &
+interrupted_pid=$!
+exec 9> "$INTERRUPT_FIFO"
+printf 'partial fixture' >&9
+wait_for_private_temp 'fm-signal-input.*' || fail "stdin staging interruption fixture never created its private temporary"
+kill -TERM "$interrupted_pid" 2>/dev/null || true
+exec 9>&-
+wait "$interrupted_pid" 2>/dev/null || true
+rm -f "$INTERRUPT_FIFO"
+assert_no_private_temps
+
+printf 'interruption fixture\n' > "$SIGNAL_ROOT/interruption-message"
+perl -e 'setpgrp(0, 0) or exit 125; exec @ARGV; exit 125' \
+  env FM_HOME="$HINT" FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$HINT/config" \
+    PATH="$FAKEBIN:$PATH" TMPDIR="$SIGNAL_TMP" FM_FAKE_SIGNAL_ROOT="$INTERRUPT_ROOT" \
+    FM_FAKE_SIGNAL_LIST_DELAY=30 "$ROOT/bin/fm-procevent-signal.sh" \
+    send team "$SIGNAL_ROOT/interruption-message" \
+    > "$SIGNAL_ROOT/interrupted-account.out" 2> "$SIGNAL_ROOT/interrupted-account.err" &
+interrupted_pid=$!
+wait_for_private_temp 'fm-signal-accounts.*' || fail "account interruption fixture never created its private temporary"
+kill -TERM -"$interrupted_pid" 2>/dev/null || true
+wait "$interrupted_pid" 2>/dev/null || true
+assert_no_private_temps
+
+perl -e 'setpgrp(0, 0) or exit 125; exec @ARGV; exit 125' \
+  env FM_HOME="$HINT" FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$HINT/config" \
+    PATH="$FAKEBIN:$PATH" TMPDIR="$SIGNAL_TMP" FM_FAKE_SIGNAL_ROOT="$INTERRUPT_ROOT" \
+    FM_FAKE_SIGNAL_SEND_DELAY=30 "$ROOT/bin/fm-procevent-signal.sh" \
+    send team "$SIGNAL_ROOT/interruption-message" \
+    > "$SIGNAL_ROOT/interrupted-send.out" 2> "$SIGNAL_ROOT/interrupted-send.err" &
+interrupted_pid=$!
+wait_for_private_temp 'fm-signal-message.*' || fail "send interruption fixture never created its private temporary"
+kill -TERM -"$interrupted_pid" 2>/dev/null || true
+wait "$interrupted_pid" 2>/dev/null || true
+assert_no_private_temps
+pass "interruptions remove partial stdin, account, and outbound private temporaries"
 
 signal "$H" arm team >/dev/null
 reconcile "$H" >/dev/null
