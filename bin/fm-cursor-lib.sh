@@ -129,6 +129,9 @@ fm_cursor_catalog_has_model() {  # <model>
   local wanted=$1
   awk -v wanted="$wanted" '
     BEGIN { ansi = sprintf("%c\\[[0-9;]*[A-Za-z]", 27) }
+    function is_parameterized_auto(model) {
+      return model ~ /^auto-smart\[optimize_for=(balanced|cost|intelligence)\]$/
+    }
     {
       line = $0
       gsub(ansi, "", line)
@@ -137,7 +140,7 @@ fm_cursor_catalog_has_model() {  # <model>
       id = substr(line, 1, separator - 1)
       sub(/^[[:space:]]+/, "", id)
       sub(/[[:space:]]+$/, "", id)
-      if (id == wanted) found = 1
+      if (id == wanted || (id == "auto" && is_parameterized_auto(wanted))) found = 1
     }
     END { exit found ? 0 : 1 }
   '
