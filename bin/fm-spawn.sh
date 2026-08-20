@@ -160,13 +160,17 @@
 #   not interrupt-free end to end, though: the zellij and cmux send_text_line
 #   adapters clear their own failed submit with C-c, and gating both first sends
 #   roughly doubles the number of send_text_line calls that can reach that
-#   pre-existing adapter path. Every gate refusal names the window to inspect and
-#   says the created pane survives, because nothing here removes it.
-#   Known residual: on the herdr presentation-projection path both gates run
+#   pre-existing adapter path. Every gate refusal names the window to inspect,
+#   and the gate removes nothing itself, so on every flat layout that pane is
+#   still there afterwards.
+#   Known residuals on the herdr presentation-projection path: both gates run
 #   while this session's presentation-order lock is held, so an unresponsive pane
-#   can add up to two full poll budgets to that hold window. A concurrent herdr
-#   spawn that cannot acquire the lock meanwhile takes the same documented path it
-#   already does, warning once and falling back to the flat layout.
+#   can add up to two full poll budgets to that hold window; and the shared
+#   spawn-abort cleanup closes the exact projected task pane on any nonzero exit
+#   before the launch literal lands, this gate's refusal included, so there the
+#   named window is already gone rather than left for inspection. A concurrent
+#   herdr spawn that cannot acquire the lock meanwhile takes the same documented
+#   path it already does, warning once and falling back to the flat layout.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
