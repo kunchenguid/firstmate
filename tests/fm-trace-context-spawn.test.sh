@@ -180,6 +180,16 @@ run_two_level() {
   printf 'claude\n' > "$prim/config/crew-harness"
   [ "$pfile" = present ] && : > "$prim/config/trace-context"
   touch "$prim/state/.last-watcher-beat"
+  # The nested spawn below is a ship spawn inside a secondmate home, which the
+  # plan gate refuses without a primary-signed approval (bin/fm-plan-approval.sh).
+  # Mint the primary keypair before the secondmate launch so the public half
+  # reaches that home through the ordinary inheritance push, exactly as it would
+  # in a real fleet.
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
+    FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
+    FM_CONFIG_OVERRIDE="$prim/config" \
+    "$ROOT/bin/fm-plan-approval.sh" init >/dev/null 2>&1 \
+    || fail "the two-level fixture could not create the primary plan-approval key"
   start_trace_session "$prim" "$penv"
 
   # Seed the secondmate home so validate_firstmate_home_for_spawn accepts it.
@@ -217,6 +227,13 @@ run_two_level() {
   mkdir -p "$sm/state" "$sm/projects" "$sm/data/$worker_id"
   printf 'worker brief\n' > "$sm/data/$worker_id/brief.md"
   touch "$sm/state/.last-watcher-beat"
+  # Approve that exact brief so the nested ship spawn clears the plan gate.
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
+    FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
+    FM_CONFIG_OVERRIDE="$prim/config" \
+    "$ROOT/bin/fm-plan-approval.sh" approve "$sm_id" "$worker_id" \
+    --plan-file "$sm/data/$worker_id/brief.md" >/dev/null 2>&1 \
+    || fail "the two-level fixture could not approve the nested worker's plan"
   start_trace_session "$sm" "$TL_ENV_TC"
   wlog="$base/worker-launch.log"
   wfake=$(make_spawn_fakebin "$base/w-fake")

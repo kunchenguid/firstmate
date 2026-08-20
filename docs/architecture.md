@@ -240,6 +240,10 @@ Remote routes accept verified harness adapters only and reject raw launch comman
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the complete inherited-local-material allowlist and propagation contract.
 
+A secondmate home cannot start an implementation on its own authority.
+The primary home holds an ed25519 private key that never leaves it and inherits only the public half downstream, so a ship spawn and a scout promotion in a marked secondmate home refuse unless a primary signature covers that exact task and the exact current bytes of the brief the worker would follow, while investigation and secondmate launches stay ungated.
+[`bin/fm-plan-approval.sh`](../bin/fm-plan-approval.sh)'s header is the single owner of that contract, including the record format, the verification steps, and the boundary it does and does not claim.
+
 The `data/secondmates.md` line contract is owned by the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#routing-table), and the secondmate environment variables are documented in [configuration.md](configuration.md).
 
 ## Delivery modes are explicit per task

@@ -163,6 +163,14 @@ An inherited `data/captain-shared.md` counts in a secondmate's total but remains
 The internal [`/stow` skill](../.agents/skills/stow/SKILL.md) owns curation and its automatic secondmate cascade, which accounts every home against this same per-home allowance separately rather than against a fleet total.
 The helper's header owns exact parsing, publication, and report output mechanics.
 
+## Plan approval keys (config/plan-approval-key)
+
+The primary firstmate home holds an ed25519 keypair that authorizes a secondmate implementation: the private `config/plan-approval-key` and the public `config/plan-approval-key.pub`, both local and gitignored.
+[`bin/fm-plan-approval.sh`](../bin/fm-plan-approval.sh)'s header is the single owner of the whole contract, including the approval record, the verification steps, and which spawns the gate covers.
+Run `bin/fm-plan-approval.sh init` once in the primary home to create the pair, or let the first approval create it lazily.
+Only the public half is inherited: it is a declared item in the propagation allowlist, so every convergence point pushes it into each secondmate home under the contract in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md), while the private half is absent from every propagation path.
+Signing and verification need an `openssl` build with ed25519 raw sign and verify, which `init` proves before writing any key.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.

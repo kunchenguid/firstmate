@@ -12,6 +12,10 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
+# In a home carrying the .fm-secondmate-home marker, promotion is the other way a
+# ship contract can begin, so it refuses unless bin/fm-plan-approval.sh verifies
+# the primary firstmate's signed approval for this task id and the exact current
+# brief bytes; that script's header owns the whole plan-gate contract.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
 set -eu
 
@@ -19,11 +23,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 
 MODE=
 YOLO=
@@ -75,6 +83,20 @@ esac
 
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+
+# Plan gate (bin/fm-plan-approval.sh owns the whole contract). Promotion turns a
+# free investigation into an implementation, so in a secondmate home it needs the
+# same signed approval a fresh ship spawn needs, checked before anything is
+# locked or rewritten.
+if fm_root_is_secondmate_home "$FM_HOME"; then
+  if ! PLAN_GATE_OUT=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-plan-approval.sh" verify "$ID" --plan-file "$DATA/$ID/brief.md" 2>&1); then
+    [ -z "$PLAN_GATE_OUT" ] || printf '%s\n' "$PLAN_GATE_OUT" >&2
+    echo "error: $ID cannot be promoted to an implementation here without the main firstmate's plan approval; submit the plan for this task and promote only after it approves (bin/fm-plan-approval.sh, and the plan-gate section of the secondmate-provisioning skill)" >&2
+    exit 1
+  fi
+fi
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=

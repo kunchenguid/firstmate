@@ -2,8 +2,8 @@
 name: secondmate-provisioning
 description: >-
   Agent-only reference for persistent secondmate setup and retirement.
-  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
-  Covers local leases, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, and teardown safety.
+  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, approving a secondmate's implementation plan, or retiring a secondmate home, or when editing data/secondmates.md.
+  Covers local leases, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, the plan-approval gate on secondmate implementations, idle charter, handoff helper, and teardown safety.
 user-invocable: false
 metadata:
   internal: true
@@ -11,7 +11,7 @@ metadata:
 
 # secondmate-provisioning
 
-Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
+Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, approving an implementation plan for, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
 Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
 
@@ -104,7 +104,7 @@ That no-fetch path is a purely local fast-forward of tracked files, never an ori
 A remote launch and the deferred bootstrap sweep ask the configured host to fast-forward its persistent home to that host's code-root commit under the same clean and ancestry guards.
 `/updatefirstmate` first updates the remote code root from its own origin, then runs that guarded home sync.
 SSH exit 255 preserves the route and reports unknown completion; it never triggers local respawn or failover.
-The same placement-specific launch and deferred bootstrap sweep also propagate the primary's declared inherited local material: `config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, `config/backend`, `config/herdr-presentation-spaces`, `config/startup-memory-budget`, and the one shared captain-preference file `data/captain-shared.md`.
+The same placement-specific launch and deferred bootstrap sweep also propagate the primary's declared inherited local material: `config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, `config/backend`, `config/herdr-presentation-spaces`, `config/startup-memory-budget`, `config/plan-approval-key.pub`, and the one shared captain-preference file `data/captain-shared.md`.
 Because these paths are gitignored, that propagation is a separate, primary-authoritative copy independent of the tracked-files fast-forward: it re-converges every live home whether or not its tracked files advanced, and it touches only the declared items.
 Propagation failures warn without blocking secondmate launch or session-start continuation, and the destination keeps whatever safely validated state the helper left behind.
 Inheritance copies the literal `config/crew-harness` file, so a secondmate's own crewmates use the primary's crewmate harness only when it names a concrete adapter such as `codex`; an unset or `default` value has nothing concrete to inherit, and the secondmate's own crewmates fall back to the secondmate's own or detected harness instead.
@@ -112,6 +112,8 @@ Inherited `config/backend` becomes that secondmate home's local runtime-backend 
 A present primary value always converges byte-exact into validated secondmate homes, and primary absence removes the destination so those homes keep runtime auto-detection.
 Explicit per-spawn `--backend` and `FM_BACKEND` remain stronger than every home's local `config/backend`, including an inherited default.
 `config/secondmate-harness` is not inherited because it is only the primary's knob for launching secondmate agents.
+`config/plan-approval-key.pub` is the public half of the primary's plan-approval key, which each secondmate home needs to verify the approvals that gate its implementations; its private counterpart `config/plan-approval-key` is absent from every propagation path by construction, so no route can carry it downstream.
+It is also the one inherited item that is never inlined into the config-reread instruction below, because a verification key is not a default the agent may choose differently about.
 `data/captain-shared.md` is main-authoritative in the primary home and read-only in secondmate homes.
 Its primary file header must state that the file is main-authoritative, read-only in secondmate homes, must not be edited there, and that new captain-preference discoveries are routed to the main firstmate through marked status or a document pointer.
 Every propagation point converges the secondmate copy to the primary bytes; when the primary file is absent, any existing secondmate copy is quarantined and removed so absence converges too.
@@ -173,6 +175,20 @@ For an existing or inherited domain, the creating agent must:
 
 A live backlog keeps only the configured recent Done entries by design, so an inherited queue structurally over-represents plans and under-represents deliveries.
 Treat an inherited queue that carries plans with no matching delivery record as unreconciled rather than as open work, and record whatever could not be reconciled as an explicit residual-uncertainty list in the new home rather than leaving that gap silent.
+
+## Plan approval before an implementation
+
+The captain's standing order is that an officer submits a plan - goal, which agreement it implements, steps, acceptance - before every implementation and starts only after the main firstmate's explicit approval, while investigation and analysis stay free.
+That order is enforced mechanically rather than by memory: in a home carrying the `.fm-secondmate-home` marker, a fresh ship spawn and a scout promotion both refuse unless [`bin/fm-plan-approval.sh`](../../../bin/fm-plan-approval.sh) verifies a signature only the primary home can produce, bound to that exact task id and to the exact current bytes of the brief the worker would follow.
+That script's header is the single owner of the record format, the key files, the verification steps, and the exact scope of the gate; do not restate its mechanics here or anywhere else.
+
+The operational shape for the main firstmate is short.
+The officer writes the plan into the task's brief in its own home and routes that path back through its marked status channel.
+Read it, and when you approve, run `bin/fm-plan-approval.sh approve <secondmate-id> <task-id> --plan-file <path-to-that-brief>`; the first approval generates the primary keypair lazily.
+When you do not approve, say so through the ordinary routed reply and leave the record unwritten, because an absent approval is already a refusal at the officer's spawn.
+Editing the brief after approval invalidates it by design, so a changed plan comes back for a fresh approval rather than starting on stale authority.
+Use `revoke` to withdraw an approval that has not been acted on yet, and `list` to see what a home is currently authorized to start.
+A remote route needs `--emit` because this home cannot write into it; place the printed bytes at the path the command names on that host.
 
 ## Backlog handoff
 

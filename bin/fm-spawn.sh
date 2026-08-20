@@ -16,6 +16,11 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   In a home carrying the .fm-secondmate-home marker, a fresh ship spawn also
+#   refuses unless bin/fm-plan-approval.sh verifies the primary firstmate's
+#   signed approval for this task id and the exact current brief bytes; that
+#   script's header owns the whole plan-gate contract, including which spawns
+#   stay ungated.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
@@ -274,6 +279,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1688,6 +1695,22 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+
+# Plan gate (bin/fm-plan-approval.sh owns the whole contract). A secondmate home
+# may not START an implementation without the primary firstmate's signed approval
+# for this exact task and the exact bytes of the brief about to be handed to the
+# worker. Scout spawns and secondmate launches stay ungated because investigation
+# is free and a launch is not an implementation, and --relaunch stays ungated
+# because it reuses metadata only a gated fresh spawn could have written.
+if [ "$KIND" = ship ] && [ "$RELAUNCH" -eq 0 ] && fm_root_is_secondmate_home "$FM_HOME"; then
+  if ! PLAN_GATE_OUT=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-plan-approval.sh" verify "$ID" --plan-file "$BRIEF" 2>&1); then
+    [ -z "$PLAN_GATE_OUT" ] || printf '%s\n' "$PLAN_GATE_OUT" >&2
+    echo "error: $ID cannot start here without the main firstmate's plan approval; submit the plan for this task and start only after it approves (bin/fm-plan-approval.sh, and the plan-gate section of the secondmate-provisioning skill)" >&2
+    exit 1
   fi
 fi
 

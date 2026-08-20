@@ -17,6 +17,10 @@
 # default-off W3C trace-context setup, while live convergence leaves it unchanged.
 # The primary passes its frozen home-session decision into a newly launched
 # Secondmate; see docs/trace-context.md.
+# config/plan-approval-key.pub carries the PUBLIC half of the primary's plan-approval
+# key so a secondmate home can verify the approvals that gate its implementations
+# (bin/fm-plan-approval.sh). Its private counterpart, config/plan-approval-key, is
+# deliberately absent from every list here, so no propagation path can carry it.
 # It also pushes
 # the one primary-authoritative shared captain-preference file,
 # data/captain-shared.md, into each secondmate home's data/ as a read-only copy.
@@ -63,7 +67,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context plan-approval-key.pub}"
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
@@ -71,6 +75,13 @@ FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness 
 # untouched by live convergence into an already-running home, whose decision is
 # already frozen for its current session (bin/fm-trace-context-lib.sh).
 FM_SESSION_SCOPED_INHERITABLE_CONFIG="trace-context"
+
+# Items that are inherited material but not agent instruction material. They
+# converge into a secondmate home exactly like any other item and are simply
+# never inlined into the config-reread instruction below, because that
+# instruction's framing is "defaults and rules you may choose differently about"
+# and a verification key is neither.
+FM_NON_INSTRUCTION_INHERITABLE_CONFIG="plan-approval-key.pub"
 
 # True when <item> is session-scoped in the sense above.
 fm_config_inherit_item_session_scoped() {  # <item>
@@ -553,10 +564,14 @@ FM_CONFIG_REREAD_FRAMING='These inherited config files changed. Re-read and appl
 
 # fm_config_reread_is_allowlisted_item <item>
 # True only for the declared inheritable config allowlist (bare item name as
-# recorded in FM_CONFIG_INHERIT_REPORT). data/captain-shared.md is never
-# allowlisted here and must never be inlined into a reread instruction.
+# recorded in FM_CONFIG_INHERIT_REPORT), minus the non-instruction items above.
+# data/captain-shared.md is never allowlisted here and must never be inlined
+# into a reread instruction.
 fm_config_reread_is_allowlisted_item() {
   local item=$1 candidate
+  for candidate in $FM_NON_INSTRUCTION_INHERITABLE_CONFIG; do
+    [ "$candidate" = "$item" ] && return 1
+  done
   for candidate in $FM_INHERITABLE_CONFIG; do
     [ "$candidate" = "$item" ] && return 0
   done
@@ -564,12 +579,16 @@ fm_config_reread_is_allowlisted_item() {
 }
 
 # fm_config_reread_changed_items <report>
-# Print bare allowlisted config item names whose report status is "pushed",
-# in FM_INHERITABLE_CONFIG order (deterministic path order). Empty when none.
+# Print bare instruction-allowlisted config item names whose report status is
+# "pushed", in FM_INHERITABLE_CONFIG order (deterministic path order). Empty when
+# none. It applies the same allowlist test the writer does, so a push that
+# changed only non-instruction material is correctly "nothing to re-read"
+# rather than an instruction the writer would then decline to produce.
 fm_config_reread_changed_items() {
   local report=$1 item status
   [ -n "$report" ] && [ -f "$report" ] || return 0
   for item in $FM_INHERITABLE_CONFIG; do
+    fm_config_reread_is_allowlisted_item "$item" || continue
     status=$(awk -F '\t' -v item="$item" '$1 == item { print $2; exit }' "$report" 2>/dev/null) || status=""
     [ "$status" = pushed ] || continue
     printf '%s\n' "$item"
