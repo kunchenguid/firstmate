@@ -542,36 +542,90 @@ test_unresolvable_codex_home_reports_one_cause() {
   pass "an unresolvable CODEX_HOME reports exactly one cause"
 }
 
-test_remote_routes_through_registered_home() {
-  local home fakebin argv encoded decoded home_encoded remote_home
-  home=$(new_home)
+remote_registry_home() {
+  local home=$1
   mkdir -p "$home/data"
   cat > "$home/data/secondmates.md" <<EOF
 - mac - registered Mac (host: remote-mac; root: /remote/firstmate; home: /remote/firstmate-home; scope: user tools; projects: ; added 2026-08-20)
+- studio - registered studio Mac (host: studio-mac; root: /studio/firstmate; home: /studio/firstmate-home; scope: user tools; projects: ; added 2026-08-20)
+- studio-standby - standby account on the studio Mac (host: studio-mac; root: /studio/firstmate-standby; home: /studio/standby-home; scope: user tools; projects: ; added 2026-08-20)
 EOF
+}
+
+remote_ssh_stub() {
+  local home=$1 fakebin
   fakebin=$(fm_fakebin "$home")
   cat > "$fakebin/ssh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "${SSH_ARGV:?}"
 SH
   chmod +x "$fakebin/ssh"
+  printf '%s\n' "$fakebin/ssh"
+}
+
+decode_b64() {
+  printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D
+}
+
+test_remote_routes_through_registered_home() {
+  local home ssh_bin argv decoded remote_root remote_home
+  home=$(new_home)
+  remote_registry_home "$home"
+  ssh_bin=$(remote_ssh_stub "$home")
   argv="$home/ssh.argv"
 
-  HOME="$home" FM_HOME="$home" FM_SSH_BIN="$fakebin/ssh" SSH_ARGV="$argv" \
+  HOME="$home" FM_HOME="$home" FM_SSH_BIN="$ssh_bin" SSH_ARGV="$argv" \
     "$SCRIPT" --remote mac --apply
 
   assert_grep 'remote-mac' "$argv" "remote operation did not use the registered SSH host"
-  home_encoded=$(tail -n 2 "$argv" | head -n 1)
-  remote_home=$(printf '%s' "$home_encoded" | base64 --decode 2>/dev/null \
-    || printf '%s' "$home_encoded" | base64 -D)
+  remote_root=$(decode_b64 "$(tail -n 3 "$argv" | head -n 1)")
+  remote_home=$(decode_b64 "$(tail -n 2 "$argv" | head -n 1)")
+  [ "$remote_root" = /remote/firstmate ] || fail "remote operation changed the registered root: $remote_root"
   [ "$remote_home" = /remote/firstmate-home ] || fail "remote operation changed the registered home: $remote_home"
-  encoded=$(tail -n 1 "$argv")
-  decoded=$(printf '%s' "$encoded" | base64 --decode 2>/dev/null | tr '\0' '\n' \
-    || printf '%s' "$encoded" | base64 -D | tr '\0' '\n')
+  decoded=$(decode_b64 "$(tail -n 1 "$argv")" | tr '\0' '\n')
   assert_contains "$decoded" "fm-user-skill-sync.sh" "remote argv omitted the authoritative command"
   assert_contains "$decoded" "--apply" "remote argv lost explicit apply intent"
-  assert_not_contains "$(cat "$argv")" "different-host" "remote route changed hosts"
-  pass "remote invocation binds the registered host and forwards explicit apply"
+  assert_not_contains "$(cat "$argv")" "studio-mac" "remote route reached another registered host"
+  assert_not_contains "$remote_home" "studio" "remote route bound another registered home"
+  pass "remote invocation binds exactly the selected record's host, root, and home"
+}
+
+test_remote_second_record_binds_its_own_placement() {
+  local home ssh_bin argv remote_root remote_home
+  home=$(new_home)
+  remote_registry_home "$home"
+  ssh_bin=$(remote_ssh_stub "$home")
+  argv="$home/ssh.argv"
+
+  HOME="$home" FM_HOME="$home" FM_SSH_BIN="$ssh_bin" SSH_ARGV="$argv" \
+    "$SCRIPT" --remote studio --dry-run
+
+  assert_grep 'studio-mac' "$argv" "selecting the second record did not use its own SSH host"
+  assert_not_contains "$(cat "$argv")" "remote-mac" "selecting the second record reached the first host"
+  remote_root=$(decode_b64 "$(tail -n 3 "$argv" | head -n 1)")
+  remote_home=$(decode_b64 "$(tail -n 2 "$argv" | head -n 1)")
+  [ "$remote_root" = /studio/firstmate ] || fail "second record bound root $remote_root"
+  [ "$remote_home" = /studio/firstmate-home ] || fail "second record bound home $remote_home"
+  pass "each registered record binds its own host, root, and home"
+}
+
+test_remote_ambiguous_alias_refuses_without_transport() {
+  local home ssh_bin argv out rc
+  home=$(new_home)
+  remote_registry_home "$home"
+  ssh_bin=$(remote_ssh_stub "$home")
+  argv="$home/ssh.argv"
+
+  set +e
+  out=$(HOME="$home" FM_HOME="$home" FM_SSH_BIN="$ssh_bin" SSH_ARGV="$argv" \
+    "$SCRIPT" --remote studio-mac --apply 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "an ambiguous host alias was accepted"
+  assert_contains "$out" "ambiguous" "ambiguous alias refusal did not name the ambiguity"
+  [ ! -e "$argv" ] || fail "ambiguous alias still opened a remote transport"
+  pass "an ambiguous host alias refuses instead of selecting a host"
 }
 
 test_canonicalizes_and_links
@@ -596,3 +650,5 @@ test_interrupt_stops_apply
 test_interrupt_during_preflight_reports_no_mutation
 test_unresolvable_codex_home_reports_one_cause
 test_remote_routes_through_registered_home
+test_remote_second_record_binds_its_own_placement
+test_remote_ambiguous_alias_refuses_without_transport
