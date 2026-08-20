@@ -3,12 +3,16 @@
 #
 # Usage: fm-herdr-home-label.sh
 #
-# Runs on the locked, fresh session-start path (composed by fm-session-start.sh
-# next to fm-herdr-session-cleanup.sh). No-op unless firstmate itself is CURRENTLY
-# executing inside a herdr pane - detected by fm_backend_detect (which resolves
-# innermost-first, so a tmux nested inside a herdr pane correctly does NOT match)
-# plus the HERDR_WORKSPACE_ID/HERDR_PANE_ID the herdr client injects into the
-# entrypoint pane.
+# Runs on BOTH locked session-start paths (composed by fm-session-start.sh next
+# to fm-herdr-session-cleanup.sh): the fresh start AND the --reemit path a /clear
+# or compaction takes. A compaction is exactly when the herdr client reverts the
+# workspace back to its cwd-basename ("firstmate"), collapsing every home's crews
+# under one group, so the label must be re-applied there too (hlay-06). Idempotent
+# (a rename sets the label to the exact value), so re-running is safe. No-op
+# unless firstmate itself is CURRENTLY executing inside a herdr pane - detected by
+# fm_backend_detect (which resolves innermost-first, so a tmux nested inside a
+# herdr pane correctly does NOT match) plus the HERDR_WORKSPACE_ID/HERDR_PANE_ID
+# the herdr client injects into the entrypoint pane.
 #
 # It gives this home's workspace a display label = the home's own workspace
 # label and titles the entrypoint pane "<label> · firstmate". The label is
@@ -21,6 +25,16 @@
 # start keeps one label with no duplicate. Every error warns and returns success
 # so startup continues.
 set -u
+
+# Was a home actually provided BEFORE any fallback? The workspace label is the
+# FM_HOME basename, so an unset FM_HOME silently falls through to the code root
+# whose basename is "firstmate" - relabeling this home's workspace to "firstmate"
+# and collapsing its crews under the flat group the per-home labeling exists to
+# prevent (hlay-06). We must fail loud rather than mislabel, so capture the
+# provided-ness now, before the FM_HOME line below defaults it. FM_ROOT_OVERRIDE
+# is the test-only knob fm-backend.sh also treats as a home source, so an
+# explicit override still counts as provided.
+FM_HOME_PROVIDED="${FM_HOME:+x}${FM_ROOT_OVERRIDE:+x}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -42,6 +56,14 @@ fm_herdr_home_label() {
   # on tmux/other backends exactly as required.
   detected=$(fm_backend_detect) || return 0
   [ "$detected" = herdr ] || return 0
+
+  # We are genuinely about to label a herdr workspace, so an unresolved home is
+  # now a loud refusal, not a silent "firstmate" mislabel (hlay-06). Return
+  # success so startup still continues; just leave the existing label untouched.
+  [ -n "$FM_HOME_PROVIDED" ] || {
+    fm_herdr_home_label_warn 'FM_HOME is not set; refusing to label the workspace rather than defaulting it to the code-root name "firstmate", which would collapse this home under a flat group'
+    return 0
+  }
 
   workspace="${HERDR_WORKSPACE_ID:-}"
   pane="${HERDR_PANE_ID:-}"

@@ -31,7 +31,10 @@
 #   2. bootstrap      - home-local stale Herdr projection cleanup and, on a
 #                       herdr runtime, this home's own workspace/entrypoint-pane
 #                       labeling (fm-herdr-home-label.sh) run only when this
-#                       session actually holds the lock. Detect-only
+#                       session actually holds the lock. The labeling ALSO re-runs
+#                       on the locked --reemit path, because a compaction reverts
+#                       the workspace to its cwd-basename and the label must be
+#                       re-applied (hlay-06); the cleanup does not. Detect-only
 #                       diagnostics always run. Bootstrap's six MUTATING sweeps
 #                       (legacy PR-check migration, secondmate convergence,
 #                       secondmate liveness, pending remote handoff retry,
@@ -673,8 +676,19 @@ if [ "$READ_ONLY" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 elif [ "$REEMIT" -eq 1 ]; then
-  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 FM_BOOTSTRAP_NETWORK=skip \
-    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+  BOOT_OUT=$(
+    # Re-apply this home's herdr workspace label. A compaction is the exact point
+    # the herdr client reverts the workspace to its cwd-basename ("firstmate"),
+    # so unlike the mutating sweeps this must re-run on the re-emit path or the
+    # home's crews silently collapse under a flat "firstmate" group (hlay-06).
+    # Idempotent and herdr-only (no-op on other backends), and only reached when
+    # this session holds the lock, so re-running it here is safe. The stale-Herdr
+    # projection cleanup stays skipped - it is a mutating reconciliation startup
+    # already ran, not a label the client just clobbered.
+    "$SCRIPT_DIR/fm-herdr-home-label.sh" 2>&1 || true
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 FM_BOOTSTRAP_NETWORK=skip \
+      FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
+  )
 else
   BOOT_OUT=$(
     "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" 2>&1 || true

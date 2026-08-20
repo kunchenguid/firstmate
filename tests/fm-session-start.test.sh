@@ -2016,6 +2016,59 @@ EOF
   pass "--reemit reprints the digest without repeating startup's mutating sweeps and still drains queued wakes"
 }
 
+# hlay-06: a compaction reverts the herdr workspace to its cwd-basename, so
+# unlike the mutating sweeps the per-home labeling MUST re-run on --reemit or the
+# home's crews silently collapse under a flat "firstmate" group. Prove the
+# re-emit path re-applies the label (workspace rename to the FM_HOME basename)
+# just like a fresh start does.
+test_reemit_reapplies_the_herdr_home_label() {
+  local rec root home fakebin herdr_log startup reemit
+  rec=$(new_world reemit-herdr-label)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  rm -f "$fakebin/tmux"
+  printf '%s\n' herdr > "$home/config/backend"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+
+  herdr_log="$home/herdr-calls.log"
+  cat > "$fakebin/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "\$*" >> "$herdr_log"
+if [ "\${1:-}" = status ] && [ "\${2:-}" = --json ]; then
+  printf '%s\n' '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
+
+  # A full startup labels the workspace on the fresh path (the home basename,
+  # here "home", not the code-root "root"/"firstmate").
+  startup=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    TMUX='' HERDR_ENV=1 HERDR_WORKSPACE_ID=ws1 HERDR_PANE_ID=p1 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ \
+    PATH="$fakebin:$BASE_PATH" "$SESSION_START")
+  assert_contains "$startup" "SESSION START - $home" "the herdr fixture did not run a full startup"
+  assert_contains "$(cat "$herdr_log" 2>/dev/null)" "workspace rename ws1 home" \
+    "the fresh start did not label the herdr workspace with the home name"
+
+  # Isolate the re-emit: only calls made AFTER this point prove the re-emit path
+  # itself re-labels, not the fresh start above.
+  : > "$herdr_log"
+  reemit=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    TMUX='' HERDR_ENV=1 HERDR_WORKSPACE_ID=ws1 HERDR_PANE_ID=p1 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ \
+    PATH="$fakebin:$BASE_PATH" "$SESSION_START" --reemit)
+  assert_contains "$reemit" "SESSION START (CONTEXT RE-EMIT) - $home" "--reemit did not run in the herdr home"
+  assert_contains "$(cat "$herdr_log" 2>/dev/null)" "workspace rename ws1 home" \
+    "--reemit did not re-apply this home's herdr workspace label after a compaction"
+
+  pass "--reemit re-applies the herdr home workspace label a compaction reverts (hlay-06)"
+}
+
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact() {
   local rec root home fakebin startup compact_equal compact_first compact_second clear_out resume_out reset_out baseline baseline_after expected_hash refresh_line bootstrap_line
   rec=$(new_world agents-refresh)
@@ -2500,6 +2553,7 @@ test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
+test_reemit_reapplies_the_herdr_home_label
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
