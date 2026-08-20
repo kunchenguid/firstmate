@@ -979,6 +979,7 @@ test_replace_does_not_follow_a_swapped_destination() {
   id="brief-replace-no-follow"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # Variables expand in the generated cp shim, not this test shell.
   printf '%s\n' \
     '#!/bin/sh' \
     '"$FM_TEST_REAL_CP" "$@" || exit $?' \
@@ -1011,6 +1012,7 @@ test_replace_does_not_move_into_a_swapped_directory() {
   id="brief-replace-directory-swap"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # Variables expand in the generated cp shim, not this test shell.
   printf '%s\n' \
     '#!/bin/sh' \
     '"$FM_TEST_REAL_CP" "$@" || exit $?' \
