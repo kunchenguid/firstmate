@@ -40,6 +40,11 @@ The `repair` subcommand records the resolution block on a hold that was already 
 It refuses a hold that is still actively held, never reopens a closed hold, and never clears a dependency edge, so an unanswered decision keeps blocking teardown until the captain's word closes it.
 It also requires the identity to carry the captain-hold provenance that tasks-axi preserves through a close, so an ordinary captain-kind task that was never held cannot be repaired into a resolved decision.
 
+Every read that asks whether a durable captain decision exists spans the active backlog and then the archive that backlog retention sweeps closed rows into, so an answered decision that retention has already filed still satisfies the gate.
+Every write stays on the active backlog, because tasks-axi cannot rewrite the archive, and a mutation path that cannot reach its target says so instead of reporting the record as missing.
+An archive this home cannot open establishes no absence, so a read that gates a write refuses on it rather than treating an unread file as an empty one.
+The script header owns the exact refusals and which read each path performs.
+
 ## Answer-time closure
 
 The live status-log decision ledger has always had answer-time closure through `bin/fm-send.sh --resolve-key`: answering a keyed decision closes it in the same act.
