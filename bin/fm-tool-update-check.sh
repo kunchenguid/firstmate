@@ -143,10 +143,15 @@ if [ "$BUDGET_SECS" -gt 120 ]; then
 fi
 
 # The smallest bound a probe can be given, because fm_run_timed treats a
-# non-positive bound as no bound. It is also the margin a sweep can still need
-# after its deadline, since a probe started just inside the budget is given this
-# bound, so it is what the budget has to leave the watcher's own bound.
+# non-positive bound as no bound.
 PROBE_MIN_SECS=1
+# Both clocks here count whole seconds, so a probe can start when the arithmetic
+# says a second is left while almost none of it really is, and it still gets a
+# full bound.
+CLOCK_ROUNDING_SECS=1
+# fm_run_timed asks its runner for -k 1, so a probe that does not stop on TERM is
+# only killed a second after its bound.
+KILL_GRACE_SECS=1
 
 # The watcher's per check bound, read from this check's own environment. The
 # watcher runs the check as a direct child, so an operator who raised it is seen
@@ -155,7 +160,9 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
 case "$CHECK_TIMEOUT" in
   ''|*[!0-9]*|0) CHECK_TIMEOUT=30 ;;
 esac
-BUDGET_MAX=$((CHECK_TIMEOUT - PROBE_MIN_SECS))
+# The last probe of a sweep can end this far past the deadline, so that is what
+# the budget has to leave the watcher's own bound.
+BUDGET_MAX=$((CHECK_TIMEOUT - PROBE_MIN_SECS - CLOCK_ROUNDING_SECS - KILL_GRACE_SECS))
 [ "$BUDGET_MAX" -ge 1 ] || BUDGET_MAX=1
 # Cut rather than refuse. A refusal is reported once and then suppressed by the
 # no-nag gate, which leaves the detector dead and quiet, and a check that goes
@@ -509,7 +516,13 @@ git_findings() {
     return 0
   fi
   budget_allows "$name" || return 0
-  if ! git_probe "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+  git_probe "$repo" rev-parse --git-dir >/dev/null 2>&1
+  status=$?
+  if [ "$status" -eq 124 ]; then
+    emit "$name check failed: $repo did not answer whether it is a git repository"
+    return 0
+  fi
+  if [ "$status" -ne 0 ]; then
     emit "$name check failed: $repo is not a git repository"
     return 0
   fi
@@ -517,6 +530,11 @@ git_findings() {
   if [ -z "$branch" ]; then
     budget_allows "$name" || return 0
     branch=$(git_probe "$repo" symbolic-ref --short "refs/remotes/$remote/HEAD" 2>/dev/null)
+    status=$?
+    if [ "$status" -eq 124 ]; then
+      emit "$name check failed: $repo did not answer which branch it records for $remote"
+      return 0
+    fi
     branch=${branch#"$remote/"}
   fi
   if [ -z "$branch" ]; then
@@ -754,8 +772,38 @@ shim_write() {
   fm_pr_private_file_valid "$CHECK_SHIM" 700 "$device"
 }
 
+# Keep a byte copy of a shim that is already in place, so a failed arm can put
+# back exactly what it found. Restoring re-written bytes instead would break the
+# trust binding that matched the original, which is the same false wake a
+# leftover shim causes.
+shim_backup() {
+  local device tmp
+  device=$(fm_pr_file_device "$STATE") || return 1
+  [ -n "$device" ] || return 1
+  tmp=$(umask 077; mktemp "$STATE/.fm-tool-updates-check.XXXXXX" 2>/dev/null) || return 1
+  if ! cat "$CHECK_SHIM" > "$tmp" 2>/dev/null \
+    || ! chmod 0700 "$tmp" \
+    || ! fm_pr_private_file_valid "$tmp" 700 "$device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  printf '%s\n' "$tmp"
+}
+
+# An unregistered shim is not inert: the watcher rejects it on every cycle and
+# wakes firstmate about unauthenticated state checks. So a home that could not be
+# armed goes back to the state it was in, and the failure is still reported.
+shim_restore() {
+  local backup=$1
+  if [ -z "$backup" ]; then
+    rm -f -- "$CHECK_SHIM"
+    return 0
+  fi
+  mv -f -- "$backup" "$CHECK_SHIM" || { rm -f -- "$backup"; return 1; }
+}
+
 action_arm() {
-  local want home
+  local want home backup=
   if [ ! -f "$CONFIG" ]; then
     printf 'fm-tool-update-check: no watched tool registry at %s\n' "$CONFIG" >&2
     return 1
@@ -775,14 +823,24 @@ action_arm() {
       ;;
   esac
   want=$(shim_content "$home")
+  if [ -f "$CHECK_SHIM" ] && [ ! -L "$CHECK_SHIM" ]; then
+    backup=$(shim_backup) || {
+      printf 'fm-tool-update-check: could not save the existing %s\n' "$CHECK_SHIM" >&2
+      return 1
+    }
+  fi
   shim_write "$want" || {
+    [ -z "$backup" ] || rm -f -- "$backup"
     printf 'fm-tool-update-check: could not write %s\n' "$CHECK_SHIM" >&2
     return 1
   }
-  FM_HOME="$home" "$REGISTER_BIN" "$CHECK_ID" >/dev/null || {
+  if ! FM_HOME="$home" "$REGISTER_BIN" "$CHECK_ID" >/dev/null; then
+    shim_restore "$backup" \
+      || printf 'fm-tool-update-check: could not restore %s\n' "$CHECK_SHIM" >&2
     printf 'fm-tool-update-check: could not register %s\n' "$CHECK_SHIM" >&2
     return 1
-  }
+  fi
+  [ -z "$backup" ] || rm -f -- "$backup"
   printf 'armed: state/%s.check.sh\n' "$CHECK_ID"
   return 0
 }

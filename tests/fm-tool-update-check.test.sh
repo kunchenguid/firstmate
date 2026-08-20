@@ -89,11 +89,15 @@ fixture_path() {
   printf '%s:%s\n' "$1" "$PATH"
 }
 
+# The watcher check timeout is pinned to its documented default here, because the
+# sweep budget is cut to fit it and an operator's ambient value would otherwise
+# add a report line to cases that mean to be silent. The one case that exercises
+# the cut sets its own value.
 run_check() {
   local home=$1 path=$2 out=$3
   shift 3
   local status=0
-  env "$@" FM_HOME="$home" PATH="$path" FM_TOOL_UPDATE_INTERVAL=0 "$CHECK" >"$out" 2>&1 || status=$?
+  env FM_CHECK_TIMEOUT=30 "$@" FM_HOME="$home" PATH="$path" FM_TOOL_UPDATE_INTERVAL=0 "$CHECK" >"$out" 2>&1 || status=$?
   expect_code 0 "$status" "check exit"
 }
 
@@ -528,12 +532,48 @@ SH
 
   write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
   out="$home/out.txt"
-  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  # The bound is wide enough that the earlier probes answer comfortably, so the
+  # only probe that can hit it is the object query the fixture stalls. Asserting
+  # that specific report keeps an unrelated timeout from passing this case for the
+  # wrong reason.
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=3
   report=$(cat "$out")
   assert_not_contains "$report" "update available" "a probe that never answered was reported as an available update"
-  assert_contains "$report" "firstmate check failed" "a probe that never answered was not reported at all"
+  assert_contains "$report" "firstmate check failed: $work did not answer whether it already has" "the stalled object query was not the reported failure"
   [ "$(git -C "$work" rev-parse HEAD)" = "$head_before" ] || fail "the check moved the watched repository's HEAD"
   pass "a git probe that does not answer is reported as a failure, never as an update"
+}
+
+test_a_stalled_repository_probe_is_not_reported_as_not_a_repository() {
+  local home work dir out report
+  # The very first git probe is bounded too. A clone on a stalled mount that
+  # never answers must be reported as not answering, not as not being a git
+  # repository, which is a diagnosis the probe never established.
+  home=$(make_home git-stall)
+  work=$(git_fixture git-stall-repo)
+  git -C "$work" reset -q --hard HEAD~2
+
+  dir="$TMP_ROOT/git-stall/bin"
+  mkdir -p "$dir"
+  cat > "$dir/git" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = rev-parse ]; then
+    sleep 30
+    exit 0
+  fi
+done
+exec $(command -v git) "\$@"
+SH
+  chmod 0755 "$dir/git"
+
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  report=$(cat "$out")
+  assert_contains "$report" "firstmate check failed: $work did not answer whether it is a git repository" "a repository probe that never answered was not reported as such"
+  assert_not_contains "$report" "is not a git repository" "a repository probe that never answered was reported as not a repository"
+  pass "a stalled repository probe is reported as no answer, not as not a repository"
 }
 
 # --- registry and reporting contract ----------------------------------------
@@ -633,7 +673,7 @@ test_probes_are_skipped_between_intervals() {
   now=1700000000
 
   status=0
-  FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$now" \
+  FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$now" \
     "$CHECK" >"$out" 2>&1 || status=$?
   expect_code 0 "$status" "first cadence run exit"
   assert_grep 'fm-tool-updates-v1' "$home/state/.tool-updates" "the first run did not record its sweep"
@@ -641,13 +681,13 @@ test_probes_are_skipped_between_intervals() {
   # A finding appears, but the interval has not elapsed, so no probe runs.
   make_copy "$dir" "$TOOL" 'no version here'
   status=0
-  FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$((now + 300))" \
+  FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$((now + 300))" \
     "$CHECK" >"$out" 2>&1 || status=$?
   expect_code 0 "$status" "gated cadence run exit"
   [ ! -s "$out" ] || fail "a run inside the interval probed and spoke: $(cat "$out")"
 
   status=0
-  FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$((now + 901))" \
+  FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$((now + 901))" \
     "$CHECK" >"$out" 2>&1 || status=$?
   expect_code 0 "$status" "due cadence run exit"
   assert_contains "$(cat "$out")" "did not report a version" "the run after the interval did not probe"
@@ -672,10 +712,26 @@ test_an_oversized_budget_is_cut_to_fit_and_reported() {
     FM_TOOL_UPDATE_BUDGET_SECS=60 FM_CHECK_TIMEOUT=30 "$CHECK" >"$out" 2>&1 || status=$?
   expect_code 0 "$status" "oversized budget exit"
   report=$(cat "$out")
-  assert_contains "$report" "sweep budget 60s cut to 29s to stay inside the watcher check timeout of 30s" "a budget that cannot fit the watcher bound was not cut and reported"
+  # The cut leaves room for the whole-second rounding and the kill grace as well
+  # as one probe bound, so a cut sweep really does end before the watcher bound.
+  assert_contains "$report" "sweep budget 60s cut to 27s to stay inside the watcher check timeout of 30s" "a budget that cannot fit the watcher bound was not cut and reported"
   assert_contains "$report" "herdr update not in effect" "the detector went quiet instead of sweeping with the cut budget"
 
-  # A budget the watcher bound has room for is used as written.
+  # The default budget of 20s fits the default bound, so it is used as written.
+  # The record is cleared first because the no-nag gate would otherwise suppress
+  # this run, whose bare skew line differs from the cut run's line above.
+  rm -f "$home/state/.tool-updates"
+  status=0
+  env FM_HOME="$home" PATH="$(fixture_path "$stale:$fresh")" FM_TOOL_UPDATE_INTERVAL=0 \
+    FM_CHECK_TIMEOUT=30 "$CHECK" >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "default budget exit"
+  report=$(cat "$out")
+  assert_not_contains "$report" "sweep budget" "the default budget was cut at the default watcher bound"
+  assert_contains "$report" "herdr update not in effect" "the sweep stopped reporting with the default budget"
+
+  # A budget the watcher bound has room for is used as written. The cleared
+  # record keeps the no-nag gate from hiding this run's repeat of the same line.
+  rm -f "$home/state/.tool-updates"
   status=0
   env FM_HOME="$home" PATH="$(fixture_path "$stale:$fresh")" FM_TOOL_UPDATE_INTERVAL=0 \
     FM_TOOL_UPDATE_BUDGET_SECS=60 FM_CHECK_TIMEOUT=120 "$CHECK" >"$out" 2>&1 || status=$?
@@ -763,6 +819,43 @@ test_arm_refuses_a_symlink_at_the_shim_path() {
   pass "a symlink at the shim path is refused instead of followed"
 }
 
+test_a_failed_registration_leaves_no_unregistered_shim() {
+  local home dir target stale_shim status
+  # An unregistered shim in state/ is not inert: the watcher rejects it every
+  # cycle and wakes firstmate about unauthenticated state checks until someone
+  # deletes it by hand. So a home that could not be armed has to come back to the
+  # state it was in, and arm still has to say it failed.
+  home=$(make_home arm-register-fail)
+  dir="$TMP_ROOT/arm-register-fail/bin"
+  make_copy "$dir" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  # A symlink at the trust path makes registration refuse, which is the shape any
+  # register failure has from arm's side.
+  target="$TMP_ROOT/arm-register-fail/not-the-trust.txt"
+  printf 'a file the trust binding must not touch\n' > "$target"
+  ln -s "$target" "$home/state/tool-updates.check-trust"
+
+  status=0
+  FM_HOME="$home" "$CHECK" arm >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "arm with an unusable trust path exit"
+  assert_absent "$home/state/tool-updates.check.sh" "a failed registration left an unregistered check shim behind"
+  [ "$(cat "$target")" = 'a file the trust binding must not touch' ] || fail "arm wrote through the trust symlink"
+
+  # A shim that was already there comes back byte for byte, because deleting it
+  # would leave a home that was armed silently unarmed, and rewriting it would
+  # break the trust binding that matched the original bytes.
+  stale_shim="$TMP_ROOT/arm-register-fail/shim-armed-earlier"
+  printf '#!/usr/bin/env bash\n# a shim armed earlier\nexit 0\n' > "$stale_shim"
+  cp "$stale_shim" "$home/state/tool-updates.check.sh"
+  chmod 0700 "$home/state/tool-updates.check.sh"
+  status=0
+  FM_HOME="$home" "$CHECK" arm >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "arm over an existing shim with an unusable trust path exit"
+  cmp -s "$stale_shim" "$home/state/tool-updates.check.sh" \
+    || fail "the shim that was already there was not put back byte for byte"
+  pass "a failed registration leaves no unregistered shim and restores what it found"
+}
+
 test_arm_resolves_a_relative_home_into_the_shim() {
   local home stale fresh out status
   # The watcher runs the shim from its own working directory, so a relative home
@@ -782,7 +875,7 @@ test_arm_resolves_a_relative_home_into_the_shim() {
 
   out="$home/out.txt"
   status=0
-  (cd / && env -u FM_HOME PATH="$(fixture_path "$stale:$fresh")" FM_TOOL_UPDATE_INTERVAL=0 \
+  (cd / && env -u FM_HOME PATH="$(fixture_path "$stale:$fresh")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=0 \
     "$home/state/tool-updates.check.sh" >"$out" 2>&1) || status=$?
   expect_code 0 "$status" "shim run from another directory exit"
   assert_contains "$(cat "$out")" "herdr update not in effect" "the shim read a different home than the one it was armed for"
@@ -807,7 +900,7 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
   out="$home/out.txt"
   err="$home/err.txt"
   status=0
-  env FM_HOME="$home" PATH="$(fixture_path "$stale:$fresh")" FM_TOOL_UPDATE_INTERVAL=0 \
+  env FM_HOME="$home" PATH="$(fixture_path "$stale:$fresh")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=0 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 \
     "$CHECKPOINT" --seconds 10 >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "watcher checkpoint exit"
@@ -837,6 +930,7 @@ test_unreadable_remote_is_not_reported_as_a_missing_branch
 test_missing_branch_on_a_readable_remote_is_still_reported
 test_git_probes_stop_when_the_sweep_budget_is_gone
 test_a_git_probe_that_does_not_answer_is_not_an_update
+test_a_stalled_repository_probe_is_not_reported_as_not_a_repository
 test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
@@ -846,5 +940,6 @@ test_an_oversized_budget_is_cut_to_fit_and_reported
 test_invalid_environment_and_action_refuse
 test_arm_registers_the_check_and_disarm_removes_it
 test_arm_refuses_a_symlink_at_the_shim_path
+test_a_failed_registration_leaves_no_unregistered_shim
 test_arm_resolves_a_relative_home_into_the_shim
 test_armed_check_wakes_the_watcher_with_the_skew_report
