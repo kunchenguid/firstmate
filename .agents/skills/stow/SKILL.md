@@ -1,6 +1,6 @@
 ---
 name: stow
-description: Sweep the current session for uncaptured durable knowledge, file it to disk, persist the open work records this session knows are unfiled or now wrong, and curate the home's tiered, decaying startup memory before a context reset. Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, or periodically to keep operational memory current.
+description: Sweep the current session for uncaptured durable knowledge, file it to disk, persist the open work records this session knows are unfiled or now wrong, and curate the home's tiered, decaying startup memory before a context reset. Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, or periodically to keep operational memory current. Also use on any notice that firstmate's instructions or tooling changed, to re-validate memory against the changed surface before those entries are read as settled fact.
 user-invocable: true
 metadata:
   internal: true
@@ -50,6 +50,35 @@ Marking rules:
 - A pre-existing missing or hand-dropped marker is never grounds for destructive treatment: it means the file's default tier; an unmarked entry in a default-pinned file is simply pinned, while an unmarked entry in a file whose default tier carries a clock follows the migration rule below.
 
 Decay advances only when a pass runs, so a home stowed less often than a clock experiences that clock at its stow interval.
+A clock is not the only trigger these entries answer to: see re-validation on mechanism change below.
+
+## Re-validation on mechanism change
+
+The tier clocks measure elapsed time, and elapsed time is not what falsifies most operational memory.
+An entry is falsified when the mechanism it describes moves, which can happen the day after it was admitted and deep inside any clock; shortening a clock does not reach that and taxes every entry to chase a few.
+So memory answers a second trigger alongside its clocks: a landed change to the code an entry describes makes that entry due for re-validation regardless of its date.
+
+This is a targeted pass, not the full startup-memory pass.
+Run it whenever this home is told firstmate's instructions or tooling changed - the `/updatefirstmate` nudge, the startup convergence nudge, or the captain saying so - and again alongside the required pass's decay step whenever a full pass runs after such a change.
+
+1. Establish the changed surface.
+   Use the paths the notice names when it names them.
+   When it names none, or its list was truncated, derive them in this home with `git -C <this home> diff --name-only 'HEAD@{1}' HEAD`, because a fast-forward leaves the pre-update commit at `HEAD@{1}`.
+   When neither is available, say so and treat every entry naming a firstmate script, flag, or behaviour as due.
+2. Check your own entries against that surface, not only the ones the notice or the sender called out.
+   A sender can only name what it knew to mention; it does not know what this home is holding.
+   Read every entry in each editable memory file and ask whether the changed surface could have moved what that entry claims.
+3. Verify each due entry against the source, never against its own confidence.
+   An entry reads as settled fact and nothing in a normal turn re-opens it, so re-opening it takes the current code, not a judgment that it still sounds right.
+   Confirm it from the changed file itself; that reading is the independent current-session evidence the required pass's reinforcement rule demands before any date is refreshed.
+4. Correct a falsified entry by pointing it at the authoritative owner and restating only what that owner does not carry.
+   A summary of a moving mechanism decays wherever it is kept, so the durable fix is to stop keeping the summary, not to keep a fresher one.
+   A corrected entry is `rewritten` in the receipt, and one that cannot be re-validated leaves memory as `archived` with its provenance.
+5. Never defer this for budget reasons.
+   A false entry carries the qualifications, workarounds, and exceptions that accreted around the part that no longer holds, and a true replacement needs none of them, so correcting one usually frees tokens rather than spending them.
+
+Report each entry this trigger re-validated and each one it corrected, with the changed path that put it in scope.
+When the pass runs on its own rather than inside a full `/stow`, report those same facts in the same plain language and claim nothing about the rest of memory.
 
 ## Required startup-memory pass
 

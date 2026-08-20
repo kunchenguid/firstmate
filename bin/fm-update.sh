@@ -26,8 +26,17 @@
 #   - one status line per target (updated/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - firstmate-changed-surface: <comma-list>|none   (which watched paths changed)
+#   - firstmate-changed-files: <comma-list>|none   (which watched FILES changed)
+#   - firstmate-changed-range: <before>..<after>|none   (the advance that changed them)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
 #   - nudge-surface fm-<id>: <comma-list>|unknown   (per-target changed paths)
+#   - nudge-files fm-<id>: <comma-list>|unknown   (per-target changed FILES)
+#   - nudge-range fm-<id>: <before>..<after>|unknown   (per-target advance)
+#
+# The changed-FILES lines exist so a nudge can name the surface a reader can
+# check its own memory and assumptions against, instead of only asserting that
+# something moved. They are capped to keep a nudge one sendable line and end in a
+# "+N-more" element when truncated; the matching range line recovers the full set.
 #
 # Usage: fm-update.sh [--help]
 set -eu
@@ -54,9 +63,13 @@ fi
 
 reread_firstmate="no"
 firstmate_surface="none"
+firstmate_files="none"
+firstmate_range="none"
 ff_target "$FM_ROOT" "firstmate" upstream no no
 if [ "$FF_STATUS" = "updated" ]; then
   firstmate_surface=$(printf '%s' "${FF_INSTR:-none}" | tr -d ' ')
+  firstmate_files=$(printf '%s' "${FF_FILES:-none}" | tr -d ' ')
+  firstmate_range="${FF_RANGE:-none}"
   if [ -n "$FF_INSTR" ]; then
     reread_firstmate="yes"
   fi
@@ -69,6 +82,8 @@ fi
 
 FF_NUDGE_WINDOWS=""
 FF_NUDGE_SURFACES=""
+FF_NUDGE_FILES=""
+FF_NUDGE_RANGES=""
 FF_SEEN_HOMES=""
 
 # Live direct reports first: state/<id>.meta with kind=secondmate carries the
@@ -98,6 +113,8 @@ if [ -f "$SECONDMATES_MD" ]; then
             if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
               FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
               FF_NUDGE_SURFACES="$FF_NUDGE_SURFACES fm-$id=unknown"
+              FF_NUDGE_FILES="$FF_NUDGE_FILES fm-$id=unknown"
+              FF_NUDGE_RANGES="$FF_NUDGE_RANGES fm-$id=unknown"
             fi
             ;;
           current:*) echo "remote secondmate $id: already current on $SECONDMATE_REGISTRY_HOST (${remote_result#current: })" ;;
@@ -116,9 +133,21 @@ fi
 
 echo "reread-firstmate: $reread_firstmate"
 echo "firstmate-changed-surface: $firstmate_surface"
+echo "firstmate-changed-files: ${firstmate_files:-none}"
+echo "firstmate-changed-range: $firstmate_range"
 echo "nudge-secondmates:${FF_NUDGE_WINDOWS:- none}"
 for _pair in $FF_NUDGE_SURFACES; do
   _target="${_pair%%=*}"
   _surface="${_pair#*=}"
   echo "nudge-surface ${_target}: ${_surface}"
+done
+for _pair in $FF_NUDGE_FILES; do
+  _target="${_pair%%=*}"
+  _files="${_pair#*=}"
+  echo "nudge-files ${_target}: ${_files:-unknown}"
+done
+for _pair in $FF_NUDGE_RANGES; do
+  _target="${_pair%%=*}"
+  _range="${_pair#*=}"
+  echo "nudge-range ${_target}: ${_range:-unknown}"
 done

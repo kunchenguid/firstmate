@@ -224,6 +224,34 @@ changed_instr() {
   printf '%s' "$out"
 }
 
+# Which tracked FILES under that same watched surface changed (comma list, capped).
+# changed_instr answers "which surface moved"; this answers "which files moved",
+# so a nudge can name a surface the reader can check its own holdings against
+# instead of only asserting that something moved. The list is capped to keep the
+# nudge one sendable line: a reader that needs the full set recovers it from the
+# reported range, or locally from its own pre-update commit at HEAD@{1}. A path
+# containing whitespace would break the caller's pair accumulators, so the whole
+# list degrades to empty rather than emitting a value that cannot be parsed.
+FM_FF_CHANGED_FILES_CAP=${FM_FF_CHANGED_FILES_CAP:-12}
+changed_files() {
+  local dir=$1 base=$2 files total cap out
+  files=$(git -C "$dir" diff --name-only HEAD "$base" -- AGENTS.md bin .agents/skills 2>/dev/null) || return 0
+  [ -n "$files" ] || return 0
+  if printf '%s\n' "$files" | grep -q '[[:blank:]]'; then
+    return 0
+  fi
+  cap=$FM_FF_CHANGED_FILES_CAP
+  case "$cap" in ''|*[!0-9]*) cap=12 ;; esac
+  [ "$cap" -gt 0 ] || cap=12
+  total=$(printf '%s\n' "$files" | wc -l | tr -d ' ')
+  out=$(printf '%s\n' "$files" | head -n "$cap" \
+    | awk 'NR>1 { printf "," } { printf "%s", $0 } END { print "" }')
+  if [ "$total" -gt "$cap" ]; then
+    out="$out,+$((total - cap))-more"
+  fi
+  printf '%s' "$out"
+}
+
 dirty_status() {
   local dir=$1 ignore_seed_marker=${2:-no}
   if [ "$ignore_seed_marker" = yes ]; then
@@ -257,6 +285,9 @@ live_secondmate_meta_records() {
 # caller:
 #   FF_STATUS = updated|current|skipped
 #   FF_INSTR  = comma list of changed instruction paths (only when updated)
+#   FF_FILES  = comma list of changed instruction FILES, capped, with a trailing
+#               "+N-more" element when the cap truncated it (only when updated)
+#   FF_RANGE  = <before>..<after> short-sha range of the advance (only when updated)
 #
 # base_mode selects where the fast-forward base comes from:
 #   origin       - fetch origin and advance to origin/<default> (legacy); requires an
@@ -272,10 +303,14 @@ live_secondmate_meta_records() {
 # dirty, diverged, or wrong-branch target and leave its work untouched.
 FF_STATUS=""
 FF_INSTR=""
+FF_FILES=""
+FF_RANGE=""
 ff_target() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
   FF_STATUS="skipped"
   FF_INSTR=""
+  FF_FILES=""
+  FF_RANGE=""
 
   if [ ! -d "$dir" ]; then
     echo "$label: skipped: not a directory"
@@ -286,7 +321,7 @@ ff_target() {
     return 0
   fi
 
-  local default base cur instr local_rev base_rev before after out
+  local default base cur instr instr_files local_rev base_rev before after out
   default=$(default_branch "$dir") || {
     echo "$label: skipped: cannot determine default branch"
     return 0
@@ -366,6 +401,7 @@ ff_target() {
   fi
 
   instr=$(changed_instr "$dir" "$base")
+  instr_files=$(changed_files "$dir" "$base")
   before=$(git -C "$dir" rev-parse --short HEAD)
   if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
     echo "$label: skipped: fast-forward failed: $(first_line "$out")"
@@ -374,6 +410,8 @@ ff_target() {
   after=$(git -C "$dir" rev-parse --short HEAD)
   FF_STATUS="updated"
   FF_INSTR="$instr"
+  FF_FILES="$instr_files"
+  FF_RANGE="$before..$after"
   if [ -n "$instr" ]; then
     echo "$label: updated $before..$after (instructions changed: $instr)"
   else
@@ -382,10 +420,14 @@ ff_target() {
   return 0
 }
 
-# Sweep accumulators. The caller resets all three before a sweep and reads
-# FF_NUDGE_WINDOWS and FF_NUDGE_SURFACES after.
+# Sweep accumulators. The caller resets them before a sweep and reads
+# FF_NUDGE_WINDOWS, FF_NUDGE_SURFACES, FF_NUDGE_FILES, and FF_NUDGE_RANGES after.
+# The three detail accumulators are space-separated "fm-<id>=<value>" pairs, so
+# no value they carry may contain whitespace.
 FF_NUDGE_WINDOWS=""
 FF_NUDGE_SURFACES=""
+FF_NUDGE_FILES=""
+FF_NUDGE_RANGES=""
 FF_SEEN_HOMES=""
 
 # Validate and fast-forward one secondmate home, accumulating its stable
@@ -421,9 +463,12 @@ process_secondmate() {
       return 0
     fi
     FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
-    local _ff_surface
+    local _ff_surface _ff_files
     _ff_surface=$(printf '%s' "${FF_INSTR:-unknown}" | tr -d ' ')
+    _ff_files=$(printf '%s' "${FF_FILES:-unknown}" | tr -d ' ')
     FF_NUDGE_SURFACES="$FF_NUDGE_SURFACES fm-$id=${_ff_surface}"
+    FF_NUDGE_FILES="$FF_NUDGE_FILES fm-$id=${_ff_files}"
+    FF_NUDGE_RANGES="$FF_NUDGE_RANGES fm-$id=${FF_RANGE:-unknown}"
     if [ "$nudge_requires_instr" = yes ] && [ -n "$FF_INSTR" ] \
       && type fm_ff_after_instruction_update >/dev/null 2>&1; then
       fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR"
@@ -434,8 +479,8 @@ process_secondmate() {
 # Sweep this home's LIVE secondmate direct reports - state/<id>.meta files with
 # kind=secondmate - fast-forwarding each to base_mode. Passes base_mode and
 # nudge_requires_instr through to process_secondmate. Accumulates into
-# FF_NUDGE_WINDOWS / FF_NUDGE_SURFACES / FF_SEEN_HOMES, which the caller resets
-# before and reads after.
+# FF_NUDGE_WINDOWS / FF_NUDGE_SURFACES / FF_NUDGE_FILES / FF_NUDGE_RANGES /
+# FF_SEEN_HOMES, which the caller resets before and reads after.
 # The registry argument is only for home= fallback on older or incomplete meta records.
 sweep_live_secondmate_metas() {
   local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta
