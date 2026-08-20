@@ -790,17 +790,23 @@ test_manifest_class_disposition_pairs_are_enforced() {
 # gh-axi 0.1.29 wraps a selected scalar in an api_response TOON envelope.
 # Refresh parses that current real shape and rejects the old fake-scalar assumption.
 test_refresh_parses_current_gh_axi_scalar_envelope() {
-  local w repo fakebin out log tmp
+  local w repo fakebin out log tmp rc
   w=$(new_world refresh-envelope)
   add_topic_and_merge "$w" repo-issues repo-issues.txt current
   add_topic_and_merge "$w" owner-issues owner-issues.txt current
   add_topic_and_merge "$w" genuine-issue genuine-issue.txt current
+  add_topic_and_merge "$w" completed-issue completed-issue.txt current rejected-but-retained
+  add_topic_and_merge "$w" declined-issue declined-issue.txt current rejected-but-retained
+  add_topic_and_merge "$w" unknown-issue unknown-issue.txt current rejected-but-retained
   repo="$w/admin"
   tmp="$w/manifest-routes"
   jq '
     (.divergences[] | select(.id == "repo-issues") | .upstream_pr.url) = "https://github.com/acme/issues/pull/7" |
     (.divergences[] | select(.id == "owner-issues") | .upstream_pr.url) = "https://github.com/issues/repo/pull/7" |
-    (.divergences[] | select(.id == "genuine-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/7"
+    (.divergences[] | select(.id == "genuine-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/7" |
+    (.divergences[] | select(.id == "completed-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/8" |
+    (.divergences[] | select(.id == "declined-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/9" |
+    (.divergences[] | select(.id == "unknown-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/10"
   ' "$repo/fork-divergences.json" > "$tmp" || fail "could not build refresh route fixtures"
   mv "$tmp" "$repo/fork-divergences.json"
   git -C "$repo" add fork-divergences.json
@@ -813,11 +819,22 @@ test_refresh_parses_current_gh_axi_scalar_envelope() {
 #!/usr/bin/env bash
 : "${FAKE_GH_LOG:?}"
 printf '%s\n' "${2:-}" >> "$FAKE_GH_LOG"
-printf '%s\n' 'api_response:' '  body: open' '  truncated: false'
+case "${2:-}" in
+  /repos/acme/repo/issues/8) payload='{"state":"closed","state_reason":"completed"}' ;;
+  /repos/acme/repo/issues/9) payload='{"state":"closed","state_reason":"not_planned"}' ;;
+  /repos/acme/repo/issues/10) payload='{"state":"closed","state_reason":null}' ;;
+  /repos/*/*/issues/*) payload='{"state":"open","state_reason":null}' ;;
+  /repos/*/*/pulls/*) payload='{"state":"open","merged_at":null}' ;;
+  *) exit 1 ;;
+esac
+body=$(printf '%s\n' "$payload" | jq -r "${4:?}") || exit 1
+printf '%s\n' 'api_response:' "  body: $body" '  truncated: false'
 SH
   chmod +x "$fakebin/gh-axi"
-  out=$(PATH="$fakebin:$PATH" FAKE_GH_LOG="$log" "$STATUS" --repo "$repo" --refresh 2>&1) \
-    || fail "refresh rejected gh-axi's current scalar envelope: $out"
+  set +e
+  out=$(PATH="$fakebin:$PATH" FAKE_GH_LOG="$log" "$STATUS" --repo "$repo" --refresh 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "refresh accepted an issue closed as completed or with an unavailable closure reason"
   assert_not_contains "$out" 'records open but its live upstream review is api_response' \
     "refresh compared the serializer envelope as the live disposition"
   grep -Fxq -- '/repos/acme/issues/pulls/7' "$log" \
@@ -826,9 +843,15 @@ SH
     || fail "an owner named issues routed a pull request through the issue endpoint"
   grep -Fxq -- '/repos/acme/repo/issues/7' "$log" \
     || fail "a genuine issue route did not use the issue endpoint"
-  [ "$(wc -l < "$log" | tr -d ' ')" -eq 3 ] || fail "refresh queried an unexpected number of API paths"
-  assert_contains "$out" 'errors=0' "current gh-axi scalar envelope created a refresh error"
-  pass "fork health refresh parses the scalar envelope and routes by resource segment"
+  assert_contains "$out" 'manifest unit completed-issue records rejected but its live upstream review is merged' \
+    "an issue closed as completed satisfied a recorded rejection"
+  assert_not_contains "$out" 'manifest unit declined-issue' \
+    "an issue closed as not planned did not refresh cleanly"
+  assert_contains "$out" "manifest unit unknown-issue live issue's closure reason is unavailable" \
+    "an issue with no closure reason was accepted as a decline"
+  [ "$(wc -l < "$log" | tr -d ' ')" -eq 6 ] || fail "refresh queried an unexpected number of API paths"
+  assert_contains "$out" 'errors=2' "refresh did not isolate the two invalid issue closure outcomes"
+  pass "fork health refresh parses envelopes, routes structurally, and distinguishes issue closure reasons"
 }
 
 # Two canonical topics integrate as separate merge units, and discarding one
