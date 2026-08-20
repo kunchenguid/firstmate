@@ -917,7 +917,7 @@ families_for_changed_path() {
       ;;
     .pi/extensions/fm-pi-quota-status.ts|.pi/extensions/lib/fm-pi-quota-status.ts)
       # The portable test owns parsing, formatting, process, and lifecycle behavior;
-      # the opt-in guard owns Pi's real footer/status composition API.
+      # the opt-in guard owns Pi's real footer/widget composition API.
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;

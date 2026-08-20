@@ -9,7 +9,7 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 ## Pi quota footer
 
 - Verified 2026-08-20 against Pi 0.84.2 through an isolated credential-free pseudo-terminal and fake `quota-axi --json` producer.
-- The live footer retained Pi's cwd, branch, context, and model rows plus an unrelated extension status while the auto-discovered Firstmate extension rendered all three fake Codex windows, resets, plan, and credits through `setStatus`.
+- The live footer retained Pi's cwd, branch, context, model rows, and unrelated extension status while the auto-discovered Firstmate extension rendered all three fake Codex windows, resets, plan, and credits in a separate width-aware row below the editor.
 - Pi and `pi-signed` share this Pi extension surface; Claude, Grok, Codex, OpenCode, and Cursor do not discover `.pi/extensions`, so their primary UI paths remain unchanged.
 - tmux, Herdr, Zellij, Orca, and cmux only host the selected process and need no quota-specific branch, so the Pi-family behavior is backend-independent and non-Pi processes remain unchanged.
 
@@ -18,12 +18,12 @@ FM_PI_QUOTA_STATUS_LIVE=1 bin/fm-test-run.sh tests/fm-pi-quota-status-live-e2e.t
 ```
 
 ```text
-ok - pi 0.84.2 auto-discovered complete quota through Pi setStatus while preserving the built-in footer and unrelated status
+ok - pi 0.84.2 auto-discovered complete quota in a width-aware row while preserving the built-in footer and unrelated status
 # harness absent, not verified here: pi-signed
 ok - live Pi quota guard verified 1 installed Pi-family harness(es)
 ```
 
-The portable `tests/fm-pi-quota-status.test.sh` regression owns schema parsing, active-provider selection, responsive formatting, subprocess bounds, unavailable outcomes, refresh, replacement, and cleanup without credentials.
+The required portable `tests/fm-pi-quota-status.test.sh` regression owns schema parsing, active-provider selection, responsive footer composition, freshness expiry, subprocess bounds, unavailable outcomes, refresh, replacement, and cleanup without credentials; portable CI pins Pi 0.84.2 as its extension runtime.
 
 ## tmux
 

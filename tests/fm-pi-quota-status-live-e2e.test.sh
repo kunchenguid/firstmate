@@ -174,7 +174,7 @@ EOF
   grep -Fvx -- eof "$stdin_log" >/dev/null \
     && fail "$harness left quota-axi stdin readable: $(tr '\n' '|' < "$stdin_log")"
 
-  printf 'ok - %s %s auto-discovered complete quota through Pi setStatus while preserving the built-in footer and unrelated status\n' "$harness" "$version"
+  printf 'ok - %s %s auto-discovered complete quota in a width-aware row while preserving the built-in footer and unrelated status\n' "$harness" "$version"
   checked=$((checked + 1))
 }
 

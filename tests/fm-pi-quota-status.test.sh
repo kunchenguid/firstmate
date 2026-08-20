@@ -5,13 +5,13 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-command -v node >/dev/null 2>&1 || { echo "skip: node not found for Pi quota status test"; exit 0; }
-command -v npm >/dev/null 2>&1 || { echo "skip: npm not found for Pi quota status test"; exit 0; }
+command -v node >/dev/null 2>&1 || fail "node not found for Pi quota status test"
+command -v npm >/dev/null 2>&1 || fail "npm not found for Pi quota status test"
 
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
-[ -f "$PI_PACKAGE_DIR/package.json" ] || { echo "skip: installed @earendil-works/pi-coding-agent package not found"; exit 0; }
+[ -f "$PI_PACKAGE_DIR/package.json" ] || fail "installed @earendil-works/pi-coding-agent package not found"
 [ -d "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" ] \
-  || { echo "skip: installed Pi package is missing pi-tui"; exit 0; }
+  || fail "installed Pi package is missing pi-tui"
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-quota-status)
 FIXTURE="$TMP_ROOT/project"
@@ -68,7 +68,8 @@ SH
 chmod +x "$FAKEBIN/quota-axi"
 
 cat > "$TMP_ROOT/quota-fixture.mjs" <<'JS'
-const now = Date.now();
+const configuredNow = Number(process.env.FM_QUOTA_TEST_NOW_MS);
+const now = Number.isFinite(configuredNow) && configuredNow > 0 ? configuredNow : Date.now();
 const generatedAt = new Date(now - (process.env.FM_QUOTA_TEST_STALE === "1" ? 60 * 60 * 1000 : 0)).toISOString();
 const state = { status: "fresh", stale: false, refreshedAt: generatedAt, sourcesTried: ["fake"] };
 const reset = (milliseconds) => new Date(now + milliseconds).toISOString();
@@ -269,7 +270,10 @@ assert(directResult.kind === "ok", `fake quota-axi process failed: ${directResul
 function makePi(factory, provider = "openai-codex", mode = "tui") {
   const handlers = new Map();
   const statuses = new Map([["aaa-unrelated", "UNRELATED_STATUS"]]);
+  const widgets = new Map();
   const writes = [];
+  let footer = "BUILTIN_FOOTER";
+  const theme = { fg(_color, text) { return `\x1b[2m${text}\x1b[0m`; } };
   const pi = {
     on(event, handler) {
       const list = handlers.get(event) ?? [];
@@ -282,18 +286,46 @@ function makePi(factory, provider = "openai-codex", mode = "tui") {
     mode,
     model: provider ? { provider, id: "fixture-model" } : undefined,
     ui: {
-      theme: { fg(_color, text) { return `\x1b[2m${text}\x1b[0m`; } },
+      theme,
       setStatus(key, value) {
-        writes.push([key, value]);
+        writes.push(["status", key, value]);
         if (value === undefined) statuses.delete(key);
         else statuses.set(key, value);
+      },
+      setWidget(key, content, options) {
+        writes.push(["widget", key, content]);
+        if (content === undefined) {
+          widgets.delete(key);
+          return;
+        }
+        const component = Array.isArray(content)
+          ? { render() { return content; }, invalidate() {} }
+          : content({ requestRender() {} }, theme);
+        widgets.set(key, { component, options });
+      },
+      setFooter(value) {
+        writes.push(["footer", value]);
+        footer = value ?? "BUILTIN_FOOTER";
       },
     },
   };
   async function emit(event, payload = {}, overrideCtx = ctx) {
     for (const handler of handlers.get(event) ?? []) await handler(payload, overrideCtx);
   }
-  return { ctx, emit, statuses, writes };
+  function widgetText(width = 200, key = "firstmate-quota") {
+    const widget = widgets.get(key);
+    return plain(widget ? widget.component.render(width).join("\n") : "");
+  }
+  return {
+    ctx,
+    emit,
+    statuses,
+    widgets,
+    writes,
+    widgetText,
+    get footer() { return footer; },
+    get widgetWriteCount() { return writes.filter(([kind]) => kind === "widget").length; },
+  };
 }
 
 const baselineResizeListeners = process.stdout.listenerCount("resize");
@@ -301,19 +333,21 @@ const lifecycle = makePi(createFirstmateQuotaStatusExtension({
   refreshMs: 80,
   timeoutMs: 500,
   maxOutputBytes: 1024 * 1024,
-  width: () => 400,
 }));
 await lifecycle.emit("session_start", { reason: "startup" });
 await waitFor(
-  () => plain(lifecycle.statuses.get("zz-firstmate-quota")).includes("GPT-5.3-Codex-Spark week"),
+  () => lifecycle.widgetText(400).includes("GPT-5.3-Codex-Spark week"),
   "startup did not render every Codex quota window",
 );
-assert(lifecycle.statuses.get("aaa-unrelated") === "UNRELATED_STATUS", "quota status replaced an unrelated extension status");
-assert(process.stdout.listenerCount("resize") === baselineResizeListeners + 1, "session start did not own exactly one resize listener");
+assert(lifecycle.widgets.get("firstmate-quota")?.options?.placement === "belowEditor", "quota did not use its width-aware footer row");
+assert(lifecycle.widgetText(72).includes("narrow") && lifecycle.widgetText(72).includes("3 windows"), "composed narrow footer did not degrade explicitly");
+assert(lifecycle.statuses.get("aaa-unrelated") === "UNRELATED_STATUS", "quota widget replaced an unrelated extension status");
+assert(lifecycle.footer === "BUILTIN_FOOTER", "quota widget replaced Pi's built-in footer");
+assert(process.stdout.listenerCount("resize") === baselineResizeListeners, "session start installed a direct resize listener");
 
 await lifecycle.emit("model_select", { model: { provider: "anthropic", id: "claude-fixture" } });
 await waitFor(
-  () => plain(lifecycle.statuses.get("zz-firstmate-quota")).includes("Quota Claude"),
+  () => lifecycle.widgetText(240).includes("Quota Claude"),
   "model change did not refresh active-provider selection",
 );
 const callsBeforeCadence = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
@@ -322,31 +356,88 @@ const callsAfterCadence = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8
 assert(callsAfterCadence > callsBeforeCadence, "bounded cadence did not refresh during a long-lived session");
 
 await lifecycle.emit("session_shutdown", { reason: "reload" });
-assert(!lifecycle.statuses.has("zz-firstmate-quota"), "shutdown did not clear the quota status");
+assert(!lifecycle.widgets.has("firstmate-quota"), "shutdown did not clear the quota widget");
 assert(lifecycle.statuses.get("aaa-unrelated") === "UNRELATED_STATUS", "shutdown cleared an unrelated status");
-assert(process.stdout.listenerCount("resize") === baselineResizeListeners, "shutdown leaked a resize listener");
+assert(lifecycle.footer === "BUILTIN_FOOTER", "shutdown changed Pi's built-in footer");
+assert(process.stdout.listenerCount("resize") === baselineResizeListeners, "shutdown changed resize listeners");
 const callsAtShutdown = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 await sleep(120);
 const callsAfterShutdown = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 assert(callsAfterShutdown === callsAtShutdown, "shutdown leaked a refresh timer");
 
-// Every replacement reason rebinds one generation and refreshes without a process leak.
 for (const reason of ["reload", "new", "resume", "fork"]) {
   lifecycle.ctx.model = { provider: "xai", id: "grok-fixture" };
   await lifecycle.emit("session_start", { reason });
   await waitFor(
-    () => plain(lifecycle.statuses.get("zz-firstmate-quota")).includes("Quota Grok"),
-    `${reason} did not refresh quota status`,
+    () => lifecycle.widgetText(240).includes("Quota Grok"),
+    `${reason} did not refresh quota widget`,
   );
-  assert(process.stdout.listenerCount("resize") === baselineResizeListeners + 1, `${reason} duplicated resize listeners`);
+  assert(process.stdout.listenerCount("resize") === baselineResizeListeners, `${reason} changed resize listeners`);
   await lifecycle.emit("session_shutdown", { reason: "reload" });
   assert(process.stdout.listenerCount("resize") === baselineResizeListeners, `${reason} leaked resize listeners`);
 }
 
-// Non-TUI Pi modes never start status work.
+class FakeClock {
+  constructor(nowMs) {
+    this.nowMs = nowMs;
+    this.nextId = 1;
+    this.tasks = new Map();
+    this.timers = {
+      setTimeout: (callback, delayMs) => this.add(callback, delayMs, null),
+      clearTimeout: (id) => this.tasks.delete(id),
+      setInterval: (callback, delayMs) => this.add(callback, delayMs, delayMs),
+      clearInterval: (id) => this.tasks.delete(id),
+    };
+  }
+  add(callback, delayMs, intervalMs) {
+    const id = this.nextId++;
+    this.tasks.set(id, { id, callback, at: this.nowMs + delayMs, intervalMs });
+    return id;
+  }
+  advance(milliseconds) {
+    const target = this.nowMs + milliseconds;
+    for (;;) {
+      const task = [...this.tasks.values()]
+        .filter((candidate) => candidate.at <= target)
+        .sort((a, b) => a.at - b.at || a.id - b.id)[0];
+      if (!task) break;
+      this.nowMs = task.at;
+      if (task.intervalMs === null) this.tasks.delete(task.id);
+      else task.at += task.intervalMs;
+      task.callback();
+    }
+    this.nowMs = target;
+  }
+}
+
+const fakeStart = Date.now();
+const fakeClock = new FakeClock(fakeStart);
+process.env.FM_QUOTA_TEST_NOW_MS = String(fakeStart);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const expiring = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => fakeClock.nowMs,
+  timers: fakeClock.timers,
+}));
+await expiring.emit("session_start", { reason: "startup" });
+await waitFor(() => expiring.widgetText(400).includes("week 94% left"), "fake clock fixture did not publish fresh quota");
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "fail\n");
+const writesBeforeFailedRefresh = expiring.widgetWriteCount;
+fakeClock.advance(5 * 60 * 1000);
+await waitFor(() => expiring.widgetWriteCount > writesBeforeFailedRefresh, "failed refresh did not republish the still-fresh report");
+assert(expiring.widgetText(400).includes("week 94% left"), "failed refresh discarded quota before its freshness deadline");
+fakeClock.advance(60 * 1000);
+assert(expiring.widgetText(400).includes("stale"), "fresh quota did not expire at its publication deadline");
+assert(!expiring.widgetText(400).includes("94%"), "expired quota values remained visible as fresh");
+await expiring.emit("session_shutdown", { reason: "quit" });
+assert(fakeClock.tasks.size === 0, "shutdown leaked a fake-clock refresh or expiry timer");
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
 const nonTui = makePi(createFirstmateQuotaStatusExtension({ refreshMs: 40, timeoutMs: 80 }), "openai-codex", "print");
 await nonTui.emit("session_start", { reason: "startup" });
-assert(!nonTui.statuses.has("zz-firstmate-quota"), "print mode installed a TUI status");
+assert(!nonTui.widgets.has("firstmate-quota"), "print mode installed a TUI quota widget");
 await nonTui.emit("session_shutdown", { reason: "quit" });
 
 async function statusCase(mode, expected, options = {}) {
@@ -360,8 +451,8 @@ async function statusCase(mode, expected, options = {}) {
   }));
   await instance.emit("session_start", { reason: "startup" });
   await waitFor(
-    () => plain(instance.statuses.get("zz-firstmate-quota")).includes(expected),
-    `${mode} did not render ${expected}: ${plain(instance.statuses.get("zz-firstmate-quota"))}`,
+    () => instance.widgetText(200).includes(expected),
+    `${mode} did not render ${expected}: ${instance.widgetText(200)}`,
   );
   await instance.emit("session_shutdown", { reason: "quit" });
   return instance;
@@ -381,7 +472,7 @@ const slow = makePi(createFirstmateQuotaStatusExtension({
   width: () => 200,
 }));
 await slow.emit("session_start", { reason: "startup" });
-await waitFor(() => plain(slow.statuses.get("zz-firstmate-quota")).includes("unavailable"), "slow quota process did not time out");
+await waitFor(() => slow.widgetText(200).includes("unavailable"), "slow quota process did not time out");
 await slow.emit("session_shutdown", { reason: "quit" });
 
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "slow\n");
@@ -400,7 +491,7 @@ await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
 replacement.ctx.model = { provider: "openai-codex", id: "replacement-model" };
 await replacement.emit("session_start", { reason: "new" });
 await waitFor(
-  () => plain(replacement.statuses.get("zz-firstmate-quota")).includes("GPT-5.3-Codex-Spark week"),
+  () => replacement.widgetText(240).includes("GPT-5.3-Codex-Spark week"),
   "replacement session did not start a fresh quota read",
 );
 await replacement.emit("session_shutdown", { reason: "quit" });
@@ -427,4 +518,4 @@ fi
 if grep -Fvx -- eof "$STDIN_LOG" >/dev/null; then
   fail "quota extension left quota-axi stdin readable: $(tr '\n' '|' < "$STDIN_LOG")"
 fi
-pass "Pi quota status parses and formats complete active-provider quota, composes through setStatus, degrades explicitly by ANSI-visible width, refreshes on every session/model lifecycle, and bounds and cleans fake quota-axi failures"
+pass "Pi quota status parses and formats complete active-provider quota, preserves footer statuses in a separate width-aware row, expires reports on time, refreshes every session/model lifecycle, and bounds and cleans fake quota-axi failures"

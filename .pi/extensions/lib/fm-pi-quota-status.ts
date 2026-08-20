@@ -24,10 +24,12 @@ export type FreshQuotaView = {
   windows: QuotaWindowView[];
   credits: QuotaCreditsView | null;
   generatedAtMs: number;
+  freshUntilMs: number;
 };
 
 export type QuotaView =
   | FreshQuotaView
+  | { kind: "refreshing"; provider: string }
   | { kind: "unsupported"; provider: string }
   | { kind: "unavailable"; provider: string; label: string | null }
   | { kind: "stale"; provider: string; label: string | null }
@@ -163,10 +165,14 @@ export function selectActiveProviderQuota(
   if (!provider) return { kind: "unsupported", provider: cleanText(piProvider, 48) ?? "unknown" };
 
   const nowMs = options.nowMs ?? Date.now();
-  const freshnessMs = options.freshnessMs ?? DEFAULT_QUOTA_FRESHNESS_MS;
+  const requestedFreshnessMs = options.freshnessMs ?? DEFAULT_QUOTA_FRESHNESS_MS;
+  const freshnessMs = Number.isFinite(requestedFreshnessMs) && requestedFreshnessMs > 0
+    ? requestedFreshnessMs
+    : DEFAULT_QUOTA_FRESHNESS_MS;
+  let freshUntilMs = report.generatedAtMs + freshnessMs;
   if (
     report.generatedAtMs > nowMs + 60_000 ||
-    nowMs - report.generatedAtMs > freshnessMs
+    nowMs >= freshUntilMs
   ) {
     return { kind: "stale", provider, label: null };
   }
@@ -192,7 +198,8 @@ export function selectActiveProviderQuota(
   if (rawProvider.state.refreshedAt !== undefined) {
     const refreshedAtMs = parseTimestamp(rawProvider.state.refreshedAt);
     if (refreshedAtMs === null) return malformed(provider);
-    if (refreshedAtMs > nowMs + 60_000 || nowMs - refreshedAtMs > freshnessMs) {
+    freshUntilMs = Math.min(freshUntilMs, refreshedAtMs + freshnessMs);
+    if (refreshedAtMs > nowMs + 60_000 || nowMs >= freshUntilMs) {
       return { kind: "stale", provider, label };
     }
   }
@@ -220,6 +227,7 @@ export function selectActiveProviderQuota(
     windows,
     credits: credits ?? null,
     generatedAtMs: report.generatedAtMs,
+    freshUntilMs,
   };
 }
 
@@ -272,6 +280,9 @@ export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.n
   const safeWidth = Math.max(0, Math.floor(width));
   if (safeWidth === 0) return "";
 
+  if (view.kind === "refreshing") {
+    return truncateToWidth("Quota: refreshing", safeWidth, "…");
+  }
   if (view.kind === "unsupported") {
     return truncateToWidth(`Quota: unavailable for ${view.provider}`, safeWidth, "…");
   }

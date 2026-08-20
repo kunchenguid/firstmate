@@ -9,11 +9,10 @@ import {
   type QuotaView,
 } from "./lib/fm-pi-quota-status.ts";
 
-const STATUS_KEY = "zz-firstmate-quota";
+const WIDGET_KEY = "firstmate-quota";
 const DEFAULT_REFRESH_MS = 5 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 20 * 1000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
-const DEFAULT_WIDTH = 160;
 
 type QuotaProcessResult =
   | { kind: "ok"; stdout: string }
@@ -25,6 +24,13 @@ type QuotaProcess = {
   child: ChildProcess;
 };
 
+export type QuotaTimerScheduler = {
+  setTimeout: (callback: () => void, delayMs: number) => unknown;
+  clearTimeout: (timer: unknown) => void;
+  setInterval: (callback: () => void, delayMs: number) => unknown;
+  clearInterval: (timer: unknown) => void;
+};
+
 export type FirstmateQuotaStatusOptions = {
   command?: string;
   refreshMs?: number;
@@ -33,29 +39,34 @@ export type FirstmateQuotaStatusOptions = {
   maxOutputBytes?: number;
   now?: () => number;
   width?: () => number;
+  timers?: QuotaTimerScheduler;
 };
 
 type ActiveSession = {
-  generation: number;
   ctx: ExtensionContext;
   piProvider: string;
   report: ParsedQuotaAxiReport | null;
   process: QuotaProcess | null;
   refreshPending: boolean;
-  refreshTimer: ReturnType<typeof setInterval> | null;
-  resizeHandler: (() => void) | null;
+  refreshTimer: unknown | null;
+  expiryTimer: unknown | null;
 };
 
 function positiveNumber(value: number | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-function terminalWidth(): number {
-  const stdoutWidth = process.stdout.columns;
-  if (typeof stdoutWidth === "number" && Number.isFinite(stdoutWidth) && stdoutWidth > 0) return stdoutWidth;
-  const environmentWidth = Number(process.env.COLUMNS);
-  if (Number.isFinite(environmentWidth) && environmentWidth > 0) return environmentWidth;
-  return DEFAULT_WIDTH;
+const defaultTimers: QuotaTimerScheduler = {
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+  setInterval: (callback, delayMs) => setInterval(callback, delayMs),
+  clearInterval: (timer) => clearInterval(timer as ReturnType<typeof setInterval>),
+};
+
+function unrefTimer(timer: unknown): void {
+  if (typeof timer !== "object" || timer === null || !("unref" in timer)) return;
+  const unref = (timer as { unref?: unknown }).unref;
+  if (typeof unref === "function") unref.call(timer);
 }
 
 function killProcess(child: ChildProcess): void {
@@ -151,10 +162,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
   const freshnessMs = positiveNumber(options.freshnessMs, DEFAULT_QUOTA_FRESHNESS_MS);
   const maxOutputBytes = positiveNumber(options.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
   const now = options.now ?? Date.now;
-  const width = options.width ?? terminalWidth;
+  const width = options.width;
+  const timers = options.timers ?? defaultTimers;
 
   return function firstmateQuotaStatus(pi: ExtensionAPI): void {
-    let nextGeneration = 0;
     let active: ActiveSession | null = null;
 
     function currentView(session: ActiveSession): QuotaView {
@@ -166,14 +177,37 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       });
     }
 
-    function render(session: ActiveSession, override?: QuotaView | string): void {
+    function clearExpiry(session: ActiveSession): void {
+      if (session.expiryTimer !== null) timers.clearTimeout(session.expiryTimer);
+      session.expiryTimer = null;
+    }
+
+    function render(session: ActiveSession, override?: QuotaView): void {
       if (active !== session) return;
-      const availableWidth = Math.max(1, Math.floor(width()));
-      const plain = typeof override === "string"
-        ? override
-        : formatQuotaStatus(override ?? currentView(session), availableWidth, now());
-      const text = plain ? session.ctx.ui.theme.fg("dim", plain) : undefined;
-      session.ctx.ui.setStatus(STATUS_KEY, text);
+      const view = override ?? currentView(session);
+      clearExpiry(session);
+      if (view.kind === "fresh") {
+        let timer: unknown;
+        timer = timers.setTimeout(() => {
+          if (active !== session || session.expiryTimer !== timer) return;
+          session.expiryTimer = null;
+          render(session);
+        }, Math.max(0, view.freshUntilMs - now()));
+        session.expiryTimer = timer;
+        unrefTimer(timer);
+      }
+      session.ctx.ui.setWidget(WIDGET_KEY, (_tui, theme) => ({
+        render(componentWidth: number): string[] {
+          const boundedComponentWidth = Math.max(0, Math.floor(componentWidth));
+          const configuredWidth = width?.();
+          const availableWidth = typeof configuredWidth === "number" && Number.isFinite(configuredWidth) && configuredWidth > 0
+            ? Math.min(boundedComponentWidth, Math.floor(configuredWidth))
+            : boundedComponentWidth;
+          const plain = formatQuotaStatus(view, availableWidth, now());
+          return plain ? [theme.fg("dim", plain)] : [];
+        },
+        invalidate() {},
+      }), { placement: "belowEditor" });
     }
 
     async function refresh(session: ActiveSession): Promise<void> {
@@ -192,7 +226,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         return;
       }
       if (!session.report || currentView(session).kind !== "fresh") {
-        render(session, "Quota: refreshing");
+        render(session, { kind: "refreshing", provider: session.piProvider });
       }
 
       const running = runQuotaAxiJson({ command, timeoutMs, maxOutputBytes });
@@ -227,14 +261,13 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     }
 
     function stop(session: ActiveSession): void {
-      if (session.refreshTimer) clearInterval(session.refreshTimer);
+      if (session.refreshTimer !== null) timers.clearInterval(session.refreshTimer);
       session.refreshTimer = null;
-      if (session.resizeHandler) process.stdout.off("resize", session.resizeHandler);
-      session.resizeHandler = null;
+      clearExpiry(session);
       if (session.process) session.process.cancel();
       session.process = null;
       session.refreshPending = false;
-      session.ctx.ui.setStatus(STATUS_KEY, undefined);
+      session.ctx.ui.setWidget(WIDGET_KEY, undefined);
       if (active === session) active = null;
     }
 
@@ -243,22 +276,19 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (ctx.mode !== "tui") return;
 
       const session: ActiveSession = {
-        generation: ++nextGeneration,
         ctx,
         piProvider: ctx.model?.provider ?? "",
         report: null,
         process: null,
         refreshPending: false,
         refreshTimer: null,
-        resizeHandler: null,
+        expiryTimer: null,
       };
       active = session;
-      session.resizeHandler = () => render(session);
-      process.stdout.on("resize", session.resizeHandler);
-      session.refreshTimer = setInterval(() => {
+      session.refreshTimer = timers.setInterval(() => {
         void refresh(session);
       }, refreshMs);
-      session.refreshTimer.unref();
+      unrefTimer(session.refreshTimer);
       void refresh(session);
     }
 
