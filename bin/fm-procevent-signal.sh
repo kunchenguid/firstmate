@@ -98,6 +98,7 @@ source_id() {
 
 ensure_groups_file() {
   [ -f "$GROUPS_FILE" ] && [ ! -L "$GROUPS_FILE" ] || die "Signal is not configured"
+  [ "$(fm_pr_file_mode "$GROUPS_FILE")" = 600 ] || die "Signal group configuration must have mode 0600"
 }
 
 group_id() {

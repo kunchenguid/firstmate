@@ -92,6 +92,7 @@ new_home() {
   local home=$1
   mkdir -p "$home/state" "$home/config"
   printf 'team\tgroup-fixture-id\tFixture\nops\tsecond-group-fixture-id\tOperations\n' > "$home/config/signal-groups"
+  chmod 600 "$home/config/signal-groups"
 }
 
 signal() {
@@ -116,7 +117,7 @@ cleanup_sources() {
   local home
   for home in "$SIGNAL_ROOT/home" "$SIGNAL_ROOT/failure" "$SIGNAL_ROOT/validation" \
     "$SIGNAL_ROOT/rearm-failure" "$SIGNAL_ROOT/invalid-config" "$SIGNAL_ROOT/foreign" \
-    "$SIGNAL_ROOT/interruption"; do
+    "$SIGNAL_ROOT/interruption" "$SIGNAL_ROOT/public-config"; do
     [ -d "$home" ] || continue
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   done
@@ -400,6 +401,20 @@ fi
 cli_count_after=$(wc -l < "$SIGNAL_ROOT/cli.log" | tr -d ' ')
 [ "$cli_count_before" = "$cli_count_after" ] || fail "invalid routing configuration reached signal-cli"
 pass "arm validates the complete routing table before registration"
+
+HPERM="$SIGNAL_ROOT/public-config"
+new_home "$HPERM"
+chmod 644 "$HPERM/config/signal-groups"
+cli_count_before=$(wc -l < "$SIGNAL_ROOT/cli.log" | tr -d ' ')
+if signal "$HPERM" arm team > "$SIGNAL_ROOT/public-config.out" 2> "$SIGNAL_ROOT/public-config.err"; then
+  fail "arm accepted a publicly readable Signal routing file"
+fi
+assert_grep 'error: Signal group configuration must have mode 0600' "$SIGNAL_ROOT/public-config.err" \
+  "public Signal routing file fails with a sanitized permission error"
+[ ! -s "$SIGNAL_ROOT/public-config.out" ] || fail "public Signal routing file exposed unexpected stdout"
+cli_count_after=$(wc -l < "$SIGNAL_ROOT/cli.log" | tr -d ' ')
+[ "$cli_count_before" = "$cli_count_after" ] || fail "public Signal routing file reached signal-cli"
+pass "Signal routing requires private file permissions"
 
 HREARM="$SIGNAL_ROOT/rearm-failure"
 new_home "$HREARM"

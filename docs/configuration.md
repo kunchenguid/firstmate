@@ -646,6 +646,8 @@ Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that sa
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so re-arm a live board once to adopt this retry policy.
 The optional Signal adapter (`bin/fm-procevent-signal.sh`) is inert unless a home-local `config/signal-groups` file exists.
 The adapter requires exactly one local `signal-cli` account and refuses ambiguous multi-account state.
+Create the empty routing file with `install -m 600 /dev/null "$FM_HOME/config/signal-groups"` after ensuring the home-local `config/` directory exists, then add private rows through an editor that preserves its mode.
+The adapter refuses a routing file whose mode is not `0600`.
 Each non-comment row in that private file is `selector<TAB>Signal group id<TAB>display label`, and the selector is the only identifier used in the adapter's commands.
 Use `bin/fm-procevent-signal.sh arm <selector>` to register a nonterminal receive source and `bin/fm-procevent-signal.sh send <selector> [message-file|-]` to send content from a file or standard input.
 All configured selectors share one account-scoped receive source, which routes each structured inbound message by its authenticated group id.
