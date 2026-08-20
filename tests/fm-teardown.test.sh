@@ -1506,29 +1506,35 @@ SH
 # filesystem reports about the paths named here and nothing else. That keeps the
 # divergence real for every function that reads an owner, while needing neither
 # a second real account nor any privilege.
-write_teardown_uid_stat_shim() {  # <case-dir> <path-glob> <uid> [<path-glob> <uid>...]
-  local sb="$1/fakebin" real glob uid
+write_teardown_uid_stat_shim() {  # <case-dir> <path-glob> <uid|mode:octal> [...]
+  local sb="$1/fakebin" real glob value
+  local uid_rules=() mode_rules=() rule
   shift
   real=$(command -v stat) || fail "the uid stat shim needs a real stat on PATH"
   mkdir -p "$sb"
-  cat > "$sb/stat" <<'SH'
-#!/usr/bin/env bash
-set -u
-if [ "$#" -eq 3 ] && [ "$2" = '%u' ]; then
-  case "$3" in
-SH
   while [ "$#" -ge 2 ]; do
-    glob=$1; uid=$2; shift 2
-    printf '    %s) printf "%%s\\n" "%s"; exit 0 ;;\n' "$glob" "$uid" >> "$sb/stat"
+    glob=$1; value=$2; shift 2
+    rule=$(printf '    %s) printf "%%s\\n" "%s"; exit 0 ;;' "$glob" "${value#mode:}")
+    case "$value" in
+      mode:*) mode_rules+=("$rule") ;;
+      *) uid_rules+=("$rule") ;;
+    esac
   done
-  cat >> "$sb/stat" <<SH
-  esac
-fi
-exec $real "\$@"
-SH
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -u' 'if [ "$#" -eq 3 ]; then' '  case "$2" in'
+    printf '%s\n' "    '%u')" '      case "$3" in'
+    [ "${#uid_rules[@]}" -eq 0 ] || printf '  %s\n' "${uid_rules[@]}"
+    printf '%s\n' '      esac' '      ;;' "    '%Lp' | '%a')" '      case "$3" in'
+    [ "${#mode_rules[@]}" -eq 0 ] || printf '  %s\n' "${mode_rules[@]}"
+    printf '%s\n' '      esac' '      ;;' '  esac' 'fi' "exec $real \"\$@\""
+  } > "$sb/stat"
   chmod +x "$sb/stat"
 }
 
+# Both halves of a genuinely foreign namespace are staged without privileges:
+# the reported owner is a foreign uid at the reported mode 700 the check
+# demands, and the real mode 500 denies this account the entry creation that
+# would prove the directory answers to it.
 test_herdr_teardown_diagnoses_a_foreign_owned_lock_namespace() {
   local case_dir log closed rc ns
   case_dir=$(make_case herdr-foreign-lock-namespace)
@@ -1537,15 +1543,20 @@ test_herdr_teardown_diagnoses_a_foreign_owned_lock_namespace() {
   log="$case_dir/herdr.log"; : > "$log"
   closed="$case_dir/closed"
   : > "$case_dir/state/task-x1.status"
-  ns="/tmp/firstmate-herdr-presentation-$(id -u)"
-  mkdir -m 700 "$ns" 2>/dev/null || true
-  [ -d "$ns" ] || fail "herdr-foreign-lock-namespace: could not stage the namespace at $ns"
-  write_teardown_uid_stat_shim "$case_dir" "$ns" 424246
+  ns=/tmp/firstmate-herdr-presentation-424247
+  chmod 700 "$ns" 2>/dev/null || true
+  rmdir "$ns" 2>/dev/null || true
+  mkdir -m 500 "$ns" \
+    || fail "herdr-foreign-lock-namespace: could not stage an unwritable namespace at $ns"
+  write_teardown_uid_stat_shim "$case_dir" \
+    '/tmp/firstmate-herdr-lock-uid.*' 424247 "$ns" 424246 "$ns" mode:700
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   rm -f "$case_dir/fakebin/stat"
+  chmod 700 "$ns" 2>/dev/null || true
+  rmdir "$ns" 2>/dev/null || true
   [ "$rc" -ne 0 ] \
     || fail "herdr-foreign-lock-namespace: teardown proceeded without its presentation lock"
   [ -e "$case_dir/state/task-x1.meta" ] \
@@ -1562,6 +1573,54 @@ test_herdr_teardown_diagnoses_a_foreign_owned_lock_namespace() {
     fail "herdr-foreign-lock-namespace: the refusal blamed the session instead of the namespace"
   fi
   pass "herdr teardown separates an unusable lock namespace from an unreachable session"
+}
+
+# The end-to-end ordering that the unit-level fault test cannot reach: teardown
+# resolves the lock path first, which CREATES the namespace, and only then does
+# the refusal consult the fault probe. A diagnosis that depends on the fault
+# probe having done the mkdir itself is silent here and prints the banned
+# unclearable foreign-owner remedy for a directory this very account created.
+# The account id is contradicted the only unprivileged way available: the probe
+# entries report 424253 while the namespace that id names reports 424254, and
+# nothing makes that directory unwritable, so it still answers to this account.
+test_herdr_teardown_diagnoses_an_untrustworthy_account_id() {
+  local case_dir log closed rc ns
+  case_dir=$(make_case herdr-untrustworthy-account-id)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; : > "$log"
+  closed="$case_dir/closed"
+  : > "$case_dir/state/task-x1.status"
+  ns=/tmp/firstmate-herdr-presentation-424253
+  rmdir "$ns" 2>/dev/null || true
+  [ ! -e "$ns" ] || fail "herdr-untrustworthy-account-id: the staged namespace name already exists: $ns"
+  write_teardown_uid_stat_shim "$case_dir" \
+    '/tmp/firstmate-herdr-lock-uid.*' 424253 "$ns" 424254
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  rm -f "$case_dir/fakebin/stat"
+  rmdir "$ns" 2>/dev/null || true
+  [ "$rc" -ne 0 ] \
+    || fail "herdr-untrustworthy-account-id: teardown proceeded without its presentation lock"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-untrustworthy-account-id: the refusal erased the durable endpoint metadata"
+  [ ! -e "$closed" ] \
+    || fail "herdr-untrustworthy-account-id: the refusal still closed the pane unlocked"
+  assert_grep "cannot be trusted" "$case_dir/stderr" \
+    "herdr-untrustworthy-account-id: the refusal did not name the untrustworthy account id"
+  assert_grep "can still create entries inside it" "$case_dir/stderr" \
+    "herdr-untrustworthy-account-id: the refusal did not name the contradicting evidence"
+  assert_grep "no later attempt will clear it" "$case_dir/stderr" \
+    "herdr-untrustworthy-account-id: the refusal did not say that retrying cannot help"
+  if grep -qE "remove that directory|have uid" "$case_dir/stderr"; then
+    fail "herdr-untrustworthy-account-id: the unclearable foreign-owner remedy was printed for a namespace this account created: $(cat "$case_dir/stderr")"
+  fi
+  if grep -q "rerun teardown once the session is reachable" "$case_dir/stderr"; then
+    fail "herdr-untrustworthy-account-id: the refusal blamed the session instead of the namespace"
+  fi
+  pass "herdr teardown diagnoses an untrustworthy account id through the real refusal ordering"
 }
 
 # A namespace this account cannot create is just as permanent as one another
@@ -2827,6 +2886,7 @@ test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_teardown_diagnoses_a_foreign_owned_lock_namespace
+test_herdr_teardown_diagnoses_an_untrustworthy_account_id
 test_herdr_teardown_diagnoses_an_uncreatable_lock_namespace
 test_herdr_teardown_ignores_an_inherited_account_id
 test_herdr_teardown_ignores_another_accounts_lock_namespace
