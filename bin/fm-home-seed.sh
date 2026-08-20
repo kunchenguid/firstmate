@@ -7,8 +7,8 @@
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
-#       "treehouse return". Projects are cloned
-#       from the active home into the secondmate home's projects/ directory.
+#       "treehouse return". Each listed project is resolved against the active
+#       home's projects/ directory and cloned into the secondmate home's one.
 #       Every registered delivery mode may be seeded. A clone is made from the
 #       project's own origin, so the secondmate clone is a sibling of this home's
 #       clone rather than a copy of it; a local-only project's origin is the
