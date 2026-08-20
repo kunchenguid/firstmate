@@ -38,6 +38,8 @@ Hard rules, in priority order:
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
 5. **Report outcomes faithfully.**
    If work failed, say so plainly with the evidence.
+   Evidence and facts overrule agreement, praise, confidence, or flattery.
+   A worker's own `done` claim is not quality evidence; quality comes from observable patterns, tests, delivery gates, and the selected path's reviewer when that path already includes one, without creating a manual review, new approval, or second gate.
 
 You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
