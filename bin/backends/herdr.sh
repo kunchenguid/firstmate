@@ -778,9 +778,10 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 # a concurrent process of this account may already hold a lock inside it; every
 # refusal that appends this fragment therefore states what it did not touch
 # rather than claiming nothing changed at all.
-# A namespace that reports some other owner while this account can still create
-# entries inside it names no foreign account: the directory answers to this
-# account, so the ownership report contradicts the id this run read back for
+# A namespace that reports some other owner while it is still mode 700 and this
+# account can nonetheless create entries inside it names no foreign account: a
+# mode 700 directory admits only its owner, so the directory answers to this
+# account, the ownership report contradicts the id this run read back for
 # itself, and that is reported as an untrustworthy account id. The foreign-owner
 # remedy is never printed for it, because removing a directory this account
 # recreates identically on the next run, or becoming an account it already is,
