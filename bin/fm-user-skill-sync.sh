@@ -12,7 +12,8 @@
 # broken link, special file, malformed skill directory, unexpected root entry,
 # overlapping managed roots, or ambiguous tree refuses the whole run before any
 # mutation. Skill trees may contain directories and regular files only and must
-# include SKILL.md. Managed roots are compared by filesystem identity rather than
+# include SKILL.md. A duplicate is verified only when its tree matches the
+# retained copy in structure, bytes, and permission bits. Managed roots are compared by filesystem identity rather than
 # path spelling, so a case-insensitive volume or an aliased path cannot present
 # one directory under two ownership roles.
 #
@@ -135,8 +136,35 @@ PI="$HOME/.pi/agent/skills"
 # whole-root link to the canonical store is a supported input this run converges
 # rather than an ownership collision. GNU stat is probed before BSD stat because
 # BSD's -f prints inode fields while GNU's -f prints filesystem fields.
+if stat -c '%d:%i' / >/dev/null 2>&1; then
+  STAT_IDENTITY_FORMAT='-c'
+  STAT_IDENTITY_SPEC='%d:%i'
+  STAT_MODE_SPEC='%a %n'
+elif stat -f '%d:%i' / >/dev/null 2>&1; then
+  STAT_IDENTITY_FORMAT='-f'
+  STAT_IDENTITY_SPEC='%d:%i'
+  STAT_MODE_SPEC='%Lp %N'
+else
+  die "stat does not report device, inode, and permission fields"
+fi
+
 path_identity() {
-  stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1" 2>/dev/null
+  stat "$STAT_IDENTITY_FORMAT" "$STAT_IDENTITY_SPEC" "$1" 2>/dev/null
+}
+
+# Identity of a path and of every existing ancestor above it, so containment is
+# answered from one precomputed chain instead of re-walking per comparison.
+path_identity_chain() {
+  local probe=$1 id
+  while :; do
+    if [ -e "$probe" ] || [ -L "$probe" ]; then
+      id=$(path_identity "$probe") || id=
+      [ -z "$id" ] || printf '%s\n' "$id"
+    fi
+    [ "$probe" != / ] || break
+    probe=${probe%/*}
+    [ -n "$probe" ] || probe=/
+  done
 }
 
 nearest_existing_ancestor() {
@@ -162,18 +190,21 @@ unresolved_suffix() {
   printf '\n'
 }
 
-path_contains_identity() {
-  local probe=$1 wanted=$2 id
-  while :; do
-    if [ -e "$probe" ] || [ -L "$probe" ]; then
-      id=$(path_identity "$probe") || id=
-      [ -z "$id" ] || [ "$id" != "$wanted" ] || return 0
-    fi
-    [ "$probe" != / ] || break
-    probe=${probe%/*}
-    [ -n "$probe" ] || probe=/
-  done
+chain_contains_identity() {
+  local chain=$1 wanted=$2
+  [ -n "$wanted" ] || return 1
+  case "
+$chain
+" in
+    *"
+$wanted
+"*) return 0 ;;
+  esac
   return 1
+}
+
+path_contains_identity() {
+  chain_contains_identity "$(path_identity_chain "$1")" "$2"
 }
 
 path_self_identity() {
@@ -200,32 +231,56 @@ managed_root_for_role() {
     *) die "internal error: unknown managed root role $1" ;;
   esac
 }
-for role_a in $MANAGED_ROLES; do
-  root_a=$(managed_root_for_role "$role_a")
-  self_a=$(path_self_identity "$root_a")
-  anchor_a=$(path_identity "$(nearest_existing_ancestor "$root_a")") \
-    || die "cannot resolve managed skill root ancestor: $root_a"
-  [ -n "$anchor_a" ] || die "cannot resolve managed skill root ancestor: $root_a"
-  suffix_a=$(unresolved_suffix "$root_a")
-  for role_b in $MANAGED_ROLES; do
-    [ "$role_a" != "$role_b" ] || continue
-    root_b=$(managed_root_for_role "$role_b")
-    self_b=$(path_self_identity "$root_b")
-    if [ -n "$self_a" ] && [ "$self_a" = "$self_b" ]; then
+ROLE_NAME=()
+ROLE_PATH=()
+ROLE_SELF=()
+ROLE_CHAIN=()
+ROLE_ANCHOR=()
+ROLE_SUFFIX=()
+for role in $MANAGED_ROLES; do
+  role_root=$(managed_root_for_role "$role")
+  role_anchor=$(path_identity "$(nearest_existing_ancestor "$role_root")") || role_anchor=
+  [ -n "$role_anchor" ] || die "cannot resolve managed skill root ancestor: $role_root"
+  ROLE_NAME+=("$role")
+  ROLE_PATH+=("$role_root")
+  ROLE_SELF+=("$(path_self_identity "$role_root")")
+  ROLE_CHAIN+=("$(path_identity_chain "$role_root")")
+  ROLE_ANCHOR+=("$role_anchor")
+  ROLE_SUFFIX+=("$(unresolved_suffix "$role_root")")
+done
+
+role_count=${#ROLE_NAME[@]}
+index_a=0
+while [ "$index_a" -lt "$role_count" ]; do
+  index_b=0
+  while [ "$index_b" -lt "$role_count" ]; do
+    if [ "$index_a" -eq "$index_b" ]; then
+      index_b=$((index_b + 1))
+      continue
+    fi
+    role_a=${ROLE_NAME[$index_a]}
+    role_b=${ROLE_NAME[$index_b]}
+    root_a=${ROLE_PATH[$index_a]}
+    root_b=${ROLE_PATH[$index_b]}
+    self_a=${ROLE_SELF[$index_a]}
+    if [ -n "$self_a" ] && [ "$self_a" = "${ROLE_SELF[$index_b]}" ]; then
       die "managed skill roots $role_a and $role_b are the same directory: $root_a and $root_b"
     fi
-    if [ -n "$self_a" ] && path_contains_identity "$root_b" "$self_a"; then
+    if chain_contains_identity "${ROLE_CHAIN[$index_b]}" "$self_a"; then
       die "managed skill root $role_b is nested inside $role_a: $root_b"
     fi
-    anchor_b=$(path_identity "$(nearest_existing_ancestor "$root_b")") || anchor_b=
-    if [ -n "$anchor_b" ] && [ "$anchor_a" = "$anchor_b" ]; then
-      [ "$suffix_a" != "$(unresolved_suffix "$root_b")" ] \
+    if [ "${ROLE_ANCHOR[$index_a]}" = "${ROLE_ANCHOR[$index_b]}" ]; then
+      suffix_a=${ROLE_SUFFIX[$index_a]}
+      suffix_b=${ROLE_SUFFIX[$index_b]}
+      [ "$suffix_a" != "$suffix_b" ] \
         || die "managed skill roots $role_a and $role_b resolve to the same directory: $root_a and $root_b"
-      case "$(unresolved_suffix "$root_b")" in
+      case "$suffix_b" in
         "$suffix_a"/*) die "managed skill root $role_b is nested inside $role_a: $root_b" ;;
       esac
     fi
+    index_b=$((index_b + 1))
   done
+  index_a=$((index_a + 1))
 done
 
 for parent in \
@@ -254,6 +309,27 @@ PLAN="$TMP/plan"
 : > "$INVENTORY"
 : > "$ROOT_LINKS"
 : > "$PLAN"
+
+# A verified duplicate must match the retained tree in structure, bytes, and
+# permission bits, otherwise removing it would silently drop the only copy that
+# carries an executable helper script.
+tree_mode_listing() {
+  local tree=$1
+  find -P "$tree" \( -type d -o -type f \) -exec stat "$STAT_IDENTITY_FORMAT" "$STAT_MODE_SPEC" {} + 2>/dev/null \
+    | awk -v prefix="$tree" '{
+        mode = $1
+        sub(/^[^ ]* /, "")
+        if (index($0, prefix) == 1) { $0 = substr($0, length(prefix) + 1) }
+        print mode " " $0
+      }' \
+    | LC_ALL=C sort
+}
+
+trees_equivalent() {
+  local a=$1 b=$2
+  diff -qr "$a" "$b" >/dev/null 2>&1 || return 1
+  [ "$(tree_mode_listing "$a")" = "$(tree_mode_listing "$b")" ]
+}
 
 validate_skill_tree() {
   local skill=$1 bad
@@ -363,7 +439,7 @@ while IFS= read -r name; do
   while IFS=$'\t' read -r inv_name kind path role; do
     [ "$inv_name" = "$name" ] || continue
     if [ "$kind" = real ] && [ "$path" != "$baseline" ]; then
-      diff -qr "$baseline" "$path" >/dev/null 2>&1 || die "conflicting skill trees for '$name': $baseline and $path"
+      trees_equivalent "$baseline" "$path" || die "conflicting skill trees for '$name': $baseline and $path"
     fi
   done < "$INVENTORY"
 
@@ -425,7 +501,7 @@ remove_verified_duplicate() {
     verify_link_to_canonical "$path" "$name"
   elif [ -d "$path" ]; then
     validate_skill_tree "$path"
-    diff -qr "$canonical" "$path" >/dev/null 2>&1 || die "duplicate changed after preflight: $path"
+    trees_equivalent "$canonical" "$path" || die "duplicate changed after preflight: $path"
   else
     die "duplicate changed type after preflight: $path"
   fi

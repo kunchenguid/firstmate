@@ -245,6 +245,48 @@ test_aliased_managed_roots_refuse() {
   pass "aliased managed roots that name one directory refuse before any mutation"
 }
 
+make_script_skill() {
+  local root=$1 name=$2 mode=$3
+  mkdir -p "$root/$name/scripts"
+  printf '%s\n' body > "$root/$name/SKILL.md"
+  printf '%s\n' 'echo hi' > "$root/$name/scripts/run.sh"
+  chmod "$mode" "$root/$name/scripts/run.sh"
+}
+
+test_mode_differing_duplicate_refuses() {
+  local home out second
+  home=$(new_home)
+  make_script_skill "$home/.agents/skills" alpha 644
+  make_script_skill "$home/.pi/agent/skills" alpha 755
+
+  out=$(expect_failure "$home" "mode-differing duplicate" --apply)
+
+  assert_contains "$out" "conflicting skill trees" "mode-difference refusal lacked diagnosis"
+  [ -x "$home/.pi/agent/skills/alpha/scripts/run.sh" ] \
+    || fail "executable duplicate was removed despite differing from the canonical copy"
+  [ ! -x "$home/.agents/skills/alpha/scripts/run.sh" ] || fail "canonical script mode changed"
+
+  chmod 644 "$home/.pi/agent/skills/alpha/scripts/run.sh"
+  second=$(run_sync "$home" --apply)
+  [ ! -e "$home/.pi/agent/skills/alpha" ] || fail "mode-identical duplicate was not removed"
+  assert_contains "$second" "user skills converged" "mode-identical duplicate did not converge"
+  pass "duplicate removal proves permission bits as well as bytes"
+}
+
+test_executable_skill_script_survives_migration() {
+  local home
+  home=$(new_home)
+  make_script_skill "$home/.gemini/skills" alpha 755
+
+  run_sync "$home" --apply >/dev/null
+
+  [ -x "$home/.agents/skills/alpha/scripts/run.sh" ] \
+    || fail "migration dropped the executable bit on a skill script"
+  [ -x "$home/.claude/skills/alpha/scripts/run.sh" ] \
+    || fail "executable script is not executable through the Claude link"
+  pass "migration preserves executable skill scripts"
+}
+
 test_remote_routes_through_registered_home() {
   local home fakebin argv encoded decoded home_encoded remote_home
   home=$(new_home)
@@ -287,4 +329,6 @@ test_safe_whole_root_links_converge
 test_codex_relative_link_resolves_in_isolated_home
 test_colliding_managed_roots_refuse
 test_aliased_managed_roots_refuse
+test_mode_differing_duplicate_refuses
+test_executable_skill_script_survives_migration
 test_remote_routes_through_registered_home
