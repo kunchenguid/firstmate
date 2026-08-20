@@ -317,7 +317,32 @@ if tail -n "+$((utf8_payload_boundary + 1))" "$UTF8_RESULT_THREE" \
 fi
 pass "cursor rebase recovers a rejected delta without replaying committed bytes"
 
+INTERLEAVE_HASH=$(sed -n 's/^prefix_sha256=//p' "$PARENT/state/remote-replies/interleave.cursor")
 EMPTY_PREFIX_HASH=$(sha256_file /dev/null)
+cp "$PARENT/state/remote-replies/interleave.cursor" "$TMP_ROOT/interleave-cursor.before"
+BOGUS_HASH=$(printf '%sa' "${INTERLEAVE_HASH%?}")
+set +e
+bogus_out=$(remote_env "$ADAPTER" rebase interleave "$INTERLEAVE_OFFSET" "$BOGUS_HASH" 2>&1)
+bogus_rc=$?
+set -e
+[ "$bogus_rc" -ne 0 ] || fail "rebase accepted a bogus prefix hash"
+assert_contains "$bogus_out" 'prefix hash does not match' \
+  "wrong-hash rebase did not explain the refusal"
+cmp -s "$TMP_ROOT/interleave-cursor.before" "$PARENT/state/remote-replies/interleave.cursor" \
+  || fail "wrong-hash rebase changed the cursor"
+REMOTE_LOG_SIZE=$(LC_ALL=C wc -c < "$REMOTE_INTERLEAVE/state/parent-replies.status" | tr -d ' ')
+PAST_END=$((REMOTE_LOG_SIZE + 10))
+set +e
+past_out=$(remote_env "$ADAPTER" rebase interleave "$PAST_END" "$EMPTY_PREFIX_HASH" 2>&1)
+past_rc=$?
+set -e
+[ "$past_rc" -ne 0 ] || fail "rebase accepted an offset past the remote log end"
+assert_contains "$past_out" 'prefix could not be validated' \
+  "past-end rebase did not explain the refusal"
+cmp -s "$TMP_ROOT/interleave-cursor.before" "$PARENT/state/remote-replies/interleave.cursor" \
+  || fail "past-end rebase changed the cursor"
+pass "rebase refuses wrong-hash and past-end offsets without moving the cursor"
+
 remote_env "$ADAPTER" rebase interleave 0 "$EMPTY_PREFIX_HASH" >/dev/null \
   || fail "cursor rebase to offset zero was rejected"
 assert_grep 'offset=0' "$PARENT/state/remote-replies/interleave.cursor" \
