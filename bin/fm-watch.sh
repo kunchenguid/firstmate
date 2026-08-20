@@ -325,6 +325,31 @@ recorded_windows() {
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
+# start_wedge_timer: open a wedge window on <window> and take that window's
+# progress baseline in the SAME poll.
+#
+# The timer and the measurement must share an origin. Starting the timer here and
+# leaving the first probe to the next poll means the earliest reading that can
+# exist when the timer fires is "unknown baseline-recorded" - the ABSENCE of a
+# measurement, which every caller correctly refuses to read as progress - so the
+# pane escalates on a reading nobody ever took. At production cadences the gap is
+# one 15s poll inside a 240s timer and never decides anything; whenever a single
+# poll cycle outlives the whole wedge window - a contended host, a tight test
+# cadence - it consumes the entire budget and the escalation is settled before any
+# measurement was possible. Baselining here is what makes bin/fm-progress-lib.sh's
+# FM_PROGRESS_MIN_SPAN_SECS contract true: a baseline taken when the wedge timer
+# starts is already mature when that timer fires.
+#
+# The probe's verdict is deliberately discarded. A key with no baseline has
+# nothing to compare against, so this first call can only record one; it is
+# logged for triage and never acted on.
+start_wedge_timer() {  # <window> <since-file>
+  local win=$1 since_file=$2 verdict
+  verdict=$(window_progress "$win" "$FM_PROGRESS_MIN_SPAN_SECS")
+  date +%s > "$since_file"
+  triage_log "wedge timer started (progress baseline: $verdict): $win"
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -1316,7 +1341,7 @@ EOF
               working)
                 clear_pause_tracking "$w"
                 printf '%s' "$h" > "$sf"
-                date +%s > "$ssf"
+                start_wedge_timer "$w" "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)

@@ -79,7 +79,10 @@ FM_PROGRESS_LIB_VERSION=v1
 # below FM_STALE_ESCALATE_SECS (240) so a baseline taken when the wedge timer
 # starts is already mature when that timer fires, and high enough that "minutes
 # apart" is literally true - a short span cannot distinguish a wedge from the gap
-# between two tool calls.
+# between two tool calls. "Taken when the wedge timer starts" is a property of the
+# CALLER, not of this number: bin/fm-watch.sh's start_wedge_timer owns it, and
+# without it the first reading available when the timer fires is the absence of
+# one, whatever this span is set to.
 FM_PROGRESS_MIN_SPAN_SECS=${FM_PROGRESS_MIN_SPAN_SECS:-180}
 # Sustained absence of both signals before a busy pane may be called stalled on
 # its own - the NEW alarm, so it buys confidence with a much longer window than
