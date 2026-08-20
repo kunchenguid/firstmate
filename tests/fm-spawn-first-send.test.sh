@@ -33,6 +33,10 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-first-send)
 # delivered line of the form `touch <path>` is then executed for real, which is
 # the only way the readiness marker can ever appear - and, exactly like a real
 # shell, a head-truncated form is not that shape and creates nothing.
+#
+# FM_FAKE_SEND_FAIL_STATUS models the other failure mode: a send channel that
+# reports the given exit status and delivers nothing at all, which is what a
+# closed or renumbered pane looks like to the adapters.
 make_lossy_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -73,11 +77,17 @@ case "${1:-}" in
       exit 0
     fi
     if [ "${#args[@]}" -eq 1 ]; then
-      # A bare key: the gate's retry pre-clear C-c, or the launch submit.
+      # A bare key: the gate's retry pre-clear Enter, or the launch submit.
       printf 'key %s\n' "${args[0]}" >> "${FM_FAKE_DELIVERED:?}"
       exit 0
     fi
     text=${args[0]}
+    if [ -n "${FM_FAKE_SEND_FAIL_STATUS:-}" ]; then
+      # A send channel that reports failure and delivers nothing. The attempt is
+      # still recorded so a case can count how many the caller made.
+      printf 'send-failed %s\n' "$FM_FAKE_SEND_FAIL_STATUS" >> "${FM_FAKE_DELIVERED:?}"
+      exit "$FM_FAKE_SEND_FAIL_STATUS"
+    fi
     countfile="${FM_FAKE_DELIVERY_COUNTFILE:?FM_FAKE_DELIVERY_COUNTFILE unset}"
     seenfile="$countfile.post-treehouse"
     n=0
@@ -289,10 +299,13 @@ test_unready_shell_fails_loudly() {
   assert_not_contains "$out" "spawned $id" "spawn reported success despite an unready shell"
   assert_only_probes_delivered \
     "a task command reached the pane after the readiness gate had given up"
-  # Each resend must be able to escape a continuation prompt a partial line left
-  # behind. A bare Enter cannot; C-c can, which is why the pre-clear is a C-c.
-  [ "$(delivered_line_count 'key C-c')" -ge 1 ] \
-    || fail "the gate's resends never cleared the input line, so a stranded continuation prompt would swallow every later probe"
+  # Each resend flushes whatever a prior attempt left half-typed, so it cannot be
+  # concatenated onto the next probe. It must be a bare Enter and never an
+  # interrupt: the pane may still be running productive work at this point.
+  [ "$(delivered_line_count 'key Enter')" -ge 1 ] \
+    || fail "the gate's resends never flushed the input line, so a half-typed probe would be concatenated onto the next one"
+  [ "$(delivered_line_count 'key C-c')" = 0 ] \
+    || fail "the gate sent an interrupt into the pane, which can signal foreground work such as treehouse get"
   pass "an unready pane shell refuses the spawn loudly instead of sending into it"
 }
 
@@ -317,8 +330,13 @@ test_healthy_shell_pays_one_probe_per_gate() {
     touch\ /*) : ;;
     *) fail "the readiness probe did not precede the first task command (first delivery: '$first_line')" ;;
   esac
-  [ "$(delivered_line_count 'key C-c')" = 0 ] \
-    || fail "a healthy shell should never pay the gate's retry pre-clear C-c"
+  # The count the case name claims, pinned exactly. The fake shell creates the
+  # marker synchronously inside the send, so a healthy gate's very next marker
+  # check succeeds and each of the two gates owes exactly one probe. A regression
+  # that re-probed on the next stride before checking would slide under the 8s
+  # bound and leave every other assertion here true.
+  [ "$(delivered_prefix_count 'touch ')" = 2 ] \
+    || fail "a healthy spawn sent $(delivered_prefix_count 'touch ') readiness probes, not one per gate"
   [ "$(delivered_line_count 'key Enter')" = 1 ] \
     || fail "a healthy spawn should send exactly one bare Enter, the launch submit"
   [ "$elapsed" -le 8 ] || fail "a healthy spawn took ${elapsed}s - the gate is charging retries it should not need"
@@ -358,6 +376,59 @@ test_probe_scratch_is_cleaned_up() {
   [ "$(count_probe_scratch)" = 0 ] \
     || fail "readiness probe scratch survived a refused spawn ($(count_probe_scratch) left in $CASE_TMP)"
   pass "readiness probe scratch is removed on both the success and refusal paths"
+}
+
+# A send channel that reports failure is not a pane refusing to answer, and the
+# refusal has to say so. Before the gate existed, a non-zero send aborted the
+# spawn at once under set -eu; swallowing the status would instead spend the whole
+# poll budget and then blame the pane's shell for a probe that never left the box.
+test_broken_send_channel_refuses_on_the_channel_not_the_pane() {
+  local rec id out status start end elapsed
+  id=first-send-dead-channel-k1
+  rec=$(make_case dead-channel "$id")
+  read_case "$rec"
+
+  start=$(date +%s)
+  out=$(run_spawn "$id" 1 0 FM_FAKE_SEND_FAIL_STATUS=1)
+  status=$?
+  end=$(date +%s)
+  elapsed=$((end - start))
+  [ "$status" -ne 0 ] || fail "a send channel that delivered no probe at all still spawned"
+  assert_contains "$out" "send path is broken, not its shell" \
+    "the refusal did not attribute the failure to the send channel"
+  assert_not_contains "$out" "never confirmed it can read a command line" \
+    "a send-channel failure was reported with the pane-shell timeout message"
+  assert_not_contains "$out" "spawned $id" "spawn reported success despite a dead send channel"
+  # One bounded retry, then refuse - not the whole poll budget. run_spawn's
+  # 300 polls at 0.05s would be 15s if the status were swallowed.
+  [ "$(delivered_line_count 'send-failed 1')" = 2 ] \
+    || fail "the gate made $(delivered_line_count 'send-failed 1') probe attempts, not one bounded retry"
+  [ "$elapsed" -le 8 ] \
+    || fail "a dead send channel cost ${elapsed}s - the gate spent its poll budget instead of refusing on the send error"
+  pass "a failing send channel refuses promptly and names the channel, not the pane"
+}
+
+# Status 2 is the adapters' distinct "input could not be cleared" verdict, which
+# fm-spawn already treats as terminal at the TRACEPARENT send site. It must not be
+# collapsed into the retryable case: a pane whose input cannot be cleared would
+# concatenate the probe onto whatever is already on the line.
+test_uncleared_probe_input_is_terminal() {
+  local rec id out status
+  id=first-send-uncleared-m2
+  rec=$(make_case uncleared "$id")
+  read_case "$rec"
+
+  out=$(run_spawn "$id" 1 0 FM_FAKE_SEND_FAIL_STATUS=2)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an uncleared-input send failure still spawned"
+  assert_contains "$out" "probe input could not be cleared" \
+    "the refusal did not name the uncleared input as the cause"
+  assert_not_contains "$out" "never confirmed it can read a command line" \
+    "an uncleared-input failure was reported with the pane-shell timeout message"
+  assert_not_contains "$out" "spawned $id" "spawn reported success despite uncleared pane input"
+  [ "$(delivered_line_count 'send-failed 2')" = 1 ] \
+    || fail "an uncleared-input failure was retried $(delivered_line_count 'send-failed 2') times instead of being terminal on sight"
+  pass "an uncleared-input send failure is terminal on sight rather than retried"
 }
 
 # The probe root is derived from an INHERITED TMPDIR, so a TMPDIR that cannot
@@ -430,6 +501,8 @@ test_second_gate_protects_the_launch_environment
 test_unready_shell_fails_loudly
 test_healthy_shell_pays_one_probe_per_gate
 test_misconfigured_budget_knob_falls_back_to_its_default
+test_broken_send_channel_refuses_on_the_channel_not_the_pane
+test_uncleared_probe_input_is_terminal
 test_unusable_tmpdir_falls_back_instead_of_refusing
 test_fixture_bypass_is_explicit
 test_probe_scratch_is_cleaned_up

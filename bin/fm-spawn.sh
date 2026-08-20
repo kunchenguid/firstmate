@@ -151,7 +151,12 @@
 #   shell in a quote continuation. The probe directory is created under TMPDIR
 #   when that yields a plain absolute marker path, and otherwise under the same
 #   fixed /tmp root TASK_TMP uses, with one stderr notice; only a /tmp that also
-#   cannot yield a plain path refuses the spawn.
+#   cannot yield a plain path refuses the spawn. A probe the backend cannot even
+#   deliver refuses on the SEND CHANNEL rather than spending the poll budget and
+#   blaming the pane: a cleared-input failure is terminal on sight, and any other
+#   send failure gets one bounded retry before the endpoint is named. The gate
+#   never sends an interrupt, so it cannot signal work already running in the
+#   pane.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -2214,16 +2219,18 @@ spawn_ready_cleanup() {
 }
 
 # spawn_ready_probe_dir <root>: mktemp one probe directory under <root> and echo
-# it, or return non-zero when that root cannot yield a marker path the probe line
-# can carry unquoted. Separate from the caller so the preferred root and the
-# known-safe fallback root run the exact same validation.
+# it. Separate from the caller so the preferred root and the known-safe fallback
+# root run the exact same validation. The two failure modes are distinct causes
+# an operator has to act on differently, so they get distinct statuses: 1 means
+# mktemp itself could not create a directory there (missing, read-only, full),
+# 2 means the path it produced cannot be carried by an unquoted probe line.
 spawn_ready_probe_dir() {  # <root>
   local dir
   dir=$(mktemp -d "$1/fm-spawn-ready.XXXXXX") || return 1
   case "$dir/ready" in
     [!/]*|*[!A-Za-z0-9._/+:@-]*)
       rm -rf "$dir" 2>/dev/null || true
-      return 1
+      return 2
       ;;
   esac
   printf '%s\n' "$dir"
@@ -2231,6 +2238,7 @@ spawn_ready_probe_dir() {  # <root>
 
 spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
   local target=$1 about=$2 marker polls interval resend_every root i=0 sends=0
+  local probe_rc=0 send_status=0 send_failures=0
   [ "${FM_SPAWN_READY_BYPASS:-}" != 1 ] || return 0
   polls=${FM_SPAWN_READY_POLLS:-300}
   interval=${FM_SPAWN_READY_INTERVAL:-0.1}
@@ -2258,28 +2266,68 @@ spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
   # TASK_TMP already uses rather than failing a spawn over the caller's
   # environment. Only a /tmp that also cannot yield a plain path refuses.
   root=${TMPDIR:-/tmp}
-  SPAWN_READY_DIR=$(spawn_ready_probe_dir "$root") || SPAWN_READY_DIR=
-  if [ -z "$SPAWN_READY_DIR" ] && [ "$root" != /tmp ]; then
-    echo "notice: shell-readiness probe root $root cannot yield a plain absolute marker path; falling back to /tmp for task $ID" >&2
-    SPAWN_READY_DIR=$(spawn_ready_probe_dir /tmp) || SPAWN_READY_DIR=
+  SPAWN_READY_DIR=$(spawn_ready_probe_dir "$root") || probe_rc=$?
+  if [ "$probe_rc" -ne 0 ] && [ "$root" != /tmp ]; then
+    if [ "$probe_rc" -eq 2 ]; then
+      echo "notice: shell-readiness probe root $root cannot yield a plain absolute marker path; falling back to /tmp for task $ID" >&2
+    else
+      echo "notice: shell-readiness probe root $root does not accept a temp directory; falling back to /tmp for task $ID" >&2
+    fi
+    probe_rc=0
+    SPAWN_READY_DIR=$(spawn_ready_probe_dir /tmp) || probe_rc=$?
   fi
-  if [ -z "$SPAWN_READY_DIR" ]; then
-    echo "error: no shell-readiness probe directory for task $ID: /tmp yielded no plain absolute marker path, so the probe line cannot be sent without shell quoting" >&2
+  if [ "$probe_rc" -ne 0 ] || [ -z "$SPAWN_READY_DIR" ]; then
+    if [ "$probe_rc" -eq 2 ]; then
+      echo "error: no shell-readiness probe directory for task $ID: /tmp yields no plain absolute marker path, so the probe line cannot be sent without shell quoting" >&2
+    else
+      echo "error: no shell-readiness probe directory for task $ID: mktemp could not create one under /tmp - check that it exists, is writable, and has free space" >&2
+    fi
     return 1
   fi
   marker="$SPAWN_READY_DIR/ready"
   while [ "$i" -lt "$polls" ]; do
     if [ $((i % resend_every)) -eq 0 ]; then
-      # Every resend after the first clears the input line with C-c first, so a
-      # prior attempt left half-typed - or any continuation state a partial line
-      # produced - is discarded instead of being concatenated onto this one. A
-      # bare Enter cannot escape a continuation prompt, C-c can. The tradeoff is
-      # that C-c can interrupt rc sourcing, which is acceptable only because a
-      # resend means the shell already failed to answer a whole probe window. A
-      # healthy first probe never pays it.
-      [ "$sends" -eq 0 ] || spawn_send_key "$target" C-c || true
-      spawn_send_text_line "$target" "touch $marker" || true
+      # Every resend after the first submits a bare Enter, so a prior attempt
+      # left half-typed on the input line is flushed as its own failing command
+      # instead of being concatenated onto this one. A healthy first probe never
+      # pays it.
+      #
+      # Deliberately NOT C-c, even though a bare Enter cannot escape a PS2
+      # continuation. The probe line is unquoted and metacharacter-free, so no
+      # truncation of the gate's OWN line can produce a continuation, which was
+      # C-c's only justification. Against that, C-c is a real SIGINT to whatever
+      # holds the pane's foreground: `treehouse get` can still be running at the
+      # second gate, because the settle loop below accepts a transiently settled
+      # non-project path before the shell catches up with its cd, and a relaunch
+      # endpoint is only required to be agent-free, not idle at a prompt.
+      # Interrupting either would let this gate pass over a half-created
+      # worktree - worse than the silent corruption it exists to prevent.
+      # Accepted residual: a genuinely partial line from some other cause can
+      # leave continuation state a bare Enter cannot clear. That rare liveness
+      # edge is traded away rather than risk signalling productive work, and the
+      # bounded budget still turns it into a loud refusal, never a corrupt spawn.
+      [ "$sends" -eq 0 ] || spawn_send_key "$target" Enter || true
+      send_status=0
+      spawn_send_text_line "$target" "touch $marker" || send_status=$?
       sends=$((sends + 1))
+      # A send channel that reports failure is not a pane that will not answer,
+      # and burning the whole budget would report the wrong cause. Status 2 is
+      # the adapters' distinct "input could not be cleared" verdict, terminal on
+      # sight exactly as at the TRACEPARENT send site. Any other failure gets one
+      # bounded retry on the next stride, then refuses naming the channel.
+      if [ "$send_status" -ne 0 ]; then
+        send_failures=$((send_failures + 1))
+        if [ "$send_status" -eq 2 ]; then
+          spawn_ready_cleanup
+          echo "error: shell-readiness probe input could not be cleared on $target for task $ID; refusing to send '$about'" >&2
+          return 1
+        fi
+        if [ "$send_failures" -ge 2 ]; then
+          spawn_ready_cleanup
+          echo "error: the send channel for task $ID's endpoint $target failed the shell-readiness probe $send_failures times (last status $send_status), so no probe reached the pane; refusing to send '$about' - the endpoint's send path is broken, not its shell" >&2
+          return 1
+        fi
+      fi
     fi
     if [ -e "$marker" ]; then
       spawn_ready_cleanup
