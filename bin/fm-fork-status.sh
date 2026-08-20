@@ -9,13 +9,14 @@
 # commits have no equivalent upstream patch. The tracked fork-divergences.json
 # manifest supplies meaning: the canonical topic patches the fork intends to
 # carry, their class, upstream review disposition, retirement condition, paths,
-# and integration merges. That review is a pull request or an issue; the record
-# is still spelled upstream_pr for the reason docs/fork-main.md gives. A raw non-upstream commit outside those topics is a visible
-# signal, not automatically a carried divergence or a health failure. Descendant
-# validation fixes and manifest-only governance commits are attributed as
-# integration artifacts. retired_upstream records add the one equivalence fact
-# Git can no longer recompute after an integration merge, and every one of them
-# is re-proved here before its patch leaves the factual non-upstream count.
+# and integration merges. docs/fork-main.md owns the accepted review-route and
+# legacy `upstream_pr` naming contracts. A raw non-upstream commit outside those
+# topics is a visible signal, not automatically a carried divergence or a health
+# failure. Descendant validation fixes and manifest-only governance commits are
+# attributed as integration artifacts. retired_upstream records add the one
+# equivalence fact Git can no longer recompute after an integration merge, and
+# every one of them is re-proved here before its patch leaves the factual
+# non-upstream count.
 #
 # --refresh fetches origin and upstream and verifies recorded GitHub upstream
 # review dispositions with gh-axi, asking whichever endpoint the recorded URL
@@ -122,9 +123,7 @@ git -C "$REPO" ls-files --error-unmatch -- "$MANIFEST_REL" >/dev/null 2>&1 \
 command -v jq >/dev/null 2>&1 || die "jq is required"
 
 if ! jq -e --arg upstream_route_pattern "$(fm_fork_upstream_route_pattern)" '
-  # A divergence names its upstream route in one of exactly two accepted forms:
-  # a GitHub pull request, or a GitHub issue stating the problem before any pull
-  # request exists. Nothing else counts as a route.
+  # docs/fork-main.md owns the accepted upstream-route forms.
   def upstream_route_url: type == "string" and test($upstream_route_pattern);
   .schema == "firstmate.fork-divergences.v1" and
   (.upstream_syncs | type == "array" and length <= 20) and

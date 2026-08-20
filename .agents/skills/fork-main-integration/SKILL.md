@@ -60,7 +60,7 @@ Use a falsifiable statement such as "Upstream ships equivalent endpoint identity
 
 ## Upstream review disposition
 
-A pending divergence whose upstream review ends without acceptance must not remain pending, whether that review was a pull request that closed unmerged or an issue closed without action.
+A pending divergence whose upstream review ends without acceptance must not remain pending, whether that review was a pull request closed unmerged or an issue closed as not planned or duplicate.
 Choose one of two outcomes in the next validated fork integration:
 
 - Reclassify it to `rejected-but-retained` through `bin/fm-fork-topic.sh disposition` because current evidence still justifies the behavior.

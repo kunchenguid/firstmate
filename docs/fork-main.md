@@ -163,11 +163,8 @@ The ordinary no-mistakes upstream registration still opens a pull request in its
 It records a decision never to propose, so classifying an intended-but-unraised divergence as private would assert an intent the fork does not hold, and the manifest is later read as though it were true.
 An otherwise integration-ready divergence the fork means to raise is registered once its issue exists, which is the order the contribution model asks for anyway.
 
-The field is named `upstream_pr` and the flag is named `--pr-url`, and both now also carry issues.
-That naming is inaccurate and known to be so.
-Correcting it means rewriting the existing entries in [`fork-divergences.json`](../fork-divergences.json), and `bin/fm-fork-topic.sh` refuses any divergence topic that edits that manifest, so the rename cannot travel with the change that widened the field.
-It is worth its own change, which would move the data and the name together.
-Until then, read `upstream_pr` as "the upstream review" and trust the URL rather than the key.
+The legacy field `upstream_pr` and flag `--pr-url` now carry either route.
+Renaming them requires a coordinated [`fork-divergences.json`](../fork-divergences.json) migration, so read both as the upstream review route and trust the URL rather than the legacy name.
 
 An upstream-sync record keeps the pre-merge fork SHA, previous and incoming upstream SHA, date, touched divergence IDs, and an optional validation pull-request URL.
 Counts are derived from Git rather than copied into the manifest.
@@ -192,6 +189,10 @@ bin/fm-fork-status.sh
 
 Add `--refresh` to fetch both remotes and compare recorded GitHub upstream review dispositions through `gh-axi`.
 Refresh fails closed when live disposition evidence is incomplete or its response shape is unsupported.
+For an issue route, refresh maps an open issue to `open`, a `completed` closure to `merged`, and a `not_planned` or `duplicate` closure to `closed`.
+Any other or missing issue closure reason is incomplete evidence and makes refresh unhealthy.
+A stored `rejected` disposition is fresh when the corresponding live result is `closed`.
+These live labels check manifest freshness only; `merged` does not retire a patch without the independent Git proof described below.
 Add `--json` for schema `firstmate.fork-health.v1`.
 
 The report uses `git cherry upstream/main origin/main` for one fact only: which commits have no equivalent upstream patch.
@@ -303,7 +304,7 @@ After the fork pull request lands, `/updatefirstmate` performs only safe fast-fo
 Upstream review is evidence, not the local shipping gate.
 A change enters use only after its topic validation, fork merge candidate validation, green fork CI, captain-approved fork pull request, and safe fleet update.
 
-If upstream rejects a useful running change, whether by closing its pull request unmerged or closing its issue without action, reclassify it from `pending` to `rejected-but-retained` in the next validated fork integration through the supported interface:
+If upstream rejects a useful running change, whether by closing its pull request unmerged or closing its issue as `not_planned` or `duplicate`, reclassify it from `pending` to `rejected-but-retained` in the next validated fork integration through the supported interface:
 
 ```sh
 bin/fm-fork-topic.sh disposition \

@@ -14,18 +14,8 @@
 #   fm-fork-topic.sh discard --id <id> [--repo <isolated-worktree>]
 #   fm-fork-topic.sh continue --decisions <json> [--repo <isolated-worktree>]
 #
-# A non-private divergence must name one real upstream route, and the accepted
-# forms are exactly two: a GitHub pull request, or a GitHub issue raised to state
-# the problem before any pull request exists. An absent or malformed route stays
-# refused, because that refusal is what stops a divergence being registered with
-# no upstream story at all. Only `private` carries no route, and `private` means
-# the fork decided never to propose it.
-#
-# The record is still spelled `upstream_pr`, and `--pr-url` still names the flag,
-# although either may now hold an issue. Renaming them needs the existing entries
-# in fork-divergences.json rewritten, and a divergence topic is forbidden to edit
-# that manifest, so the rename cannot travel with this change. The name is known
-# to be inaccurate rather than silently wrong; docs/fork-main.md records it.
+# docs/fork-main.md owns the upstream-route requirement, class meanings, and the
+# legacy `upstream_pr` and `--pr-url` naming caveat.
 #
 # integrate requires a clean named candidate branch at fetched origin/main and a
 # canonical topic whose `git cherry upstream/main <topic>` result contains
