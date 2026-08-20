@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Decision</title>
+<!--
+  Script and styling are separate files on purpose. The service sends a
+  content-security-policy without 'unsafe-inline', so an inline <script> block
+  here is blocked and the page renders its heading and nothing else - the exact
+  "Mini App does not load" the prototype produced on the captain's phone.
+-->
+<link rel="stylesheet" href="style.css">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="app.js" defer></script>
+<main id="app">
+  <h1 id="question">Loading...</h1>
+  <div id="options"></div>
+  <p id="status"></p>
+</main>

@@ -1,0 +1,22 @@
+# Telegram Mini App decision surface.
+#
+# Rendered and installed by bin/fm-miniapp-deploy.sh, which substitutes
+# __ADDRESS__ and __UPSTREAM__ from local configuration. The template carries no
+# hostname and no port, so no installation's concrete address ends up in shared
+# material.
+#
+# This block is deliberately three lines, and each omission is load-bearing:
+#
+#   - No basic_auth. The access control here is the initData signature check;
+#     Telegram's built-in web view cannot serve a password prompt, and a block
+#     copied from a neighbour brings one along. That is one of the ways this
+#     page shows up as "does not load".
+#   - No path list. Enumerating /, /app.js and /answer means the next route the
+#     service grows 404s until someone remembers this file. Pass everything
+#     through instead.
+#   - No content-security-policy here. The service sends its own; a second one
+#     applies on top and the stricter of the two wins, which blocks the page's
+#     script exactly as an inline <script> block would.
+__ADDRESS__ {
+	reverse_proxy __UPSTREAM__
+}

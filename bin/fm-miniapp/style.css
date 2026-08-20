@@ -1,0 +1,60 @@
+/* Telegram supplies its theme as CSS variables on the document element, so the
+   page follows the captain's own light or dark setting instead of fighting it.
+   The fallbacks are what a normal browser sees. */
+:root {
+  --bg: var(--tg-theme-bg-color, #ffffff);
+  --fg: var(--tg-theme-text-color, #1a1a1a);
+  --muted: var(--tg-theme-hint-color, #707579);
+  --button-bg: var(--tg-theme-button-color, #2481cc);
+  --button-fg: var(--tg-theme-button-text-color, #ffffff);
+}
+
+body {
+  margin: 0;
+  padding: 1.5rem 1.25rem calc(1.5rem + env(safe-area-inset-bottom));
+  background: var(--bg);
+  color: var(--fg);
+  font: 17px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+h1 {
+  margin: 0 0 1.25rem;
+  font-size: 1.15rem;
+  font-weight: 600;
+  white-space: pre-wrap;
+}
+
+button {
+  display: block;
+  width: 100%;
+  margin: 0 0 0.6rem;
+  padding: 0.85rem 1rem;
+  border: 0;
+  border-radius: 10px;
+  background: var(--button-bg);
+  color: var(--button-fg);
+  font: inherit;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+#status {
+  margin: 1.25rem 0 0;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+#status.ok {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+#status.error {
+  color: var(--tg-theme-destructive-text-color, #d1453b);
+}
