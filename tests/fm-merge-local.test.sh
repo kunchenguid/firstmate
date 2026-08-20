@@ -10,6 +10,11 @@
 # Every refusal here has to leave the origin folder byte-identical, so each
 # refusing case asserts the folder's own commit and its uncommitted work
 # afterwards rather than only the exit status.
+#
+# The landing classifies its origin through bin/fm-project-origin-lib.sh, so a
+# change to that library is a change to what this suite covers: it decides which
+# origins name a folder on this machine and which spellings have to be anchored
+# against the clone before anyone follows them.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -315,6 +320,109 @@ EOF
   pass "the local landing path still refuses any task that is not local-only"
 }
 
+test_landing_refuses_a_gitignored_file_it_would_overwrite() {
+  local home origin clone out before_head
+  IFS='|' read -r home origin clone <<EOF
+$(make_landing ignored)
+EOF
+  ready_branch "$home" "$clone" task-m Cover.pdf "the worker's generated cover letter"
+  # The folder ignores what its owner keeps to himself, and .git/info/exclude is
+  # never shared, so the clone can legitimately commit a path the folder ignores.
+  # git's own fast-forward overwrites such a file without a word.
+  printf '%s\n' '*.pdf' >> "$origin/.git/info/exclude"
+  printf '%s\n' "the cover letter he wrote by hand" > "$origin/Cover.pdf"
+  before_head=$(head_of "$origin")
+
+  if out=$(run_merge "$home" task-m); then
+    fail "landing overwrote a gitignored file in the origin folder: $out"
+  fi
+  case "$out" in
+    *REFUSED*"Cover.pdf"*) ;;
+    *) fail "refusal did not name the ignored path: $out" ;;
+  esac
+  [ "$(cat "$origin/Cover.pdf")" = "the cover letter he wrote by hand" ] \
+    || fail "the refused landing still overwrote the ignored file"
+  [ "$(head_of "$origin")" = "$before_head" ] || fail "the refused landing still moved the origin folder"
+  pass "landing refuses when a gitignored file sits on a path it would overwrite"
+}
+
+test_landing_allows_an_ignored_file_it_would_not_touch() {
+  local home origin clone out
+  IFS='|' read -r home origin clone <<EOF
+$(make_landing ignoredelsewhere)
+EOF
+  ready_branch "$home" "$clone" task-n Cover.tex "the cover letter"
+  # Ignored material the landing does not touch must not refuse it: the folder is
+  # always full of such files, and refusing on any of them would mean never
+  # landing at all.
+  printf '%s\n' '*.log' >> "$origin/.git/info/exclude"
+  printf '%s\n' "an export log nobody tracks" > "$origin/export.log"
+
+  out=$(run_merge "$home" task-n) || fail "landing refused over an ignored file it never touches: $out"
+  [ -f "$origin/Cover.tex" ] || fail "the landed file never reached the origin folder"
+  [ "$(cat "$origin/export.log")" = "an export log nobody tracks" ] \
+    || fail "the landing disturbed an ignored file it had no business touching"
+  pass "an ignored file outside the landing's paths does not refuse the carry"
+}
+
+test_landing_follows_an_origin_spelled_relative_to_the_clone() {
+  local home origin clone out
+  IFS='|' read -r home origin clone <<EOF
+$(make_landing relative)
+EOF
+  ready_branch "$home" "$clone" task-o Cover.tex "the cover letter"
+  # A relative origin names the same folder the clone was made from, so it must
+  # land rather than be reported as somewhere else on some other machine.
+  git -C "$clone" remote set-url origin ../../../JobSearch
+
+  out=$(run_merge "$home" task-o) || fail "landing refused a relative origin spelling: $out"
+  [ -f "$origin/Cover.tex" ] || fail "the landed file never reached the origin folder"
+  [ "$(head_of "$origin")" = "$(head_of "$clone")" ] \
+    || fail "the origin folder is not at the landed commit"
+  case "$out" in
+    *"carried main into $origin"*) ;;
+    *) fail "landing did not report the resolved origin folder: $out" ;;
+  esac
+  pass "an origin spelled relative to the clone is anchored and landed into"
+}
+
+test_landing_follows_an_origin_spelled_with_a_tilde() {
+  local home origin clone out base
+  IFS='|' read -r home origin clone <<EOF
+$(make_landing tilde)
+EOF
+  ready_branch "$home" "$clone" task-p Cover.tex "the cover letter"
+  base=$(dirname "$origin")
+  git -C "$clone" remote set-url origin '~/JobSearch'
+
+  out=$(HOME="$base" run_merge "$home" task-p) \
+    || fail "landing refused a tilde-spelled origin: $out"
+  [ -f "$origin/Cover.tex" ] || fail "the landed file never reached the origin folder"
+  [ "$(head_of "$origin")" = "$(head_of "$clone")" ] \
+    || fail "the origin folder is not at the landed commit"
+  pass "a tilde-spelled origin expands against the invoking user's home and lands"
+}
+
+test_landing_refuses_a_path_shaped_origin_it_cannot_anchor() {
+  local home origin clone out before_head
+  IFS='|' read -r home origin clone <<EOF
+$(make_landing unanchorable)
+EOF
+  ready_branch "$home" "$clone" task-q Cover.tex "the cover letter"
+  git -C "$clone" remote set-url origin ../nowhere/JobSearch
+  before_head=$(head_of "$origin")
+
+  if out=$(run_merge "$home" task-q); then
+    fail "landing accepted a path-shaped origin that names no folder: $out"
+  fi
+  case "$out" in
+    *REFUSED*"names no folder relative to"*) ;;
+    *) fail "refusal did not report the unresolvable origin spelling: $out" ;;
+  esac
+  [ "$(head_of "$origin")" = "$before_head" ] || fail "the refused landing still moved the origin folder"
+  pass "a path-shaped origin that resolves to nothing refuses instead of reporting"
+}
+
 test_landing_reaches_the_origin_folder
 test_landing_is_idempotent
 test_landing_refuses_uncommitted_work_on_a_path_it_would_change
@@ -327,3 +435,8 @@ test_landing_reports_when_the_clone_is_the_only_copy
 test_landing_reports_a_bare_origin
 test_landing_reports_a_remote_origin_url
 test_landing_still_refuses_a_task_that_is_not_local_only
+test_landing_refuses_a_gitignored_file_it_would_overwrite
+test_landing_allows_an_ignored_file_it_would_not_touch
+test_landing_follows_an_origin_spelled_relative_to_the_clone
+test_landing_follows_an_origin_spelled_with_a_tilde
+test_landing_refuses_a_path_shaped_origin_it_cannot_anchor
