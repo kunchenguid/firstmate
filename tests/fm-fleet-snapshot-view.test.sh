@@ -7,6 +7,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
+BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
 
@@ -260,6 +261,112 @@ EOF
       and (([.tasks[].id] | sort) == ["orphan-ship", "visible-ship"])
   ' >/dev/null || fail "main_inventory stayed invalid after meta + structured cleanup: $out"
   pass "main_inventory discloses orphan/unstructured and clears when inventory is consistent"
+}
+
+# The canonical snapshot hands the full parsed backlog and task inventory to its
+# main-inventory projection.  This fixture derives a payload larger than the
+# platform's exec argument limit, then verifies that the public snapshot still
+# returns every row.  It is deliberately larger than ARG_MAX rather than tied to
+# a particular fleet count, so a different host cannot turn this into a vacuous
+# small-fleet test.
+test_large_inventory_does_not_use_argv_transport() {
+  local home fakebin arg_max target_bytes row_bytes rows padding i out summary bearings count reference_out
+  home=$(make_home argv-scale)
+  arg_max=$(getconf ARG_MAX 2>/dev/null) || fail "getconf ARG_MAX is required for argv-scale regression"
+  case "$arg_max" in ''|*[!0-9]*|0) fail "getconf ARG_MAX returned an invalid value: $arg_max" ;; esac
+  target_bytes=$((arg_max + (arg_max / 4)))
+  row_bytes=4096
+  rows=$(((target_bytes + row_bytes - 1) / row_bytes))
+  padding=$(LC_ALL=C head -c "$row_bytes" /dev/zero | tr '\0' x)
+  {
+    printf '## In flight\n'
+    printf '%s\n' '- [ ] argv-scale-live - Live synthetic task (repo: alpha) (kind: ship)'
+    printf '\n## Queued\n'
+    i=0
+    while [ "$i" -lt "$rows" ]; do
+      printf '%s\n' "- [ ] argv-scale-$i - $padding (repo: alpha) (kind: ship)"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+  mkdir -p "$home/projects/argv-scale-live"
+  fm_write_meta "$home/state/argv-scale-live.meta" \
+    "window=firstmate:fm-argv-scale-live" \
+    "worktree=$home/projects/argv-scale-live" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'working: synthetic task inventory is present\n' > "$home/state/argv-scale-live.status"
+  fakebin=$(make_fakebin "$home")
+  reference_out="$home/argv-reference.out"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_TEST_ARGV_REFERENCE=1 \
+    "$SNAPSHOT" --json > "$reference_out" 2>&1; then
+    fail "ARG_MAX-derived firing input did not make the pre-fix argv owner fail"
+  fi
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot failed above ARG_MAX=$arg_max; bulk inventory still reached argv: $out"
+  count=$(printf '%s' "$out" | jq '[.backlog.records[] | select(.state == "queued")] | length')
+  [ "$count" -eq "$rows" ] \
+    || fail "large backlog was incomplete: expected $rows queued rows, got $count"
+  printf '%s' "$out" | jq -e '
+    (.tasks | map(.id)) == ["argv-scale-live"]
+      and .main_inventory.valid == true
+  ' >/dev/null || fail "large inventory snapshot contract changed: $out"
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "secondmate summary failed above ARG_MAX=$arg_max: $summary"
+  printf '%s' "$summary" | jq -e --argjson rows "$rows" '
+    .schema == "fm-secondmate-home-summary.v1"
+      and .counts.queued == $rows
+      and .counts.endpoints == 1
+  ' >/dev/null || fail "secondmate summary lost the oversized inventory: $summary"
+  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" --json --all-queued) \
+    || fail "bearings failed above ARG_MAX=$arg_max after canonical snapshot succeeded: $bearings"
+  printf '%s' "$bearings" | jq -e --argjson rows "$rows" '
+    .schema == "fm-bearings.v1"
+      and (.in_flight | map(.id)) == ["argv-scale-live"]
+      and (.gates | length) == $rows
+  ' >/dev/null || fail "bearings projection lost the oversized inventory: $bearings"
+  pass "ARG_MAX-derived input is RED on argv reference and GREEN on streamed snapshot owners"
+}
+
+# The test-only argv reference exercises the two former transport owners at a
+# deliberately small size where argv is still valid.  Both paths feed the same
+# projection, so byte equality proves that changing the transport did not change
+# either owner's serialized contract.
+test_streamed_owner_outputs_match_argv_reference_byte_for_byte() {
+  local home fakebin streamed_snapshot argv_snapshot streamed_bearings argv_bearings
+  home=$(make_home transport-equivalence)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  streamed_snapshot="$home/snapshot.streamed.json"
+  argv_snapshot="$home/snapshot.argv.json"
+  streamed_bearings="$home/bearings.streamed.json"
+  argv_bearings="$home/bearings.argv.json"
+
+  if ! PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-10T12:00:00Z \
+    "$SNAPSHOT" --json > "$streamed_snapshot"; then
+    fail "streamed canonical snapshot failed during argv equivalence control"
+  fi
+  if ! PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-10T12:00:00Z \
+    FM_SNAPSHOT_TEST_ARGV_REFERENCE=1 "$SNAPSHOT" --json > "$argv_snapshot"; then
+    fail "argv-reference canonical snapshot failed during equivalence control"
+  fi
+  cmp -s "$streamed_snapshot" "$argv_snapshot" \
+    || fail "streamed canonical snapshot differs byte-for-byte from argv reference"
+
+  if ! PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-08-10T12:00:00Z \
+    "$BEARINGS" --json > "$streamed_bearings"; then
+    fail "streamed Bearings JSON failed during argv equivalence control"
+  fi
+  if ! PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-08-10T12:00:00Z \
+    FM_SNAPSHOT_TEST_ARGV_REFERENCE=1 "$BEARINGS" --json > "$argv_bearings"; then
+    fail "argv-reference Bearings JSON failed during equivalence control"
+  fi
+  cmp -s "$streamed_bearings" "$argv_bearings" \
+    || fail "streamed Bearings JSON differs byte-for-byte from argv reference"
+
+  pass "streamed canonical snapshot and Bearings JSON match argv reference byte-for-byte"
 }
 
 test_normalized_roles_and_plural_blocker_readiness() {
@@ -782,6 +889,8 @@ test_parked_scout_decision_stays_pending() {
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
+test_large_inventory_does_not_use_argv_transport
+test_streamed_owner_outputs_match_argv_reference_byte_for_byte
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
