@@ -20,16 +20,20 @@
 #     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, and
 #     captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
 #     resolves only when its structured record is Done, and missing ids stay open.
-#   tasks[]: one row per state/<id>.meta, sorted by id.
+#   tasks[]: one row per state/<id>.meta, sorted by id, including recorded
+#     harness and model identity.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
-#     state, source, detail, and raw line separately.
+#     state, source, detail, and raw line separately. With --no-remote-probe,
+#     remote rows use their local status history and explicitly report unknown
+#     when that history does not establish current state.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
-#     endpoint.exists is the cheap backend endpoint-presence read.
+#     endpoint.exists is the cheap backend endpoint-presence read; it is unknown
+#     for remote rows when --no-remote-probe is set.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
@@ -140,11 +144,12 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 
 usage() {
   cat <<'EOF'
-usage: fm-fleet-snapshot.sh --json
+usage: fm-fleet-snapshot.sh --json [--no-remote-probe]
        fm-fleet-snapshot.sh --secondmate-home-summary
 
 Print a read-only structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract.
+--no-remote-probe keeps --json local-only and reports remote state as unknown.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -168,12 +173,19 @@ EOF
 }
 
 OUTPUT_MODE=json
-case "${1:---json}" in
-  --json) ;;
-  --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
+REMOTE_PROBE=1
+[ "$#" -gt 0 ] || set -- --json
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --json) OUTPUT_MODE=json ;;
+    --no-remote-probe) REMOTE_PROBE=0 ;;
+    --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
+[ "$OUTPUT_MODE" = json ] || [ "$REMOTE_PROBE" -eq 1 ] || { usage >&2; exit 2; }
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
 
@@ -243,6 +255,29 @@ status_event_json() {  # <status-log>
     --arg note "$note" \
     --argjson present "$(bool_json "$present")" \
     '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
+}
+
+status_current_json() {  # <status-event-json>
+  local event=$1 raw verb note state=unknown source=none detail
+  raw=$(printf '%s' "$event" | jq -r '.last_event.raw // ""')
+  verb=$(printf '%s' "$event" | jq -r '.last_event.state // ""')
+  note=$(printf '%s' "$event" | jq -r '.last_event.note // ""')
+  detail="remote live state unavailable without probe"
+  if status_is_paused "$raw"; then
+    state=paused
+    source=status-log
+    detail=$note
+  else
+    case "$verb" in
+      working) state=working; source=status-log; detail=$note ;;
+      needs-decision) state=parked; source=status-log; detail=$note ;;
+      blocked) state=blocked; source=status-log; detail=$note ;;
+      done) state='done'; source=status-log; detail=$note ;;
+      failed) state=failed; source=status-log; detail=$note ;;
+    esac
+  fi
+  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
+    '{state:$state,source:$source,detail:$detail,raw:$raw}'
 }
 
 first_pr_url_in_file() {  # <file>
@@ -401,7 +436,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind harness model mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -413,6 +448,7 @@ task_json_lines() {
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
+    model=$(meta_value "$meta" model)
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
     project=$(meta_value "$meta" project)
@@ -443,8 +479,12 @@ task_json_lines() {
       pr_source=absent
     fi
 
-    current_json=$(crew_state_json "$id")
     event_json=$(status_event_json "$status_log")
+    if [ -n "$remote_host" ] && [ "$REMOTE_PROBE" -eq 0 ]; then
+      current_json=$(status_current_json "$event_json")
+    else
+      current_json=$(crew_state_json "$id")
+    fi
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
@@ -483,24 +523,26 @@ task_json_lines() {
     endpoint_exists=null
     agent_alive=not_checked
     if [ -n "$remote_host" ]; then
-      if remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
-        "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
-        remote_rc=0
-      else
-        remote_rc=$?
-      fi
-      if [ "$remote_rc" -eq 0 ]; then
-        remote_home_present=true
-        remote_state=$(printf '%s\n' "$remote_state" | tail -1)
-        case "$remote_state" in
-          alive) endpoint_exists=true; agent_alive=alive ;;
-          dead) endpoint_exists=true; agent_alive=dead ;;
-          missing) endpoint_exists=false; agent_alive=dead ;;
-          *) endpoint_exists=null; agent_alive=unknown ;;
-        esac
-      else
-        endpoint_exists=null
-        agent_alive=unknown
+      if [ "$REMOTE_PROBE" -eq 1 ]; then
+        if remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
+          "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
+          remote_rc=0
+        else
+          remote_rc=$?
+        fi
+        if [ "$remote_rc" -eq 0 ]; then
+          remote_home_present=true
+          remote_state=$(printf '%s\n' "$remote_state" | tail -1)
+          case "$remote_state" in
+            alive) endpoint_exists=true; agent_alive=alive ;;
+            dead) endpoint_exists=true; agent_alive=dead ;;
+            missing) endpoint_exists=false; agent_alive=dead ;;
+            *) endpoint_exists=null; agent_alive=unknown ;;
+          esac
+        else
+          endpoint_exists=null
+          agent_alive=unknown
+        fi
       fi
     else
       if [ -n "$target" ]; then
@@ -532,6 +574,7 @@ task_json_lines() {
       --arg id "$id" \
       --arg kind "$kind" \
       --arg harness "$harness" \
+      --arg model "$model" \
       --arg mode "$mode" \
       --arg yolo "$yolo" \
       --arg project "$project" \
@@ -562,6 +605,7 @@ task_json_lines() {
         id:$id,
         kind:$kind,
         harness:($harness // ""),
+        model:($model // ""),
         mode:($mode // ""),
         yolo:($yolo // ""),
         project:($project // ""),
@@ -1170,7 +1214,9 @@ secondmate_current_json() {  # <parent-tasks-json>
       esac
     fi
     if [ -z "$reason" ]; then
-      if [ "$remote" = true ]; then
+      if [ "$remote" = true ] && [ "$REMOTE_PROBE" -eq 0 ]; then
+        reason="remote probe disabled"
+      elif [ "$remote" = true ]; then
         [ -n "$host" ] || reason="invalid remote route: missing SSH host"
         case " $seen_homes " in
           *" $host:$home "*) reason="invalid home: duplicate resolved remote route" ;;
