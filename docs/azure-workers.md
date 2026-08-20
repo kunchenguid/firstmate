@@ -143,6 +143,7 @@ Provider-account credentials never enter ARM parameters, controller output, logs
 
 A submitted provider action has a canonical SHA-256 idempotency key and remains in the per-slot `pending_actions` map until the exact provider result is durably applied; the map entry is a deep copy that re-derives its own key at every load, and the legacy scalar slot permanently holds a sentinel an old binary refuses rather than misreads.
 After a host restart, the same action and key are replayed.
+The compartment message lane (`message-put`/`message-collect`) is the one provider operation family outside the per-slot claim contract: bounded, content-addressed, idempotent data-plane blob transfers that touch no compute, no money, and no lifecycle state; every compute-mutating action keeps the full claim/lease/fence discipline.
 The Azure singleton deployment is incremental and receives the same task, home, assignment, and snapshot bindings, so replay converges one generation rather than creating a second assignment.
 A visible VM with another task or assignment binding refuses instead of being adopted.
 

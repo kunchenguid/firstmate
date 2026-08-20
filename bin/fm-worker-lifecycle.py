@@ -96,8 +96,16 @@ PROVIDER_STEER_TIMEOUT_SECONDS = 1800
 # that actually ran.
 PROVIDER_GUEST_RUN_SLACK_SECONDS = 8400
 MAX_PROVIDER_OUTPUT_BYTES = 2 * 1024 * 1024
+# The compartment message lane's attachment ceiling. Must equal
+# MESSAGE_ATTACH_MAX_BYTES in bin/fm-azure-worker-provider.py, which owns the
+# actual size refusal; this copy only sizes the provider subprocess deadline.
+# Kept in step by a test rather than by runtime coupling.
+MESSAGE_ATTACH_MAX_BYTES = 256 * 1024 * 1024
 # Every provider mutation type the claim contract covers. admission-refused is
 # a bare planning verdict with no idempotency key, never claimed, never sent.
+# message-put/message-collect are deliberately NOT here: the message lane is
+# the one claim-exempt provider operation family (docs/azure-workers.md), and
+# a message spec must never be storable as a pending claim.
 ACTION_TYPES = frozenset({
     "create", "resume", "deallocate", "delete-compute", "reset", "execute", "steer",
 })
@@ -658,6 +666,12 @@ def provider_action_timeout(action):
         return PROVIDER_CREATE_TIMEOUT_SECONDS
     if action.get("type") == "steer":
         return PROVIDER_STEER_TIMEOUT_SECONDS
+    message_bytes = action.get("message_bytes")
+    if isinstance(message_bytes, int) and not isinstance(message_bytes, bool) and message_bytes >= 0:
+        # Message-lane blob transfers get a bound proportional to their
+        # declared size, mirroring the provider's own per-transfer az bounds;
+        # a 256 MiB attachment cannot move inside the ordinary bound.
+        return PROVIDER_TIMEOUT_SECONDS + message_bytes // (256 * 1024)
     return PROVIDER_TIMEOUT_SECONDS
 
 
@@ -2121,6 +2135,29 @@ def parser():
     steer.add_argument("--confirm-steer", action="store_true")
     steer.add_argument("--confirm-subscription", required=True)
 
+    message_put = sub.add_parser(
+        "message-put",
+        help="deliver one bounded content-addressed message blob to the compartment session inbox",
+    )
+    message_put.add_argument("--task", required=True)
+    message_put.add_argument("--task-generation", required=True)
+    message_put.add_argument("--assignment-generation", required=True)
+    message_put.add_argument("--file", default=None, help="bounded JSON message payload")
+    message_put.add_argument("--attach", default=None, help="bounded binary attachment (child delta bundle)")
+
+    message_collect = sub.add_parser(
+        "message-collect",
+        help="fetch new compartment session outbox blobs without verification or overwrite",
+    )
+    message_collect.add_argument("--task", required=True)
+    message_collect.add_argument("--task-generation", required=True)
+    message_collect.add_argument("--assignment-generation", required=True)
+    message_collect.add_argument("--output-dir", required=True)
+    message_collect.add_argument(
+        "--after", default=None,
+        help="resume after this local outbox name (the cursor a previous summary reported)",
+    )
+
     status = sub.add_parser("status", help="show bounded local lifecycle and cost evidence")
     status.add_argument("--live", action="store_true")
     status.add_argument("--json", action="store_true")
@@ -3258,6 +3295,87 @@ def command_steer(env, args):
     print("steer request digest delivered to the exact worker generation")
 
 
+def message_lane_worker(env, args, command):
+    """Resolve the exact assigned worker for one message-lane command.
+
+    Read-only on purpose: the state is loaded under the fleet lock, checked
+    with command_execute's own identity gates (assigned status, exact
+    assignment generation, no release proof), and never saved - neither
+    message op modifies controller.json or any other lifecycle state.
+
+    Role scope: until PR 4's spawn lane creates compartments, no secondmate
+    worker exists to address, so the lane deliberately serves author-role
+    workers as well as secondmate compartments; PR 4/6 narrows the callers
+    to compartments.
+    """
+    with controller_lock(env):
+        state = load_state(env)
+        key = request_key(require_id("task", args.task), require_id("task generation", args.task_generation))
+        item = state["queue"].get(key)
+        if item is None or item.get("status") != "assigned":
+            raise LifecycleError("{} requires one exact assigned task generation".format(command))
+        worker = state["workers"].get(str(item.get("slot")))
+        if worker is None or worker.get("assignment_generation") != args.assignment_generation:
+            raise LifecycleError("{} assignment generation is not exact".format(command))
+        if worker.get("release_proof") is not None:
+            raise LifecycleError("released work cannot use the compartment message lane")
+        return {
+            "slot": worker["slot"],
+            "role": worker.get("role", "author"),
+            "cloud_generation": worker["cloud_generation"],
+            "bindings": worker["bindings"],
+        }
+
+
+def command_message_put(env, args):
+    if (args.file is None) == (args.attach is None):
+        raise LifecycleError("message-put requires exactly one of --file or --attach")
+    source = Path(args.file if args.file is not None else args.attach)
+    if source.is_symlink() or not source.is_file():
+        raise LifecycleError("message payload file is unavailable: {}".format(source))
+    message = message_lane_worker(env, args, "message-put")
+    message.update({
+        "lane": "json" if args.file is not None else "attach",
+        "file": str(source.resolve()),
+        "message_bytes": source.stat().st_size,
+    })
+    # THE ONE DELIBERATE CLAIM-EXEMPT CARVE (design R2/R3 B.1/B.9, and the
+    # doc sentence next to the claim contract in docs/azure-workers.md): no
+    # make_action, no claim_pending, no apply_pending, no slot_lease. A leg's
+    # execute claim occupies pending_actions[slot] for its whole wall and
+    # claim_pending refuses any different key on that slot, so a claimed
+    # message lane could never deliver during a leg - precisely when delivery
+    # matters. Safe only because the provider op is a bounded,
+    # content-addressed, idempotent data-plane blob write that touches no
+    # compute, no money, and no lifecycle state; idempotency comes from the
+    # content address, which is stronger than a claim for this payload class.
+    result = provider_call(env, "message-put", message)["result"]
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+
+
+def command_message_collect(env, args):
+    output_dir = Path(args.output_dir)
+    if output_dir.is_symlink() or not output_dir.is_dir():
+        raise LifecycleError("message collect output directory is unavailable: {}".format(args.output_dir))
+    message = message_lane_worker(env, args, "message-collect")
+    message.update({
+        "output_dir": str(output_dir.resolve()),
+        # The provider caps each call's downloads at its transfer budget,
+        # which equals this constant, so the subprocess deadline is sized
+        # from the bytes one call can actually fetch; already-collected
+        # history is skipped without a transfer and costs nothing here.
+        "message_bytes": MESSAGE_ATTACH_MAX_BYTES,
+    })
+    if args.after is not None:
+        message["after"] = args.after
+    # Same claim-exempt carve as message-put: read-only dumb transport,
+    # shaped like inventory. Chain verification belongs to the secondmate
+    # monitor, never here, and the provider op refuses divergent overwrites
+    # of existing local files rather than deciding anything.
+    result = provider_call(env, "message-collect", message)["result"]
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+
+
 def command_status(env, args):
     inventory = None
     if args.live:
@@ -3328,6 +3446,10 @@ def main(argv=None):
         command_resume(env, args)
     elif args.command == "steer":
         command_steer(env, args)
+    elif args.command == "message-put":
+        command_message_put(env, args)
+    elif args.command == "message-collect":
+        command_message_collect(env, args)
     elif args.command == "status":
         command_status(env, args)
     else:
