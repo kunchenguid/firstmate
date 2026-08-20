@@ -8,6 +8,10 @@ export const OUTBOUND_RECEIPT_SCHEMA: string;
 export const OUTBOUND_INTENT_SCHEMA: string;
 export const TRANSPORT_HEALTH_SCHEMA: string;
 export const DEFAULT_MAX_INBOUND_BYTES: number;
+export const DEFAULT_MAX_INBOUND_MEDIA_BYTES: number;
+export const DEFAULT_MAX_INBOUND_MESSAGE_MEDIA_BYTES: number;
+export const DEFAULT_MAX_INBOUND_ATTACHMENTS: number;
+export const DEFAULT_INBOUND_MEDIA_RETENTION_MS: number;
 export const DEFAULT_MAX_OUTBOUND_CHUNK_BYTES: number;
 export const DEFAULT_MAX_PENDING_OUTBOUND: number;
 export const IDEMPOTENCY_WINDOW_MS: number;
@@ -57,8 +61,9 @@ export interface InboundEvent {
   schema: string;
   source: "feishu";
   message_id: string;
-  message_type: "text";
-  text: string;
+  message_type: "text" | "image" | "post";
+  text?: string;
+  content?: Array<{ type: "text"; text: string } | { type: "image"; media_id: string }>;
   reply_to: string | null;
   ingress_seq: number;
   binding_id: string;
@@ -101,6 +106,8 @@ export interface StatePaths {
   inboundPendingCount: string;
   inboundDeliveryMap: string;
   inboundPublications: string;
+  inboundMedia: string;
+  inboundMediaCache: string;
   outbox: string;
   outboundLedger: string;
   outboundReceipts: string;
@@ -160,11 +167,29 @@ export function convergeConfiguredSession(home: string, input: {
 }, options?: { requireEmptyDeliveryState?: boolean }): { changed: boolean; pairing: PairingRecord; binding: BindingRecord };
 export function publishFeishuInbound(home: string, raw: Record<string, unknown>, options?: {
   maxInboundBytes?: number;
+  maxInboundAttachments?: number;
   maxPendingInbound?: number;
   minFreeBytes?: number;
   transport?: string;
   bindingFence?: { bindingId: string; bindingGeneration: number; sessionId: string; chatId: string };
 }): { status: string; reason?: string; ingressSeq?: number; deliveryRef?: string; messageIdHash?: string };
+export interface InboundMediaClaim {
+  media_id: string;
+  message_id: string;
+  delivery_ref: string;
+  part_index: number;
+  resource_type: "image";
+  resource_key: string;
+  resource_key_hash: string;
+  state: "downloading";
+  attempts: number;
+  next_attempt_at_ms?: number | null;
+}
+export function pendingFeishuMedia(home: string, fence: { ownerNonce: string; bindingId: string; bindingGeneration: number; sessionId: string }, options?: { downloadStaleMs?: number }): InboundMediaClaim[];
+export function completeFeishuMediaDownload(home: string, claim: InboundMediaClaim, bytes: Uint8Array, evidence: { declaredResourceType: "image"; responseMimeType: string; actualMimeType: string }, fence: { ownerNonce: string; bindingId: string; bindingGeneration: number; sessionId: string }, options?: { maxMediaBytes?: number; maxMessageMediaBytes?: number }): { mediaId: string; byteHash: string; byteLength: number; mimeType: string };
+export function failFeishuMediaDownload(home: string, claim: InboundMediaClaim, errorKind: string, fence: { ownerNonce: string }, options?: { terminal?: boolean; retryAfterMs?: number; nowMs?: number }): boolean;
+export function loadFeishuIngressContent(home: string, event: InboundEvent): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> | undefined;
+export function cleanupFeishuMedia(home: string, options?: { nowMs?: number; retentionMs?: number }): { removedRecords: number; removedBytes: number };
 export function repairInboundLedgers(home: string): number;
 export function pendingFeishuIngress(home: string, fence: {
   sessionId: string;
