@@ -28,6 +28,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$ROOT/bin/fm-pending-reply-lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -231,6 +233,32 @@ test_remote_delivered_unconfirmed_closes_resolve_key() {
   pass "fm-send remote: a delivered-unconfirmed answer closes its --resolve-key decision"
 }
 
+test_local_secondmate_pending_keeps_expectation_armed() {
+  local dir fb log home rc rec corr
+  dir="$TMP_ROOT/local-pending-expectation"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home local-pending-expectation)
+  fm_write_meta "$home/state/lsm.meta" \
+    "window=sess:fm-lsm" "harness=claude" "kind=secondmate" "mode=secondmate" "home=$home/sm"
+
+  : > "$log"
+  env PATH="$fb:$PATH" FM_FAKE_TMUX_PENDING=1 \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lsm "audit the ledger" >/dev/null 2>&1; rc=$?
+  expect_code 3 "$rc" "an unconfirmed local secondmate submit must exit delivered-unconfirmed"
+  rec=$(pending_record "$home")
+  [ -n "$rec" ] \
+    || fail "the pending-reply expectation must survive an unconfirmed local secondmate send"
+  [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] \
+    || fail "the surviving expectation must stay armed, got $(fm_pending_reply_get "$rec" phase)"
+  # Armed means resolvable: the mate's correlated report still closes it.
+  corr=$(fm_pending_reply_get "$rec" corr_id)
+  printf 'done [corr=%s]: ledger clean\n' "$corr" > "$home/state/lsm.status"
+  fm_pending_reply_try_resolve "$home/state" "$corr" \
+    || fail "a correlated report must still resolve the preserved expectation"
+  pass "fm-send local: an unconfirmed secondmate send keeps its reply expectation armed"
+}
+
 test_local_pending_reports_delivered_unconfirmed() {
   local dir fb log home rc err
   dir="$TMP_ROOT/local-pending"; mkdir -p "$dir"
@@ -281,5 +309,6 @@ test_remote_transport_unknown_preserves_expectation
 test_remote_delivered_unconfirmed_closes_resolve_key
 test_local_pending_reports_delivered_unconfirmed
 test_local_pending_does_not_close_resolve_key
+test_local_secondmate_pending_keeps_expectation_armed
 
 echo "all fm-send-remote-delivery tests passed"

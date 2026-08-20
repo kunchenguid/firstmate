@@ -46,15 +46,17 @@ The live status-log decision ledger has always had answer-time closure through `
 The durable hold ledger did not, so an answer could be captured, believed, and even implemented while its hold stayed open, and the captain could then be asked to re-answer a decision already on disk.
 
 "A keyed answer closes its matching hold" is now one capability with one owner.
-`answers` is its channel-agnostic entry point: it reads `<decision-key>`, answer, and label lines on stdin, maps each key to `<origin-id>-decision-<key>`, and closes it through the same `answer` path, so every guard applies identically no matter which channel the answer arrived on.
+`answers` is its channel-agnostic entry point: it reads a key, answer, and label on each input line and closes the matching hold through the same `answer` path, so every guard applies identically no matter which channel the answer arrived on.
+For a single-origin intake the key is the decision key mapped under that bound origin; for the cross-origin intake it is the full hold identity, while keys that do not name a full decision hold feed nothing.
 `--source` is provenance text recorded in the durable decision, never a behavior switch, and the command carries no per-channel branch and no knowledge of chat, review decks, or any transport.
 A channel's only job is to turn whatever it received into those keyed lines and pipe them in; it never maps keys to holds, builds decision records, chooses between the close paths, or closes a hold itself.
 The decision text is a pure function of source, key, answer, and label, which is what makes a replayed delivery an idempotent no-op rather than a rejected different decision.
 A key whose hold is absent, already closed, or still blocking routed work is reported as skipped and left for `resolve`, and the command exits nonzero when any key was skipped.
 
-`bind`, `unbind`, and `binding` record which origin a captured-answer source belongs to, for a channel whose answers arrive detached from the origin.
+`bind`, `unbind`, and `binding` record whether a captured-answer source belongs to one origin or uses the cross-origin intake, for a channel whose answers arrive detached from the origin.
 The binding is a private record under `state/decision-bindings/`, and a source with no binding feeds nothing, so the path is opt-in per source.
 `bind` deliberately does not require the source to exist yet, so a channel can be bound before it is armed and never produce an answer that has nowhere to go.
+The script header and `--help` own the exact cross-origin marker, identity split, limits, and refusal behavior.
 
 Two channels feed that one intake today, and both are ordinary callers rather than special cases.
 
@@ -86,6 +88,7 @@ Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
 Unrouted close-path verification date: 2026-08-13.
 Answer-time closure verification date: 2026-08-16.
+Cross-origin answer-time closure verification date: 2026-08-19.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -104,6 +107,7 @@ Four holds whose answers route no work close, the one still blocking routed work
 The capture is left unacknowledged throughout, so the wake firstmate needs in order to act on the answers is never retired.
 A replayed delivery closes nothing new and is not rejected as a different decision, a source with no binding closes nothing at all, and the `answer` subcommand itself refuses an empty or missing decision file, an absent hold, and a drifted retry.
 A separate regression drives the real `fm-send` over a stubbed transport to prove the chat channel reaches the same intake for a decision already transferred to its hold, which the status ledger alone can no longer close.
+The cross-origin regression drives a bound source through the real runner and adapter interface, closes full-identity holds from different origins, and proves that over-limit, malformed, non-decision, routed-work, absent-hold, and replayed answers all fail or skip without weakening the existing guards.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -123,6 +127,7 @@ ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
 ok - a bound channel's captured answers close their captain holds at answer time
 ok - a channel source with no decision binding closes nothing
+ok - an any-origin bound source closes full-identity holds across origins
 ok - the answer path keeps every guard the unrouted close path already had
 ok - the chat channel feeds the same keyed-answer intake a captured review does
 

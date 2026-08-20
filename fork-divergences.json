@@ -80,6 +80,18 @@
         "supervision-owner-aware-recovery"
       ],
       "validation_pr": null
+    },
+    {
+      "date": "2026-08-20",
+      "fork_before": "1ee955739e5fe55063cd29ace9d91451612b592d",
+      "upstream_before": "03bb1d8b78a8632ae2d9cea4c10868eb100e885e",
+      "upstream_after": "1cb900c28faf23fe23c9bb54e63f7c3b436ea096",
+      "touched": [
+        "firstmate-progressive-disclosure-restructure",
+        "fork-main-integration",
+        "supervision-owner-aware-recovery"
+      ],
+      "validation_pr": null
     }
   ],
   "divergences": [

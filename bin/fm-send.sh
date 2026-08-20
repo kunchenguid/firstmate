@@ -19,8 +19,9 @@
 # target, delivered with confirmation pending - see the remote paragraph);
 # 3 = the text was typed into the live endpoint and Enter was sent, but the
 # submit read-back stayed unconfirmed (verify the pane before any resend, and
-# never re-type blindly); any other nonzero = the send failed and nothing may
-# be assumed delivered.
+# never re-type blindly; a marked request's pending-reply expectation stays
+# armed because this outcome is not a proven failure); any other nonzero = the
+# send failed and nothing may be assumed delivered.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
@@ -39,9 +40,11 @@
 # also receives a privacy-safe correlation id and a durable parent record under
 # state/pending-replies/ before delivery (bin/fm-pending-reply-lib.sh). Delivery
 # success and reply success are separate facts: a successful submit never
-# resolves the expectation. Set FM_PENDING_REPLY_EXISTING_CORR=<id> when
-# re-sending a recovery request for an already-open expectation so a second
-# record is not created. Direct unmarked captain input never creates one.
+# resolves the expectation, and an unconfirmed submit (exit 3) keeps it armed
+# rather than dropping it; only a proven send failure discards it. Set
+# FM_PENDING_REPLY_EXISTING_CORR=<id> when re-sending a recovery request for an
+# already-open expectation so a second record is not created. Direct unmarked
+# captain input never creates one.
 #
 # Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) that runs this same verified
@@ -615,9 +618,13 @@ else
       # re-type the message: verify the pane instead. Exit 3 is the documented
       # delivered-unconfirmed status, and the remote send leg above depends on
       # it crossing the ssh boundary intact.
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
+      # The pending-reply expectation is deliberately NOT discarded here: this
+      # is the same not-a-failure outcome the remote leg reports as delivered,
+      # so dropping it would silently stop tracking a marked request that very
+      # likely landed. It stays armed on its unconfirmed-delivery marker, so a
+      # correlated report still resolves it and an unanswered one still
+      # surfaces through the library's own reconciliation
+      # (bin/fm-pending-reply-lib.sh).
       echo "fm-send: text delivered to $T but submission is unconfirmed (verdict=pending; tried $RESOLUTION_TRIED); do not retype or blindly resend - verify with fm-peek.sh, then re-send '--key Enter' only if the composer still holds the text" >&2
       exit 3
       ;;
