@@ -102,10 +102,20 @@ case "$HOME" in /*) ;; *) die "HOME must be absolute: $HOME" ;; esac
 case "/$HOME/" in */../*|*/./*) die "HOME contains traversal components: $HOME" ;; esac
 case "$HOME" in *$'\n'*|*$'\r'*|*$'\t'*) die "HOME must not contain control characters" ;; esac
 HOME=$(cd "$HOME" && pwd -P)
-CODEX_ROOT=${CODEX_HOME:-$HOME/.codex}
-while case "$CODEX_ROOT" in *'//'*) true ;; *) false ;; esac; do
-  CODEX_ROOT=${CODEX_ROOT//\/\//\/}
-done
+# Separator spelling must never reach path construction: relative_path splits on
+# every component, so a duplicate or trailing slash would emit a wrong link.
+normalize_absolute_path() {
+  local path=$1
+  while case "$path" in *'//'*) true ;; *) false ;; esac; do
+    path=${path//\/\//\/}
+  done
+  while [ "$path" != / ] && [ "$path" != "${path%/}" ]; do
+    path=${path%/}
+  done
+  printf '%s\n' "$path"
+}
+
+CODEX_ROOT=$(normalize_absolute_path "${CODEX_HOME:-$HOME/.codex}")
 case "$CODEX_ROOT" in /*) ;; *) die "CODEX_HOME must be absolute: $CODEX_ROOT" ;; esac
 case "/$CODEX_ROOT/" in */../*|*/./*) die "CODEX_HOME contains traversal components: $CODEX_ROOT" ;; esac
 case "$CODEX_ROOT" in *$'\n'*|*$'\r'*|*$'\t'*) die "CODEX_HOME must not contain control characters" ;; esac
@@ -123,7 +133,9 @@ physicalize_path() {
   physical=$(cd "$probe" && pwd -P) || die "cannot resolve CODEX_HOME ancestor: $probe"
   printf '%s%s\n' "$physical" "$suffix"
 }
-CODEX_ROOT=$(physicalize_path "$CODEX_ROOT")
+CODEX_ROOT=$(normalize_absolute_path "$(physicalize_path "$CODEX_ROOT")")
+case "$CODEX_ROOT" in /*) ;; *) die "CODEX_HOME must resolve to an absolute path: $CODEX_ROOT" ;; esac
+[ "$CODEX_ROOT" != / ] || die "CODEX_HOME must not be the filesystem root"
 
 CANON="$HOME/.agents/skills"
 CLAUDE="$HOME/.claude/skills"
@@ -309,6 +321,7 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 INVENTORY="$TMP/inventory"
 ROOT_LINKS="$TMP/root-links"
 PLAN="$TMP/plan"
+TREE_NAMES="$TMP/tree-names"
 : > "$INVENTORY"
 : > "$ROOT_LINKS"
 : > "$PLAN"
@@ -349,7 +362,8 @@ validate_skill_tree() {
   [ -f "$skill/SKILL.md" ] && [ ! -L "$skill/SKILL.md" ] || die "skill lacks a regular SKILL.md: $skill"
   bad=$(find -P "$skill" ! -type d ! -type f -print -quit 2>/dev/null) || die "cannot inspect skill tree: $skill"
   [ -z "$bad" ] || die "skill tree contains a link or special entry: $bad"
-  control=$(LC_ALL=C find -P "$skill" -print0 | LC_ALL=C tr -d '\000' | LC_ALL=C tr -dc '[:cntrl:]' | wc -c) \
+  LC_ALL=C find -P "$skill" -print0 > "$TREE_NAMES" || die "cannot inspect skill tree names: $skill"
+  control=$(LC_ALL=C tr -d '\000' < "$TREE_NAMES" | LC_ALL=C tr -dc '[:cntrl:]' | wc -c) \
     || die "cannot inspect skill tree names: $skill"
   [ "$control" -eq 0 ] || die "skill tree contains a control character in a nested name: $skill"
 }

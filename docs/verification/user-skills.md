@@ -5,7 +5,7 @@ This record owns the current empirical verification boundary.
 
 ## Isolated filesystem verification
 
-On 2026-08-20, the focused temporary-home suite exercised canonicalization, relative Claude and Codex links, verified whole-root link conversion, duplicate removal under default and restrictive umasks, byte and permission-bit conflict refusal, control-character name refusal, `.system` preservation, default dry-run behavior, idempotence, unsafe-entry refusal, colliding, nested, and aliased managed-root refusal, and registered-remote command construction.
+On 2026-08-20, the focused temporary-home suite exercised canonicalization, relative Claude and Codex links, verified whole-root link conversion, duplicate removal under default and restrictive umasks, byte and permission-bit conflict refusal, control-character name refusal, CODEX_HOME separator normalization, `.system` preservation, default dry-run behavior, idempotence, unsafe-entry refusal, colliding, nested, and aliased managed-root refusal, and registered-remote command construction.
 
 Command:
 
@@ -31,6 +31,7 @@ ok - migration preserves executable skill scripts
 ok - migration preserves source modes and converges under a default umask
 ok - migration converges under a restrictive umask
 ok - a control character in a nested skill name refuses before mutation
+ok - odd CODEX_HOME separator spelling still links correctly and converges
 ok - remote invocation binds the registered host and forwards explicit apply
 ```
 

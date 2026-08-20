@@ -344,6 +344,34 @@ test_control_character_nested_name_refuses() {
   pass "a control character in a nested skill name refuses before mutation"
 }
 
+test_codex_home_separator_spelling_converges() {
+  local home resolved expected second
+  home=$(new_home)
+  make_skill "$home/.agents/skills" alpha body
+
+  HOME="$home" CODEX_HOME="$home/.codex/" "$SCRIPT" --apply >/dev/null
+
+  [ -L "$home/.codex/skills/alpha" ] || fail "trailing-slash CODEX_HOME did not create the Codex link"
+  resolved=$(cd "$home/.codex/skills/alpha" 2>/dev/null && pwd -P) \
+    || fail "trailing-slash CODEX_HOME produced a link that does not resolve"
+  expected=$(cd "$home/.agents/skills/alpha" && pwd -P)
+  [ "$resolved" = "$expected" ] || fail "Codex link resolves outside the canonical store: $resolved"
+  [ -f "$home/.codex/skills/alpha/SKILL.md" ] || fail "SKILL.md is unreadable through the Codex link"
+
+  second=$(run_sync "$home" --apply)
+  [ "$second" = "user skills already converged; no changes" ] \
+    || fail "canonically spelled rerun did not converge: $second"
+
+  home=$(new_home)
+  make_skill "$home/.agents/skills" alpha body
+  HOME="$home" CODEX_HOME="$home//.codex//" "$SCRIPT" --apply >/dev/null
+  resolved=$(cd "$home/.codex/skills/alpha" 2>/dev/null && pwd -P) \
+    || fail "repeated-separator CODEX_HOME produced a link that does not resolve"
+  [ "$resolved" = "$(cd "$home/.agents/skills/alpha" && pwd -P)" ] \
+    || fail "repeated-separator CODEX_HOME resolves outside the canonical store"
+  pass "odd CODEX_HOME separator spelling still links correctly and converges"
+}
+
 test_remote_routes_through_registered_home() {
   local home fakebin argv encoded decoded home_encoded remote_home
   home=$(new_home)
@@ -391,4 +419,5 @@ test_executable_skill_script_survives_migration
 test_non_default_modes_migrate_and_converge
 test_restrictive_umask_migration_converges
 test_control_character_nested_name_refuses
+test_codex_home_separator_spelling_converges
 test_remote_routes_through_registered_home
