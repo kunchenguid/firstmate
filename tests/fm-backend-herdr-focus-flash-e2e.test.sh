@@ -237,7 +237,17 @@ C_SURVIVOR_ORDER=$(printf '%s' "$C_ORDER" | tr ',' '\n' | grep -v "^$C_DOOMED_WS
 
 # One persistent background child of the pane's shell, started outside any
 # worktree so nothing reaps it, is enough to fail the proof on every sample.
-lab pane send-text "$C_DOOMED_PANE" 'cd / && sleep 3000 &' >/dev/null \
+#
+# The child must be a DIRECT child of the pane shell, because that is what the
+# production proof (fm_backend_herdr_pane_idle_shell_sample) scans for. The two
+# statements are therefore separated by ';' and never by '&&': backgrounding an
+# AND-list makes the shell fork a subshell for the whole list, and in bash the
+# sleep then hangs off that subshell rather than off the pane shell, so the scan
+# below never matches. zsh execs the last command of the list and hides the
+# difference, which is why a macOS-only run of this fixture passed while the
+# Linux CI lane could never establish its precondition. A backgrounded simple
+# command is a direct child in every POSIX shell.
+lab pane send-text "$C_DOOMED_PANE" 'cd / ; sleep 3000 &' >/dev/null \
   || fail 'could not send the Part C persistent-child command'
 lab pane send-keys "$C_DOOMED_PANE" enter >/dev/null \
   || fail 'could not submit the Part C persistent-child command'

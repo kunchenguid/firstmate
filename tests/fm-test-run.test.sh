@@ -286,7 +286,7 @@ SH
 test_gate_skip_accounting() {
   local tmp skip_f out json
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-skip.XXXXXX")
-  skip_f="$tmp/skip.test.sh"
+  skip_f="$tmp/fm-backend-herdr-smoke.test.sh"
   out="$tmp/out.txt"
   json="$tmp/timing.json"
   cat >"$skip_f" <<'SH'
@@ -312,10 +312,111 @@ assert doc["summary"]["failed"] == 0
   pass "gate-skip accounting is honest and non-failing"
 }
 
+test_unexpected_gate_skip_fails_the_run() {
+  # The coverage guard proves every test file is SCHEDULED. Nothing proved any
+  # of them EXECUTED, so scripts could gate-skip in a green run and contribute
+  # zero assertions forever. A family that declares expected_gate_skip=none is
+  # claiming the script has no gate, so a gate skip there is a coverage hole and
+  # must fail rather than pass silently.
+  local tmp none_f gated_f out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-unexpected-skip.XXXXXX")
+  # fm-supervision-instructions.test.sh -> pure-contract-unit -> expected none.
+  none_f="$tmp/fm-supervision-instructions.test.sh"
+  # fm-backend-herdr-smoke.test.sh -> real-herdr-gated -> expected herdr.
+  gated_f="$tmp/fm-backend-herdr-smoke.test.sh"
+  cat >"$none_f" <<'SH'
+#!/usr/bin/env bash
+echo "skip: node not found"
+exit 0
+SH
+  cp "$none_f" "$gated_f"
+  chmod +x "$none_f" "$gated_f"
+
+  out="$tmp/none.txt"
+  set +e
+  "$RUNNER" "$none_f" >"$out" 2>"$tmp/none.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "a gate skip under expected_gate_skip=none must fail the run"; }
+  grep -q 'expected_gate_skip=none' "$out" \
+    || { rm -rf "$tmp"; fail "BEGIN marker must declare expected_gate_skip=none: $(grep '^FM_TEST_BEGIN' "$out")"; }
+  grep -Eq '^FM_TEST_END .+ exit=1 duration_ms=[0-9]+ gate_skip=true$' "$out" \
+    || { rm -rf "$tmp"; fail "END must record the unexpected gate skip as a failure: $(grep '^FM_TEST_END' "$out")"; }
+  grep -q 'FM_TEST_SUMMARY total=1 failed=1 skipped_gate=1' "$out" \
+    || { rm -rf "$tmp"; fail "summary must count the skip AND the failure: $(grep FM_TEST_SUMMARY "$out")"; }
+  grep -q 'unexpected gate skip' "$tmp/none.err" \
+    || { rm -rf "$tmp"; fail "runner must say which script skipped unexpectedly: $(cat "$tmp/none.err")"; }
+
+  # The identical skip in a family that DOES declare a gate stays successful, so
+  # the guard cannot be satisfied by failing every gate skip everywhere.
+  out="$tmp/gated.txt"
+  "$RUNNER" "$gated_f" >"$out" 2>"$tmp/gated.err" \
+    || { rm -rf "$tmp"; fail "an EXPECTED gate skip must still pass"; }
+  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true$' "$out" \
+    || { rm -rf "$tmp"; fail "expected gate skip must stay a pass: $(grep '^FM_TEST_END' "$out")"; }
+  grep -q 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=1' "$out" \
+    || { rm -rf "$tmp"; fail "expected gate skip summary wrong: $(grep FM_TEST_SUMMARY "$out")"; }
+
+  rm -rf "$tmp"
+  pass "a gate skip fails the run under expected_gate_skip=none and still passes in a gated family"
+}
+
+test_pi_package_gate_is_declared_and_traceable() {
+  # fm-calm-pi-extension.test.sh is deliberately gated until
+  # fm-calm-pi-duplicate-render lands. A gate is only acceptable while it stays
+  # HONEST, so pin the three properties that make it so: it is a declared gate
+  # rather than a silent skip, it still covers exactly one script, and it names
+  # the work that retires it. When that follow-up lands, this test is what
+  # fails and points at the branch to delete.
+  local tmp gated out
+  grep -q 'fm-calm-pi-duplicate-render' "$RUNNER" \
+    || fail "the pi-package gate must name the follow-up that retires it"
+  grep -q 'fm-calm-pi-duplicate-render' "$ROOT/.github/workflows/ci.yml" \
+    || fail "the serial lane's omitted Pi package must name the same follow-up"
+
+  "$RUNNER" --list-families | grep -qx 'pi-package-gated' \
+    || fail "pi-package-gated must be a known family"
+
+  # Exactly one member: the gate must never grow into a bucket that quiets
+  # other scripts.
+  local members
+  members=$("$RUNNER" --list --family pi-package-gated)
+  [ "$members" = tests/fm-calm-pi-extension.test.sh ] \
+    || fail "pi-package-gated must hold exactly the calm Pi script, got: $members"
+
+  # The skip is DECLARED in the run output, not silent: the BEGIN marker names
+  # the expected class and the END marker records gate_skip=true, so a reader or
+  # a tool can tell this script did not execute.
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-pi-gate.XXXXXX")
+  gated="$tmp/fm-calm-pi-extension.test.sh"
+  out="$tmp/out.txt"
+  cat >"$gated" <<'SH'
+#!/usr/bin/env bash
+echo "skip: installed @earendil-works/pi-coding-agent package not found"
+exit 0
+SH
+  chmod +x "$gated"
+  "$RUNNER" "$gated" >"$out" 2>"$tmp/err.txt" \
+    || { rm -rf "$tmp"; fail "the declared Pi package gate must not fail the run"; }
+  grep -q 'expected_gate_skip=optional-pi-package' "$out" \
+    || { rm -rf "$tmp"; fail "BEGIN must declare the gate: $(grep '^FM_TEST_BEGIN' "$out")"; }
+  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true$' "$out" \
+    || { rm -rf "$tmp"; fail "END must record a visible gate skip: $(grep '^FM_TEST_END' "$out")"; }
+  grep -q 'FM_TEST_SUMMARY_FAMILY family=pi-package-gated' "$out" \
+    || { rm -rf "$tmp"; fail "the family summary must name the gate: $(grep FM_TEST_SUMMARY "$out")"; }
+
+  rm -rf "$tmp"
+  pass "the Pi package gate is declared in the run output, single-member, and names fm-calm-pi-duplicate-render"
+}
+
 test_fail_on_gate_skip_token() {
   local tmp skip_f out rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-fail-skip.XXXXXX")
-  skip_f="$tmp/skip.test.sh"
+  # A real-herdr-gated basename, so this proves the FLAG converts an EXPECTED
+  # gate skip into a failure. An expected_gate_skip=none basename would fail
+  # natively and the assertion below could not tell the two apart.
+  skip_f="$tmp/fm-backend-herdr-smoke.test.sh"
   out="$tmp/out.txt"
   cat >"$skip_f" <<'SH'
 #!/usr/bin/env bash
@@ -616,12 +717,21 @@ SH
   grep -q 'FM_TEST_SUMMARY total=1 failed=1' "$tmp/out5" \
     || { rm -rf "$tmp"; fail "parallel stderr hard-fail summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out5")"; }
 
-  "$runner" --jobs 2 "$d" >"$tmp/out6" 2>"$tmp/err6" \
-    || { rm -rf "$tmp"; fail "ordinary parallel stderr gate skip must remain successful"; }
-  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true$' "$tmp/out6" \
-    || { rm -rf "$tmp"; fail "parallel stderr gate skip was not recorded"; }
-  grep -q 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=1' "$tmp/out6" \
-    || { rm -rf "$tmp"; fail "parallel stderr skip summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out6")"; }
+  # $d's family declares expected_gate_skip=none, so the same stderr gate skip
+  # is a hard failure with no flag at all - and the parallel worker path must
+  # report it exactly as the serial path does rather than swallow it.
+  set +e
+  "$runner" --jobs 2 "$d" >"$tmp/out6" 2>"$tmp/err6"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "parallel unexpected gate skip must fail the run"; }
+  grep -Eq '^FM_TEST_END .+ exit=1 duration_ms=[0-9]+ gate_skip=true$' "$tmp/out6" \
+    || { rm -rf "$tmp"; fail "parallel unexpected gate skip not recorded as a failure: $(grep '^FM_TEST_END' "$tmp/out6")"; }
+  grep -q 'FM_TEST_SUMMARY total=1 failed=1 skipped_gate=1' "$tmp/out6" \
+    || { rm -rf "$tmp"; fail "parallel unexpected gate skip summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out6")"; }
+  grep -q 'unexpected gate skip' "$tmp/err6" \
+    || { rm -rf "$tmp"; fail "runner must name the unexpected gate skip: $(cat "$tmp/err6")"; }
 
   rm -rf "$tmp"
   pass "jobs scheduler runs proven scripts; failure propagates; non-proven refused"
@@ -759,6 +869,8 @@ test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
 test_gate_skip_accounting
+test_unexpected_gate_skip_fails_the_run
+test_pi_package_gate_is_declared_and_traceable
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard

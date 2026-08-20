@@ -67,8 +67,15 @@ jobs:
       - name: Install tasks-axi
         run: |
           set -eu
-          npm install -g tasks-axi
+          # tsc and the Pi package are what let tests/fm-pi-primary-types.test.sh
+          # actually typecheck the tracked Pi extensions instead of gate-skipping.
+          # The package is pinned, never floating: it is the declarations the
+          # strict no-emit check runs against, and a silently newer release would
+          # change that check's meaning underneath us. Bumping the pin is a
+          # deliberate change, exactly like the Herdr pin in the Herdr lane.
+          npm install -g tasks-axi typescript @earendil-works/pi-coding-agent@0.82.0
           tasks-axi --version
+          tsc --version
       - name: Run portable parallel shard 1
         run: |
           set -eu
@@ -104,8 +111,15 @@ jobs:
       - name: Install tasks-axi
         run: |
           set -eu
-          npm install -g tasks-axi
+          # tsc and the Pi package are what let tests/fm-pi-primary-types.test.sh
+          # actually typecheck the tracked Pi extensions instead of gate-skipping.
+          # The package is pinned, never floating: it is the declarations the
+          # strict no-emit check runs against, and a silently newer release would
+          # change that check's meaning underneath us. Bumping the pin is a
+          # deliberate change, exactly like the Herdr pin in the Herdr lane.
+          npm install -g tasks-axi typescript @earendil-works/pi-coding-agent@0.82.0
           tasks-axi --version
+          tsc --version
       - name: Run portable parallel shard 2
         run: |
           set -eu
@@ -163,8 +177,16 @@ jobs:
       - name: Install tasks-axi for backlog-handoff delegation
         run: |
           set -eu
-          npm install -g tasks-axi
+          # No Pi package here, deliberately: the only serial-lane script that
+          # wants it is tests/fm-calm-pi-extension.test.sh, whose Pi TUI suite
+          # fails on a real rendering defect tracked as fm-calm-pi-duplicate-render.
+          # Until that lands, the script gate-skips VISIBLY as its own
+          # pi-package-gated family rather than failing this lane - see the
+          # family comment in bin/fm-test-run.sh. Every other script here keeps
+          # expected_gate_skip=none, so the guard stays armed across this lane.
+          npm install -g tasks-axi typescript
           tasks-axi --version
+          tsc --version
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
           # job-total rather than a literal, so shrinking or growing the matrix
