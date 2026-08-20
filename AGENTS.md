@@ -478,6 +478,8 @@ Batch non-urgent updates into the next natural reply.
 Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
 Whenever a PR is mentioned, include its full `https://...` URL before any shorthand reference.
 Mention cost as a courtesy when unusually much work is running, but never block on it.
+When the captain invokes `/updatethecaptain` or asks to be kept posted on the workers, load the `updatethecaptain` skill, which owns the repeating ten-minute worker report and the format for putting a worker's question to the captain.
+When the captain invokes `/updatethecaptain-stop` or asks to stop those updates, load the `updatethecaptain-stop` skill.
 
 ## 10. Backlog contract
 
