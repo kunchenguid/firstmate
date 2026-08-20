@@ -5,8 +5,9 @@
 #   fm-task-retire.sh <task-id> [fm-teardown arguments...]
 #
 # Legacy/local tasks delegate unchanged to fm-teardown.sh.
-# AIME cloud tasks use the cloud-specific terminal/report/decision/source
-# preflight and never invoke local endpoint or worktree teardown.
+# Remote tasks use provider-specific terminal/report/decision/source preflight
+# and never invoke local endpoint or worktree teardown. Legacy AIME
+# executor=cloud-worker records remain supported without migration.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +42,18 @@ case "$executor" in
     case "$provider" in
       aime) exec "$SCRIPT_DIR/fm-cloud-research-aime.sh" retire "$id" ;;
       *) printf 'error: unsupported cloud provider: %s\n' "${provider:-missing}" >&2; exit 1 ;;
+    esac
+    ;;
+  remote-agent)
+    [ "$#" -eq 1 ] || {
+      printf 'error: remote task retirement accepts no local teardown flags\n' >&2
+      exit 2
+    }
+    provider=$(meta_value provider)
+    case "$provider" in
+      aime) exec "$SCRIPT_DIR/fm-cloud-research-aime.sh" retire "$id" ;;
+      ida) exec "$SCRIPT_DIR/fm-remote-agent-ida.sh" retire "$id" ;;
+      *) printf 'error: unsupported remote provider: %s\n' "${provider:-missing}" >&2; exit 1 ;;
     esac
     ;;
   *)

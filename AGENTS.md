@@ -75,7 +75,8 @@ config/feishu.env  optional protected local Feishu activation data; LOCAL, gitig
 config/startup-memory-budget     primary-authoritative per-home startup-memory budget; LOCAL, gitignored, materialized as 7,500 estimated tokens by locked primary bootstrap and inherited into secondmate homes; see docs/configuration.md "Startup memory budget"
 config/herdr-presentation-spaces  optional "off" opt-out from, or "on" opt-in to, Herdr's default-on disposable single-task visual projection, which is unconfigured-default-on only at or above a Herdr version floor; LOCAL, gitignored; inherited by secondmate homes; see docs/herdr-backend.md "Presentation spaces"
 config/trace-context  optional presence flag enabling default-off native W3C trace-context propagation to spawned agents; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Trace context propagation" and docs/trace-context.md
-config/aime-cloud-worker  optional disabled-by-default AIME cloud research executor configuration; LOCAL, gitignored, not inherited; see docs/configuration.md "AIME cloud research worker"
+config/aime-cloud-worker  optional disabled-by-default AIME remote-agent configuration; LOCAL, gitignored, not inherited; see docs/configuration.md "Remote research agents"
+config/ida-remote-agent  optional disabled-by-default SG iDA remote-agent configuration; LOCAL, gitignored, not inherited; see docs/configuration.md "Remote research agents"
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
@@ -95,7 +96,7 @@ state/               volatile runtime signals; gitignored
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
   <id>.muse-session  muse busy-source binding (sessions root plus task worktree) written by fm-spawn; removed by teardown
-  <id>.meta          executor-discriminated task metadata: fm-spawn owns local-agent fields and fm-cloud-research-aime owns cloud-worker/aime fields; docs/configuration.md owns both schemas; producing PR and Relay helpers append their own fields
+  <id>.meta          executor-discriminated task metadata: fm-spawn owns local-agent fields, fm-remote-agent-lib owns new remote-agent fields, and fm-aime-cloud-lib preserves legacy cloud-worker/aime fields; docs/configuration.md owns the compatibility contract; producing PR and Relay helpers append their own fields
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified Relay shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
@@ -110,6 +111,7 @@ state/               volatile runtime signals; gitignored
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (section 13)
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
   cloud-tasks/       private provider-specific cloud execution state; bin/fm-aime-cloud-lib.sh owns the current AIME schema and transition mechanics
+  remote-tasks/      private normalized iDA remote-agent state; bin/fm-remote-agent-lib.sh owns its shared remote schema while AIME retains state/cloud-tasks compatibility
   x-inbox/           generated Relay pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated Relay durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
   x-outbox/          generated Relay dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
@@ -288,7 +290,7 @@ Write the task-specific brief under section 11 before spawning.
 
 Dispatch only through `bin/fm-task-dispatch.sh`, whose `local-agent` path delegates to `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 Every local-agent spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
-Before selecting or dispatching `cloud-worker/aime`, adopting or retiring an AIME task, handling its process-event wake, interpreting its AIME-created Feishu document result, or responding to a cancellation request, load `cloud-research-worker`.
+Before selecting or dispatching `remote-agent/aime` or `remote-agent/ida`, operating a legacy `cloud-worker/aime` record, adopting or retiring remote work, handling its process-event wake or result, or responding to a remote cancellation request, load `cloud-research-worker`.
 After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship or scout work as under way.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
@@ -527,7 +529,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `decision-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a decision, and when recording or routing the captain's answer.
 - `process-event-sources` - load before arming a long-polling source, and on any `procevent <adapter> <source-id> <sequence>` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.
-- `cloud-research-worker` - load before selecting or dispatching AIME for research, adopting or retiring an AIME task, handling an AIME process-event wake, interpreting an AIME-created Feishu document result, or responding to an AIME cancellation request.
+- `cloud-research-worker` - load before selecting AIME or iDA for remote research, dispatching or recovering a remote-agent task, operating a legacy AIME record, handling its process-event wake or result, or responding to a remote cancellation request.
 - `feishu-channel` - load when an input carries the authorized Feishu source badge, before local `/fm-feishu-*` control, and on a `FEISHU:` session-start diagnostic; Feishu input follows the same ordinary Pi tool path as native TUI input, while finalized Assistant text from the bound session is mirrored to the bound chat except for the exact routine response.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the Relay configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for a Relay-linked task before posting its completion follow-up; relevant only when Relay is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.

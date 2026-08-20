@@ -21,7 +21,8 @@
 #     captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
 #     resolves only when its structured record is Done, and missing ids stay open.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
-#     executor discriminates local-agent from cloud-worker task records.
+#     executor discriminates local-agent from legacy cloud-worker and native
+#     remote-agent task records.
 #     current_state is parsed from bin/fm-task-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
 #     paths.status_log.last_event is historical wake-event data only, never
@@ -403,9 +404,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind executor provider task_type cloud_state harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind executor provider task_type cloud_state remote_task_state harness mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json cloud_state_json
+  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json cloud_state_json remote_state_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -419,6 +420,7 @@ task_json_lines() {
     provider=$(meta_value "$meta" provider)
     task_type=$(meta_value "$meta" task_type)
     cloud_state=$(meta_value "$meta" cloud_state)
+    remote_task_state=$(meta_value "$meta" remote_state)
     harness=$(meta_value "$meta" harness)
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
@@ -431,6 +433,9 @@ task_json_lines() {
     remote_home_present=null
     if [ "$executor" = cloud-worker ]; then
       backend=cloud
+      target=
+    elif [ "$executor" = remote-agent ]; then
+      backend=remote
       target=
     elif [ -n "$remote_host" ]; then
       backend=$(meta_value "$meta" remote_backend)
@@ -479,7 +484,8 @@ task_json_lines() {
     open_decisions_tsv=$(status_open_decisions "$status_log")
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ] \
-             || [ "$current_source" = cloud-state ] || [ "$current_source" = cloud-readback ]; } \
+             || [ "$current_source" = cloud-state ] || [ "$current_source" = cloud-readback ] \
+             || [ "$current_source" = remote-state ] || [ "$current_source" = remote-readback ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
          || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
       open_decisions_tsv=""
@@ -493,7 +499,7 @@ task_json_lines() {
 
     endpoint_exists=null
     agent_alive=not_checked
-    if [ "$executor" = cloud-worker ]; then
+    if [ "$executor" = cloud-worker ] || [ "$executor" = remote-agent ]; then
       endpoint_exists=null
       agent_alive=not_applicable
     elif [ -n "$remote_host" ]; then
@@ -535,6 +541,7 @@ task_json_lines() {
     report_json=$(path_present_json "$report_path")
     if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
     if [ -n "$cloud_state" ]; then cloud_state_json=$(path_present_json "$cloud_state"); else cloud_state_json=$(jq -n '{path:null,present:false}'); fi
+    if [ -n "$remote_task_state" ]; then remote_state_json=$(path_present_json "$remote_task_state"); else remote_state_json=$(jq -n '{path:null,present:false}'); fi
     if [ -n "$home" ] && [ -n "$remote_host" ]; then
       home_json=$(jq -n --arg path "$home" --argjson present "$remote_home_present" '{path:$path,present:$present}')
     elif [ -n "$home" ]; then
@@ -571,6 +578,7 @@ task_json_lines() {
       --argjson report "$report_json" \
       --argjson worktree_path "$worktree_json" \
       --argjson cloud_state_path "$cloud_state_json" \
+      --argjson remote_state_path "$remote_state_json" \
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
       --argjson open_decisions "$open_decisions_json" \
@@ -594,13 +602,14 @@ task_json_lines() {
           status_log:$status_log,
           worktree:$worktree_path,
           cloud_state:$cloud_state_path,
+          remote_state:$remote_state_path,
           home:$home_path,
           report:$report
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
-          status:(if $executor == "cloud-worker" then "not_applicable"
+          status:(if ($executor == "cloud-worker" or $executor == "remote-agent") then "not_applicable"
                   elif $endpoint_exists == false then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
@@ -620,6 +629,18 @@ task_json_lines() {
              cancel:"bin/fm-cloud-research-aime.sh cancel \($id)",
              retire:"bin/fm-task-retire.sh \($id)",
              return_channel_note:"AIME results return through deterministic process-event readback and data/<id>/report.md."}
+          elif $executor == "remote-agent" and $provider == "aime" then
+            {watch:"bin/fm-task-state.sh \($id)",
+             adopt:"bin/fm-cloud-research-aime.sh adopt \($id)",
+             cancel:"bin/fm-cloud-research-aime.sh cancel \($id)",
+             retire:"bin/fm-task-retire.sh \($id)",
+             return_channel_note:"AIME results return through deterministic process-event readback and data/<id>/report.md."}
+          elif $executor == "remote-agent" and $provider == "ida" then
+            {watch:"bin/fm-task-state.sh \($id)",
+             adopt:"bin/fm-remote-agent-ida.sh adopt \($id)",
+             cancel:"bin/fm-remote-agent-ida.sh cancel \($id) --authorize-provider-cancel",
+             retire:"bin/fm-task-retire.sh \($id)",
+             return_channel_note:"iDA results return through normalized process-event readback and data/<id>/report.md."}
           elif $kind == "secondmate" then
             {send:"bin/fm-send.sh fm-\($id) \u0027<request>\u0027",
              watch:"read status/doc return channel; do not routinely fm-peek a secondmate for answers",

@@ -3,13 +3,19 @@
 #
 # Usage:
 #   fm-task-dispatch.sh local-agent <task-id> [fm-spawn arguments...]
+#   fm-task-dispatch.sh remote-agent/aime <task-id> --instructions <private-file> [--document]
+#   fm-task-dispatch.sh remote-agent/ida <task-id> --instructions <private-file> [--document]
 #   fm-task-dispatch.sh cloud-worker/aime <task-id> --instructions <private-file> [--document]
 #
 # This is the narrow executor seam above local harness/runtime semantics.
 # `local-agent` delegates byte-for-byte argument ownership to fm-spawn.sh, which
 # retains its existing isolated-worktree guarantee and all harness/backend
 # validation.
-# `cloud-worker/aime` delegates to the AIME task record and never creates a
+# Both remote selectors are explicit; no heuristic chooses a provider.
+# `remote-agent/aime` delegates to AIME's established fm-aime-task-state.v1
+# lifecycle but records executor=remote-agent; `cloud-worker/aime` remains the
+# permanent read-compatible legacy selector. `remote-agent/ida` uses the shared
+# fm-remote-agent-task-state.v1 record. Neither native provider creates a
 # worktree, terminal endpoint, harness, or runtime-backend record.
 set -u
 
@@ -29,8 +35,14 @@ case "$executor" in
   local-agent)
     exec "$SCRIPT_DIR/fm-spawn.sh" "$id" "$@"
     ;;
+  remote-agent/aime)
+    exec "$SCRIPT_DIR/fm-remote-agent-aime.sh" dispatch "$id" "$@"
+    ;;
   cloud-worker/aime)
     exec "$SCRIPT_DIR/fm-cloud-research-aime.sh" dispatch "$id" "$@"
+    ;;
+  remote-agent/ida)
+    exec "$SCRIPT_DIR/fm-remote-agent-ida.sh" dispatch "$id" "$@"
     ;;
   *)
     printf 'error: unsupported task executor: %s\n' "$executor" >&2

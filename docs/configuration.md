@@ -11,10 +11,10 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, and opt-in Feishu pairing and binding generations under `data/feishu/`.
-`state/` holds volatile runtime records such as executor-discriminated task metadata, append-only status events, local endpoint signals, private cloud execution state under `state/cloud-tasks/`, watcher and wake-queue coordination, away-mode state, generated Relay artifacts, opt-in private Feishu delivery state under `state/feishu/`, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds volatile runtime records such as executor-discriminated task metadata, append-only status events, local endpoint signals, legacy AIME execution state under `state/cloud-tasks/`, native remote-agent state under `state/remote-tasks/`, watcher and wake-queue coordination, away-mode state, generated Relay artifacts, opt-in private Feishu delivery state under `state/feishu/`, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 
-`bin/fm-spawn.sh` owns the local-agent task-metadata fields it emits, while `bin/fm-aime-cloud-lib.sh` owns the discriminated cloud-worker/AIME metadata and private task-state schemas.
+`bin/fm-spawn.sh` owns local-agent task metadata, `bin/fm-remote-agent-lib.sh` owns the native remote-agent metadata shape and normalized iDA task state, and `bin/fm-aime-cloud-lib.sh` preserves AIME's proven task-state schema plus the legacy cloud-worker metadata path.
 The runtime-backend section below owns local backend-specific fields and selector interpretation.
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-task-state.sh` owns provider-aware current-state reconciliation while delegating local tasks unchanged to `bin/fm-crew-state.sh`.
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
@@ -44,11 +44,28 @@ Malformed content, unsafe ownership, unsafe permissions, another file type, a sy
 [`docs/feishu-channel.md`](feishu-channel.md) is the single operator owner for app setup, activation, local controls, supported limits, transport operation, safety, health, and recovery.
 [`bin/fm-feishu-state.mjs`](../bin/fm-feishu-state.mjs) owns the exact private child schemas and mutation mechanics.
 
-## AIME cloud research worker (config/aime-cloud-worker)
+## Remote research agents
+
+Firstmate supports exactly two native remote research providers: AIME and iDA.
+New work must select `remote-agent/aime` or `remote-agent/ida` explicitly through `bin/fm-task-dispatch.sh`; no config, capability probe, or heuristic silently chooses one.
+Both providers are optional, disabled by default, and operate above local harness and runtime-backend semantics.
+They create no local worker endpoint or worktree and retain the ordinary task, backlog, report, decision, supervision, and notification lifecycle.
+
+New native metadata records `kind=scout`, `executor=remote-agent`, `provider=aime|ida`, and `task_type=research|document` without local endpoint fields.
+iDA records `remote_state=...`; `bin/fm-remote-agent-lib.sh` owns that metadata/state shape and the `fm-remote-agent-task-state.v1` normalized phases.
+New AIME records retain `cloud_state=...` and the proven `fm-aime-task-state.v1` lifecycle while recording `executor=remote-agent`.
+Provider adapters own provider commands and normalized observations.
+Existing AIME records with `executor=cloud-worker`, `provider=aime`, `cloud_state=...`, and `fm-aime-task-state.v1` are a permanent read-compatibility path.
+They are not migrated or rewritten and remain readable, adoptable, cancellable, reportable, and retireable through their original lifecycle.
+The [`cloud-research-worker` skill](../.agents/skills/cloud-research-worker/SKILL.md) owns the conditional operator procedure for both providers.
+
+<a id="aime-cloud-research-worker-configaime-cloud-worker"></a>
+
+### AIME (config/aime-cloud-worker)
 
 The AIME cloud research executor is optional and disabled by default.
 An absent, malformed, unsafe, version-mismatched, or explicitly disabled `config/aime-cloud-worker` leaves ordinary local task routing unchanged and refuses new AIME dispatch before any cloud write.
-It is a task executor above local harness and runtime-backend semantics, not another harness or backend.
+It is a native remote task executor, not a harness or backend.
 
 `bin/fm-cloud-research-aime.sh sandbox-verify` is the only supported config writer.
 Its `--help` output owns the exact authorization flag, site and space arguments, config fields, and current schema.
@@ -67,9 +84,10 @@ The instruction file is passed through `bytedcli --content-file`; prompt bytes n
 The maximum instruction size defaults to 262144 bytes and is controlled by `FM_AIME_MAX_INSTRUCTION_BYTES`.
 The [`cloud-research-worker` skill](../.agents/skills/cloud-research-worker/SKILL.md) owns the intake, document-result, wake, adoption, cancellation, and retirement procedure.
 
-A dispatched task records only the cloud discriminator in `state/<id>.meta`: `kind=scout`, `executor=cloud-worker`, `provider=aime`, the research or document task type, and the private cloud-state directory.
+A new AIME task records the native discriminator in `state/<id>.meta`: `kind=scout`, `executor=remote-agent`, `provider=aime`, the research or document task type, and the private AIME state directory.
+The legacy `cloud-worker/aime` selector remains available only for read-compatible operation and fixtures that require the old discriminator.
 It never fakes `window`, `worktree`, `harness`, `backend`, or local endpoint fields.
-Private state and raw provider artifacts live beneath mode-restricted `state/cloud-tasks/<id>/`.
+Private AIME state and provider artifacts live beneath mode-restricted `state/cloud-tasks/<id>/`.
 `bin/fm-aime-cloud-lib.sh` owns their exact schemas, phases, atomic transition rules, file modes, and allowed error classifications.
 `bin/fm-procevent-aime.sh` owns authoritative event replay, session and output readback, durable cursor advancement, duplicate handling, report generation, and re-arming through the existing process-event runner.
 Replay, session, and output readback failures remain adoptable and re-armed unless one identity-bound observation proves provider status `stopped`, authoritative terminal replay, and unavailable bounded output readback.
@@ -95,6 +113,54 @@ AIME creates the requested document and returns its canonical URL, identity, and
 Firstmate validates and records that artifact but performs no local create, copy, rewrite, permission, or sharing operation.
 
 Current active evidence, including the pinned CLI version and the non-mutating verification commands, is in [`verification/aime-cloud-worker.md`](verification/aime-cloud-worker.md).
+
+### iDA (config/ida-remote-agent)
+
+iDA uses the official SG-capable iDA Deep Research and session lifecycle exposed by installed `bytedcli`.
+An absent, malformed, version-mismatched, or explicitly disabled config refuses new iDA dispatch before any provider write and leaves local-agent and AIME routing unchanged.
+The config is a current-user-owned, single-link regular file at mode `0600` with this schema:
+
+```text
+schema=fm-ida-remote-agent-config.v1
+enabled=false
+region=sg
+identity=user
+agent_id=default
+model=default
+bytedcli_version=<exact installed version>
+```
+
+Obtain the version from the official structured `bytedcli --json --version` surface.
+Use `default` to let iDA select its established Deep Research agent/model, or record an explicit numeric agent id and supported model name when the task requires them.
+The adapter preserves the recorded agent and model identity when the official response provides them.
+The config contains no credential, token, OECID, or prompt; authentication remains in bytedcli-managed `user` identity state.
+Set `enabled=true` only after a read-only `bin/fm-remote-agent-ida.sh probe` succeeds against the exact config and installed version.
+The probe uses only an SG session list read and creates no session.
+
+Before dispatch, create the ordinary private task directory and `brief.md`, then put the instruction in a non-symlinked `0600` or `0400` file below `data/<id>/`.
+The default instruction bound is 262144 bytes (`FM_REMOTE_MAX_INSTRUCTION_BYTES`).
+Submission uses the official `bytedcli --as user mcp --allow-domains ida --all-tools` server and `ida_deep_research_create`; `bin/fm-bytedcli-mcp-call.sh` passes the private tool arguments through a mode-`0600` stdin request so prompt bytes do not enter argv.
+Session list/get and cancellation use official `bytedcli --json ida --region sg ...` commands.
+Firstmate stores only normalized bounded observations, not the MCP exchange, raw messages, SSE/event bodies, credentials, or private request payload.
+
+Before the sole allowed create, the adapter records a unique marker derived from the Firstmate task id and instruction digest and exact-matches it through session list.
+It repeats that reconciliation after a timeout or ambiguous submission before deciding state.
+A unique match is adopted; multiple matches, a truncated listing, provider unavailability, or unresolved identity becomes a preserved unavailable or ambiguous state and never authorizes a silent duplicate create.
+Restart adoption and startup recovery use the durable marker and session id and re-arm the existing process-event source without pretending a local endpoint exists.
+
+`bin/fm-procevent-ida.sh` owns first submission, session readback, normalized state transitions, report creation, acknowledgement, and re-arming.
+Provider-running or idle-but-processing state is healthy.
+Terminal success, failure, and provider-confirmed cancellation produce a mode-`0600` `data/<id>/report.md` bound by task state.
+The report preserves `available`, exact `zero`, `unavailable`, and `error` distinctions and includes normalized session, remote-task, agent, model, outcome, and error-class fields when available.
+It never embeds the prompt, credentials, raw provider streams, or private payloads.
+iDA document mode does not imply AIME's Feishu creation contract; the durable return remains the self-contained report or its authoritative provider identity.
+
+`interrupt-wait` stops only local waiting and may leave the provider session running.
+Provider cancellation uses official `chat completion close`, requires current destructive-action authority plus `--authorize-provider-cancel`, and does not become terminal until session readback confirms a cancelled/closed state.
+An ambiguous or submission-unknown task whose marker yields an authoritative complete non-truncated zero-match session list can leave its permanent blocked state only through the explicit `abandon` command with `--authorize-abandon`; abandonment fail-terminals the durable record, performs no provider write, never retries or recreates, and any future execution requires a separate explicit dispatch.
+Retirement requires normalized terminal state, a safe bound report, retired process-event supervision, and the ordinary decision-hold completion gate.
+Disabling the config blocks new submission but does not erase, cancel, or make an existing record unreadable.
+Current behavioral evidence is in [`verification/remote-agents.md`](verification/remote-agents.md).
 
 ## Pi Calm preference (config/calm)
 
@@ -514,7 +580,7 @@ See [verification/public-followup.md](verification/public-followup.md) for the c
 
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
 `bin/fm-procevent.sh` owns the generic contract.
-Current applying adapters include the remote-secondmate reply relay and AIME cloud research readback, while `bin/fm-procevent-lavish.sh` wraps only the currently published `lavish-axi poll` interface.
+Current applying adapters include the remote-secondmate reply relay plus AIME and iDA remote research readback, while `bin/fm-procevent-lavish.sh` wraps only the currently published `lavish-axi poll` interface.
 
 This section is the single owner of the runner's operating contract.
 Registration writes one private record under `state/procevent/`, and a completed result plus its immutable adapter identity are captured under `state/procevent-inbox/` before it is published.
@@ -539,6 +605,7 @@ That call runs strictly after terminal retirement, because a handling adapter re
 Failed publication skips the call, and exit 0 means the adapter fully applied and acknowledged the result; failed publication, a missing command, an error, or any other exit is not a capture failure but leaves the result unacknowledged and therefore still eligible for re-announcement, so a handler receives it exactly as before and an adapter with no such command needs no change.
 The remote-secondmate reply adapter implements it, so a captured reply reaches its local status mirror and settles its correlated pending-reply expectation without any handler step; the published wake still reaches firstmate, and handling that wake through the adapter again is idempotent.
 The AIME adapter also implements it, so each captured observation advances or preserves the provider-aware task state, writes a verified terminal report or re-arms readback, then acknowledges the exact generation; handling the wake through the adapter again is idempotent.
+The iDA adapter implements the same applying boundary for normalized observations: it advances the shared remote state, records a safe report or explicit blocker, re-arms only when provider state permits, and acknowledges the exact generation idempotently.
 
 Ownership is machine-wide per canonical source, because separate homes can share one underlying source store.
 Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `FM_PROCEVENT_CLAIM_ROOT`).
@@ -619,6 +686,10 @@ FM_AIME_REPLAY_MAX_STREAMS=200         # maximum replay streams before the adapt
 FM_AIME_READBACK_TIMEOUT=20            # seconds allowed for each AIME replay/session/output CLI call
 FM_AIME_RETIRE_MAX_GENERATIONS=256       # maximum queued AIME generations scanned and sealed for stopped terminal-unavailable retirement
 FM_AIME_RETIRE_MAX_CAPTURE_BYTES=1048576 # maximum bytes of one quarantined captured AIME generation during that retirement seal
+FM_REMOTE_MAX_INSTRUCTION_BYTES=262144    # maximum private instruction-file size for native remote-agent providers
+FM_REMOTE_RESULT_MAX_CHARS=131072         # maximum redacted iDA final-answer characters captured into normalized state/report artifacts
+FM_IDA_SESSION_PAGE_SIZE=100             # bounded SG session list used for exact marker reconciliation
+FM_IDA_DEEP_RESEARCH_TIMEOUT_MS=900000   # official iDA Deep Research MCP timeout passed to the provider tool
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh

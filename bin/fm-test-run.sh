@@ -132,7 +132,7 @@ now_ms() {
 # unclassified so new tests are still runnable and visible in summaries.
 family_for_basename() {
   case "$1" in
-    fm-aime-cloud-worker.test.sh|fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
+    fm-aime-cloud-worker.test.sh|fm-remote-agent.test.sh|fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
@@ -877,6 +877,7 @@ families_for_changed_path() {
     bin/fm-classify-lib.sh)
       printf '%s\n' watcher-wake-lock
       printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
+      printf '%s\n' "__script__:fm-remote-agent.test.sh"
       ;;
     bin/fm-watch*|bin/fm-wake*|\
     bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
@@ -896,6 +897,12 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
       ;;
+    bin/fm-remote-agent-lib.sh|bin/fm-remote-agent-aime.sh|bin/fm-remote-agent-ida.sh|\
+    bin/fm-ida-remote-lib.sh|bin/fm-bytedcli-mcp-call.sh|bin/fm-procevent-ida.sh|\
+    bin/fm-task-dispatch.sh|bin/fm-task-state.sh|bin/fm-task-retire.sh)
+      printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
+      printf '%s\n' "__script__:fm-remote-agent.test.sh"
+      ;;
     bin/fm-secondmate*|bin/fm-remote*|bin/fm-on.sh|bin/fm-home-seed.sh|\
     bin/fm-backlog-handoff.sh|bin/fm-backlog-receive.sh|bin/fm-procevent-remote-reply.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*|\
@@ -905,6 +912,7 @@ families_for_changed_path() {
     bin/fm-session-start.sh)
       printf '%s\n' session-bootstrap
       printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
+      printf '%s\n' "__script__:fm-remote-agent.test.sh"
       ;;
     bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
@@ -924,9 +932,9 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-aime-cloud-lib.sh|bin/fm-cloud-research-aime.sh|bin/fm-procevent-aime.sh|\
-    bin/fm-task-dispatch.sh|bin/fm-task-state.sh|bin/fm-task-retire.sh)
+    bin/fm-aime-cloud-lib.sh|bin/fm-cloud-research-aime.sh|bin/fm-procevent-aime.sh)
       printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
+      printf '%s\n' "__script__:fm-remote-agent.test.sh"
       ;;
     bin/fm-timeout-lib.sh)
       # The shared hard bound: session start's runtime bound, the fleet/bearings
@@ -956,6 +964,7 @@ families_for_changed_path() {
     bin/fm-fleet-snapshot.sh)
       printf '%s\n' snapshot-bearings
       printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
+      printf '%s\n' "__script__:fm-remote-agent.test.sh"
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings

@@ -7,10 +7,10 @@
 #
 # Legacy metadata and explicit executor=local-agent records delegate unchanged
 # to fm-crew-state.sh.
-# executor=cloud-worker requires provider=aime and delegates only to AIME's
-# durable phase plus authoritative provider readback.
-# Unknown executor/provider records fail closed and never fall through to pane,
-# worktree, harness, or runtime-backend semantics.
+# executor=cloud-worker/provider=aime is the permanent legacy AIME path.
+# executor=remote-agent delegates to the explicitly recorded AIME or iDA
+# provider. Unknown executor/provider records fail closed and never fall
+# through to pane, worktree, harness, or runtime-backend semantics.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +41,14 @@ case "$executor" in
     case "$provider" in
       aime) exec "$SCRIPT_DIR/fm-cloud-research-aime.sh" state "$id" ;;
       *) printf 'state: unknown · source: none · unsupported cloud provider=%s\n' "${provider:-missing}" ;;
+    esac
+    ;;
+  remote-agent)
+    provider=$(meta_value provider)
+    case "$provider" in
+      aime) exec "$SCRIPT_DIR/fm-cloud-research-aime.sh" state "$id" ;;
+      ida) exec "$SCRIPT_DIR/fm-remote-agent-ida.sh" state "$id" ;;
+      *) printf 'state: unknown · source: none · unsupported remote provider=%s\n' "${provider:-missing}" ;;
     esac
     ;;
   *)

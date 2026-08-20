@@ -26,7 +26,9 @@
 # Per-task state owner:
 #   state/cloud-tasks/<task-id>/state.json
 #
-# State schema fm-aime-task-state.v1 is a discriminated cloud execution record.
+# State schema fm-aime-task-state.v1 is the proven AIME execution record. New
+# native AIME tasks use executor=remote-agent; legacy records remain
+# executor=cloud-worker and are never migrated.
 # It never contains local worktree, window, harness, backend, endpoint, prompt
 # bytes, credential, or token fields.
 # Every transition is serialized by a per-task lock and published atomically at
@@ -270,7 +272,7 @@ fm_aime_state_validate_file() {
   jq -e --arg schema "$AIME_STATE_SCHEMA" '
     .schema == $schema
     and (.task_id | type == "string" and length > 0)
-    and .executor == "cloud-worker"
+    and (.executor == "cloud-worker" or .executor == "remote-agent")
     and .provider == "aime"
     and (.revision | type == "number" and . >= 1 and floor == .)
     and (.phase == "create-not-started"
@@ -302,6 +304,8 @@ fm_aime_state_load() {
   [ "$(jq -r '.task_id' "$file")" = "$id" ] || return 1
   # shellcheck disable=SC2034
   AIME_STATE_FILE=$file
+  # shellcheck disable=SC2034
+  AIME_STATE_EXECUTOR=$(jq -r '.executor' "$file")
   # shellcheck disable=SC2034
   AIME_STATE_PHASE=$(jq -r '.phase' "$file")
   # shellcheck disable=SC2034
@@ -352,7 +356,8 @@ fm_aime_state_publish() {
 
 fm_aime_state_initialize() {
   local id=$1 site=$2 space_id=$3 result_mode=$4 instruction_file=$5 instruction_sha=$6 version=$7
-  local dir file staged now
+  local dir file staged now executor=${FM_AIME_EXECUTOR:-cloud-worker}
+  case "$executor" in cloud-worker|remote-agent) ;; *) return 1 ;; esac
   dir=$(fm_aime_task_dir "$id") || return 1
   file=$(fm_aime_state_path "$id") || return 1
   [ ! -e "$file" ] && [ ! -L "$file" ] || return 2
@@ -368,11 +373,12 @@ fm_aime_state_initialize() {
     --arg instruction_file "$instruction_file" \
     --arg instruction_sha256 "$instruction_sha" \
     --arg bytedcli_version "$version" \
+    --arg executor "$executor" \
     --arg now "$now" \
     '{
       schema:$schema,
       task_id:$task_id,
-      executor:"cloud-worker",
+      executor:$executor,
       provider:"aime",
       site:$site,
       space_id:$space_id,
@@ -492,7 +498,7 @@ fm_aime_meta_value() {
 }
 
 fm_aime_meta_validate() {
-  local id=$1 result_mode=$2 file="$STATE/$1.meta" mode links owner key
+  local id=$1 result_mode=$2 file="$STATE/$1.meta" mode links owner key expected_executor
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   mode=$(fm_aime_file_mode "$file") || return 1
   [ "$mode" = 600 ] || return 1
@@ -504,7 +510,9 @@ fm_aime_meta_validate() {
     [ "$(grep -c "^$key=" "$file" 2>/dev/null || true)" -eq 1 ] || return 1
   done
   [ "$(fm_aime_meta_value "$file" kind)" = scout ] || return 1
-  [ "$(fm_aime_meta_value "$file" executor)" = cloud-worker ] || return 1
+  expected_executor=${AIME_STATE_EXECUTOR:-${FM_AIME_EXECUTOR:-cloud-worker}}
+  case "$expected_executor" in cloud-worker|remote-agent) ;; *) return 1 ;; esac
+  [ "$(fm_aime_meta_value "$file" executor)" = "$expected_executor" ] || return 1
   [ "$(fm_aime_meta_value "$file" provider)" = aime ] || return 1
   [ "$(fm_aime_meta_value "$file" task_type)" = "$result_mode" ] || return 1
   [ "$(fm_aime_meta_value "$file" cloud_state)" = "$(fm_aime_task_dir "$id")" ] || return 1
@@ -512,7 +520,8 @@ fm_aime_meta_validate() {
 }
 
 fm_aime_meta_write() {
-  local id=$1 result_mode=$2 cloud_dir meta tmp
+  local id=$1 result_mode=$2 cloud_dir meta tmp executor=${FM_AIME_EXECUTOR:-cloud-worker}
+  case "$executor" in cloud-worker|remote-agent) ;; *) return 1 ;; esac
   meta="$STATE/$id.meta"
   cloud_dir=$(fm_aime_task_dir "$id") || return 1
   [ ! -e "$meta" ] && [ ! -L "$meta" ] || return 2
@@ -520,7 +529,7 @@ fm_aime_meta_write() {
   tmp=$(umask 077; mktemp "$STATE/.aime-meta.XXXXXX") || return 1
   {
     printf 'kind=scout\n'
-    printf 'executor=cloud-worker\n'
+    printf 'executor=%s\n' "$executor"
     printf 'provider=aime\n'
     printf 'task_type=%s\n' "$result_mode"
     printf 'cloud_state=%s\n' "$cloud_dir"

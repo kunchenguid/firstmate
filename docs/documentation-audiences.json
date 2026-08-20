@@ -366,6 +366,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/remote-agents.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/public-followup.md",
       "audience": "maintainer-verification"
     },

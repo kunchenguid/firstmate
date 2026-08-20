@@ -290,7 +290,7 @@ write_report() { # <id> <observation-artifact> <output-artifact> <document-json-
   {
     printf '# AIME cloud research report\n\n'
     printf -- '- Task: `%s`\n' "$id"
-    printf -- '- Executor: `cloud-worker`\n'
+    printf -- '- Executor: `%s`\n' "$AIME_STATE_EXECUTOR"
     printf -- '- Provider: `aime`\n'
     printf -- '- Site: `%s`\n' "$AIME_STATE_SITE"
     printf -- '- Space: `%s`\n' "$AIME_STATE_SPACE_ID"
@@ -331,7 +331,7 @@ write_terminal_failure_report() { # <id> <error-class> <observation-path>
   {
     printf '# AIME cloud research result\n\n'
     printf -- '- Task: `%s`\n' "$id"
-    printf -- '- Executor: `cloud-worker`\n'
+    printf -- '- Executor: `%s`\n' "$AIME_STATE_EXECUTOR"
     printf -- '- Provider: `aime`\n'
     printf -- '- Site: `%s`\n' "$AIME_STATE_SITE"
     printf -- '- Space: `%s`\n' "$AIME_STATE_SPACE_ID"

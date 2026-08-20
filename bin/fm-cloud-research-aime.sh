@@ -243,7 +243,7 @@ write_failure_report() { # <id> <outcome> <phase> <error-class>
 # AIME cloud research result
 
 - Task: \`$id\`
-- Executor: \`cloud-worker\`
+- Executor: \`$AIME_STATE_EXECUTOR\`
 - Provider: \`aime\`
 - Site: \`$AIME_STATE_SITE\`
 - Space: \`$AIME_STATE_SPACE_ID\`
@@ -314,7 +314,7 @@ cmd_dispatch_locked() {
   fm_aime_state_initialize "$id" "$AIME_CONFIG_SITE" "$AIME_CONFIG_SPACE_ID" \
     "$result_mode" "$instructions" "$instruction_sha" "$version" \
     || { rm -rf -- "$root"; die "cannot initialize durable AIME task state"; }
-  if ! fm_aime_meta_write "$id" "$result_mode"; then
+  if ! FM_AIME_EXECUTOR="${FM_AIME_EXECUTOR:-cloud-worker}" fm_aime_meta_write "$id" "$result_mode"; then
     meta_rc=$?
     rm -rf -- "$(fm_aime_task_dir "$id")"
     rm -rf -- "$root"
@@ -442,7 +442,7 @@ cmd_adopt_locked() {
       ;;
   esac
   if [ ! -f "$STATE/$id.meta" ]; then
-    fm_aime_meta_write "$id" "$AIME_STATE_RESULT_MODE" \
+    FM_AIME_EXECUTOR="$AIME_STATE_EXECUTOR" fm_aime_meta_write "$id" "$AIME_STATE_RESULT_MODE" \
       || die "cannot repair missing AIME task metadata"
   elif ! fm_aime_meta_validate "$id" "$AIME_STATE_RESULT_MODE"; then
     die "AIME task metadata does not match the recorded cloud task"
