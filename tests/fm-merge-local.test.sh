@@ -419,6 +419,33 @@ EOF
   pass "an ignored file that is really there still refuses, named path and all"
 }
 
+test_landing_refuses_an_ignored_file_blocking_a_directory_it_needs() {
+  local home origin clone out before_head
+  IFS='|' read -r home origin clone <<EOF
+$(make_landing ignoredblocker)
+EOF
+  ready_branch "$home" "$clone" task-t out/report.txt "the report the worker committed"
+  # He keeps a file called out; the incoming commit needs out to be a directory.
+  # git deletes an ignored file standing there without a word, so the landing has
+  # to see it before git does.
+  printf '%s\n' 'out' >> "$origin/.git/info/exclude"
+  printf '%s\n' "the notes he keeps in a file called out" > "$origin/out"
+  before_head=$(head_of "$origin")
+
+  if out=$(run_merge "$home" task-t); then
+    fail "landing deleted an ignored file blocking a directory it needed: $out"
+  fi
+  case "$out" in
+    *REFUSED*"!! out"*) ;;
+    *) fail "refusal did not name the blocking ignored path: $out" ;;
+  esac
+  [ -f "$origin/out" ] || fail "the refused landing still replaced the ignored file with a directory"
+  [ "$(cat "$origin/out")" = "the notes he keeps in a file called out" ] \
+    || fail "the refused landing still destroyed the ignored file's contents"
+  [ "$(head_of "$origin")" = "$before_head" ] || fail "the refused landing still moved the origin folder"
+  pass "an ignored file standing where the landing needs a directory refuses the carry"
+}
+
 test_landing_follows_an_origin_spelled_relative_to_the_clone() {
   local home origin clone out
   IFS='|' read -r home origin clone <<EOF
@@ -503,6 +530,7 @@ test_landing_refuses_a_gitignored_file_it_would_overwrite
 test_landing_allows_an_ignored_file_it_would_not_touch
 test_landing_adds_a_file_inside_a_wholly_ignored_directory
 test_landing_refuses_an_ignored_file_inside_a_wholly_ignored_directory
+test_landing_refuses_an_ignored_file_blocking_a_directory_it_needs
 test_landing_follows_an_origin_spelled_relative_to_the_clone
 test_landing_follows_an_origin_spelled_with_a_tilde
 test_landing_refuses_a_path_shaped_origin_it_cannot_anchor

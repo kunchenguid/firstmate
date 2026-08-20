@@ -20,11 +20,12 @@
 # tree on this machine, only while that folder sits on the same default branch,
 # only as a fast-forward, and only when nothing uncommitted, untracked, or
 # gitignored that is really present there sits on a path the fast-forward would
-# change. Ignored paths count because git's own fast-forward overwrites them
-# without a word, and a folder ignoring a path the clone commits is exactly how
-# personal material would be lost; they count only when the path is actually
-# there, because git reports a wholly-ignored directory as one entry and a
-# landing that merely adds a file beside someone's scratch work destroys nothing.
+# change or stands where it needs a directory. Ignored paths count because git's
+# own fast-forward overwrites and deletes them without a word, and a folder
+# ignoring a path the clone commits is exactly how personal material would be
+# lost; they count only where something is actually there, because git reports a
+# wholly-ignored directory as one entry and a landing that merely adds a file
+# beside someone's scratch work destroys nothing.
 # Anything else refuses with the concrete reason. An origin spelled relative to
 # the clone or with a leading tilde names that same folder, so it is anchored
 # against the clone first, the way seeding anchors the origin it seeds from; the
@@ -209,16 +210,39 @@ CHANGED=()
 while IFS= read -r -d '' changed_path; do
   CHANGED+=("$changed_path")
 done < <(git -C "$ORIGIN_PATH" diff --name-only --no-renames -z "$current" "$target")
-# Ignored paths are asked about too, because git's fast-forward overwrites an
-# ignored file in silence and the folder ignores what its owner keeps to himself.
-# They are asked about only where the path is really present: git reports a
+# Ignored paths are asked about too, because git's fast-forward overwrites and
+# deletes them in silence and the folder ignores what its owner keeps to himself.
+# They are asked about only where something is really there: git reports a
 # wholly-ignored directory as a single entry, so asking about the rest would
 # refuse a landing that only adds a file next to somebody's scratch work.
+# A changed path also endangers whatever stands where it needs a directory, so
+# each of its ancestors that exists as something other than a directory is asked
+# about as well. Those ancestors go to the ignored probe alone: an untracked one
+# is already refused by git's own two-tree check below, and asking the plain
+# probe about them would refuse dirtiness that never gets touched.
 PRESENT=()
+IGNORED_SPECS=()
 for changed_path in "${CHANGED[@]+"${CHANGED[@]}"}"; do
   if [ -e "$ORIGIN_PATH/$changed_path" ] || [ -L "$ORIGIN_PATH/$changed_path" ]; then
     PRESENT+=("$changed_path")
+    IGNORED_SPECS+=("$changed_path")
   fi
+  ancestor=$changed_path
+  while [ "${ancestor%/*}" != "$ancestor" ]; do
+    ancestor=${ancestor%/*}
+    [ -n "$ancestor" ] || break
+    if [ -L "$ORIGIN_PATH/$ancestor" ] || { [ -e "$ORIGIN_PATH/$ancestor" ] && [ ! -d "$ORIGIN_PATH/$ancestor" ]; }; then
+      seen_spec=0
+      for known_spec in "${IGNORED_SPECS[@]+"${IGNORED_SPECS[@]}"}"; do
+        if [ "$known_spec" = "$ancestor" ]; then
+          seen_spec=1
+          break
+        fi
+      done
+      [ "$seen_spec" -eq 1 ] || IGNORED_SPECS+=("$ancestor")
+      break
+    fi
+  done
 done
 if [ "${#CHANGED[@]}" -gt 0 ]; then
   collisions=$(GIT_LITERAL_PATHSPECS=1 git -C "$ORIGIN_PATH" status --porcelain --untracked-files=all -- "${CHANGED[@]}") || {
@@ -226,8 +250,8 @@ if [ "${#CHANGED[@]}" -gt 0 ]; then
     echo "The change is safe in $PROJ on $DEFAULT; nothing in $ORIGIN_PATH was changed." >&2
     exit 1
   }
-  if [ "${#PRESENT[@]}" -gt 0 ]; then
-    ignored_raw=$(GIT_LITERAL_PATHSPECS=1 git -C "$ORIGIN_PATH" status --porcelain --untracked-files=all --ignored=matching -- "${PRESENT[@]}") || {
+  if [ "${#IGNORED_SPECS[@]}" -gt 0 ]; then
+    ignored_raw=$(GIT_LITERAL_PATHSPECS=1 git -C "$ORIGIN_PATH" status --porcelain --untracked-files=all --ignored=matching -- "${IGNORED_SPECS[@]}") || {
       echo "REFUSED: could not read whether $ORIGIN_PATH ignores any of the paths this landing would change." >&2
       echo "The change is safe in $PROJ on $DEFAULT; nothing in $ORIGIN_PATH was changed." >&2
       exit 1
@@ -245,7 +269,7 @@ if [ "${#CHANGED[@]}" -gt 0 ]; then
           # so name the present paths it covers instead. A spelling that covers
           # none of them is kept as git reported it rather than dropped.
           hits_before=${#ignored_hits[@]}
-          for changed_path in "${PRESENT[@]}"; do
+          for changed_path in "${PRESENT[@]+"${PRESENT[@]}"}"; do
             case $changed_path in
               "$spec"*) ignored_hits+=("!! $changed_path") ;;
             esac
@@ -269,8 +293,10 @@ EOF
   fi
 fi
 
-# git's own two-tree safety is the last word: an ff-only merge it declines
-# changes nothing, so a refusal here is reported rather than worked around.
+# git's own two-tree safety has the last word on everything it does see: an
+# ff-only merge it declines changes nothing, so a refusal here is reported rather
+# than worked around. It does not see an ignored path, which it overwrites or
+# removes without complaint, so that class is the check above's to catch.
 if ! merge_output=$(git -C "$ORIGIN_PATH" merge --ff-only --quiet "$target" 2>&1); then
   echo "REFUSED: git declined to fast-forward $ORIGIN_PATH and left it unchanged:" >&2
   printf '%s\n' "$merge_output" >&2
