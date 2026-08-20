@@ -14,10 +14,11 @@
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
 # config/secondmate-harness format: a single line "<harness> [<model>] [<effort>]",
-# whitespace-separated. A bare "<harness>" (today's format) behaves exactly as before:
-# harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
-# Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
-# name and is never parsed for a model.
+# whitespace-separated. A bare "<harness>" still contributes no model or effort
+# token from this file; Cursor's later --model auto default is owned by
+# bin/fm-spawn.sh (docs/configuration.md#harness-support). Only the first
+# non-empty, non-comment line is parsed. Model/effort come ONLY from this file -
+# config/crew-harness stays a bare adapter name and is never parsed for a model.
 # cursor-agent is an intake alias for cursor (bin/fm-cursor-lib.sh); detection
 # and recorded identity stay cursor.
 # Detection layers: verified environment markers first, then process ancestry.
