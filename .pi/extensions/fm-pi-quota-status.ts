@@ -170,6 +170,7 @@ type ActiveSession = {
   lastFailure: QuotaFailureReason | null;
   process: QuotaProcess | null;
   operationAbort: AbortController | null;
+  credentialCheckAbort: AbortController | null;
   credentialWatcher: FSWatcher | null;
   credentialMonitoringAvailable: boolean;
   refreshInFlight: boolean;
@@ -927,18 +928,59 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       render(session);
     }
 
+    function credentialsChanged(session: ActiveSession): void {
+      if (active !== session) return;
+      session.generation += 1;
+      session.target = preflightTarget(session.ctx, session.ctx.model);
+      session.quota = null;
+      session.lastFailure = null;
+      cancelProcess(session);
+      render(session);
+      void refresh(session);
+    }
+
+    async function checkCredentialRevision(session: ActiveSession): Promise<void> {
+      if (
+        active !== session ||
+        !session.credentialMonitoringAvailable ||
+        session.refreshInFlight ||
+        session.credentialCheckAbort !== null ||
+        session.target.kind !== "supported"
+      ) return;
+      if (!targetMatchesLiveModel(session)) {
+        resetForLiveModel(session);
+        void refresh(session);
+        return;
+      }
+
+      const target = session.target;
+      const generation = session.generation;
+      const controller = new AbortController();
+      session.credentialCheckAbort = controller;
+      try {
+        const result = await readStoredCredential(target.piProvider, controller.signal);
+        if (
+          active !== session ||
+          session.generation !== generation ||
+          session.credentialCheckAbort !== controller ||
+          session.target !== target ||
+          session.refreshInFlight ||
+          !targetMatchesLiveModel(session)
+        ) return;
+        if (result.kind === "cancelled") return;
+        if (result.kind === "ok" && result.revision === target.credentialRevision) return;
+        session.credentialCheckAbort = null;
+        credentialsChanged(session);
+      } finally {
+        if (session.credentialCheckAbort === controller) session.credentialCheckAbort = null;
+      }
+    }
+
     function watchCredentials(session: ActiveSession): void {
       try {
         const watcher = watchAuthDirectory(dirname(authFile), { persistent: false }, (_event, filename) => {
           if (filename !== null && String(filename) !== basename(authFile)) return;
-          if (active !== session) return;
-          session.generation += 1;
-          session.target = preflightTarget(session.ctx, session.ctx.model);
-          session.quota = null;
-          session.lastFailure = null;
-          cancelProcess(session);
-          render(session);
-          void refresh(session);
+          credentialsChanged(session);
         });
         session.credentialWatcher = watcher;
         session.credentialMonitoringAvailable = true;
@@ -997,7 +1039,13 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       }), { placement: "belowEditor" });
     }
 
+    function cancelCredentialCheck(session: ActiveSession): void {
+      session.credentialCheckAbort?.abort();
+      session.credentialCheckAbort = null;
+    }
+
     function cancelProcess(session: ActiveSession): void {
+      cancelCredentialCheck(session);
       session.operationAbort?.abort();
       session.operationAbort = null;
       if (session.process) session.process.cancel();
@@ -1020,6 +1068,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
 
       if (!targetMatchesLiveModel(session)) resetForLiveModel(session);
       session.refreshInFlight = true;
+      cancelCredentialCheck(session);
       const generation = session.generation;
       const operationAbort = new AbortController();
       session.operationAbort = operationAbort;
@@ -1200,6 +1249,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         lastFailure: null,
         process: null,
         operationAbort: null,
+        credentialCheckAbort: null,
         credentialWatcher: null,
         credentialMonitoringAvailable: false,
         refreshInFlight: false,
@@ -1216,9 +1266,13 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       }, refreshMs);
       unrefTimer(session.refreshTimer);
       session.revisionTimer = timers.setInterval(() => {
-        if (active !== session || targetMatchesLiveModel(session)) return;
-        resetForLiveModel(session);
-        void refresh(session);
+        if (active !== session) return;
+        if (!targetMatchesLiveModel(session)) {
+          resetForLiveModel(session);
+          void refresh(session);
+          return;
+        }
+        if (refreshMs > DEFAULT_REVISION_CHECK_MS) void checkCredentialRevision(session);
       }, Math.min(refreshMs, DEFAULT_REVISION_CHECK_MS));
       unrefTimer(session.revisionTimer);
       render(session);

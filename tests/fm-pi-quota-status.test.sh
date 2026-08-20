@@ -793,6 +793,10 @@ const unknownProviderSource = report(now);
 unknownProviderSource.providers[1].source = "tunnel";
 const paddedProviderSource = report(now);
 paddedProviderSource.providers[1].source = " oauth ";
+const freshCacheSource = report(now);
+freshCacheSource.providers[1].source = "cache";
+const freshUnavailableSource = report(now);
+freshUnavailableSource.providers[1].source = "unavailable";
 const unknownProviderStatus = report(now);
 unknownProviderStatus.providers[1].state.status = "maybe";
 const paddedProviderStatus = report(now);
@@ -866,6 +870,49 @@ assert(schema5PopulatedParsed, "schema-5 full pace fixture did not parse structu
 assert(
   selectActiveProviderQuota(schema5PopulatedParsed, "openai-codex", { nowMs: now }).kind === "fresh",
   "valid schema-5 full pace and runway output was rejected",
+);
+const partialKimi = structuredClone(schema5Populated);
+const partialKimiProvider = partialKimi.providers[1];
+partialKimi.providers = [{
+  ...partialKimiProvider,
+  provider: "kimi",
+  label: "Kimi",
+  source: "api",
+  state: {
+    ...partialKimiProvider.state,
+    untrustedWindowIds: ["unparsed_limit"],
+  },
+  windows: [partialKimiProvider.windows[0]],
+  quotaSemantics: {
+    status: "partial",
+    description: "Known Kimi windows coexist with an unresolved limit.",
+    effectiveAvailability: [{
+      scope: "all_models",
+      status: "unknown",
+      boundedBy: ["weekly"],
+      pace: {
+        status: "behind",
+        behindWindowIds: ["weekly"],
+        worstReservePercentPoints: 8.2857,
+        worstReserveWindowId: "weekly",
+      },
+      runway: {
+        status: "unknown",
+        unmeasurableWindowIds: ["weekly", "unparsed_limit"],
+      },
+      selection: {
+        status: "unknown",
+        unmeasurableWindowIds: ["weekly", "unparsed_limit"],
+      },
+    }],
+    unresolvedWindowIds: ["unparsed_limit"],
+  },
+}];
+const partialKimiParsed = parseQuotaAxiJson(JSON.stringify(partialKimi), { projection: "full" });
+assert(partialKimiParsed, "partial Kimi full output did not parse structurally");
+assert(
+  selectActiveProviderQuota(partialKimiParsed, "kimi-coding", { nowMs: now }).kind === "fresh",
+  "valid partial Kimi runway with unresolved bounds was rejected",
 );
 const schema5PaceWithRemovedField = structuredClone(schema5Populated);
 schema5PaceWithRemovedField.providers[1].windows[0].pace.projectionBasis = "cycle_average";
@@ -1096,6 +1143,8 @@ for (const [malformedReport, description] of [
   [missingProviderSource, "missing provider source"],
   [unknownProviderSource, "unknown provider source"],
   [paddedProviderSource, "normalized provider source"],
+  [freshCacheSource, "fresh state with cache source"],
+  [freshUnavailableSource, "fresh state with unavailable source"],
   [unknownProviderStatus, "unknown provider status"],
   [paddedProviderStatus, "normalized provider status"],
   [missingSourcesTried, "missing state sources"],
@@ -1722,6 +1771,32 @@ assert(
   credentialChange.widgetWriteCount === writesAfterCredentialShutdown,
   "shutdown leaked the credential watcher",
 );
+
+const silentCredentialWatcher = new EventEmitter();
+silentCredentialWatcher.close = () => {};
+const missedCredentialEvent = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 500,
+  watchAuthDirectory() {
+    return silentCredentialWatcher;
+  },
+}));
+await missedCredentialEvent.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => missedCredentialEvent.widgetText(400).includes("week 94% left"),
+  "missed-event fixture did not publish initial account quota",
+);
+await setStoredOAuth("openai-codex", fixtureAccessToken("replacement-codex-account"));
+await waitFor(
+  () => !missedCredentialEvent.widgetText(400).includes("94%"),
+  "periodic credential revision check retained old-account quota after a missed watch event",
+);
+await waitFor(
+  () => missedCredentialEvent.widgetText(240).includes("account unverified"),
+  `missed credential event was not re-correlated: ${missedCredentialEvent.widgetText(240)}`,
+);
+await missedCredentialEvent.emit("session_shutdown", { reason: "quit" });
+await setStoredOAuth("openai-codex", fixtureAccessToken("fixture-codex-account"));
 
 const failedWatcher = new EventEmitter();
 failedWatcher.close = () => {};

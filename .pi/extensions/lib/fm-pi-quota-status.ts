@@ -121,6 +121,7 @@ function exactText(value: unknown, maximum = 200): string | null {
 const QUOTA_WINDOW_KINDS = ["session", "weekly", "monthly", "model", "credits", "unknown"] as const;
 const QUOTA_CREDIT_UNITS = ["usd", "credits"] as const;
 const QUOTA_PROVIDER_SOURCES = ["oauth", "cli-rpc", "api", "web", "cache", "unavailable"] as const;
+const QUOTA_FRESH_PROVIDER_SOURCES = ["oauth", "cli-rpc", "api", "web"] as const;
 const QUOTA_PROVIDER_STATUSES = ["fresh", "stale", "unavailable", "auth_required", "rate_limited", "error"] as const;
 const QUOTA_AUTH_STATUSES = ["usable", "expired_refreshable", "unusable"] as const;
 const QUOTA_STATE_REASONS = ["keychain_access_required", "credentials_expired"] as const;
@@ -759,6 +760,7 @@ function validRunway(
   value: unknown,
   boundedBy: string[],
   allowedBlockers: string[],
+  unresolvedWindowIds: string[],
   windowsById: ReadonlyMap<string, QuotaWindowView>,
   rawWindowsById: ReadonlyMap<string, Record<string, unknown>>,
   generatedAtMs: number,
@@ -790,10 +792,13 @@ function validRunway(
     value.unmeasurableWindowIds.some((id) => !allowedBlockers.includes(id))
   ) return false;
   if (requireAuditFields) {
-    return matchesExpectedRunway(
-      value,
-      expectedEffectiveRunway(boundedBy, rawWindowsById, generatedAtMs, schemaVersion),
-    );
+    const expected = unresolvedWindowIds.length > 0
+      ? {
+          status: "unknown",
+          unmeasurableWindowIds: [...boundedBy, ...unresolvedWindowIds],
+        }
+      : expectedEffectiveRunway(boundedBy, rawWindowsById, generatedAtMs, schemaVersion);
+    return matchesExpectedRunway(value, expected);
   }
 
   if (status === "unknown") {
@@ -920,6 +925,7 @@ function validSelection(
 function validEffectiveAvailability(
   value: unknown,
   requireAuditFields: boolean,
+  provider: string,
   unresolvedWindowIds: string[],
   windowsById: ReadonlyMap<string, QuotaWindowView>,
   rawWindowsById: ReadonlyMap<string, Record<string, unknown>>,
@@ -970,6 +976,7 @@ function validEffectiveAvailability(
       value.runway,
       value.boundedBy,
       allowedBlockers,
+      provider === "kimi" ? unresolvedWindowIds : [],
       windowsById,
       rawWindowsById,
       generatedAtMs,
@@ -990,6 +997,7 @@ function validQuotaSemantics(
   value: unknown,
   requireDescription: boolean,
   requireAuditFields: boolean,
+  provider: string,
   windows: QuotaWindowView[],
   rawWindows: Record<string, unknown>[],
   generatedAtMs: number,
@@ -1023,6 +1031,7 @@ function validQuotaSemantics(
       !validEffectiveAvailability(
         entry,
         requireAuditFields,
+        provider,
         unresolvedWindowIds,
         windowsById,
         rawWindowsById,
@@ -1068,6 +1077,19 @@ function validProviderFields(
   }
   if (value.plan !== undefined && cleanText(value.plan, 48) === null) return false;
   if (!validProviderState(value.state, requireFullFields)) return false;
+  const source = value.source === undefined ? null : exactEnum(value.source, QUOTA_PROVIDER_SOURCES);
+  const status = isRecord(value.state)
+    ? exactEnum(value.state.status, QUOTA_PROVIDER_STATUSES)
+    : null;
+  if (
+    source !== null &&
+    status !== null &&
+    (status === "fresh"
+      ? !QUOTA_FRESH_PROVIDER_SOURCES.includes(source as (typeof QUOTA_FRESH_PROVIDER_SOURCES)[number])
+      : status === "stale"
+        ? source !== "cache"
+        : source !== "unavailable")
+  ) return false;
   if (!Array.isArray(value.windows)) return false;
   const providerIsStale = isRecord(value.state) && value.state.stale === true;
   const parsedWindows = value.windows.map((window) => (
@@ -1081,6 +1103,7 @@ function validProviderFields(
     value.quotaSemantics,
     requireFullFields,
     requireFullFields && !providerIsStale,
+    exactText(value.provider) ?? "",
     parsedWindows as QuotaWindowView[],
     rawWindows,
     generatedAtMs,
