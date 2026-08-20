@@ -256,27 +256,42 @@ malformed.providers[1].windows[0].percentRemaining = 101;
 const malformedParsed = parseQuotaAxiJson(JSON.stringify(malformed));
 assert(malformedParsed, "malformed provider fixture should remain structurally parseable");
 assert(selectActiveProviderQuota(malformedParsed, "openai-codex", { nowMs: now }).kind === "malformed", "bad percentage was accepted");
+const missingWindows = report(now);
+delete missingWindows.providers[1].windows;
 const missingWindowKind = report(now);
 delete missingWindowKind.providers[1].windows[0].kind;
 const unknownWindowKind = report(now);
 unknownWindowKind.providers[1].windows[0].kind = "annual";
+const paddedWindowKind = report(now);
+paddedWindowKind.providers[1].windows[0].kind = " weekly ";
 const unknownCreditUnit = report(now);
 unknownCreditUnit.providers[1].credits.unit = "bananas";
+const paddedCreditUnit = report(now);
+paddedCreditUnit.providers[1].credits.unit = " credits ";
 const missingProviderSource = report(now);
 delete missingProviderSource.providers[1].source;
 const unknownProviderSource = report(now);
 unknownProviderSource.providers[1].source = "tunnel";
+const paddedProviderSource = report(now);
+paddedProviderSource.providers[1].source = " oauth ";
 const unknownProviderStatus = report(now);
 unknownProviderStatus.providers[1].state.status = "maybe";
+const paddedProviderStatus = report(now);
+paddedProviderStatus.providers[1].state.status = " fresh ";
 const missingSourcesTried = report(now);
 delete missingSourcesTried.providers[1].state.sourcesTried;
 for (const [malformedReport, description] of [
+  [missingWindows, "missing windows"],
   [missingWindowKind, "missing window kind"],
   [unknownWindowKind, "unknown window kind"],
+  [paddedWindowKind, "normalized window kind"],
   [unknownCreditUnit, "unknown credit unit"],
+  [paddedCreditUnit, "normalized credit unit"],
   [missingProviderSource, "missing provider source"],
   [unknownProviderSource, "unknown provider source"],
+  [paddedProviderSource, "normalized provider source"],
   [unknownProviderStatus, "unknown provider status"],
+  [paddedProviderStatus, "normalized provider status"],
   [missingSourcesTried, "missing state sources"],
 ]) {
   const structurallyParsed = parseQuotaAxiJson(JSON.stringify(malformedReport));
@@ -286,6 +301,24 @@ for (const [malformedReport, description] of [
     `${description} was accepted as fresh`,
   );
 }
+const uppercaseProvider = report(now);
+uppercaseProvider.providers[1].provider = "CODEX";
+const uppercaseProviderParsed = parseQuotaAxiJson(JSON.stringify(uppercaseProvider));
+assert(uppercaseProviderParsed, "uppercase provider fixture did not parse structurally");
+assert(
+  selectActiveProviderQuota(uppercaseProviderParsed, "openai-codex", { nowMs: now }).kind === "unavailable",
+  "normalized quota provider ID was selected as fresh",
+);
+const emptyWindows = report(now);
+emptyWindows.providers[1].windows = [];
+const emptyWindowsParsed = parseQuotaAxiJson(JSON.stringify(emptyWindows));
+assert(emptyWindowsParsed, "empty-window fixture did not parse structurally");
+const emptyWindowsView = selectActiveProviderQuota(emptyWindowsParsed, "openai-codex", { nowMs: now });
+assert(emptyWindowsView.kind === "fresh", "valid fresh empty-window quota was discarded");
+const emptyWindowsText = formatQuotaStatus(emptyWindowsView, 400, now);
+assert(emptyWindowsText.includes("no quota windows"), `empty-window state was not explicit: ${emptyWindowsText}`);
+assert(emptyWindowsText.includes("plan pro"), `empty-window state omitted plan: ${emptyWindowsText}`);
+assert(emptyWindowsText.includes("credits 0"), `empty-window state omitted credits: ${emptyWindowsText}`);
 assert(selectActiveProviderQuota(parsed, "custom-proxy", { nowMs: now }).kind === "unsupported", "unsupported provider was not isolated");
 const ansiReport = report(now);
 ansiReport.providers[1].label = "Co\x1b[31mdex";

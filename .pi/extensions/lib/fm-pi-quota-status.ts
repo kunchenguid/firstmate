@@ -83,10 +83,9 @@ function parseTimestamp(value: unknown): number | null {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-function cleanEnum<T extends string>(value: unknown, allowed: readonly T[]): T | null {
-  const cleaned = cleanText(value, 48);
-  if (!cleaned || !allowed.includes(cleaned as T)) return null;
-  return cleaned as T;
+function exactEnum<T extends string>(value: unknown, allowed: readonly T[]): T | null {
+  if (typeof value !== "string" || !allowed.includes(value as T)) return null;
+  return value as T;
 }
 
 const QUOTA_WINDOW_KINDS = ["session", "weekly", "monthly", "model", "credits", "unknown"] as const;
@@ -132,7 +131,7 @@ function parseWindow(value: unknown): QuotaWindowView | null {
   if (!isRecord(value)) return null;
   const id = cleanText(value.id);
   const label = cleanText(value.label);
-  const kind = cleanEnum(value.kind, QUOTA_WINDOW_KINDS);
+  const kind = exactEnum(value.kind, QUOTA_WINDOW_KINDS);
   if (!id || !label || !kind) return null;
 
   let percentRemaining: number | null = null;
@@ -166,7 +165,7 @@ function parseCredits(value: unknown): QuotaCreditsView | null | undefined {
     if (typeof value.unlimited !== "boolean") return null;
     unlimited = value.unlimited;
   }
-  const unit = value.unit === undefined ? null : cleanEnum(value.unit, QUOTA_CREDIT_UNITS);
+  const unit = value.unit === undefined ? null : exactEnum(value.unit, QUOTA_CREDIT_UNITS);
   if (value.unit !== undefined && unit === null) return null;
   return { remaining, unlimited, unit };
 }
@@ -193,16 +192,16 @@ export function selectActiveProviderQuota(
   }
 
   const rawProvider = report.providers.find(
-    (entry) => isRecord(entry) && cleanText(entry.provider, 48)?.toLowerCase() === provider,
+    (entry) => isRecord(entry) && entry.provider === provider,
   );
   if (!rawProvider || !isRecord(rawProvider)) {
     return { kind: "unavailable", provider, label: null };
   }
 
   const label = cleanText(rawProvider.label);
-  const source = cleanEnum(rawProvider.source, QUOTA_PROVIDER_SOURCES);
+  const source = exactEnum(rawProvider.source, QUOTA_PROVIDER_SOURCES);
   if (!label || !source || !isRecord(rawProvider.state)) return malformed(provider);
-  const status = cleanEnum(rawProvider.state.status, QUOTA_PROVIDER_STATUSES);
+  const status = exactEnum(rawProvider.state.status, QUOTA_PROVIDER_STATUSES);
   const sourcesTried = rawProvider.state.sourcesTried;
   if (
     typeof rawProvider.state.stale !== "boolean" ||
@@ -226,9 +225,7 @@ export function selectActiveProviderQuota(
     }
   }
 
-  if (!Array.isArray(rawProvider.windows) || rawProvider.windows.length === 0) {
-    return { kind: "unavailable", provider, label };
-  }
+  if (!Array.isArray(rawProvider.windows)) return malformed(provider);
   const windows: QuotaWindowView[] = [];
   for (const rawWindow of rawProvider.windows) {
     const window = parseWindow(rawWindow);
@@ -327,7 +324,7 @@ export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.n
       : `${compactNumber(window.percentRemaining)}% left`;
     return `${window.label} ${remaining} ${formatReset(window, nowMs).replace(/^resets /, "reset ")}`;
   });
-  const fullParts = [heading, ...windowParts];
+  const fullParts = [heading, ...(windowParts.length > 0 ? windowParts : ["no quota windows"])];
   if (view.credits) fullParts.push(formatCredits(view.credits));
   const full = fullParts.join(" | ");
   if (visibleWidth(full) <= safeWidth) return full;
