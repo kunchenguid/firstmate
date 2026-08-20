@@ -27,16 +27,30 @@ export type FreshQuotaView = {
   windows: QuotaWindowView[];
   credits: QuotaCreditsView | null;
   generatedAtMs: number;
+  freshnessTimestampMs: number;
   freshUntilMs: number;
   refreshFailure?: QuotaFailureReason | null;
 };
 
 export type QuotaFailureReason = "missing" | "failed" | "timeout" | "overflow" | "cancelled";
 
+export type QuotaUnsupportedReason =
+  | "provider"
+  | "no-model"
+  | "auth-inspection"
+  | "non-subscription-auth"
+  | "auth-timeout"
+  | "auth-cancelled"
+  | "auth-overflow"
+  | "auth-unavailable"
+  | "custom-endpoint"
+  | "account-correlation"
+  | "credential-monitoring";
+
 export type QuotaView =
   | FreshQuotaView
   | { kind: "refreshing"; provider: string }
-  | { kind: "unsupported"; provider: string }
+  | { kind: "unsupported"; provider: string; reason: QuotaUnsupportedReason }
   | { kind: "unavailable"; provider: string; label: string | null }
   | { kind: "failure"; provider: string; reason: QuotaFailureReason }
   | { kind: "unverified"; provider: string }
@@ -171,6 +185,16 @@ export function parseQuotaAxiJson(
 
 function malformed(provider: string): QuotaView {
   return { kind: "malformed", provider };
+}
+
+function isFreshAt(generatedAtMs: number, freshUntilMs: number, nowMs: number): boolean {
+  return generatedAtMs <= nowMs + 60_000 && nowMs < freshUntilMs;
+}
+
+export function revalidateFreshQuotaView(view: FreshQuotaView, nowMs = Date.now()): QuotaView {
+  return isFreshAt(view.freshnessTimestampMs, view.freshUntilMs, nowMs)
+    ? view
+    : { kind: "stale", provider: view.provider, label: view.label };
 }
 
 function validOptionalNumber(
@@ -396,6 +420,8 @@ function validRunway(
   value: unknown,
   boundedBy: string[],
   allowedBlockers: string[],
+  windowsById: ReadonlyMap<string, QuotaWindowView>,
+  generatedAtMs: number,
 ): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
@@ -431,17 +457,31 @@ function validRunway(
       validNonemptyTextArray(value.unmeasurableWindowIds);
   }
   if (value.unmeasurableWindowIds !== undefined) return false;
+  const exhaustedWindowIds = boundedBy.filter(
+    (id) => windowsById.get(id)?.percentRemaining === 0,
+  );
   if (status === "exhausted_now") {
     return value.usableRunwaySeconds === 0 &&
-      value.projectedExhaustedAt !== undefined &&
-      limitingWindowId !== null &&
+      parseTimestamp(value.projectedExhaustedAt) === generatedAtMs &&
+      limitingWindowId === exhaustedWindowIds[0] &&
       value.projectionConfidence === undefined &&
       value.projectionBasis === undefined;
   }
+  if (exhaustedWindowIds.length > 0) return false;
   if (status === "projected_exhaustion") {
-    return value.usableRunwaySeconds !== undefined &&
-      value.projectedExhaustedAt !== undefined &&
-      limitingWindowId !== null &&
+    const projectedExhaustedAtMs = parseTimestamp(value.projectedExhaustedAt);
+    const usableRunwaySeconds = finiteNumber(value.usableRunwaySeconds);
+    const limitingWindow = limitingWindowId === null ? undefined : windowsById.get(limitingWindowId);
+    const limitingPercentRemaining = limitingWindow?.percentRemaining ?? null;
+    return usableRunwaySeconds !== null &&
+      projectedExhaustedAtMs !== null &&
+      projectedExhaustedAtMs > generatedAtMs &&
+      limitingPercentRemaining !== null &&
+      limitingPercentRemaining > 0 &&
+      limitingWindow?.resetsAtMs !== null &&
+      limitingWindow?.resetsAtMs !== undefined &&
+      projectedExhaustedAtMs < limitingWindow.resetsAtMs &&
+      Math.abs((projectedExhaustedAtMs - generatedAtMs) / 1000 - usableRunwaySeconds) <= 0.5 &&
       projectionConfidence !== null;
   }
   return value.usableRunwaySeconds === undefined &&
@@ -474,6 +514,7 @@ function validEffectiveAvailability(
   requireAuditFields: boolean,
   unresolvedWindowIds: string[],
   windowsById: ReadonlyMap<string, QuotaWindowView>,
+  generatedAtMs: number,
 ): boolean {
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_AVAILABILITY_STATUSES);
@@ -510,7 +551,7 @@ function validEffectiveAvailability(
   }
   const allowedBlockers = [...new Set([...value.boundedBy, ...unresolvedWindowIds])];
   return validEffectivePace(value.pace, requireAuditFields, value.boundedBy) &&
-    validRunway(value.runway, value.boundedBy, allowedBlockers) &&
+    validRunway(value.runway, value.boundedBy, allowedBlockers, windowsById, generatedAtMs) &&
     validSelection(value.selection, allowedBlockers);
 }
 
@@ -519,6 +560,7 @@ function validQuotaSemantics(
   requireDescription: boolean,
   requireAuditFields: boolean,
   windows: QuotaWindowView[],
+  generatedAtMs: number,
 ): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
@@ -540,7 +582,13 @@ function validQuotaSemantics(
     if (
       scope === null ||
       scopes.has(scope) ||
-      !validEffectiveAvailability(entry, requireAuditFields, unresolvedWindowIds, windowsById)
+      !validEffectiveAvailability(
+        entry,
+        requireAuditFields,
+        unresolvedWindowIds,
+        windowsById,
+        generatedAtMs,
+      )
     ) return false;
     scopes.add(scope);
   }
@@ -570,6 +618,7 @@ function validProviderFields(
   value: Record<string, unknown>,
   schemaVersion: number,
   projection: QuotaAxiProjection,
+  generatedAtMs: number,
 ): boolean {
   const requireFullFields = schemaVersion === 3 || projection === "full";
   if (value.label !== undefined && cleanText(value.label) === null) return false;
@@ -583,11 +632,13 @@ function validProviderFields(
   const parsedWindows = value.windows.map((window) => parseWindow(window));
   if (parsedWindows.some((window) => window === null)) return false;
   if (new Set(parsedWindows.map((window) => window?.id)).size !== parsedWindows.length) return false;
+  const providerIsStale = isRecord(value.state) && value.state.stale === true;
   if (!validQuotaSemantics(
     value.quotaSemantics,
     requireFullFields,
-    requireFullFields,
+    requireFullFields && !providerIsStale,
     parsedWindows as QuotaWindowView[],
+    generatedAtMs,
   )) return false;
   if (parseCredits(value.credits) === null) return false;
   if (parseAccount(value.account) === null || parseAttempts(value.attempts) === null) return false;
@@ -605,18 +656,18 @@ export function selectActiveProviderQuota(
   } = {},
 ): QuotaView {
   const provider = quotaProviderForPiProvider(piProvider);
-  if (!provider) return { kind: "unsupported", provider: cleanText(piProvider, 48) ?? "unknown" };
+  if (!provider) {
+    return { kind: "unsupported", provider: cleanText(piProvider, 48) ?? "unknown", reason: "provider" };
+  }
 
   const nowMs = options.nowMs ?? Date.now();
   const requestedFreshnessMs = options.freshnessMs ?? DEFAULT_QUOTA_FRESHNESS_MS;
   const freshnessMs = Number.isFinite(requestedFreshnessMs) && requestedFreshnessMs > 0
     ? requestedFreshnessMs
     : DEFAULT_QUOTA_FRESHNESS_MS;
+  let freshnessTimestampMs = report.generatedAtMs;
   let freshUntilMs = report.generatedAtMs + freshnessMs;
-  if (
-    report.generatedAtMs > nowMs + 60_000 ||
-    nowMs >= freshUntilMs
-  ) {
+  if (!isFreshAt(report.generatedAtMs, freshUntilMs, nowMs)) {
     return { kind: "stale", provider, label: null };
   }
 
@@ -628,7 +679,12 @@ export function selectActiveProviderQuota(
   }
 
   const fullProjection = report.projection === "full";
-  if (!validProviderFields(rawProvider, report.schemaVersion, report.projection)) return malformed(provider);
+  if (!validProviderFields(
+    rawProvider,
+    report.schemaVersion,
+    report.projection,
+    report.generatedAtMs,
+  )) return malformed(provider);
   const label = rawProvider.label === undefined && report.schemaVersion === 5 && !fullProjection
     ? QUOTA_PROVIDER_LABELS[provider] ?? null
     : cleanText(rawProvider.label);
@@ -662,8 +718,9 @@ export function selectActiveProviderQuota(
   if (rawProvider.state.refreshedAt !== undefined) {
     const refreshedAtMs = parseTimestamp(rawProvider.state.refreshedAt);
     if (refreshedAtMs === null) return malformed(provider);
+    freshnessTimestampMs = Math.max(freshnessTimestampMs, refreshedAtMs);
     freshUntilMs = Math.min(freshUntilMs, refreshedAtMs + freshnessMs);
-    if (refreshedAtMs > nowMs + 60_000 || nowMs >= freshUntilMs) {
+    if (!isFreshAt(freshnessTimestampMs, freshUntilMs, nowMs)) {
       return { kind: "stale", provider, label };
     }
   }
@@ -711,7 +768,7 @@ export function selectActiveProviderQuota(
     if (options.expectedAccountId === undefined) return { kind: "unverified", provider };
   }
 
-  return {
+  return revalidateFreshQuotaView({
     kind: "fresh",
     provider,
     label,
@@ -719,8 +776,9 @@ export function selectActiveProviderQuota(
     windows,
     credits: credits ?? null,
     generatedAtMs: report.generatedAtMs,
+    freshnessTimestampMs,
     freshUntilMs,
-  };
+  }, nowMs);
 }
 
 function compactNumber(value: number): string {
@@ -757,6 +815,23 @@ function formatCredits(credits: QuotaCreditsView): string {
   }
   return credits.unlimited === false ? "credits unavailable" : "credits unknown";
 }
+
+const UNSUPPORTED_TEXT: Readonly<Record<QuotaUnsupportedReason, { detail: string; compact: string }>> = {
+  provider: { detail: "", compact: "Quota: unsupported" },
+  "no-model": { detail: "no model", compact: "Quota: no model" },
+  "auth-inspection": { detail: "auth inspection unavailable", compact: "Quota: auth unknown" },
+  "non-subscription-auth": { detail: "non-subscription auth", compact: "Quota: unsupported auth" },
+  "auth-timeout": { detail: "auth timed out", compact: "Quota: auth timeout" },
+  "auth-cancelled": { detail: "auth cancelled", compact: "Quota: auth cancelled" },
+  "auth-overflow": { detail: "auth data too large", compact: "Quota: auth too large" },
+  "auth-unavailable": { detail: "auth unavailable", compact: "Quota: auth unavailable" },
+  "custom-endpoint": { detail: "custom endpoint", compact: "Quota: custom endpoint" },
+  "account-correlation": { detail: "account correlation unavailable", compact: "Quota: account unknown" },
+  "credential-monitoring": {
+    detail: "credential monitoring unavailable",
+    compact: "Quota: monitor failed",
+  },
+};
 
 const FAILURE_TEXT: Readonly<Record<QuotaFailureReason, { long: string; compact: string }>> = {
   missing: { long: "quota-axi missing", compact: "missing" },
@@ -805,7 +880,12 @@ export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.n
     return truncateToWidth("Quota: refreshing", safeWidth, "…");
   }
   if (view.kind === "unsupported") {
-    return truncateToWidth(`Quota: unavailable for ${view.provider}`, safeWidth, "…");
+    const reason = UNSUPPORTED_TEXT[view.reason];
+    const provider = cleanText(view.provider, 48) ?? "unknown";
+    const long = view.reason === "no-model"
+      ? "Quota: unavailable (no model)"
+      : `Quota: unavailable for ${provider}${reason.detail ? ` (${reason.detail})` : ""}`;
+    return firstFitting([long, reason.compact], safeWidth);
   }
   if (view.kind === "unavailable") {
     const label = view.label ? ` ${view.label}` : "";
@@ -819,7 +899,10 @@ export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.n
     ], safeWidth);
   }
   if (view.kind === "unverified") {
-    return truncateToWidth("Quota: unavailable (account unverified)", safeWidth, "…");
+    return firstFitting([
+      "Quota: unavailable (account unverified)",
+      "Quota: account unknown",
+    ], safeWidth);
   }
   if (view.kind === "stale") {
     const label = view.label ? ` ${view.label}` : "";

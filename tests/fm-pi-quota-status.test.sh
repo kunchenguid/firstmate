@@ -222,6 +222,7 @@ const {
   formatQuotaStatus,
   parseQuotaAxiJson,
   quotaProviderForPiProvider,
+  revalidateFreshQuotaView,
   selectActiveProviderQuota,
 } = quotaModule;
 
@@ -351,6 +352,31 @@ for (const customProvider of ["claude", "codex", "copilot", "cursor", "grok", "k
 
 const codex = selectActiveProviderQuota(parsed, "openai-codex", { nowMs: now });
 assert(codex.kind === "fresh", "active Codex provider was not selected");
+const detachedReport = parseQuotaAxiJson(JSON.stringify(report(now)));
+const detachedView = selectActiveProviderQuota(detachedReport, "openai-codex", { nowMs: now });
+assert(detachedView.kind === "fresh", "detached quota fixture was not fresh");
+detachedReport.providers = new Proxy(detachedReport.providers, {
+  get() {
+    throw new Error("cached freshness re-read the full report");
+  },
+});
+assert(
+  revalidateFreshQuotaView(detachedView, now).kind === "fresh",
+  "cached quota freshness did not remain independent of the full report",
+);
+assert(
+  revalidateFreshQuotaView(detachedView, detachedView.freshUntilMs).kind === "stale",
+  "cached quota freshness did not expire at its publication deadline",
+);
+const futureRefreshReport = report(now);
+futureRefreshReport.providers[1].state.refreshedAt = new Date(now + 30_000).toISOString();
+const futureRefreshParsed = parseQuotaAxiJson(JSON.stringify(futureRefreshReport));
+const futureRefreshView = selectActiveProviderQuota(futureRefreshParsed, "openai-codex", { nowMs: now });
+assert(futureRefreshView.kind === "fresh", "within-skew refreshed quota was rejected");
+assert(
+  revalidateFreshQuotaView(futureRefreshView, now - 40_001).kind === "stale",
+  "cached quota ignored a future refreshed-at timestamp after a backward clock shift",
+);
 const full = formatQuotaStatus(codex, 400, now);
 for (const expected of [
   "Quota Codex (plan pro)",
@@ -465,6 +491,18 @@ for (const [reason, expected, compact] of [
   assert(failureText.includes(expected), `${reason} failure was not explicit: ${failureText}`);
   const compactFailureText = formatQuotaStatus({ kind: "failure", provider: "codex", reason }, 24, now);
   assert(compactFailureText === compact, `${reason} failure lost its narrow identity: ${compactFailureText}`);
+}
+for (const [reason, detail, compact] of [
+  ["provider", "custom-proxy", "Quota: unsupported"],
+  ["auth-timeout", "auth timed out", "Quota: auth timeout"],
+  ["custom-endpoint", "custom endpoint", "Quota: custom endpoint"],
+  ["credential-monitoring", "credential monitoring unavailable", "Quota: monitor failed"],
+]) {
+  const unsupported = { kind: "unsupported", provider: "custom-proxy", reason };
+  const fullUnsupported = formatQuotaStatus(unsupported, 200, now);
+  assert(fullUnsupported.includes(detail), `${reason} unavailable state omitted its reason: ${fullUnsupported}`);
+  const compactUnsupported = formatQuotaStatus(unsupported, 24, now);
+  assert(compactUnsupported === compact, `${reason} unavailable state collapsed narrowly: ${compactUnsupported}`);
 }
 
 const claude = selectActiveProviderQuota(parsed, "anthropic", { nowMs: now });
@@ -584,6 +622,13 @@ const invalidPaceRelation = structuredClone(fullyPopulated);
 invalidPaceRelation.providers[1].windows[0].pace.reason = "stale";
 const invalidRunwayRelation = structuredClone(fullyPopulated);
 invalidRunwayRelation.providers[1].quotaSemantics.effectiveAvailability[0].runway.status = "unknown";
+const falseExhaustedRunway = structuredClone(fullyPopulated);
+falseExhaustedRunway.providers[1].quotaSemantics.effectiveAvailability[0].runway = {
+  status: "exhausted_now",
+  usableRunwaySeconds: 0,
+  projectedExhaustedAt: new Date(now).toISOString(),
+  limitingWindowId: "weekly",
+};
 const invalidSelectionRelation = structuredClone(fullyPopulated);
 invalidSelectionRelation.providers[1].quotaSemantics.effectiveAvailability[0].selection.status = "unknown";
 const missingPaceBlockers = structuredClone(fullyPopulated);
@@ -675,6 +720,7 @@ for (const [malformedReport, description] of [
   [invalidQuotaSemantics, "invalid quota semantics field"],
   [invalidPaceRelation, "invalid pace status relation"],
   [invalidRunwayRelation, "invalid runway status relation"],
+  [falseExhaustedRunway, "exhausted runway with remaining quota"],
   [invalidSelectionRelation, "invalid selection status relation"],
   [missingPaceBlockers, "unknown pace without blockers"],
   [missingRunwayBlockers, "unknown runway without blockers"],
@@ -699,6 +745,30 @@ for (const [malformedReport, description] of [
     `${description} was accepted as fresh`,
   );
 }
+const staleMixedPace = structuredClone(fullyPopulated);
+staleMixedPace.providers[1].source = "cache";
+staleMixedPace.providers[1].state.status = "stale";
+staleMixedPace.providers[1].state.stale = true;
+for (const window of staleMixedPace.providers[1].windows) {
+  window.pace = { status: "unknown", reason: "stale" };
+}
+staleMixedPace.providers[1].quotaSemantics = {
+  status: "unknown",
+  description: "Stale quota has unknown effective availability",
+  effectiveAvailability: [{
+    scope: "all_models",
+    status: "unknown",
+    boundedBy: ["weekly", "spark-session"],
+    pace: { status: "unknown", unknownWindowIds: ["weekly"] },
+    runway: { status: "unknown", unmeasurableWindowIds: ["weekly", "spark-session"] },
+  }],
+};
+const staleMixedPaceParsed = parseQuotaAxiJson(JSON.stringify(staleMixedPace), { projection: "full" });
+assert(staleMixedPaceParsed, "mixed-pace stale fixture did not parse structurally");
+assert(
+  selectActiveProviderQuota(staleMixedPaceParsed, "openai-codex", { nowMs: now }).kind === "stale",
+  "valid mixed-pace stale projection was mislabeled malformed",
+);
 const uppercaseProvider = report(now);
 uppercaseProvider.providers[1].provider = "CODEX";
 const uppercaseProviderParsed = parseQuotaAxiJson(JSON.stringify(uppercaseProvider));
