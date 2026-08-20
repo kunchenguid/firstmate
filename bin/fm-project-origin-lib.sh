@@ -186,25 +186,6 @@ fm_project_origin_safe() { # <url>; 0 when the URL is an accepted clone URL
   return 0
 }
 
-# A `local-only` project's canonical copy is a folder on this machine rather than
-# a forge, so its clones carry a filesystem origin. This answers "does this
-# TRANSPORTED origin name a repository the receiving machine can reach as a path",
-# so everything fm_project_origin_safe refuses at that boundary stays refused here.
-# A value a caller has already anchored against a clone of its own is a different
-# question, answered by fm_project_origin_anchored_local_path below. It decides on
-# the URL's form alone and never touches the filesystem, so the caller still proves
-# the path is a git work tree it may write to.
-fm_project_origin_local_path() { # <url>; prints the filesystem path, or 1 when the origin is not local
-  local url=${1-} path
-  fm_project_origin_safe "$url" || return 1
-  case $url in
-    file:///?*) path=${url#file://} ;;
-    /?*) path=$url ;;
-    *) return 1 ;;
-  esac
-  printf '%s\n' "$path"
-}
-
 # An origin a caller has ALREADY ANCHORED against the clone it belongs to is a path
 # on THIS machine, so it is judged on what a local filesystem path has to be rather
 # than on the transport rules fm_project_origin_safe applies to a value bound for

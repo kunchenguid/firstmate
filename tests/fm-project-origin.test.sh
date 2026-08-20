@@ -107,35 +107,6 @@ refuses 'file:///srv/git/../../etc/app.git'
 refuses '/srv/git/..'
 pass "executable transports, option-shaped values, and unusable spellings are refused"
 
-# A transported origin may still name a path on the receiving machine, so the
-# validator answers that separately. A local answer is a real path, and anything
-# on another host must not read as one.
-local_path_is() {  # <url> <expected-path>
-  local actual
-  actual=$(fm_project_origin_local_path "$1") \
-    || fail "did not recognize a local repository origin: $1"
-  [ "$actual" = "$2" ] || fail "resolved $1 to $actual, expected $2"
-}
-not_local() {
-  ! fm_project_origin_local_path "$1" >/dev/null \
-    || fail "treated an origin on another host as a folder on this machine: $1"
-}
-
-local_path_is '/Users/captain/JobSearch' '/Users/captain/JobSearch'
-local_path_is 'file:///Users/captain/JobSearch' '/Users/captain/JobSearch'
-local_path_is '/srv/git/app.git' '/srv/git/app.git'
-not_local 'https://example.com/owner/app.git'
-not_local 'ssh://git@example.com/owner/app.git'
-not_local 'git@example.com:owner/app.git'
-not_local 'git://example.com/owner/app.git'
-# Refused spellings stay refused here too: a path the validator will not accept
-# must never be handed on as somewhere to land a change.
-not_local '/srv/git/../../etc/app.git'
-not_local 'relative/path.git'
-not_local '-/srv/git/app.git'
-not_local ''
-pass "a local repository origin resolves to its path and a remote one never does"
-
 # A caller holding the clone an origin belongs to may anchor a path-shaped
 # spelling before asking, so the library also answers which spellings are paths
 # at all. A colon only makes an origin scp-like when it precedes the first slash.
