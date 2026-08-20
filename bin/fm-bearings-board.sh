@@ -25,12 +25,13 @@
 # path       Print the stable board path for this home.
 #
 # Validation is fail-closed: the payload must be valid JSON with
-# schema=fm-bearings-board.v1; string `home` and `generated`; boolean
-# `prs_live`; arrays `captains_call`, `underway`, `landed`, and `charted`;
-# every captains_call item carries a slug `key` of at most 128 characters
-# (matching the Lavish adapter's question cap), a `type` of decision, merge, or
-# credential, and an `options` array; every charted item carries a boolean
-# `dispatchable`. Anything else refuses before the existing board is touched.
+# schema=fm-bearings-board.v1 and every renderer-consumed field must satisfy
+# the fm-bearings-board.v1 types and item invariants below. Every fleet row and
+# Captain's Call item explicitly carries `repo`; the composer fills it from the
+# snapshot and task records wherever known, and uses null or an empty string
+# only as the deliberate genuinely-no-repo marker. In that exceptional case
+# the template may display the routing id. Anything else refuses before the
+# existing board is touched.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
@@ -66,19 +67,58 @@ board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
 
 validate_payload() {  # <data.json>
   jq -e --arg schema "$BOARD_SCHEMA" '
-    (.schema == $schema)
-    and (.home | type == "string")
-    and (.generated | type == "string")
+    def nonempty_string: type == "string" and length > 0;
+    def slug($max): type == "string" and test("^[A-Za-z0-9._-]{1," + ($max | tostring) + "}$");
+    def repo_marker: has("repo") and (.repo == null or (.repo | type == "string"));
+    def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
+    def call_item:
+      type == "object"
+      and (.key | slug(128))
+      and (.type == "decision" or .type == "merge" or .type == "credential")
+      and repo_marker
+      and (.title | nonempty_string)
+      and (.options | type == "array")
+      and ([.options[]
+        | type == "object"
+          and (.value | slug(128))
+          and (.label | nonempty_string)
+          and optional_string("hint")] | all)
+      and (optional_string("about"))
+      and (optional_string("decide"))
+      and (optional_string("detail"))
+      and (optional_string("pr_url"))
+      and (optional_string("freeform_hint"))
+      and ((has("allow_freeform") | not) or (.allow_freeform | type == "boolean"))
+      and ((has("recommend_value") | not)
+        or ((.recommend_value | slug(128))
+          and (.recommend_value as $recommend | [.options[].value] | index($recommend) != null)))
+      and (if .type == "merge" then (.risk | nonempty_string) else true end);
+    def underway_item:
+      type == "object" and repo_marker and (.id | nonempty_string)
+      and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string);
+    def landed_item:
+      type == "object" and repo_marker and (.id | nonempty_string)
+      and (.what | nonempty_string) and (.owner | nonempty_string)
+      and optional_string("pr_url");
+    def charted_item:
+      type == "object" and repo_marker and (.id | slug(128))
+      and (.title | nonempty_string) and (.reason | type == "string")
+      and (.dispatchable | type == "boolean");
+    type == "object"
+    and (.schema == $schema)
+    and (.home | nonempty_string)
+    and (.generated | nonempty_string)
     and (.prs_live | type == "boolean")
     and (.captains_call | type == "array")
     and (.underway | type == "array")
     and (.landed | type == "array")
     and (.charted | type == "array")
-    and ([.captains_call[]
-      | ((.key | type == "string") and (.key | test("^[A-Za-z0-9._-]{1,128}$")))
-        and (.type == "decision" or .type == "merge" or .type == "credential")
-        and (.options | type == "array")] | all)
-    and ([.charted[] | (.dispatchable | type == "boolean")] | all)
+    and ((has("charted_more") | not)
+      or ((.charted_more | type == "number") and (.charted_more >= 0) and (.charted_more | floor == .)))
+    and ([.captains_call[] | call_item] | all)
+    and ([.underway[] | underway_item] | all)
+    and ([.landed[] | landed_item] | all)
+    and ([.charted[] | charted_item] | all)
   ' "$1" >/dev/null
 }
 

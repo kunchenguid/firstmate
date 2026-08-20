@@ -182,7 +182,8 @@ a { color: inherit; text-decoration: none; }
 .bb-call::before { transform: rotate(1.3deg) translate(4px, 5px); }
 .bb-call::after  { transform: rotate(-1.1deg) translate(-3px, 9px); }
 .bb-call--penult::after { display: none; }
-.bb-call--last::before, .bb-call--last::after { display: none; }
+.bb-call--last::before, .bb-call--last::after,
+.bb-call--empty::before, .bb-call--empty::after { display: none; }
 .bb-call > .bb-decision { grid-area: 1 / 1; z-index: 1; }
 .bb-call > .bb-decision[hidden] { display: none; }
 .bb-decision { display: flex; flex-direction: column; }
@@ -547,6 +548,7 @@ __FM_BEARINGS_BOARD_DATA__
   var stackCount = document.getElementById("bb-stack-count");
   var stackPrev = document.getElementById("bb-stack-prev");
   var stackNext = document.getElementById("bb-stack-next");
+  var stackNav = stackCount.parentNode;
   function showCard(i) {
     active = Math.max(0, Math.min(cards.length - 1, i));
     cards.forEach(function (c, j) { c.hidden = j !== active; });
@@ -559,9 +561,15 @@ __FM_BEARINGS_BOARD_DATA__
     deck.classList.toggle("bb-call--penult", active === cards.length - 2);
     deck.classList.toggle("bb-call--last", active === cards.length - 1);
   }
-  stackPrev.addEventListener("click", function () { showCard(active - 1); });
-  stackNext.addEventListener("click", function () { showCard(active + 1); });
-  showCard(0);
+  if (cards.length) {
+    stackPrev.addEventListener("click", function () { showCard(active - 1); });
+    stackNext.addEventListener("click", function () { showCard(active + 1); });
+    showCard(0);
+  } else {
+    deck.classList.add("bb-call--empty");
+    deck.appendChild(el("div", "bb-empty", "Nothing needs your action right now."));
+    stackNav.hidden = true;
+  }
 
   /* Underway */
   var uw = document.getElementById("bb-underway");

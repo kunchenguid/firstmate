@@ -4,7 +4,7 @@ description: >-
   Generate a "pick up where I left off" fleet digest from firstmate's live fleet state.
   Use when the captain invokes /bearings or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works".
   Plain /bearings is chat-only by default, /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact, and /bearings lavish additionally builds and arms the interactive fleet board; live PR enrichment remains opt-in and composes with the other modes.
-  Also load this skill's board-wake handling on a procevent lavish wake whose keyed answers carry merge. or dispatch. keys.
+  Also load this skill's board-wake handling when a procevent lavish wake's source id matches the canonical source id of the stable bearings board path.
 user-invocable: true
 metadata:
   internal: true
@@ -16,8 +16,8 @@ Generate a complete current snapshot from the fleet's current state, so the capt
 Plain `/bearings` returns only the concise four-section chat digest.
 Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
 Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
-This skill is operationally read-only apart from those explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
-It never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, or mutates backlog or task state; board answers are acted on later, at wake time, through the normal owners under the normal authority rules.
+A digest/build invocation is operationally read-only apart from those explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
+During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, or mutates backlog or task state. Board answers are acted on later under the normal authority rules; this skill's board-wake section explicitly owns the guarded routing at that time.
 
 ## Invocation modes
 
@@ -76,14 +76,14 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 
 - A Captain's Call decision key is the FULL hold identity from `decisions_open`; a merge card's key is `merge.<task-id>`; the Charted Next dispatch picker's key is `dispatch.charted`.
 - Decision cards carry agent-authored copy: a short noun-phrase title, one-line `about` and `decide` context rows, and option labels with hints, with the recommended option marked.
-- Every row names the repo, never an internal task id (ids stay in the payload as the routing channel), and composed reasons name blockers in plain words.
+- Every Captain's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.
 
 After `build`, serve the board with `lavish-axi` and include its URL in the chat digest.
 Never run `lavish-axi poll` for the board yourself: the armed source's supervised runner owns the blocking poll, and the watcher's ordinary reconcile restarts it, so no conversational turn ever blocks on the board.
 
 ### Handling a board wake
 
-A board answer arrives as an ordinary `procevent lavish <source-id> <sequence>` check wake; load `process-event-sources` and follow its contract for the result read, adapter classification, and the handled acknowledgement.
+A board answer arrives as an ordinary `procevent lavish <source-id> <sequence>` check wake. Identify it by comparing the wake source id with `bin/fm-procevent-lavish.sh source-id "$(bin/fm-bearings-board.sh path)"`, regardless of which answer kinds the result contains; then load `process-event-sources` and follow its contract for the result read, adapter classification, and the handled acknowledgement.
 Decision answers need no routing from you: the runner feeds the board's any-origin binding into `bin/fm-decision-hold.sh`'s one keyed-answer intake, which closes each full-identity hold at answer time; reconcile any `skipped:` key yourself, using `resolve` when routed work exists.
 Route the non-decision keys yourself:
 
@@ -137,6 +137,6 @@ Rules that keep the contract unambiguous:
 
 ## Supervision discipline
 
-This skill changes no fleet state.
-Do not tear down a task, merge a PR, dispatch queued work, steer a worker, answer a queued decision, clean up work, or mutate any `state/` or `data/` file other than the single report file in explicit file mode.
-If the state you read suggests an action - a PR ready to merge, a queued item whose gate has arrived, or a needs-decision finding - name it in its section and leave the action to the normal lifecycle and configured authority rather than taking it from inside this skill.
+During a digest/build invocation, this skill changes no fleet state beyond its explicit report or board artifacts, binding, and source registration.
+Do not tear down a task, merge a PR, dispatch queued work, steer a worker, answer a queued decision, clean up work, or mutate any other `state/` or `data/` file during that invocation.
+If the state gathered for the digest suggests an action, name it in its section and leave it to the normal lifecycle and configured authority. On a later board wake, this read-only invocation rule yields to "Handling a board wake" and its guarded authority for captain-selected dispatches and merges.
