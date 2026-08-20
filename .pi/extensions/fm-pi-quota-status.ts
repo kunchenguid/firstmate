@@ -17,7 +17,6 @@ const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
 
 const OFFICIAL_PROVIDER_BASE_URLS: Readonly<Record<string, string>> = {
   anthropic: "https://api.anthropic.com",
-  "github-copilot": "https://api.individual.githubcopilot.com",
   "kimi-coding": "https://api.kimi.com/coding",
   "openai-codex": "https://chatgpt.com/backend-api",
   xai: "https://api.x.ai/v1",
@@ -54,8 +53,18 @@ export type FirstmateQuotaStatusOptions = {
 type ActiveModel = NonNullable<ExtensionContext["model"]>;
 
 type QuotaTarget =
-  | { kind: "supported"; piProvider: string }
+  | { kind: "supported"; piProvider: string; activeAccountId: string | null }
   | { kind: "unsupported"; view: Extract<QuotaView, { kind: "unsupported" }> };
+
+type CompatibleModelRegistry = {
+  getProvider?: (provider: string) => {
+    auth?: { oauth?: { isSubscription?: boolean } };
+  } | undefined;
+  getProviderAuth?: (provider: string) => Promise<{
+    auth: { apiKey?: string; baseUrl?: string };
+  } | undefined>;
+  isUsingOAuth?: (model: ActiveModel) => boolean;
+};
 
 type ActiveSession = {
   ctx: ExtensionContext;
@@ -98,6 +107,57 @@ function canonicalBaseUrl(value: string): string | null {
   }
 }
 
+function isOfficialProviderBaseUrl(provider: string, value: string): boolean {
+  const canonical = canonicalBaseUrl(value);
+  if (!canonical) return false;
+  if (provider === "github-copilot") {
+    return /^https:\/\/api\.(?:individual|business|enterprise)\.githubcopilot\.com$/.test(canonical);
+  }
+  const expected = OFFICIAL_PROVIDER_BASE_URLS[provider];
+  return Boolean(expected && canonical === canonicalBaseUrl(expected));
+}
+
+function exactAccountId(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > 200) return null;
+  if (value.trim() !== value || /[\u0000-\u001f\u007f-\u009f]/.test(value)) return null;
+  return value;
+}
+
+function jwtPayload(token: string | undefined): Record<string, unknown> | null {
+  if (!token) return null;
+  const encoded = token.split(".")[1];
+  if (!encoded) return null;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function activeAccountId(provider: string, apiKey: string | undefined): string | null {
+  if (provider !== "openai-codex") return null;
+  const payload = jwtPayload(apiKey);
+  if (!payload) return null;
+  const auth = typeof payload["https://api.openai.com/auth"] === "object" &&
+      payload["https://api.openai.com/auth"] !== null &&
+      !Array.isArray(payload["https://api.openai.com/auth"])
+    ? payload["https://api.openai.com/auth"] as Record<string, unknown>
+    : null;
+  for (const candidate of [
+    payload["https://api.openai.com/auth/account_id"],
+    payload.account_id,
+    auth?.chatgpt_account_id,
+    auth?.account_id,
+  ]) {
+    const accountId = exactAccountId(candidate);
+    if (accountId) return accountId;
+  }
+  return null;
+}
+
 function killProcess(child: ChildProcess, processGroupId: number | null): void {
   if (processGroupId !== null) {
     try {
@@ -117,11 +177,18 @@ export function runQuotaAxiJson(options: {
   command?: string;
   timeoutMs?: number;
   maxOutputBytes?: number;
+  full?: boolean;
+  provider?: string;
 } = {}): QuotaProcess {
   const command = options.command ?? "quota-axi";
   const timeoutMs = positiveNumber(options.timeoutMs, DEFAULT_TIMEOUT_MS);
   const maxOutputBytes = positiveNumber(options.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
-  const child = spawn(command, ["--json"], {
+  const args = [
+    "--json",
+    ...(options.full ? ["--full"] : []),
+    ...(options.provider ? ["--provider", options.provider] : []),
+  ];
+  const child = spawn(command, args, {
     detached: process.platform !== "win32",
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
@@ -214,8 +281,19 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (!quotaProviderForPiProvider(model.provider)) {
         return { kind: "unsupported", view: unsupportedProvider(model.provider) };
       }
-      const provider = ctx.modelRegistry.getProvider(model.provider);
-      if (provider?.auth.oauth?.isSubscription !== true || !ctx.modelRegistry.isUsingOAuth(model)) {
+      const registry = ctx.modelRegistry as unknown as CompatibleModelRegistry;
+      if (
+        typeof registry.getProvider !== "function" ||
+        typeof registry.getProviderAuth !== "function" ||
+        typeof registry.isUsingOAuth !== "function"
+      ) {
+        return {
+          kind: "unsupported",
+          view: { kind: "unsupported", provider: `${model.provider} (auth inspection unavailable)` },
+        };
+      }
+      const provider = registry.getProvider.call(ctx.modelRegistry, model.provider);
+      if (provider?.auth?.oauth?.isSubscription !== true || !registry.isUsingOAuth.call(ctx.modelRegistry, model)) {
         return {
           kind: "unsupported",
           view: { kind: "unsupported", provider: `${model.provider} (non-subscription auth)` },
@@ -229,9 +307,16 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (preflight) return preflight;
       if (!model) return { kind: "unsupported", view: { kind: "unsupported", provider: "no model" } };
 
+      const registry = ctx.modelRegistry as unknown as CompatibleModelRegistry;
+      if (typeof registry.getProviderAuth !== "function") {
+        return {
+          kind: "unsupported",
+          view: { kind: "unsupported", provider: `${model.provider} (auth inspection unavailable)` },
+        };
+      }
       let auth;
       try {
-        auth = await ctx.modelRegistry.getProviderAuth(model.provider);
+        auth = await registry.getProviderAuth.call(ctx.modelRegistry, model.provider);
       } catch {
         return {
           kind: "unsupported",
@@ -245,18 +330,18 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         };
       }
 
-      const expectedBaseUrl = OFFICIAL_PROVIDER_BASE_URLS[model.provider];
       const effectiveBaseUrl = auth.auth.baseUrl ?? model.baseUrl;
-      if (
-        !expectedBaseUrl ||
-        canonicalBaseUrl(effectiveBaseUrl) !== canonicalBaseUrl(expectedBaseUrl)
-      ) {
+      if (!isOfficialProviderBaseUrl(model.provider, effectiveBaseUrl)) {
         return {
           kind: "unsupported",
           view: { kind: "unsupported", provider: `${model.provider} (custom endpoint)` },
         };
       }
-      return { kind: "supported", piProvider: model.provider };
+      return {
+        kind: "supported",
+        piProvider: model.provider,
+        activeAccountId: activeAccountId(model.provider, auth.auth.apiKey),
+      };
     }
 
     function currentView(session: ActiveSession): QuotaView {
@@ -269,6 +354,9 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       return selectActiveProviderQuota(session.report, piProvider, {
         nowMs: now(),
         freshnessMs,
+        expectedAccountId: session.target?.kind === "supported"
+          ? session.target.activeAccountId
+          : undefined,
       });
     }
 
@@ -337,7 +425,19 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           render(session, { kind: "refreshing", provider: piProvider });
         }
 
-        const running = runQuotaAxiJson({ command, timeoutMs, maxOutputBytes });
+        const quotaProvider = quotaProviderForPiProvider(piProvider);
+        if (!quotaProvider) {
+          session.target = { kind: "unsupported", view: unsupportedProvider(piProvider) };
+          render(session);
+          return;
+        }
+        const running = runQuotaAxiJson({
+          command,
+          timeoutMs,
+          maxOutputBytes,
+          full: true,
+          provider: quotaProvider,
+        });
         session.process = running;
         const result = await running.promise;
         if (

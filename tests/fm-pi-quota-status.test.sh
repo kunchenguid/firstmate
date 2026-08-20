@@ -38,6 +38,16 @@ if IFS= read -r input; then
 else
   printf '%s\n' eof >> "${FM_QUOTA_TEST_STDIN:?}"
 fi
+full=0
+provider=
+if [ "$#" -eq 1 ] && [ "$1" = --json ]; then
+  :
+elif [ "$#" -eq 4 ] && [ "$1" = --json ] && [ "$2" = --full ] && [ "$3" = --provider ]; then
+  full=1
+  provider=$4
+else
+  exit 64
+fi
 mode=$(cat "${FM_QUOTA_TEST_MODE:?}")
 case "$mode" in
   fail)
@@ -86,10 +96,12 @@ case "$mode" in
     exit 0
     ;;
   stale)
-    FM_QUOTA_TEST_STALE=1 exec node "${FM_QUOTA_TEST_FIXTURE:?}"
+    FM_QUOTA_TEST_STALE=1 FM_QUOTA_TEST_FULL=$full FM_QUOTA_TEST_PROVIDER=$provider \
+      exec node "${FM_QUOTA_TEST_FIXTURE:?}"
     ;;
   success)
-    exec node "${FM_QUOTA_TEST_FIXTURE:?}"
+    FM_QUOTA_TEST_FULL=$full FM_QUOTA_TEST_PROVIDER=$provider \
+      exec node "${FM_QUOTA_TEST_FIXTURE:?}"
     ;;
   *)
     exit 2
@@ -102,25 +114,30 @@ cat > "$TMP_ROOT/quota-fixture.mjs" <<'JS'
 const configuredNow = Number(process.env.FM_QUOTA_TEST_NOW_MS);
 const now = Number.isFinite(configuredNow) && configuredNow > 0 ? configuredNow : Date.now();
 const generatedAt = new Date(now - (process.env.FM_QUOTA_TEST_STALE === "1" ? 60 * 60 * 1000 : 0)).toISOString();
-const state = { status: "fresh", stale: false, refreshedAt: generatedAt, sourcesTried: ["fake"] };
+const full = process.env.FM_QUOTA_TEST_FULL === "1";
+const requestedProvider = process.env.FM_QUOTA_TEST_PROVIDER || "";
 const reset = (milliseconds) => new Date(now + milliseconds).toISOString();
-const providers = [
-  {
-    provider: "claude",
-    label: "Claude",
-    source: "oauth",
+const provider = (provider, label, source, fields) => ({
+  provider,
+  ...fields,
+  state: {
+    status: "fresh",
+    stale: false,
+    ...(full ? { refreshedAt: generatedAt, sourcesTried: ["fake"] } : {}),
+  },
+  ...(full ? { label, source } : {}),
+});
+const allProviders = [
+  provider("claude", "Claude", "oauth", {
     plan: "max",
     windows: [
       { id: "session", label: "session", kind: "session", percentRemaining: 72.5, resetsAt: reset(2 * 60 * 60 * 1000) },
       { id: "week", label: "week", kind: "weekly", percentRemaining: 61, resetsAt: reset(4 * 24 * 60 * 60 * 1000) },
     ],
     credits: { unlimited: true, unit: "credits" },
-    state,
-  },
-  {
-    provider: "codex",
-    label: "Codex",
-    source: "oauth",
+    ...(full ? { account: { accountId: "fixture-claude-account" } } : {}),
+  }),
+  provider("codex", "Codex", "oauth", {
     plan: "pro",
     windows: [
       { id: "weekly", label: "week", kind: "weekly", percentRemaining: 94, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
@@ -128,18 +145,28 @@ const providers = [
       { id: "model:spark:7d", label: "GPT-5.3-Codex-Spark week", kind: "model", percentRemaining: 100, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
     ],
     credits: { remaining: 0, unlimited: false, unit: "credits" },
-    state,
-  },
-  {
-    provider: "grok",
-    label: "Grok",
-    source: "web",
+    ...(full ? { account: { accountId: "fixture-codex-account" } } : {}),
+  }),
+  provider("copilot", "GitHub Copilot", "api", {
+    plan: "business",
+    windows: [],
+    ...(full ? { account: { accountId: "fixture-copilot-account" } } : {}),
+  }),
+  provider("grok", "Grok", "web", {
     windows: [
       { id: "credits", label: "credits", kind: "credits", percentRemaining: 48, resetText: "next month" },
     ],
-    state,
-  },
+    ...(full ? { account: { email: "fixture@example.invalid" } } : {}),
+  }),
+  provider("kimi", "Kimi", "api", {
+    windows: [
+      { id: "weekly", label: "week", kind: "weekly", percentRemaining: 83, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
+    ],
+  }),
 ];
+const providers = requestedProvider
+  ? allProviders.filter((entry) => entry.provider === requestedProvider)
+  : allProviders;
 process.stdout.write(JSON.stringify({ generatedAt, schemaVersion: 5, providers }));
 JS
 
@@ -223,6 +250,7 @@ function report(now = Date.now()) {
         label: "Codex",
         source: "oauth",
         plan: "pro",
+        account: { accountId: "fixture-codex-account" },
         windows: [
           { id: "weekly", label: "week", kind: "weekly", percentRemaining: 94, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString() },
           { id: "spark-session", label: "GPT-5.3-Codex-Spark session", kind: "model", percentRemaining: 100, resetsAt: new Date(now + 5 * 60 * 60 * 1000).toISOString() },
@@ -234,14 +262,29 @@ function report(now = Date.now()) {
     ],
   };
 }
+function schema5Default(value) {
+  const current = structuredClone(value);
+  current.schemaVersion = 5;
+  for (const provider of current.providers) {
+    delete provider.label;
+    delete provider.source;
+    delete provider.account;
+    delete provider.state.refreshedAt;
+    delete provider.state.sourcesTried;
+  }
+  return current;
+}
 
 // Parser and formatter public interfaces.
 const now = Date.now();
 const parsed = parseQuotaAxiJson(JSON.stringify(report(now)));
 assert(parsed, "valid quota-axi schema-3 JSON was rejected");
-const currentSchema = report(now);
-currentSchema.schemaVersion = 5;
-assert(parseQuotaAxiJson(JSON.stringify(currentSchema)), "valid quota-axi schema-5 JSON was rejected");
+const currentSchema = schema5Default(report(now));
+const parsedCurrentSchema = parseQuotaAxiJson(JSON.stringify(currentSchema));
+assert(parsedCurrentSchema, "quota-axi schema-5 default JSON was rejected");
+const currentCodex = selectActiveProviderQuota(parsedCurrentSchema, "openai-codex", { nowMs: now });
+assert(currentCodex.kind === "fresh", `quota-axi schema-5 default provider was not fresh: ${currentCodex.kind}`);
+assert(currentCodex.label === "Codex", "schema-5 default provider label was not supplied safely");
 assert(quotaProviderForPiProvider("openai-codex") === "codex", "openai-codex provider mapping failed");
 assert(quotaProviderForPiProvider("anthropic") === "claude", "anthropic provider mapping failed");
 assert(quotaProviderForPiProvider("github-copilot") === "copilot", "GitHub Copilot provider mapping failed");
@@ -270,6 +313,27 @@ for (const expected of [
   assert(full.includes(expected), `complete format omitted ${expected}: ${full}`);
 }
 assert(visibleWidth(full) <= 400, "complete format exceeded its width");
+const matchedAccount = selectActiveProviderQuota(parsed, "openai-codex", {
+  nowMs: now,
+  expectedAccountId: "fixture-codex-account",
+});
+assert(matchedAccount.kind === "fresh", "matching active/report account provenance was rejected");
+for (const expectedAccountId of [null, "different-account"]) {
+  const unverified = selectActiveProviderQuota(parsed, "openai-codex", { nowMs: now, expectedAccountId });
+  assert(unverified.kind === "unverified", "unmatched quota account was presented as active quota");
+  assert(!formatQuotaStatus(unverified, 200, now).includes("94%"), "unverified account exposed quota percentages");
+}
+const paddedAccount = report(now);
+paddedAccount.providers[1].account.accountId = " fixture-codex-account ";
+const paddedAccountParsed = parseQuotaAxiJson(JSON.stringify(paddedAccount));
+assert(paddedAccountParsed, "padded-account fixture did not parse structurally");
+assert(
+  selectActiveProviderQuota(paddedAccountParsed, "openai-codex", {
+    nowMs: now,
+    expectedAccountId: "fixture-codex-account",
+  }).kind === "unverified",
+  "normalized quota account identity was accepted as provenance",
+);
 const narrow = formatQuotaStatus(codex, 72, now);
 assert(narrow.includes("narrow") && narrow.includes("3 windows"), `narrow format was not explicit: ${narrow}`);
 assert(!narrow.includes("week 94%"), `narrow format silently presented a partial window set: ${narrow}`);
@@ -374,6 +438,12 @@ assert(ansiText.includes("週 quota") && visibleWidth(ansiText) <= 400, "wide-ch
 const direct = runQuotaAxiJson({ timeoutMs: 1000, maxOutputBytes: 1024 * 1024 });
 const directResult = await direct.promise;
 assert(directResult.kind === "ok", `fake quota-axi process failed: ${directResult.kind}`);
+const directReport = directResult.kind === "ok" ? parseQuotaAxiJson(directResult.stdout) : null;
+assert(directReport?.schemaVersion === 5, "fake default quota-axi output did not use schema 5");
+assert(
+  directReport && selectActiveProviderQuota(directReport, "openai-codex").kind === "fresh",
+  "fake default quota-axi projection was not consumable",
+);
 
 const officialBaseUrls = {
   anthropic: "https://api.anthropic.com",
@@ -384,6 +454,13 @@ const officialBaseUrls = {
 };
 function fixtureModel(provider, id = "fixture-model", baseUrl = officialBaseUrls[provider] ?? "https://custom.example.invalid") {
   return { provider, id, baseUrl };
+}
+function fixtureAccessToken(accountId) {
+  if (!accountId) return "opaque-fixture-token";
+  const payload = Buffer.from(JSON.stringify({
+    "https://api.openai.com/auth": { chatgpt_account_id: accountId },
+  })).toString("base64url");
+  return `eyJhbGciOiJub25lIn0.${payload}.fixture`;
 }
 function makePi(factory, provider = "openai-codex", mode = "tui", providerOptions = {}) {
   const handlers = new Map();
@@ -403,22 +480,30 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
   const ctx = {
     mode,
     model: provider ? fixtureModel(provider, "fixture-model", providerOptions.baseUrl) : undefined,
-    modelRegistry: {
-      getProvider() {
-        return { auth: { oauth: { isSubscription: providerOptions.subscription !== false } } };
-      },
-      isUsingOAuth() {
-        return providerOptions.authType !== "api_key";
-      },
-      async getProviderAuth() {
-        if (providerOptions.authError) throw new Error("fixture auth failure");
-        if (providerOptions.authUnavailable) return undefined;
-        return {
-          auth: providerOptions.authBaseUrl ? { baseUrl: providerOptions.authBaseUrl } : {},
-          source: providerOptions.authType === "api_key" ? "fixture API key" : "OAuth",
-        };
-      },
-    },
+    modelRegistry: providerOptions.legacyRegistry
+      ? {}
+      : {
+          getProvider() {
+            return { auth: { oauth: { isSubscription: providerOptions.subscription !== false } } };
+          },
+          isUsingOAuth() {
+            return providerOptions.authType !== "api_key";
+          },
+          async getProviderAuth() {
+            if (providerOptions.authError) throw new Error("fixture auth failure");
+            if (providerOptions.authUnavailable) return undefined;
+            const accountId = Object.hasOwn(providerOptions, "accountId")
+              ? providerOptions.accountId
+              : "fixture-codex-account";
+            return {
+              auth: {
+                apiKey: fixtureAccessToken(accountId),
+                ...(providerOptions.authBaseUrl ? { baseUrl: providerOptions.authBaseUrl } : {}),
+              },
+              source: providerOptions.authType === "api_key" ? "fixture API key" : "OAuth",
+            };
+          },
+        },
     ui: {
       theme,
       setStatus(key, value) {
@@ -481,9 +566,10 @@ assert(process.stdout.listenerCount("resize") === baselineResizeListeners, "sess
 
 await lifecycle.emit("model_select", { model: fixtureModel("anthropic", "claude-fixture") });
 await waitFor(
-  () => lifecycle.widgetText(240).includes("Quota Claude"),
-  "model change did not refresh active-provider selection",
+  () => lifecycle.widgetText(240).includes("account unverified"),
+  "model change did not refuse uncorrelated Claude account quota",
 );
+assert(!lifecycle.widgetText(240).includes("72.5%"), "uncorrelated Claude quota was presented as active");
 const callsBeforeCadence = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 await sleep(180);
 const callsAfterCadence = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
@@ -503,8 +589,8 @@ for (const reason of ["reload", "new", "resume", "fork"]) {
   lifecycle.ctx.model = fixtureModel("xai", "grok-fixture");
   await lifecycle.emit("session_start", { reason });
   await waitFor(
-    () => lifecycle.widgetText(240).includes("Quota Grok"),
-    `${reason} did not refresh quota widget`,
+    () => lifecycle.widgetText(240).includes("account unverified"),
+    `${reason} did not refresh quota widget with explicit account provenance`,
   );
   assert(process.stdout.listenerCount("resize") === baselineResizeListeners, `${reason} changed resize listeners`);
   await lifecycle.emit("session_shutdown", { reason: "reload" });
@@ -601,6 +687,81 @@ for (const [description, providerOptions, expected] of [
   await sleep(30);
   const callsAfter = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
   assert(callsAfter === callsBefore, `${description} invoked quota-axi for unrelated local quota`);
+  await instance.emit("session_shutdown", { reason: "quit" });
+}
+
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const callsBeforeLegacyRegistry = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+const legacyRegistry = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 100 }),
+  "openai-codex",
+  "tui",
+  { legacyRegistry: true },
+);
+await legacyRegistry.emit("session_start", { reason: "startup" });
+assert(
+  legacyRegistry.widgetText(240).includes("auth inspection unavailable"),
+  `older Pi registry was not handled explicitly: ${legacyRegistry.widgetText(240)}`,
+);
+await sleep(30);
+const callsAfterLegacyRegistry = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+assert(callsAfterLegacyRegistry === callsBeforeLegacyRegistry, "older Pi registry invoked quota-axi without auth inspection");
+await legacyRegistry.emit("session_shutdown", { reason: "quit" });
+
+for (const endpoint of [
+  "https://api.business.githubcopilot.com",
+  "https://api.enterprise.githubcopilot.com",
+]) {
+  const callsBefore = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+  const instance = makePi(
+    createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
+    "github-copilot",
+    "tui",
+    { authBaseUrl: endpoint },
+  );
+  await instance.emit("session_start", { reason: "startup" });
+  await waitFor(
+    () => instance.widgetText(240).includes("account unverified"),
+    `official Copilot endpoint was misclassified: ${endpoint}: ${instance.widgetText(240)}`,
+  );
+  const callsAfter = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+  assert(callsAfter > callsBefore, `official Copilot endpoint did not invoke quota-axi: ${endpoint}`);
+  await instance.emit("session_shutdown", { reason: "quit" });
+}
+
+const callsBeforeEnterpriseProxy = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+const enterpriseProxy = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 100 }),
+  "github-copilot",
+  "tui",
+  { authBaseUrl: "https://copilot-api.company.ghe.example" },
+);
+await enterpriseProxy.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => enterpriseProxy.widgetText(240).includes("custom endpoint"),
+  `custom Copilot proxy was not rejected: ${enterpriseProxy.widgetText(240)}`,
+);
+await sleep(30);
+const callsAfterEnterpriseProxy = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+assert(callsAfterEnterpriseProxy === callsBeforeEnterpriseProxy, "custom Copilot proxy invoked quota-axi");
+await enterpriseProxy.emit("session_shutdown", { reason: "quit" });
+
+for (const [description, accountId] of [
+  ["missing active account identity", null],
+  ["different active account", "other-codex-account"],
+]) {
+  const instance = makePi(
+    createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
+    "openai-codex",
+    "tui",
+    { accountId },
+  );
+  await instance.emit("session_start", { reason: "startup" });
+  await waitFor(
+    () => instance.widgetText(240).includes("account unverified"),
+    `${description} was not refused: ${instance.widgetText(240)}`,
+  );
+  assert(!instance.widgetText(400).includes("94%"), `${description} exposed unrelated fresh quota`);
   await instance.emit("session_shutdown", { reason: "quit" });
 }
 
@@ -731,10 +892,10 @@ status=$?
 [ -z "$out" ] || fail "Pi quota status public-interface regression printed output: $out"
 
 [ -s "$CALLS" ] || fail "fake quota-axi was never called"
-if grep -Fvx -- '--json' "$CALLS" >/dev/null; then
+if grep -Ev -- '^(--json|--json --full --provider (claude|codex|copilot|grok|kimi))$' "$CALLS" >/dev/null; then
   fail "quota extension used an unexpected quota-axi argv: $(tr '\n' '|' < "$CALLS")"
 fi
 if grep -Fvx -- eof "$STDIN_LOG" >/dev/null; then
   fail "quota extension left quota-axi stdin readable: $(tr '\n' '|' < "$STDIN_LOG")"
 fi
-pass "Pi quota status parses and formats complete active-provider quota, preserves footer statuses in a separate width-aware row, expires reports on time, refreshes every session/model lifecycle, and bounds and cleans fake quota-axi failures"
+pass "Pi quota status parses real schema projections, correlates active accounts and official endpoints, preserves footer composition, expires reports, refreshes lifecycle transitions, and bounds and cleans fake quota-axi failures"

@@ -45,6 +45,7 @@ process.stdout.write(JSON.stringify({
     label: "Codex",
     source: "oauth",
     plan: "pro",
+    account: { accountId: "live-codex-account" },
     windows: [
       { id: "weekly", label: "week", kind: "weekly", percentRemaining: 94, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
       { id: "model:spark:5h", label: "GPT-5.3-Codex-Spark session", kind: "model", percentRemaining: 100, resetsAt: reset(5 * 60 * 60 * 1000) },
@@ -58,12 +59,18 @@ JS
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
-cat > "$PI_CONFIG/auth.json" <<'JSON'
+LIVE_ACCESS=$(node -e '
+const payload = Buffer.from(JSON.stringify({
+  "https://api.openai.com/auth": { chatgpt_account_id: "live-codex-account" },
+})).toString("base64url");
+process.stdout.write(`eyJhbGciOiJub25lIn0.${payload}.fixture`);
+')
+cat > "$PI_CONFIG/auth.json" <<JSON
 {
   "openai-codex": {
     "type": "oauth",
     "refresh": "credential-free-live-fixture",
-    "access": "credential-free-live-fixture",
+    "access": "$LIVE_ACCESS",
     "expires": 4102444800000
   }
 }
@@ -158,7 +165,7 @@ EOF
       || fail "$harness live footer omitted '$expected'"
   done
   [ "$(wc -l < "$calls" | tr -d ' ')" -ge 1 ] || fail "$harness never invoked fake quota-axi"
-  grep -Fvx -- '--json' "$calls" >/dev/null \
+  grep -Fvx -- '--json --full --provider codex' "$calls" >/dev/null \
     && fail "$harness used unexpected quota-axi argv: $(tr '\n' '|' < "$calls")"
   grep -Fvx -- eof "$stdin_log" >/dev/null \
     && fail "$harness left quota-axi stdin readable: $(tr '\n' '|' < "$stdin_log")"

@@ -35,6 +35,7 @@ export type QuotaView =
   | { kind: "refreshing"; provider: string }
   | { kind: "unsupported"; provider: string }
   | { kind: "unavailable"; provider: string; label: string | null }
+  | { kind: "unverified"; provider: string }
   | { kind: "stale"; provider: string; label: string | null }
   | { kind: "malformed"; provider: string };
 
@@ -50,6 +51,14 @@ const PI_PROVIDER_TO_QUOTA_PROVIDER: Readonly<Record<string, string>> = {
   "kimi-coding": "kimi",
   "openai-codex": "codex",
   xai: "grok",
+};
+
+const QUOTA_PROVIDER_LABELS: Readonly<Record<string, string>> = {
+  claude: "Claude",
+  codex: "Codex",
+  copilot: "GitHub Copilot",
+  grok: "Grok",
+  kimi: "Kimi",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -80,6 +89,11 @@ function parseTimestamp(value: unknown): number | null {
 function exactEnum<T extends string>(value: unknown, allowed: readonly T[]): T | null {
   if (typeof value !== "string" || !allowed.includes(value as T)) return null;
   return value as T;
+}
+
+function exactText(value: unknown, maximum = 200): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > maximum) return null;
+  return cleanText(value, maximum) === value ? value : null;
 }
 
 const QUOTA_WINDOW_KINDS = ["session", "weekly", "monthly", "model", "credits", "unknown"] as const;
@@ -166,7 +180,7 @@ function parseCredits(value: unknown): QuotaCreditsView | null | undefined {
 export function selectActiveProviderQuota(
   report: ParsedQuotaAxiReport,
   piProvider: string,
-  options: { nowMs?: number; freshnessMs?: number } = {},
+  options: { nowMs?: number; freshnessMs?: number; expectedAccountId?: string | null } = {},
 ): QuotaView {
   const provider = quotaProviderForPiProvider(piProvider);
   if (!provider) return { kind: "unsupported", provider: cleanText(piProvider, 48) ?? "unknown" };
@@ -191,16 +205,28 @@ export function selectActiveProviderQuota(
     return { kind: "unavailable", provider, label: null };
   }
 
-  const label = cleanText(rawProvider.label);
-  const source = exactEnum(rawProvider.source, QUOTA_PROVIDER_SOURCES);
-  if (!label || !source || !isRecord(rawProvider.state)) return malformed(provider);
+  const label = rawProvider.label === undefined && report.schemaVersion === 5
+    ? QUOTA_PROVIDER_LABELS[provider] ?? null
+    : cleanText(rawProvider.label);
+  const source = rawProvider.source === undefined && report.schemaVersion === 5
+    ? null
+    : exactEnum(rawProvider.source, QUOTA_PROVIDER_SOURCES);
+  if (
+    !label ||
+    (report.schemaVersion === 3 && !source) ||
+    (rawProvider.source !== undefined && !source) ||
+    !isRecord(rawProvider.state)
+  ) return malformed(provider);
   const status = exactEnum(rawProvider.state.status, QUOTA_PROVIDER_STATUSES);
   const sourcesTried = rawProvider.state.sourcesTried;
   if (
     typeof rawProvider.state.stale !== "boolean" ||
     !status ||
-    !Array.isArray(sourcesTried) ||
-    sourcesTried.some((entry) => cleanText(entry) === null)
+    (report.schemaVersion === 3 && !Array.isArray(sourcesTried)) ||
+    (sourcesTried !== undefined && (
+      !Array.isArray(sourcesTried) ||
+      sourcesTried.some((entry) => exactText(entry) === null)
+    ))
   ) return malformed(provider);
   if (rawProvider.state.stale || status === "stale") {
     return { kind: "stale", provider, label };
@@ -230,6 +256,14 @@ export function selectActiveProviderQuota(
   if (rawProvider.plan !== undefined && plan === null) return malformed(provider);
   const credits = parseCredits(rawProvider.credits);
   if (credits === null) return malformed(provider);
+
+  if (options.expectedAccountId === null) return { kind: "unverified", provider };
+  if (options.expectedAccountId !== undefined) {
+    const accountId = isRecord(rawProvider.account) ? exactText(rawProvider.account.accountId) : null;
+    if (!accountId || accountId !== options.expectedAccountId) {
+      return { kind: "unverified", provider };
+    }
+  }
 
   return {
     kind: "fresh",
@@ -301,6 +335,9 @@ export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.n
   if (view.kind === "unavailable") {
     const label = view.label ? ` ${view.label}` : "";
     return truncateToWidth(`Quota${label}: unavailable`, safeWidth, "…");
+  }
+  if (view.kind === "unverified") {
+    return truncateToWidth("Quota: unavailable (account unverified)", safeWidth, "…");
   }
   if (view.kind === "stale") {
     const label = view.label ? ` ${view.label}` : "";
