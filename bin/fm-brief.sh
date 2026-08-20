@@ -222,7 +222,7 @@ $PROJECT_CLONES_NOTE
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
 When you wait on a crewmate or on a background job of your own, never sit in a foreground blocking \`sleep\`: from outside it is indistinguishable from a stall, and it burns the very context the wait was meant to protect.
-Prefer a harness-tracked background job whose completion resumes or notifies you; otherwise poll briefly and do other useful work between checks; otherwise record the thing as unverified and move on, and declare a wait you can neither shorten nor abandon with \`$PAUSED_VERB: {why}\` below.
+Prefer a harness-tracked background job whose completion resumes or notifies you; otherwise poll briefly and do other useful work between checks; otherwise record the thing as unverified and move on; a wait you can neither shorten nor abandon belongs to this home's own watcher and status cycle.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
@@ -349,7 +349,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    To wait on your own background job, prefer a harness-tracked background job whose completion
    resumes or notifies you; otherwise poll briefly and do other useful work between checks;
    otherwise record the thing as unverified and move on - never for a wait your Definition of done
-   requires: declare it under rule 4 with \`$PAUSED_VERB: {why}\` instead.
+   requires: instead declare it under rule 4 with \`$PAUSED_VERB: {why}\` and stop.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -474,7 +474,7 @@ $RULE1
    To wait on your own background job, prefer a harness-tracked background job whose completion
    resumes or notifies you; otherwise poll briefly and do other useful work between checks;
    otherwise record the thing as unverified and move on - never for a wait your Definition of done
-   requires: declare it under rule 4 with \`$PAUSED_VERB: {why}\` instead.
+   requires: instead declare it under rule 4 with \`$PAUSED_VERB: {why}\` and stop.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
