@@ -684,7 +684,9 @@ test_accelerate_refuses_symlinked_delivery_state() {
   set -e
 
   [ "$rc" -ne 0 ] || fail "accelerate accepted a symlinked delivery subdirectory"
-  [ ! -e "$outside"/*.marker ] || fail "accelerate created a marker through a delivery subdirectory symlink"
+  for marker in "$outside"/*.marker; do
+    [ ! -e "$marker" ] || fail "accelerate created a marker through a delivery subdirectory symlink"
+  done
   pass "accelerate refuses symlinked delivery state directories"
 }
 

@@ -486,7 +486,8 @@ pr_is_listed() { # <number> <numbers...>
 }
 
 retire_absent_pr_state() { # <repo> <open-numbers...>
-  local repo=$1 key path base number marker marker_url retained= line row_repo row_number
+  local repo=$1 key path base number marker marker_url retained line row_repo row_number
+  retained=
   shift
   key=$(repo_state_key "$repo")
   for path in "$FINGERPRINT_DIR/$key-"*.fp "$DELIVERED_DIR/$key-"*.delivered; do
