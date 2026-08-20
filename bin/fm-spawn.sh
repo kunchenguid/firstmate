@@ -2382,6 +2382,11 @@ if [ "$KIND" != secondmate ]; then
       # the turn-ended NOTIFICATION touch for the watcher. Every
       # hook command tolerates a refused event (|| true) so a stale-gen writer
       # can never break Claude's own lifecycle.
+      # includeCoAuthoredBy and the newer attribution object both suppress the
+      # Claude-authored commit/PR footer (AGENTS.md: never an agent co-author);
+      # both are set because upstream deprecated includeCoAuthoredBy in favor
+      # of attribution but attribution.commit="" alone has a known upstream
+      # bug that leaves the footer in place (anthropics/claude-code#45137).
       mkdir -p "$WT/.claude"
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
@@ -2390,7 +2395,7 @@ if [ "$KIND" != secondmate ]; then
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;

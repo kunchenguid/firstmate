@@ -712,6 +712,38 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Every scaffold must carry the fleet-wide no-agent-co-author rule where a
+# worker actually re-reads it before committing (AGENTS.md section 1, hard
+# rule "Never add an agent name as a commit co-author"). The prose alone does
+# not enforce it - mechanical enforcement lives in fm-spawn.sh's claude
+# settings.local.json - so this guards the reinforcement text survives.
+test_no_agent_coauthor_rule_in_every_scaffold() {
+  local home id brief
+  home="$TMP_ROOT/no-coauthor-home"
+  mkdir -p "$home/data"
+
+  id="brief-coauthor-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Never add an agent name as a commit co-author or Co-authored-by footer" "$brief" \
+    "ship brief did not carry the no-agent-co-author rule"
+
+  id="brief-coauthor-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Never add an agent name as a commit co-author or Co-authored-by footer" "$brief" \
+    "scout brief did not carry the no-agent-co-author rule"
+
+  id="brief-coauthor-secondmate"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='sample domain' \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Never add an agent name as a commit co-author or Co-authored-by footer" "$brief" \
+    "secondmate charter did not carry the no-agent-co-author rule"
+
+  pass "fm-brief.sh: ship, scout, and secondmate scaffolds all carry the no-agent-co-author rule"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -732,3 +764,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_no_agent_coauthor_rule_in_every_scaffold
