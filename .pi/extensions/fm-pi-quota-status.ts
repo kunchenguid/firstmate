@@ -109,29 +109,29 @@ export function runQuotaAxiJson(options: {
     resolveResult = resolve;
   });
   const timeout = setTimeout(() => {
-    finish({ kind: "timeout" }, true);
+    finish({ kind: "timeout" });
   }, timeoutMs);
   timeout.unref();
 
-  function finish(result: QuotaProcessResult, kill = false): void {
+  function finish(result: QuotaProcessResult): void {
     if (settled) return;
     settled = true;
     clearTimeout(timeout);
-    if (kill) killProcess(child, processGroupId);
+    killProcess(child, processGroupId);
     resolveResult(result);
   }
 
   child.stdout?.on("data", (chunk: Buffer) => {
     stdoutBytes += chunk.length;
     if (stdoutBytes > maxOutputBytes) {
-      finish({ kind: "overflow" }, true);
+      finish({ kind: "overflow" });
       return;
     }
     stdoutChunks.push(chunk);
   });
   child.stderr?.on("data", (chunk: Buffer) => {
     stderrBytes += chunk.length;
-    if (stderrBytes > maxOutputBytes) finish({ kind: "overflow" }, true);
+    if (stderrBytes > maxOutputBytes) finish({ kind: "overflow" });
   });
   child.on("error", (error: NodeJS.ErrnoException) => {
     finish({ kind: error.code === "ENOENT" ? "missing" : "failed" });
@@ -147,7 +147,7 @@ export function runQuotaAxiJson(options: {
   return {
     child,
     promise,
-    cancel: () => finish({ kind: "cancelled" }, true),
+    cancel: () => finish({ kind: "cancelled" }),
   };
 }
 

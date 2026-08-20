@@ -71,6 +71,20 @@ case "$mode" in
     ' &
     exit 0
     ;;
+  leader_exit_closed_stdio)
+    descendants_before=$(wc -l < "${FM_QUOTA_TEST_DESCENDANT_PIDS:?}")
+    node -e '
+      const fs = require("node:fs");
+      fs.appendFileSync(process.env.FM_QUOTA_TEST_DESCENDANT_PIDS, `${process.pid}\n`);
+      setTimeout(() => {
+        fs.appendFileSync(process.env.FM_QUOTA_TEST_SURVIVORS, `${process.pid}\n`);
+      }, 1000);
+    ' </dev/null >/dev/null 2>/dev/null &
+    while [ "$(wc -l < "${FM_QUOTA_TEST_DESCENDANT_PIDS:?}")" -le "$descendants_before" ]; do
+      sleep 0.01
+    done
+    exit 0
+    ;;
   stale)
     FM_QUOTA_TEST_STALE=1 exec node "${FM_QUOTA_TEST_FIXTURE:?}"
     ;;
@@ -230,7 +244,17 @@ currentSchema.schemaVersion = 5;
 assert(parseQuotaAxiJson(JSON.stringify(currentSchema)), "valid quota-axi schema-5 JSON was rejected");
 assert(quotaProviderForPiProvider("openai-codex") === "codex", "openai-codex provider mapping failed");
 assert(quotaProviderForPiProvider("anthropic") === "claude", "anthropic provider mapping failed");
+assert(quotaProviderForPiProvider("github-copilot") === "copilot", "GitHub Copilot provider mapping failed");
+assert(quotaProviderForPiProvider("kimi-coding") === "kimi", "Kimi Coding provider mapping failed");
+assert(quotaProviderForPiProvider("xai") === "grok", "xAI provider mapping failed");
 assert(quotaProviderForPiProvider("openai") === null, "direct OpenAI was incorrectly mapped to Codex quota");
+for (const customProvider of ["claude", "codex", "copilot", "cursor", "grok", "kimi", "OPENAI-CODEX", " openai-codex "]) {
+  assert(quotaProviderForPiProvider(customProvider) === null, `custom provider ${customProvider} was treated as canonical`);
+  assert(
+    selectActiveProviderQuota(parsed, customProvider, { nowMs: now }).kind === "unsupported",
+    `custom provider ${customProvider} was assigned unrelated local quota`,
+  );
+}
 
 const codex = selectActiveProviderQuota(parsed, "openai-codex", { nowMs: now });
 assert(codex.kind === "fresh", "active Codex provider was not selected");
@@ -600,6 +624,18 @@ assert(
   "quota process-group descendant survived after its leader exited",
 );
 await leaderExit.emit("session_shutdown", { reason: "quit" });
+
+const descendantsBeforeNormalExit = (await readFile(process.env.FM_QUOTA_TEST_DESCENDANT_PIDS, "utf8")).trim().split(/\s+/).filter(Boolean).length;
+const survivorsBeforeNormalExit = (await readFile(process.env.FM_QUOTA_TEST_SURVIVORS, "utf8")).trim().split(/\s+/).filter(Boolean).length;
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "leader_exit_closed_stdio\n");
+const normalExit = runQuotaAxiJson({ timeoutMs: 500, maxOutputBytes: 1024 * 1024 });
+const normalExitResult = await normalExit.promise;
+assert(normalExitResult.kind === "ok", `normal-exit descendant fixture failed: ${normalExitResult.kind}`);
+const descendantsAfterNormalExit = (await readFile(process.env.FM_QUOTA_TEST_DESCENDANT_PIDS, "utf8")).trim().split(/\s+/).filter(Boolean).length;
+assert(descendantsAfterNormalExit > descendantsBeforeNormalExit, "normal-exit fixture did not launch its descendant");
+await sleep(1100);
+const survivorsAfterNormalExit = (await readFile(process.env.FM_QUOTA_TEST_SURVIVORS, "utf8")).trim().split(/\s+/).filter(Boolean).length;
+assert(survivorsAfterNormalExit === survivorsBeforeNormalExit, "quota descendant survived normal leader completion");
 
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "slow\n");
 const pidsBeforeReplacement = (await readFile(process.env.FM_QUOTA_TEST_PIDS, "utf8")).trim().split(/\s+/).filter(Boolean).length;

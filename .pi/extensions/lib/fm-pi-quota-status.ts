@@ -46,16 +46,10 @@ export type ParsedQuotaAxiReport = {
 
 const PI_PROVIDER_TO_QUOTA_PROVIDER: Readonly<Record<string, string>> = {
   anthropic: "claude",
-  claude: "claude",
   "github-copilot": "copilot",
-  copilot: "copilot",
   "kimi-coding": "kimi",
-  kimi: "kimi",
   "openai-codex": "codex",
-  codex: "codex",
-  cursor: "cursor",
   xai: "grok",
-  grok: "grok",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -94,8 +88,7 @@ const QUOTA_PROVIDER_SOURCES = ["oauth", "cli-rpc", "api", "web", "cache", "unav
 const QUOTA_PROVIDER_STATUSES = ["fresh", "stale", "unavailable", "auth_required", "rate_limited", "error"] as const;
 
 export function quotaProviderForPiProvider(piProvider: string): string | null {
-  const normalized = piProvider.trim().toLowerCase();
-  return PI_PROVIDER_TO_QUOTA_PROVIDER[normalized] ?? null;
+  return PI_PROVIDER_TO_QUOTA_PROVIDER[piProvider] ?? null;
 }
 
 export function parseQuotaAxiJson(raw: string): ParsedQuotaAxiReport | null {
