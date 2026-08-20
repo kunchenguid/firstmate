@@ -167,6 +167,9 @@ cmd_terminal() {
 # source of decision keys. A row that does not carry both a slug-shaped `question`
 # and an `answer` inside its `Context data:` block is skipped, so a deck that does
 # not key its forms by decision key simply yields nothing.
+# The question cap is 128 so a FULL hold identity (<origin>-decision-<key>) fits
+# for an any-origin bound deck such as the bearings board; the security property
+# is the slug SHAPE, which is unchanged.
 cmd_answers() {
   local file=${1-}
   [ -n "$file" ] || usage
@@ -215,7 +218,7 @@ cmd_answers() {
       next unless $ctx =~ /"answer"\s*:\s*"((?:[^"\\]|\\.)*)"/;
       my $answer = $1;
       $_ =~ s/\\(.)/$1/g for ($key, $answer);
-      next unless $key =~ /\A[A-Za-z0-9._-]{1,64}\z/;
+      next unless $key =~ /\A[A-Za-z0-9._-]{1,128}\z/;
       next unless length $answer && length($answer) <= 512;
       my $label = defined $f{text} ? $f{text} : "";
       s/[\x00-\x1f\x7f]/ /g for ($answer, $label);
