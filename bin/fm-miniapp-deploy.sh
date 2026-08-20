@@ -160,8 +160,12 @@ printf '%s\n' "$SNIPPET" >"$CANDIDATE/projekte/fm-miniapp.caddy"
 # hash would reach the container with its quotes and the run would fail on a
 # problem that is not ours.
 sed "s/^\([A-Za-z_][A-Za-z0-9_]*\)='\(.*\)'$/\1=\2/" "$CADDY_DIR/.env" >"$ENVFILE" 2>/dev/null || :
+# </dev/null on every docker call is load-bearing, not tidiness: this
+# script reaches the host on stdin, and `docker compose exec -T` attaches
+# stdin - it swallowed the rest of this file once, so the reload below
+# never ran and the failure was completely silent.
 docker run --rm --env-file "$ENVFILE" -v "$CANDIDATE":/etc/caddy:ro caddy:2-alpine \
-  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null </dev/null
 echo "  candidate validates"
 
 # Only now does the file reach the directory Caddy reads, and it arrives whole:
@@ -172,11 +176,14 @@ if [ -f "$CADDY_DIR/caddy-projekte/fm-miniapp.caddy" ]; then
     "$CADDY_DIR/caddy-sicherungen/fm-miniapp.caddy.bak-$(date -u +%Y%m%dT%H%M%SZ)"
 fi
 printf '%s\n' "$SNIPPET" >"$CADDY_DIR/caddy-eingang/fm-miniapp.caddy"
+# Readable like its neighbour in that directory: the block holds no secret,
+# and a 0600 file there depends on Caddy happening to run as root.
+chmod 644 "$CADDY_DIR/caddy-eingang/fm-miniapp.caddy"
 mv "$CADDY_DIR/caddy-eingang/fm-miniapp.caddy" "$CADDY_DIR/caddy-projekte/fm-miniapp.caddy"
 
 cd "$CADDY_DIR"
-docker compose exec -T caddy caddy validate --config /etc/caddy/Caddyfile >/dev/null
-docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+docker compose exec -T caddy caddy validate --config /etc/caddy/Caddyfile >/dev/null </dev/null
+docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile </dev/null
 echo "  caddy reloaded"
 REMOTE
 
@@ -186,6 +193,19 @@ REMOTE
   if [ "$before" != "$after" ]; then
     die "neighbouring addresses changed across the reload - investigate before continuing"
   fi
+
+  # Caddy obtains the certificate on the first request to a new name, so the
+  # address is briefly unreachable after the reload. Waiting is the difference
+  # between reporting a deployment failure and reporting earliness.
+  printf 'Waiting for the address to answer...\n'
+  local waited=0 status
+  while [ "$waited" -lt 60 ]; do
+    status=$(probe "https://$FM_MINIAPP_ADDRESS/")
+    case "$status" in
+      *' ERR'|*' 000'*) sleep 3; waited=$((waited + 3)) ;;
+      *) break ;;
+    esac
+  done
 
   printf 'The address:\n'
   note "$(probe "https://$FM_MINIAPP_ADDRESS/")"
@@ -212,8 +232,8 @@ if [ -f "$CADDY_DIR/caddy-projekte/fm-miniapp.caddy" ]; then
   mv "$CADDY_DIR/caddy-projekte/fm-miniapp.caddy" \
     "$CADDY_DIR/caddy-sicherungen/fm-miniapp.caddy.removed-$(date -u +%Y%m%dT%H%M%SZ)"
   cd "$CADDY_DIR"
-  docker compose exec -T caddy caddy validate --config /etc/caddy/Caddyfile >/dev/null
-  docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+  docker compose exec -T caddy caddy validate --config /etc/caddy/Caddyfile >/dev/null </dev/null
+  docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile </dev/null
   echo "  block removed, caddy reloaded"
 else
   echo "  no block installed"
