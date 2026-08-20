@@ -84,6 +84,28 @@ commit_on() {
 run() { FM_HOME="${FM_HOME:-$TMP_ROOT/nohome}" GH_LIST_URL="${GH_LIST_URL:-}" \
   GH_CREATE_LOG="${GH_CREATE_LOG:-/dev/null}" FM_STUB_BRANCHES="$FM_STUB_BRANCHES" "$SHIP" "$@"; }
 
+# --- ship-gate fixtures (G-ship-1/2) ----------------------------------------
+# The completeness + no-mistakes-green gates read an epic dir under FM_HOME. Most
+# cases only exercise the gitflow, so they use a home whose epic has NO kind:ship
+# stories (completeness passes vacuously) and records green at the epic tip.
+HCOUNT=0
+epic_home() {  # <slug> [<epic-sha>] -> echoes FM_HOME; epic dir with optional green
+  local slug=$1 sha=${2:-} home dir
+  HCOUNT=$((HCOUNT + 1))
+  home="$TMP_ROOT/home-$slug-$HCOUNT"
+  dir="$home/data/plans/260820-epic-$slug"
+  mkdir -p "$dir"
+  printf -- '---\nepic: %s\ntitle: t\n---\n' "$slug" > "$dir/epic.md"
+  [ -n "$sha" ] && printf '%s  # test green\n' "$sha" > "$dir/no-mistakes-green"
+  printf '%s\n' "$home"
+}
+epic_dir_of() { printf '%s\n' "$1/data/plans/260820-epic-$2"; }  # <home> <slug>
+add_story() {  # <epic-dir> <id> <repo>
+  mkdir -p "$1/stories"
+  printf -- '---\nid: %s\nepic: x\nrepo: %s\nkind: ship\ngate: false\n---\n' "$2" "$3" > "$1/stories/$2.md"
+}
+tip() { git -C "$1" rev-parse "$2"; }  # <clone> <ref> -> sha
+
 # ===========================================================================
 # help + arg validation
 # ===========================================================================
@@ -113,8 +135,9 @@ pass "missing epic/<slug> refuses and guides to cut it"
 C=$(new_repo nostg)
 commit_on "$C" "epic/demo" epic.txt "epic work"
 FM_STUB_BRANCHES="main"; export GH_LIST_URL=""
+H=$(epic_home demo "$(tip "$C" epic/demo)")
 LOG="$TMP_ROOT/nostg.create.log"; : > "$LOG"
-out=$(GH_CREATE_LOG="$LOG" run demo "$C") || fail "no-staging ship failed"
+out=$(FM_HOME="$H" GH_CREATE_LOG="$LOG" run demo "$C") || fail "no-staging ship failed"
 assert_contains "$out" "production PR (epic/demo -> main)" "reports the production PR"
 assert_contains "$out" "/pull/" "production PR URL reported"
 assert_grep "--base main --head epic/demo" "$LOG" "created epic/demo -> main"
@@ -139,8 +162,9 @@ git -C "$C" checkout -q main
 commit_on "$C" "epic/demo" feature.txt "new feature"
 FM_STUB_BRANCHES="main release"
 export GH_LIST_URL=""
+H=$(epic_home demo "$(tip "$C" epic/demo)")
 LOG="$TMP_ROOT/stgclean.create.log"; : > "$LOG"
-out=$(FM_STUB_BRANCHES="main release" GH_CREATE_LOG="$LOG" run demo "$C") || fail "staging ship failed"
+out=$(FM_HOME="$H" FM_STUB_BRANCHES="main release" GH_CREATE_LOG="$LOG" run demo "$C") || fail "staging ship failed"
 assert_contains "$out" "staging PR (epic/demo -> release)" "opens the staging test vehicle first"
 assert_contains "$out" "after this staging PR merges" "withholds the production PR until staging merges"
 assert_grep "--base release --head epic/demo" "$LOG" "created epic/demo -> release"
@@ -155,7 +179,7 @@ git -C "$C" checkout -q release
 git -C "$C" merge -q --no-ff epic/demo -m "merge epic/demo into release"
 git -C "$C" push -q origin release
 : > "$LOG"
-out=$(FM_STUB_BRANCHES="main release" GH_CREATE_LOG="$LOG" run demo "$C") || fail "post-merge ship failed"
+out=$(FM_HOME="$H" FM_STUB_BRANCHES="main release" GH_CREATE_LOG="$LOG" run demo "$C") || fail "post-merge ship failed"
 assert_contains "$out" "production PR (epic/demo -> main)" "opens production once staging contains the epic"
 assert_grep "--base main --head epic/demo" "$LOG" "created epic/demo -> main after staging merged"
 pass "staging merged -> production PR opens (git-ancestry gate)"
@@ -184,8 +208,9 @@ pass "staging conflict -> resolve-epic cut, PR withheld"
 git -C "$C" checkout -q -B resolve-epic/demo origin/resolve-epic/demo
 git -C "$C" -c user.name=t -c user.email=t@t.invalid merge -q -X ours epic/demo -m "resolve" || true
 git -C "$C" push -q origin resolve-epic/demo
+H=$(epic_home demo "$(tip "$C" epic/demo)")
 : > "$LOG"
-out=$(FM_STUB_BRANCHES="main release" GH_LIST_URL="" GH_CREATE_LOG="$LOG" run demo "$C") \
+out=$(FM_HOME="$H" FM_STUB_BRANCHES="main release" GH_LIST_URL="" GH_CREATE_LOG="$LOG" run demo "$C") \
   || fail "post-resolve ship errored"
 assert_contains "$out" "staging PR (resolve-epic/demo -> release)" "opens staging PR from the resolve branch"
 assert_grep "--base release --head resolve-epic/demo" "$LOG" "staging PR head is resolve-epic/demo"
@@ -196,8 +221,9 @@ pass "resolved conflict -> staging PR opens from resolve-epic/<slug>"
 # ===========================================================================
 C=$(new_repo dry)
 commit_on "$C" "epic/demo" f.txt "work"
+H=$(epic_home demo "$(tip "$C" epic/demo)")
 LOG="$TMP_ROOT/dry.create.log"; : > "$LOG"
-out=$(FM_STUB_BRANCHES="main" GH_LIST_URL="" GH_CREATE_LOG="$LOG" run demo "$C" --dry-run 2>&1) \
+out=$(FM_HOME="$H" FM_STUB_BRANCHES="main" GH_LIST_URL="" GH_CREATE_LOG="$LOG" run demo "$C" --dry-run 2>&1) \
   || fail "dry-run errored"
 assert_contains "$out" "[dry-run]" "dry-run announces itself"
 assert_contains "$out" "pr create" "dry-run prints the gh create command"
@@ -217,11 +243,108 @@ epic: gflow
 title: test
 ---
 EOF
+# The completeness + green gates read this epic dir: no stories -> complete
+# vacuously; record green at the epic tip so the delivery PR opens.
+printf '%s  # test green\n' "$(tip "$C" epic/gflow)" \
+  > "$HOME_DIR/data/plans/260817-2007-epic-gflow-x/no-mistakes-green"
 LOG="$TMP_ROOT/rec.create.log"; : > "$LOG"
 FM_STUB_BRANCHES="main" GH_LIST_URL="" GH_CREATE_LOG="$LOG" FM_HOME="$HOME_DIR" \
   FM_STUB_BRANCHES="main" "$SHIP" gflow "$C" >/dev/null || fail "recording ship failed"
 assert_present "$HOME_DIR/data/plans/260817-2007-epic-gflow-x/ships.md" "ships.md recorded"
 assert_grep "delivery" "$HOME_DIR/data/plans/260817-2007-epic-gflow-x/ships.md" "ships.md has the delivery line"
 pass "opened PR is recorded to the epic's ships.md"
+
+# ===========================================================================
+# ship gate G-ship-1: refuse an INCOMPLETE epic (a kind:ship story for this repo
+# is absent from the epic branch), naming the unmerged story.
+# ===========================================================================
+C=$(new_repo incomplete)
+git -C "$C" checkout -q -B epic/demo
+printf 'a\n' > "$C/a.txt"; git -C "$C" add a.txt
+git -C "$C" -c user.name=t -c user.email=t@t.invalid commit -qm "feat: first story (st-01)"
+git -C "$C" push -q origin epic/demo
+H=$(epic_home demo "$(tip "$C" epic/demo)")
+D=$(epic_dir_of "$H" demo)
+add_story "$D" "st-01-alpha" "$C"   # landed: (st-01) is in the epic log
+add_story "$D" "st-02-beta"  "$C"   # NOT landed: no st-02 commit
+LOG="$TMP_ROOT/incomplete.create.log"; : > "$LOG"
+err=$(FM_HOME="$H" FM_STUB_BRANCHES="main" GH_LIST_URL="" GH_CREATE_LOG="$LOG" \
+  run demo "$C" --dry-run 2>&1) && fail "shipped an incomplete epic"
+assert_contains "$err" "INCOMPLETE" "refuses an incomplete epic"
+assert_contains "$err" "st-02" "names the unmerged story"
+assert_no_grep "st-01" <(printf '%s\n' "$err") "landed story st-01 is not reported missing"
+assert_no_grep "create" "$LOG" "no PR created for an incomplete epic"
+pass "G-ship-1: incomplete epic refuses, naming the unmerged story"
+
+# ===========================================================================
+# ship gate G-ship-2: a COMPLETE epic with NO no-mistakes-green evidence refuses,
+# fail-closed (evidence surface absent).
+# ===========================================================================
+C=$(new_repo nogreen)
+git -C "$C" checkout -q -B epic/demo
+printf 'a\n' > "$C/a.txt"; git -C "$C" add a.txt
+git -C "$C" -c user.name=t -c user.email=t@t.invalid commit -qm "feat: only story (st-01)"
+git -C "$C" push -q origin epic/demo
+H=$(epic_home demo)   # no green sha recorded
+D=$(epic_dir_of "$H" demo)
+add_story "$D" "st-01-alpha" "$C"
+LOG="$TMP_ROOT/nogreen.create.log"; : > "$LOG"
+err=$(FM_HOME="$H" FM_STUB_BRANCHES="main" GH_LIST_URL="" GH_CREATE_LOG="$LOG" \
+  run demo "$C" --dry-run 2>&1) && fail "shipped without no-mistakes-green evidence"
+assert_contains "$err" "no-mistakes-green" "refuses without green evidence"
+assert_no_grep "create" "$LOG" "no PR created without green evidence"
+pass "G-ship-2: complete-but-not-green epic refuses (fail-closed)"
+
+# stale green (recorded at a different sha than the current epic tip) still refuses.
+printf '%s  # stale\n' "0000000000000000000000000000000000000000" > "$D/no-mistakes-green"
+err=$(FM_HOME="$H" FM_STUB_BRANCHES="main" GH_LIST_URL="" GH_CREATE_LOG="$LOG" \
+  run demo "$C" --dry-run 2>&1) && fail "shipped on stale green evidence"
+assert_contains "$err" "no-mistakes-green" "stale green (wrong sha) refuses"
+pass "G-ship-2: green bound to the epic tip - a stale sha does not authorize ship"
+
+# ===========================================================================
+# both gates pass: complete + green -> opens the PR (dry-run).
+# ===========================================================================
+C=$(new_repo greenok)
+git -C "$C" checkout -q -B epic/demo
+printf 'a\n' > "$C/a.txt"; git -C "$C" add a.txt
+git -C "$C" -c user.name=t -c user.email=t@t.invalid commit -qm "feat: the story (st-01)"
+git -C "$C" push -q origin epic/demo
+H=$(epic_home demo "$(tip "$C" epic/demo)")
+D=$(epic_dir_of "$H" demo)
+add_story "$D" "st-01-alpha" "$C"
+LOG="$TMP_ROOT/greenok.create.log"; : > "$LOG"
+out=$(FM_HOME="$H" FM_STUB_BRANCHES="main" GH_LIST_URL="" GH_CREATE_LOG="$LOG" \
+  run demo "$C" --dry-run 2>&1) || fail "complete+green ship refused"
+assert_contains "$out" "pr create" "complete+green opens the PR (dry-run)"
+pass "complete + green -> the ship PR opens"
+
+# a story for a DIFFERENT repo does not gate this repo's ship.
+add_story "$D" "st-99-other" "some-other-repo"
+out=$(FM_HOME="$H" FM_STUB_BRANCHES="main" GH_LIST_URL="" GH_CREATE_LOG="$LOG" \
+  run demo "$C" --dry-run 2>&1) || fail "other-repo story wrongly gated this ship"
+assert_contains "$out" "pr create" "another repo's story is not required on this repo's epic branch"
+pass "completeness is scoped to this repo's kind:ship stories"
+
+# ===========================================================================
+# --allow-incomplete: single logged bypass for both gates.
+# ===========================================================================
+C=$(new_repo bypass)
+git -C "$C" checkout -q -B epic/demo
+printf 'a\n' > "$C/a.txt"; git -C "$C" add a.txt
+git -C "$C" -c user.name=t -c user.email=t@t.invalid commit -qm "feat: partial (st-01)"
+git -C "$C" push -q origin epic/demo
+H=$(epic_home demo)   # incomplete AND no green
+D=$(epic_dir_of "$H" demo)
+add_story "$D" "st-01-alpha" "$C"
+add_story "$D" "st-02-beta"  "$C"   # unmerged
+LOG="$TMP_ROOT/bypass.create.log"; : > "$LOG"
+out=$(FM_HOME="$H" FM_STUB_BRANCHES="main" GH_LIST_URL="" GH_CREATE_LOG="$LOG" \
+  run demo "$C" --allow-incomplete 2>&1) || fail "--allow-incomplete did not ship"
+assert_contains "$out" "--allow-incomplete" "bypass announces itself"
+assert_grep "--base main --head epic/demo" "$LOG" "bypass opens the PR despite incomplete+not-green"
+assert_present "$D/ships.md" "bypass logged a ships.md line"
+assert_grep "BYPASS" "$D/ships.md" "bypass ship is logged"
+pass "--allow-incomplete bypasses both gates and logs"
 
 pass "all fm-epic-ship cases passed"
