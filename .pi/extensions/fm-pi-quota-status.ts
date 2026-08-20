@@ -69,6 +69,12 @@ type StoredOAuthCredential = {
   [key: string]: unknown;
 };
 
+type StoredApiKeyCredential = {
+  type: "api_key";
+  key: string;
+  [key: string]: unknown;
+};
+
 type ResolvedOAuthAuth = {
   apiKey?: string;
   baseUrl?: string;
@@ -94,6 +100,10 @@ type CompatibleModelRegistry = {
     };
   } | undefined;
   isUsingOAuth?: (model: ActiveModel) => boolean;
+  getProviderAuthStatus?: (provider: string) => {
+    configured: boolean;
+    source?: "stored" | "runtime" | "environment" | "fallback" | "models_json_key" | "models_json_command";
+  };
 };
 
 type ActiveSession = {
@@ -163,6 +173,17 @@ function storedOAuthCredential(value: unknown): StoredOAuthCredential | null {
     !Number.isFinite(value.expires)
   ) return null;
   return value as StoredOAuthCredential;
+}
+
+function storedApiKeyCredential(value: unknown): StoredApiKeyCredential | null {
+  if (!isRecord(value) || value.type !== "api_key" || typeof value.key !== "string") return null;
+  if (
+    value.key.trim().length === 0 ||
+    value.key.startsWith("!") ||
+    value.key.includes("$") ||
+    /[\u0000-\u001f\u007f]/.test(value.key)
+  ) return null;
+  return value as StoredApiKeyCredential;
 }
 
 function credentialRevision(value: unknown): string {
@@ -420,13 +441,27 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         };
       }
       const provider = registry.getProvider.call(ctx.modelRegistry, model.provider);
-      if (provider?.auth?.oauth?.isSubscription !== true || !registry.isUsingOAuth.call(ctx.modelRegistry, model)) {
-        return {
-          kind: "unsupported",
-          view: { kind: "unsupported", provider: `${model.provider} (non-subscription auth)` },
-        };
+      if (registry.isUsingOAuth.call(ctx.modelRegistry, model)) {
+        if (provider?.auth?.oauth?.isSubscription !== true) {
+          return {
+            kind: "unsupported",
+            view: { kind: "unsupported", provider: `${model.provider} (non-subscription auth)` },
+          };
+        }
+        return { kind: "resolving", piProvider: model.provider };
       }
-      return { kind: "resolving", piProvider: model.provider };
+      if (
+        model.provider === "kimi-coding" &&
+        typeof registry.getProviderAuthStatus === "function" &&
+        registry.getProviderAuthStatus.call(ctx.modelRegistry, model.provider).source === "stored" &&
+        storedApiKeyCredential(storedCredential(authFile, model.provider))
+      ) {
+        return { kind: "resolving", piProvider: model.provider };
+      }
+      return {
+        kind: "unsupported",
+        view: { kind: "unsupported", provider: `${model.provider} (non-subscription auth)` },
+      };
     }
 
     async function resolveTarget(
@@ -439,44 +474,59 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (!model) return { kind: "unsupported", view: { kind: "unsupported", provider: "no model" } };
 
       const registry = ctx.modelRegistry as unknown as CompatibleModelRegistry;
-      const provider = registry.getProvider?.call(ctx.modelRegistry, model.provider);
-      const oauth = provider?.auth?.oauth;
-      if (!oauth || typeof oauth.toAuth !== "function") {
-        return {
-          kind: "unsupported",
-          view: { kind: "unsupported", provider: `${model.provider} (auth inspection unavailable)` },
-        };
-      }
-
       const rawCredential = storedCredential(authFile, model.provider);
-      const credential = storedOAuthCredential(rawCredential);
-      if (!credential) {
-        return {
-          kind: "unsupported",
-          view: { kind: "unsupported", provider: `${model.provider} (auth unavailable)` },
-        };
-      }
-      const authResult = await resolveOAuthAuth(oauth, credential, signal);
-      if (authResult.kind !== "ok") {
-        const reason = authResult.kind === "timeout"
-          ? "auth timed out"
-          : authResult.kind === "cancelled"
-            ? "auth cancelled"
-            : "auth unavailable";
-        return {
-          kind: "unsupported",
-          view: { kind: "unsupported", provider: `${model.provider} (${reason})` },
-        };
+      let resolvedAuth: ResolvedOAuthAuth = {};
+      if (!registry.isUsingOAuth?.call(ctx.modelRegistry, model)) {
+        const authStatus = registry.getProviderAuthStatus?.call(ctx.modelRegistry, model.provider);
+        if (
+          model.provider !== "kimi-coding" ||
+          authStatus?.source !== "stored" ||
+          !storedApiKeyCredential(rawCredential)
+        ) {
+          return {
+            kind: "unsupported",
+            view: { kind: "unsupported", provider: `${model.provider} (auth unavailable)` },
+          };
+        }
+      } else {
+        const provider = registry.getProvider?.call(ctx.modelRegistry, model.provider);
+        const oauth = provider?.auth?.oauth;
+        if (!oauth || typeof oauth.toAuth !== "function") {
+          return {
+            kind: "unsupported",
+            view: { kind: "unsupported", provider: `${model.provider} (auth inspection unavailable)` },
+          };
+        }
+        const credential = storedOAuthCredential(rawCredential);
+        if (!credential) {
+          return {
+            kind: "unsupported",
+            view: { kind: "unsupported", provider: `${model.provider} (auth unavailable)` },
+          };
+        }
+        const authResult = await resolveOAuthAuth(oauth, credential, signal);
+        if (authResult.kind !== "ok") {
+          const reason = authResult.kind === "timeout"
+            ? "auth timed out"
+            : authResult.kind === "cancelled"
+              ? "auth cancelled"
+              : "auth unavailable";
+          return {
+            kind: "unsupported",
+            view: { kind: "unsupported", provider: `${model.provider} (${reason})` },
+          };
+        }
+        resolvedAuth = authResult.auth;
       }
 
-      const effectiveBaseUrl = authResult.auth.baseUrl ?? model.baseUrl;
+      const effectiveBaseUrl = resolvedAuth.baseUrl ?? model.baseUrl;
       if (!isOfficialProviderBaseUrl(model.provider, effectiveBaseUrl)) {
         return {
           kind: "unsupported",
           view: { kind: "unsupported", provider: `${model.provider} (custom endpoint)` },
         };
       }
-      const verification = quotaVerification(model.provider, authResult.auth.apiKey);
+      const verification = quotaVerification(model.provider, resolvedAuth.apiKey);
       if (!verification) {
         return {
           kind: "unsupported",
@@ -494,6 +544,20 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       };
     }
 
+    function selectTargetReport(
+      report: ParsedQuotaAxiReport,
+      target: Extract<QuotaTarget, { kind: "supported" }>,
+      nowMs: number,
+    ): QuotaView {
+      const verification = target.verification;
+      return selectActiveProviderQuota(report, target.piProvider, {
+        nowMs,
+        freshnessMs,
+        expectedAccountId: verification.kind === "account" ? verification.accountId : undefined,
+        expectedSuccessfulSource: verification.kind === "source" ? verification.source : undefined,
+      });
+    }
+
     function currentView(session: ActiveSession, nowMs = now()): QuotaView {
       if (session.target.kind === "unsupported") return session.target.view;
       if (session.target.kind === "resolving") {
@@ -503,13 +567,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         return { kind: "refreshing", provider: session.target.piProvider };
       }
       if (!session.report) return { kind: "refreshing", provider: session.target.piProvider };
-      const verification = session.target.verification;
-      const selected = selectActiveProviderQuota(session.report, session.target.piProvider, {
-        nowMs,
-        freshnessMs,
-        expectedAccountId: verification.kind === "account" ? verification.accountId : undefined,
-        expectedSuccessfulSource: verification.kind === "source" ? verification.source : undefined,
-      });
+      const selected = selectTargetReport(session.report, session.target, nowMs);
       if (!session.lastFailure) return selected;
       if (selected.kind === "fresh") {
         return { ...selected, refreshFailure: session.lastFailure };
@@ -670,8 +728,14 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             render(session, { kind: "malformed", provider: completedProvider });
           }
         } else if (result.kind !== "cancelled") {
+          const cached = session.report
+            ? selectTargetReport(session.report, completedTarget, now())
+            : null;
           session.lastFailure = result.kind;
-          render(session, session.report ? undefined : processFailureView(result.kind, completedProvider));
+          if (cached?.kind !== "fresh") session.report = null;
+          render(session, cached?.kind === "fresh"
+            ? undefined
+            : processFailureView(result.kind, completedProvider));
         }
       } finally {
         if (session.operationAbort === operationAbort) session.operationAbort = null;

@@ -549,7 +549,6 @@ populatedProvider.quotaSemantics = {
     },
     selection: { status: "known", spendPriority: 1 },
   }],
-  unresolvedWindowIds: [],
 };
 const fullyPopulatedParsed = parseQuotaAxiJson(JSON.stringify(fullyPopulated));
 assert(fullyPopulatedParsed, "fully-populated quota fixture did not parse structurally");
@@ -563,6 +562,14 @@ const invalidPace = structuredClone(fullyPopulated);
 invalidPace.providers[1].windows[0].pace.reservePercentPoints = "invalid";
 const invalidQuotaSemantics = structuredClone(fullyPopulated);
 invalidQuotaSemantics.providers[1].quotaSemantics.effectiveAvailability[0].selection.spendPriority = "invalid";
+const invalidPaceRelation = structuredClone(fullyPopulated);
+invalidPaceRelation.providers[1].windows[0].pace.reason = "stale";
+const invalidRunwayRelation = structuredClone(fullyPopulated);
+invalidRunwayRelation.providers[1].quotaSemantics.effectiveAvailability[0].runway.status = "unknown";
+const invalidSelectionRelation = structuredClone(fullyPopulated);
+invalidSelectionRelation.providers[1].quotaSemantics.effectiveAvailability[0].selection.status = "unknown";
+const invalidAvailabilityRelation = structuredClone(fullyPopulated);
+invalidAvailabilityRelation.providers[1].quotaSemantics.effectiveAvailability[0].status = "unknown";
 const invalidAuthStatus = structuredClone(fullyPopulated);
 invalidAuthStatus.providers[1].state.authStatus = "invalid";
 for (const [malformedReport, description] of [
@@ -581,6 +588,10 @@ for (const [malformedReport, description] of [
   [invalidPercentUsed, "invalid percent used"],
   [invalidPace, "invalid pace field"],
   [invalidQuotaSemantics, "invalid quota semantics field"],
+  [invalidPaceRelation, "invalid pace status relation"],
+  [invalidRunwayRelation, "invalid runway status relation"],
+  [invalidSelectionRelation, "invalid selection status relation"],
+  [invalidAvailabilityRelation, "invalid availability status relation"],
   [invalidAuthStatus, "invalid auth status"],
 ]) {
   const structurallyParsed = parseQuotaAxiJson(JSON.stringify(malformedReport));
@@ -665,19 +676,25 @@ function fixtureAccessToken(accountId) {
   })).toString("base64url");
   return `eyJhbGciOiJub25lIn0.${payload}.fixture`;
 }
-async function setStoredOAuth(provider, access, expires = Date.now() + 24 * 60 * 60 * 1000) {
+async function setStoredCredential(provider, credential) {
   let credentials = {};
   try {
     credentials = JSON.parse(await readFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, "utf8"));
   } catch {
   }
-  credentials[provider] = {
+  credentials[provider] = credential;
+  await writeFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, `${JSON.stringify(credentials)}\n`);
+}
+async function setStoredOAuth(provider, access, expires = Date.now() + 24 * 60 * 60 * 1000) {
+  await setStoredCredential(provider, {
     type: "oauth",
     access,
     refresh: `fixture-refresh-${provider}`,
     expires,
-  };
-  await writeFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, `${JSON.stringify(credentials)}\n`);
+  });
+}
+async function setStoredApiKey(provider, key) {
+  await setStoredCredential(provider, { type: "api_key", key });
 }
 for (const provider of Object.keys(officialBaseUrls)) {
   await setStoredOAuth(
@@ -728,6 +745,12 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
           },
           isUsingOAuth() {
             return providerOptions.authType !== "api_key";
+          },
+          getProviderAuthStatus() {
+            return {
+              configured: true,
+              source: providerOptions.authSource ?? "stored",
+            };
           },
           async getProviderAuth() {
             throw new Error("quota extension used the refreshing auth resolver");
@@ -823,6 +846,57 @@ const callsAtShutdown = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")
 await sleep(120);
 const callsAfterShutdown = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 assert(callsAfterShutdown === callsAtShutdown, "shutdown leaked a refresh timer");
+
+await setStoredApiKey("kimi-coding", "fixture-kimi-api-key");
+const kimiApiKey = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
+  "kimi-coding",
+  "tui",
+  { authType: "api_key", authSource: "stored" },
+);
+await kimiApiKey.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => kimiApiKey.widgetText(240).includes("week 83% left"),
+  `stored Kimi API-key quota was not correlated: ${kimiApiKey.widgetText(240)}`,
+);
+await kimiApiKey.emit("session_shutdown", { reason: "quit" });
+const callsBeforeRuntimeKimi = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+const runtimeKimiApiKey = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 100 }),
+  "kimi-coding",
+  "tui",
+  { authType: "api_key", authSource: "runtime" },
+);
+await runtimeKimiApiKey.emit("session_start", { reason: "startup" });
+assert(
+  runtimeKimiApiKey.widgetText(240).includes("non-subscription auth"),
+  "a Kimi runtime API key was correlated with the unrelated stored credential",
+);
+await sleep(30);
+const callsAfterRuntimeKimi = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+assert(callsAfterRuntimeKimi === callsBeforeRuntimeKimi, "a non-file Kimi API key invoked quota-axi");
+await runtimeKimiApiKey.emit("session_shutdown", { reason: "quit" });
+await setStoredOAuth("kimi-coding", "fixture-kimi-coding-access");
+
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const switchedFailure = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 500,
+}));
+await switchedFailure.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => switchedFailure.widgetText(400).includes("week 94% left"),
+  "provider-switch failure fixture did not publish initial Codex quota",
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "fail\n");
+await switchedFailure.emit("model_select", { model: fixtureModel("kimi-coding", "kimi-fixture") });
+await waitFor(
+  () => switchedFailure.widgetText(240).includes("quota-axi failed"),
+  `provider-switch process failure was hidden by the old report: ${switchedFailure.widgetText(240)}`,
+);
+assert(!switchedFailure.widgetText(240).includes("week 94%"), "provider switch retained Codex quota");
+await switchedFailure.emit("session_shutdown", { reason: "quit" });
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
 
 const transitionOptions = {};
 const resolvingTransition = makePi(

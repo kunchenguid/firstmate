@@ -190,14 +190,22 @@ function validTextArray(value: unknown): boolean {
   return Array.isArray(value) && value.every((entry) => exactText(entry) !== null);
 }
 
+function validNonemptyTextArray(value: unknown): value is string[] {
+  return Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((entry) => exactText(entry) !== null);
+}
+
 function validOptionalTextArray(value: unknown): boolean {
   return value === undefined || validTextArray(value);
 }
 
 function validPace(value: unknown): boolean {
   if (value === undefined) return true;
-  if (!isRecord(value) || !exactEnum(value.status, QUOTA_PACE_STATUSES)) return false;
-  if (value.reason !== undefined && !exactEnum(value.reason, QUOTA_PACE_REASONS)) return false;
+  if (!isRecord(value)) return false;
+  const status = exactEnum(value.status, QUOTA_PACE_STATUSES);
+  const reason = value.reason === undefined ? null : exactEnum(value.reason, QUOTA_PACE_REASONS);
+  if (!status || (value.reason !== undefined && !reason)) return false;
   if (!validOptionalNumber(value.timeRemainingPercent)) return false;
   if (!validOptionalNumber(value.elapsedPercent)) return false;
   if (!validOptionalNumber(value.reservePercentPoints)) return false;
@@ -209,7 +217,25 @@ function validPace(value: unknown): boolean {
   ) return false;
   if (value.projectionBasis !== undefined && value.projectionBasis !== "cycle_average") return false;
   if (value.cycleBasis !== undefined && !exactEnum(value.cycleBasis, QUOTA_CYCLE_BASES)) return false;
-  return validOptionalNumber(value.cycleSeconds, (number) => number > 0);
+  if (!validOptionalNumber(value.cycleSeconds, (number) => number > 0)) return false;
+
+  const hasProjection = value.projectedExhaustedAt !== undefined;
+  if (hasProjection !== (value.projectionConfidence !== undefined)) return false;
+  if ((value.cycleBasis !== undefined) !== (value.cycleSeconds !== undefined)) return false;
+  if (status === "unknown") {
+    return reason !== null && [
+      value.timeRemainingPercent,
+      value.elapsedPercent,
+      value.reservePercentPoints,
+      value.burnMultiple,
+      value.projectedExhaustedAt,
+      value.projectionConfidence,
+      value.projectionBasis,
+      value.cycleBasis,
+      value.cycleSeconds,
+    ].every((field) => field === undefined);
+  }
+  return value.reason === undefined && (hasProjection || value.projectionBasis === undefined);
 }
 
 function parseWindow(value: unknown): QuotaWindowView | null {
@@ -297,61 +323,172 @@ function parseAttempts(value: unknown): ParsedAttempt[] | null | undefined {
   return attempts;
 }
 
-function validEffectivePace(value: unknown): boolean {
+function validEffectivePace(value: unknown, requireAuditFields: boolean): boolean {
   if (value === undefined) return true;
-  if (!isRecord(value) || !exactEnum(value.status, QUOTA_EFFECTIVE_PACE_STATUSES)) return false;
-  if (!validOptionalTextArray(value.aheadWindowIds)) return false;
-  if (!validOptionalTextArray(value.behindWindowIds)) return false;
-  if (!validOptionalTextArray(value.onPaceWindowIds)) return false;
-  if (!validOptionalTextArray(value.unknownWindowIds)) return false;
+  if (!isRecord(value)) return false;
+  const status = exactEnum(value.status, QUOTA_EFFECTIVE_PACE_STATUSES);
+  if (!status) return false;
+  const listFields = [
+    "aheadWindowIds",
+    "behindWindowIds",
+    "onPaceWindowIds",
+    "unknownWindowIds",
+  ] as const;
+  const seen = new Set<string>();
+  for (const field of listFields) {
+    const entries = value[field];
+    if (entries === undefined) continue;
+    if (!validNonemptyTextArray(entries)) return false;
+    for (const entry of entries) {
+      if (seen.has(entry)) return false;
+      seen.add(entry);
+    }
+  }
   if (!validOptionalNumber(value.worstReservePercentPoints)) return false;
-  return value.worstReserveWindowId === undefined || exactText(value.worstReserveWindowId) !== null;
+  const worstId = value.worstReserveWindowId === undefined
+    ? null
+    : exactText(value.worstReserveWindowId);
+  if (value.worstReserveWindowId !== undefined && worstId === null) return false;
+  if ((value.worstReservePercentPoints !== undefined) !== (worstId !== null)) return false;
+
+  if (status === "unknown") {
+    return value.aheadWindowIds === undefined &&
+      value.behindWindowIds === undefined &&
+      value.onPaceWindowIds === undefined &&
+      value.worstReservePercentPoints === undefined;
+  }
+  if (value.worstReservePercentPoints === undefined) return false;
+  if (requireAuditFields && worstId !== null && !seen.has(worstId)) return false;
+  if (status === "ahead") {
+    return validNonemptyTextArray(value.aheadWindowIds) && value.behindWindowIds === undefined;
+  }
+  if (status === "behind") {
+    return value.aheadWindowIds === undefined &&
+      (!requireAuditFields || validNonemptyTextArray(value.behindWindowIds));
+  }
+  if (status === "on_pace") {
+    return value.aheadWindowIds === undefined &&
+      value.behindWindowIds === undefined &&
+      (!requireAuditFields || validNonemptyTextArray(value.onPaceWindowIds));
+  }
+  return validNonemptyTextArray(value.aheadWindowIds) &&
+    (!requireAuditFields || validNonemptyTextArray(value.behindWindowIds));
 }
 
 function validRunway(value: unknown): boolean {
   if (value === undefined) return true;
-  if (!isRecord(value) || !exactEnum(value.status, QUOTA_RUNWAY_STATUSES)) return false;
+  if (!isRecord(value)) return false;
+  const status = exactEnum(value.status, QUOTA_RUNWAY_STATUSES);
+  if (!status) return false;
   if (!validOptionalNumber(value.usableRunwaySeconds, (number) => number >= 0)) return false;
   if (!validOptionalTimestamp(value.projectedExhaustedAt)) return false;
-  if (value.limitingWindowId !== undefined && exactText(value.limitingWindowId) === null) return false;
-  if (
-    value.projectionConfidence !== undefined &&
-    !exactEnum(value.projectionConfidence, QUOTA_PROJECTION_CONFIDENCES)
-  ) return false;
+  const limitingWindowId = value.limitingWindowId === undefined
+    ? null
+    : exactText(value.limitingWindowId);
+  if (value.limitingWindowId !== undefined && limitingWindowId === null) return false;
+  const projectionConfidence = value.projectionConfidence === undefined
+    ? null
+    : exactEnum(value.projectionConfidence, QUOTA_PROJECTION_CONFIDENCES);
+  if (value.projectionConfidence !== undefined && projectionConfidence === null) return false;
   if (value.projectionBasis !== undefined && value.projectionBasis !== "cycle_average") return false;
-  return validOptionalTextArray(value.unmeasurableWindowIds);
+  if (
+    value.unmeasurableWindowIds !== undefined &&
+    !validNonemptyTextArray(value.unmeasurableWindowIds)
+  ) return false;
+
+  if (status === "unknown") {
+    return value.usableRunwaySeconds === undefined &&
+      value.projectedExhaustedAt === undefined &&
+      value.limitingWindowId === undefined &&
+      value.projectionConfidence === undefined &&
+      value.projectionBasis === undefined;
+  }
+  if (value.unmeasurableWindowIds !== undefined) return false;
+  if (status === "exhausted_now") {
+    return value.usableRunwaySeconds === 0 &&
+      value.projectedExhaustedAt !== undefined &&
+      limitingWindowId !== null &&
+      value.projectionConfidence === undefined &&
+      value.projectionBasis === undefined;
+  }
+  if (status === "projected_exhaustion") {
+    return value.usableRunwaySeconds !== undefined &&
+      value.projectedExhaustedAt !== undefined &&
+      limitingWindowId !== null &&
+      projectionConfidence !== null;
+  }
+  return value.usableRunwaySeconds === undefined &&
+    value.projectedExhaustedAt === undefined &&
+    value.limitingWindowId === undefined &&
+    projectionConfidence !== null;
 }
 
 function validSelection(value: unknown): boolean {
   if (value === undefined) return true;
-  if (!isRecord(value) || !exactEnum(value.status, QUOTA_SELECTION_STATUSES)) return false;
-  if (!validOptionalNumber(value.spendPriority, (number) => number >= -100 && number <= 100)) return false;
-  return validOptionalTextArray(value.unmeasurableWindowIds);
-}
-
-function validEffectiveAvailability(value: unknown): boolean {
   if (!isRecord(value)) return false;
-  if (exactText(value.scope) === null || !exactEnum(value.status, QUOTA_AVAILABILITY_STATUSES)) return false;
-  if (!validOptionalNumber(value.effectivePercentRemaining, (number) => number >= 0 && number <= 100)) return false;
-  if (!validTextArray(value.boundedBy) || !validOptionalTextArray(value.limitingWindowIds)) return false;
-  return validEffectivePace(value.pace) && validRunway(value.runway) && validSelection(value.selection);
+  const status = exactEnum(value.status, QUOTA_SELECTION_STATUSES);
+  if (!status) return false;
+  if (!validOptionalNumber(value.spendPriority, (number) => number >= -100 && number <= 100)) return false;
+  if (
+    value.unmeasurableWindowIds !== undefined &&
+    !validNonemptyTextArray(value.unmeasurableWindowIds)
+  ) return false;
+  return status === "known"
+    ? value.spendPriority !== undefined && value.unmeasurableWindowIds === undefined
+    : value.spendPriority === undefined;
 }
 
-function validQuotaSemantics(value: unknown, requireDescription: boolean): boolean {
+function validEffectiveAvailability(value: unknown, requireAuditFields: boolean): boolean {
+  if (!isRecord(value)) return false;
+  const status = exactEnum(value.status, QUOTA_AVAILABILITY_STATUSES);
+  if (exactText(value.scope) === null || !status) return false;
+  if (!validOptionalNumber(value.effectivePercentRemaining, (number) => number >= 0 && number <= 100)) return false;
+  if (!validNonemptyTextArray(value.boundedBy)) return false;
+  if (
+    value.limitingWindowIds !== undefined &&
+    !validNonemptyTextArray(value.limitingWindowIds)
+  ) return false;
+  if (
+    Array.isArray(value.limitingWindowIds) &&
+    value.limitingWindowIds.some((id) => !value.boundedBy.includes(id))
+  ) return false;
+  if (status === "known") {
+    if (value.effectivePercentRemaining === undefined || value.limitingWindowIds === undefined) return false;
+  } else if (value.effectivePercentRemaining !== undefined || value.limitingWindowIds !== undefined) {
+    return false;
+  }
+  return validEffectivePace(value.pace, requireAuditFields) &&
+    validRunway(value.runway) &&
+    validSelection(value.selection);
+}
+
+function validQuotaSemantics(
+  value: unknown,
+  requireDescription: boolean,
+  requireAuditFields: boolean,
+): boolean {
   if (value === undefined) return true;
-  if (!isRecord(value) || !exactEnum(value.status, QUOTA_SEMANTICS_STATUSES)) return false;
+  if (!isRecord(value)) return false;
+  const status = exactEnum(value.status, QUOTA_SEMANTICS_STATUSES);
+  if (!status) return false;
   if (requireDescription && typeof value.description !== "string") return false;
   if (value.description !== undefined && typeof value.description !== "string") return false;
   if (
     !Array.isArray(value.effectiveAvailability) ||
-    !value.effectiveAvailability.every(validEffectiveAvailability)
+    !value.effectiveAvailability.every((entry) => validEffectiveAvailability(entry, requireAuditFields))
   ) return false;
-  return validOptionalTextArray(value.unresolvedWindowIds);
+  if (!validOptionalTextArray(value.unresolvedWindowIds)) return false;
+  if (status === "known") {
+    return value.effectiveAvailability.length > 0 && value.unresolvedWindowIds === undefined;
+  }
+  return status !== "partial" || validNonemptyTextArray(value.unresolvedWindowIds);
 }
 
 function validProviderState(value: unknown, requireSourcesTried: boolean): boolean {
   if (!isRecord(value)) return false;
-  if (!exactEnum(value.status, QUOTA_PROVIDER_STATUSES) || typeof value.stale !== "boolean") return false;
+  const status = exactEnum(value.status, QUOTA_PROVIDER_STATUSES);
+  if (!status || typeof value.stale !== "boolean") return false;
+  if ((status === "stale") !== value.stale) return false;
   if (!validOptionalTimestamp(value.refreshedAt)) return false;
   for (const field of ["error", "retryAfter", "remedyCommand"] as const) {
     if (value[field] !== undefined && typeof value[field] !== "string") return false;
@@ -377,7 +514,7 @@ function validProviderFields(
   if (value.plan !== undefined && cleanText(value.plan, 48) === null) return false;
   if (!validProviderState(value.state, requireFullFields)) return false;
   if (!Array.isArray(value.windows) || !value.windows.every((window) => parseWindow(window) !== null)) return false;
-  if (!validQuotaSemantics(value.quotaSemantics, requireFullFields)) return false;
+  if (!validQuotaSemantics(value.quotaSemantics, requireFullFields, requireFullFields)) return false;
   if (parseCredits(value.credits) === null) return false;
   if (parseAccount(value.account) === null || parseAttempts(value.attempts) === null) return false;
   return true;
