@@ -154,6 +154,80 @@ SH
   chmod +x "$dir/bin/fm-watch-arm.sh"
 }
 
+write_real_terminal_watch_fixture() {
+  local dir=$1 delivered=$2 key hash sig
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  capture-pane) cat "$FM_HOME/state/pane.txt"; exit 0 ;;
+  display-message) printf '\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 1
+SH
+  cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: unknown · source: none · quiet fixture\n'
+SH
+  chmod +x "$dir/fakebin/tmux" "$dir/fakebin/fm-crew-state.sh"
+  printf 'window=test:fm-footer\nkind=ship\n' > "$dir/state/footer.meta"
+  printf 'done: PR https://example.test/pr/footer\n' > "$dir/state/footer.status"
+  printf 'finished, awaiting review\n⏱  15m | 12%% context\n' > "$dir/state/pane.txt"
+  sig=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_wake_signal_sig "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state/footer.status")
+  printf '%s' "$sig" > "$dir/state/.seen-footer_status"
+  key=test_fm-footer
+  hash=$(hash_text $'finished, awaiting review\n⏱  15m | 12% context')
+  printf '%s' "$hash" > "$dir/state/.hash-$key"
+  printf '1\n' > "$dir/state/.count-$key"
+  if [ "$delivered" = 1 ]; then
+    printf 'done: PR https://example.test/pr/footer' > "$dir/state/.hb-surfaced-footer"
+  fi
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+out="$FM_HOME/state/watch-arm.out"
+watcher_live() {
+  kill -0 "$1" 2>/dev/null || return 1
+  case "$(ps -p "$1" -o stat= 2>/dev/null | tr -d '[:space:]')" in
+    ''|Z*) return 1 ;;
+  esac
+}
+PATH="$FM_HOME/fakebin:$PATH" FM_STATE_OVERRIDE="$FM_HOME/state" FM_CREW_STATE_BIN="$FM_HOME/fakebin/fm-crew-state.sh" \
+    FM_FAKE_TMUX_WINDOW=test:fm-footer FM_FAKE_TMUX_CAPTURE="$FM_HOME/state/pane.txt" FM_POLL=0.2 FM_SIGNAL_GRACE=0.1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "${FM_WATCH_SCRIPT:-$FM_HOME/bin/fm-watch.sh}" > "$out" 2>&1 &
+pid=$!
+sleep 0.3
+if [ "${FM_TEST_FOOTER_TICK:-0}" = 1 ] && watcher_live "$pid"; then
+  printf 'finished, awaiting review\n⏱  16m | 12%% context\n' > "$FM_HOME/state/pane.txt"
+fi
+i=0
+settled=0
+while watcher_live "$pid" && [ "$i" -lt 60 ]; do
+  if [ -n "${FM_TEST_FOOTER_STALE_HASH:-}" ] &&
+     [ "$(cat "$FM_HOME/state/.stale-test_fm-footer" 2>/dev/null || true)" = "$FM_TEST_FOOTER_STALE_HASH" ]; then
+    settled=$((settled + 1))
+    [ "$settled" -ge 5 ] && break
+  fi
+  sleep 0.1
+  i=$((i + 1))
+done
+if watcher_live "$pid"; then
+  printf '%s\n' "$pid" > "$FM_HOME/state/fixture-watcher-pid"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -f "$FM_HOME/state/footer.meta" "$FM_HOME/state/task.meta"
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$pid"
+  exit 0
+fi
+wait "$pid"; rc=$?
+cat "$out"
+exit "$rc"
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
 epoch_outcome() {
   sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$1/state/.claude-autoarm-epoch" 2>/dev/null || true
 }
@@ -345,6 +419,33 @@ test_actionable_close_rewakes_with_reason() {
   [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "owner lock must be released after the cycle"
   [ -e "$dir/state/arm-ran" ] || fail "hook never foregrounded the arm wrapper"
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"
+}
+
+test_delivered_terminal_footer_change_does_not_rewake_claude() {
+  local dir out status watch_pid post_tick_hash
+  dir=$(make_primary_dir "$TMP_ROOT/terminal-footer-delivered")
+  : > "$dir/state/task.meta"
+  write_real_terminal_watch_fixture "$dir" 1
+  post_tick_hash=$(hash_text $'finished, awaiting review\n⏱  16m | 12% context')
+  out=$(FM_WATCH_SCRIPT="$ROOT/bin/fm-watch.sh" FM_TEST_FOOTER_TICK=1 \
+    FM_TEST_FOOTER_STALE_HASH="$post_tick_hash" run_autoarm "$dir" 2>/dev/null); status=$?
+  [ "$status" -eq 0 ] || fail "a delivered terminal footer change must not trigger a Claude Stop rewake: rc=$status output=$out queue=$(cat "$dir/state/.wake-queue" 2>/dev/null || true)"
+  [ -z "$out" ] || fail "a delivered terminal footer change produced Claude Stop feedback: $out"
+  [ "$(epoch_outcome "$dir")" = clean ] || fail "a delivered terminal footer change did not record a clean Claude cycle"
+  [ "$(cat "$dir/state/.stale-test_fm-footer" 2>/dev/null || true)" = "$post_tick_hash" ] || fail "the quiet Claude cycle never reached the delivered-terminal absorb: stale=$(cat "$dir/state/.stale-test_fm-footer" 2>/dev/null || true) expected=$post_tick_hash"
+  [ ! -e "$dir/state/.stale-since-test_fm-footer" ] || fail "the delivered terminal footer absorb left a wedge timer running"
+  watch_pid=$(cat "$dir/state/fixture-watcher-pid")
+  kill "$watch_pid" 2>/dev/null || true
+  wait "$watch_pid" 2>/dev/null || true
+
+  dir=$(make_primary_dir "$TMP_ROOT/terminal-footer-undelivered")
+  : > "$dir/state/task.meta"
+  write_real_terminal_watch_fixture "$dir" 0
+  out=$(FM_WATCH_SCRIPT="$ROOT/bin/fm-watch.sh" run_autoarm "$dir" 2>/dev/null); status=$?
+  [ "$status" -eq 2 ] || fail "the first undelivered terminal state must trigger exactly one Claude Stop rewake: rc=$status output=$out state=$(ls -la "$dir/state"; cat "$dir/state/watch-arm.out" 2>/dev/null || true; cat "$dir/state/.hash-test_fm-footer" 2>/dev/null || true; cat "$dir/state/.stale-test_fm-footer" 2>/dev/null || true)"
+  assert_contains "$out" "stale: test:fm-footer" "the Claude rewake must carry the real watcher reason"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the first undelivered terminal state did not record a Claude rewake"
+  pass "Claude Stop stays quiet for delivered changing-footer state and rewakes once for the first undelivered state"
 }
 
 test_actionable_close_with_live_successor_rewakes_once() {
@@ -586,6 +687,7 @@ test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
+test_delivered_terminal_footer_change_does_not_rewake_claude
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying

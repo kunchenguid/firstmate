@@ -590,6 +590,118 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# Wait for the watcher to record <hash> as the classified stale hash for a key
+# while it stays alive and silent. A watcher that surfaces instead prints its
+# reason and exits, so this reports that case immediately (1) rather than racing
+# a fixed sleep against the absorb; 2 means neither happened within the limit.
+await_absorbed_stale() {  # <pid> <out> <marker> <hash> [limit-tenths]
+  local pid=$1 out=$2 marker=$3 want=$4 limit=${5:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    { [ -s "$out" ] || ! kill -0 "$pid" 2>/dev/null; } && return 1
+    [ "$(cat "$marker" 2>/dev/null || true)" = "$want" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 2
+}
+
+test_delivered_terminal_footer_change_is_absorbed() {
+  local dir state fakebin out capture_file window key first_hash second_hash pid status_file
+  local raw_capture raw_status raw_window raw_key raw_hash sig absorbed
+  dir=$(make_case terminal-footer-change); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-footer"
+  status_file="$state/footer.status"
+  printf 'finished, awaiting review\n⏱  15m | 12%% context\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/footer.meta"
+  printf 'done: PR https://example.test/pr/footer\n' > "$status_file"
+  prime_status_seen "$state" "$status_file" || fail "could not prime the terminal status signal"
+  printf '%s' "$(cat "$status_file")" > "$state/.hb-surfaced-footer"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  first_hash=$(hash_text $'finished, awaiting review\n⏱  15m | 12% context')
+  printf '%s' "$first_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=0.1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  absorbed=0
+  await_absorbed_stale "$pid" "$out" "$state/.stale-$key" "$first_hash" || absorbed=$?
+  case "$absorbed" in
+    1) reap "$pid"; fail "a delivered terminal state with an unchanged footer woke the watcher: $(cat "$out")" ;;
+    2) reap "$pid"; fail "stale bookkeeping did not advance for the delivered terminal state" ;;
+  esac
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "delivered terminal state enqueued a duplicate wake before the footer changed"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "delivered terminal state started a wedge timer"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "delivered terminal state retained wedge escalation bookkeeping"; }
+
+  printf 'finished, awaiting review\n⏱  16m | 12%% context\n' > "$capture_file"
+  second_hash=$(hash_text $'finished, awaiting review\n⏱  16m | 12% context')
+  printf '%s' "$second_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  absorbed=0
+  await_absorbed_stale "$pid" "$out" "$state/.stale-$key" "$second_hash" || absorbed=$?
+  case "$absorbed" in
+    1) reap "$pid"; fail "a cosmetic footer change woke the watcher: $(cat "$out")" ;;
+    2) reap "$pid"; fail "stale bookkeeping did not advance after the cosmetic footer change" ;;
+  esac
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "cosmetic footer change enqueued a duplicate wake"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "cosmetic footer change started a wedge timer"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional quiet watcher stop"
+
+  raw_capture="$dir/raw-pane.txt"
+  raw_window="test:fm-footer-raw"
+  raw_status="$state/raw.status"
+  printf 'finished, awaiting review\n⏱  17m | 12%% context\n' > "$raw_capture"
+  printf 'window=%s\nkind=ship\n' "$raw_window" > "$state/raw.meta"
+  printf 'done: PR https://example.test/pr/raw\n' > "$raw_status"
+  prime_status_seen "$state" "$raw_status" || fail "could not prime the raw terminal status signal"
+  raw_key=$(printf '%s' "$raw_window" | tr ':/.' '___')
+  raw_hash=$(hash_text $'finished, awaiting review\n⏱  17m | 12% context')
+  printf '%s' "$raw_hash" > "$state/.hash-$raw_key"
+  printf '1\n' > "$state/.count-$raw_key"
+  : > "$out"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$raw_window" FM_FAKE_TMUX_CAPTURE="$raw_capture" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=0.1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "the first undelivered terminal state did not wake"; }
+  [ "$(grep -cF "stale: $raw_window" "$out")" -eq 1 ] || fail "the first undelivered terminal state did not wake exactly once: $(cat "$out")"
+  [ "$(cat "$state/.hb-surfaced-raw")" = "done: PR https://example.test/pr/raw" ] || fail "the first terminal wake did not record delivery"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first raw terminal wake"
+
+  printf 'blocked: credentials expired\n' >> "$raw_status"
+  prime_status_seen "$state" "$raw_status" || fail "could not isolate the blocked stale transition"
+  printf 'finished, awaiting review\n⏱  18m | 12%% context\n' > "$raw_capture"
+  raw_hash=$(hash_text $'finished, awaiting review\n⏱  18m | 12% context')
+  printf '%s' "$raw_hash" > "$state/.hash-$raw_key"
+  printf '1\n' > "$state/.count-$raw_key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$raw_window" FM_FAKE_TMUX_CAPTURE="$raw_capture" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=0.1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "a later blocked transition did not wake"; }
+  [ "$(grep -cF "stale: $raw_window" "$out")" -eq 1 ] || fail "the blocked stale transition did not wake exactly once: $(cat "$out")"
+  [ "$(cat "$state/.hb-surfaced-raw")" = "blocked: credentials expired" ] || fail "the blocked transition did not record delivery"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the blocked terminal wake"
+
+  printf 'needs-decision [key=credential]: renew credentials\n' >> "$raw_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$raw_window" FM_FAKE_TMUX_CAPTURE="$raw_capture" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=0.1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "a later keyed decision transition did not wake"; }
+  grep -F "signal: $raw_status" "$out" >/dev/null || fail "the keyed decision transition did not wake through the signal path: $(cat "$out")"
+  sig=$(last_status_line "$raw_status")
+  [ "$(cat "$state/.hb-surfaced-raw")" = "$sig" ] || fail "the keyed decision transition did not record delivery"
+  pass "a delivered terminal lifecycle absorbs changing cosmetic footer content"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -2107,6 +2219,7 @@ test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_delivered_terminal_footer_change_is_absorbed
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

@@ -299,14 +299,6 @@ is_live_non_zombie() {
   return 0
 }
 
-hash_text() {
-  if command -v md5 >/dev/null 2>&1; then
-    printf '%s' "$1" | md5 -q
-  else
-    printf '%s' "$1" | md5sum | cut -d' ' -f1
-  fi
-}
-
 dead_pid() {
   local p=999999
   while kill -0 "$p" 2>/dev/null; do

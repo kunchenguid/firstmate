@@ -34,6 +34,7 @@ export class UserMessageComponent {
   render() { return []; }
   invalidate() {}
 }
+
 JS
   cat > "$repo/node_modules/@earendil-works/pi-tui/package.json" <<'JSON'
 {"name":"@earendil-works/pi-tui","type":"module","exports":"./index.js"}
@@ -57,6 +58,137 @@ export const Type = {
   },
 };
 JS
+}
+
+write_pi_terminal_footer_case() {
+  local home=$1 delivered=$2 key hash sig
+  mkdir -p "$home/state" "$home/config" "$home/fakebin"
+  cat > "$home/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  capture-pane) cat "$FM_HOME/state/pane.txt"; exit 0 ;;
+  display-message) printf '\n'; exit 0 ;;
+  list-windows)
+    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  cat > "$home/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: unknown · source: none · quiet fixture\n'
+SH
+  chmod +x "$home/fakebin/tmux" "$home/fakebin/fm-crew-state.sh"
+  printf 'window=test:fm-footer\nkind=ship\n' > "$home/state/footer.meta"
+  printf 'done: PR https://example.test/pr/footer\n' > "$home/state/footer.status"
+  printf 'finished, awaiting review\n⏱  15m | 12%% context\n' > "$home/state/pane.txt"
+  sig=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_signal_sig "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/footer.status")
+  printf '%s' "$sig" > "$home/state/.seen-footer_status"
+  key=test_fm-footer
+  hash=$(hash_text $'finished, awaiting review\n⏱  15m | 12% context')
+  printf '%s' "$hash" > "$home/state/.hash-$key"
+  printf '1\n' > "$home/state/.count-$key"
+  if [ "$delivered" = 1 ]; then
+    printf 'done: PR https://example.test/pr/footer' > "$home/state/.hb-surfaced-footer"
+  fi
+}
+
+write_pi_terminal_footer_arm() {
+  local repo=$1
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+exec env PATH="$FM_HOME/fakebin:$PATH" FM_STATE_OVERRIDE="$FM_HOME/state" FM_CREW_STATE_BIN="$FM_HOME/fakebin/fm-crew-state.sh" \
+  FM_FAKE_TMUX_WINDOW=test:fm-footer FM_FAKE_TMUX_CAPTURE="$FM_HOME/state/pane.txt" FM_POLL=0.2 FM_SIGNAL_GRACE=0.1 \
+  FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 sh -c '
+    if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+      printf "watcher: started pid=%s (beacon fresh)\\n" "$$"
+    fi
+    exec "$FM_WATCH_SCRIPT"
+  '
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+}
+
+run_pi_terminal_footer_case() {
+  local repo=$1 home=$2 expected=$3 stale_hash=${4:-}
+  PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
+    FM_WATCH_SCRIPT="$ROOT/bin/fm-watch.sh" EXPECTED_PROMPT="$expected" EXPECTED_STALE_HASH="$stale_hash" \
+    node --input-type=module 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let handler = null;
+let prompt = "";
+let sends = 0;
+const pi = {
+  on() {},
+  registerCommand(name, options) {
+    if (name === "fm-watch-arm-pi") handler = options.handler;
+  },
+  registerTool() {},
+  sendUserMessage: async (message) => {
+    sends += 1;
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!handler) throw new Error("Pi watch command was not registered");
+await handler("footer-case", { ui: { notify() {} } });
+const staleMarker = `${process.env.FM_HOME}/state/.stale-test_fm-footer`;
+const staleRecorded = () => {
+  try {
+    return readFileSync(staleMarker, "utf8") === process.env.EXPECTED_STALE_HASH;
+  } catch {
+    return false;
+  }
+};
+const wantQuiet = process.env.EXPECTED_PROMPT === "0";
+let absorbedAt = -1;
+// 60s of 20ms ticks is a FAILURE bound, not a wait: the undelivered case stops
+// the moment the follow-up lands, and the quiet case stops shortly after the
+// absorb is recorded. Both exits are driven by observed watcher state, so the
+// bound only has to clear the worst-case surface latency - which reaches ~10s
+// when several watcher suites overlap, far past the 6s this loop used to allow.
+for (let i = 0; i < 3000 && !prompt; i += 1) {
+  if (wantQuiet) {
+    if (absorbedAt < 0 && staleRecorded()) absorbedAt = i;
+    if (absorbedAt >= 0 && i - absorbedAt >= 10) break;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (wantQuiet) {
+  if (sends !== 0 || prompt) throw new Error(`delivered footer state sent a Pi follow-up: ${prompt}`);
+  if (absorbedAt < 0) throw new Error("delivered footer state never reached the delivered-terminal absorb");
+} else if (sends !== 1 || !prompt.includes("stale: test:fm-footer")) {
+  throw new Error(`undelivered footer state did not send one real Pi follow-up: sends=${sends} prompt=${prompt}`);
+}
+process.exit(0);
+EOF
+}
+
+test_delivered_terminal_footer_change_does_not_send_pi_followup() {
+  local repo home pane_hash
+  repo="$TMP_ROOT/pi-footer-root"
+  home="$TMP_ROOT/pi-footer-delivered"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  write_pi_terminal_footer_case "$home" 1
+  write_pi_terminal_footer_arm "$repo"
+  pane_hash=$(hash_text $'finished, awaiting review\n⏱  15m | 12% context')
+  run_pi_terminal_footer_case "$repo" "$home" 0 "$pane_hash" || fail "Pi delivered footer fixture failed"
+  [ "$(cat "$home/state/.stale-test_fm-footer" 2>/dev/null || true)" = "$pane_hash" ] || fail "the quiet Pi cycle never reached the delivered-terminal absorb: stale=$(cat "$home/state/.stale-test_fm-footer" 2>/dev/null || true) expected=$pane_hash"
+  [ ! -e "$home/state/.stale-since-test_fm-footer" ] || fail "the delivered terminal footer absorb left a wedge timer running for Pi"
+
+  home="$TMP_ROOT/pi-footer-undelivered"
+  mkdir -p "$home/state" "$home/config"
+  write_pi_terminal_footer_case "$home" 0
+  run_pi_terminal_footer_case "$repo" "$home" 1 || fail "Pi undelivered footer fixture failed"
+  pass "Pi sends no follow-up for delivered changing-footer state and sends one for the first undelivered state"
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
@@ -2150,6 +2282,7 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+test_delivered_terminal_footer_change_does_not_send_pi_followup
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
