@@ -4,6 +4,7 @@ import {
   DEFAULT_QUOTA_FRESHNESS_MS,
   formatQuotaStatus,
   parseQuotaAxiJson,
+  quotaProviderForPiProvider,
   selectActiveProviderQuota,
   type ParsedQuotaAxiReport,
   type QuotaView,
@@ -13,6 +14,14 @@ const WIDGET_KEY = "firstmate-quota";
 const DEFAULT_REFRESH_MS = 5 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 20 * 1000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
+
+const OFFICIAL_PROVIDER_BASE_URLS: Readonly<Record<string, string>> = {
+  anthropic: "https://api.anthropic.com",
+  "github-copilot": "https://api.individual.githubcopilot.com",
+  "kimi-coding": "https://api.kimi.com/coding",
+  "openai-codex": "https://chatgpt.com/backend-api",
+  xai: "https://api.x.ai/v1",
+};
 
 type QuotaProcessResult =
   | { kind: "ok"; stdout: string }
@@ -42,11 +51,20 @@ export type FirstmateQuotaStatusOptions = {
   timers?: QuotaTimerScheduler;
 };
 
+type ActiveModel = NonNullable<ExtensionContext["model"]>;
+
+type QuotaTarget =
+  | { kind: "supported"; piProvider: string }
+  | { kind: "unsupported"; view: Extract<QuotaView, { kind: "unsupported" }> };
+
 type ActiveSession = {
   ctx: ExtensionContext;
-  piProvider: string;
+  model: ActiveModel | undefined;
+  generation: number;
+  target: QuotaTarget | null;
   report: ParsedQuotaAxiReport | null;
   process: QuotaProcess | null;
+  refreshInFlight: boolean;
   refreshPending: boolean;
   refreshTimer: unknown | null;
   expiryTimer: unknown | null;
@@ -67,6 +85,17 @@ function unrefTimer(timer: unknown): void {
   if (typeof timer !== "object" || timer === null || !("unref" in timer)) return;
   const unref = (timer as { unref?: unknown }).unref;
   if (typeof unref === "function") unref.call(timer);
+}
+
+function canonicalBaseUrl(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) return null;
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    return `${parsed.protocol}//${parsed.host}${pathname}`;
+  } catch {
+    return null;
+  }
 }
 
 function killProcess(child: ChildProcess, processGroupId: number | null): void {
@@ -169,10 +198,75 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
   return function firstmateQuotaStatus(pi: ExtensionAPI): void {
     let active: ActiveSession | null = null;
 
+    function unsupportedProvider(piProvider: string): Extract<QuotaView, { kind: "unsupported" }> {
+      const view = selectActiveProviderQuota(
+        { generatedAtMs: now(), schemaVersion: 3, providers: [] },
+        piProvider,
+        { nowMs: now(), freshnessMs },
+      );
+      return view.kind === "unsupported"
+        ? view
+        : { kind: "unsupported", provider: piProvider };
+    }
+
+    function preflightTarget(ctx: ExtensionContext, model: ActiveModel | undefined): QuotaTarget | null {
+      if (!model) return { kind: "unsupported", view: { kind: "unsupported", provider: "no model" } };
+      if (!quotaProviderForPiProvider(model.provider)) {
+        return { kind: "unsupported", view: unsupportedProvider(model.provider) };
+      }
+      const provider = ctx.modelRegistry.getProvider(model.provider);
+      if (provider?.auth.oauth?.isSubscription !== true || !ctx.modelRegistry.isUsingOAuth(model)) {
+        return {
+          kind: "unsupported",
+          view: { kind: "unsupported", provider: `${model.provider} (non-subscription auth)` },
+        };
+      }
+      return null;
+    }
+
+    async function resolveTarget(ctx: ExtensionContext, model: ActiveModel | undefined): Promise<QuotaTarget> {
+      const preflight = preflightTarget(ctx, model);
+      if (preflight) return preflight;
+      if (!model) return { kind: "unsupported", view: { kind: "unsupported", provider: "no model" } };
+
+      let auth;
+      try {
+        auth = await ctx.modelRegistry.getProviderAuth(model.provider);
+      } catch {
+        return {
+          kind: "unsupported",
+          view: { kind: "unsupported", provider: `${model.provider} (auth unavailable)` },
+        };
+      }
+      if (!auth) {
+        return {
+          kind: "unsupported",
+          view: { kind: "unsupported", provider: `${model.provider} (auth unavailable)` },
+        };
+      }
+
+      const expectedBaseUrl = OFFICIAL_PROVIDER_BASE_URLS[model.provider];
+      const effectiveBaseUrl = auth.auth.baseUrl ?? model.baseUrl;
+      if (
+        !expectedBaseUrl ||
+        canonicalBaseUrl(effectiveBaseUrl) !== canonicalBaseUrl(expectedBaseUrl)
+      ) {
+        return {
+          kind: "unsupported",
+          view: { kind: "unsupported", provider: `${model.provider} (custom endpoint)` },
+        };
+      }
+      return { kind: "supported", piProvider: model.provider };
+    }
+
     function currentView(session: ActiveSession): QuotaView {
-      if (!session.piProvider) return { kind: "unsupported", provider: "no model" };
-      if (!session.report) return { kind: "unavailable", provider: session.piProvider, label: null };
-      return selectActiveProviderQuota(session.report, session.piProvider, {
+      if (session.target?.kind === "unsupported") return session.target.view;
+      const piProvider = session.target?.kind === "supported"
+        ? session.target.piProvider
+        : session.model?.provider;
+      if (!piProvider) return { kind: "unsupported", provider: "no model" };
+      if (!session.report) return { kind: "refreshing", provider: piProvider };
+      return selectActiveProviderQuota(session.report, piProvider, {
         nowMs: now(),
         freshnessMs,
       });
@@ -204,7 +298,11 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           const availableWidth = typeof configuredWidth === "number" && Number.isFinite(configuredWidth) && configuredWidth > 0
             ? Math.min(boundedComponentWidth, Math.floor(configuredWidth))
             : boundedComponentWidth;
-          const plain = formatQuotaStatus(view, availableWidth, now());
+          const renderNowMs = now();
+          const renderView: QuotaView = view.kind === "fresh" && renderNowMs >= view.freshUntilMs
+            ? { kind: "stale", provider: view.provider, label: view.label }
+            : view;
+          const plain = formatQuotaStatus(renderView, availableWidth, renderNowMs);
           return plain ? [theme.fg("dim", plain)] : [];
         },
         invalidate() {},
@@ -214,57 +312,78 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     function cancelProcess(session: ActiveSession): void {
       if (session.process) session.process.cancel();
       session.process = null;
-      session.refreshPending = false;
     }
 
     async function refresh(session: ActiveSession): Promise<void> {
       if (active !== session) return;
-      const selected = selectActiveProviderQuota(
-        session.report ?? { generatedAtMs: now(), schemaVersion: 3, providers: [] },
-        session.piProvider,
-        { nowMs: now(), freshnessMs },
-      );
-      if (selected.kind === "unsupported") {
-        cancelProcess(session);
-        render(session, selected);
-        return;
-      }
-      if (session.process) {
+      if (session.refreshInFlight) {
         session.refreshPending = true;
         return;
       }
-      if (!session.report || currentView(session).kind !== "fresh") {
-        render(session, { kind: "refreshing", provider: session.piProvider });
-      }
 
-      const running = runQuotaAxiJson({ command, timeoutMs, maxOutputBytes });
-      session.process = running;
-      const result = await running.promise;
-      if (active !== session || session.process !== running) return;
-      session.process = null;
-
-      if (result.kind === "ok") {
-        const report = parseQuotaAxiJson(result.stdout);
-        if (report) {
-          session.report = report;
+      session.refreshInFlight = true;
+      const generation = session.generation;
+      try {
+        const target = await resolveTarget(session.ctx, session.model);
+        if (active !== session || session.generation !== generation) return;
+        session.target = target;
+        if (target.kind === "unsupported") {
           render(session);
-        } else {
-          session.report = null;
-          render(session, { kind: "malformed", provider: session.piProvider });
+          return;
         }
-      } else if (result.kind !== "cancelled") {
-        const stillFresh = session.report ? currentView(session) : null;
-        if (stillFresh?.kind === "fresh") {
-          render(session, stillFresh);
-        } else {
-          session.report = null;
-          render(session, processFailureView(result.kind, session.piProvider));
-        }
-      }
 
-      if (session.refreshPending && active === session) {
-        session.refreshPending = false;
-        void refresh(session);
+        const piProvider = target.piProvider;
+        if (!session.report || currentView(session).kind !== "fresh") {
+          render(session, { kind: "refreshing", provider: piProvider });
+        }
+
+        const running = runQuotaAxiJson({ command, timeoutMs, maxOutputBytes });
+        session.process = running;
+        const result = await running.promise;
+        if (
+          active !== session ||
+          session.generation !== generation ||
+          session.process !== running
+        ) return;
+
+        const completedTarget = await resolveTarget(session.ctx, session.model);
+        if (
+          active !== session ||
+          session.generation !== generation ||
+          session.process !== running
+        ) return;
+        session.process = null;
+        session.target = completedTarget;
+        if (completedTarget.kind === "unsupported") {
+          render(session);
+          return;
+        }
+
+        const completedProvider = completedTarget.piProvider;
+        if (result.kind === "ok") {
+          const report = parseQuotaAxiJson(result.stdout);
+          if (report) {
+            session.report = report;
+            render(session);
+          } else {
+            session.report = null;
+            render(session, { kind: "malformed", provider: completedProvider });
+          }
+        } else if (result.kind !== "cancelled") {
+          const stillFresh = session.report ? currentView(session) : null;
+          if (stillFresh?.kind === "fresh") {
+            render(session, stillFresh);
+          } else {
+            session.report = null;
+            render(session, processFailureView(result.kind, completedProvider));
+          }
+        }
+      } finally {
+        session.refreshInFlight = false;
+        if (session.refreshPending && active === session) {
+          session.refreshPending = false;
+          void refresh(session);
+        }
       }
     }
 
@@ -272,6 +391,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (session.refreshTimer !== null) timers.clearInterval(session.refreshTimer);
       session.refreshTimer = null;
       clearExpiry(session);
+      session.refreshPending = false;
       cancelProcess(session);
       session.ctx.ui.setWidget(WIDGET_KEY, undefined);
       if (active === session) active = null;
@@ -281,11 +401,15 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (active) stop(active);
       if (ctx.mode !== "tui") return;
 
+      const model = ctx.model;
       const session: ActiveSession = {
         ctx,
-        piProvider: ctx.model?.provider ?? "",
+        model,
+        generation: 0,
+        target: preflightTarget(ctx, model),
         report: null,
         process: null,
+        refreshInFlight: false,
         refreshPending: false,
         refreshTimer: null,
         expiryTimer: null,
@@ -295,6 +419,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         void refresh(session);
       }, refreshMs);
       unrefTimer(session.refreshTimer);
+      render(session);
       void refresh(session);
     }
 
@@ -306,7 +431,11 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         start(ctx);
         return;
       }
-      active.piProvider = event.model.provider;
+      active.ctx = ctx;
+      active.model = event.model;
+      active.generation += 1;
+      active.target = preflightTarget(ctx, event.model);
+      cancelProcess(active);
       render(active);
       void refresh(active);
     });

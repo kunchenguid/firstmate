@@ -58,28 +58,17 @@ JS
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
-cat > "$PI_CONFIG/models.json" <<'JSON'
+cat > "$PI_CONFIG/auth.json" <<'JSON'
 {
-  "providers": {
-    "openai-codex": {
-      "baseUrl": "http://127.0.0.1:9/v1",
-      "apiKey": "credential-free-live-fixture",
-      "api": "openai-responses",
-      "models": [
-        {
-          "id": "fm-quota-live",
-          "name": "Firstmate quota live fixture",
-          "reasoning": false,
-          "input": ["text"],
-          "contextWindow": 128000,
-          "maxTokens": 4096,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        }
-      ]
-    }
+  "openai-codex": {
+    "type": "oauth",
+    "refresh": "credential-free-live-fixture",
+    "access": "credential-free-live-fixture",
+    "expires": 4102444800000
   }
 }
 JSON
+chmod 600 "$PI_CONFIG/auth.json"
 
 checked=0
 cleanup() {
@@ -122,7 +111,7 @@ TS
   cat > "$launch_script" <<EOF
 #!/usr/bin/env bash
 sleep 0.5
-exec "$binary" --approve --no-session --no-context-files --no-skills --api-key credential-free-live-fixture --model openai-codex/fm-quota-live --tui-mode regular
+exec "$binary" --approve --no-session --no-context-files --no-skills --model openai-codex/gpt-5.3-codex-spark --tui-mode regular
 EOF
   chmod +x "$launch_script"
   cat > "$expect_script" <<EOF
@@ -152,7 +141,7 @@ EOF
   pane=$(tr -d '\r' < "$capture_log")
   printf '%s\n' "$pane" | grep -Fq '(quota-live)' \
     || fail "$harness quota extension hid Pi's built-in cwd/git footer information"
-  printf '%s\n' "$pane" | grep -Fq 'fm-quota-live' \
+  printf '%s\n' "$pane" | grep -Fq 'gpt-5.3-codex-spark' \
     || fail "$harness quota extension hid Pi's built-in model footer information"
   printf '%s\n' "$pane" | grep -Eq '/[0-9.]+[kM]' \
     || fail "$harness quota extension hid Pi's built-in context footer information"

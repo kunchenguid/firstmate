@@ -375,7 +375,17 @@ const direct = runQuotaAxiJson({ timeoutMs: 1000, maxOutputBytes: 1024 * 1024 })
 const directResult = await direct.promise;
 assert(directResult.kind === "ok", `fake quota-axi process failed: ${directResult.kind}`);
 
-function makePi(factory, provider = "openai-codex", mode = "tui") {
+const officialBaseUrls = {
+  anthropic: "https://api.anthropic.com",
+  "github-copilot": "https://api.individual.githubcopilot.com",
+  "kimi-coding": "https://api.kimi.com/coding",
+  "openai-codex": "https://chatgpt.com/backend-api",
+  xai: "https://api.x.ai/v1",
+};
+function fixtureModel(provider, id = "fixture-model", baseUrl = officialBaseUrls[provider] ?? "https://custom.example.invalid") {
+  return { provider, id, baseUrl };
+}
+function makePi(factory, provider = "openai-codex", mode = "tui", providerOptions = {}) {
   const handlers = new Map();
   const statuses = new Map([["aaa-unrelated", "UNRELATED_STATUS"]]);
   const widgets = new Map();
@@ -392,7 +402,23 @@ function makePi(factory, provider = "openai-codex", mode = "tui") {
   factory(pi);
   const ctx = {
     mode,
-    model: provider ? { provider, id: "fixture-model" } : undefined,
+    model: provider ? fixtureModel(provider, "fixture-model", providerOptions.baseUrl) : undefined,
+    modelRegistry: {
+      getProvider() {
+        return { auth: { oauth: { isSubscription: providerOptions.subscription !== false } } };
+      },
+      isUsingOAuth() {
+        return providerOptions.authType !== "api_key";
+      },
+      async getProviderAuth() {
+        if (providerOptions.authError) throw new Error("fixture auth failure");
+        if (providerOptions.authUnavailable) return undefined;
+        return {
+          auth: providerOptions.authBaseUrl ? { baseUrl: providerOptions.authBaseUrl } : {},
+          source: providerOptions.authType === "api_key" ? "fixture API key" : "OAuth",
+        };
+      },
+    },
     ui: {
       theme,
       setStatus(key, value) {
@@ -453,7 +479,7 @@ assert(lifecycle.statuses.get("aaa-unrelated") === "UNRELATED_STATUS", "quota wi
 assert(lifecycle.footer === "BUILTIN_FOOTER", "quota widget replaced Pi's built-in footer");
 assert(process.stdout.listenerCount("resize") === baselineResizeListeners, "session start installed a direct resize listener");
 
-await lifecycle.emit("model_select", { model: { provider: "anthropic", id: "claude-fixture" } });
+await lifecycle.emit("model_select", { model: fixtureModel("anthropic", "claude-fixture") });
 await waitFor(
   () => lifecycle.widgetText(240).includes("Quota Claude"),
   "model change did not refresh active-provider selection",
@@ -474,7 +500,7 @@ const callsAfterShutdown = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf
 assert(callsAfterShutdown === callsAtShutdown, "shutdown leaked a refresh timer");
 
 for (const reason of ["reload", "new", "resume", "fork"]) {
-  lifecycle.ctx.model = { provider: "xai", id: "grok-fixture" };
+  lifecycle.ctx.model = fixtureModel("xai", "grok-fixture");
   await lifecycle.emit("session_start", { reason });
   await waitFor(
     () => lifecycle.widgetText(240).includes("Quota Grok"),
@@ -501,6 +527,9 @@ class FakeClock {
     const id = this.nextId++;
     this.tasks.set(id, { id, callback, at: this.nowMs + delayMs, intervalMs });
     return id;
+  }
+  jump(milliseconds) {
+    this.nowMs += milliseconds;
   }
   advance(milliseconds) {
     const target = this.nowMs + milliseconds;
@@ -536,9 +565,13 @@ const writesBeforeFailedRefresh = expiring.widgetWriteCount;
 fakeClock.advance(5 * 60 * 1000);
 await waitFor(() => expiring.widgetWriteCount > writesBeforeFailedRefresh, "failed refresh did not republish the still-fresh report");
 assert(expiring.widgetText(400).includes("week 94% left"), "failed refresh discarded quota before its freshness deadline");
-fakeClock.advance(60 * 1000);
-assert(expiring.widgetText(400).includes("stale"), "fresh quota did not expire at its publication deadline");
-assert(!expiring.widgetText(400).includes("94%"), "expired quota values remained visible as fresh");
+const writesBeforeDelayedExpiry = expiring.widgetWriteCount;
+fakeClock.jump(60 * 1000);
+assert(expiring.widgetWriteCount === writesBeforeDelayedExpiry, "fake clock unexpectedly ran the delayed expiry callback");
+assert(expiring.widgetText(400).includes("stale"), "rendering presented quota past its freshness deadline");
+assert(!expiring.widgetText(400).includes("94%"), "rendering presented expired quota values as fresh");
+fakeClock.advance(0);
+assert(expiring.widgetWriteCount > writesBeforeDelayedExpiry, "expiry callback did not republish the stale view");
 await expiring.emit("session_shutdown", { reason: "quit" });
 assert(fakeClock.tasks.size === 0, "shutdown leaked a fake-clock refresh or expiry timer");
 delete process.env.FM_QUOTA_TEST_NOW_MS;
@@ -547,6 +580,29 @@ const nonTui = makePi(createFirstmateQuotaStatusExtension({ refreshMs: 40, timeo
 await nonTui.emit("session_start", { reason: "startup" });
 assert(!nonTui.widgets.has("firstmate-quota"), "print mode installed a TUI quota widget");
 await nonTui.emit("session_shutdown", { reason: "quit" });
+
+for (const [description, providerOptions, expected] of [
+  ["API-key auth", { authType: "api_key" }, "non-subscription auth"],
+  ["model endpoint override", { baseUrl: "https://proxy.example.invalid" }, "custom endpoint"],
+  ["auth endpoint override", { authBaseUrl: "https://gateway.example.invalid" }, "custom endpoint"],
+]) {
+  const callsBefore = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+  const instance = makePi(
+    createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 100 }),
+    "anthropic",
+    "tui",
+    providerOptions,
+  );
+  await instance.emit("session_start", { reason: "startup" });
+  await waitFor(
+    () => instance.widgetText(240).includes(expected),
+    `${description} was not identified explicitly: ${instance.widgetText(240)}`,
+  );
+  await sleep(30);
+  const callsAfter = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+  assert(callsAfter === callsBefore, `${description} invoked quota-axi for unrelated local quota`);
+  await instance.emit("session_shutdown", { reason: "quit" });
+}
 
 async function statusCase(mode, expected, options = {}) {
   await writeFile(process.env.FM_QUOTA_TEST_MODE, `${mode}\n`);
@@ -584,7 +640,7 @@ await waitFor(async () => {
   const pids = (await readFile(process.env.FM_QUOTA_TEST_PIDS, "utf8")).trim().split(/\s+/).filter(Boolean);
   return pids.length > pidsBeforeUnsupportedRace;
 }, "delayed failure fixture did not start");
-await unsupportedRace.emit("model_select", { model: { provider: "custom-proxy", id: "unsupported-model" } });
+await unsupportedRace.emit("model_select", { model: fixtureModel("custom-proxy", "unsupported-model") });
 await waitFor(
   () => unsupportedRace.widgetText(200).includes("unavailable for custom-proxy"),
   "model change did not publish the unsupported-provider view",
@@ -651,7 +707,7 @@ await waitFor(async () => {
 }, "replacement fixture did not launch its slow process");
 await replacement.emit("session_shutdown", { reason: "new" });
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
-replacement.ctx.model = { provider: "openai-codex", id: "replacement-model" };
+replacement.ctx.model = fixtureModel("openai-codex", "replacement-model");
 await replacement.emit("session_start", { reason: "new" });
 await waitFor(
   () => replacement.widgetText(240).includes("GPT-5.3-Codex-Spark week"),
