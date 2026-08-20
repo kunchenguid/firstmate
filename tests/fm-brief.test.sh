@@ -867,6 +867,7 @@ test_concurrent_replacements_preserve_every_superseded_brief() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
 
+  # shellcheck disable=SC2016 # Variables expand in the generated cat shim, not this test shell.
   printf '%s\n' \
     '#!/bin/sh' \
     ': > "$FM_TEST_BARRIER/$$"' \
