@@ -82,3 +82,11 @@ if ! caller_has_merge_method "$@"; then
 fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+
+# Only a merge that actually landed moves the card: set -eu has already exited
+# above if it did not. A task with no board link reaches no board at all, and a
+# board write that does not land leaves the card stale for the next poll rather
+# than changing the merge's own outcome. bin/fm-board.sh owns the mechanics.
+if FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-board.sh" lookup "$ID" >/dev/null 2>&1; then
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-board.sh" mark "$ID" 'done' >&2 || true
+fi

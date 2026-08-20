@@ -928,6 +928,89 @@ SH
   pass "bootstrap: FM_BOOTSTRAP_NETWORK partitions one run into local and network halves"
 }
 
+# The session start is the cycle that makes the board reconcile on its own
+# rather than because firstmate remembered to poll. It has to run in the network
+# half, print only what firstmate must act on, and stay completely absent in a
+# home that configured no board.
+test_a_configured_board_is_reconciled_by_the_session_start() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/board-poll"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/data" "$case_dir/home/state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cat > "$case_dir/home/config/boards" <<'EOF'
+project = harbourlight
+owner = harbour-collective
+number = 4
+label = firstmate
+EOF
+  fakebin=$(make_fake_toolchain "$case_dir")
+  # One tagged card waiting to be taken, and one already showing exactly what
+  # firstmate recorded.
+  printf '# links\n' > "$case_dir/home/data/board-links.tsv"
+  printf 'harbourlight\thttps://github.com/harbour-collective/app/issues/2\tfm-settled\ttodo\ttodo\t-\t-\n' \
+    >> "$case_dir/home/data/board-links.tsv"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "project item-list")
+    printf 'PVTI_a	Issue	https://github.com/harbour-collective/app/issues/1	Todo	firstmate	-	New work	-
+'
+    printf 'PVTI_b	Issue	https://github.com/harbour-collective/app/issues/2	Todo	firstmate	-	Settled work	-
+'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CONFIG_OVERRIDE="$case_dir/home/config" FM_DATA_OVERRIDE="$case_dir/home/data" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'BOARD_POLL: new harbourlight https://github.com/harbour-collective/app/issues/1 label' \
+    "a session start did not surface work waiting on the board"
+  assert_not_contains "$out" 'issues/2' \
+    "a card already showing what firstmate recorded added noise to the session start"
+
+  # The local half never touches the board, so the digest itself stays off the
+  # network exactly as before.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CONFIG_OVERRIDE="$case_dir/home/config" FM_DATA_OVERRIDE="$case_dir/home/data" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" 'BOARD_POLL' "the local half read a board"
+
+  # A read-only session is not authorized to mutate anything, so it polls nothing.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CONFIG_OVERRIDE="$case_dir/home/config" FM_DATA_OVERRIDE="$case_dir/home/data" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only \
+    FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" 'BOARD_POLL' "a read-only session reconciled a board"
+  pass "bootstrap: a configured board is reconciled by the session start, reporting only what needs acting on"
+}
+
+test_a_home_with_no_board_reconciles_nothing() {
+  local case_dir fakebin out log
+  case_dir="$TMP_ROOT/board-poll-absent"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  log="$case_dir/gh.log"
+  cat > "$fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$log'
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  : > "$log"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CONFIG_OVERRIDE="$case_dir/home/config" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" 'BOARD_POLL' "a home with no board reported a board poll"
+  assert_not_contains "$out" 'board' "a home with no board named the board sweep at all"
+  assert_no_grep 'project item-list' "$log" "a home with no board read a project board"
+  pass "bootstrap: a home with no board configuration reads no board and never names the sweep"
+}
+
 test_network_sweeps_recheck_lock_ownership() {
   local case_dir fakebin fake_root marker out
   case_dir="$TMP_ROOT/network-lock-handoff"
@@ -1172,6 +1255,8 @@ test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership
+test_a_configured_board_is_reconciled_by_the_session_start
+test_a_home_with_no_board_reconciles_nothing
 test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info

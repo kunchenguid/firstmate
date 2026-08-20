@@ -1193,6 +1193,29 @@ detect_local_config() {
   fi
 }
 
+# board_poll reconciles a configured project board on the one cycle a session
+# start already has. It is the whole reason firstmate no longer has to remember
+# to poll: a board that gained a card while the fleet was idle is picked up here.
+# A home with no board configuration performs zero board reads, because
+# bin/fm-board.sh is inert without it - and this returns before invoking it at
+# all. Only lines that need firstmate to act are printed, so a board that is
+# already reconciled adds nothing to a session start. bin/fm-board.sh owns every
+# board mechanic, including exiting 0 on an unreadable board so a board problem
+# can never fail a session start.
+board_poll() {
+  local board_sh="$FM_ROOT/bin/fm-board.sh" line
+  [ -s "$CONFIG/boards" ] || return 0
+  [ -x "$board_sh" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      # `linked` is a card already showing what firstmate recorded.
+      linked\ *) continue ;;
+      '') continue ;;
+    esac
+    printf 'BOARD_POLL: %s\n' "$line"
+  done < <(FM_HOME="$FM_HOME" "$board_sh" poll 2>&1 || true)
+}
+
 # The order below is the order the diagnostics have always printed in, so a
 # `skip` run is the same output with the network lines removed rather than a
 # reshuffle. `gh auth status` sits between the two local blocks because that is
@@ -1239,6 +1262,14 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     __fm_timing_stamp=$(fm_timing_now_ms)
     fleet_sync
     fm_timing_record phase fleet-sync "$__fm_timing_stamp"
+  fi
+  # The configuration check comes first so a home with no board never even
+  # names this sweep, let alone runs it.
+  if network_phase && [ -s "$CONFIG/boards" ] \
+    && network_sweep_authorized 'project board reconciliation'; then
+    __fm_timing_stamp=$(fm_timing_now_ms)
+    board_poll
+    fm_timing_record phase board-poll "$__fm_timing_stamp"
   fi
 fi
 local_phase && secondmate_handoff_detect

@@ -69,29 +69,64 @@ status-field = Status
 todo = Todo
 in-progress = In Progress
 done = Done
+queued = Queued
+big-picture-todo = Big Picture Todo
+big-picture-in-progress = Big Picture In Progress
+big-picture-done = Big Picture Done
 ```
 
 `project` is the project's name in the local project registry (`data/projects.md`), and `owner` plus `number` are the GitHub Projects owner login and project number.
-Everything else is optional: `repo` restricts intake to one repository on a board that carries several, `status-field` names the single-select field holding the columns, and `todo`, `in-progress`, and `done` name that field's three options.
+Everything else is optional: `repo` restricts intake to one repository on a board that carries several and is also the repository firstmate files a new card's issue in, `status-field` names the single-select field holding the columns, and `todo`, `in-progress`, and `done` name that field's three options.
 The defaults are `Status`, `Todo`, `In Progress`, and `Done`, and the names are matched ignoring case and spaces, so a field exported as `status` still resolves.
 Nothing about the board is baked into firstmate's tracked code; every identifier comes from this file, so any project can gain a board without a code change.
+
+`queued` is optional and unset by default.
+Configure it and firstmate uses that column for work it has been cleared to launch, between filed and started; leave it out and there is no such column and nothing changes.
+
+The three `big-picture-*` keys are also optional and unset by default, and they are one switch rather than three: set all three or none, because a partial set is refused with the reason rather than half-enabled.
+They turn on decomposition, described below.
+No column name may be used twice across all of these keys.
 
 A card is picked up only when it is a real issue, sits in the Todo column, and carries the trigger.
 The **label** is the authoritative trigger and defaults to `firstmate`, so add a `firstmate` label to an issue to hand it to the first mate.
 `mention` and `assignee` are additional triggers and are off unless you set them; a mention is a weaker signal than a label because a plausible handle may belong to a real GitHub account that is not yours, so prefer the label and treat a mention as a convenience.
 An issue is imported once and the link is kept forever, so the same issue can never produce two backlog items even after its task is finished and cleaned up.
+Work you file on the board is never started just because it arrived: firstmate imports it, tells you it is there, and waits for your go before dispatching anything.
 
-Cards move only on firstmate's own execution events: In Progress when a worker is dispatched, the working PR attached to the originating issue when it opens, and Done after a confirmed merge.
-A blocked item stays in the column it is already in with the blocker recorded as an issue comment; there is no fourth column.
-If you move, reprioritize, or cancel a card yourself, that is an instruction: firstmate reconciles its backlog to your board and never moves the card back.
-Cancelling a card stops the work and never discards unlanded work; that still needs you to say so.
+Work can also go the other way. Firstmate puts a task it already holds onto the board, filing the issue and carding it, so the roadmap shows work that started in the backlog as well as work that started on the board.
+That happens automatically when it dispatches a task whose project has a board, and can be done deliberately for any task the first mate judges belongs on that roadmap.
+There is no bulk operation that sweeps existing work onto a board; cards are placed one at a time.
+
+Cards then move on firstmate's own execution events, without anyone remembering a step: In Progress when a worker is dispatched, the working PR attached to the originating issue when it opens, and Done after a confirmed merge.
+A blocked item stays in the column it is already in with the blocker recorded as an issue comment.
 A board update that fails never blocks a dispatch, a merge, or cleanup - the board simply goes stale and the next cycle reconciles it.
+
+### Who says what
+
+Firstmate's own records are the source of truth and the board shows them; chat, not the board, is where you steer the work.
+That splits into two halves worth knowing:
+
+- **Filing work on the board is you adding work.** A new labelled card is picked up as before.
+- **The status columns are firstmate's report.** If a card's column changes to something firstmate did not put there, it changes nothing, starts nothing, stops nothing, and tells you in chat instead - including if a card appears in the `queued` column, which under this model can only mean something outside firstmate wrote to the board.
+
+So moving a card yourself is a fine way to tell firstmate something, but tell it in chat too: it will report the difference rather than act on it.
+Nothing here ever discards unlanded work.
+
+### Big-picture items and their children
+
+With the three `big-picture-*` keys configured, a card in the big-picture Todo column carrying the trigger label is a container: an issue whose children are the real work.
+Firstmate reads it, breaks it into concrete work items, and files each one as a native GitHub sub-issue of that container, carded in the ordinary Todo column - so GitHub's own `Parent issue` and `Sub-issues progress` fields show the structure with nothing invented on top.
+A container never becomes a task itself, and is only ever broken down once.
+Its own card then follows its children: any child in progress moves it to the big-picture In Progress column, and all children done moves it to big-picture Done.
+
+Creating those child cards is unattended; running them is not.
+Children are captain-gated exactly like any other work that arrived from a board.
 
 ### Turning it off
 
 Delete `config/boards`, or empty it, and the bridge is fully disabled with no residue.
 That is the whole off switch: there is no generated poll, watcher check, cadence file, daemon, or background process to unwind, because the bridge never creates one.
-The only file it ever writes is the local link record `data/board-links.tsv`, which does nothing at all without configuration and is kept so a re-enabled board does not re-import issues it already imported.
+The only files it ever writes are the local records `data/board-links.tsv` and `data/board-decompositions.tsv`, which do nothing at all without configuration and are kept so a re-enabled board does not re-import issues it already imported or break down a container it already broke down.
 
 Disabling stops future board reads and writes; it is not an undo, and it deliberately leaves earlier work in place.
 Backlog items already imported stay in the backlog, issues already created stay on GitHub, comments already posted stay posted, and cards already moved stay in the column they were moved to.
@@ -103,7 +138,9 @@ The bridge is strictly per project.
 Only a project with its own stanza in `config/boards` is ever mapped to a board, so work on every other project is never placed on any board, never commented on, and never moved.
 Configuring a board for one project therefore has no effect on the rest of the fleet, and a home with several boards keeps them separate: an event on one project resolves that project's stanza and no other.
 
-The board is read at session start and on the heartbeat cycles firstmate already runs, so expect minutes of lag while the fleet is busy, and note that an idle fleet produces no heartbeats at all: an item filed while everything is idle is picked up at the next session start.
+The board is read at session start and on the heartbeat cycles firstmate already runs, and both happen on their own rather than because firstmate remembered to look.
+Expect minutes of lag while the fleet is busy, and note that an idle fleet produces no heartbeats at all: an item filed while everything is idle is picked up at the next session start.
+The columns are therefore as current as the last cycle rather than live.
 Board commands use `gh`, already required by the toolchain below, and need its `project` scope; run `gh auth refresh -s project` once if `gh` reports the scope missing.
 Board configuration is local to one home and is not inherited by secondmate homes, because the home holding an issue's link is the home that updates it.
 

@@ -14,6 +14,10 @@
 #   fm-board.sh boards [<project>]
 #   fm-board.sh poll [<project>] [--limit <n>]
 #   fm-board.sh import <project> <issue-url> <task-id>
+#   fm-board.sh place <project> <task-id> <title> [<body>] [--lands-in <owner/name>]
+#   fm-board.sh child-add <project> <parent-issue-url> <title> <body> <task-id>
+#   fm-board.sh decomposed <project> <parent-issue-url>
+#   fm-board.sh decompositions [<project>]
 #   fm-board.sh links [<project>]
 #   fm-board.sh lookup <issue-url|task-id>
 #   fm-board.sh mark <task-id> todo|in-progress|done [--limit <n>]
@@ -42,6 +46,22 @@
 #   todo = Todo                  # default: Todo
 #   in-progress = In Progress    # default: In Progress
 #   done = Done                  # default: Done
+#   queued = Queued              # optional; default: off
+#   big-picture-todo = Big Picture Todo              # optional; default: off
+#   big-picture-in-progress = Big Picture In Progress  # optional; default: off
+#   big-picture-done = Big Picture Done              # optional; default: off
+#
+# `queued` is optional and off by default. Configured, it names the column a card
+# sits in once firstmate has been cleared to launch the work. Unconfigured, no
+# card is ever read or written as queued and the adapter behaves exactly as it
+# did before the key existed.
+#
+# The three `big-picture-*` keys are the whole on switch for decomposition and
+# default to unset. With none of them set this adapter behaves exactly as it did
+# before they existed: no card is ever classified as a container and `decompose`
+# is never printed. Setting some but not all three is a configuration error
+# rather than a half-enabled feature, and so is naming a column that a
+# `todo`, `in-progress`, or `done` key already names.
 #
 # INERT UNTIL CONFIGURED. This is a contract, not a side effect. With no
 # `config/boards` file, or an empty one, this adapter performs zero board reads
@@ -53,8 +73,9 @@
 # OFF SWITCH. Deleting or emptying `config/boards` fully disables the bridge and
 # leaves no residue: there is no generated poll, watcher check, cadence file,
 # daemon, or background process to unwind, because none was ever created. The
-# only file this adapter ever writes is data/board-links.tsv, and an unconfigured
-# home never reads it into any behavior.
+# only files this adapter ever writes are data/board-links.tsv and
+# data/board-decompositions.tsv, and an unconfigured home never reads either of
+# them into any behavior.
 #
 # WHAT DISABLING DOES NOT UNDO, by design. Work already done stays done: issues
 # and backlog items already imported remain, comments already posted on an issue
@@ -87,12 +108,100 @@
 #   project  issue  task  desired  synced  pr  pr_synced
 # `desired` is the column state firstmate's execution events call for and
 # `synced` is the last state this adapter confirmed on the board, both drawn
-# from todo|in-progress|done|other. They differ exactly while a board write is
+# from todo|queued|in-progress|done|other. They differ exactly while a board write is
 # outstanding, which is what makes a failed write retryable on the next cycle.
 # `other` is a column the captain added that firstmate does not drive; it is
 # recorded so their intent is preserved, not so a fourth execution state exists.
 # No column is ever empty: `-` is the placeholder, because bash collapses empty
 # tab-separated fields when it reads them back.
+#
+# DECOMPOSITION. A big-picture card is a container: an issue whose children are
+# the real work. No worker can ship a container, so a container must never spend
+# the one issue-to-task binding above, and this adapter makes that structural
+# rather than conventional. `poll` never prints `new` for a card sitting in a
+# big-picture column, `import` refuses an issue that holds a decomposition
+# record, and `child-add` refuses a parent that holds a link. Neither record can
+# therefore be reached from the other's side. `poll` writes a container's record
+# the first time it sees the card rather than when it is decomposed, so the
+# refusal covers every container the board has ever shown, not only the ones
+# already broken down.
+#
+# `poll` prints `decompose <project> <parent-issue-url>` for a real issue in the
+# big-picture Todo column that carries the configured label and is not yet
+# recorded as decomposed. Deciding what a container breaks down into is
+# judgement, so this script never invents children: firstmate reads that line,
+# runs `child-add` once per piece of work, and closes the container with
+# `decomposed`. Like `new`, a `decompose` line repeats every cycle until that
+# closing command runs, so an interrupted decomposition is finished rather than
+# lost; once closed it is never printed again, however long ago it was closed.
+#
+# data/board-decompositions.tsv is that durable record, alongside the linkage
+# record and for the same reason: it must outlive task cleanup, so a parent
+# decomposed months ago is never decomposed a second time. One row per parent,
+# tab separated, `-` for an empty column:
+#   project  parent  state  desired  synced  children
+# `state` is open while children are being created and done once `decomposed`
+# closed it. `children` is `-`, or a comma-separated list of `task=child-url`
+# pairs; neither half can contain a comma or an `=`, so the pair parses back
+# unambiguously. `desired` and `synced` carry the parent card's status exactly as
+# the linkage record's own two columns do.
+#
+# PLACEMENT, the inverse of import. `place` puts a task firstmate already holds
+# onto the board: it creates the issue, cards it, sets it to Todo, and records
+# the link, after which dispatch, PR attachment, and merge all reflect through
+# the ordinary events with no further special casing. `child-add` is the same
+# operation with a parent - it additionally creates the issue as a native GitHub
+# sub-issue of the container and records the child against it - so both verbs run
+# one shared implementation rather than two that can drift.
+#
+# Both create the issue in the board's configured repo (a board with no `repo`
+# key uses the parent's repo for a child, and refuses `place` because it has no
+# repo to choose), carrying the trigger label. `place` takes an optional
+# `--lands-in <owner/name>` that states on the card which repository the change
+# actually lands in; pass it whenever that is not the repository the issue itself
+# is filed in, so a roadmap never implies a diff is somewhere it is not.
+#
+# Which tasks belong on a board is an editorial call this script never makes.
+# There is deliberately no command that sweeps unlinked tasks onto a board:
+# placement is one task at a time, by a caller that decided that task belongs
+# there.
+#
+# Because the created issue carries the label and holds a link before the next
+# cycle reads the board, `poll` reports it as `linked` and can never offer it as
+# `new`.
+#
+# The failure contract has two halves, split at the one irreversible step.
+# Creating the issue is the command's whole purpose, so a creation that does not
+# land writes nothing, reports the failure, and exits 1 - there is nothing to
+# converge toward and firstmate must not build a backlog item on it. Every step
+# after creation degrades fail-soft: the command prints `placed-partial` or
+# `child-partial` naming the first step that did not land, and exits 0.
+#
+# Repeating either command converges instead of filing a second issue for the
+# same work, through three guards in falling order of cost. A task that already
+# holds a link is finished, and answers `already-placed` with no network call at
+# all - the link is written last precisely so that holding one proves the rest
+# landed. A child already recorded against its parent is reused rather than
+# created. Otherwise, before creating anything, the repo's most recent issues are
+# read and one already carrying this task's `firstmate-task:` marker is adopted;
+# that scan is deliberately shallow because the only gap it closes is an issue
+# created moments before an interruption.
+#
+# The link is written as soon as the card exists rather than at the very end, so
+# a card on the board is never briefly importable as new work; its `synced` stays
+# unconfirmed until the column write lands, which leaves the ordinary outstanding
+# -write retry to finish the job on the next cycle.
+#
+# PARENT STATUS. Once a parent has children, `poll` keeps its card honest from
+# their recorded states: any child in progress derives in-progress, all children
+# done derives done, and anything else derives todo. A child recorded in a column
+# firstmate does not drive is left out of that entirely, because a withdrawn
+# child must not hold its parent short of done forever. The derived state moves
+# the card through the three big-picture columns exactly as `mark` moves an
+# ordinary card, is retried on the next cycle when the write does not land, and
+# is reported with the same `synced` and `stale` vocabulary. A parent already
+# showing what firstmate recorded prints nothing at all, and one showing anything
+# firstmate did not write diverges exactly as any other card does.
 #
 # FAIL SOFT. Every board write degrades to a stale board instead of blocking
 # delivery: `mark`, `pr`, and `note` exit 0 whether or not the write landed,
@@ -102,15 +211,34 @@
 # board read failure, reporting it as an `error` line. A read that cannot tell
 # absence from its own limits - a full page, or a board answering with no cards
 # at all while links are open - says so and reconciles nothing rather than
-# guessing. Only a usage or
-# configuration error exits non-zero, and a refused conflicting relink exits 3.
+# guessing. Exiting non-zero is reserved for the three things a caller must not
+# proceed past: a usage or configuration error exits 2, a refused conflicting
+# relink or container-versus-task conflict exits 3, and an issue this adapter was
+# asked to create but could not exits 1, as PLACEMENT above sets out.
 #
-# WHO WINS. When the board disagrees with a record, the board is a captain
-# instruction: `poll` adopts the board's state into the record and reports an
-# `instruction` line for firstmate to reconcile the backlog to. It never writes
-# firstmate's state back over the captain's edit. The one exception is an
-# outstanding write the board has not taken yet, which is retried because the
-# board still shows the value this adapter last confirmed.
+# DIRECTION OF AUTHORITY. Firstmate's own durable records are the truth and the
+# board is how that truth is shown; chat, not the board, is where the captain
+# controls the work. So status flows one way, outward: this adapter writes
+# todo, queued, in-progress, and done onto a card from what firstmate already
+# recorded, and a card's column never tells firstmate what to do.
+#
+# That makes a status this adapter did not write a divergence rather than an
+# instruction. `poll` prints a `divergence` line, writes nothing to the record,
+# writes nothing to the board, and leaves it for firstmate to raise with the
+# captain; the deliberate exception is a write still outstanding, which is
+# retried because the board is showing the value this adapter last confirmed
+# rather than a change to it. A card that appears in the queued column without
+# firstmate having put it there can only mean something outside firstmate wrote
+# to this board, which is why nothing here reconciles it in either direction and
+# nothing about it starts work.
+#
+# Intake is the one thing the board still states rather than reports: a new
+# labelled card is the captain adding work, and `new` continues to mean exactly
+# that.
+#
+# An explicit `mark` is how a divergence is resolved, because it is firstmate
+# acting rather than the adapter reconciling behind the captain's back: it writes
+# the card and records what it confirmed, and the divergence stops being reported.
 #
 # An issue that a different configured board already owns is a misconfiguration
 # rather than an instruction, so `poll` names it in a `foreign` line carrying the
@@ -119,13 +247,23 @@
 # board. `import` stays fleet-wide: an issue linked under any project can never
 # be imported a second time under another one.
 #
-# A card that left the board is the captain withdrawing work firstmate is still
-# executing, so `poll` keeps reporting it as `cancelled` until `ack` records that
-# the withdrawal was reconciled. Repeating survives a missed cycle; a card that
-# left after reaching Done is ordinary archiving and is never reported. Neither
-# reporting nor acknowledging a withdrawal ever authorizes discarding unlanded
-# work: hard rule 3 stands, and this adapter touches no branch, worktree, or
-# repository.
+# A card that left the board while firstmate was still executing it is reported
+# as `cancelled` until `ack` records that it was reconciled. Repeating survives a
+# missed cycle; a card that left after reaching Done is ordinary archiving and is
+# never reported. Like a divergence it is something to raise, not something this
+# adapter acts on, and neither reporting nor acknowledging one ever authorizes
+# discarding unlanded work: hard rule 3 stands, and this adapter touches no
+# branch, worktree, or repository.
+#
+# COST. Board and Projects work is GraphQL with its own hourly budget, and a
+# full board read inside a per-item loop is what exhausts it. So one
+# reconciliation cycle reads the board exactly once and every write it then makes
+# reuses a card id from that one read; `place` and `child-add` read no board at
+# all, taking their card id from what the add itself returned, because a freshly
+# added card is not immediately visible in a board listing anyway. The project,
+# field, and option node IDs are resolved once per invocation and cached. Their
+# cost is therefore a small constant per card rather than a function of how many
+# cards the board carries.
 #
 # GITHUB CLI. This adapter calls `gh` rather than `gh-axi`, and adds no new
 # dependency because `gh` is already part of firstmate's universal toolchain
@@ -149,6 +287,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 BOARDS_FILE="$CONFIG/boards"
 LINKS="$DATA/board-links.tsv"
+DECOMPS="$DATA/board-decompositions.tsv"
 GH="${FM_BOARD_GH:-gh}"
 TAB=$'\t'
 # One board read's ceiling, shared by `poll` and the card lookup `mark` needs.
@@ -188,22 +327,47 @@ CONFIG_SLUG_RE='^[A-Za-z0-9._-]+$'
 # Emits the stanza being accumulated by boards_emit. Called only from there, and
 # deliberately reads that caller's locals rather than taking eleven arguments.
 boards_flush() {
+  local set_count=0 name norm seen_cols=
   [ -n "$project" ] || return 0
   [ "$owner" != - ] || die "config/boards: board \"$project\" has no owner"
   [ "$number" != - ] || die "config/boards: board \"$project\" has no number"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  # The three big-picture columns are one switch, not three independent keys: a
+  # partial set would classify some containers and not others, so it is refused
+  # here rather than half-enabled.
+  for name in "$bp_todo" "$bp_in_progress" "$bp_done"; do
+    [ "$name" = - ] || set_count=$((set_count + 1))
+  done
+  if [ "$set_count" != 0 ] && [ "$set_count" != 3 ]; then
+    die "config/boards: board \"$project\" sets some big-picture columns but not all three (big-picture-todo, big-picture-in-progress, big-picture-done)"
+  fi
+  # Two keys naming one column would make a single card mean two different
+  # things, so every configured column name has to be distinct.
+  for name in "$todo" "$in_progress" "$done_col" "$queued" "$bp_todo" \
+    "$bp_in_progress" "$bp_done"; do
+    [ "$name" != - ] || continue
+    norm=$(norm_name "$name")
+    case "$TAB$seen_cols" in
+      *"$TAB$norm$TAB"*)
+        die "config/boards: board \"$project\" gives \"$name\" as more than one column"
+        ;;
+    esac
+    seen_cols="$seen_cols$norm$TAB"
+  done
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$project" "$owner" "$number" "$repo" "$label" "$mention" "$assignee" \
-    "$status_field" "$todo" "$in_progress" "$done_col"
+    "$status_field" "$todo" "$in_progress" "$done_col" \
+    "$bp_todo" "$bp_in_progress" "$bp_done" "$queued"
 }
-
 boards_emit() {
   local line key value project owner number repo label mention assignee
   local status_field todo in_progress done_col lineno=0 seen=
+  local bp_todo bp_in_progress bp_done queued
   [ -f "$BOARDS_FILE" ] || return 0
 
   project=''
   owner=- number=- repo=- label=firstmate mention=- assignee=-
   status_field=Status todo=Todo in_progress='In Progress' done_col=Done
+  bp_todo=- bp_in_progress=- bp_done=- queued=-
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
     line=${line%$'\r'}
@@ -236,6 +400,7 @@ boards_emit() {
       project=$value
       owner=- number=- repo=- label=firstmate mention=- assignee=-
       status_field=Status todo=Todo in_progress='In Progress' done_col=Done
+      bp_todo=- bp_in_progress=- bp_done=- queued=-
       continue
     fi
     [ -n "$project" ] || die "config/boards line $lineno: \"$key\" appears before any project"
@@ -258,7 +423,8 @@ boards_emit() {
           *) die "config/boards line $lineno: repo \"$value\" is not owner/name" ;;
         esac
         ;;
-      label | todo | in-progress | done | status-field)
+      label | todo | in-progress | done | queued | status-field \
+        | big-picture-todo | big-picture-in-progress | big-picture-done)
         [[ $value =~ $CONFIG_VALUE_RE ]] \
           || die "config/boards line $lineno: \"$key\" may use only letters, digits, spaces, dot, underscore, and dash"
         case "$key" in
@@ -267,6 +433,10 @@ boards_emit() {
           in-progress) in_progress=$value ;;
           done) done_col=$value ;;
           status-field) status_field=$value ;;
+          queued) queued=$value ;;
+          big-picture-todo) bp_todo=$value ;;
+          big-picture-in-progress) bp_in_progress=$value ;;
+          big-picture-done) bp_done=$value ;;
         esac
         ;;
       mention)
@@ -392,6 +562,122 @@ links_put() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$project" "$issue" "$task" "$desired" "$synced" "${pr:--}" "${pr_synced:--}" >> "$tmp"
   mv -f "$tmp" "$LINKS" || { rm -f "$tmp"; die "cannot replace the linkage record" 1; }
+}
+
+# --- durable decomposition record -------------------------------------------
+#
+# One row per container, kept for the same reason the linkage record is: a
+# parent decomposed long ago must never be offered for decomposition again.
+
+DECOMPS_HEADER="# fm-board.sh durable decompositions: project${TAB}parent${TAB}state${TAB}desired${TAB}synced${TAB}children"
+
+decomps_rows() {
+  local row
+  [ -f "$DECOMPS" ] || return 0
+  while IFS= read -r row || [ -n "$row" ]; do
+    case "$row" in
+      '' | '#'*) continue ;;
+    esac
+    printf '%s\n' "$row"
+  done < "$DECOMPS"
+}
+
+DECOMP_PROJECT=- DECOMP_PARENT=- DECOMP_STATE=-
+DECOMP_DESIRED=- DECOMP_SYNCED=- DECOMP_CHILDREN=-
+
+decomp_clear() {
+  DECOMP_PROJECT=- DECOMP_PARENT=- DECOMP_STATE=-
+  DECOMP_DESIRED=- DECOMP_SYNCED=- DECOMP_CHILDREN=-
+}
+
+# decomps_find <parent-issue-url>: leave the matching row in the DECOMP_
+# variables and print it, or clear them and return 1. Like links_find, callers
+# read the variables, so this never runs inside a command substitution.
+decomps_find() {
+  local want=$1 found=
+  while IFS=$TAB read -r DECOMP_PROJECT DECOMP_PARENT DECOMP_STATE \
+    DECOMP_DESIRED DECOMP_SYNCED DECOMP_CHILDREN; do
+    [ "$DECOMP_PARENT" = "$want" ] || continue
+    found=1
+    break
+  done < <(decomps_rows)
+  if [ -z "$found" ]; then
+    decomp_clear
+    return 1
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$DECOMP_PROJECT" "$DECOMP_PARENT" "$DECOMP_STATE" \
+    "$DECOMP_DESIRED" "$DECOMP_SYNCED" "$DECOMP_CHILDREN"
+}
+
+# decomps_put <project> <parent> <state> <desired> <synced> <children>
+decomps_put() {
+  local project=$1 parent=$2 state=$3 desired=$4 synced=$5 children=$6
+  local tmp r_project r_parent r_state r_desired r_synced r_children
+  mkdir -p "$DATA" || die "cannot create $DATA" 1
+  tmp=$(umask 077; mktemp "$DATA/.board-decompositions.XXXXXX") \
+    || die "cannot write the decomposition record" 1
+  printf '%s\n' "$DECOMPS_HEADER" > "$tmp"
+  while IFS=$TAB read -r r_project r_parent r_state r_desired \
+    r_synced r_children; do
+    [ "$r_parent" != "$parent" ] || continue
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$r_project" "$r_parent" "$r_state" "$r_desired" \
+      "$r_synced" "$r_children" >> "$tmp"
+  done < <(decomps_rows)
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$project" "$parent" "$state" "$desired" "$synced" "$children" >> "$tmp"
+  mv -f "$tmp" "$DECOMPS" || { rm -f "$tmp"; die "cannot replace the decomposition record" 1; }
+}
+
+# The children column packs one `task=child-url` pair per child, comma
+# separated. Neither half can hold a comma or an `=`, so splitting on those two
+# characters recovers the pairs exactly.
+
+# children_pairs <children>: print one `task=url` pair per line.
+children_pairs() {
+  local children=${1:--} pair rest
+  [ "$children" != - ] || return 0
+  rest=$children
+  while [ -n "$rest" ]; do
+    pair=${rest%%,*}
+    if [ "$pair" = "$rest" ]; then
+      rest=
+    else
+      rest=${rest#*,}
+    fi
+    [ -z "$pair" ] || printf '%s\n' "$pair"
+  done
+}
+
+# children_child_for <children> <task-id>: print that task's recorded child URL.
+children_child_for() {
+  local children=$1 task=$2 pair
+  while IFS= read -r pair; do
+    [ "${pair%%=*}" = "$task" ] || continue
+    printf '%s\n' "${pair#*=}"
+    return 0
+  done < <(children_pairs "$children")
+  return 1
+}
+
+# children_add <children> <task-id> <child-url>: print the list with that pair
+# added, replacing any pair the same task already holds.
+children_add() {
+  local children=$1 task=$2 url=$3 pair out=
+  while IFS= read -r pair; do
+    [ "${pair%%=*}" != "$task" ] || continue
+    out="${out:+$out,}$pair"
+  done < <(children_pairs "$children")
+  printf '%s\n' "${out:+$out,}$task=$url"
+}
+
+# children_tasks <children>: print one child task id per line.
+children_tasks() {
+  local pair
+  while IFS= read -r pair; do
+    printf '%s\n' "${pair%%=*}"
+  done < <(children_pairs "${1:--}")
 }
 
 # --- identifiers ------------------------------------------------------------
@@ -626,6 +912,97 @@ board_set_status() {
   board_write_status "$owner" "$number" "$status_field" "$item_id" "$issue" "$option_name"
 }
 
+# board_item_add <owner> <number> <issue-url>: card an issue and print the item
+# id the add itself returned. The id is taken from the add's own answer and
+# never by re-reading the board, because a freshly added card is not immediately
+# visible in a board listing.
+board_item_add() {
+  local owner=$1 number=$2 issue=$3 id
+  id=$("$GH" project item-add "$number" --owner "$owner" --url "$issue" \
+    --format json --jq '.id' </dev/null) || {
+    warn "could not add $issue to project $owner/$number"
+    return 1
+  }
+  [ -n "$id" ] || {
+    warn "adding $issue to project $owner/$number returned no card id"
+    return 1
+  }
+  printf '%s\n' "$id"
+}
+
+# Every issue this adapter creates carries this marker line in its body, so an
+# issue created moments before an interruption can be recognized rather than
+# filed a second time.
+MARKER_PREFIX='firstmate-task:'
+# How far back the recovery scan looks. Deliberately shallow: the only gap it
+# closes is an issue created seconds ago, which is necessarily among the newest.
+MARKER_SCAN_LIMIT=30
+
+issue_marker() {
+  printf '%s %s\n' "$MARKER_PREFIX" "$1"
+}
+
+# issue_find_by_marker <repo> <task-id>: print the URL of a recent issue already
+# carrying this task's marker, or fail. The match is made here rather than in the
+# query so the scan stays one plain listing of recent issues.
+issue_find_by_marker() {
+  local repo=$1 task=$2 marker tmp url body found=
+  marker=$(issue_marker "$task")
+  tmp=$(mktemp) || return 1
+  if "$GH" issue list --repo "$repo" --state all --limit "$MARKER_SCAN_LIMIT" \
+    --json url,body \
+    --jq '.[] | [(.url // ""), ((.body // "") | gsub("[\\n\\t\\r]+"; " "))] | @tsv' \
+    > "$tmp" </dev/null; then
+    while IFS=$TAB read -r url body; do
+      case "$body" in
+        *"$marker"*) ;;
+        *) continue ;;
+      esac
+      found=$(issue_canonical "$url") || continue
+      break
+    done < "$tmp"
+  else
+    rm -f "$tmp"
+    warn "could not read the recent issues of $repo"
+    return 2
+  fi
+  rm -f "$tmp"
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+# issue_body <body> <task-id> <lands-in|->: the issue body actually filed.
+issue_body() {
+  local body=$1 task=$2 lands_in=$3 out=
+  [ "$body" = - ] || out=$body
+  if [ "$lands_in" != - ]; then
+    out="${out:+$out
+
+}Lands in: $lands_in"
+  fi
+  printf '%s\n' "${out:+$out
+
+}$(issue_marker "$task")"
+}
+
+# issue_create <repo> <label> <title> <body> <parent|-> : print the new issue URL.
+# A child is created as a native sub-issue in this same call, so a parent link is
+# never a separate step that can be left half-done.
+issue_create() {
+  local repo=$1 label=$2 title=$3 body=$4 parent=$5
+  local args url line
+  args=(issue create --repo "$repo" --title "$title" --body "$body" --label "$label")
+  [ "$parent" = - ] || args+=(--parent "$parent")
+  url=''
+  while IFS= read -r line; do
+    case "$line" in
+      https://*/issues/*) url=$line ;;
+    esac
+  done < <("$GH" "${args[@]}" </dev/null)
+  [ -n "$url" ] || return 1
+  issue_canonical "$url"
+}
+
 # board_comment <issue-url> <body>
 # Runs from inside poll's item loop, so it never inherits the board read on
 # stdin.
@@ -639,22 +1016,27 @@ board_comment() {
 
 # --- state vocabulary -------------------------------------------------------
 #
-# Todo, In Progress, and Done are the whole mapping. A column the captain added
-# is recorded as "other" so their intent survives, never as a fourth state
-# firstmate drives.
+# Todo, In Progress, and Done are always drivable, and a configured queued column
+# joins them. Firstmate writes all four from its own records. A column that is
+# none of them is read as "other": the adapter neither drives it nor pretends to
+# understand it, and a card sitting in one diverges from what firstmate recorded.
 
 state_column() {
-  local state=$1 todo=$2 in_progress=$3 done_col=$4
+  local state=$1 todo=$2 in_progress=$3 done_col=$4 queued=${5:--}
   case "$state" in
     todo) printf '%s\n' "$todo" ;;
     in-progress) printf '%s\n' "$in_progress" ;;
     done) printf '%s\n' "$done_col" ;;
+    queued)
+      [ "$queued" != - ] || return 1
+      printf '%s\n' "$queued"
+      ;;
     *) return 1 ;;
   esac
 }
 
 column_state() {
-  local raw=$1 todo=$2 in_progress=$3 done_col=$4 want
+  local raw=$1 todo=$2 in_progress=$3 done_col=$4 queued=${5:--} want
   want=$(norm_name "$raw")
   if [ "$want" = "$(norm_name "$todo")" ]; then
     printf 'todo\n'
@@ -662,8 +1044,40 @@ column_state() {
     printf 'in-progress\n'
   elif [ "$want" = "$(norm_name "$done_col")" ]; then
     printf 'done\n'
+  elif [ "$queued" != - ] && [ "$want" = "$(norm_name "$queued")" ]; then
+    printf 'queued\n'
   else
     printf 'other\n'
+  fi
+}
+
+# The big-picture columns carry the same three states, on a parallel set of
+# column names. They are the container lane, never a fourth execution state.
+
+bp_state_column() {
+  local state=$1 bp_todo=$2 bp_in_progress=$3 bp_done=$4
+  case "$state" in
+    todo) printf '%s\n' "$bp_todo" ;;
+    in-progress) printf '%s\n' "$bp_in_progress" ;;
+    done) printf '%s\n' "$bp_done" ;;
+    *) return 1 ;;
+  esac
+}
+
+# bp_column_state <raw> <bp_todo> <bp_in_progress> <bp_done>: the container state
+# that column names, or nothing at all when it names no big-picture column.
+bp_column_state() {
+  local raw=$1 bp_todo=$2 bp_in_progress=$3 bp_done=$4 want
+  [ "$bp_todo" != - ] || return 1
+  want=$(norm_name "$raw")
+  if [ "$want" = "$(norm_name "$bp_todo")" ]; then
+    printf 'todo\n'
+  elif [ "$want" = "$(norm_name "$bp_in_progress")" ]; then
+    printf 'in-progress\n'
+  elif [ "$want" = "$(norm_name "$bp_done")" ]; then
+    printf 'done\n'
+  else
+    return 1
   fi
 }
 
@@ -693,16 +1107,22 @@ list_has() {
 
 cmd_boards() {
   local want=${1:-} project owner number repo label mention assignee
-  local status_field todo in_progress done_col
+  local status_field todo in_progress done_col bp_todo bp_in_progress bp_done
+  local queued big
   while IFS=$'\t' read -r project owner number repo label mention assignee \
-    status_field todo in_progress done_col; do
+    status_field todo in_progress done_col bp_todo bp_in_progress bp_done queued; do
     [ -n "$project" ] || continue
     if [ -n "$want" ] && [ "$want" != "$project" ]; then
       continue
     fi
-    printf 'board %s %s/%s repo=%s label=%s mention=%s assignee=%s field=%s columns=%s|%s|%s\n' \
+    if [ "$bp_todo" = - ]; then
+      big=off
+    else
+      big="$bp_todo|$bp_in_progress|$bp_done"
+    fi
+    printf 'board %s %s/%s repo=%s label=%s mention=%s assignee=%s field=%s columns=%s|%s|%s queued=%s big-picture=%s\n' \
       "$project" "$owner" "$number" "$repo" "$label" "$mention" "$assignee" \
-      "$status_field" "$todo" "$in_progress" "$done_col"
+      "$status_field" "$todo" "$in_progress" "$done_col" "$queued" "$big"
   done < <(boards_rows)
 }
 
@@ -742,6 +1162,12 @@ cmd_import() {
     die "$issue is not in $repo, the repo configured for board \"$project\""
   fi
 
+  # A container's children are the real work, so the container itself must never
+  # spend the one binding an issue has. With poll never offering a big-picture
+  # card for import, this closes the other direction.
+  if decomps_find "$issue" >/dev/null; then
+    die "$issue is a decomposition container on board \"$DECOMP_PROJECT\"; its children hold the work" 3
+  fi
   # This duplicate check is deliberately fleet-wide rather than scoped to one
   # board: an issue holds at most one task no matter which board carries it.
   if links_find issue "$issue" >/dev/null; then
@@ -759,10 +1185,241 @@ cmd_import() {
   printf 'linked %s %s %s\n' "$project" "$issue" "$task"
 }
 
+# --- shared placement -------------------------------------------------------
+#
+# `place` and `child-add` are one operation with different parents, so they run
+# the same two steps here rather than two implementations that can drift.
+
+CARD_STEP=
+
+# card_ensure <project> <owner> <number> <status_field> <todo-column> <issue> <task>
+# Card the issue, record the issue-to-task link, and set it to the ordinary Todo
+# column. The link is written the moment the card exists so the next cycle can
+# never offer it as new work, and its `synced` stays unconfirmed until the column
+# write lands, which leaves poll's ordinary outstanding-write retry to finish it.
+card_ensure() {
+  local project=$1 owner=$2 number=$3 status_field=$4 column=$5 issue=$6 task=$7
+  local item_id pr=- pr_synced=-
+  CARD_STEP=
+  item_id=$(board_item_add "$owner" "$number" "$issue") || {
+    CARD_STEP=card
+    return 1
+  }
+  if links_find issue "$issue" >/dev/null; then
+    pr=$LINK_PR
+    pr_synced=$LINK_PR_SYNCED
+  fi
+  links_put "$project" "$issue" "$task" todo other "$pr" "$pr_synced"
+  if ! board_write_status "$owner" "$number" "$status_field" "$item_id" "$issue" "$column"; then
+    CARD_STEP=status
+    return 1
+  fi
+  links_put "$project" "$issue" "$task" todo todo "$pr" "$pr_synced"
+  return 0
+}
+
+# issue_ensure <repo> <label> <title> <body> <task> <parent|-> <known-url|->
+# Print the issue that carries this task's work, creating it only when neither
+# the caller's own record nor a shallow scan of the repo's newest issues already
+# holds one. A scan that cannot run stops the command instead of creating, so a
+# transient read failure can never file the same work twice.
+issue_ensure() {
+  local repo=$1 label=$2 title=$3 body=$4 task=$5 parent=$6 known=$7 url rc=0
+  if [ "$known" != - ]; then
+    printf '%s\n' "$known"
+    return 0
+  fi
+  url=$(issue_find_by_marker "$repo" "$task") || rc=$?
+  case "$rc" in
+    0)
+      printf '%s\n' "$url"
+      return 0
+      ;;
+    # A scan that could not run is not the same answer as one that found
+    # nothing, so it refuses rather than risk filing a second issue.
+    1) ;;
+    *) return 1 ;;
+  esac
+  issue_create "$repo" "$label" "$title" "$body" "$parent"
+}
+
+cmd_place() {
+  local project='' task='' title='' body=- lands_in=-
+  local board owner number repo label status_field todo issue
+  local PLACE_USAGE='usage: fm-board.sh place <project> <task-id> <title> [<body>] [--lands-in <owner/name>]'
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --lands-in)
+        [ "$#" -gt 1 ] || die "--lands-in needs a value"
+        lands_in=$2
+        shift 2
+        ;;
+      --lands-in=*)
+        lands_in=${1#--lands-in=}
+        shift
+        ;;
+      -*) die "unknown option \"$1\"" ;;
+      *)
+        if [ -z "$project" ]; then
+          project=$1
+        elif [ -z "$task" ]; then
+          task=$1
+        elif [ -z "$title" ]; then
+          title=$1
+        elif [ "$body" = - ]; then
+          body=$1
+        else
+          die "$PLACE_USAGE"
+        fi
+        shift
+        ;;
+    esac
+  done
+  if [ -z "$project" ] || [ -z "$task" ] || [ -z "$title" ]; then
+    die "$PLACE_USAGE"
+  fi
+  task_id_valid "$task" || die "\"$task\" is not a task id"
+  if [ "$lands_in" != - ]; then
+    case "$lands_in" in
+      */*/* | */ | /* | *' '*) die "--lands-in \"$lands_in\" is not owner/name" ;;
+      */*) ;;
+      *) die "--lands-in \"$lands_in\" is not owner/name" ;;
+    esac
+  fi
+
+  board=$(board_for "$project")
+  owner=$(printf '%s' "$board" | cut -f2)
+  number=$(printf '%s' "$board" | cut -f3)
+  repo=$(printf '%s' "$board" | cut -f4)
+  label=$(printf '%s' "$board" | cut -f5)
+  status_field=$(printf '%s' "$board" | cut -f8)
+  todo=$(printf '%s' "$board" | cut -f9)
+
+  # A task that already holds a link is finished, and says so without a single
+  # network call: the link is written last precisely so that holding one proves
+  # every earlier step landed.
+  if links_find task "$task" >/dev/null; then
+    printf 'already-placed %s %s %s\n' "$LINK_PROJECT" "$LINK_ISSUE" "$task"
+    return 0
+  fi
+  [ "$repo" != - ] \
+    || die "board \"$project\" has no repo key, so there is no repository to file a card in"
+
+  issue=$(issue_ensure "$repo" "$label" "$title" \
+    "$(issue_body "$body" "$task" "$lands_in")" "$task" - -) || {
+    printf 'error: could not create the issue for task %s in %s\n' "$task" "$repo" >&2
+    return 1
+  }
+  if card_ensure "$project" "$owner" "$number" "$status_field" "$todo" "$issue" "$task"; then
+    printf 'placed %s %s %s\n' "$project" "$issue" "$task"
+  else
+    printf 'placed-partial %s %s %s %s\n' "$project" "$issue" "$task" "$CARD_STEP"
+  fi
+  return 0
+}
+
+cmd_child_add() {
+  local project=${1:?usage: fm-board.sh child-add <project> <parent-issue-url> <title> <body> <task-id>}
+  local raw_parent=${2:?usage: fm-board.sh child-add <project> <parent-issue-url> <title> <body> <task-id>}
+  local title=${3:?usage: fm-board.sh child-add <project> <parent-issue-url> <title> <body> <task-id>}
+  local body=${4:?usage: fm-board.sh child-add <project> <parent-issue-url> <title> <body> <task-id>}
+  local task=${5:?usage: fm-board.sh child-add <project> <parent-issue-url> <title> <body> <task-id>}
+  local board owner number repo label status_field todo bp_todo
+  local parent known child state desired synced children
+
+  board=$(board_for "$project")
+  owner=$(printf '%s' "$board" | cut -f2)
+  number=$(printf '%s' "$board" | cut -f3)
+  repo=$(printf '%s' "$board" | cut -f4)
+  label=$(printf '%s' "$board" | cut -f5)
+  status_field=$(printf '%s' "$board" | cut -f8)
+  todo=$(printf '%s' "$board" | cut -f9)
+  bp_todo=$(printf '%s' "$board" | cut -f12)
+  [ "$bp_todo" != - ] \
+    || die "board \"$project\" has no big-picture columns configured, so it has no containers to decompose"
+  parent=$(issue_canonical "$raw_parent") || die "\"$raw_parent\" is not an issue URL"
+  task_id_valid "$task" || die "\"$task\" is not a task id"
+  # A container is work nobody can ship, so it must never hold the one binding an
+  # issue has. Refusing here is the other half of poll never offering a
+  # big-picture card for import.
+  if links_find issue "$parent" >/dev/null; then
+    die "$parent is linked to task $LINK_TASK, so it is ordinary work rather than a container" 3
+  fi
+  [ "$repo" != - ] || repo=$(issue_repo "$parent")
+
+  if decomps_find "$parent" >/dev/null; then
+    [ "$DECOMP_PROJECT" = "$project" ] \
+      || die "$parent is already decomposed under project $DECOMP_PROJECT" 3
+    state=$DECOMP_STATE
+    desired=$DECOMP_DESIRED
+    synced=$DECOMP_SYNCED
+    children=$DECOMP_CHILDREN
+  else
+    state=open desired=- synced=- children=-
+  fi
+
+  known=$(children_child_for "$children" "$task") || known=-
+  if [ "$known" = - ] && links_find task "$task" >/dev/null; then
+    die "task $task is already linked to $LINK_ISSUE" 3
+  fi
+  if [ "$known" != - ] && links_find task "$task" >/dev/null; then
+    printf 'already-child %s %s %s %s\n' "$project" "$parent" "$known" "$task"
+    return 0
+  fi
+
+  child=$(issue_ensure "$repo" "$label" "$title" \
+    "$(issue_body "$body" "$task" -)" "$task" "$parent" "$known") || {
+    printf 'error: could not create the child issue for task %s under %s\n' "$task" "$parent" >&2
+    return 1
+  }
+  # Recorded against the parent the instant it exists, so a run interrupted
+  # before the card lands is resumed rather than repeated.
+  children=$(children_add "$children" "$task" "$child")
+  decomps_put "$project" "$parent" "$state" "$desired" "$synced" "$children"
+
+  if card_ensure "$project" "$owner" "$number" "$status_field" "$todo" "$child" "$task"; then
+    printf 'child %s %s %s %s\n' "$project" "$parent" "$child" "$task"
+  else
+    printf 'child-partial %s %s %s %s %s\n' "$project" "$parent" "$child" "$task" "$CARD_STEP"
+  fi
+  return 0
+}
+
+cmd_decomposed() {
+  local project=${1:?usage: fm-board.sh decomposed <project> <parent-issue-url>}
+  local raw_parent=${2:?usage: fm-board.sh decomposed <project> <parent-issue-url>}
+  local parent
+  board_for "$project" >/dev/null
+  parent=$(issue_canonical "$raw_parent") || die "\"$raw_parent\" is not an issue URL"
+  if decomps_find "$parent" >/dev/null; then
+    [ "$DECOMP_PROJECT" = "$project" ] \
+      || die "$parent is decomposed under project $DECOMP_PROJECT" 3
+    decomps_put "$project" "$parent" 'done' "$DECOMP_DESIRED" \
+      "$DECOMP_SYNCED" "$DECOMP_CHILDREN"
+  else
+    decomps_put "$project" "$parent" 'done' - - -
+  fi
+  printf 'decomposed %s %s\n' "$project" "$parent"
+}
+
+cmd_decompositions() {
+  local want=${1:-} row
+  while IFS= read -r row; do
+    if [ -n "$want" ]; then
+      case "$row" in
+        "$want$TAB"*) ;;
+        *) continue ;;
+      esac
+    fi
+    printf '%s\n' "$row"
+  done < <(decomps_rows)
+}
+
 cmd_mark() {
   local task='' state='' limit=$DEFAULT_LIMIT
   local project issue synced pr pr_synced board
-  local owner number status_field todo in_progress done_col column
+  local owner number status_field todo in_progress done_col queued column
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -793,8 +1450,9 @@ cmd_mark() {
   fi
   limit_valid "$limit" || die "--limit must be a positive number"
   case "$state" in
-    todo | in-progress | done) ;;
-    *) die "unknown board state \"$state\" (use todo, in-progress, or done)" ;;
+    todo | in-progress | 'done') ;;
+    queued) ;;
+    *) die "unknown board state \"$state\" (use todo, queued, in-progress, or done)" ;;
   esac
   links_find task "$task" >/dev/null || die "task $task is not linked to a board issue"
   project=$LINK_PROJECT
@@ -809,7 +1467,9 @@ cmd_mark() {
   todo=$(printf '%s' "$board" | cut -f9)
   in_progress=$(printf '%s' "$board" | cut -f10)
   done_col=$(printf '%s' "$board" | cut -f11)
-  column=$(state_column "$state" "$todo" "$in_progress" "$done_col")
+  queued=$(printf '%s' "$board" | cut -f15)
+  column=$(state_column "$state" "$todo" "$in_progress" "$done_col" "$queued") \
+    || die "board \"$project\" has no queued column configured"
 
   links_put "$project" "$issue" "$task" "$state" "$synced" "$pr" "$pr_synced"
   if board_set_status "$owner" "$number" "$status_field" "$limit" "$issue" "$column"; then
@@ -882,13 +1542,17 @@ cmd_ack() {
 }
 
 # poll_board <board-row> <limit> <items-file>
-# Classifies every card, adopts captain edits, and retries outstanding writes.
+# Classifies every card from the one board read it is handed, reports what
+# firstmate has to act on, and retries writes the board has not taken yet. Every
+# write below reuses a card id from that same read, so nothing here refetches the
+# board per item.
 poll_board() {
   local board=$1 limit=$2 items=$3
   local project owner number repo label mention assignee status_field todo in_progress done_col
+  local bp_todo bp_in_progress bp_done queued
   local id type url status labels assignees title body
   local canonical task desired synced pr pr_synced board_state count=0
-  local seen_file trigger column
+  local seen_file trigger column container
   local l_project l_issue l_task l_desired
 
   project=$(printf '%s' "$board" | cut -f1)
@@ -902,6 +1566,10 @@ poll_board() {
   todo=$(printf '%s' "$board" | cut -f9)
   in_progress=$(printf '%s' "$board" | cut -f10)
   done_col=$(printf '%s' "$board" | cut -f11)
+  bp_todo=$(printf '%s' "$board" | cut -f12)
+  bp_in_progress=$(printf '%s' "$board" | cut -f13)
+  bp_done=$(printf '%s' "$board" | cut -f14)
+  queued=$(printf '%s' "$board" | cut -f15)
 
   seen_file=$(mktemp) || return 1
   while IFS=$TAB read -r id type url status labels assignees title body; do
@@ -912,12 +1580,12 @@ poll_board() {
     # this cycle declines to import is still a card that has not left, and the
     # withdrawal scan below reads absence from this file.
     printf '%s\n' "$canonical" >> "$seen_file"
-    board_state=$(column_state "$status" "$todo" "$in_progress" "$done_col")
+    board_state=$(column_state "$status" "$todo" "$in_progress" "$done_col" "$queued")
 
     if links_find issue "$canonical" >/dev/null; then
       # An issue another configured board already owns is a misconfiguration,
-      # not an instruction. Re-homing it would point every later event at the
-      # wrong board, so this one is named and left entirely alone.
+      # not something to reconcile. Re-homing it would point every later event at
+      # the wrong board, so this one is named and left entirely alone.
       if [ "$LINK_PROJECT" != "$project" ]; then
         printf 'foreign %s %s %s %s\n' \
           "$project" "$canonical" "$LINK_PROJECT" "$LINK_TASK"
@@ -928,24 +1596,17 @@ poll_board() {
       synced=$LINK_SYNCED
       pr=$LINK_PR
       pr_synced=$LINK_PR_SYNCED
-      if [ "$desired" = "$synced" ]; then
-        if [ "$board_state" = "$desired" ]; then
-          printf 'linked %s %s %s %s\n' "$project" "$canonical" "$task" "$desired"
-        else
-          links_put "$project" "$canonical" "$task" "$board_state" "$board_state" "$pr" "$pr_synced"
-          printf 'instruction %s %s %s %s %s %s\n' \
-            "$project" "$canonical" "$task" "$desired" "$board_state" "$status"
-          desired=$board_state
-          synced=$board_state
+      if [ "$board_state" = "$desired" ]; then
+        # The board agrees. Record it as confirmed if a write was outstanding.
+        if [ "$synced" != "$desired" ]; then
+          links_put "$project" "$canonical" "$task" "$desired" "$desired" "$pr" "$pr_synced"
+          synced=$desired
         fi
-      # A write is outstanding. The board still showing the last confirmed value
-      # is this adapter's own lag, not a captain edit.
-      elif [ "$board_state" = "$desired" ]; then
-        links_put "$project" "$canonical" "$task" "$desired" "$desired" "$pr" "$pr_synced"
-        synced=$desired
         printf 'linked %s %s %s %s\n' "$project" "$canonical" "$task" "$desired"
-      elif [ "$board_state" = "$synced" ]; then
-        column=$(state_column "$desired" "$todo" "$in_progress" "$done_col") || column=
+      elif [ "$desired" != "$synced" ] && [ "$board_state" = "$synced" ]; then
+        # A write is outstanding and the board still shows the value this adapter
+        # last confirmed, so this is its own lag rather than a change to it.
+        column=$(state_column "$desired" "$todo" "$in_progress" "$done_col" "$queued") || column=
         if [ -n "$column" ] && board_write_status "$owner" "$number" "$status_field" "$id" "$canonical" "$column"; then
           links_put "$project" "$canonical" "$task" "$desired" "$desired" "$pr" "$pr_synced"
           synced=$desired
@@ -954,11 +1615,11 @@ poll_board() {
           printf 'stale %s %s %s %s\n' "$project" "$canonical" "$task" "$desired"
         fi
       else
-        links_put "$project" "$canonical" "$task" "$board_state" "$board_state" "$pr" "$pr_synced"
-        printf 'instruction %s %s %s %s %s %s\n' \
+        # The card shows a status firstmate did not write. Firstmate's records are
+        # the truth here, so this changes nothing on either side and is reported
+        # for the captain rather than reconciled behind them.
+        printf 'divergence %s %s %s %s %s %s\n' \
           "$project" "$canonical" "$task" "$desired" "$board_state" "$status"
-        desired=$board_state
-        synced=$board_state
       fi
       # An outstanding PR attachment is retried exactly like an outstanding card
       # move, because `pr` promised the next cycle would reconcile it.
@@ -973,9 +1634,16 @@ poll_board() {
       continue
     fi
 
-    # Not linked yet, so from here on this is intake alone. A draft card or a
-    # pull request is not a real issue, and an issue outside the configured repo
-    # is not this board's work to take.
+    # Not linked. A card in a big-picture column is a container: its children
+    # hold the work, so it is never intake and never binds a task.
+    if container=$(bp_column_state "$status" "$bp_todo" "$bp_in_progress" "$bp_done"); then
+      poll_container "$board" "$id" "$canonical" "$container" "$status" "$labels"
+      continue
+    fi
+
+    # From here on this is intake alone. A draft card or a pull request is not a
+    # real issue, and an issue outside the configured repo is not this board's
+    # work to take.
     [ "$type" = Issue ] || continue
     if [ "$repo" != - ] && [ "$(issue_repo "$canonical")" != "$repo" ]; then
       continue
@@ -993,12 +1661,12 @@ poll_board() {
     printf 'new %s %s %s %s\n' "$project" "$canonical" "$trigger" "$title"
   done < "$items"
 
-  # A card that vanished from the board is the captain withdrawing the work.
+  # A card that vanished from the board while firstmate was still executing it.
   # Two reads cannot tell absence apart from something else and so reconcile
   # nothing: a full page may have another page behind it, and a board that
   # answers with no cards at all while links are open is far more likely to be
-  # a changed project number or a lost permission than the captain clearing
-  # every card by hand.
+  # a changed project number or a lost permission than every card being cleared
+  # by hand.
   if [ "$count" -ge "$limit" ]; then
     printf 'truncated %s %s\n' "$project" "$count"
   elif [ "$count" -eq 0 ] && [ -n "$(cmd_links "$project")" ]; then
@@ -1010,15 +1678,122 @@ poll_board() {
         continue
       fi
       # Leaving the board after Done is archiving, and an acknowledged
-      # withdrawal is already reconciled; neither is an open instruction.
+      # withdrawal is already reconciled; neither is open.
       case "$l_desired" in
-        todo | in-progress) ;;
+        todo | queued | in-progress) ;;
         *) continue ;;
       esac
       printf 'cancelled %s %s %s %s\n' "$project" "$l_issue" "$l_task" "$l_desired"
     done < <(links_rows)
   fi
   rm -f "$seen_file"
+}
+
+# poll_container <board-row> <card-id> <parent-issue> <container-state> <raw-status> <labels>
+# A container is offered for decomposition until it is recorded as decomposed,
+# and once it has children its own card follows their recorded states. A parent
+# whose card already shows what firstmate recorded prints nothing at all, so a
+# reconciled board stays silent.
+poll_container() {
+  local board=$1 id=$2 parent=$3 container=$4 raw=$5 labels=$6
+  local project owner number label status_field bp_todo bp_in_progress bp_done
+  local state desired synced children now column task child_state pair
+  local any_in_progress='' any_open='' any_driven=''
+
+  project=$(printf '%s' "$board" | cut -f1)
+  owner=$(printf '%s' "$board" | cut -f2)
+  number=$(printf '%s' "$board" | cut -f3)
+  label=$(printf '%s' "$board" | cut -f5)
+  status_field=$(printf '%s' "$board" | cut -f8)
+  bp_todo=$(printf '%s' "$board" | cut -f12)
+  bp_in_progress=$(printf '%s' "$board" | cut -f13)
+  bp_done=$(printf '%s' "$board" | cut -f14)
+
+  if decomps_find "$parent" >/dev/null; then
+    if [ "$DECOMP_PROJECT" != "$project" ]; then
+      printf 'foreign %s %s %s -\n' "$project" "$parent" "$DECOMP_PROJECT"
+      return 0
+    fi
+    state=$DECOMP_STATE
+    desired=$DECOMP_DESIRED
+    synced=$DECOMP_SYNCED
+    children=$DECOMP_CHILDREN
+  else
+    state=open desired=- synced=- children=-
+    # Recorded the first time it is seen, not the first time it is decomposed.
+    # `import` refuses any issue holding a decomposition record, so recording it
+    # here is what makes a container structurally unable to bind a task rather
+    # than merely never offered one.
+    decomps_put "$project" "$parent" "$state" "$desired" "$synced" "$children"
+  fi
+
+  # Offering a container for decomposition repeats until `decomposed` closes it,
+  # exactly as `new` repeats until `import` runs, so a decomposition interrupted
+  # part way is finished rather than lost.
+  if [ "$state" != 'done' ] && [ "$container" = todo ] && list_has "$labels" "$label"; then
+    printf 'decompose %s %s\n' "$project" "$parent"
+  fi
+
+  [ "$children" != - ] || return 0
+
+  # The parent's own column follows its children. A child recorded in a column
+  # firstmate does not drive is left out entirely, so a withdrawn child cannot
+  # hold its parent short of done forever.
+  while IFS= read -r task; do
+    child_state=todo
+    if links_find task "$task" >/dev/null; then
+      child_state=$LINK_DESIRED
+    fi
+    case "$child_state" in
+      in-progress)
+        any_driven=1
+        any_in_progress=1
+        ;;
+      done) any_driven=1 ;;
+      todo | queued)
+        any_driven=1
+        any_open=1
+        ;;
+      *) ;;
+    esac
+  done < <(children_tasks "$children")
+  [ -n "$any_driven" ] || return 0
+  if [ -n "$any_in_progress" ]; then
+    now=in-progress
+  elif [ -n "$any_open" ]; then
+    now=todo
+  else
+    now='done'
+  fi
+
+  # A newly derived state is firstmate's own event, exactly like `mark` on an
+  # ordinary card: it says what the card should show from now on.
+  if [ "$desired" != "$now" ]; then
+    desired=$now
+    decomps_put "$project" "$parent" "$state" "$desired" "$synced" "$children"
+  fi
+
+  if [ "$container" = "$desired" ]; then
+    # The card already shows it. Reconciled boards stay silent.
+    if [ "$synced" != "$desired" ]; then
+      decomps_put "$project" "$parent" "$state" "$desired" "$desired" "$children"
+    fi
+    return 0
+  fi
+  if [ "$desired" != "$synced" ] && { [ "$synced" = - ] || [ "$container" = "$synced" ]; }; then
+    # A write this adapter owes: either it has never written this card, or the
+    # card still shows the value it last confirmed.
+    column=$(bp_state_column "$desired" "$bp_todo" "$bp_in_progress" "$bp_done") || return 0
+    if board_write_status "$owner" "$number" "$status_field" "$id" "$parent" "$column"; then
+      decomps_put "$project" "$parent" "$state" "$desired" "$desired" "$children"
+      printf 'synced %s %s - %s\n' "$project" "$parent" "$desired"
+    else
+      printf 'stale %s %s - %s\n' "$project" "$parent" "$desired"
+    fi
+    return 0
+  fi
+  # The card shows a state firstmate never wrote.
+  printf 'divergence %s %s - %s %s %s\n' "$project" "$parent" "$desired" "$container" "$raw"
 }
 
 cmd_poll() {
@@ -1085,6 +1860,10 @@ case "$VERB" in
   boards) cmd_boards "$@" ;;
   poll) cmd_poll "$@" ;;
   import) cmd_import "$@" ;;
+  place) cmd_place "$@" ;;
+  child-add) cmd_child_add "$@" ;;
+  decomposed) cmd_decomposed "$@" ;;
+  decompositions) cmd_decompositions "$@" ;;
   links) cmd_links "$@" ;;
   lookup) cmd_lookup "$@" ;;
   mark) cmd_mark "$@" ;;

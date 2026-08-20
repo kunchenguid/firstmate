@@ -32,6 +32,7 @@ new_home() {
   cat > "$home/bin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_LOG"
+l_prev=''
 if [ -n "${GH_FAIL:-}" ]; then
   case "$1 $2" in
     $GH_FAIL)
@@ -62,6 +63,59 @@ case "$1 $2" in
     mv "$edit_tmp" "$GH_ITEMS"
     ;;
   "issue comment") : ;;
+  "issue create")
+    # A real create: allocate the next number in the named repo, store the
+    # issue, and print its URL, exactly as gh does.
+    c_repo=''; c_title=''; c_body=''; c_labels=''; c_parent='-'
+    shift 2
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --repo) c_repo=$2; shift 2 ;;
+        --title) c_title=$2; shift 2 ;;
+        --body) c_body=$2; shift 2 ;;
+        --label) c_labels=$2; shift 2 ;;
+        --parent) c_parent=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ -n "${GH_NO_LABEL:-}" ] && [ "$c_labels" = "$GH_NO_LABEL" ]; then
+      printf 'label %s not found\n' "$c_labels" >&2
+      exit 1
+    fi
+    c_next=$(( $(wc -l < "$GH_ISSUES") + 900 ))
+    c_url="https://github.com/$c_repo/issues/$c_next"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$c_repo" "$c_url" "$c_title" \
+      "$(printf '%s' "$c_body" | tr '\n' ' ')" "$c_labels" "$c_parent" >> "$GH_ISSUES"
+    printf '%s\n' "$c_url"
+    ;;
+  "issue list")
+    # Only the shape the adapter asks for: url and body, newest first.
+    l_repo=''
+    for l_arg in "$@"; do
+      case "$l_prev" in
+        --repo) l_repo=$l_arg ;;
+      esac
+      l_prev=$l_arg
+    done
+    awk -F'\t' -v OFS='\t' -v r="$l_repo" '$1 == r { print $2, $4 }' "$GH_ISSUES" \
+      | tac
+    ;;
+  "project item-add")
+    a_url=''
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --url) a_url=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    a_id="PVTI_added$(wc -l < "$GH_ITEMS")"
+    # A real board keeps a card with no status until one is set.
+    a_title=$(awk -F'\t' -v u="$a_url" '$2 == u { print $3 }' "$GH_ISSUES")
+    a_labels=$(awk -F'\t' -v u="$a_url" '$2 == u { print $5 }' "$GH_ISSUES")
+    printf '%s\tIssue\t%s\t-\t%s\t-\t%s\t-\n' \
+      "$a_id" "$a_url" "${a_labels:--}" "${a_title:--}" >> "$GH_ITEMS"
+    printf '%s\n' "$a_id"
+    ;;
   *)
     printf 'unexpected gh call: %s\n' "$*" >&2
     exit 9
@@ -72,6 +126,7 @@ SH
   : > "$home/gh.log"
   : > "$home/items"
   : > "$home/fields"
+  : > "$home/issues"
   printf '%s\n' "$home"
 }
 
@@ -86,7 +141,9 @@ board() {
   GH_LOG="$home/gh.log" \
   GH_ITEMS="$home/items" \
   GH_FIELDS="$home/fields" \
+  GH_ISSUES="$home/issues" \
   GH_FAIL="${GH_FAIL:-}" \
+  GH_NO_LABEL="${GH_NO_LABEL:-}" \
     "$BOARD" "$@"
 }
 
@@ -140,6 +197,34 @@ in-progress = Under Way
 done = Landed
 EOF
   fields "$home" PVTSSF_lane opt_wait:Waiting 'opt_under:Under Way' opt_landed:Landed
+}
+
+# An ordinary board that names the one repository its cards are filed in, which
+# is what a board has to state before firstmate can file a card on it.
+repo_board() {
+  local home=$1
+  cat > "$home/config/boards" <<'EOF'
+project = harbourlight
+owner = harbour-collective
+number = 4
+repo = harbour-collective/app
+label = firstmate
+EOF
+  fields "$home" PVTSSF_status opt_todo:Todo 'opt_prog:In Progress' opt_done:Done
+}
+
+# An ordinary board that also carries the optional authorized-to-launch column.
+queued_board() {
+  local home=$1
+  cat > "$home/config/boards" <<'EOF'
+project = harbourlight
+owner = harbour-collective
+number = 4
+label = firstmate
+queued = Queued
+EOF
+  fields "$home" PVTSSF_status opt_todo:Todo opt_queued:Queued \
+    'opt_prog:In Progress' opt_done:Done
 }
 
 # --- configuration is the whole board identity ------------------------------
@@ -433,14 +518,14 @@ test_a_column_firstmate_does_not_drive_is_recorded_not_invented() {
   : > "$home/items"
   item "$home" PVTI_a Issue "$issue" 'Needs Review' firstmate - 'Parked work' -
   out=$(board "$home" poll)
-  assert_contains "$out" "instruction harbourlight $issue fm-parked todo other Needs Review" \
-    "a column outside the three did not surface as an instruction carrying its own name"
-  assert_contains "$(board "$home" lookup fm-parked)" "	other	other	" \
-    "the captain's own column was not recorded"
+  assert_contains "$out" "divergence harbourlight $issue fm-parked todo other Needs Review" \
+    "a column outside the driven ones did not surface as a divergence carrying its own name"
+  assert_contains "$(board "$home" lookup fm-parked)" "	todo	todo	" \
+    "firstmate's record was rewritten to a column it never drove"
 
   out=$(board "$home" mark fm-parked blocked 2>&1) && rc=0 || rc=$?
-  expect_code 2 "$rc" "the adapter accepted a fourth execution state"
-  pass "a column the captain added is recorded as the board's own, never as a fourth state to drive"
+  expect_code 2 "$rc" "the adapter accepted a state it does not drive"
+  pass "a column the adapter does not drive is reported by its own name, never adopted as a state"
 }
 
 # --- PR linkage -------------------------------------------------------------
@@ -486,33 +571,93 @@ test_a_blocker_is_recorded_on_the_issue() {
   pass "a blocker is recorded on the issue while the item stays visible where it is"
 }
 
-# --- the board owns intent --------------------------------------------------
+# --- firstmate's records are the truth the board reports ---------------------
 
-test_a_captain_board_edit_is_an_instruction_never_a_correction() {
-  local home issue out log
-  home=$(new_home a_captain_board_edit_is_an_instruction_never_a_correction)
+test_a_status_firstmate_did_not_write_is_reported_not_reconciled() {
+  local home issue out log record
+  home=$(new_home a_status_firstmate_did_not_write_is_reported_not_reconciled)
   ordinary_board "$home"
   issue=https://github.com/harbour-collective/app/issues/60
   item "$home" PVTI_a Issue "$issue" Todo firstmate - 'Reprioritized work' -
   board "$home" import harbourlight "$issue" fm-repri >/dev/null
   board "$home" mark fm-repri in-progress >/dev/null
+  record=$(board "$home" lookup fm-repri)
 
-  # The captain pulls the card back to the first column.
+  # Something outside firstmate pulls the card back to the first column.
   : > "$home/items"
   : > "$home/gh.log"
   item "$home" PVTI_a Issue "$issue" Todo firstmate - 'Reprioritized work' -
   out=$(board "$home" poll)
-  assert_contains "$out" "instruction harbourlight $issue fm-repri in-progress todo Todo" \
-    "the captain's move backwards was not surfaced as an instruction"
+  assert_contains "$out" "divergence harbourlight $issue fm-repri in-progress todo Todo" \
+    "a status firstmate never wrote was not surfaced as a divergence"
+  assert_not_contains "$out" 'instruction' "a board status was still treated as an instruction"
   log=$(gh_log "$home")
-  assert_not_contains "$log" 'item-edit' "the sync tried to correct the captain's own board edit"
-  assert_contains "$(board "$home" lookup fm-repri)" "	todo	todo	" \
-    "the record did not reconcile to the captain's board"
+  assert_not_contains "$log" 'item-edit' "the poll reconciled the board behind the captain"
+  [ "$(board "$home" lookup fm-repri)" = "$record" ] \
+    || fail "the poll changed firstmate's own record to match the board"
 
-  # And it stays reconciled rather than drifting back on the next cycle.
+  # It keeps being reported, and still changes nothing, until firstmate acts.
   out=$(board "$home" poll)
-  assert_contains "$out" "linked harbourlight $issue fm-repri todo" "the reconciled state did not hold"
-  pass "a captain's board edit reconciles the record and is never written back over"
+  assert_contains "$out" 'divergence' "an unreconciled divergence stopped being reported"
+  [ "$(board "$home" lookup fm-repri)" = "$record" ] || fail "a later poll adopted the board status"
+
+  # An explicit mark is how it resolves: firstmate acting, not the poll deciding.
+  board "$home" mark fm-repri in-progress >/dev/null
+  out=$(board "$home" poll)
+  assert_not_contains "$out" 'divergence' "an explicitly re-marked card kept diverging"
+  pass "a status firstmate did not write is reported and changes nothing on either side"
+}
+
+test_a_queued_card_firstmate_did_not_place_never_starts_work() {
+  local home issue out
+  home=$(new_home a_queued_card_firstmate_did_not_place_never_starts_work)
+  queued_board "$home"
+  issue=https://github.com/harbour-collective/app/issues/62
+  item "$home" PVTI_a Issue "$issue" Todo firstmate - 'Not cleared yet' -
+  board "$home" import harbourlight "$issue" fm-notcleared >/dev/null
+
+  # A card appears in the authorized column that firstmate never put there.
+  : > "$home/items"
+  : > "$home/gh.log"
+  item "$home" PVTI_a Issue "$issue" Queued firstmate - 'Not cleared yet' -
+  out=$(board "$home" poll)
+  assert_contains "$out" "divergence harbourlight $issue fm-notcleared todo queued Queued" \
+    "a card in the authorized column that firstmate never placed was not reported"
+  assert_contains "$(board "$home" lookup fm-notcleared)" "	todo	todo	" \
+    "the record adopted an authorization firstmate never gave"
+  assert_not_contains "$(gh_log "$home")" 'item-edit' "the divergence caused a board write"
+
+  # Firstmate's own record is what puts a card in that column.
+  : > "$home/gh.log"
+  out=$(board "$home" mark fm-notcleared queued)
+  assert_contains "$out" "synced harbourlight $issue fm-notcleared queued" \
+    "firstmate could not record the work as cleared to launch"
+  assert_contains "$(gh_log "$home")" '--single-select-option-id opt_queued' \
+    "the queued write did not set this board's own Queued option"
+  pass "the queued column is written from firstmate's records, and a card it did not place starts nothing"
+}
+
+test_the_queued_column_does_not_exist_until_it_is_configured() {
+  local home issue out rc
+  home=$(new_home the_queued_column_does_not_exist_until_it_is_configured)
+  ordinary_board "$home"
+  issue=https://github.com/harbour-collective/app/issues/64
+  item "$home" PVTI_a Issue "$issue" Todo firstmate - 'Ordinary work' -
+  board "$home" import harbourlight "$issue" fm-ordinary >/dev/null
+
+  out=$(board "$home" mark fm-ordinary queued 2>&1) && rc=0 || rc=$?
+  expect_code 2 "$rc" "an unconfigured queued column was still writable"
+  assert_contains "$out" 'no queued column configured' "the refusal did not name the missing column"
+  assert_contains "$(board "$home" boards)" 'queued=-' "an unconfigured board reported a queued column"
+
+  # A board that happens to carry such a column reads it as a column firstmate
+  # does not drive, exactly as it did before the key existed.
+  : > "$home/items"
+  item "$home" PVTI_a Issue "$issue" Queued firstmate - 'Ordinary work' -
+  out=$(board "$home" poll)
+  assert_contains "$out" "divergence harbourlight $issue fm-ordinary todo other Queued" \
+    "an unconfigured queued column was read as a queued state"
+  pass "with no queued key configured the column does not exist in either direction"
 }
 
 test_a_withdrawn_card_stops_the_work_without_touching_it() {
@@ -774,6 +919,333 @@ test_mark_reads_the_board_under_the_limit_it_is_given() {
   pass "mark looks a card up under a limit it exposes, the same way poll does"
 }
 
+# --- containers and their children ------------------------------------------
+
+# The same ordinary board, plus the three container columns.
+big_picture_board() {
+  local home=$1
+  cat > "$home/config/boards" <<'EOF'
+project = harbourlight
+owner = harbour-collective
+number = 4
+repo = harbour-collective/app
+label = firstmate
+big-picture-todo = Big Picture Todo
+big-picture-in-progress = Big Picture In Progress
+big-picture-done = Big Picture Done
+EOF
+  fields "$home" PVTSSF_status opt_todo:Todo 'opt_prog:In Progress' opt_done:Done \
+    'opt_bptodo:Big Picture Todo' 'opt_bpprog:Big Picture In Progress' \
+    'opt_bpdone:Big Picture Done'
+}
+
+issues_created() {
+  wc -l < "$1/issues" | tr -d ' '
+}
+
+test_the_container_lane_does_not_exist_until_it_is_configured() {
+  local home out
+  home=$(new_home the_container_lane_does_not_exist_until_it_is_configured)
+  # Exactly the container board, minus the three keys.
+  ordinary_board "$home"
+  item "$home" PVTI_a Issue https://github.com/harbour-collective/app/issues/200 \
+    'Big Picture Todo' firstmate - 'A container nobody configured for' -
+  item "$home" PVTI_b Issue https://github.com/harbour-collective/app/issues/201 \
+    Todo firstmate - 'Ordinary work' -
+
+  out=$(board "$home" poll)
+  assert_not_contains "$out" 'decompose' "an unconfigured home offered a decomposition"
+  assert_not_contains "$out" 'issues/200' "an unconfigured home acted on a container column at all"
+  assert_contains "$out" 'new harbourlight https://github.com/harbour-collective/app/issues/201 label' \
+    "an ordinary Todo card stopped being importable"
+  assert_absent "$home/data/board-decompositions.tsv" \
+    "an unconfigured home created a decomposition record"
+  [ "$(issues_created "$home")" = 0 ] || fail "an unconfigured home created an issue"
+  assert_contains "$(board "$home" boards)" 'big-picture=off' \
+    "an unconfigured board reported container columns"
+  pass "with no container columns configured nothing about decomposition exists"
+}
+
+test_a_partial_container_configuration_is_refused() {
+  local home out rc
+  home=$(new_home a_partial_container_configuration_is_refused)
+  cat > "$home/config/boards" <<'EOF'
+project = harbourlight
+owner = harbour-collective
+number = 4
+big-picture-todo = Big Picture Todo
+big-picture-done = Big Picture Done
+EOF
+  out=$(board "$home" poll 2>&1) && rc=0 || rc=$?
+  expect_code 2 "$rc" "a half-configured container lane was accepted"
+  assert_contains "$out" 'big-picture' "the refusal did not name the incomplete key set"
+  [ -z "$(gh_log "$home")" ] || fail "a refused configuration still reached GitHub"
+
+  cat > "$home/config/boards" <<'EOF'
+project = harbourlight
+owner = harbour-collective
+number = 4
+todo = Todo
+big-picture-todo = Todo
+big-picture-in-progress = Big Picture In Progress
+big-picture-done = Big Picture Done
+EOF
+  out=$(board "$home" poll 2>&1) && rc=0 || rc=$?
+  expect_code 2 "$rc" "one column serving as both ordinary and container work was accepted"
+  assert_contains "$out" 'more than one column' "the duplicate column was not named"
+  pass "a half-configured or self-overlapping container lane is refused, never half-enabled"
+}
+
+test_a_container_is_offered_for_decomposition_and_never_imported() {
+  local home parent out rc
+  home=$(new_home a_container_is_offered_for_decomposition_and_never_imported)
+  big_picture_board "$home"
+  parent=https://github.com/harbour-collective/app/issues/210
+  item "$home" PVTI_p Issue "$parent" 'Big Picture Todo' firstmate - 'Rebuild the harbour' 'lots of work'
+  item "$home" PVTI_q Issue https://github.com/harbour-collective/app/issues/211 \
+    'Big Picture Todo' - - 'An untagged container' -
+
+  out=$(board "$home" poll)
+  assert_contains "$out" "decompose harbourlight $parent" "a labelled container was not offered for decomposition"
+  assert_not_contains "$out" "new harbourlight $parent" "a container was offered as importable work"
+  assert_not_contains "$out" 'issues/211' "an untagged container was offered for decomposition"
+
+  # The binding a container must never spend is unspendable from the moment the
+  # board first showed the card, not only once it has been broken down.
+  out=$(board "$home" import harbourlight "$parent" fm-container 2>&1) && rc=0 || rc=$?
+  expect_code 3 "$rc" "a container was allowed to bind a task"
+  assert_contains "$out" 'container' "the refusal did not say why the container cannot hold a task"
+  [ -z "$(board "$home" links)" ] || fail "a container wrote a linkage record"
+
+  board "$home" decomposed harbourlight "$parent" >/dev/null
+  board "$home" import harbourlight "$parent" fm-container >/dev/null 2>&1 && rc=0 || rc=$?
+  expect_code 3 "$rc" "a decomposed container was allowed to bind a task"
+
+  # And the refusal closes from the other side too: an issue that already holds a
+  # task can never be turned into a container.
+  item "$home" PVTI_w Issue https://github.com/harbour-collective/app/issues/212 \
+    Todo firstmate - 'Ordinary work' -
+  board "$home" import harbourlight https://github.com/harbour-collective/app/issues/212 fm-ordinary >/dev/null
+  out=$(board "$home" child-add harbourlight https://github.com/harbour-collective/app/issues/212 \
+    'A child of ordinary work' 'body' fm-child 2>&1) && rc=0 || rc=$?
+  expect_code 3 "$rc" "work that already holds a task was accepted as a container"
+  assert_contains "$out" 'ordinary work' "the refusal did not say why the task cannot be a container"
+  pass "a labelled container is offered for decomposition, and container and task can never be the same issue"
+}
+
+test_a_container_is_never_offered_twice_once_decomposed() {
+  local home parent out
+  home=$(new_home a_container_is_never_offered_twice_once_decomposed)
+  big_picture_board "$home"
+  parent=https://github.com/harbour-collective/app/issues/220
+  item "$home" PVTI_p Issue "$parent" 'Big Picture Todo' firstmate - 'Rebuild the harbour' -
+
+  out=$(board "$home" poll)
+  assert_contains "$out" 'decompose' "the container was not offered at all"
+  # An interrupted decomposition is finished, not lost: it keeps being offered.
+  out=$(board "$home" poll)
+  assert_contains "$out" 'decompose' "an unfinished decomposition stopped being offered"
+
+  board "$home" decomposed harbourlight "$parent" >/dev/null
+  out=$(board "$home" poll)
+  assert_not_contains "$out" 'decompose' "a decomposed container was offered a second time"
+
+  # The record outlives the tasks it produced, exactly as the linkage record does.
+  rm -rf "$home/state"
+  out=$(board "$home" poll)
+  assert_not_contains "$out" 'decompose' "the decomposition record did not survive task cleanup"
+  pass "a container is decomposed once, ever, and the record outlives the work"
+}
+
+test_a_child_is_created_linked_and_never_re_imported() {
+  local home parent out child log
+  home=$(new_home a_child_is_created_linked_and_never_re_imported)
+  big_picture_board "$home"
+  parent=https://github.com/harbour-collective/app/issues/230
+  item "$home" PVTI_p Issue "$parent" 'Big Picture Todo' firstmate - 'Rebuild the harbour' -
+
+  out=$(board "$home" child-add harbourlight "$parent" 'Replace the mooring lines' \
+    'The first piece of the rebuild.' fm-moorings)
+  assert_contains "$out" "child harbourlight $parent" "the child was not reported as created"
+  child=$(printf '%s' "$out" | cut -d" " -f4)
+  log=$(gh_log "$home")
+  assert_contains "$log" "--parent $parent" "the child was not created as a native sub-issue of the parent"
+  assert_contains "$log" '--label firstmate' "the child did not carry the trigger label"
+  assert_contains "$log" '--single-select-option-id opt_todo' "the child was not set to the ordinary Todo column"
+  assert_not_contains "$log" 'project item-list' "creating a child read the whole board"
+  assert_contains "$(board "$home" lookup fm-moorings)" "$child" "the child did not record its issue-to-task link"
+
+  # The next cycle sees an ordinary linked card, never new work.
+  out=$(board "$home" poll)
+  assert_contains "$out" "linked harbourlight $child fm-moorings todo" "the child was not reported as linked"
+  assert_not_contains "$out" "new harbourlight $child" "the child was offered as fresh work to import"
+  pass "a child is created labelled, linked to its parent, carded in Todo, and never re-imported"
+}
+
+test_child_add_converges_instead_of_filing_a_second_issue() {
+  local home parent out first
+  home=$(new_home child_add_converges_instead_of_filing_a_second_issue)
+  big_picture_board "$home"
+  parent=https://github.com/harbour-collective/app/issues/240
+  item "$home" PVTI_p Issue "$parent" 'Big Picture Todo' firstmate - 'Rebuild the harbour' -
+
+  # The card cannot be added, so the run stops half way with the issue created.
+  out=$(GH_FAIL="project item-add" board "$home" child-add harbourlight "$parent" \
+    'Dredge the channel' 'Second piece.' fm-dredge)
+  assert_contains "$out" 'child-partial' "an interrupted child was reported as complete"
+  assert_contains "$out" ' card' "the partial result did not name the step that failed"
+  [ "$(issues_created "$home")" = 1 ] || fail "the interrupted run did not create exactly one issue"
+  first=$(cut -f2 "$home/issues")
+  [ -z "$(board "$home" lookup fm-dredge)" ] || fail "an uncarded child recorded a link"
+
+  # Re-running finishes the job rather than filing the work twice.
+  out=$(board "$home" child-add harbourlight "$parent" 'Dredge the channel' 'Second piece.' fm-dredge)
+  assert_contains "$out" "child harbourlight $parent $first fm-dredge" \
+    "the repeat run did not converge on the issue that already existed"
+  [ "$(issues_created "$home")" = 1 ] || fail "the repeat run filed a second issue for the same work"
+
+  # And a third run is a plain no-op that touches nothing at all.
+  : > "$home/gh.log"
+  out=$(board "$home" child-add harbourlight "$parent" 'Dredge the channel' 'Second piece.' fm-dredge)
+  assert_contains "$out" 'already-child' "a settled child was not reported as already done"
+  [ -z "$(gh_log "$home")" ] || fail "a settled child still reached GitHub"
+  pass "an interrupted child-add converges on the issue it already filed, never a second one"
+}
+
+test_a_container_card_follows_its_children() {
+  local home parent out log
+  home=$(new_home a_container_card_follows_its_children)
+  big_picture_board "$home"
+  parent=https://github.com/harbour-collective/app/issues/250
+  item "$home" PVTI_p Issue "$parent" 'Big Picture Todo' firstmate - 'Rebuild the harbour' -
+  board "$home" child-add harbourlight "$parent" 'Piece one' 'body' fm-piece-one >/dev/null
+  board "$home" child-add harbourlight "$parent" 'Piece two' 'body' fm-piece-two >/dev/null
+  board "$home" decomposed harbourlight "$parent" >/dev/null
+
+  # Nothing has started, so the container stays where it is and says nothing.
+  : > "$home/gh.log"
+  out=$(board "$home" poll)
+  assert_not_contains "$out" "$parent" "a settled container printed a record with nothing to report"
+  assert_not_contains "$(gh_log "$home")" 'item-edit' "a settled container was written to the board"
+
+  # One child starts.
+  board "$home" mark fm-piece-one in-progress >/dev/null
+  : > "$home/gh.log"
+  out=$(board "$home" poll)
+  assert_contains "$out" "synced harbourlight $parent - in-progress" \
+    "a child in progress did not move its container"
+  assert_contains "$(gh_log "$home")" '--single-select-option-id opt_bpprog' \
+    "the container was not moved to this board's own container In Progress column"
+
+  # Both children finish.
+  board "$home" mark fm-piece-one 'done' >/dev/null
+  board "$home" mark fm-piece-two 'done' >/dev/null
+  : > "$home/gh.log"
+  out=$(board "$home" poll)
+  assert_contains "$out" "synced harbourlight $parent - done" "all children done did not finish the container"
+  assert_contains "$(gh_log "$home")" '--single-select-option-id opt_bpdone' \
+    "the container was not moved to this board's own container Done column"
+
+  # Settled again, and silent again.
+  out=$(board "$home" poll)
+  assert_not_contains "$out" "$parent" "a settled container kept reporting"
+  pass "a container card follows its children's recorded states, and is silent once it matches"
+}
+
+test_an_outstanding_container_move_is_retried_on_the_next_cycle() {
+  local home parent out
+  home=$(new_home an_outstanding_container_move_is_retried_on_the_next_cycle)
+  big_picture_board "$home"
+  parent=https://github.com/harbour-collective/app/issues/260
+  item "$home" PVTI_p Issue "$parent" 'Big Picture Todo' firstmate - 'Rebuild the harbour' -
+  board "$home" child-add harbourlight "$parent" 'Piece one' 'body' fm-only-piece >/dev/null
+  board "$home" decomposed harbourlight "$parent" >/dev/null
+  board "$home" mark fm-only-piece in-progress >/dev/null
+
+  out=$(GH_FAIL="project item-edit" board "$home" poll)
+  assert_contains "$out" "stale harbourlight $parent - in-progress" \
+    "a container move that did not land was not reported as stale"
+  out=$(board "$home" poll)
+  assert_contains "$out" "synced harbourlight $parent - in-progress" \
+    "an outstanding container move was not retried on the next cycle"
+  pass "a container move that does not land leaves a stale card the next cycle reconciles"
+}
+
+# --- placing work firstmate already holds ------------------------------------
+
+test_place_is_the_inverse_of_import() {
+  local home out issue log
+  home=$(new_home place_is_the_inverse_of_import)
+  repo_board "$home"
+
+  out=$(board "$home" place harbourlight fm-already-mine 'Work that started in the backlog' \
+    'Filed by firstmate, not by the captain.')
+  assert_contains "$out" 'placed harbourlight' "the task was not placed on the board"
+  issue=$(printf '%s' "$out" | cut -d" " -f3)
+  log=$(gh_log "$home")
+  assert_contains "$log" '--label firstmate' "the placed card did not carry the trigger label"
+  assert_contains "$log" '--single-select-option-id opt_todo' "the placed card was not set to Todo"
+  assert_not_contains "$log" 'project item-list' "placing a card read the whole board"
+  assert_contains "$(board "$home" lookup fm-already-mine)" "$issue" "placing did not record the link"
+
+  # From here it is an ordinary board task: dispatch, PR and merge all work.
+  out=$(board "$home" mark fm-already-mine in-progress)
+  assert_contains "$out" "synced harbourlight $issue fm-already-mine in-progress" \
+    "a placed task did not move on dispatch"
+  out=$(board "$home" poll)
+  assert_not_contains "$out" 'new harbourlight' "a placed card was offered as fresh work to import"
+
+  # Repeating is a no-op that never files a second issue and never asks GitHub.
+  : > "$home/gh.log"
+  out=$(board "$home" place harbourlight fm-already-mine 'Work that started in the backlog')
+  assert_contains "$out" "already-placed harbourlight $issue fm-already-mine" \
+    "a repeat placement was not reported as already done"
+  [ "$(issues_created "$home")" = 1 ] || fail "a repeat placement filed a second issue"
+  [ -z "$(gh_log "$home")" ] || fail "a repeat placement reached GitHub at all"
+  pass "place is the inverse of import: one command, convergent, and ordinary afterwards"
+}
+
+test_place_says_where_the_change_actually_lands() {
+  local home out body
+  home=$(new_home place_says_where_the_change_actually_lands)
+  repo_board "$home"
+  board "$home" place harbourlight fm-elsewhere-work 'Work that lands in another repo' \
+    'The roadmap carries it; the diff does not.' --lands-in harbour-collective/tooling >/dev/null
+  body=$(cut -f4 "$home/issues")
+  assert_contains "$body" 'Lands in: harbour-collective/tooling' \
+    "the card did not say which repository the change lands in"
+  out=$(board "$home" place harbourlight fm-bad-repo 'Bad' 'Bad' --lands-in 'not a repo' 2>&1) && rc=0 || rc=$?
+  expect_code 2 "${rc:-0}" "a malformed landing repository was accepted"
+  pass "a card can state plainly that its change lands somewhere other than its own repository"
+}
+
+test_placement_converges_after_an_interrupted_run() {
+  local home out first
+  home=$(new_home placement_converges_after_an_interrupted_run)
+  repo_board "$home"
+
+  out=$(GH_FAIL="project item-add" board "$home" place harbourlight fm-interrupted 'Interrupted placement' 'body')
+  assert_contains "$out" 'placed-partial' "an interrupted placement was reported as complete"
+  [ "$(issues_created "$home")" = 1 ] || fail "the interrupted run did not create exactly one issue"
+  first=$(cut -f2 "$home/issues")
+
+  out=$(board "$home" place harbourlight fm-interrupted 'Interrupted placement' 'body')
+  assert_contains "$out" "placed harbourlight $first fm-interrupted" \
+    "the repeat run did not converge on the issue it had already filed"
+  [ "$(issues_created "$home")" = 1 ] || fail "the repeat run filed a second issue for the same task"
+  pass "an interrupted placement is finished on the next run, never filed twice"
+}
+
+test_an_unreadable_repo_never_files_a_duplicate() {
+  local home out rc
+  home=$(new_home an_unreadable_repo_never_files_a_duplicate)
+  repo_board "$home"
+  out=$(GH_FAIL="issue list" board "$home" place harbourlight fm-unreadable 'Work' 'body' 2>&1) && rc=0 || rc=$?
+  expect_code 1 "$rc" "a placement continued after it could not check for an existing issue"
+  [ "$(issues_created "$home")" = 0 ] || fail "an unchecked placement filed an issue anyway"
+  pass "a check that cannot run stops the placement rather than risking a duplicate"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_boards_are_configuration_not_convention
@@ -789,7 +1261,9 @@ test_transitions_follow_firstmate_execution_events
 test_a_column_firstmate_does_not_drive_is_recorded_not_invented
 test_the_pull_request_is_attached_to_the_originating_issue
 test_a_blocker_is_recorded_on_the_issue
-test_a_captain_board_edit_is_an_instruction_never_a_correction
+test_a_status_firstmate_did_not_write_is_reported_not_reconciled
+test_a_queued_card_firstmate_did_not_place_never_starts_work
+test_the_queued_column_does_not_exist_until_it_is_configured
 test_a_withdrawn_card_stops_the_work_without_touching_it
 test_a_completed_card_leaving_the_board_is_not_a_withdrawal
 test_a_failed_board_write_never_blocks_delivery
@@ -800,3 +1274,15 @@ test_a_card_an_intake_filter_skips_is_not_a_withdrawal
 test_an_issue_another_board_owns_is_skipped_not_re_homed
 test_an_outstanding_pr_attachment_is_retried_on_the_next_cycle
 test_mark_reads_the_board_under_the_limit_it_is_given
+test_the_container_lane_does_not_exist_until_it_is_configured
+test_a_partial_container_configuration_is_refused
+test_a_container_is_offered_for_decomposition_and_never_imported
+test_a_container_is_never_offered_twice_once_decomposed
+test_a_child_is_created_linked_and_never_re_imported
+test_child_add_converges_instead_of_filing_a_second_issue
+test_a_container_card_follows_its_children
+test_an_outstanding_container_move_is_retried_on_the_next_cycle
+test_place_is_the_inverse_of_import
+test_place_says_where_the_change_actually_lands
+test_placement_converges_after_an_interrupted_run
+test_an_unreadable_repo_never_files_a_duplicate

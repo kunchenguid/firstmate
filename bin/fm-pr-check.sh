@@ -135,3 +135,11 @@ fm_pr_poll_publish_prepared || {
   exit 1
 }
 printf 'armed: state/%s.check.sh\n' "$ID"
+
+# Attach the PR to its originating card when the task holds a board link. A task
+# with no link - every task in a home with no configured board - reaches no board
+# at all, and a board write that does not land leaves the card stale for the next
+# poll rather than affecting this recording. bin/fm-board.sh owns the mechanics.
+if FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-board.sh" lookup "$ID" >/dev/null 2>&1; then
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-board.sh" pr "$ID" "$URL" >&2 || true
+fi

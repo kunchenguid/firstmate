@@ -2847,6 +2847,28 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   fi
 fi
 
+# Reflect the dispatch onto a configured project board, so a card reaching In
+# Progress is a property of dispatching rather than of anyone remembering to run
+# a second command. bin/fm-board.sh owns every board mechanic here, including
+# staying completely inert for a project with no board stanza: the name lookup
+# below is a local file read and reaches no board at all when none is
+# configured. A board write can never fail, delay, or alter this dispatch - a
+# card that does not land is left stale for the next poll to reconcile.
+spawn_reflect_on_board() {
+  local project board_sh="$FM_ROOT/bin/fm-board.sh"
+  [ "$KIND" = ship ] || return 0
+  [ -x "$board_sh" ] || return 0
+  project=$(basename "$PROJ_ABS")
+  [ -n "$(FM_HOME="$FM_HOME" "$board_sh" boards "$project" 2>/dev/null)" ] || return 0
+  if ! FM_HOME="$FM_HOME" "$board_sh" lookup "$ID" >/dev/null 2>&1; then
+    FM_HOME="$FM_HOME" "$board_sh" place "$project" "$ID" "$ID" \
+      "Dispatched by firstmate as task $ID." >&2 || true
+  fi
+  FM_HOME="$FM_HOME" "$board_sh" mark "$ID" in-progress >&2 || true
+  return 0
+}
+spawn_reflect_on_board || true
+
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
