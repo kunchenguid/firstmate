@@ -22,6 +22,7 @@ MODE_FILE="$TMP_ROOT/quota.mode"
 PID_LOG="$TMP_ROOT/quota.pids"
 DESCENDANT_PID_LOG="$TMP_ROOT/quota.descendant-pids"
 SURVIVOR_LOG="$TMP_ROOT/quota.survivors"
+TASKKILL_LOG="$TMP_ROOT/taskkill.calls"
 PI_CONFIG="$TMP_ROOT/pi-config"
 AUTH_FILE="$PI_CONFIG/auth.json"
 mkdir -p "$FIXTURE/.pi/extensions/lib" "$FIXTURE/node_modules/@earendil-works" "$FAKEBIN" "$PI_CONFIG"
@@ -110,7 +111,28 @@ case "$mode" in
     ;;
 esac
 SH
-chmod +x "$FAKEBIN/quota-axi"
+
+cat > "$FAKEBIN/taskkill" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_QUOTA_TEST_TASKKILL_CALLS:?}"
+pid=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = /PID ] && [ "$#" -gt 1 ]; then
+    shift
+    pid=$1
+  fi
+  shift
+done
+[ -n "$pid" ] || exit 2
+children=$(ps -eo pid=,ppid= | awk -v parent="$pid" '$2 == parent { print $1 }')
+for child in $children; do
+  kill -KILL "$child" 2>/dev/null || true
+done
+kill -KILL "$pid" 2>/dev/null || true
+exit 0
+SH
+chmod +x "$FAKEBIN/quota-axi" "$FAKEBIN/taskkill"
 
 cat > "$TMP_ROOT/quota-fixture.mjs" <<'JS'
 const configuredNow = Number(process.env.FM_QUOTA_TEST_NOW_MS);
@@ -257,23 +279,52 @@ const codexWindows = [
     resetsAt: reset(6 * 24 * 60 * 60 * 1000),
   }),
 ];
+const claudeWindows = [
+  withPace({
+    id: "five_hour",
+    label: "session",
+    kind: "session",
+    percentRemaining: 72.5,
+    startsAt: new Date(now - 3 * 60 * 60 * 1000).toISOString(),
+    resetsAt: reset(2 * 60 * 60 * 1000),
+  }),
+  withPace({
+    id: "seven_day",
+    label: "week",
+    kind: "weekly",
+    percentRemaining: 61,
+    startsAt: new Date(now - 3 * 24 * 60 * 60 * 1000).toISOString(),
+    resetsAt: reset(4 * 24 * 60 * 60 * 1000),
+  }),
+];
+const grokWindows = [
+  withPace({
+    id: "credits",
+    label: "credits",
+    kind: "credits",
+    percentRemaining: 48,
+    startsAt: new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString(),
+    resetsAt: reset(15 * 24 * 60 * 60 * 1000),
+  }),
+];
+const kimiWindows = [
+  withPace({
+    id: "weekly",
+    label: "week",
+    kind: "weekly",
+    percentRemaining: 83,
+    startsAt: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+    resetsAt: reset(6 * 24 * 60 * 60 * 1000),
+  }),
+];
 const allProviders = [
   provider("claude", "Claude", "oauth", {
     plan: "max",
-    windows: [
-      { id: "session", label: "session", kind: "session", percentRemaining: 72.5, resetsAt: reset(2 * 60 * 60 * 1000) },
-      { id: "week", label: "week", kind: "weekly", percentRemaining: 61, resetsAt: reset(4 * 24 * 60 * 60 * 1000) },
-    ],
+    windows: claudeWindows,
     quotaSemantics: {
       status: "known",
       description: "Claude account windows bound every model.",
-      effectiveAvailability: [{
-        scope: "all_models",
-        status: "known",
-        effectivePercentRemaining: 61,
-        boundedBy: ["session", "week"],
-        limitingWindowIds: ["week"],
-      }],
+      effectiveAvailability: [effectiveAvailability("all_models", claudeWindows)],
     },
     credits: { unlimited: true, unit: "credits" },
     account: { accountId: "fixture-claude-account" },
@@ -304,19 +355,11 @@ const allProviders = [
     account: { accountId: "fixture-copilot-account" },
   }),
   provider("grok", "Grok", "web", {
-    windows: [
-      { id: "credits", label: "credits", kind: "credits", percentRemaining: 48, resetText: "next month" },
-    ],
+    windows: grokWindows,
     quotaSemantics: {
       status: "known",
       description: "Grok shared credits bind every product.",
-      effectiveAvailability: [{
-        scope: "all_products",
-        status: "known",
-        effectivePercentRemaining: 48,
-        boundedBy: ["credits"],
-        limitingWindowIds: ["credits"],
-      }],
+      effectiveAvailability: [effectiveAvailability("all_products", grokWindows)],
     },
     account: { email: "fixture@example.invalid" },
     attempts: [
@@ -325,19 +368,11 @@ const allProviders = [
     ],
   }),
   provider("kimi", "Kimi", "api", {
-    windows: [
-      { id: "weekly", label: "week", kind: "weekly", percentRemaining: 83, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
-    ],
+    windows: kimiWindows,
     quotaSemantics: {
       status: "known",
       description: "Kimi account windows jointly bind every model.",
-      effectiveAvailability: [{
-        scope: "all_models",
-        status: "known",
-        effectivePercentRemaining: 83,
-        boundedBy: ["weekly"],
-        limitingWindowIds: ["weekly"],
-      }],
+      effectiveAvailability: [effectiveAvailability("all_models", kimiWindows)],
     },
     attempts: [{ source: "pi:kimi-coding", status: "success" }],
   }),
@@ -399,6 +434,7 @@ export FM_QUOTA_TEST_MODE="$MODE_FILE"
 export FM_QUOTA_TEST_PIDS="$PID_LOG"
 export FM_QUOTA_TEST_DESCENDANT_PIDS="$DESCENDANT_PID_LOG"
 export FM_QUOTA_TEST_SURVIVORS="$SURVIVOR_LOG"
+export FM_QUOTA_TEST_TASKKILL_CALLS="$TASKKILL_LOG"
 export FM_QUOTA_TEST_FIXTURE="$TMP_ROOT/quota-fixture.mjs"
 export PI_CODING_AGENT_DIR="$PI_CONFIG"
 export PATH="$FAKEBIN:$PATH"
@@ -409,6 +445,7 @@ printf '%s\n' success > "$MODE_FILE"
 : > "$PID_LOG"
 : > "$DESCENDANT_PID_LOG"
 : > "$SURVIVOR_LOG"
+: > "$TASKKILL_LOG"
 
 out=$(cd "$FIXTURE" && \
   EXT="$FIXTURE/.pi/extensions/fm-pi-quota-status.ts" \
@@ -499,16 +536,38 @@ function report(now = Date.now()) {
 }
 function schema5CodexSemantics(value, full) {
   const codex = value.providers.find((provider) => provider.provider === "codex");
+  for (const window of codex.windows) {
+    window.pace = { status: "unknown", reason: "missing_cycle" };
+  }
+  const account = codex.windows.filter((window) => /^(?:five_hour|weekly)(?:_\d+)?$/.test(window.id));
+  const models = new Map();
+  for (const window of codex.windows.filter((candidate) => candidate.kind === "model")) {
+    const scope = window.id.replace(/_\d+$/, "").replace(/:(?:5h|7d|window:[^:]+)$/, "");
+    models.set(scope, [...(models.get(scope) ?? []), window]);
+  }
+  const availability = (scope, windows) => {
+    const boundedBy = windows.map((window) => window.id);
+    const effectivePercentRemaining = Math.min(...windows.map((window) => window.percentRemaining));
+    return {
+      scope,
+      status: "known",
+      effectivePercentRemaining,
+      boundedBy,
+      limitingWindowIds: windows
+        .filter((window) => window.percentRemaining === effectivePercentRemaining)
+        .map((window) => window.id),
+      pace: { status: "unknown", unknownWindowIds: boundedBy },
+      runway: { status: "unknown", unmeasurableWindowIds: boundedBy },
+      selection: { status: "unknown", unmeasurableWindowIds: boundedBy },
+    };
+  };
   return {
     status: "known",
     ...(full ? { description: "Codex base account windows bound every model." } : {}),
-    effectiveAvailability: [{
-      scope: "all_models",
-      status: "known",
-      effectivePercentRemaining: 94,
-      boundedBy: [codex.windows[0].id],
-      limitingWindowIds: [codex.windows[0].id],
-    }],
+    effectiveAvailability: [
+      ...(account.length > 0 ? [availability("all_models", account)] : []),
+      ...[...models].map(([scope, windows]) => availability(scope, [...account, ...windows])),
+    ],
   };
 }
 function schema5Default(value) {
@@ -579,6 +638,45 @@ assert(
   selectActiveProviderQuota(missingFullSourcesParsed, "openai-codex", { nowMs: now }).kind === "malformed",
   "schema-5 full output missing sourcesTried was accepted as fresh",
 );
+const missingFullWindowPace = structuredClone(schema5Full);
+delete missingFullWindowPace.providers[1].windows[0].pace;
+const missingFullWindowPaceParsed = parseQuotaAxiJson(
+  JSON.stringify(missingFullWindowPace),
+  { projection: "full" },
+);
+assert(
+  selectActiveProviderQuota(missingFullWindowPaceParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "schema-5 full output missing window pace was accepted as fresh",
+);
+for (const field of ["pace", "runway", "selection"]) {
+  const missingDerived = structuredClone(schema5Full);
+  delete missingDerived.providers[1].quotaSemantics.effectiveAvailability[0][field];
+  const missingDerivedParsed = parseQuotaAxiJson(
+    JSON.stringify(missingDerived),
+    { projection: "full" },
+  );
+  assert(
+    selectActiveProviderQuota(missingDerivedParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+    `schema-5 full output missing availability ${field} was accepted as fresh`,
+  );
+}
+for (const [description, mutate] of [
+  ["missing model scope", (entries) => entries.splice(1, 1)],
+  ["extra model scope", (entries) => entries.push(structuredClone(entries[1]))],
+  ["reordered scopes", (entries) => entries.reverse()],
+  ["detached bounds", (entries) => entries[1].boundedBy.pop()],
+]) {
+  const wrongTopology = structuredClone(schema5Full);
+  mutate(wrongTopology.providers[1].quotaSemantics.effectiveAvailability);
+  const wrongTopologyParsed = parseQuotaAxiJson(
+    JSON.stringify(wrongTopology),
+    { projection: "full" },
+  );
+  assert(
+    selectActiveProviderQuota(wrongTopologyParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+    `schema-5 full output with ${description} was accepted as fresh`,
+  );
+}
 assert(quotaProviderForPiProvider("openai-codex") === "codex", "openai-codex provider mapping failed");
 assert(quotaProviderForPiProvider("anthropic") === "claude", "anthropic provider mapping failed");
 assert(quotaProviderForPiProvider("github-copilot") === "copilot", "GitHub Copilot provider mapping failed");
@@ -909,24 +1007,40 @@ Object.assign(populatedProvider.windows[0], {
 populatedProvider.quotaSemantics = {
   status: "known",
   description: "Fixture quota semantics",
-  effectiveAvailability: [{
-    scope: "all_models",
-    status: "known",
-    effectivePercentRemaining: 94,
-    boundedBy: ["weekly"],
-    limitingWindowIds: ["weekly"],
-    pace: {
-      status: "behind",
-      behindWindowIds: ["weekly"],
-      worstReservePercentPoints: 8.2857,
-      worstReserveWindowId: "weekly",
+  effectiveAvailability: [
+    {
+      scope: "all_models",
+      status: "known",
+      effectivePercentRemaining: 94,
+      boundedBy: ["weekly"],
+      limitingWindowIds: ["weekly"],
+      pace: {
+        status: "behind",
+        behindWindowIds: ["weekly"],
+        worstReservePercentPoints: 8.2857,
+        worstReserveWindowId: "weekly",
+      },
+      runway: {
+        status: "through_reset",
+        projectionConfidence: "established",
+        projectionBasis: "cycle_average",
+      },
     },
-    runway: {
-      status: "through_reset",
-      projectionConfidence: "established",
-      projectionBasis: "cycle_average",
+    {
+      scope: "spark-session",
+      status: "known",
+      effectivePercentRemaining: 94,
+      boundedBy: ["weekly", "spark-session"],
+      limitingWindowIds: ["weekly"],
     },
-  }],
+    {
+      scope: "spark-week",
+      status: "known",
+      effectivePercentRemaining: 94,
+      boundedBy: ["weekly", "spark-week"],
+      limitingWindowIds: ["weekly"],
+    },
+  ],
 };
 const fullyPopulatedParsed = parseQuotaAxiJson(JSON.stringify(fullyPopulated));
 assert(fullyPopulatedParsed, "fully-populated quota fixture did not parse structurally");
@@ -942,6 +1056,27 @@ schema5Populated.providers[1].quotaSemantics.effectiveAvailability[0].selection 
   status: "known",
   spendPriority: 0.6767,
 };
+for (const window of schema5Populated.providers[1].windows.slice(1)) {
+  window.pace = { status: "unknown", reason: "missing_cycle" };
+}
+for (const availability of schema5Populated.providers[1].quotaSemantics.effectiveAvailability.slice(1)) {
+  const unknownWindowId = availability.boundedBy[availability.boundedBy.length - 1];
+  availability.pace = {
+    status: "behind",
+    behindWindowIds: ["weekly"],
+    unknownWindowIds: [unknownWindowId],
+    worstReservePercentPoints: 8.2857,
+    worstReserveWindowId: "weekly",
+  };
+  availability.runway = {
+    status: "unknown",
+    unmeasurableWindowIds: [unknownWindowId],
+  };
+  availability.selection = {
+    status: "unknown",
+    unmeasurableWindowIds: [unknownWindowId],
+  };
+}
 const schema5PopulatedParsed = parseQuotaAxiJson(
   JSON.stringify(schema5Populated),
   { projection: "full" },
@@ -1060,6 +1195,10 @@ Object.assign(schema3ProjectedProvider.quotaSemantics.effectiveAvailability[0], 
     projectionBasis: "cycle_average",
   },
 });
+for (const availability of schema3ProjectedProvider.quotaSemantics.effectiveAvailability.slice(1)) {
+  availability.effectivePercentRemaining = 10;
+  availability.limitingWindowIds = ["weekly"];
+}
 const schema3ProjectedParsed = parseQuotaAxiJson(JSON.stringify(schema3Projected));
 assert(
   selectActiveProviderQuota(schema3ProjectedParsed, "openai-codex", { nowMs: now }).kind === "fresh",
@@ -1318,13 +1457,29 @@ for (const window of staleMixedPace.providers[1].windows) {
 staleMixedPace.providers[1].quotaSemantics = {
   status: "unknown",
   description: "Stale quota has unknown effective availability",
-  effectiveAvailability: [{
-    scope: "all_models",
-    status: "unknown",
-    boundedBy: ["weekly", "spark-session"],
-    pace: { status: "unknown", unknownWindowIds: ["weekly"] },
-    runway: { status: "unknown", unmeasurableWindowIds: ["weekly", "spark-session"] },
-  }],
+  effectiveAvailability: [
+    {
+      scope: "all_models",
+      status: "unknown",
+      boundedBy: ["weekly"],
+      pace: { status: "unknown", unknownWindowIds: ["weekly"] },
+      runway: { status: "unknown", unmeasurableWindowIds: ["weekly"] },
+    },
+    {
+      scope: "spark-session",
+      status: "unknown",
+      boundedBy: ["weekly", "spark-session"],
+      pace: { status: "unknown", unknownWindowIds: ["weekly", "spark-session"] },
+      runway: { status: "unknown", unmeasurableWindowIds: ["weekly", "spark-session"] },
+    },
+    {
+      scope: "spark-week",
+      status: "unknown",
+      boundedBy: ["weekly", "spark-week"],
+      pace: { status: "unknown", unknownWindowIds: ["weekly", "spark-week"] },
+      runway: { status: "unknown", unmeasurableWindowIds: ["weekly", "spark-week"] },
+    },
+  ],
 };
 const staleMixedPaceParsed = parseQuotaAxiJson(JSON.stringify(staleMixedPace), { projection: "full" });
 assert(staleMixedPaceParsed, "mixed-pace stale fixture did not parse structurally");
@@ -1378,6 +1533,27 @@ assert(directReport?.schemaVersion === 5, "fake default quota-axi output did not
 assert(
   directReport && selectActiveProviderQuota(directReport, "openai-codex").kind === "fresh",
   "fake default quota-axi projection was not consumable",
+);
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+let windowsTimeoutResult;
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "slow\n");
+try {
+  Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+  const windowsTimeout = runQuotaAxiJson({ timeoutMs: 40, maxOutputBytes: 1024 * 1024 });
+  windowsTimeoutResult = await windowsTimeout.promise;
+} finally {
+  Object.defineProperty(process, "platform", platformDescriptor);
+  await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+}
+assert(windowsTimeoutResult?.kind === "timeout", "Windows quota process did not time out");
+const taskkillCalls = (await readFile(process.env.FM_QUOTA_TEST_TASKKILL_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean);
+assert(taskkillCalls.length === 1, `Windows timeout did not invoke one process-tree kill: ${taskkillCalls}`);
+assert(
+  /^\/PID [1-9][0-9]* \/T \/F$/.test(taskkillCalls[0]),
+  `Windows timeout did not request bounded tree termination: ${taskkillCalls[0]}`,
 );
 const grokProcess = runQuotaAxiJson({
   timeoutMs: 1000,
@@ -2018,7 +2194,8 @@ class SplitClock {
   }
   add(callback, delayMs, intervalMs) {
     const id = this.nextId++;
-    this.tasks.set(id, { id, callback, at: this.timerNowMs + delayMs, intervalMs });
+    const effectiveDelayMs = delayMs > 2_147_483_647 ? 1 : delayMs;
+    this.tasks.set(id, { id, callback, at: this.timerNowMs + effectiveDelayMs, intervalMs });
     return id;
   }
   advanceTimers(milliseconds) {
@@ -2082,6 +2259,42 @@ assert(
 );
 await backwardExpiry.emit("session_shutdown", { reason: "quit" });
 assert(backwardExpiryClock.tasks.size === 0, "backward-clock expiry leaked a timer");
+delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
+const overflowSkewStart = Date.now();
+const overflowSkewClock = new SplitClock(overflowSkewStart);
+process.env.FM_QUOTA_TEST_NOW_MS = String(overflowSkewStart);
+process.env.FM_QUOTA_TEST_FIRST_RESET_MS = String(60_000);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  overflowSkewStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const overflowSkew = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => overflowSkewClock.wallNowMs,
+  timers: overflowSkewClock.timers,
+}));
+await overflowSkew.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => overflowSkew.widgetText(400).includes("week 94% left"),
+  "large-skew fixture did not publish fresh quota",
+);
+overflowSkewClock.wallNowMs -= 2_147_483_647 + 120_000;
+overflowSkewClock.advanceTimers(60_000);
+assert(overflowSkew.widgetText(400).includes("stale"), "large backward skew remained fresh");
+const writesAfterLargeSkew = overflowSkew.widgetWriteCount;
+overflowSkewClock.advanceTimers(1);
+assert(
+  overflowSkew.widgetWriteCount === writesAfterLargeSkew,
+  "oversized expiry delay collapsed into a one-millisecond render loop",
+);
+await overflowSkew.emit("session_shutdown", { reason: "quit" });
+assert(overflowSkewClock.tasks.size === 0, "large-skew expiry leaked a timer");
 delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 

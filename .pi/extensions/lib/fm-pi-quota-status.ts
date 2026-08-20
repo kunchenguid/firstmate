@@ -369,7 +369,7 @@ function validPace(
   schemaVersion: number,
   providerIsStale: boolean,
 ): boolean {
-  if (value === undefined) return true;
+  if (value === undefined) return schemaVersion !== 5;
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_PACE_STATUSES);
   const reason = value.reason === undefined ? null : exactEnum(value.reason, QUOTA_PACE_REASONS);
@@ -584,10 +584,11 @@ function expectedEffectivePace(
 function validEffectivePace(
   value: unknown,
   requireAuditFields: boolean,
+  requireDerivedFields: boolean,
   boundedBy: string[],
   rawWindowsById: ReadonlyMap<string, Record<string, unknown>>,
 ): boolean {
-  if (value === undefined) return true;
+  if (value === undefined) return !requireDerivedFields;
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_EFFECTIVE_PACE_STATUSES);
   if (!status) return false;
@@ -767,7 +768,7 @@ function validRunway(
   schemaVersion: number,
   requireAuditFields: boolean,
 ): boolean {
-  if (value === undefined) return true;
+  if (value === undefined) return schemaVersion !== 5;
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_RUNWAY_STATUSES);
   if (!status) return false;
@@ -917,7 +918,7 @@ function validSelection(
   schemaVersion: number,
   requireAuditFields: boolean,
 ): boolean {
-  if (value === undefined) return true;
+  if (value === undefined) return schemaVersion !== 5;
   if (schemaVersion !== 5 || !isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_SELECTION_STATUSES);
   if (!status) return false;
@@ -1008,6 +1009,7 @@ function validEffectiveAvailability(
   return validEffectivePace(
     value.pace,
     requireAuditFields,
+    schemaVersion === 5,
     value.boundedBy,
     rawWindowsById,
   ) &&
@@ -1033,11 +1035,24 @@ function validEffectiveAvailability(
     );
 }
 
+type ExpectedEffectiveAvailability = {
+  scope: string;
+  boundedBy: string[];
+};
+
 type ExpectedQuotaSemantics = {
   status: (typeof QUOTA_SEMANTICS_STATUSES)[number];
   unresolvedWindowIds: string[] | null;
-  hasEffectiveAvailability: boolean;
+  effectiveAvailability: ExpectedEffectiveAvailability[];
 };
+
+function quotaAvailability(scope: string, windows: QuotaWindowView[]): ExpectedEffectiveAvailability {
+  return { scope, boundedBy: windows.map((window) => window.id) };
+}
+
+function codexModelScope(id: string): string {
+  return id.replace(/_\d+$/, "").replace(/:(?:5h|7d|window:[^:]+)$/, "");
+}
 
 function expectedQuotaSemantics(
   provider: string,
@@ -1046,77 +1061,118 @@ function expectedQuotaSemantics(
   providerIsStale: boolean,
 ): ExpectedQuotaSemantics | null {
   let unresolvedWindowIds: string[] = [];
-  let recognizedCount = 0;
-  let preservesRecognizedAvailability = false;
-  let alwaysUnknown = false;
+  let effectiveAvailability: ExpectedEffectiveAvailability[] = [];
+  let baseStatus: (typeof QUOTA_SEMANTICS_STATUSES)[number];
   let requiresUnresolvedField = false;
 
   if (provider === "claude") {
-    for (const window of windows) {
-      if (["five_hour", "seven_day"].includes(window.id) || window.kind === "model") {
-        recognizedCount += 1;
-      } else if (window.id !== "extra_usage") {
-        unresolvedWindowIds.push(window.id);
+    const account = windows.filter((window) => ["five_hour", "seven_day"].includes(window.id));
+    const models = windows.filter((window) => window.kind === "model");
+    unresolvedWindowIds = windows
+      .filter((window) => (
+        !["five_hour", "seven_day", "extra_usage"].includes(window.id) &&
+        window.kind !== "model"
+      ))
+      .map((window) => window.id);
+    if (unresolvedWindowIds.length === 0) {
+      if (account.length > 0) effectiveAvailability.push(quotaAvailability("all_models", account));
+      for (const model of models) {
+        effectiveAvailability.push(quotaAvailability(model.id, [...account, model]));
       }
     }
+    baseStatus = unresolvedWindowIds.length > 0
+      ? "partial"
+      : effectiveAvailability.length > 0 ? "known" : "unknown";
   } else if (provider === "codex") {
-    for (const window of windows) {
-      if (
-        /^(?:five_hour|weekly)(?:_\d+)?$/.test(window.id) ||
-        window.id.startsWith("window:") ||
-        window.id.startsWith("code_review_five_hour") ||
-        window.id.startsWith("code_review_weekly") ||
-        window.id.startsWith("code_review_window:") ||
-        window.kind === "model"
-      ) {
-        recognizedCount += 1;
-      } else {
-        unresolvedWindowIds.push(window.id);
+    const account = windows.filter((window) => (
+      /^(?:five_hour|weekly)(?:_\d+)?$/.test(window.id) || window.id.startsWith("window:")
+    ));
+    const codeReview = windows.filter((window) => (
+      window.id.startsWith("code_review_five_hour") ||
+      window.id.startsWith("code_review_weekly") ||
+      window.id.startsWith("code_review_window:")
+    ));
+    const modelWindows = windows.filter((window) => window.kind === "model");
+    const recognized = new Set([...account, ...codeReview, ...modelWindows]);
+    unresolvedWindowIds = windows
+      .filter((window) => !recognized.has(window))
+      .map((window) => window.id);
+    if (unresolvedWindowIds.length === 0) {
+      if (account.length > 0) effectiveAvailability.push(quotaAvailability("all_models", account));
+      if (codeReview.length > 0) {
+        effectiveAvailability.push(quotaAvailability("code_review", codeReview));
+      }
+      const models = new Map<string, QuotaWindowView[]>();
+      for (const window of modelWindows) {
+        const scope = codexModelScope(window.id);
+        const scoped = models.get(scope) ?? [];
+        scoped.push(window);
+        models.set(scope, scoped);
+      }
+      for (const [scope, scoped] of models) {
+        effectiveAvailability.push(quotaAvailability(scope, [...account, ...scoped]));
       }
     }
+    baseStatus = unresolvedWindowIds.length > 0
+      ? "partial"
+      : effectiveAvailability.length > 0 ? "known" : "unknown";
   } else if (provider === "grok") {
-    for (const window of windows) {
-      if (window.id === "credits" || window.id.startsWith("product:")) recognizedCount += 1;
-      else unresolvedWindowIds.push(window.id);
+    const shared = windows.filter((window) => window.id === "credits");
+    const products = windows.filter((window) => window.id.startsWith("product:"));
+    unresolvedWindowIds = windows
+      .filter((window) => window.id !== "credits" && !window.id.startsWith("product:"))
+      .map((window) => window.id);
+    if (unresolvedWindowIds.length === 0) {
+      if (shared.length > 0) effectiveAvailability.push(quotaAvailability("all_products", shared));
+      for (const product of products) {
+        effectiveAvailability.push(quotaAvailability(product.id, [...shared, product]));
+      }
     }
+    baseStatus = unresolvedWindowIds.length > 0
+      ? "partial"
+      : effectiveAvailability.length > 0 ? "known" : "unknown";
   } else if (provider === "kimi") {
-    for (const window of windows) {
-      if (window.id === "weekly" || window.id === "five_hour") recognizedCount += 1;
-      else unresolvedWindowIds.push(window.id);
+    const recognized = windows.filter((window) => ["weekly", "five_hour"].includes(window.id));
+    unresolvedWindowIds = [
+      ...new Set([
+        ...windows
+          .filter((window) => !["weekly", "five_hour"].includes(window.id))
+          .map((window) => window.id),
+        ...untrustedWindowIds,
+      ]),
+    ];
+    if (recognized.length > 0) {
+      effectiveAvailability = [quotaAvailability("all_models", recognized)];
     }
-    unresolvedWindowIds = [...new Set([...unresolvedWindowIds, ...untrustedWindowIds])];
-    preservesRecognizedAvailability = true;
+    baseStatus = unresolvedWindowIds.length > 0
+      ? "partial"
+      : effectiveAvailability.length > 0 ? "known" : "unknown";
   } else if (provider === "cursor") {
-    const recognized = ["included_usage", "auto_usage", "api_usage", "spend_limit"];
-    for (const window of windows) {
-      if (recognized.includes(window.id)) recognizedCount += 1;
-      else unresolvedWindowIds.push(window.id);
+    const recognizedIds = ["included_usage", "auto_usage", "api_usage", "spend_limit"];
+    const recognized = windows.filter((window) => recognizedIds.includes(window.id));
+    unresolvedWindowIds = windows
+      .filter((window) => !recognizedIds.includes(window.id))
+      .map((window) => window.id);
+    if (recognized.length > 0) {
+      effectiveAvailability = [quotaAvailability("all_models", recognized)];
     }
-    preservesRecognizedAvailability = true;
+    baseStatus = unresolvedWindowIds.length > 0
+      ? "partial"
+      : effectiveAvailability.length > 0 ? "known" : "unknown";
   } else if (provider === "copilot") {
     unresolvedWindowIds = windows.map((window) => window.id);
-    alwaysUnknown = true;
+    baseStatus = "unknown";
     requiresUnresolvedField = true;
   } else {
     return null;
   }
 
-  const baseStatus = alwaysUnknown
-    ? "unknown"
-    : unresolvedWindowIds.length > 0
-      ? "partial"
-      : recognizedCount > 0
-        ? "known"
-        : "unknown";
-  const hasEffectiveAvailability = recognizedCount > 0 && (
-    unresolvedWindowIds.length === 0 || preservesRecognizedAvailability
-  );
   return {
     status: providerIsStale && baseStatus !== "partial" ? "unknown" : baseStatus,
     unresolvedWindowIds: unresolvedWindowIds.length > 0 || requiresUnresolvedField
       ? unresolvedWindowIds
       : null,
-    hasEffectiveAvailability,
+    effectiveAvailability,
   };
 }
 
@@ -1168,15 +1224,19 @@ function validQuotaSemantics(
   ) return false;
   if (
     !Array.isArray(value.effectiveAvailability) ||
-    (value.effectiveAvailability.length > 0) !== expected.hasEffectiveAvailability
+    value.effectiveAvailability.length !== expected.effectiveAvailability.length
   ) return false;
   const scopes = new Set<string>();
-  for (const entry of value.effectiveAvailability) {
+  for (const [index, entry] of value.effectiveAvailability.entries()) {
     if (!isRecord(entry)) return false;
     const scope = exactText(entry.scope);
+    const expectedEntry = expected.effectiveAvailability[index];
     if (
       scope === null ||
       scopes.has(scope) ||
+      expectedEntry === undefined ||
+      scope !== expectedEntry.scope ||
+      !exactTextArray(entry.boundedBy, expectedEntry.boundedBy) ||
       !validEffectiveAvailability(
         entry,
         requireAuditFields,

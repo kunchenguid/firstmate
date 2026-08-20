@@ -37,6 +37,27 @@ node <<'JS'
 const now = Date.now();
 const reset = (milliseconds) => new Date(now + milliseconds).toISOString();
 const generatedAt = new Date(now).toISOString();
+const windows = [
+  { id: "weekly", label: "week", kind: "weekly", percentRemaining: 94, resetsAt: reset(6 * 24 * 60 * 60 * 1000), pace: { status: "unknown", reason: "missing_cycle" } },
+  { id: "model:spark:5h", label: "GPT-5.3-Codex-Spark session", kind: "model", percentRemaining: 100, resetsAt: reset(5 * 60 * 60 * 1000), pace: { status: "unknown", reason: "missing_cycle" } },
+  { id: "model:spark:7d", label: "GPT-5.3-Codex-Spark week", kind: "model", percentRemaining: 100, resetsAt: reset(6 * 24 * 60 * 60 * 1000), pace: { status: "unknown", reason: "missing_cycle" } },
+];
+const availability = (scope, bounded) => {
+  const boundedBy = bounded.map((window) => window.id);
+  const effectivePercentRemaining = Math.min(...bounded.map((window) => window.percentRemaining));
+  return {
+    scope,
+    status: "known",
+    effectivePercentRemaining,
+    boundedBy,
+    limitingWindowIds: bounded
+      .filter((window) => window.percentRemaining === effectivePercentRemaining)
+      .map((window) => window.id),
+    pace: { status: "unknown", unknownWindowIds: boundedBy },
+    runway: { status: "unknown", unmeasurableWindowIds: boundedBy },
+    selection: { status: "unknown", unmeasurableWindowIds: boundedBy },
+  };
+};
 process.stdout.write(JSON.stringify({
   generatedAt,
   schemaVersion: 5,
@@ -46,21 +67,14 @@ process.stdout.write(JSON.stringify({
     source: "oauth",
     plan: "pro",
     account: { accountId: "live-codex-account" },
-    windows: [
-      { id: "weekly", label: "week", kind: "weekly", percentRemaining: 94, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
-      { id: "model:spark:5h", label: "GPT-5.3-Codex-Spark session", kind: "model", percentRemaining: 100, resetsAt: reset(5 * 60 * 60 * 1000) },
-      { id: "model:spark:7d", label: "GPT-5.3-Codex-Spark week", kind: "model", percentRemaining: 100, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
-    ],
+    windows,
     quotaSemantics: {
       status: "known",
       description: "Codex base account windows bound every model.",
-      effectiveAvailability: [{
-        scope: "all_models",
-        status: "known",
-        effectivePercentRemaining: 94,
-        boundedBy: ["weekly"],
-        limitingWindowIds: ["weekly"],
-      }],
+      effectiveAvailability: [
+        availability("all_models", [windows[0]]),
+        availability("model:spark", windows),
+      ],
     },
     credits: { remaining: 0, unlimited: false, unit: "credits" },
     state: { status: "fresh", stale: false, refreshedAt: generatedAt, sourcesTried: ["live-fake"] },

@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, watch, type FSWatcher } from "node:fs";
 import { open } from "node:fs/promises";
@@ -24,6 +24,8 @@ const DEFAULT_TIMEOUT_MS = 20 * 1000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_MAX_AUTH_BYTES = 1024 * 1024;
 const DEFAULT_REVISION_CHECK_MS = 1000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const WINDOWS_TREE_KILL_TIMEOUT_MS = 5000;
 
 const OFFICIAL_PROVIDER_BASE_URLS: Readonly<Record<string, string>> = {
   anthropic: "https://api.anthropic.com",
@@ -335,6 +337,18 @@ function killProcess(child: ChildProcess, processGroupId: number | null): void {
     }
   }
   if (child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform === "win32" && child.pid) {
+    const result = spawnSync(
+      "taskkill",
+      ["/PID", String(child.pid), "/T", "/F"],
+      {
+        stdio: "ignore",
+        windowsHide: true,
+        timeout: WINDOWS_TREE_KILL_TIMEOUT_MS,
+      },
+    );
+    if (!result.error && result.status === 0) return;
+  }
   try {
     child.kill("SIGKILL");
   } catch {
@@ -1014,7 +1028,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           session.expiryTimer = null;
           cachedQuotaView(session, now());
           render(session);
-        }, Math.max(0, nextRevalidationMs - renderScheduledAtMs));
+        }, Math.min(
+          MAX_TIMER_DELAY_MS,
+          Math.max(0, nextRevalidationMs - renderScheduledAtMs),
+        ));
         session.expiryTimer = timer;
         unrefTimer(timer);
       }
