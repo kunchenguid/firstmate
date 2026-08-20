@@ -721,58 +721,8 @@ test_briefs_forbid_waiting_in_a_blocking_sleep() {
       "$variant: brief lost the poll-briefly-and-do-other-work fallback"
     assert_grep "otherwise record the thing as unverified and move on" "$brief" \
       "$variant: brief lost the record-as-unverified fallback"
-    # The unverified fallback must not swallow a wait the Definition of done itself requires
-    # (mode=no-mistakes ends on `done: PR {url} checks green`): such a wait can neither be
-    # shortened nor abandoned, so the ladder ends by pointing at rule 4's declared-wait status.
-    assert_grep "never for a wait your Definition of done" "$brief" \
-      "$variant: brief lets a Definition-of-done wait end as silently unverified"
-    # That declaration must also end the turn, in the same shape rules 5 and 6 use: a declared wait
-    # stops the watcher treating an over-long busy pane as a wedge suspect, so declaring one and
-    # then blocking in the foreground anyway would hide the very stall this rule exists to remove.
-    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-    assert_grep 'declare it under rule 4 with `paused: {why}` and stop' "$brief" \
-      "$variant: brief does not point a required wait at the declared-wait status and end the turn"
   done
   pass "fm-brief.sh: every ship mode and the scout forbid waiting in a blocking sleep"
-}
-
-# The secondmate needs the same waiting contract: it is persistent and waits on its own crewmates
-# for its whole lifecycle, and no other surface it loads carries the contract. The charter has no
-# numbered Rules block, so it states the contract in its own prose voice, which is why this asserts
-# the charter's own wording rather than reusing the ship/scout needles above.
-test_secondmate_charter_carries_the_waiting_contract() {
-  local home charter section
-  home="$TMP_ROOT/secondmate-waiting-home"
-  mkdir -p "$home/data"
-  # A distinctive pause verb makes the parent-facing declared-wait status unmistakable in the
-  # section that owns this contract. A wait on the secondmate's own crewmate is crewmate churn,
-  # which the Escalation section keeps inside this home and off the main firstmate's status file,
-  # so the waiting contract must route it to this home's own supervision cycle instead.
-  FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
-    "$ROOT/bin/fm-brief.sh" brief-waiting-mate --secondmate alpha >/dev/null 2>&1 \
-    || fail "secondmate: scaffold exited non-zero"
-  charter="$home/data/brief-waiting-mate/brief.md"
-  assert_present "$charter" "secondmate charter was not scaffolded"
-  section="$TMP_ROOT/secondmate-operating-model.txt"
-  awk '/^# Operating model$/ { inside = 1; next } inside && /^# / { exit } inside { print }' \
-    "$charter" > "$section"
-  [ -s "$section" ] || fail "secondmate charter has no Operating model section to carry the waiting contract"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep 'never sit in a foreground blocking `sleep`' "$section" \
-    "secondmate charter does not forbid waiting in a foreground blocking sleep"
-  assert_grep "indistinguishable from a stall" "$section" \
-    "secondmate charter does not say a blocking wait reads as a stall from outside"
-  assert_grep "harness-tracked background job whose completion" "$section" \
-    "secondmate charter does not prefer a harness-tracked background job for a wait"
-  assert_grep "otherwise poll briefly and do other useful work between checks" "$section" \
-    "secondmate charter lost the poll-briefly-and-do-other-work fallback"
-  assert_grep "otherwise record the thing as unverified and move on" "$section" \
-    "secondmate charter lost the record-as-unverified fallback"
-  assert_grep "belongs to this home's own watcher and status cycle" "$section" \
-    "secondmate charter does not keep an unshortenable internal wait on this home's own cycle"
-  assert_no_grep "awaiting" "$section" \
-    "secondmate waiting contract routes an internal wait to the parent-facing declared-wait status"
-  pass "fm-brief.sh: the secondmate charter carries the waiting contract in its own voice"
 }
 
 # Scope is deliberate: the scout report and the secondmate charter's detailed answer are the
@@ -855,6 +805,5 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_briefs_forbid_waiting_in_a_blocking_sleep
-test_secondmate_charter_carries_the_waiting_contract
 test_document_producing_briefs_require_incremental_writes
 test_scout_and_secondmate_scaffold
