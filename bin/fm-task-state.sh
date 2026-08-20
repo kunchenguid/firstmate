@@ -9,9 +9,8 @@
 # to fm-crew-state.sh.
 # executor=cloud-worker/provider=aime is the permanent legacy AIME path.
 # executor=remote-agent delegates to the explicitly recorded AIME or iDA
-# provider. Unknown executor/provider records fail closed.
-# Unknown executor/provider records fail closed and never fall through to pane,
-# worktree, harness, or runtime-backend semantics.
+# provider. Unknown executor/provider records fail closed and never fall
+# through to pane, worktree, harness, or runtime-backend semantics.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
