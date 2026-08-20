@@ -267,6 +267,15 @@ The generic Herdr agent-liveness probe reuses the same classifier.
 A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
 Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
 
+Both recovery-licensing verdicts are then checked against endpoint evidence, because Herdr's own ids and registrations can each go stale while the agent is still running.
+
+Pane and tab ids are re-issued when the server rebuilds its layout outside a plain restart, so a recorded pane id can stop resolving while the agent keeps running under a new one.
+A `missing` verdict therefore becomes `drifted` when a live pane in the same session sits under a tab labeled with this task's label AND in this task's directory - the two facts firstmate itself wrote at spawn.
+`drifted` licenses no recovery; `bin/fm-control.sh <id> rebind` is what corrects the record ([`agent-control.md`](agent-control.md)).
+
+A suspended worker deregisters its agent, because Herdr drops the registration as soon as the shell reclaims the foreground.
+That reads as `agent_not_found` - identical to a restored husk - so a `dead` verdict becomes `suspended` when the pane's shell tty holds a stopped harness process, and a suspended pane is never a close-and-replace husk candidate.
+
 The session-start sweep uses this probe.
 Mid-session secondmate liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 

@@ -5,10 +5,14 @@
 # (2026-07-28): each harness adapter reports turn lifecycle through a
 # machine-readable semantic source it owns, classification always exposes
 # which source produced it, and missing, malformed, stale, unsupported, or
-# unverified semantic data is UNKNOWN - never idle. Endpoint death is the only
-# process-level override and yields dead, never busy. Child processes, CPU,
-# process sleep state, marker mtimes, and the old global UI-regex OR are not
-# state signals here; state/<id>.turn-ended files remain wake NOTIFICATIONS
+# unverified semantic data is UNKNOWN - never idle. Endpoint death and endpoint
+# SUSPENSION are the two process-level overrides: death yields dead, and a
+# stopped harness agent turns a busy verdict into `unknown suspended`
+# (fm_busy_suspension_override). Neither is a state SIGNAL - no process fact
+# here can ever say a turn is running - and the suspension override only
+# invalidates a record whose writer is provably frozen. Child processes, CPU,
+# a running process's sleep state, marker mtimes, and the old global UI-regex
+# OR remain non-signals; state/<id>.turn-ended files remain wake NOTIFICATIONS
 # owned by the watcher, not current-state truth.
 #
 # Record file: state/<id>.busy-state - exactly one line, atomically replaced
@@ -859,13 +863,62 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
-# fm_busy_classify: semantic classification for a task whose endpoint the
-# caller has already established as present. Prints "<verdict> <source>":
-# busy|idle|unknown plus the producing source (see header). Never probes
-# process state. <tail40> is optional pre-captured plain output used only by
-# the Grok arm; when absent the Grok arm captures through fm_backend_capture
-# if available, else reports unknown capture-failed.
+# fm_busy_classify: classification for a task whose endpoint the caller has
+# already established as present. Prints "<verdict> <source>":
+# busy|idle|unknown plus the producing source (see header). <tail40> is
+# optional pre-captured plain output used only by the Grok arm; when absent
+# the Grok arm captures through fm_backend_capture if available, else reports
+# unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
+  local verdict
+  verdict=$(fm_busy_classify_semantic "$@")
+  fm_busy_suspension_override "$1" "$2" "$verdict"
+}
+
+# fm_busy_suspension_override: <verdict> unchanged, except that a `busy`
+# verdict for an endpoint holding a stopped harness agent becomes
+# `unknown suspended`.
+#
+# Found live on 2026-08-20: four workers were suspended at a shell prompt with
+# ctrl-z while every one of them still read `working - harness busy`. The busy
+# record was true when it was written, and the suspension froze the only
+# process that could ever have replaced it, so the fleet kept reading a
+# permanently current-looking answer off a permanently stale record.
+#
+# The verdict becomes unknown rather than idle because neither pole is true: a
+# suspended turn is neither running nor finished. Unknown is also what puts
+# the task back on the watcher's ordinary stale path, which is why the
+# override belongs here rather than only where the state is displayed: a busy
+# verdict routes a task away from that path (bin/fm-watch.sh), leaving only
+# the progress probe's own measurement span to notice, while a false idle
+# suppresses nothing. That asymmetry is also why only `busy` pays for the
+# probe, which keeps a per-poll process read off every idle and unknown task.
+#
+# The progress measurement in bin/fm-progress-lib.sh reaches the same
+# suspended worker from the other side, by measuring that nothing advances.
+# This override is still the one that makes the ANSWER correct: every reader
+# that asks what a worker is doing right now - fm-crew-state, the control
+# plane, a heartbeat sweep - gets it immediately rather than after a
+# measurement window, and the endpoint verdict it accompanies
+# (fm_backend_agent_state's `suspended`) is what stops a relaunch from
+# replacing a worker that is still there.
+fm_busy_suspension_override() {  # <backend> <target> <verdict>
+  local backend=$1 target=$2 verdict=$3
+  case "${verdict%% *}" in busy) ;; *) printf '%s' "$verdict"; return 0 ;; esac
+  [ -n "$target" ] || { printf '%s' "$verdict"; return 0; }
+  if command -v fm_backend_endpoint_suspended >/dev/null 2>&1 \
+    && fm_backend_endpoint_suspended "$backend" "$target" 2>/dev/null; then
+    printf 'unknown suspended'
+    return 0
+  fi
+  printf '%s' "$verdict"
+}
+
+# fm_busy_classify_semantic: the semantic half of fm_busy_classify, which owns
+# the source precedence documented in this file's header. Never call it
+# directly; it is separated only so the process-level override above has
+# exactly one place to apply.
+fm_busy_classify_semantic() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log
   case "$harness" in

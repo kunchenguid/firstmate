@@ -678,6 +678,12 @@ secondmate_liveness_one() {  # <meta> <id>
           echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
         fi
         ;;
+      drifted)
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: recorded endpoint identifier no longer resolves on $remote_host but a live endpoint still carries this secondmate's identity, so its agent is not gone; correct the record with bin/fm-control.sh $id rebind before any relaunch"
+        ;;
+      suspended)
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: agent on $remote_host is stopped, not gone; resume it in its own endpoint rather than relaunching over it"
+        ;;
       ambiguous|unreadable|unverified)
         echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint state is $agent_state on $remote_host"
         ;;
@@ -688,7 +694,14 @@ secondmate_liveness_one() {  # <meta> <id>
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || target="$window"
-  agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+  # The secondmate's own identity - its endpoint label and the home directory
+  # it runs in - travels with the probe, so a recorded identifier that merely
+  # stopped resolving is told apart from an endpoint that is actually gone.
+  # Without it this sweep reads a renumbered endpoint as absent and relaunches
+  # a second agent alongside the first (bin/fm-backend.sh's
+  # fm_backend_agent_state owns that distinction).
+  agent_state=$(fm_backend_agent_state "$backend" "$target" \
+    "fm-$id" "$(fm_meta_get "$meta" worktree)" 2>/dev/null) || agent_state=unreadable
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|agy) ;;
     *)
@@ -714,6 +727,12 @@ secondmate_liveness_one() {  # <meta> <id>
       else
         echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
       fi
+      ;;
+    drifted)
+      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: recorded endpoint identifier no longer resolves but a live endpoint still carries this secondmate's identity, so its agent is not gone; correct the record with bin/fm-control.sh $id rebind before any relaunch (backend=$backend)"
+      ;;
+    suspended)
+      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: agent is stopped, not gone; resume it in its own endpoint rather than relaunching over it (backend=$backend)"
       ;;
     ambiguous)
       echo "SECONDMATE_LIVENESS: secondmate $id: skipped: existing endpoint has ambiguous agent process (backend=$backend)"

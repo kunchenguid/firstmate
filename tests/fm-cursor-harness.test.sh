@@ -149,28 +149,28 @@ test_resolve_binary_prefers_stable_path() {
   pass "fm_cursor_resolve_binary: prints the stable launcher, not the versioned target"
 }
 
-# --- 2. tmux pane liveness ---------------------------------------------------
+# --- 2. pane liveness --------------------------------------------------------
 
 test_tmux_classifies_cursor_pane_without_inferring_dead() {
   local tree bin
   tree="$TMP_ROOT/tree5"; bin=$(make_cursor_tree "$tree")
-  # shellcheck source=bin/backends/tmux.sh
-  ( FM_BACKEND_LIB_DIR="$ROOT/bin"; . "$ROOT/bin/backends/tmux.sh"
-    [ "$(fm_backend_tmux_classify_process_name node "$bin/cursor-agent")" = agent ] \
+  # shellcheck source=bin/fm-backend.sh
+  ( . "$ROOT/bin/fm-backend.sh"
+    [ "$(fm_backend_classify_process_name node "$bin/cursor-agent")" = agent ] \
       || fail "a cursor pane reported as node must classify agent"
-    [ "$(fm_backend_tmux_classify_process_name '' "$bin/cursor-agent")" = agent ] \
+    [ "$(fm_backend_classify_process_name '' "$bin/cursor-agent")" = agent ] \
       || fail "the argv[0]-only call must classify a cursor pane agent"
     # The safety half: an unrelated node is `other`, and the callers turn
     # `other` into `ambiguous`, never `dead`.
-    [ "$(fm_backend_tmux_classify_process_name node /usr/bin/node)" = other ] \
+    [ "$(fm_backend_classify_process_name node /usr/bin/node)" = other ] \
       || fail "an unrelated node must stay 'other', never agent"
-    [ "$(fm_backend_tmux_classify_process_name agent /usr/local/bin/agent)" = other ] \
+    [ "$(fm_backend_classify_process_name agent /usr/local/bin/agent)" = other ] \
       || fail "an unrelated agent must stay 'other', never agent"
     # Neighbours must not regress.
-    [ "$(fm_backend_tmux_classify_process_name claude '')" = agent ] || fail "claude regressed"
-    [ "$(fm_backend_tmux_classify_process_name zsh '')" = shell ] || fail "zsh regressed"
+    [ "$(fm_backend_classify_process_name claude '')" = agent ] || fail "claude regressed"
+    [ "$(fm_backend_classify_process_name zsh '')" = shell ] || fail "zsh regressed"
   ) || exit 1
-  pass "tmux liveness: a cursor pane is agent; an unrelated node/agent is other, never dead"
+  pass "process-name classifier: a cursor pane is agent; an unrelated node/agent is other, never dead"
 }
 
 # --- 3. Detection ordering ---------------------------------------------------

@@ -54,6 +54,15 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
+# Process-identity sources for the endpoint-evidence layer below
+# (fm_backend_classify_process_name and the suspension probe). Both libraries
+# are definition-only, so sourcing them here costs nothing at load time and
+# keeps the classifier available to every adapter rather than to tmux alone.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh"
+
 # Verified backend adapters. Extend only after a backend gets its own
 # bin/backends/<name>.sh and empirical verification, mirroring AGENTS.md
 # section 4's harness-verification discipline. herdr is EXPERIMENTAL (P2;
@@ -847,6 +856,55 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
   esac
 }
 
+# fm_backend_classify_process_name: the single owner of the process-name
+# vocabulary shared by every backend's liveness signals - `agent` for a verified
+# harness, `shell` for an idle login/interactive shell, `other` for anything
+# else. Keeping one classifier means the two independent name sources can never
+# drift into disagreeing about what a given name means. It lives here rather
+# than in one adapter because the endpoint-evidence probes below, and every
+# adapter that reads a process name, must answer from the same vocabulary.
+fm_backend_classify_process_name() {  # <path> [argv0] -> agent|shell|other
+  local path=$1 argv0=${2:-} base
+  base=${path##*/}
+  base=${base#-}
+  case "$base" in
+    # muse is anchored rather than globbed like its neighbours: its installed
+    # binary is muse-bin-<version> (the launcher execs it, so the version is the
+    # live process name and changes on every auto-update), and unlike `claude` or
+    # `codex` the substring `muse` is a common English fragment - a *muse* glob
+    # would classify musescore or amuse as a live agent pane. The install path
+    # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
+    # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
+    muse|muse-bin-*) printf 'agent' ;;
+    # agy ships a single stable binary named `agy`, so it is anchored like kimi
+    # and pi rather than globbed like claude/codex (whose installers produce
+    # version-named executables). An unanchored *agy* would claim an unrelated
+    # sibling such as agy-helper or legagy.
+    agy) printf 'agent' ;;
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
+    *)
+      if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
+        printf 'agent'
+      # cursor-agent runs as a bundled node script, so tmux reports the pane
+      # command as a bare `node` that no name pattern above can own, and its
+      # other installed name is the far-too-generic `agent` (verified live on
+      # cursor-agent 2026.08.11-e8db854: #{pane_current_command} is `node` while
+      # `ps -o comm=` carries the cursor-agent install path). Identity therefore
+      # comes from the narrowed structural rule in bin/fm-cursor-lib.sh, which
+      # demands Cursor's own name or install tree in the path or argv[0]. An
+      # unrelated `node` or `agent` matches nothing here and stays `other`,
+      # which the callers above fold into `ambiguous` rather than `dead`, so a
+      # stranger's node pane is never reported as an agent-free pane.
+      elif fm_cursor_process_matches "${path:-$argv0}" '' "$argv0"; then
+        printf 'agent'
+      else
+        printf 'other'
+      fi
+      ;;
+  esac
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
 # recorded TARGET endpoint still exist on BACKEND? Never starts a server or
 # session: for herdr this deliberately queries the pane directly instead of
@@ -898,12 +956,162 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
+# --- endpoint evidence: identity and suspension --------------------------
+#
+# Both probes below exist for the same defect, found live on 2026-08-20: a
+# liveness verdict was answered from firstmate's own BOOKKEEPING about an
+# endpoint rather than from the endpoint itself, and answered confidently in
+# the direction that authorises recovery.
+#
+#   - A Herdr server renumbered its panes. The recorded pane id stopped
+#     resolving while the agent kept running under a new id in the same
+#     session, and the recorded-endpoint probe reported `missing`, which is
+#     one of the two verdicts that license a relaunch. Only an incidental
+#     duplicate-tab-label refusal inside Herdr stopped a second agent from
+#     being launched alongside the first.
+#   - A worker was suspended with ctrl-z. Herdr deregisters the agent the
+#     moment the shell reclaims the foreground, so `agent get` answered
+#     agent_not_found and the endpoint read `dead` - which both licenses a
+#     relaunch and makes the tab a close-and-replace husk candidate, so a
+#     frozen-but-recoverable worker could be killed and replaced. On tmux the
+#     same suspension empties the foreground process group of everything but
+#     the shell, producing the same `dead`.
+#
+# The rule both probes follow: absence of the recorded IDENTIFIER is not
+# absence of the AGENT, and a record about a process cannot be current while
+# that process is stopped. Each probe can only WITHHOLD a recovery-licensing
+# verdict, never create one, so a backend that cannot answer degrades to
+# exactly today's behavior instead of to a new hazard.
+
+# fm_backend_endpoint_tty: the controlling terminal device of <target>'s
+# endpoint on <backend>, as `ps` names it (e.g. `ttys012`), or empty when the
+# backend cannot answer. This is the one seam the suspension probe needs from
+# an adapter; everything else about the probe is backend-independent.
+fm_backend_endpoint_tty() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || return 0
+  case "$backend" in
+    tmux) fm_backend_tmux_endpoint_tty "$target" ;;
+    herdr) fm_backend_herdr_endpoint_tty "$target" ;;
+    *) : ;;
+  esac
+}
+
+# fm_backend_tty_suspended_agent: 0 when <tty> hosts a STOPPED process that
+# fm_backend_classify_process_name recognizes as a verified harness agent.
+#
+# The signal is the kernel's own process state (`T`), not a rendered string,
+# so it is immune to how a harness draws itself. Requiring BOTH the stopped
+# state and agent identity is what keeps the probe narrow enough to sit
+# outside the foreground process group without weakening the negative
+# verdicts the liveness classifiers depend on: a harness-named process merely
+# left running in the background of an idle pane is `S`, never `T`, so a
+# genuinely agent-free endpoint still classifies as agent-free.
+fm_backend_tty_suspended_agent() {  # <tty>
+  local tty=$1 state pid comm args argv0
+  [ -n "$tty" ] || return 1
+  tty=${tty#/dev/}
+  while read -r state pid comm; do
+    [ -n "$pid" ] || continue
+    case "$state" in T*) ;; *) continue ;; esac
+    [ -n "$comm" ] && [ "$(fm_backend_classify_process_name "$comm")" = agent ] && return 0
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+    args=${args#"${args%%[![:space:]]*}"}
+    argv0=${args%%[[:space:]]*}
+    [ -n "$argv0" ] || continue
+    [ "$(fm_backend_classify_process_name '' "$argv0")" = agent ] && return 0
+  done <<EOF
+$(LC_ALL=C ps -t "$tty" -o state=,pid=,comm= 2>/dev/null)
+EOF
+  return 1
+}
+
+# fm_backend_endpoint_suspended: 0 when <target> on <backend> provably holds a
+# stopped harness agent. Anything the backend cannot answer is 1 (not
+# provable), never a claim in either direction.
+fm_backend_endpoint_suspended() {  # <backend> <target>
+  local tty
+  tty=$(fm_backend_endpoint_tty "$1" "$2" 2>/dev/null) || return 1
+  fm_backend_tty_suspended_agent "$tty"
+}
+
+# fm_backend_identity_claimants: every LIVE endpoint on <backend>, within the
+# recorded <target>'s own session scope, that carries this task's identity -
+# endpoint label exactly <expected-label> AND working directory exactly
+# <expected-cwd>. One target per line; empty when none, when either hint is
+# absent, or when the backend cannot answer.
+#
+# Both hints are required together because neither alone identifies a task:
+# two homes can run a task of the same name, and many endpoints can share a
+# directory. Together they are distinguishing, because no two firstmate homes
+# share both a task id and that task's own worktree or home directory.
+fm_backend_identity_claimants() {  # <backend> <target> <expected-label> <expected-cwd>
+  local backend=$1 target=$2 label=$3 cwd=$4
+  [ -n "$label" ] && [ -n "$cwd" ] || return 0
+  fm_backend_source "$backend" || return 0
+  case "$backend" in
+    herdr) fm_backend_herdr_identity_claimants "$target" "$label" "$cwd" ;;
+    # tmux needs no lookup: its recorded target is `<session>:<window-name>`
+    # and the window NAME is the label, so the recorded identifier IS the
+    # identity and cannot drift out from under it the way a generated pane id
+    # can. zellij, orca, and cmux have no recovery classifier at all
+    # (fm_backend_agent_state reports `unverified` for them), so a claimant
+    # lookup would have nothing to refine.
+    *) : ;;
+  esac
+}
+
+# fm_backend_rebind_meta_fields: print <meta>'s endpoint fields rewritten to
+# bind <new-target>, one `key=value` per line, for the fields this backend
+# records an endpoint identifier in. Prints nothing and returns non-zero when
+# the backend has no drifting identifier to correct, or when the new target
+# cannot be read.
+#
+# Every consumer of a task record reads the same endpoint through several
+# fields at once, and fm_backend_validate_task_endpoint refuses a record whose
+# fields disagree. So a rebind is only correct if it rewrites all of them from
+# ONE observation of the new endpoint, which is why the per-backend field shape
+# lives here beside that validator rather than in the caller.
+fm_backend_rebind_meta_fields() {  # <backend> <meta> <new-target>
+  local backend=$1 new_target=$3 info workspace tab pane session
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr)
+      session=${new_target%%:*}
+      pane=${new_target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$new_target" ] || return 1
+      info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+      workspace=$(printf '%s' "$info" | jq -er --arg pane "$pane" '
+        select(.result.pane.pane_id == $pane) | .result.pane.workspace_id
+        | select(type == "string" and length > 0)' 2>/dev/null) || return 1
+      tab=$(printf '%s' "$info" | jq -er --arg pane "$pane" '
+        select(.result.pane.pane_id == $pane) | .result.pane.tab_id
+        | select(type == "string" and length > 0)' 2>/dev/null) || return 1
+      printf 'window=%s\n' "$session:$pane"
+      printf 'herdr_workspace_id=%s\n' "$workspace"
+      printf 'herdr_tab_id=%s\n' "$tab"
+      printf 'herdr_pane_id=%s\n' "$pane"
+      ;;
+    # tmux records its endpoint as `<session>:fm-<id>`: the identifier IS the
+    # task label, so it cannot drift out from under the record. zellij, orca,
+    # and cmux have no recovery-grade classifier, so nothing here could verify
+    # a rebind's postcondition.
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_agent_state: the single recovery-grade agent/endpoint state
 # contract. It is deliberately richer than fm_backend_target_exists's cheap
 # pane-presence read and prints exactly one of:
 #   alive      - a verified harness agent is running.
 #   dead       - the endpoint exists but confidently has no agent.
 #   missing    - the recorded endpoint is authoritatively absent.
+#   drifted    - the recorded IDENTIFIER no longer resolves, but a live
+#                endpoint in the same session still carries this task's
+#                identity. The record is stale; the agent is not gone.
+#   suspended  - the endpoint holds a stopped harness agent. The agent is
+#                present but frozen, so no record about it is current and it
+#                must not be treated as agent-free.
 #   ambiguous  - the endpoint exists but its process cannot be attributed.
 #   unreadable - a target or inventory read failed or contradicted itself.
 #   unverified - this backend has no recovery classifier.
@@ -913,21 +1121,46 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # classifier. Zellij remains unverified because its secondmate ghost-tab and
 # agent-process recovery path has not been empirically validated. Orca and cmux
 # do not support secondmate spawns.
-fm_backend_agent_state() {  # <backend> <target>
-  local backend=$1 target=$2
+#
+# The two refinements below are applied HERE rather than in each adapter, so
+# there is one owner of when an adapter's raw verdict is not the whole answer.
+# Each only ever downgrades a recovery-licensing verdict to a non-licensing
+# one, so a backend that supplies no evidence keeps exactly the adapter's own
+# behavior. <expected-label> and <expected-cwd> are this task's identity; a
+# caller that omits them gets no drift refinement, and therefore today's
+# `missing`.
+fm_backend_agent_state() {  # <backend> <target> [expected-label] [expected-cwd]
+  local backend=$1 target=$2 label=${3:-} cwd=${4:-} raw
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_state "$target" ;;
-    herdr) fm_backend_herdr_agent_state "$target" ;;
-    *) printf 'unverified' ;;
+    tmux) raw=$(fm_backend_tmux_agent_state "$target") ;;
+    herdr) raw=$(fm_backend_herdr_agent_state "$target") ;;
+    *) printf 'unverified'; return 0 ;;
   esac
+  case "$raw" in
+    dead)
+      if fm_backend_endpoint_suspended "$backend" "$target"; then
+        printf 'suspended'
+        return 0
+      fi
+      ;;
+    missing)
+      if [ -n "$(fm_backend_identity_claimants "$backend" "$target" "$label" "$cwd")" ]; then
+        printf 'drifted'
+        return 0
+      fi
+      ;;
+  esac
+  printf '%s' "$raw"
 }
 
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
-# ambiguous, unreadable, or unverified result stays unknown.
-fm_backend_agent_alive() {  # <backend> <target>
-  case "$(fm_backend_agent_state "$1" "$2")" in
+# ambiguous, unreadable, unverified, drifted, or suspended result stays unknown -
+# a drifted record and a frozen agent are both cases where firstmate does not
+# know, and unknown is the answer that licenses nothing.
+fm_backend_agent_alive() {  # <backend> <target> [expected-label] [expected-cwd]
+  case "$(fm_backend_agent_state "$@")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;

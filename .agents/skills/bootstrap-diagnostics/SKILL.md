@@ -57,6 +57,9 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - secondmate convergence left a live home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing its placement-specific target commit, unreachable, or otherwise not fast-forwardable, or because inherited local-material propagation failed; bootstrap continued, but inspect the reason because the secondmate's tracked instructions, inherited settings, or shared captain preferences may be stale after a primary update.
 - `SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>` - the session-start liveness sweep could not guarantee that the registered secondmate is running a real agent process.
   Investigate the reason because that secondmate is not guaranteed live.
+  Two of those reasons mean the agent is still there and the sweep refused on purpose rather than failing to reach it.
+  A recorded endpoint identifier that no longer resolves while a live endpoint still carries the secondmate's identity is a stale record, not an absent agent: correct it with `bin/fm-control.sh <id> rebind` and then read its real state, never by respawning.
+  A stopped agent is suspended, not gone: resume it in its own endpoint, because relaunching over it abandons a resumable worker.
 - `SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)` - queued work has already left the main dispatchable backlog and remains safe in the named remote route's backlog-format outbox.
   Preserve that outbox and rerun `bin/fm-backlog-handoff.sh --resume-pending` after same-host connectivity returns; never re-add or dispatch the items from the main backlog.
   An unsafe-outbox variant requires path and file-type inspection before any retry.

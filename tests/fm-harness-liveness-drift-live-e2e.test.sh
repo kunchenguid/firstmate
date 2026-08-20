@@ -131,7 +131,7 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   comms=$(fm_backend_tmux_foreground_comms "$target" | tr '\n' ' ')
 
   [ "$state" = alive ] || fail \
-    "LIVENESS DRIFT: $harness $version is running but classifies '$state', not 'alive'. Supervision and lifecycle control treat this endpoint as unattributable. Observed process title '$title'; observed foreground process names [$comms]. Teach bin/backends/tmux.sh's fm_backend_tmux_classify_process_name the identity this release actually reports."
+    "LIVENESS DRIFT: $harness $version is running but classifies '$state', not 'alive'. Supervision and lifecycle control treat this endpoint as unattributable. Observed process title '$title'; observed foreground process names [$comms]. Teach bin/fm-backend.sh's fm_backend_classify_process_name the identity this release actually reports."
 
   note "$harness $version: title='$title' foreground=[$comms]"
 

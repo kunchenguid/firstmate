@@ -704,6 +704,55 @@ ok - real herdr: an agent that does not stop fails closed instead of being repor
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
+### Endpoint identity and suspension evidence
+
+Both verdicts below were verified on 2026-08-20 with Herdr 0.8.2 on macOS arm64, against real panes and a real Claude Code agent in an isolated `fm-lab-` session driven through `bin/fm-herdr-lab.sh`.
+They are recorded together because they are the same failure from two directions: a liveness verdict answered from firstmate's own bookkeeping rather than from the endpoint, and answered confidently in the direction that authorises recovery.
+
+**A re-issued pane id is not an absent endpoint.**
+Herdr re-issues pane and tab ids when it rebuilds its layout, so a recorded pane id can stop resolving while the agent keeps running under a new one.
+`pane list` and `tab list` answer session-wide without a workspace filter, and joining them gives every pane's owning tab label beside its directory, which is the identity firstmate wrote at spawn.
+Pane `cwd` tracks a live `cd` on this version, and a directory passed as `/tmp/...` is reported back as `/private/tmp/...`, so the comparison normalizes both sides.
+
+**A suspended agent deregisters itself.**
+Herdr drops the agent registration the moment the shell reclaims the foreground, so a ctrl-z'd worker answers `agent_not_found` - indistinguishable from a restored husk by that read alone.
+
+Observed bounded output, one recorded endpoint whose id no longer resolves and one live agent suspended in place:
+
+```text
+agent in w1:p3: idle
+claimants   : <session>:w1:p3
+agent_state : drifted
+agent_alive : unknown
+rebound lucie backend=herdr endpoint=<session>:w1:p3 was=<session>:w1:p2 state=alive
+
+ps                  : 26630 T claude
+adapter raw verdict : dead
+agent_state         : suspended
+agent_alive         : unknown
+semantic busy       : busy claude-hook
+busy verdict        : unknown suspended
+close-and-replace   : refused
+```
+
+The negative controls ran against the same live inventory, and are what keep the refinements from making the classifier permissive:
+
+```text
+c1 closed endpoint, identity nothing carries (fm-ghost @ homeC)
+   claimants   : []
+   agent_state : missing
+c2 right label over the WRONG directory (fm-lucie @ homeB)
+   claimants   : []
+   agent_state : missing
+c3 live pane with no agent at all (fm-husk @ homeB, pane w1:p4)
+   agent_state : dead
+   close-and-replace: eligible
+```
+
+`fg` in the pane restored the suspended agent and Herdr re-registered it, so the resume the refusal messages name is the real recovery, not a suggestion.
+
+The portable regressions are `tests/fm-backend-herdr.test.sh` for the identity join and the husk refusal, and `tests/fm-tmux-agent-liveness.test.sh` for the stopped-process probe itself, which runs real processes under real job control and asserts that a stopped NON-agent still leaves the pane's `dead` verdict intact.
+
 ### Away-mode transport
 
 The Pi/Herdr return and injection path was reverified on Herdr 0.7.3 and Pi 0.80.7:

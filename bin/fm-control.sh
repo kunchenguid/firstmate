@@ -7,6 +7,7 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#        fm-control.sh <task-id> rebind
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -59,6 +60,17 @@
 #              replacement is in place but had not registered one yet. Both are
 #              successful relaunches; only ready=confirmed asserts a running
 #              agent.
+#
+#   rebind     Correct a task record whose endpoint IDENTIFIER stopped
+#              resolving while its agent kept running. Touches the record
+#              only, never the agent. Acts solely on a `drifted` endpoint -
+#              the recorded identifier is absent AND exactly one live endpoint
+#              carries this task's label and directory - and only when that
+#              endpoint holds an agent. Anything else refuses, including two
+#              claimants, because binding a task to the wrong endpoint would
+#              aim every later lifecycle command at a stranger. Postcondition:
+#              the rewritten record passes endpoint-identity validation and
+#              resolves to a positively classified endpoint.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -321,11 +333,33 @@ fm_backend_validate "$BACKEND" || exit 1
 # --- shared helpers ---------------------------------------------------------
 
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T"
+  # The task's identity travels with every probe on this plane, so a recorded
+  # identifier that merely stopped resolving reads `drifted` rather than
+  # `missing` and no verb here mistakes a live agent for an absent one.
+  fm_backend_agent_state "$BACKEND" "$T" "$LABEL" "$WT"
 }
 
 busy_verdict() {
   fm_busy_classify_meta "$META" "$ID" "$STATE"
+}
+
+# die_endpoint_evidence: refuse the two states that describe a worker this plane
+# can see but must not act on, in the worker's own terms.
+#
+# They would otherwise land in the generic "unattributed endpoint" refusals
+# below, which is the wrong sentence for both: a drifted record names the wrong
+# endpoint for an agent that is still running, and a suspended agent is exactly
+# attributed and merely frozen. Naming them accurately is what points the
+# operator at the correction instead of at a teardown.
+die_endpoint_evidence() {  # <state> <what-was-refused>
+  case "$1" in
+    drifted)
+      die "task $ID's recorded endpoint no longer resolves, but a live endpoint still carries this task's identity, so its agent is running under a new identifier rather than gone; correct the record with bin/fm-control.sh $ID rebind before $2"
+      ;;
+    suspended)
+      die "task $ID's agent is stopped, not gone, so $2 would act on a frozen worker; resume it in its own endpoint (fg) and read its state again first"
+      ;;
+  esac
 }
 
 # wait_agent_state <wanted...> <timeout>: poll until agent_state prints one of
@@ -468,7 +502,10 @@ do_exit() {
       printf 'already-stopped-missing'
       return 0
       ;;
-    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
+    *)
+      die_endpoint_evidence "$state" "stopping it"
+      die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint"
+      ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
@@ -483,7 +520,10 @@ do_exit() {
           ;;
         alive) interrupt_result="delivered verified=agent-alive cancel=$cancel" ;;
         missing) die "task $ID's recorded endpoint disappeared after interrupt delivery, so exit cannot prove whether the agent stopped" ;;
-        *) die "task $ID's endpoint reads '$state' after interrupt delivery rather than a positively classified state; exit cannot prove whether the agent stopped" ;;
+        *)
+          die_endpoint_evidence "$state" "proving the agent stopped"
+          die "task $ID's endpoint reads '$state' after interrupt delivery rather than a positively classified state; exit cannot prove whether the agent stopped"
+          ;;
       esac
       ;;
   esac
@@ -928,6 +968,63 @@ do_relaunch() {
   [ "$RELAUNCH_READY" = confirmed ] || echo "notice: $ID's replacement is in place at $T with its work at $WT, and had not finished starting after ${LAUNCH_WAIT}s; a harness can take longer than that to come up, so read its current state with bin/fm-crew-state.sh $ID rather than relaunching it again or tearing it down" >&2
 }
 
+# do_rebind: point task $ID's durable record at the live endpoint that still
+# carries its identity, without touching the agent in it.
+#
+# Every refusal below is the same refusal in a different shape: act only on an
+# endpoint this plane can positively attribute to THIS task. A drifted verdict
+# already required an exact label and directory match; requiring a single
+# claimant, an agent actually present in it, and a record that validates after
+# the rewrite is what keeps a correction from becoming a mis-binding.
+do_rebind() {
+  local claimants claimant count state fields lock tmp
+  fm_control_backend_state_verified "$BACKEND" \
+    || die "backend '$BACKEND' records no drifting endpoint identifier, or has no recovery-grade classifier to verify a rebind against; there is nothing this verb could safely correct"
+  state=$(agent_state)
+  case "$state" in
+    drifted) ;;
+    alive|suspended)
+      die "task $ID's recorded endpoint still resolves (state: $state); there is nothing to correct"
+      ;;
+    *)
+      die "task $ID's endpoint reads '$state', not 'drifted'; a rebind corrects a stale identifier, and no live endpoint currently carries this task's identity. Reconcile the task instead of re-pointing its record"
+      ;;
+  esac
+  claimants=$(fm_backend_identity_claimants "$BACKEND" "$T" "$LABEL" "$WT")
+  count=$(printf '%s
+' "$claimants" | grep -c . || true)
+  [ "$count" = 1 ] \
+    || die "task $ID's identity is carried by $count live endpoints, so a rebind cannot tell which one is the task; resolve the duplication by hand before correcting the record"
+  claimant=$(printf '%s
+' "$claimants" | head -1)
+  state=$(fm_backend_agent_state "$BACKEND" "$claimant" "$LABEL" "$WT")
+  case "$state" in
+    alive|suspended) ;;
+    *) die "the endpoint carrying task $ID's identity reads '$state', so no agent is there to rebind to; relaunch or tear the task down instead of re-pointing its record at an agent-free endpoint" ;;
+  esac
+  fields=$(fm_backend_rebind_meta_fields "$BACKEND" "$META" "$claimant") \
+    || die "could not read the endpoint identifiers of $claimant; refusing to write a partially rebound record"
+
+  lock=$(fm_meta_lock_path "$META") || die "could not derive the record lock for task $ID"
+  fm_lock_acquire_wait "$lock"
+  tmp="$STATE/.$ID.meta.rebind.${BASHPID:-$$}"
+  {
+    awk -F= -v keys="$(printf '%s\n' "$fields" | cut -d= -f1 | tr '\n' ' ')" '
+      BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) owned[k[i]] = 1 }
+      !($1 in owned)
+    ' "$META"
+    printf '%s
+' "$fields"
+  } > "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; die "could not stage the rebound record"; }
+  mv "$tmp" "$META" || { rm -f "$tmp"; fm_lock_release "$lock"; die "could not publish the rebound record"; }
+  fm_lock_release "$lock"
+
+  fm_backend_validate_task_endpoint "$META" "$ID" >/dev/null \
+    || die "the rebound record for task $ID does not pass endpoint-identity validation; inspect $META before any further control action"
+  state=$(fm_backend_agent_state "$BACKEND" "$claimant" "$LABEL" "$WT")
+  echo "rebound $ID backend=$BACKEND endpoint=$claimant was=$T state=$state worktree=$WT"
+}
+
 # --- verbs ------------------------------------------------------------------
 
 case "$VERB" in
@@ -942,7 +1039,10 @@ case "$VERB" in
         # verified rather than implying more.
         ;;
       dead|missing) die "no agent is running at task $ID's recorded endpoint (state: $state); there is nothing to interrupt" ;;
-      *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle key into an unattributed endpoint" ;;
+      *)
+        die_endpoint_evidence "$state" "interrupting it"
+        die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle key into an unattributed endpoint"
+        ;;
     esac
     proof=$(do_interrupt)
     echo "interrupt-delivered $ID harness=$HARNESS backend=$BACKEND verified=$proof"
@@ -958,5 +1058,8 @@ case "$VERB" in
     ;;
   relaunch)
     do_relaunch
+    ;;
+  rebind)
+    do_rebind
     ;;
 esac

@@ -155,53 +155,6 @@ fm_backend_tmux_current_command() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
 }
 
-# fm_backend_tmux_classify_process_name: the single owner of the process-name
-# vocabulary shared by every liveness signal below - `agent` for a verified
-# harness, `shell` for an idle login/interactive shell, `other` for anything
-# else. Keeping one classifier means the two independent name sources can never
-# drift into disagreeing about what a given name means.
-fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
-  local path=$1 argv0=${2:-} base
-  base=${path##*/}
-  base=${base#-}
-  case "$base" in
-    # muse is anchored rather than globbed like its neighbours: its installed
-    # binary is muse-bin-<version> (the launcher execs it, so the version is the
-    # live process name and changes on every auto-update), and unlike `claude` or
-    # `codex` the substring `muse` is a common English fragment - a *muse* glob
-    # would classify musescore or amuse as a live agent pane. The install path
-    # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
-    # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
-    muse|muse-bin-*) printf 'agent' ;;
-    # agy ships a single stable binary named `agy`, so it is anchored like kimi
-    # and pi rather than globbed like claude/codex (whose installers produce
-    # version-named executables). An unanchored *agy* would claim an unrelated
-    # sibling such as agy-helper or legagy.
-    agy) printf 'agent' ;;
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
-    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
-    *)
-      if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
-        printf 'agent'
-      # cursor-agent runs as a bundled node script, so tmux reports the pane
-      # command as a bare `node` that no name pattern above can own, and its
-      # other installed name is the far-too-generic `agent` (verified live on
-      # cursor-agent 2026.08.11-e8db854: #{pane_current_command} is `node` while
-      # `ps -o comm=` carries the cursor-agent install path). Identity therefore
-      # comes from the narrowed structural rule in bin/fm-cursor-lib.sh, which
-      # demands Cursor's own name or install tree in the path or argv[0]. An
-      # unrelated `node` or `agent` matches nothing here and stays `other`,
-      # which the callers above fold into `ambiguous` rather than `dead`, so a
-      # stranger's node pane is never reported as an agent-free pane.
-      elif fm_cursor_process_matches "${path:-$argv0}" '' "$argv0"; then
-        printf 'agent'
-      else
-        printf 'other'
-      fi
-      ;;
-  esac
-}
-
 # fm_backend_tmux_foreground_comms: the kernel-side names of every process in
 # <target>'s pane tty foreground process group, one full value per line.
 # Empty on any failure.
@@ -227,11 +180,24 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
 # absent target from the client's active window rather than failing, so callers
 # must confirm exact window membership first, exactly as the classifier below
 # does, or they will describe some other pane entirely.
+# fm_backend_tmux_endpoint_tty: the controlling terminal of <target>'s pane,
+# as `ps` names it. The one owner of that read for this adapter, shared by the
+# two foreground probes below and by fm-backend.sh's suspension probe.
+#
+# Like fm_backend_tmux_current_command this is a RAW pane read: tmux answers an
+# absent target from the client's active window rather than failing, so callers
+# must confirm exact window membership first.
+fm_backend_tmux_endpoint_tty() {  # <target>
+  local tty
+  tty=$(tmux display-message -p -t "$1" '#{pane_tty}' 2>/dev/null) || return 0
+  printf '%s' "${tty#/dev/}"
+}
+
 fm_backend_tmux_foreground_comms() {  # <target>
   local target=$1 tty pid pgid tpgid comm
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  tty=$(fm_backend_tmux_endpoint_tty "$target")
   [ -n "$tty" ] || return 0
-  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+  LC_ALL=C ps -t "$tty" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
     | while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
@@ -246,9 +212,9 @@ fm_backend_tmux_foreground_comms() {  # <target>
 # Returns 1 when the pane tty or the process table cannot be read.
 fm_backend_tmux_foreground_pids() {  # <target>
   local target=$1 tty out
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  tty=$(fm_backend_tmux_endpoint_tty "$target")
   [ -n "$tty" ] || return 1
-  out=$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid= 2>/dev/null) || return 1
+  out=$(LC_ALL=C ps -t "$tty" -o pid=,pgid=,tpgid= 2>/dev/null) || return 1
   out=$(printf '%s\n' "$out" | awk '$2 == $3 && $1 != "" { print $1 }')
   [ -n "$out" ] || return 1
   printf '%s\n' "$out"
@@ -256,9 +222,9 @@ fm_backend_tmux_foreground_pids() {  # <target>
 
 fm_backend_tmux_foreground_argv0s() {  # <target>
   local target=$1 tty pid pgid tpgid comm args argv0
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  tty=$(fm_backend_tmux_endpoint_tty "$target")
   [ -n "$tty" ] || return 0
-  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+  LC_ALL=C ps -t "$tty" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
     | while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
@@ -320,7 +286,7 @@ fm_backend_tmux_agent_state() {  # <target>
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     fg_seen=1
-    case "$(fm_backend_tmux_classify_process_name "$name")" in
+    case "$(fm_backend_classify_process_name "$name")" in
       agent) printf 'alive'; return 0 ;;
       shell) fg_shell=1 ;;
       *) fg_other=1 ;;
@@ -332,7 +298,7 @@ EOF
   argv0s=$(fm_backend_tmux_foreground_argv0s "$target")
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    if [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ]; then
+    if [ "$(fm_backend_classify_process_name '' "$name")" = agent ]; then
       printf 'alive'
       return 0
     fi
@@ -344,7 +310,7 @@ EOF
     printf 'unreadable'
     return 0
   }
-  if [ "$(fm_backend_tmux_classify_process_name "$comm")" = agent ]; then
+  if [ "$(fm_backend_classify_process_name "$comm")" = agent ]; then
     printf 'alive'
     return 0
   fi
@@ -363,7 +329,7 @@ EOF
   case "$comm" in
     '') printf 'unreadable'; return 0 ;;
   esac
-  case "$(fm_backend_tmux_classify_process_name "$comm")" in
+  case "$(fm_backend_classify_process_name "$comm")" in
     shell) printf 'dead' ;;
     *) printf 'ambiguous' ;;
   esac

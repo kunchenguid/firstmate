@@ -42,18 +42,29 @@
 # because the brief on disk - not a harness-private session - is the durable
 # instruction.
 
+# `rebind` IS a verb, and it is the one that acts on the RECORD rather than on
+# the agent. It exists because a backend whose endpoint identifiers are
+# generated can re-issue them while the agent keeps running, and firstmate then
+# holds a record that names nothing. Before this verb the only supported
+# response was a fresh spawn, which is exactly the duplicate this plane exists
+# to prevent; recovering by hand meant closing a live agent's endpoint. Its
+# postcondition is verifiable the same way every other verb's is - the rebound
+# record resolves to an endpoint the backend positively classifies - so it
+# belongs in the closed list rather than in operator prose.
+
 # The complete control-plane verb allowlist, one per line.
 fm_control_verbs() {
   cat <<'EOF'
 interrupt
 exit
 relaunch
+rebind
 EOF
 }
 
 fm_control_verb_allowed() {  # <verb>
   case "${1-}" in
-    interrupt|exit|relaunch) return 0 ;;
+    interrupt|exit|relaunch|rebind) return 0 ;;
   esac
   return 1
 }

@@ -213,6 +213,11 @@ bin/fm-spawn.sh <id> --secondmate
 
 Use the recorded `home=` in meta.
 If meta is missing but `data/secondmates.md` still registers the secondmate, respawn from the registry entry and its persistent home.
+
+A recorded endpoint that does not answer is not proof the secondmate is gone, and respawning over a live one puts two agents on the same home.
+When the recorded identifier no longer resolves but a live endpoint still carries this secondmate's identity, the record is stale, not the agent absent: correct it with `bin/fm-control.sh <id> rebind` and read its real state before deciding anything.
+When the agent is stopped rather than gone, resume it in its own endpoint; a respawn would abandon a worker that was still recoverable.
+Both cases refuse recovery on purpose, and `bin/fm-spawn.sh --secondmate` refuses them with that reason rather than launching.
 For a remote route, the same command probes and relaunches only on the configured host.
 An SSH transport failure or unreadable remote endpoint remains unknown and must be reconciled on that host; never launch a local replacement.
 `stuck-crewmate-recovery`'s remote-secondmate note owns why the endpoint-dead and send-failed verdicts that seem to justify this are themselves unreliable.

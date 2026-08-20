@@ -586,7 +586,31 @@ fi
 # is no run to consult, so a dead/unreadable target means the crew is gone: report
 # unknown rather than trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
-pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
+if ! pane_readable "$BACKEND_TARGET"; then
+  # An unreadable target is not proof the crew is gone. A backend whose
+  # endpoint identifiers are generated (Herdr pane ids) re-issues them when it
+  # rebuilds its layout, and the recorded one then names nothing while the
+  # crew keeps running under a new one. Ask whether a live endpoint still
+  # carries this task's identity before reporting the crew as gone; the
+  # recorded worktree is the same directory the endpoint was created in.
+  if [ "$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET" \
+      "$EXPECTED_LABEL" "$WT" 2>/dev/null)" = drifted ]; then
+    emit unknown pane "recorded endpoint identifier is stale; a live endpoint still carries this task's identity - correct the record with bin/fm-control.sh $ID rebind"
+  fi
+  emit unknown none "backend target gone: $BACKEND_TARGET"
+fi
+
+# A stopped agent is checked before anything else here, and for every kind.
+# It is the one endpoint fact that makes every OTHER source untrustworthy at
+# once: the process that writes the semantic record is frozen, so the record
+# says whatever it last said forever, and the status log stopped where the
+# worker stopped. It is checked for a secondmate too, even though the busy
+# state below is not - a secondmate's idle pane is healthy, but a secondmate
+# frozen mid-turn is not idle, and the live incident that produced this check
+# was a secondmate.
+if fm_backend_endpoint_suspended "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null; then
+  emit unknown pane "harness process is suspended, not gone; resume it in its own endpoint before trusting any recorded state"
+fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # state is not meaningful for them; read their state from the status log only.

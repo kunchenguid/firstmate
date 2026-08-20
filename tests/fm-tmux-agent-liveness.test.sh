@@ -112,7 +112,7 @@ wait_for_state() {  # <target> <expected> [tries]
 title_classifies_agent() {  # <target>
   local name
   name=$(fm_backend_tmux_current_command "$1" 2>/dev/null)
-  [ "$(fm_backend_tmux_classify_process_name "$name")" = agent ]
+  [ "$(fm_backend_classify_process_name "$name")" = agent ]
 }
 
 # Does the foreground-process-group identity, including argv[0], name one?
@@ -120,13 +120,13 @@ comms_classify_agent() {  # <target>
   local name
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    [ "$(fm_backend_tmux_classify_process_name "$name")" = agent ] && return 0
+    [ "$(fm_backend_classify_process_name "$name")" = agent ] && return 0
   done <<EOF
 $(fm_backend_tmux_foreground_comms "$1")
 EOF
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ] && return 0
+    [ "$(fm_backend_classify_process_name '' "$name")" = agent ] && return 0
   done <<EOF
 $(fm_backend_tmux_foreground_argv0s "$1")
 EOF
@@ -254,6 +254,105 @@ fm_backend_tmux_foreground_comms "$SESSION:no-such-window" >/dev/null \
 [ "$(fm_backend_agent_state tmux "$SESSION:no-such-window")" = missing ] \
   || fail "an absent window in a readable session must classify missing, not whatever the fallback pane runs"
 pass "tmux liveness: an absent window classifies missing rather than inheriting tmux's active-window fallback"
+
+# --- a SUSPENDED agent is not an agent-free pane ----------------------------
+# Found live on 2026-08-20: workers suspended at a shell prompt with ctrl-z
+# still read as working, because every record about them froze at whatever it
+# last said. The endpoint reads the other way for the same reason: ctrl-z moves
+# the agent out of the foreground process group, so the pane's foreground is
+# nothing but a shell and the adapter classifies it agent-free - the verdict
+# that authorises relaunching over a worker that is still there and resumable.
+#
+# The construction is the real one: job control puts the agent in its own
+# process group, SIGTSTP stops that group exactly as the tty driver does for
+# ctrl-z, and a shell takes the terminal back. The launching shell must stay
+# alive rather than exec away, or it hangs up its own stopped job on exit and
+# the case would test a dead process instead of a stopped one. The case asserts
+# the ADAPTER's own verdict is still `dead`, so the composed `suspended` verdict
+# provably comes from the stopped-process evidence and cannot go vacuous.
+
+new_window suspended bash -c "set -m; '$LAB/bin/claude-link' 900; /bin/sh"
+susp_pid=
+for _ in $(seq 1 100); do
+  susp_pid=$(fm_backend_tmux_endpoint_tty "$SESSION:suspended" | {
+    read -r tty
+    [ -n "$tty" ] || exit 0
+    LC_ALL=C ps -t "$tty" -o pid=,comm= 2>/dev/null \
+      | awk '$2 ~ /claude-link$/ { print $1; exit }'
+  })
+  [ -n "$susp_pid" ] && break
+  sleep 0.1
+done
+[ -n "$susp_pid" ] || fail "the agent under test never started in the suspendable pane"
+kill -TSTP "-$(LC_ALL=C ps -p "$susp_pid" -o pgid= | tr -d ' ')" 2>/dev/null \
+  || kill -TSTP "$susp_pid" \
+  || fail "could not stop the agent process group"
+
+susp_seen=0
+for _ in $(seq 1 100); do
+  case "$(LC_ALL=C ps -p "$susp_pid" -o state= 2>/dev/null | tr -d ' ')" in
+    T*) susp_seen=1; break ;;
+  esac
+  sleep 0.1
+done
+[ "$susp_seen" = 1 ] || fail "the agent process never reached the stopped state, so this case would prove nothing"
+
+wait_for_state "$SESSION:suspended" suspended \
+  || fail "a pane whose agent is stopped must classify suspended, never as an agent-free endpoint"
+[ "$(fm_backend_tmux_agent_state "$SESSION:suspended")" = dead ] \
+  || fail "the adapter's own verdict was expected to be dead here; without that divergence this case does not prove the stopped-process evidence carried the verdict"
+[ "$(fm_backend_agent_alive tmux "$SESSION:suspended")" = unknown ] \
+  || fail "a suspended agent must read unknown, not dead, in the three-state view: dead licenses recovery"
+pass "tmux liveness: a stopped agent classifies suspended, not dead, however its foreground group reads"
+
+kill -CONT "$susp_pid" 2>/dev/null || true
+
+# --- a stopped NON-agent leaves the negative verdict alone ------------------
+# The opposite defect: making the probe permissive would turn every pane with
+# any stopped process into an unrecoverable one. Identity is required as well
+# as the stopped state, so a genuinely agent-free pane still classifies dead.
+
+new_window stopped-other bash -c "set -m; '$LAB/bin/notaharness' 900; /bin/sh"
+other_pid=
+for _ in $(seq 1 100); do
+  other_pid=$(fm_backend_tmux_endpoint_tty "$SESSION:stopped-other" | {
+    read -r tty
+    [ -n "$tty" ] || exit 0
+    LC_ALL=C ps -t "$tty" -o pid=,comm= 2>/dev/null \
+      | awk '$2 ~ /notaharness$/ { print $1; exit }'
+  })
+  [ -n "$other_pid" ] && break
+  sleep 0.1
+done
+[ -n "$other_pid" ] || fail "the non-agent process under test never started"
+kill -TSTP "-$(LC_ALL=C ps -p "$other_pid" -o pgid= | tr -d ' ')" 2>/dev/null \
+  || kill -TSTP "$other_pid" \
+  || fail "could not stop the non-agent process group"
+other_seen=0
+for _ in $(seq 1 100); do
+  case "$(LC_ALL=C ps -p "$other_pid" -o state= 2>/dev/null | tr -d ' ')" in
+    T*) other_seen=1; break ;;
+  esac
+  sleep 0.1
+done
+[ "$other_seen" = 1 ] || fail "the non-agent process never reached the stopped state, so this case would prove nothing"
+wait_for_state "$SESSION:stopped-other" dead \
+  || fail "a stopped process no name source attributes as a harness must leave the pane's dead verdict intact"
+pass "tmux liveness: a stopped NON-agent process still classifies dead, so the suspension evidence is not a blanket exemption"
+kill -CONT "$other_pid" 2>/dev/null || true
+
+# --- identity hints never invent a claimant on tmux -------------------------
+# tmux records `<session>:<window-name>` and the window name IS the task label,
+# so the identifier cannot drift out from under the record and there is nothing
+# for a claimant lookup to find. Passing identity hints must therefore leave the
+# absent-window verdict exactly as it is - the case that keeps the drift
+# refinement from quietly making `missing` unreachable.
+
+[ -z "$(fm_backend_identity_claimants tmux "$SESSION:no-such-window" fm-no-such-window "$LAB/wt")" ] \
+  || fail "the tmux adapter must claim no endpoint identity"
+[ "$(fm_backend_agent_state tmux "$SESSION:no-such-window" fm-no-such-window "$LAB/wt")" = missing ] \
+  || fail "an absent tmux window must still classify missing when identity hints are supplied"
+pass "tmux liveness: identity hints leave an absent window's missing verdict intact"
 
 # --- Cursor's composer: the terminal cursor is NOT a composer locator --------
 # Cursor Agent CLI parks its terminal cursor below its footer with cursor_flag 0,

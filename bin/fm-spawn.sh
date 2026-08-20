@@ -1061,7 +1061,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  # The task's own identity, so `missing` can be told apart from a recorded
+  # identifier that merely stopped resolving while the agent kept running
+  # (bin/fm-backend.sh's fm_backend_agent_state owns that distinction). This
+  # is the exact case a relaunch must never mistake for an absent endpoint:
+  # the relaunch would put a second agent on a live worktree.
+  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET" \
+    "fm-$ID" "$(fm_meta_get "$RELAUNCH_META" worktree)")
   RELAUNCH_ENDPOINT_MISSING=0
   case "$RELAUNCH_STATE" in
     dead)
@@ -1075,6 +1081,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
       # not a failed read or a timeout. A replacement endpoint will be created
       # in the same session/workspace, bound to the same task and worktree.
       RELAUNCH_ENDPOINT_MISSING=1
+      ;;
+    drifted)
+      echo "error: task $ID's recorded endpoint no longer resolves, but a live endpoint still carries this task's identity, so its agent is running under a new identifier rather than gone; relaunching would put a second agent on the same worktree. Correct the record with bin/fm-control.sh $ID rebind, then decide from its actual state" >&2
+      exit 1
+      ;;
+    suspended)
+      echo "error: task $ID's agent is stopped, not gone; a relaunch would abandon a resumable worker. Resume it in its own endpoint (fg), then decide from its actual state" >&2
+      exit 1
       ;;
     *)
       echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires either an agent-free endpoint (dead) or a provably absent one (missing); stop the agent first with bin/fm-control.sh $ID exit" >&2

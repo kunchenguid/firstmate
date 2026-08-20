@@ -4460,6 +4460,138 @@ test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
+# --- endpoint identity: a renumbered pane id is not a gone endpoint ---------
+# Found live on 2026-08-20: a Herdr server re-issued its pane ids, the recorded
+# id stopped resolving while the agent kept running under a new one, and the
+# recovery-grade probe answered `missing` - one of the two verdicts that
+# authorise a relaunch. Nothing but an incidental duplicate-tab-label refusal
+# inside Herdr stopped a second agent from joining the first.
+
+# herdr_identity_responses: the three reads fm_backend_agent_state makes on a
+# recorded pane that no longer resolves - pane get, then the pane and tab
+# inventories the claimant lookup joins.
+herdr_identity_responses() {  # <resp-dir> <panes-json> <tabs-json>
+  printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$1/1.out"
+  printf '%s\n' "$2" > "$1/2.out"
+  printf '%s\n' "$3" > "$1/3.out"
+}
+
+HERDR_IDENTITY_PANES='{"result":{"panes":[
+  {"pane_id":"w1:p9","tab_id":"w1:t9","workspace_id":"w1","cwd":"/tmp/homes/lucie","foreground_cwd":"/tmp/homes/lucie"},
+  {"pane_id":"w1:p8","tab_id":"w1:t8","workspace_id":"w1","cwd":"/tmp/homes/other","foreground_cwd":"/tmp/homes/other"}
+]}}'
+HERDR_IDENTITY_TABS='{"result":{"tabs":[
+  {"tab_id":"w1:t9","label":"fm-lucie","workspace_id":"w1"},
+  {"tab_id":"w1:t8","label":"fm-lucie","workspace_id":"w1"}
+]}}'
+
+herdr_agent_state_with() {  # <resp-dir> <log> <fakebin> <target> <label> <cwd>
+  PATH="$3:$PATH" FM_HERDR_LOG="$2" FM_HERDR_RESPONSES="$1" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_agent_state herdr "$1" "$2" "$3"' \
+    "$ROOT" "$4" "$5" "$6" 2>/dev/null
+}
+
+test_agent_state_drifted_when_a_live_pane_claims_the_identity() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/identity-drift"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_identity_responses "$resp" "$HERDR_IDENTITY_PANES" "$HERDR_IDENTITY_TABS"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(herdr_agent_state_with "$resp" "$log" "$fb" fmtest:w1:p2 fm-lucie /tmp/homes/lucie)
+  [ "$out" = drifted ] \
+    || fail "a recorded pane id that no longer resolves, while a live pane carries the task's label and directory, must read drifted, not '$out'"
+  pass "fm_backend_agent_state herdr: a renumbered pane id reads drifted, so it never licenses a relaunch"
+}
+
+test_agent_state_missing_when_no_pane_claims_the_identity() {
+  # The case that keeps the fix from becoming the opposite defect. A genuinely
+  # absent endpoint must still read missing, or nothing could ever be
+  # recovered. The same inventory is served here; only the task's identity
+  # differs, so the refinement is proven to depend on the match rather than on
+  # the lookup merely running.
+  local dir log resp fb out
+  dir="$TMP_ROOT/identity-absent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_identity_responses "$resp" "$HERDR_IDENTITY_PANES" "$HERDR_IDENTITY_TABS"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(herdr_agent_state_with "$resp" "$log" "$fb" fmtest:w1:p2 fm-gone /tmp/homes/gone)
+  [ "$out" = missing ] \
+    || fail "an endpoint no live pane claims must still read missing, not '$out'"
+  pass "fm_backend_agent_state herdr: a genuinely absent endpoint still reads missing"
+}
+
+test_agent_state_missing_when_only_the_label_matches() {
+  # Neither hint identifies a task on its own: two homes can run a task of the
+  # same name, and many endpoints share a directory. A label match over the
+  # wrong directory must not withhold the missing verdict.
+  local dir log resp fb out
+  dir="$TMP_ROOT/identity-label-only"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_identity_responses "$resp" "$HERDR_IDENTITY_PANES" "$HERDR_IDENTITY_TABS"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(herdr_agent_state_with "$resp" "$log" "$fb" fmtest:w1:p2 fm-lucie /tmp/homes/somewhere-else)
+  [ "$out" = missing ] \
+    || fail "a label match in the wrong directory must not withhold the missing verdict; got '$out'"
+  pass "fm_backend_agent_state herdr: a label match alone never claims a task's identity"
+}
+
+test_agent_state_missing_without_identity_hints() {
+  # A caller that cannot supply the task's identity gets exactly today's
+  # verdict rather than a guess made from the label alone.
+  local dir log resp fb out
+  dir="$TMP_ROOT/identity-nohints"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_identity_responses "$resp" "$HERDR_IDENTITY_PANES" "$HERDR_IDENTITY_TABS"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_agent_state herdr fmtest:w1:p2' "$ROOT" 2>/dev/null)
+  [ "$out" = missing ] \
+    || fail "without identity hints the verdict must stay missing; got '$out'"
+  pass "fm_backend_agent_state herdr: no identity hints means no drift refinement"
+}
+
+test_identity_claimants_lists_every_matching_pane() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/identity-claimants"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' "$HERDR_IDENTITY_PANES" > "$resp/1.out"
+  printf '%s\n' "$HERDR_IDENTITY_TABS" > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_identity_claimants herdr fmtest:w1:p2 fm-lucie /tmp/homes/lucie' "$ROOT" 2>/dev/null)
+  [ "$out" = "fmtest:w1:p9" ] \
+    || fail "the claimant lookup must name the one pane whose tab label AND directory match, got '$out'"
+  pass "fm_backend_identity_claimants herdr: names the pane carrying the task's label and directory"
+}
+
+test_tab_is_husk_refuses_a_suspended_agent() {
+  # A ctrl-z'd worker answers agent_not_found exactly like a restored husk,
+  # because Herdr deregisters the agent as soon as the shell reclaims the
+  # foreground. Closing that tab would destroy live, resumable work.
+  local dir log resp fb rc
+  dir="$TMP_ROOT/husk-suspended"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  # The suspension evidence is stubbed rather than faked at the process level:
+  # the real stopped-process probe is pinned end to end against real processes
+  # in tests/fm-tmux-agent-liveness.test.sh, and what this case owns is that
+  # the husk decision consults it at all.
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr
+      fm_backend_endpoint_suspended() { return 0; }
+      fm_backend_herdr_tab_is_husk fmtest w1:p2' "$ROOT" 2>/dev/null && rc=0 || rc=$?
+  [ "$rc" != 0 ] \
+    || fail "an agent-less pane holding a STOPPED agent process must not be classified a husk"
+  : > "$log"
+  dir="$TMP_ROOT/husk-not-suspended"; mkdir -p "$dir/responses"; resp="$dir/responses"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr
+      fm_backend_endpoint_suspended() { return 1; }
+      fm_backend_herdr_tab_is_husk fmtest w1:p2' "$ROOT" 2>/dev/null && rc=0 || rc=$?
+  [ "$rc" = 0 ] \
+    || fail "a genuinely agent-free pane must still be a husk, or restored-layout recovery stops working"
+  pass "fm_backend_herdr_tab_is_husk: a suspended agent refuses close-and-replace while a real husk still qualifies"
+}
+
 test_composer_state_cursor_midturn_row_reads_pending
 test_rendered_busy_state_reads_the_cursor_busy_token
 test_send_text_submit_confirms_never_idle_native_state_via_footer_transition
@@ -4490,3 +4622,9 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_agent_state_drifted_when_a_live_pane_claims_the_identity
+test_agent_state_missing_when_no_pane_claims_the_identity
+test_agent_state_missing_when_only_the_label_matches
+test_agent_state_missing_without_identity_hints
+test_identity_claimants_lists_every_matching_pane
+test_tab_is_husk_refuses_a_suspended_agent

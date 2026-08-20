@@ -105,7 +105,12 @@ state_value() { # <id>; prints recovery-grade state
     printf 'unverified\n'
     return 0
   fi
-  fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n'
+  # The task identity travels with the probe so a recorded pane id that merely
+  # stopped resolving is reported `drifted`, not `missing`; on this path the
+  # caller is a relaunch decision made from another machine.
+  fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" \
+    "fm-$id" "$(fm_meta_get "$REMOTE_ENDPOINT_META" worktree)" 2>/dev/null \
+    || printf 'unreadable\n'
 }
 
 print_route() { # <id>
@@ -151,7 +156,8 @@ cmd_launch() {
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
     remote_endpoint_require "$id"
-    current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
+    current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" \
+      "fm-$id" "$(fm_meta_get "$REMOTE_ENDPOINT_META" worktree)" 2>/dev/null || printf 'unreadable\n')
     case "$current" in
       alive)
         print_route "$id"

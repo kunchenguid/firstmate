@@ -51,6 +51,11 @@ The deeper tmux agent-liveness probe first verifies exact window membership, the
 It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse process identities as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 
+A `dead` verdict is checked once more against the pane's own processes before it stands.
+A suspended worker - one stopped with ctrl-z - leaves the foreground process group holding nothing but a shell, which reads exactly like an agent-free pane while the agent is still there and resumable.
+The endpoint is reported `suspended` instead when the pane's tty holds a stopped process that the same name classifier recognizes as a harness.
+Both the stopped state and harness identity are required, so a pane whose only stopped process is something else still classifies `dead`.
+
 For positive attribution, the probe combines two independent name sources rather than making either one load-bearing.
 `#{pane_current_command}` and the pane tty foreground process group's kernel `comm` values expose different name fields, and which one retains executable identity is platform-dependent.
 The foreground probe also reads argv[0] so an exact harness install-path component can carry the verdict when the other fields expose a rewritten process name.
