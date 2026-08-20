@@ -80,7 +80,7 @@ test_promote_moves_and_seeds() {
   for n in T-01 T-02 T-03; do
     assert_grep "- [ ] $n - [things]" "$home/data/backlog.md" "story $n not seeded with matching id+tag"
   done
-  assert_contains "$OUT" "stories seeded now: 3" "seed count wrong"
+  assert_contains "$OUT" "seeded: 3" "seed count wrong"
   assert_contains "$OUT" "STOP" "sign-off gate not printed"
   assert_contains "$OUT" "bin/fm-epic-branch.sh create things svc" "branch step missing"
   # Never auto-signs / auto-dispatches.
@@ -151,8 +151,9 @@ test_rerun_is_noop() {
   local before; before=$(cat "$home/data/backlog.md")
   run "$home" u
   expect_code 0 "$RC" "idempotent re-run refused"
-  assert_contains "$OUT" "stories seeded now: 0" "re-run seeded again"
-  assert_contains "$OUT" "already present: 3" "re-run did not see the stories as present"
+  assert_contains "$OUT" "seeded: 0" "re-run seeded again"
+  assert_contains "$OUT" "already correct: 3" "re-run did not see the stories as already correct"
+  assert_contains "$OUT" "reconciled: 0" "re-run reconciled a correct backlog"
   [ "$(cat "$home/data/backlog.md")" = "$before" ] || fail "re-run mutated the backlog"
   pass "a re-run after a full promote is a clean no-op"
 }
@@ -170,27 +171,74 @@ test_partial_resume() {
 
   run "$home" u
   expect_code 0 "$RC" "partial resume failed"
-  assert_contains "$OUT" "stories seeded now: 2" "did not add exactly the missing stories"
-  assert_contains "$OUT" "already present: 1" "did not skip the present story"
+  assert_contains "$OUT" "seeded: 2" "did not add exactly the missing stories"
+  assert_contains "$OUT" "already correct: 1" "did not skip the present story"
   # T-01 appears exactly once (no duplicate).
   [ "$(grep -c '\- \[ \] T-01 ' "$home/data/backlog.md")" -eq 1 ] || fail "T-01 duplicated"
   pass "a re-run after a partial seed adds only the missing stories"
 }
 
-# --- botch detection: a case-mismatched prior seed is refused ----------------
-test_refuses_case_mismatch_seed() {
-  local home; home=$(make_home botch)
-  # A botched hand-seed like aimica's: lowercase ids under a short tag.
-  printf '## In flight\n\n## Queued\n- [ ] t-01 - [th] wrong-case seed (repo: svc) (kind: ship) (since 2026-08-10)\n## Done\n' > "$home/data/backlog.md"
+# --- R2 fix: a case/kebab-renamed story id is RECONCILED, not orphaned -------
+# The aimica failure: a story file renamed LH-01 -> lh-01 (here t-01 -> T-01)
+# left a stale lowercase backlog line under a mismatched tag forever. Re-running
+# promote must now converge that line to the canonical id/title/tag in place.
+test_reconciles_case_variant_seed() {
+  local home; home=$(make_home casevariant)
+  # A pre-seed of story T-01 under a wrong-case id and short tag (the aimica
+  # LH-01 -> lh-01 failure), carrying a hand-added note line that MUST survive.
+  printf '## In flight\n\n## Queued\n- [ ] t-01 - [th] wrong-case seed (repo: old) (kind: docs) (since 2026-08-10)\n  hand note: keep me\n## Done\n' > "$home/data/backlog.md"
   run "$home" u
-  expect_code 1 "$RC" "promote should refuse a mismatched prior seed"
-  assert_contains "$OUT" "MISMATCHED prior seed" "did not name the mismatch"
-  assert_contains "$OUT" "t-01" "did not point at the offending task"
+  expect_code 0 "$RC" "promote should reconcile a case-variant seed, not refuse"
+  assert_contains "$OUT" "renamed backlog id t-01 -> T-01" "did not report the id rewrite"
+  # Canonical line now present with the real id, tag, title, repo, kind...
+  assert_grep "- [ ] T-01 - [things] Story T-01 heading (repo: svc) (kind: ship)" \
+    "$home/data/backlog.md" "case-variant line not converged to canonical"
+  # ...the stale lowercase id gone...
+  assert_no_grep "- [ ] t-01" "$home/data/backlog.md" "stale lowercase line survived"
+  # ...and the hand-added note preserved.
+  assert_grep "hand note: keep me" "$home/data/backlog.md" "hand-added note was clobbered"
+  # T-02, T-03 seeded fresh; T-01 counted as renamed, not duplicated.
+  assert_contains "$OUT" "seeded: 2" "did not seed the two new stories"
+  assert_contains "$OUT" "renamed: 1" "did not count the rename"
+  [ "$(grep -c 'T-01' "$home/data/backlog.md")" -eq 1 ] || fail "T-01 duplicated"
+  pass "a case/kebab-renamed story id is reconciled in place, preserving state and notes"
+}
+
+# --- R2 fix: a present story whose title/repo/kind DRIFTED is refreshed -------
+test_reconciles_drifted_fields() {
+  local home; home=$(make_home drift)
+  run "$home" u
+  expect_code 0 "$RC" "first promote failed"
+  # Simulate a redesign after the first promote: the story T-02 title changed.
+  write_story "$home/data/plans/ep/stories" T-02 things svc main  # regenerate (heading same)
+  # Force a real drift by editing the seeded backlog line to a stale title/repo/kind.
+  perl -i -pe 's/- \[ \] T-02 - \[things\] Story T-02 heading \(repo: svc\) \(kind: ship\)/- [ ] T-02 - [things] STALE title (repo: wrong) (kind: docs)/' \
+    "$home/data/backlog.md"
+  assert_grep "STALE title" "$home/data/backlog.md" "fixture drift not applied"
+  run "$home" u
+  expect_code 0 "$RC" "reconcile re-run failed"
+  assert_contains "$OUT" "refreshed backlog entry T-02" "did not report the field refresh"
+  assert_contains "$OUT" "reconciled: 1" "did not count the reconcile"
+  assert_grep "- [ ] T-02 - [things] Story T-02 heading (repo: svc) (kind: ship)" \
+    "$home/data/backlog.md" "drifted line not converged to canonical"
+  assert_no_grep "STALE title" "$home/data/backlog.md" "stale title survived"
+  pass "an already-present story with drifted derived fields is rewritten to match the story"
+}
+
+# --- a genuine orphan tag (no matching story at all) is still refused --------
+test_refuses_orphan_epic_tag() {
+  local home; home=$(make_home orphan)
+  # A task under this epic's tag whose id matches NO story, even by case.
+  printf '## In flight\n\n## Queued\n- [ ] ghost-99 - [things] foreign task (repo: svc) (kind: ship) (since 2026-08-10)\n## Done\n' > "$home/data/backlog.md"
+  run "$home" u
+  expect_code 1 "$RC" "promote should refuse a foreign epic-tagged task"
+  assert_contains "$OUT" "will not auto-resolve" "did not name the unresolvable drift"
+  assert_contains "$OUT" "ghost-99" "did not point at the offending task"
   # Wrote nothing: epic still in the umbrella, no new tasks.
   assert_present "$home/umbrellas/u/plans/ep" "refusal still moved the epic dir"
   assert_absent "$home/data/plans/ep" "refusal wrote into data/plans"
   assert_no_grep "- [ ] T-01" "$home/data/backlog.md" "refusal seeded a second parallel task set"
-  pass "a mismatched prior seed is refused, not duplicated, and writes nothing"
+  pass "a foreign task under this epic's tag is refused, not duplicated, and writes nothing"
 }
 
 # --- validation refusals write nothing ---------------------------------------
@@ -227,9 +275,111 @@ test_manual_backend() {
   assert_grep "- [ ] T-01 - [things]" "$home/data/backlog.md" "manual seed did not render the line"
   # Idempotent under manual too.
   run "$home" u
-  assert_contains "$OUT" "stories seeded now: 0" "manual re-run seeded again"
+  assert_contains "$OUT" "seeded: 0" "manual re-run seeded again"
   [ "$(grep -c '\- \[ \] T-01 ' "$home/data/backlog.md")" -eq 1 ] || fail "manual re-run duplicated T-01"
   pass "the manual backlog backend seeds and stays idempotent"
+}
+
+# --- manual backend reconciles a drifted line in place -----------------------
+test_manual_backend_reconciles() {
+  local home; home=$(make_home manualrecon)
+  printf 'manual\n' > "$home/config/backlog-backend"
+  run "$home" u
+  expect_code 0 "$RC" "manual-backend promote failed"
+  # Drift T-01's fields (pure reconcile) AND case-rename T-02 -> t-02 (rename
+  # path) - both go through the manual backend's line-edit helpers.
+  perl -i -pe 's/- \[ \] T-01 - \[things\] Story T-01 heading \(repo: svc\) \(kind: ship\)/- [ ] T-01 - [things] OLD (repo: bad) (kind: docs)/' \
+    "$home/data/backlog.md"
+  perl -i -pe 's/- \[ \] T-02 /- [ ] t-02 /' "$home/data/backlog.md"
+  run "$home" u
+  expect_code 0 "$RC" "manual reconcile failed"
+  assert_contains "$OUT" "reconciled: 1" "manual backend did not reconcile the drift"
+  assert_contains "$OUT" "renamed backlog id t-02 -> T-02" "manual backend did not rewrite the case-variant id"
+  assert_grep "- [ ] T-01 - [things] Story T-01 heading (repo: svc) (kind: ship)" \
+    "$home/data/backlog.md" "manual reconcile did not converge the line"
+  assert_grep "- [ ] T-02 - [things] Story T-02 heading (repo: svc) (kind: ship)" \
+    "$home/data/backlog.md" "manual rename did not converge the renamed line"
+  assert_no_grep "OLD (repo: bad)" "$home/data/backlog.md" "manual reconcile left stale fields"
+  assert_no_grep "- [ ] t-02" "$home/data/backlog.md" "manual rename left the stale lowercase id"
+  pass "the manual backend rewrites drifted and case-renamed lines in place"
+}
+
+# --- verify: green on a healthy epic, red (naming the drift) on a doctored one -
+test_verify_green_then_red() {
+  local home; home=$(make_home verify)
+  run "$home" u
+  expect_code 0 "$RC" "promote failed"
+
+  # Green on the freshly promoted, healthy end-state.
+  run "$home" verify u
+  expect_code 0 "$RC" "verify should pass a healthy epic"
+  assert_contains "$OUT" "verify OK" "did not confirm the healthy end-state"
+
+  # (e) orphan: add a foreign epic-tagged task -> red naming it.
+  printf -- '- [ ] ghost-99 - [things] orphan (repo: svc) (kind: ship) (since 2026-08-10)\n' >> "$home/data/backlog.md"
+  run "$home" verify u
+  expect_code 1 "$RC" "verify should fail on an orphan tag"
+  assert_contains "$OUT" "(e)" "did not classify the orphan failure"
+  assert_contains "$OUT" "ghost-99" "did not name the orphan task"
+
+  # (d) drop a story's backlog entry -> red naming the missing brief.
+  run "$home" u >/dev/null 2>&1 || true   # (no-op; keep state)
+  local bl; bl=$(mktemp); grep -v ' T-03 ' "$home/data/backlog.md" | grep -v 'ghost-99' > "$bl"; mv "$bl" "$home/data/backlog.md"
+  run "$home" verify u
+  expect_code 1 "$RC" "verify should fail when a story has no backlog entry"
+  assert_contains "$OUT" "T-03" "did not name the unqueued story"
+  assert_contains "$OUT" "no backlog entry" "did not classify the missing brief"
+
+  # (b) break the back-symlink -> red.
+  rm -f "$home/umbrellas/u/plans/ep"
+  run "$home" verify u
+  expect_code 1 "$RC" "verify should fail on a missing back-symlink"
+  assert_contains "$OUT" "back-symlink" "did not name the broken symlink"
+  pass "verify passes a healthy epic and fails loudly naming the exact drift"
+}
+
+# --- verify + reconcile end to end: red before, green after promote ----------
+# The captain-facing repro: rename a story id (case) + drift its title, verify is
+# RED, re-run promote converges it, verify is GREEN.
+test_verify_red_then_green_after_reconcile() {
+  local home; home=$(make_home verifyrecon)
+  run "$home" u
+  expect_code 0 "$RC" "first promote failed"
+  # Doctor the backlog: T-02 -> case variant t-02 with a stale title.
+  perl -i -pe 's/- \[ \] T-02 - \[things\] Story T-02 heading \(repo: svc\) \(kind: ship\)/- [ ] t-02 - [things] STALE (repo: svc) (kind: ship)/' \
+    "$home/data/backlog.md"
+  run "$home" verify u
+  expect_code 1 "$RC" "verify should be red on the doctored backlog"
+  assert_contains "$OUT" "t-02" "verify did not name the case-variant drift"
+  # Re-run promote converges it...
+  run "$home" u
+  expect_code 0 "$RC" "reconcile re-run failed"
+  assert_contains "$OUT" "renamed backlog id t-02 -> T-02" "did not rewrite the drifted id"
+  # ...and verify is now green.
+  run "$home" verify u
+  expect_code 0 "$RC" "verify should be green after reconcile"
+  assert_contains "$OUT" "verify OK" "verify not green after reconcile"
+  pass "verify is red on drift and green after promote converges it"
+}
+
+# --- R3 regression: marker written before the move, healed on reconcile ------
+# 061c366 fixed R3 (marker recorded BEFORE the move so a crash between move and
+# seed still lets a re-run locate the moved copy). Keep it fixed: a promote must
+# leave a correct .promoted marker, and a re-run from the moved copy must work.
+test_marker_written_before_move() {
+  local home; home=$(make_home r3)
+  run "$home" u
+  expect_code 0 "$RC" "promote failed"
+  assert_grep "ep" "$home/umbrellas/u/.promoted" "marker not written on promote"
+  # Simulate a crash AFTER move+marker but BEFORE any seed: wipe the backlog and
+  # drop the source (already moved). A re-run must locate via the marker and seed.
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  [ -f "$home/umbrellas/u/.promoted" ] || fail "marker vanished"
+  run "$home" u
+  expect_code 0 "$RC" "reconcile-from-marker re-run failed"
+  assert_contains "$OUT" "already promoted to data/plans/ep" "did not reconcile from the marker"
+  assert_grep "- [ ] T-01 - [things]" "$home/data/backlog.md" "did not re-seed from the moved copy"
+  pass "the .promoted marker is written before the move and drives a clean reconcile re-run"
 }
 
 # --- fail-closed locate errors -----------------------------------------------
@@ -257,10 +407,16 @@ test_backsymlink_canonical_and_single_count
 test_rerun_heals_missing_backsymlink
 test_rerun_is_noop
 test_partial_resume
-test_refuses_case_mismatch_seed
+test_reconciles_case_variant_seed
+test_reconciles_drifted_fields
+test_refuses_orphan_epic_tag
 test_refuses_missing_pr_base
 test_refuses_unregistered_repo
 test_manual_backend
+test_manual_backend_reconciles
+test_verify_green_then_red
+test_verify_red_then_green_after_reconcile
+test_marker_written_before_move
 test_locate_errors
 
 echo "# all fm-umbrella-promote tests passed"

@@ -24,16 +24,20 @@ Run it with `FM_HOME` set to the home that owns the umbrella.
 
 ## What the engine does (do not reimplement)
 
-`fm-umbrella-promote.sh` is idempotent and fail-closed - all validation runs before any write, a re-run is a safe no-op, and a mismatched prior seed is refused rather than duplicated.
+`fm-umbrella-promote.sh` is idempotent and fail-closed - all validation and the full reconcile plan run before any write, and only unresolvable drift is refused.
 It:
 
 1. Locates the designed epic under the umbrella.
 2. Validates the epic slug and repos, and every story's `id:` / `epic:` / `repo:` / `pr_base:`, and that every involved repo is registered - writing nothing if any check fails.
 3. Makes the epic canonical in the home's plans (where dispatch reads it) and leaves a back-symlink in the umbrella pointing to it, so the captain keeps designing the epic in the lab with edits writing through to the real files - one source of truth, no separate "materialize on done" step.
 4. Seeds each story into the backlog, deriving the backlog id and `[<epic>]` tag from the story frontmatter so they match the story files by construction - the reason standard frontmatter matters.
+   On a re-run it CONVERGES the backlog to the canonical epic: it adds missing stories, rewrites a story whose title/repo/kind drifted, and rewrites a case/kebab-renamed backlog id in place (state and hand-added notes preserved).
 5. Stops at the sign-off gate and prints the remaining steps.
 
 It NEVER signs the epic, cuts a branch, or dispatches - those are judgment and approval steps, the same boundary the script itself holds.
+
+Run `fm-umbrella-promote.sh verify <umbrella-id>` at any time to assert the promoted end-state - epic canonical, back-symlink resolving, marker correct, every story queued with a resolving brief, no orphan tag - without mutating anything, exiting non-zero and naming every failure.
+Defer to `--help` for the exact contract.
 
 ## The steps it does not do (guide, never auto-run)
 
