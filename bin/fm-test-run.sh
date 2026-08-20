@@ -226,7 +226,8 @@ family_for_basename() {
       printf '%s\n' backend-dispatch
       ;;
     fm-check-register.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\
-    fm-teardown.test.sh|fm-x-mode.test.sh|fm-slack-captain-channel.test.sh|fm-slack-socket.test.sh)
+    fm-teardown.test.sh|fm-x-mode.test.sh|fm-slack-captain-channel.test.sh|fm-slack-socket.test.sh|\
+    fm-slack-captain-comms-guard.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
@@ -793,6 +794,19 @@ all_repo_tests() {
   done | LC_ALL=C sort
 }
 
+# Behavior-area fixture helpers (tests/*-helpers.sh). They are not suites, so
+# all_repo_tests skips them, but a suite that sources one inherits every name it
+# mentions - which is how a changed source path still resolves to a family after
+# a fixture is extracted out of the suite that used to own it.
+all_repo_test_helpers() {
+  local f
+  # shellcheck disable=SC2035
+  for f in tests/*-helpers.sh; do
+    [ -f "$f" ] || continue
+    printf '%s\n' "$f"
+  done | LC_ALL=C sort
+}
+
 normalize_script_path() {
   local p=$1
   case "$p" in
@@ -847,8 +861,13 @@ select_family() {
   [ "$found" -eq 1 ] || die "no tests mapped to family '$want'"
 }
 
+# Emit the families of every suite that names $needle, following one level of
+# shared-fixture indirection: when no suite names it directly, a tests/*-helpers.sh
+# that does stands in for the suites which source that helper. Without that hop,
+# extracting a fixture out of a suite silently unmaps every source path only that
+# fixture named, and --changed dies on it.
 families_for_test_reference() {
-  local needle=$1 s
+  local needle=$1 s h helper_name
   local found=0
   while IFS= read -r s; do
     [ -n "$s" ] || continue
@@ -857,6 +876,20 @@ families_for_test_reference() {
       found=1
     fi
   done < <(all_repo_tests)
+  [ "$found" -eq 0 ] || return 0
+  while IFS= read -r h; do
+    [ -n "$h" ] || continue
+    helper_name=$(basename "$h")
+    [ "$helper_name" != "$needle" ] || continue
+    grep -Fq "$needle" "$h" || continue
+    while IFS= read -r s; do
+      [ -n "$s" ] || continue
+      if grep -Fq "$helper_name" "$s"; then
+        family_for_basename "$(basename "$s")"
+        found=1
+      fi
+    done < <(all_repo_tests)
+  done < <(all_repo_test_helpers)
   [ "$found" -eq 1 ]
 }
 

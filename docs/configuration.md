@@ -536,6 +536,7 @@ While both transports run, the unchanged full-window poll is the gap-recovery pa
 Ordinary message classification remains owned by `fms_is_non_captain_message` in `bin/fm-slack-lib.sh`; both transports use the same inbox, acknowledgement, offer, and wake formats.
 
 `bin/fm-slack-post.sh` posts and updates messages only on the configured channel id.
+Its captain message size guard - caps, the gitignored `config/slack-captain-comms-lines` and `config/slack-captain-comms-chars` overrides, `--long`, exemptions, and fail-open - is specified in full in the `bin/fm-slack-post.sh` header.
 `board` creates one living status message and later edits it in place via `chat.update`, recording `state/slack-board.meta`.
 Thread replies use `message <text> <thread_ts>`.
 

@@ -974,7 +974,7 @@ slack_captain_setup() {
 
   token=
   [ -f "$env_file" ] && token=$(fmx_env_get FM_SLACK_BOT_TOKEN "$env_file")
-  channel_id=$(fms_config_channel_read "$channel_file")
+  channel_id=$(fms_config_value_read "$channel_file")
 
   slack_remove_artifacts() {
     local failed=0
@@ -1044,13 +1044,13 @@ slack_captain_setup() {
   # still a quiet shape of the reported defect. A post-convention env already
   # names the new source in its comment, so a later deleted source file falls
   # through to the default instead of re-adopting a stale value.
-  cadence_value=$(fms_cadence_read "$cadence_file")
+  cadence_value=$(fms_positive_int_config_read "$cadence_file")
   adopted=0
   if [ -z "$cadence_value" ] && [ -f "$cadence" ] \
     && ! grep -q 'slack-captain-cadence' "$cadence" 2>/dev/null; then
     existing=$(fmx_env_get FM_SLACK_CHECK_INTERVAL "$cadence")
     if [ -n "$existing" ]; then
-      valid=$(fms_cadence_emit "$existing")
+      valid=$(fms_positive_int_emit "$existing")
       if [ -n "$valid" ] && [ "$valid" -ne "$default_cadence" ]; then
         cadence_value=$valid
         adopted=1

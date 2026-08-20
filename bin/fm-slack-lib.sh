@@ -54,7 +54,12 @@ fms_poll_shim_valid() {
   cmp -s "$file" <(fms_poll_shim_content "$home" "$root")
 }
 
-fms_config_channel_read() {
+# Read a single value from an operator-owned config file: the first non-comment
+# line, trimmed, or empty when the file is absent or holds nothing. This is the
+# single owner of the one-value-per-file operator config read; the captain
+# channel and user ids read it raw, and fms_positive_int_config_read layers the
+# positive-integer contract on top of it.
+fms_config_value_read() {
   local file=$1 line
   [ -f "$file" ] || return 0
   line=$(grep -Ev '^[[:space:]]*(#|$)' "$file" 2>/dev/null | head -1) || return 0
@@ -63,12 +68,12 @@ fms_config_channel_read() {
   printf '%s' "$line"
 }
 
-# Validate and emit a Slack captain poll cadence (positive integer seconds).
+# Validate and emit a positive integer held in an operator-owned config file.
 # Empty, non-numeric, or zero input emits nothing so the caller falls back to
-# the built-in default. This is the single owner of the cadence format check;
-# both the operator-owned source reader and the one-time adoption from a
-# pre-convention generated file route through it.
-fms_cadence_emit() {
+# its built-in default. This is the single owner of that format check; the
+# operator-owned source readers, the captain comms caps, and the one-time
+# adoption from a pre-convention generated file all route through it.
+fms_positive_int_emit() {
   local v=$1
   case "$v" in
     ''|*[!0-9]*) return 0 ;;
@@ -77,19 +82,13 @@ fms_cadence_emit() {
   printf '%s' "$v"
 }
 
-# Read the operator-owned Slack captain poll cadence (seconds) from
-# config/slack-captain-cadence: the first positive integer on a non-comment
-# line, or empty when the file is absent or holds no valid integer so the
-# caller falls back to the default. Bootstrap reads but never overwrites this
-# file, so an operator's cadence choice survives regeneration; this is the same
-# operator-owned-config mechanism config/slack-captain-channel uses.
-fms_cadence_read() {
-  local file=$1 line
-  [ -f "$file" ] || return 0
-  line=$(grep -Ev '^[[:space:]]*(#|$)' "$file" 2>/dev/null | head -1) || return 0
-  line=${line#"${line%%[![:space:]]*}"}
-  line=${line%"${line##*[![:space:]]}"}
-  fms_cadence_emit "$line"
+# The shared operator-config read constrained to a positive integer: empty when
+# the file is absent or holds no valid integer, so the caller falls back to its
+# built-in default. The captain poll cadence (config/slack-captain-cadence, which
+# bootstrap reads but never overwrites so an operator's choice survives
+# regeneration) and the captain comms caps both route through it.
+fms_positive_int_config_read() {
+  fms_positive_int_emit "$(fms_config_value_read "$1")"
 }
 
 # Resolve the watcher's poll and check intervals from the operator-owned env files.
@@ -140,7 +139,7 @@ fms_load_config() {
   if [ -n "${FM_SLACK_CAPTAIN_CHANNEL_ID+x}" ]; then
     FMS_CHANNEL_ID=${FM_SLACK_CAPTAIN_CHANNEL_ID-}
   else
-    FMS_CHANNEL_ID=$(fms_config_channel_read "$channel_file")
+    FMS_CHANNEL_ID=$(fms_config_value_read "$channel_file")
   fi
   if [ -n "${FM_SLACK_APP_TOKEN+x}" ]; then
     FMS_APP_TOKEN=${FM_SLACK_APP_TOKEN-}
@@ -150,7 +149,7 @@ fms_load_config() {
   if [ -n "${FM_SLACK_CAPTAIN_USER_ID+x}" ]; then
     FMS_CAPTAIN_USER_ID=${FM_SLACK_CAPTAIN_USER_ID-}
   else
-    FMS_CAPTAIN_USER_ID=$(fms_config_channel_read "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/slack-captain-user")
+    FMS_CAPTAIN_USER_ID=$(fms_config_value_read "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/slack-captain-user")
   fi
   if [ -n "${FM_SLACK_API_URL+x}" ]; then
     FMS_API=${FM_SLACK_API_URL-}
@@ -420,4 +419,128 @@ fms_poll_cursor_read() {
 
 fms_poll_cursor_write() {
   :
+}
+
+# Captain-facing outbound message size guard for bin/fm-slack-post.sh, which
+# owns the guard contract. This file owns the built-in defaults, the optional
+# operator-owned caps, and the measurement; the post client calls
+# fms_captain_comms_guard before message and update only (board stays exempt).
+FMS_CAPTAIN_COMMS_LINES_DEFAULT=12
+FMS_CAPTAIN_COMMS_CHARS_DEFAULT=1200
+FMS_CAPTAIN_COMMS_LINES_MAX=
+FMS_CAPTAIN_COMMS_CHARS_MAX=
+FMS_CAPTAIN_COMMS_LINE_COUNT=
+FMS_CAPTAIN_COMMS_CHAR_COUNT=
+
+# One stderr line naming why the guard is standing aside. Delivery is unaffected;
+# this is the evidence trail for a guard that is silently off. Emitted where the
+# reason is known because the cap reader runs inside a command substitution.
+fms_captain_comms_stand_down() {
+  printf 'slack-captain-comms: guard stood down: %s\n' "$1" >&2
+}
+
+# Read one operator-owned cap file through the shared positive-integer reader.
+# A symlink is followed to its target, so an operator may keep the file in a
+# dotfiles checkout. An absent or malformed file falls back to the built-in
+# default; a file that is present but the guard cannot read - including a
+# dangling symlink - returns non-zero so the caller fails open.
+fms_captain_comms_cap_read() {
+  local file=$1 default=$2 value
+  if [ -e "$file" ]; then
+    if [ ! -r "$file" ]; then
+      fms_captain_comms_stand_down "cannot read cap file $file"
+      return 1
+    fi
+  elif [ -L "$file" ]; then
+    fms_captain_comms_stand_down "cap file $file is a dangling symlink"
+    return 1
+  fi
+  value=$(fms_positive_int_config_read "$file")
+  printf '%s' "${value:-$default}"
+}
+
+# Resolve both caps from config/slack-captain-comms-lines and
+# config/slack-captain-comms-chars. Either file being present but unreadable
+# fails the whole load, so the caps are all-or-nothing.
+fms_captain_comms_limits_load() {
+  local config_dir lines chars
+  config_dir="${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}"
+  lines=$(fms_captain_comms_cap_read \
+    "$config_dir/slack-captain-comms-lines" "$FMS_CAPTAIN_COMMS_LINES_DEFAULT") || return 1
+  chars=$(fms_captain_comms_cap_read \
+    "$config_dir/slack-captain-comms-chars" "$FMS_CAPTAIN_COMMS_CHARS_DEFAULT") || return 1
+  FMS_CAPTAIN_COMMS_LINES_MAX=$lines
+  FMS_CAPTAIN_COMMS_CHARS_MAX=$chars
+  return 0
+}
+
+fms_captain_comms_line_count() {
+  local text=$1 awk_cmd=${FMS_CAPTAIN_COMMS_MEASURE_AWK:-awk} count
+  FMS_CAPTAIN_COMMS_LINE_COUNT=
+  count=$(command -v "$awk_cmd" >/dev/null 2>&1 \
+    && printf '%s' "$text" | "$awk_cmd" 'END { print NR + 0 }')
+  case "$count" in
+    ''|*[!0-9]*)
+      fms_captain_comms_stand_down 'cannot count message lines'
+      return 1
+      ;;
+  esac
+  FMS_CAPTAIN_COMMS_LINE_COUNT=$count
+  return 0
+}
+
+# Count characters, not bytes: dropping UTF-8 continuation bytes (0x80-0xBF)
+# leaves exactly one byte per codepoint, so the count matches what the sender
+# typed regardless of the caller's locale. wc -m cannot be used here because CI
+# pins LC_ALL=C, where it degrades to a byte count on some platforms.
+fms_captain_comms_char_count() {
+  local text=$1 count
+  FMS_CAPTAIN_COMMS_CHAR_COUNT=
+  count=$(set -o pipefail; printf '%s' "$text" \
+    | LC_ALL=C tr -d '\200-\277' \
+    | LC_ALL=C wc -c \
+    | tr -d '[:space:]') || count=
+  case "$count" in
+    ''|*[!0-9]*)
+      fms_captain_comms_stand_down 'cannot count message characters'
+      return 1
+      ;;
+  esac
+  FMS_CAPTAIN_COMMS_CHAR_COUNT=$count
+  return 0
+}
+
+fms_captain_comms_measure() {
+  local text=$1
+  fms_captain_comms_line_count "$text" || return 1
+  fms_captain_comms_char_count "$text"
+}
+
+# fms_captain_comms_guard <text> [long-reason]
+# Passes at or under both caps. Over either cap refuses with one stderr line
+# naming that cap. A non-empty long-reason records the override and bypasses
+# the guard. Internal load or measurement failure fails open and allows delivery.
+fms_captain_comms_guard() {
+  local text=$1 long_reason=${2:-}
+  if [ -n "$long_reason" ]; then
+    printf 'slack-captain-comms: --long override: %s\n' "${long_reason//$'\n'/ }" >&2
+    return 0
+  fi
+  if ! fms_captain_comms_limits_load; then
+    return 0
+  fi
+  if ! fms_captain_comms_measure "$text"; then
+    return 0
+  fi
+  if [ "$FMS_CAPTAIN_COMMS_LINE_COUNT" -gt "$FMS_CAPTAIN_COMMS_LINES_MAX" ]; then
+    printf 'error: captain message exceeds lines cap (%s > %s)\n' \
+      "$FMS_CAPTAIN_COMMS_LINE_COUNT" "$FMS_CAPTAIN_COMMS_LINES_MAX" >&2
+    return 1
+  fi
+  if [ "$FMS_CAPTAIN_COMMS_CHAR_COUNT" -gt "$FMS_CAPTAIN_COMMS_CHARS_MAX" ]; then
+    printf 'error: captain message exceeds characters cap (%s > %s)\n' \
+      "$FMS_CAPTAIN_COMMS_CHAR_COUNT" "$FMS_CAPTAIN_COMMS_CHARS_MAX" >&2
+    return 1
+  fi
+  return 0
 }

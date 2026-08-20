@@ -5,10 +5,31 @@
 # Every path refuses a channel id that does not match configuration.
 #
 # Usage:
-#   fm-slack-post.sh message <text> [thread_ts]
-#   fm-slack-post.sh update <message_ts> <text>
+#   fm-slack-post.sh [--long <reason>] message <text> [thread_ts]
+#   fm-slack-post.sh [--long <reason>] update <message_ts> <text>
 #   fm-slack-post.sh board <text>   # chat.update when state/slack-board.ts exists,
 #                                   # otherwise chat.postMessage and record ts
+#
+# Captain message size guard (this header is the contract owner):
+# The captain-facing message and update paths cap size before delivery at 12
+# lines and 1200 characters by default. An operator overrides either cap with a
+# single positive integer in gitignored config/slack-captain-comms-lines or
+# config/slack-captain-comms-chars; an absent or malformed file keeps that
+# built-in default. Characters are counted as characters, not bytes, so UTF-8
+# text is measured the way the sender typed it. At or under both caps passes;
+# over either cap refuses with one line naming the failed cap, so the sender can
+# shorten the message or link the overflow from a file. --long <reason> bypasses
+# the guard and records the reason on stderr, collapsed to one line. The fleet
+# board path, wedge alarms, and error paths stay exempt, and board ignores a
+# --long silently rather than losing a post the exemption already allows. If the
+# guard cannot load its configuration or measure the text it steps aside and
+# allows delivery, announcing itself with one stderr line reading
+# "slack-captain-comms: guard stood down: <reason>" whose reason distinguishes an
+# unreadable cap file, a dangling cap symlink, and a failed measurement; that
+# line is the evidence trail for a guard that is silently off. So
+# FMS_CAPTAIN_COMMS_MEASURE_AWK - the awk the line count runs, overridable the
+# way FM_SLACK_CURL_BIN overrides curl - stands the guard down for every message
+# when it names a command that is missing or fails.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,15 +101,29 @@ ts=$ts
 EOF
 }
 
+LONG_REASON=
+while [ "${1-}" = --long ]; do
+  shift
+  [ -n "${1-}" ] || die "usage: --long requires a one-line reason"
+  LONG_REASON=$1
+  shift
+done
+
+captain_comms_guard_or_die() {
+  fms_captain_comms_guard "$1" "$LONG_REASON" || exit 1
+}
+
 cmd=${1-}
 shift || true
 case "$cmd" in
   message)
-    [ "$#" -ge 1 ] || die "usage: fm-slack-post.sh message <text> [thread_ts]"
+    [ "$#" -ge 1 ] || die "usage: fm-slack-post.sh [--long <reason>] message <text> [thread_ts]"
+    captain_comms_guard_or_die "$1"
     post_message "$@"
     ;;
   update)
-    [ "$#" -eq 2 ] || die "usage: fm-slack-post.sh update <message_ts> <text>"
+    [ "$#" -eq 2 ] || die "usage: fm-slack-post.sh [--long <reason>] update <message_ts> <text>"
+    captain_comms_guard_or_die "$2"
     update_message "$1" "$2"
     ;;
   board)
@@ -105,6 +140,6 @@ case "$cmd" in
     fi
     ;;
   *)
-    die "usage: fm-slack-post.sh message|update|board ..."
+    die "usage: fm-slack-post.sh [--long <reason>] message|update ... | board <text>"
     ;;
 esac

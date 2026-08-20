@@ -82,6 +82,8 @@ config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source
 config/slack-captain-channel  configured private channel id for the Slack captain channel; LOCAL, gitignored
 config/slack-captain-user     configured captain Slack user id required by the Socket Mode consumer; LOCAL, gitignored
 config/slack-captain-cadence  operator-owned Slack captain poll cadence in seconds; LOCAL, gitignored; bootstrap reads it and on the first run after this convention adopts a pre-convention value from config/slack-captain.env, then never overwrites it so the value survives regeneration (docs/configuration.md "Slack captain channel")
+config/slack-captain-comms-lines  operator-owned captain-facing Slack message line cap; LOCAL, gitignored; absent or malformed uses the built-in default (bin/fm-slack-post.sh header)
+config/slack-captain-comms-chars  operator-owned captain-facing Slack message character cap; LOCAL, gitignored; absent or malformed uses the built-in default (bin/fm-slack-post.sh header)
 config/slack-captain.env      generated Slack captain channel watcher cadence from config/slack-captain-cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -454,6 +456,7 @@ Read them as evidence, then send the plain-English outcome and consequence.
 Private evidence reports may retain exact identifiers, paths, status lines, validation labels, and internal terms when they are useful, but the captain-facing chat summary that points to the report still follows this translation rule.
 
 Every escalation must stand alone and remain concise.
+Concise is also enforced mechanically before delivery: the `bin/fm-slack-post.sh` header owns the captain-message size caps and the `--long <reason>` escape.
 Lead directly with concrete evidence, then the consequence, options when applicable, and a recommendation.
 Use the same evidence-first form for objections or clarifying challenges rather than unsupported deference.
 

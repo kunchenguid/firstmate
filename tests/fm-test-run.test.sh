@@ -117,6 +117,12 @@ init_changed_fixture_repo() {
     chmod +x "$repo/tests/$script"
   done
   : >"$repo/tests/lib.sh"
+  # A behavior-area fixture extracted out of a suite: only the helper names the
+  # shared source, and only the suite names the helper.
+  printf '#!/usr/bin/env bash\n# drives bin/fm-fixture-shared.sh\n' \
+    >"$repo/tests/fixture-helpers.sh"
+  printf '# tests/fixture-helpers.sh\n' >>"$repo/tests/fm-pr-merge.test.sh"
+  : >"$repo/bin/fm-fixture-shared.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-launch-axis-lib.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
@@ -169,6 +175,18 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-brief.test.sh" "launch-axis changes select pure contract coverage"
   git -C "$repo" add bin/fm-launch-axis-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm launch-axis-change
+
+  printf '\n' >>"$repo/bin/fm-fixture-shared.sh"
+  set +e
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD 2>"$tmp/helper-err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "source named only by a shared fixture must stay mapped: $(cat "$tmp/helper-err")"
+  assert_contains "$listed" "tests/fm-pr-merge.test.sh" \
+    "source named only by a shared fixture selects the suites sourcing that fixture"
+  git -C "$repo" add bin/fm-fixture-shared.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fixture-shared-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"
