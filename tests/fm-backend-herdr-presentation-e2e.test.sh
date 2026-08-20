@@ -207,9 +207,12 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  exit 0
-fi
+# No pool faking here. The armed abort is driven entirely by the herdr stub
+# above, which reports a non-worktree foreground_cwd for these panes, so the
+# spawn still fails at the worktree validation. Letting the real pool answer
+# closed by the abort cleanup this sequence checks. fm-spawn leaves the slot it
+# leased in place on an abort rather than returning it, so nothing here races
+# with the pane cleanup below.
 exec "$REAL_TREEHOUSE" "$@"
 SH
 
@@ -838,16 +841,29 @@ grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 
   || fail "post-create abort fixture B did not reach the armed validation failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
-ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
-  $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
-  $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
-')
-case "$ABORT_SEQUENCE" in
-  $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
-  *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
-esac
+# What must hold after a post-create abort is that the abort left nothing
+# behind, asserted POSITIVELY rather than as the absence of a close call.
+#
+# Whether the projected pane is closed explicitly by the abort cleanup or ends
+# on its own is a mechanism, and it changed when fm-spawn began leasing the
+# slot: the pane used to be kept alive incidentally by the subshell the old
+# in-pane `treehouse get` left running, and a pane moved with `cd` has no such
+# process. The fact is the same either way, and the fact is what is asserted.
+#
+# The distinction that DOES matter is "no live agent" versus "could not tell".
+# A self-terminated pane must be AUTHORITATIVELY gone, which is the structured
+# pane_not_found below - an unreadable, ambiguous, or still-live response fails
+# here rather than being accepted as equivalent to a close.
+for abort_task in abort-a abort-b; do
+  abort_pane=$(cat "$POST_CREATE_ABORT_CONTROL/$abort_task/task-pane" 2>/dev/null || true)
+  [ -n "$abort_pane" ] || fail "post-create abort fixture $abort_task recorded no task pane"
+  abort_probe=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" \
+    pane get "$abort_pane" 2>&1 || true)
+  printf '%s' "$abort_probe" | jq -e '.error.code == "pane_not_found"' >/dev/null 2>&1 \
+    || fail "post-create abort left pane $abort_pane for $abort_task in a state that is not authoritatively gone: $abort_probe"
+  [ ! -e "$HOME_DIR/state/$abort_task.meta" ] \
+    || fail "post-create abort left a registered endpoint behind for $abort_task"
+done
 ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || ($1 == "pane-close" && $4 != a && $4 != b)) && $2 != $3 { print }
 ')
@@ -857,16 +873,9 @@ assert_focus_is "$CAPTAIN_FOCUS" "concurrent post-create abort cleanup"
 assert_cleanup_focus_preserved "$ABORT_FOCUS_START" "$ABORT_A_PANE" "$CAPTAIN_FOCUS"
 assert_cleanup_focus_preserved "$ABORT_FOCUS_START" "$ABORT_B_PANE" "$CAPTAIN_FOCUS"
 assert_no_ordering_lifecycle_calls_since "$ABORT_START" "concurrent post-create abort cleanup"
-for ABORT_PANE in "$ABORT_A_PANE" "$ABORT_B_PANE"; do
-  if lab pane get "$ABORT_PANE" >/dev/null 2>&1; then
-    fail "serialized post-create abort cleanup left exact task pane $ABORT_PANE alive"
-  fi
-done
-[ ! -e "$HOME_DIR/state/abort-a.meta" ] && [ ! -e "$HOME_DIR/state/abort-b.meta" ] \
-  || fail "post-create abort fixtures published task metadata before launch"
 rm -rf "$POST_CREATE_ABORT_CONTROL"
 rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation"
-pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration"
+pass "real Herdr lab: concurrent post-create aborts leave no pane and no registered endpoint, with exact focus restoration"
 
 SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \

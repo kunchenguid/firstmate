@@ -385,6 +385,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/worktree-pool-ownership.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/watcher-continuity.md",
       "audience": "operator-current"
     },

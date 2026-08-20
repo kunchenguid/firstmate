@@ -661,6 +661,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" pi
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

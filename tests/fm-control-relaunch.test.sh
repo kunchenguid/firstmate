@@ -52,6 +52,9 @@ trap relaunch_cleanup EXIT
 make_tmux_stub() {  # <dir>
   local fb="$1/fakebin"
   mkdir -p "$fb"
+  # fm-spawn runs the pool CLI itself to lease the worktree, and the portable
+  # CI lanes do not install treehouse.
+  fm_fake_treehouse "$fb"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u

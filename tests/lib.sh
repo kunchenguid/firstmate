@@ -170,6 +170,26 @@ SH
   done
 }
 
+# fm_fake_treehouse <fakebin>: stub the pool CLI for tests that drive a real
+# crewmate spawn. `get` must PRINT a worktree path, because fm-spawn leases the
+# slot itself (`treehouse get --lease`) rather than typing a bare `treehouse
+# get` into the pane; see bin/fm-worktree-claim-lib.sh for why the slot is owned
+# for the life of the task. The path comes from FM_FAKE_LEASE_PATH, falling back
+# to FM_FAKE_PANE_PATH for the common fixture that models a single pooled
+# directory. Every other verb succeeds silently, as before.
+fm_fake_treehouse() {
+  local fakebin=$1
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = get ]; then
+  printf '%s\n' "${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-}}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation

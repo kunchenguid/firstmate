@@ -5,7 +5,14 @@
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
+# hard-resets/removes the worktree and kills its processes. Also REFUSES when
+# another LIVE task's metadata still claims the same worktree: returning the
+# slot would reset that task's copy and delete the branch checked out in it.
+# bin/fm-worktree-claim-lib.sh owns that ownership contract.
+# The pool return itself is forced only when THIS script was given --force: a
+# plain `treehouse return` already returns a clean worktree without prompting,
+# so forcing unconditionally only served to discard uncommitted work that the
+# pool would otherwise have preserved. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
@@ -61,7 +68,7 @@
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
-# non-linked worktree, .git/index.lock) that makes `treehouse return --force` fail
+# non-linked worktree, .git/index.lock) that makes the pool return fail
 # with Unable to create '...index.lock': File exists. That lock is usually transient
 # (the dying process finishes or exits within seconds) and must never be force-deleted
 # while a live git process might still own it - the fix is patience, not rm.
@@ -148,6 +155,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-worktree-claim-lib.sh
+. "$SCRIPT_DIR/fm-worktree-claim-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
@@ -1046,18 +1055,61 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
-# Return a worktree/home via `treehouse return --force`, tolerating a transient or
-# stale git index.lock left by a killed crew process. See the script header.
+# Run one pool return and prove it happened.
+#
+# `--force` is NOT unconditional for a task worktree. A plain `treehouse return` returns a
+# clean worktree with no prompt; the only thing --force adds is turning "there
+# are uncommitted changes, abort and keep them" into "clean and return anyway".
+# Cleanup has its own landed-work refusals for that decision, and --force on
+# THIS script is the captain's explicit discard authority, so the pool flag now
+# follows that authority instead of always forcing. Work that appears between
+# the safety check and the return - the agent is alive until the return kills
+# it - is then preserved by the pool rather than silently discarded.
+#
+# The outcome must be verified rather than trusted: an aborted return exits 0
+# and leaves the slot held, so a bare exit-code check would report a return that
+# never happened and leak the slot out of the pool. A genuine return cleans and
+# resets the worktree, so a still-dirty tree afterwards is proof it aborted.
+#
+# A secondmate HOME release passes always-force to keep its previous behavior:
+# that retirement has its own emptiness guards, and a home's local material is
+# gitignored rather than uncommitted work. Only task worktrees, which hold a
+# crewmate's actual changes, follow the captain's authority here.
+teardown_pool_return_once() {  # <cd-dir> <dir> [always-force] -> 0 on a proven return
+  local cd_dir=$1 dir=$2 policy=${3:-captain} rc
+  TEARDOWN_POOL_RETURN_OUT=
+  if [ "$policy" = always-force ] || [ "$FORCE" = "--force" ]; then
+    TEARDOWN_POOL_RETURN_OUT=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 )
+    return $?
+  fi
+  TEARDOWN_POOL_RETURN_OUT=$( ( cd "$cd_dir" && treehouse return "$dir" </dev/null ) 2>&1 )
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  # Proven-return check. A worktree that no longer exists was returned and
+  # removed; one that is still dirty was not returned at all.
+  [ -d "$dir" ] || return 0
+  if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
+    TEARDOWN_POOL_RETURN_OUT="$TEARDOWN_POOL_RETURN_OUT
+teardown: the pool declined to return $dir because it still holds uncommitted changes; they were preserved, not discarded. Land or discard them, or rerun with --force after explicit approval."
+    return 1
+  fi
+  return 0
+}
+
+# Return a worktree/home via the pool, tolerating a transient or stale git
+# index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
-  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} policy=${5:-captain}
   local out lock attempt=0 max_retries lock_desc
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if teardown_pool_return_once "$cd_dir" "$dir" "$policy"; then
+    out=$TEARDOWN_POOL_RETURN_OUT
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
+  out=$TEARDOWN_POOL_RETURN_OUT
   [ -n "$out" ] && printf '%s\n' "$out" >&2
 
   if ! treehouse_return_is_index_lock_error "$out"; then
@@ -1079,11 +1131,13 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if teardown_pool_return_once "$cd_dir" "$dir" "$policy"; then
+      out=$TEARDOWN_POOL_RETURN_OUT
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
     fi
+    out=$TEARDOWN_POOL_RETURN_OUT
     [ -n "$out" ] && printf '%s\n' "$out" >&2
 
     if ! treehouse_return_is_index_lock_error "$out"; then
@@ -1106,11 +1160,13 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if teardown_pool_return_once "$cd_dir" "$dir" "$policy"; then
+        out=$TEARDOWN_POOL_RETURN_OUT
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
       fi
+      out=$TEARDOWN_POOL_RETURN_OUT
       [ -n "$out" ] && printf '%s\n' "$out" >&2
       echo "teardown: $label return still failing after stale-lock cleanup" >&2
       return 1
@@ -1736,7 +1792,7 @@ remove_firstmate_home() {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
-    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
+    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" "" always-force || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
@@ -2376,25 +2432,79 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
-# Worktree collision guard: when another task's metadata claims the same
-# worktree, skip the CWD-based process reaper to avoid killing a sibling
-# task's agent. Multiple tasks sharing a project directory is a supported
-# pattern (e.g. an anchor task alongside projected workers), so teardown
-# itself must proceed - only the CWD reap is unsafe.
+# Worktree collision guard: another task's metadata claims the same worktree.
+#
+# Two different dangers live here, and the original guard only handled the
+# first. Skipping the CWD reap protects a sibling's PROCESSES; it does nothing
+# about the destructive steps further down, which reset the shared directory,
+# delete whatever branch is checked out in it, and hand the slot back to the
+# pool. A cleanup that warned "also claims worktree ... protecting sibling" and
+# then printed "Worktree returned to pool" a moment later destroyed exactly the
+# work the warning named.
+#
+# So the response is split by what the other record actually is:
+#   - ANY other claimant (live or not) still suppresses the CWD reap, because
+#     killing by directory cannot tell whose process it found. Multiple tasks
+#     sharing a project directory is a supported pattern (e.g. an anchor task
+#     alongside projected workers), so this alone never blocks cleanup.
+#   - A LIVE claimant additionally refuses the whole cleanup, because every
+#     destructive step below would take that task's copy with it. Like every
+#     other unlanded-work refusal in this script, --force is the captain's
+#     explicit discard authority and overrides it.
 _td_wt_collision=0
+_td_wt_live_claimant=
 if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -d "$WT" ]; then
+  _td_wt_real=$(fm_worktree_claim_realpath "$WT")
   for _td_other_meta in "$STATE"/*.meta; do
     [ -f "$_td_other_meta" ] || continue
     _td_other_id=$(basename "$_td_other_meta" .meta)
     [ "$_td_other_id" != "$ID" ] || continue
     _td_other_wt=$(fm_meta_get "$_td_other_meta" worktree)
-    if [ -n "$_td_other_wt" ] && [ "$_td_other_wt" = "$WT" ]; then
-      echo "warning: task $_td_other_id also claims worktree $WT; skipping CWD-based process reap to protect sibling" >&2
-      _td_wt_collision=1
-      break
+    [ -n "$_td_other_wt" ] || continue
+    [ "$(fm_worktree_claim_realpath "$_td_other_wt")" = "$_td_wt_real" ] || continue
+    echo "warning: task $_td_other_id also claims worktree $WT; skipping CWD-based process reap to protect sibling" >&2
+    _td_wt_collision=1
+    if [ -z "$_td_wt_live_claimant" ] \
+      && [ "$(fm_worktree_claim_liveness "$_td_other_meta")" = live ]; then
+      _td_wt_live_claimant=$_td_other_id
     fi
   done
 fi
+if [ -n "$_td_wt_live_claimant" ] && [ "$FORCE" != "--force" ]; then
+  echo "REFUSED: live task $_td_wt_live_claimant still claims worktree $WT." >&2
+  echo "Returning it to the pool would reset that copy, delete the branch checked out in it, and end that task's run." >&2
+  echo "Clean up $_td_wt_live_claimant first, or use --force after explicit approval to discard its work." >&2
+  exit 1
+fi
+# Decide the projection's retire candidacy HERE, before anything below kills
+# what it inspects. The candidacy test verifies the journal against the LIVE
+# workspace/pane binding, and the pane's own shell now sits inside the task
+# worktree, so both the CWD process reap and the worktree return end the pane
+# before it can be verified - which quarantined the journal of a perfectly
+# ordinary projected teardown. Deciding first keeps the exact-binding
+# requirement fully intact and only stops it from racing kills this same
+# function performs a few lines later.
+HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_SESSION=
+HERDR_PRESENTATION_PANE=
+if [ "$BACKEND" = herdr ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  fm_backend_source herdr || true
+  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
+  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_PRESENTATION_PANE" ] \
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
+     && fm_backend_herdr_projection_endpoint_matches_journal \
+       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  fi
+fi
+
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
   if [ "$_td_wt_collision" -eq 0 ]; then
@@ -2459,31 +2569,18 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+  # A scout worktree is declared scratch: validate_worktree_teardown_safety
+  # exempts it from the uncommitted-work refusal by design, and its deliverable
+  # is the report outside the worktree. Forcing its return therefore discards
+  # nothing the fleet meant to keep, and NOT forcing it would strand every
+  # ordinary scout cleanup on the debris a scout is expected to leave behind.
+  # A ship worktree holds the work itself, so it follows captain authority.
+  worktree_return_policy=captain
+  [ "$KIND" != scout ] || worktree_return_policy=always-force
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" "$worktree_return_policy" || {
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
-fi
-
-HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_SESSION=
-HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
-   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  fm_backend_source herdr || true
-  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
-  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
-     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
-  fi
 fi
 
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
