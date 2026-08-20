@@ -947,7 +947,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         timer = timers.setTimeout(() => {
           if (active !== session || session.expiryTimer !== timer) return;
           session.expiryTimer = null;
-          cachedQuotaView(session, view.freshUntilMs);
+          cachedQuotaView(session, now());
           render(session);
         }, Math.max(0, view.freshUntilMs - now()));
         session.expiryTimer = timer;

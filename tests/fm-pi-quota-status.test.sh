@@ -123,16 +123,140 @@ const configuredCodexReset = Number(process.env.FM_QUOTA_TEST_FIRST_RESET_MS);
 const codexFirstResetMs = Number.isFinite(configuredCodexReset) && configuredCodexReset > 0
   ? configuredCodexReset
   : 6 * 24 * 60 * 60 * 1000;
+const round = (value) => Number(value.toFixed(4));
+const withPace = (window) => {
+  const startsAtMs = Date.parse(window.startsAt);
+  const resetsAtMs = Date.parse(window.resetsAt);
+  const cycleSeconds = (resetsAtMs - startsAtMs) / 1000;
+  const elapsedPercent = 100 * (now - startsAtMs) / (cycleSeconds * 1000);
+  const timeRemainingPercent = 100 * (resetsAtMs - now) / (cycleSeconds * 1000);
+  const percentUsed = window.percentUsed ?? 100 - window.percentRemaining;
+  const reservePercentPoints = window.percentRemaining - timeRemainingPercent;
+  const pace = {
+    status: Math.abs(reservePercentPoints) <= 1
+      ? "on_pace"
+      : reservePercentPoints < 0 ? "ahead" : "behind",
+    timeRemainingPercent: round(timeRemainingPercent),
+    elapsedPercent: round(elapsedPercent),
+    reservePercentPoints: round(reservePercentPoints),
+    cycleBasis: "starts_at_resets_at",
+    cycleSeconds,
+  };
+  if (elapsedPercent > 0) pace.burnMultiple = round(percentUsed / elapsedPercent);
+  if (percentUsed > 0 && now > startsAtMs) {
+    pace.projectedExhaustedAt = new Date(
+      now + window.percentRemaining / (percentUsed / (now - startsAtMs)),
+    ).toISOString();
+    pace.projectionConfidence = elapsedPercent < 10 ? "early" : "established";
+  }
+  return { ...window, percentUsed, pace };
+};
+const effectiveAvailability = (scope, windows) => {
+  const boundedBy = windows.map(({ id }) => id);
+  const effectivePercentRemaining = Math.min(...windows.map(({ percentRemaining }) => percentRemaining));
+  const limitingWindowIds = windows
+    .filter(({ percentRemaining }) => percentRemaining === effectivePercentRemaining)
+    .map(({ id }) => id);
+  const paceGroups = { ahead: [], behind: [], on_pace: [], unknown: [] };
+  for (const window of windows) paceGroups[window.pace.status].push(window.id);
+  const reserves = windows
+    .filter((window) => window.pace.reservePercentPoints !== undefined)
+    .sort((left, right) => left.pace.reservePercentPoints - right.pace.reservePercentPoints);
+  const pace = {
+    status: paceGroups.ahead.length > 0 && paceGroups.behind.length > 0
+      ? "mixed"
+      : paceGroups.ahead.length > 0
+        ? "ahead"
+        : paceGroups.behind.length > 0 ? "behind" : "on_pace",
+    ...(paceGroups.ahead.length ? { aheadWindowIds: paceGroups.ahead } : {}),
+    ...(paceGroups.behind.length ? { behindWindowIds: paceGroups.behind } : {}),
+    ...(paceGroups.on_pace.length ? { onPaceWindowIds: paceGroups.on_pace } : {}),
+    ...(paceGroups.unknown.length ? { unknownWindowIds: paceGroups.unknown } : {}),
+    worstReservePercentPoints: reserves[0].pace.reservePercentPoints,
+    worstReserveWindowId: reserves[0].id,
+  };
+  const projected = windows
+    .filter((window) => window.pace.projectedExhaustedAt)
+    .map((window) => ({ window, at: Date.parse(window.pace.projectedExhaustedAt) }))
+    .filter(({ window, at }) => at < Date.parse(window.resetsAt))
+    .sort((left, right) => left.at - right.at);
+  const runway = projected.length
+    ? {
+        status: "projected_exhaustion",
+        usableRunwaySeconds: Math.max(0, Math.round((projected[0].at - now) / 1000)),
+        projectedExhaustedAt: new Date(projected[0].at).toISOString(),
+        limitingWindowId: projected[0].window.id,
+        projectionConfidence: projected[0].window.pace.projectionConfidence,
+      }
+    : {
+        status: "through_reset",
+        projectionConfidence: windows.some((window) => (
+          window.pace.projectionConfidence === "early" || window.pace.elapsedPercent < 10
+        )) ? "early" : "established",
+      };
+  let weightedGapSum = 0;
+  let cycleSecondsSum = 0;
+  for (const window of windows) {
+    const burnMultiple = window.pace.burnMultiple ?? 0;
+    const gap = window.percentRemaining / window.pace.timeRemainingPercent - burnMultiple;
+    weightedGapSum += gap * window.pace.cycleSeconds;
+    cycleSecondsSum += window.pace.cycleSeconds;
+  }
+  return {
+    scope,
+    status: "known",
+    effectivePercentRemaining,
+    boundedBy,
+    limitingWindowIds,
+    pace,
+    runway,
+    selection: {
+      status: "known",
+      spendPriority: round(Math.min(100, Math.max(-100, weightedGapSum / cycleSecondsSum))),
+    },
+  };
+};
 const provider = (provider, label, source, fields) => ({
   provider,
+  label,
+  source,
   ...fields,
   state: {
     status: "fresh",
     stale: false,
-    ...(full ? { refreshedAt: generatedAt, sourcesTried: ["fake"] } : {}),
+    refreshedAt: generatedAt,
+    sourcesTried: ["fake"],
   },
-  ...(full ? { label, source } : {}),
 });
+const codexWindows = [
+  withPace({
+    id: "weekly",
+    label: "week",
+    kind: "weekly",
+    percentUsed: 6,
+    percentRemaining: 94,
+    startsAt: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+    resetsAt: reset(codexFirstResetMs),
+  }),
+  withPace({
+    id: "model:spark:5h",
+    label: "GPT-5.3-Codex-Spark session",
+    kind: "model",
+    percentUsed: 0,
+    percentRemaining: 100,
+    startsAt: generatedAt,
+    resetsAt: reset(5 * 60 * 60 * 1000),
+  }),
+  withPace({
+    id: "model:spark:7d",
+    label: "GPT-5.3-Codex-Spark week",
+    kind: "model",
+    percentUsed: 0,
+    percentRemaining: 100,
+    startsAt: generatedAt,
+    resetsAt: reset(6 * 24 * 60 * 60 * 1000),
+  }),
+];
 const allProviders = [
   provider("claude", "Claude", "oauth", {
     plan: "max",
@@ -141,45 +265,87 @@ const allProviders = [
       { id: "week", label: "week", kind: "weekly", percentRemaining: 61, resetsAt: reset(4 * 24 * 60 * 60 * 1000) },
     ],
     credits: { unlimited: true, unit: "credits" },
-    ...(full ? { account: { accountId: "fixture-claude-account" } } : {}),
+    account: { accountId: "fixture-claude-account" },
   }),
   provider("codex", "Codex", "oauth", {
     plan: "pro",
-    windows: [
-      { id: "weekly", label: "week", kind: "weekly", percentRemaining: 94, resetsAt: reset(codexFirstResetMs) },
-      { id: "model:spark:5h", label: "GPT-5.3-Codex-Spark session", kind: "model", percentRemaining: 100, resetsAt: reset(5 * 60 * 60 * 1000) },
-      { id: "model:spark:7d", label: "GPT-5.3-Codex-Spark week", kind: "model", percentRemaining: 100, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
-    ],
+    windows: codexWindows,
+    quotaSemantics: {
+      status: "known",
+      description: "Codex base account windows bound every model. Named model windows add bounds for that model; code-review windows describe a separate workload and are not included in model availability.",
+      effectiveAvailability: [
+        effectiveAvailability("all_models", [codexWindows[0]]),
+        effectiveAvailability("model:spark", codexWindows),
+      ],
+    },
     credits: { remaining: 0, unlimited: false, unit: "credits" },
-    ...(full ? { account: { accountId: "fixture-codex-account" } } : {}),
+    account: { accountId: "fixture-codex-account" },
   }),
   provider("copilot", "GitHub Copilot", "api", {
     plan: "business",
     windows: [],
-    ...(full ? { account: { accountId: "fixture-copilot-account" } } : {}),
+    account: { accountId: "fixture-copilot-account" },
   }),
   provider("grok", "Grok", "web", {
     windows: [
       { id: "credits", label: "credits", kind: "credits", percentRemaining: 48, resetText: "next month" },
     ],
-    ...(full ? {
-      account: { email: "fixture@example.invalid" },
-      attempts: [
-        { source: "web", status: "success" },
-        { source: "pi:xai", status: "skipped", error: "model_auth_only", credentialPresent: true },
-      ],
-    } : {}),
+    account: { email: "fixture@example.invalid" },
+    attempts: [
+      { source: "web", status: "success" },
+      { source: "pi:xai", status: "skipped", error: "model_auth_only", credentialPresent: true },
+    ],
   }),
   provider("kimi", "Kimi", "api", {
     windows: [
       { id: "weekly", label: "week", kind: "weekly", percentRemaining: 83, resetsAt: reset(6 * 24 * 60 * 60 * 1000) },
     ],
-    ...(full ? { attempts: [{ source: "pi:kimi-coding", status: "success" }] } : {}),
+    attempts: [{ source: "pi:kimi-coding", status: "success" }],
   }),
 ];
+const demoteWindow = (window) => ({
+  ...window,
+  percentUsed: undefined,
+  startsAt: undefined,
+  windowSeconds: undefined,
+  ...(window.pace ? {
+    pace: {
+      status: window.pace.status,
+      ...(window.pace.reason ? { reason: window.pace.reason } : {}),
+      reservePercentPoints: window.pace.reservePercentPoints,
+      burnMultiple: window.pace.burnMultiple,
+    },
+  } : {}),
+});
+const demoteProvider = (entry) => ({
+  ...entry,
+  label: undefined,
+  source: undefined,
+  account: undefined,
+  attempts: undefined,
+  windows: entry.windows.map(demoteWindow),
+  ...(entry.quotaSemantics ? {
+    quotaSemantics: {
+      ...entry.quotaSemantics,
+      description: undefined,
+      effectiveAvailability: entry.quotaSemantics.effectiveAvailability.map((availability) => ({
+        ...availability,
+        ...(availability.pace ? {
+          pace: {
+            ...availability.pace,
+            behindWindowIds: undefined,
+            onPaceWindowIds: undefined,
+          },
+        } : {}),
+      })),
+    },
+  } : {}),
+  state: { ...entry.state, refreshedAt: undefined, sourcesTried: undefined },
+});
+const projectedProviders = full ? allProviders : allProviders.map(demoteProvider);
 const providers = requestedProvider
-  ? allProviders.filter((entry) => entry.provider === requestedProvider)
-  : allProviders;
+  ? projectedProviders.filter((entry) => entry.provider === requestedProvider)
+  : projectedProviders;
 process.stdout.write(JSON.stringify({ generatedAt, schemaVersion: 5, providers }));
 JS
 
@@ -676,7 +842,6 @@ populatedProvider.quotaSemantics = {
       projectionConfidence: "established",
       projectionBasis: "cycle_average",
     },
-    selection: { status: "known", spendPriority: 1 },
   }],
 };
 const fullyPopulatedParsed = parseQuotaAxiJson(JSON.stringify(fullyPopulated));
@@ -685,18 +850,120 @@ assert(
   selectActiveProviderQuota(fullyPopulatedParsed, "openai-codex", { nowMs: now }).kind === "fresh",
   "valid schema-3 through-reset runway was rejected",
 );
-const schema5ThroughResetWithoutConfidence = structuredClone(fullyPopulated);
-schema5ThroughResetWithoutConfidence.schemaVersion = 5;
-delete schema5ThroughResetWithoutConfidence.providers[1].quotaSemantics.effectiveAvailability[0].runway.projectionConfidence;
-delete schema5ThroughResetWithoutConfidence.providers[1].quotaSemantics.effectiveAvailability[0].runway.projectionBasis;
-const schema5ThroughResetParsed = parseQuotaAxiJson(
-  JSON.stringify(schema5ThroughResetWithoutConfidence),
+const schema5Populated = structuredClone(fullyPopulated);
+schema5Populated.schemaVersion = 5;
+delete schema5Populated.providers[1].windows[0].pace.projectionBasis;
+delete schema5Populated.providers[1].quotaSemantics.effectiveAvailability[0].runway.projectionBasis;
+schema5Populated.providers[1].quotaSemantics.effectiveAvailability[0].selection = {
+  status: "known",
+  spendPriority: 0.6767,
+};
+const schema5PopulatedParsed = parseQuotaAxiJson(
+  JSON.stringify(schema5Populated),
   { projection: "full" },
 );
-assert(schema5ThroughResetParsed, "schema-5 through-reset fixture did not parse structurally");
+assert(schema5PopulatedParsed, "schema-5 full pace fixture did not parse structurally");
 assert(
-  selectActiveProviderQuota(schema5ThroughResetParsed, "openai-codex", { nowMs: now }).kind === "fresh",
-  "valid schema-5 through-reset runway without projection confidence was rejected",
+  selectActiveProviderQuota(schema5PopulatedParsed, "openai-codex", { nowMs: now }).kind === "fresh",
+  "valid schema-5 full pace and runway output was rejected",
+);
+const schema5PaceWithRemovedField = structuredClone(schema5Populated);
+schema5PaceWithRemovedField.providers[1].windows[0].pace.projectionBasis = "cycle_average";
+const schema5PaceWithRemovedFieldParsed = parseQuotaAxiJson(
+  JSON.stringify(schema5PaceWithRemovedField),
+  { projection: "full" },
+);
+assert(
+  selectActiveProviderQuota(schema5PaceWithRemovedFieldParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "schema-5 pace accepted removed projectionBasis metadata",
+);
+const schema5RunwayWithoutConfidence = structuredClone(schema5Populated);
+delete schema5RunwayWithoutConfidence.providers[1].quotaSemantics.effectiveAvailability[0].runway.projectionConfidence;
+const schema5RunwayWithoutConfidenceParsed = parseQuotaAxiJson(
+  JSON.stringify(schema5RunwayWithoutConfidence),
+  { projection: "full" },
+);
+assert(
+  selectActiveProviderQuota(schema5RunwayWithoutConfidenceParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "schema-5 through-reset runway accepted missing projection confidence",
+);
+const schema5RunwayWithRemovedField = structuredClone(schema5Populated);
+schema5RunwayWithRemovedField.providers[1].quotaSemantics.effectiveAvailability[0].runway.projectionBasis = "cycle_average";
+const schema5RunwayWithRemovedFieldParsed = parseQuotaAxiJson(
+  JSON.stringify(schema5RunwayWithRemovedField),
+  { projection: "full" },
+);
+assert(
+  selectActiveProviderQuota(schema5RunwayWithRemovedFieldParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "schema-5 runway accepted removed projectionBasis metadata",
+);
+const schema3Projected = structuredClone(fullyPopulated);
+const schema3ProjectedProvider = schema3Projected.providers[1];
+Object.assign(schema3ProjectedProvider.windows[0], {
+  percentUsed: 90,
+  percentRemaining: 10,
+  pace: {
+    status: "ahead",
+    timeRemainingPercent: 85.7143,
+    elapsedPercent: 14.2857,
+    reservePercentPoints: -75.7143,
+    burnMultiple: 6.3,
+    projectedExhaustedAt: new Date(now + 9_600_000).toISOString(),
+    projectionConfidence: "established",
+    projectionBasis: "cycle_average",
+    cycleBasis: "starts_at_resets_at",
+    cycleSeconds: 7 * 24 * 60 * 60,
+  },
+});
+Object.assign(schema3ProjectedProvider.quotaSemantics.effectiveAvailability[0], {
+  effectivePercentRemaining: 10,
+  limitingWindowIds: ["weekly"],
+  pace: {
+    status: "ahead",
+    aheadWindowIds: ["weekly"],
+    worstReservePercentPoints: -75.7143,
+    worstReserveWindowId: "weekly",
+  },
+  runway: {
+    status: "projected_exhaustion",
+    usableRunwaySeconds: 9_600,
+    projectedExhaustedAt: new Date(now + 9_600_000).toISOString(),
+    limitingWindowId: "weekly",
+    projectionConfidence: "established",
+    projectionBasis: "cycle_average",
+  },
+});
+const schema3ProjectedParsed = parseQuotaAxiJson(JSON.stringify(schema3Projected));
+assert(
+  selectActiveProviderQuota(schema3ProjectedParsed, "openai-codex", { nowMs: now }).kind === "fresh",
+  "valid schema-3 projected-exhaustion runway was rejected",
+);
+const schema3ProjectedWithoutBasis = structuredClone(schema3Projected);
+delete schema3ProjectedWithoutBasis.providers[1].quotaSemantics.effectiveAvailability[0].runway.projectionBasis;
+const schema3ProjectedWithoutBasisParsed = parseQuotaAxiJson(JSON.stringify(schema3ProjectedWithoutBasis));
+assert(
+  selectActiveProviderQuota(schema3ProjectedWithoutBasisParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "schema-3 projected-exhaustion runway accepted missing projection basis",
+);
+const wrongSpendPriority = structuredClone(schema5Populated);
+wrongSpendPriority.providers[1].quotaSemantics.effectiveAvailability[0].selection.spendPriority = 0.5;
+const wrongSpendPriorityParsed = parseQuotaAxiJson(
+  JSON.stringify(wrongSpendPriority),
+  { projection: "full" },
+);
+assert(
+  selectActiveProviderQuota(wrongSpendPriorityParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "schema-5 selection accepted a scalar detached from its bounding windows",
+);
+const schema3UnexpectedSelection = structuredClone(fullyPopulated);
+schema3UnexpectedSelection.providers[1].quotaSemantics.effectiveAvailability[0].selection = {
+  status: "known",
+  spendPriority: 0.6767,
+};
+const schema3UnexpectedSelectionParsed = parseQuotaAxiJson(JSON.stringify(schema3UnexpectedSelection));
+assert(
+  selectActiveProviderQuota(schema3UnexpectedSelectionParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "schema-3 output accepted a schema-5 selection field",
 );
 const invalidPercentUsed = structuredClone(fullyPopulated);
 invalidPercentUsed.providers[1].windows[0].percentUsed = "invalid";
@@ -709,7 +976,7 @@ const missingKnownPaceAudit = structuredClone(fullyPopulated);
 missingKnownPaceAudit.providers[1].windows[0].pace = { status: "behind" };
 const inconsistentKnownPace = structuredClone(fullyPopulated);
 inconsistentKnownPace.providers[1].windows[0].pace.reservePercentPoints = 7;
-const invalidQuotaSemantics = structuredClone(fullyPopulated);
+const invalidQuotaSemantics = structuredClone(schema5Populated);
 invalidQuotaSemantics.providers[1].quotaSemantics.effectiveAvailability[0].selection.spendPriority = "invalid";
 const invalidPaceRelation = structuredClone(fullyPopulated);
 invalidPaceRelation.providers[1].windows[0].pace.reason = "stale";
@@ -722,15 +989,15 @@ falseExhaustedRunway.providers[1].quotaSemantics.effectiveAvailability[0].runway
   projectedExhaustedAt: new Date(now).toISOString(),
   limitingWindowId: "weekly",
 };
-const invalidSelectionRelation = structuredClone(fullyPopulated);
+const invalidSelectionRelation = structuredClone(schema5Populated);
 invalidSelectionRelation.providers[1].quotaSemantics.effectiveAvailability[0].selection.status = "unknown";
 const missingPaceBlockers = structuredClone(fullyPopulated);
 missingPaceBlockers.providers[1].quotaSemantics.effectiveAvailability[0].pace = { status: "unknown" };
 const missingRunwayBlockers = structuredClone(fullyPopulated);
 missingRunwayBlockers.providers[1].quotaSemantics.effectiveAvailability[0].runway = { status: "unknown" };
-const missingSelectionBlockers = structuredClone(fullyPopulated);
+const missingSelectionBlockers = structuredClone(schema5Populated);
 missingSelectionBlockers.providers[1].quotaSemantics.effectiveAvailability[0].selection = { status: "unknown" };
-const foreignSelectionBlocker = structuredClone(fullyPopulated);
+const foreignSelectionBlocker = structuredClone(schema5Populated);
 foreignSelectionBlocker.providers[1].quotaSemantics.effectiveAvailability[0].selection = {
   status: "unknown",
   unmeasurableWindowIds: ["not-a-bound"],
@@ -863,6 +1130,14 @@ assert(staleMixedPaceParsed, "mixed-pace stale fixture did not parse structurall
 assert(
   selectActiveProviderQuota(staleMixedPaceParsed, "openai-codex", { nowMs: now }).kind === "stale",
   "valid mixed-pace stale projection was mislabeled malformed",
+);
+const duplicateActiveProvider = report(now);
+duplicateActiveProvider.providers.push({ provider: "codex" });
+const duplicateActiveProviderParsed = parseQuotaAxiJson(JSON.stringify(duplicateActiveProvider));
+assert(duplicateActiveProviderParsed, "duplicate-provider fixture did not parse structurally");
+assert(
+  selectActiveProviderQuota(duplicateActiveProviderParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "duplicate active-provider rows were accepted as fresh",
 );
 const uppercaseProvider = report(now);
 uppercaseProvider.providers[1].provider = "CODEX";
@@ -1465,6 +1740,82 @@ class FakeClock {
     this.nowMs = target;
   }
 }
+
+class SplitClock {
+  constructor(wallNowMs) {
+    this.wallNowMs = wallNowMs;
+    this.timerNowMs = 0;
+    this.nextId = 1;
+    this.tasks = new Map();
+    this.timers = {
+      setTimeout: (callback, delayMs) => this.add(callback, delayMs, null),
+      clearTimeout: (id) => this.tasks.delete(id),
+      setInterval: (callback, delayMs) => this.add(callback, delayMs, delayMs),
+      clearInterval: (id) => this.tasks.delete(id),
+    };
+  }
+  add(callback, delayMs, intervalMs) {
+    const id = this.nextId++;
+    this.tasks.set(id, { id, callback, at: this.timerNowMs + delayMs, intervalMs });
+    return id;
+  }
+  advanceTimers(milliseconds) {
+    const target = this.timerNowMs + milliseconds;
+    for (;;) {
+      const task = [...this.tasks.values()]
+        .filter((candidate) => candidate.at <= target)
+        .sort((a, b) => a.at - b.at || a.id - b.id)[0];
+      if (!task) break;
+      this.timerNowMs = task.at;
+      if (task.intervalMs === null) this.tasks.delete(task.id);
+      else task.at += task.intervalMs;
+      task.callback();
+    }
+    this.timerNowMs = target;
+  }
+}
+
+const backwardExpiryStart = Date.now();
+const backwardExpiryClock = new SplitClock(backwardExpiryStart);
+process.env.FM_QUOTA_TEST_NOW_MS = String(backwardExpiryStart);
+process.env.FM_QUOTA_TEST_FIRST_RESET_MS = String(60_000);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  backwardExpiryStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const backwardExpiry = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => backwardExpiryClock.wallNowMs,
+  timers: backwardExpiryClock.timers,
+}));
+await backwardExpiry.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => backwardExpiry.widgetText(400).includes("week 94% left"),
+  "backward-expiry fixture did not publish its first window",
+);
+backwardExpiryClock.wallNowMs -= 30_000;
+const writesBeforeEarlyTimer = backwardExpiry.widgetWriteCount;
+backwardExpiryClock.advanceTimers(60_000);
+assert(backwardExpiry.widgetWriteCount > writesBeforeEarlyTimer, "expiry timer did not revalidate after a clock shift");
+assert(
+  backwardExpiry.widgetText(400).includes("week 94% left"),
+  "an early monotonic expiry callback discarded a wall-clock-fresh window",
+);
+backwardExpiryClock.wallNowMs += 90_000;
+backwardExpiryClock.advanceTimers(90_000);
+assert(!backwardExpiry.widgetText(400).includes("week 94% left"), "rescheduled expiry retained a reset window");
+assert(
+  backwardExpiry.widgetText(400).includes("GPT-5.3-Codex-Spark session 100% left"),
+  "rescheduled expiry hid a fresh sibling window",
+);
+await backwardExpiry.emit("session_shutdown", { reason: "quit" });
+assert(backwardExpiryClock.tasks.size === 0, "backward-clock expiry leaked a timer");
+delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
+delete process.env.FM_QUOTA_TEST_NOW_MS;
 
 const siblingStart = Date.now();
 const siblingClock = new FakeClock(siblingStart);

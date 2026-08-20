@@ -254,6 +254,7 @@ function validKnownPaceAudit(
   window: Record<string, unknown>,
   generatedAtMs: number,
   status: Exclude<(typeof QUOTA_PACE_STATUSES)[number], "unknown">,
+  schemaVersion: number,
 ): boolean {
   const percentRemaining = finiteNumber(window.percentRemaining);
   if (percentRemaining === null) return false;
@@ -320,7 +321,9 @@ function validKnownPaceAudit(
     return parsedProjectionMs !== null &&
       Math.abs(parsedProjectionMs - projectedExhaustedAtMs) <= 1 &&
       pace.projectionConfidence === expectedConfidence &&
-      pace.projectionBasis === "cycle_average";
+      (schemaVersion === 3
+        ? pace.projectionBasis === "cycle_average"
+        : pace.projectionBasis === undefined);
   }
   return pace.projectedExhaustedAt === undefined &&
     pace.projectionConfidence === undefined &&
@@ -332,6 +335,7 @@ function validPace(
   window: Record<string, unknown>,
   generatedAtMs: number,
   requireAuditFields: boolean,
+  schemaVersion: number,
 ): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
@@ -348,6 +352,7 @@ function validPace(
     !exactEnum(value.projectionConfidence, QUOTA_PROJECTION_CONFIDENCES)
   ) return false;
   if (value.projectionBasis !== undefined && value.projectionBasis !== "cycle_average") return false;
+  if (schemaVersion === 5 && value.projectionBasis !== undefined) return false;
   if (value.cycleBasis !== undefined && !exactEnum(value.cycleBasis, QUOTA_CYCLE_BASES)) return false;
   if (!validOptionalNumber(value.cycleSeconds, (number) => number > 0)) return false;
 
@@ -368,13 +373,20 @@ function validPace(
     ].every((field) => field === undefined);
   }
   if (value.reason !== undefined) return false;
-  return !requireAuditFields || validKnownPaceAudit(value, window, generatedAtMs, status);
+  return !requireAuditFields || validKnownPaceAudit(
+    value,
+    window,
+    generatedAtMs,
+    status,
+    schemaVersion,
+  );
 }
 
 function parseWindow(
   value: unknown,
   generatedAtMs: number,
   requirePaceAudit: boolean,
+  schemaVersion: number,
 ): QuotaWindowView | null {
   if (!isRecord(value)) return null;
   const id = exactText(value.id);
@@ -396,7 +408,7 @@ function parseWindow(
   if (!validOptionalNumber(value.windowSeconds, (number) => number > 0)) return null;
   if (!validOptionalNumber(value.spentUsd, (number) => number >= 0)) return null;
   if (!validOptionalNumber(value.limitUsd, (number) => number >= 0)) return null;
-  if (!validPace(value.pace, value, generatedAtMs, requirePaceAudit)) return null;
+  if (!validPace(value.pace, value, generatedAtMs, requirePaceAudit, schemaVersion)) return null;
 
   const percentRemaining = value.percentRemaining === undefined
     ? null
@@ -595,21 +607,72 @@ function validRunway(
       limitingWindow?.resetsAtMs !== undefined &&
       projectedExhaustedAtMs < limitingWindow.resetsAtMs &&
       Math.abs((projectedExhaustedAtMs - generatedAtMs) / 1000 - usableRunwaySeconds) <= 0.5 &&
-      projectionConfidence !== null;
+      projectionConfidence !== null &&
+      (schemaVersion === 3
+        ? value.projectionBasis === "cycle_average"
+        : value.projectionBasis === undefined);
   }
   if (
     value.usableRunwaySeconds !== undefined ||
     value.projectedExhaustedAt !== undefined ||
     value.limitingWindowId !== undefined
   ) return false;
-  return schemaVersion === 3
-    ? projectionConfidence !== null && value.projectionBasis === "cycle_average"
-    : value.projectionBasis === undefined;
+  return projectionConfidence !== null && (schemaVersion === 3
+    ? value.projectionBasis === "cycle_average"
+    : value.projectionBasis === undefined);
 }
 
-function validSelection(value: unknown, allowedBlockers: string[]): boolean {
+function expectedSpendPriority(
+  boundedBy: string[],
+  rawWindowsById: ReadonlyMap<string, Record<string, unknown>>,
+): number | null {
+  let weightedGapSum = 0;
+  let cycleSecondsSum = 0;
+  for (const id of boundedBy) {
+    const window = rawWindowsById.get(id);
+    const pace = isRecord(window?.pace) ? window.pace : null;
+    const percentRemaining = finiteNumber(window?.percentRemaining);
+    const timeRemainingPercent = finiteNumber(pace?.timeRemainingPercent);
+    const cycleSeconds = finiteNumber(pace?.cycleSeconds);
+    if (
+      !pace ||
+      pace.status === "unknown" ||
+      percentRemaining === null ||
+      timeRemainingPercent === null ||
+      timeRemainingPercent < 0.01 ||
+      cycleSeconds === null ||
+      cycleSeconds <= 0
+    ) return null;
+
+    let burnMultiple = finiteNumber(pace.burnMultiple);
+    if (burnMultiple === null) {
+      const elapsedPercent = finiteNumber(pace.elapsedPercent);
+      const explicitPercentUsed = finiteNumber(window?.percentUsed);
+      const percentUsed = explicitPercentUsed ?? 100 - percentRemaining;
+      if (elapsedPercent !== 0 || percentUsed !== 0) return null;
+      burnMultiple = 0;
+    }
+    const gap = percentRemaining / timeRemainingPercent - burnMultiple;
+    if (!Number.isFinite(gap)) return null;
+    weightedGapSum += gap * cycleSeconds;
+    cycleSecondsSum += cycleSeconds;
+  }
+  if (cycleSecondsSum <= 0) return null;
+  const priority = weightedGapSum / cycleSecondsSum;
+  if (!Number.isFinite(priority)) return null;
+  return roundedPace(Math.min(100, Math.max(-100, priority)));
+}
+
+function validSelection(
+  value: unknown,
+  allowedBlockers: string[],
+  boundedBy: string[],
+  rawWindowsById: ReadonlyMap<string, Record<string, unknown>>,
+  schemaVersion: number,
+  requireAuditFields: boolean,
+): boolean {
   if (value === undefined) return true;
-  if (!isRecord(value)) return false;
+  if (schemaVersion !== 5 || !isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_SELECTION_STATUSES);
   if (!status) return false;
   if (!validOptionalNumber(value.spendPriority, (number) => number >= -100 && number <= 100)) return false;
@@ -621,9 +684,14 @@ function validSelection(value: unknown, allowedBlockers: string[]): boolean {
     Array.isArray(value.unmeasurableWindowIds) &&
     value.unmeasurableWindowIds.some((id) => !allowedBlockers.includes(id))
   ) return false;
-  return status === "known"
-    ? value.spendPriority !== undefined && value.unmeasurableWindowIds === undefined
-    : value.spendPriority === undefined && validNonemptyTextArray(value.unmeasurableWindowIds);
+  if (status === "known") {
+    if (value.spendPriority === undefined || value.unmeasurableWindowIds !== undefined) return false;
+    return !requireAuditFields || value.spendPriority === expectedSpendPriority(
+      boundedBy,
+      rawWindowsById,
+    );
+  }
+  return value.spendPriority === undefined && validNonemptyTextArray(value.unmeasurableWindowIds);
 }
 
 function validEffectiveAvailability(
@@ -631,6 +699,7 @@ function validEffectiveAvailability(
   requireAuditFields: boolean,
   unresolvedWindowIds: string[],
   windowsById: ReadonlyMap<string, QuotaWindowView>,
+  rawWindowsById: ReadonlyMap<string, Record<string, unknown>>,
   generatedAtMs: number,
   schemaVersion: number,
 ): boolean {
@@ -677,7 +746,14 @@ function validEffectiveAvailability(
       generatedAtMs,
       schemaVersion,
     ) &&
-    validSelection(value.selection, allowedBlockers);
+    validSelection(
+      value.selection,
+      allowedBlockers,
+      value.boundedBy,
+      rawWindowsById,
+      schemaVersion,
+      requireAuditFields,
+    );
 }
 
 function validQuotaSemantics(
@@ -685,6 +761,7 @@ function validQuotaSemantics(
   requireDescription: boolean,
   requireAuditFields: boolean,
   windows: QuotaWindowView[],
+  rawWindows: Record<string, unknown>[],
   generatedAtMs: number,
   schemaVersion: number,
 ): boolean {
@@ -699,7 +776,12 @@ function validQuotaSemantics(
     ? value.unresolvedWindowIds as string[]
     : [];
   const windowsById = new Map(windows.map((window) => [window.id, window]));
-  if (windowsById.size !== windows.length) return false;
+  const rawWindowsById = new Map(rawWindows.map((window) => [exactText(window.id) ?? "", window]));
+  if (
+    windowsById.size !== windows.length ||
+    rawWindowsById.size !== rawWindows.length ||
+    rawWindowsById.has("")
+  ) return false;
   if (!Array.isArray(value.effectiveAvailability)) return false;
   const scopes = new Set<string>();
   for (const entry of value.effectiveAvailability) {
@@ -713,6 +795,7 @@ function validQuotaSemantics(
         requireAuditFields,
         unresolvedWindowIds,
         windowsById,
+        rawWindowsById,
         generatedAtMs,
         schemaVersion,
       )
@@ -757,16 +840,19 @@ function validProviderFields(
   if (!validProviderState(value.state, requireFullFields)) return false;
   if (!Array.isArray(value.windows)) return false;
   const parsedWindows = value.windows.map((window) => (
-    parseWindow(window, generatedAtMs, requireFullFields)
+    parseWindow(window, generatedAtMs, requireFullFields, schemaVersion)
   ));
   if (parsedWindows.some((window) => window === null)) return false;
   if (new Set(parsedWindows.map((window) => window?.id)).size !== parsedWindows.length) return false;
+  const rawWindows = value.windows.filter(isRecord);
+  if (rawWindows.length !== value.windows.length) return false;
   const providerIsStale = isRecord(value.state) && value.state.stale === true;
   if (!validQuotaSemantics(
     value.quotaSemantics,
     requireFullFields,
     requireFullFields && !providerIsStale,
     parsedWindows as QuotaWindowView[],
+    rawWindows,
     generatedAtMs,
     schemaVersion,
   )) return false;
@@ -801,9 +887,11 @@ export function selectActiveProviderQuota(
     return { kind: "stale", provider, label: null };
   }
 
-  const rawProvider = report.providers.find(
+  const providerMatches = report.providers.filter(
     (entry) => isRecord(entry) && entry.provider === provider,
   );
+  if (providerMatches.length > 1) return malformed(provider);
+  const rawProvider = providerMatches[0];
   if (!rawProvider || !isRecord(rawProvider)) {
     return { kind: "unavailable", provider, label: null };
   }
@@ -863,6 +951,7 @@ export function selectActiveProviderQuota(
       rawWindow,
       report.generatedAtMs,
       report.schemaVersion === 3 || fullProjection,
+      report.schemaVersion,
     );
     if (!window) return malformed(provider);
     windows.push(window);
