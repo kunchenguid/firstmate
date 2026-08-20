@@ -2114,7 +2114,11 @@ teardown_herdr_preflight_target() {  # <target> <task-id>
     # Two unrelated faults refuse here, and only one of them can clear on a
     # rerun; reporting the wrong one is what turned this refusal into an
     # unbounded retry loop that held cleanup open indefinitely.
-    echo "error: herdr session presentation lock could not be resolved for $task_id; nothing was changed$(fm_backend_herdr_presentation_lock_refusal_suffix 'rerun teardown once the session is reachable and unambiguous')" >&2
+    # This refusal names what it left alone rather than claiming nothing
+    # changed, because diagnosing the namespace fault may itself have created
+    # the namespace directory; the task, its records, and its work are what the
+    # operator needs to know are untouched, and they are.
+    echo "error: herdr session presentation lock could not be resolved for $task_id; the task and its work were not touched$(fm_backend_herdr_presentation_lock_refusal_suffix 'rerun teardown once the session is reachable and unambiguous')" >&2
     return 1
   fi
   if [ -n "$TEARDOWN_HERDR_LOCK_RECORDS" ]; then

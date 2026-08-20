@@ -649,18 +649,44 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
   printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
 }
 
-# fm_backend_herdr_presentation_lock_self_uid: this account's numeric uid, read
-# from the shell itself rather than from an `id` found on PATH.
-# Reading it from the shell removes the PATH dependency: two processes of one
-# account with different PATHs would otherwise be able to resolve two different
-# namespace names and silently stop serializing against each other, which is
-# the exact mutual exclusion this lock exists to provide.
-# The numeric assertion stays because the value can still be wrong: a non-bash
-# parent can export EUID and that inherited value survives into this shell, an
-# empty one would rebuild a fixed name any account can claim first, and a
+fm_backend_herdr_presentation_lock_namespace_mode() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%Lp' "$1" 2>/dev/null
+  else
+    stat -c '%a' "$1" 2>/dev/null
+  fi
+}
+
+fm_backend_herdr_presentation_lock_namespace_uid() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%u' "$1" 2>/dev/null
+  else
+    stat -c '%u' "$1" 2>/dev/null
+  fi
+}
+
+# fm_backend_herdr_presentation_lock_self_uid: this account's numeric user id,
+# read from the owner of a directory this process creates itself.
+# The owner of an entry this process just created is this account by
+# construction, so the value cannot be moved by what an `id` on PATH prints and
+# cannot be moved by an account id the environment supplies. Both matter. Two
+# processes of one account that resolved different ids would name two different
+# namespaces and silently stop serializing against each other, which is the
+# exact mutual exclusion this lock exists to provide. An id belonging to no
+# account on this machine is worse: the namespace it names is then created by
+# and owned by the real account, so the ownership check below can never pass and
+# the refusal is one no rerun can ever clear.
+# The probe is created beside the namespace so it proves the account against the
+# same filesystem the namespace lives on, holds nothing, is read by nothing but
+# this function, and is removed again immediately.
+# The numeric assertion stays because the owner can still come back unusable: an
+# empty value would rebuild a fixed name any account can claim first, and a
 # non-numeric one would name a path outside the namespace entirely.
 fm_backend_herdr_presentation_lock_self_uid() {
-  local uid=${EUID:-${UID:-}}
+  local probe uid
+  probe=$(mktemp -d /tmp/firstmate-herdr-lock-uid.XXXXXX 2>/dev/null) || return 1
+  uid=$(fm_backend_herdr_presentation_lock_namespace_uid "$probe")
+  rmdir "$probe" 2>/dev/null || true
   case "$uid" in
     '' | *[!0-9]*) return 1 ;;
   esac
@@ -683,22 +709,6 @@ fm_backend_herdr_presentation_lock_namespace() {
   local uid
   uid=$(fm_backend_herdr_presentation_lock_self_uid) || return 1
   printf '/tmp/firstmate-herdr-presentation-%s' "$uid"
-}
-
-fm_backend_herdr_presentation_lock_namespace_mode() {
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    stat -f '%Lp' "$1" 2>/dev/null
-  else
-    stat -c '%a' "$1" 2>/dev/null
-  fi
-}
-
-fm_backend_herdr_presentation_lock_namespace_uid() {
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    stat -f '%u' "$1" 2>/dev/null
-  else
-    stat -c '%u' "$1" 2>/dev/null
-  fi
 }
 
 fm_backend_herdr_presentation_lock_namespace_valid() {
@@ -726,13 +736,23 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 # probes creatability the same way the lock path resolution does: a namespace
 # that is absent because /tmp is read-only, full, or otherwise unwritable is as
 # permanent as a foreign-owned one, and reporting it as retryable would rebuild
-# the very retry loop this separation exists to end.
+# the very retry loop this separation exists to end. The probe leaves the
+# directory it created in place, exactly as lock path resolution would, because
+# a concurrent process of this account may already hold a lock inside it; every
+# refusal that appends this fragment therefore states what it did not touch
+# rather than claiming nothing changed at all.
+# A namespace THIS RUN created that then reports some other owner names no
+# foreign account: the entry this account just created contradicts the id it
+# read back for itself, so that is reported as an untrustworthy account id. The
+# foreign-owner remedy is never printed for it, because removing a directory
+# this account recreates identically on the next run, or becoming an account it
+# already is, clears nothing.
 fm_backend_herdr_presentation_lock_namespace_fault() {
-  local dir expected_uid owner mode
+  local dir expected_uid owner mode created=0
   expected_uid=$(fm_backend_herdr_presentation_lock_self_uid) || expected_uid=
   dir=$(fm_backend_herdr_presentation_lock_namespace) || dir=
   if [ -z "$dir" ]; then
-    printf 'this account has no usable numeric user id, so the presentation lock namespace cannot be named, and no later attempt will clear it; unset any inherited EUID override so the account id reads as a number and rerun'
+    printf 'the numeric user id of this account could not be read back from an entry created under /tmp, so the presentation lock namespace cannot be named, and no later attempt will clear it on its own; restore a writable /tmp that reports the owner of the entries this account creates there and rerun'
     return 0
   fi
   if [ -L "$dir" ]; then
@@ -740,8 +760,9 @@ fm_backend_herdr_presentation_lock_namespace_fault() {
     return 0
   fi
   if [ ! -e "$dir" ]; then
-    mkdir -m 700 "$dir" 2>/dev/null && return 1
-    if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    if mkdir -m 700 "$dir" 2>/dev/null; then
+      created=1
+    elif [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
       printf 'the presentation lock namespace %s is absent and could not be created, and no later attempt will clear it on its own; restore a writable /tmp with free space and a usable namespace name (it holds only lock files) and rerun' "$dir"
       return 0
     fi
@@ -756,6 +777,11 @@ fm_backend_herdr_presentation_lock_namespace_fault() {
     return 0
   fi
   if [ "$owner" != "$expected_uid" ]; then
+    if [ "$created" = 1 ]; then
+      printf 'the presentation lock namespace %s was created by this run yet reports owner uid %s rather than uid %s, the id this account read back for itself, so the account id this run resolved cannot be trusted and no later attempt will clear it; restore a /tmp that reports the true owner of the entries this account creates there and rerun' \
+        "$dir" "$owner" "$expected_uid"
+      return 0
+    fi
     printf 'the presentation lock namespace %s is owned by uid %s but this account is uid %s, so its ownership check can never pass and no later attempt will clear it; have uid %s or an administrator remove that directory (it holds only lock files) and rerun' \
       "$dir" "$owner" "$expected_uid" "$owner"
     return 0

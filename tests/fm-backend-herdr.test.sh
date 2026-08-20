@@ -2553,15 +2553,47 @@ test_presentation_session_lock_path_is_shared_across_homes() {
   pass "herdr presentation lock: one path per session/socket across homes"
 }
 
+# make_herdr_uid_stat_bin: a `stat` shim that reports a chosen owner uid for the
+# paths matching a glob and delegates every other call to the real stat.
+# The lock reads this account's numeric id back from the owner of an entry it
+# creates itself, so nothing the environment or an `id` on PATH says can drive
+# two accounts apart any more. Changing what the filesystem reports about those
+# entries is what remains, and it keeps the divergence real for every function
+# that reads an owner while the case stays unprivileged: a second real account,
+# or a chown to one, is the only alternative and neither is available here.
+make_herdr_uid_stat_bin() {  # <dir> <path-glob> <uid> [<path-glob> <uid>...] -> echoes bin dir
+  local sb="$1/statbin" real glob uid
+  shift
+  real=$(command -v stat) || fail "the uid stat shim needs a real stat on PATH"
+  mkdir -p "$sb"
+  cat > "$sb/stat" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "$#" -eq 3 ] && [ "$2" = '%u' ]; then
+  case "$3" in
+SH
+  while [ "$#" -ge 2 ]; do
+    glob=$1; uid=$2; shift 2
+    printf '    %s) printf "%%s\\n" "%s"; exit 0 ;;\n' "$glob" "$uid" >> "$sb/stat"
+  done
+  cat >> "$sb/stat" <<SH
+  esac
+fi
+exec $real "\$@"
+SH
+  chmod +x "$sb/stat"
+  printf '%s\n' "$sb"
+}
+
 # A second account on the machine must not be able to claim the lock namespace
-# name and lock this account out of it permanently. The uid is driven apart with
-# an inherited EUID rather than a real second account, so the divergence is real
-# for every function that reads it while the case stays unprivileged. EUID is
-# readonly in bash, so it is placed in the environment with `env`, which is
-# exactly how a non-bash parent can hand this shell an account id of its own.
+# name and lock this account out of it permanently. Every entry this account
+# creates under /tmp is reported as owned by <uid>, which is exactly what a run
+# by that account would see.
 run_herdr_lock_fn_as_uid() {  # <uid> <function>
-  local uid=$1 fn=$2
-  env "EUID=$uid" bash -c '. "$0/bin/backends/herdr.sh"; "$1"' "$ROOT" "$fn"
+  local uid=$1 fn=$2 tag sb
+  tag=${uid//[^0-9A-Za-z]/_}
+  sb=$(make_herdr_uid_stat_bin "$TMP_ROOT/lock-uid-$tag" '/tmp/firstmate-herdr-*' "$uid")
+  PATH="$sb:$PATH" bash -c '. "$0/bin/backends/herdr.sh"; "$1"' "$ROOT" "$fn"
 }
 
 test_presentation_lock_namespace_is_per_account() {
@@ -2601,17 +2633,14 @@ SH
     || fail "the lock namespace must resolve regardless of what PATH provides"
   [ "$path_shadowed" = "$path_real" ] \
     || fail "an id command on PATH moved the lock namespace, so one account's processes can stop serializing: $path_shadowed"
-  # An inherited account id that is not a number must refuse outright: an empty
+  # An owner that does not read back as a number must refuse outright: an empty
   # one would rebuild a fixed name any account can claim first, and a
   # path-shaped one would name a directory outside the namespace entirely.
-  for bad in ../../etc notanumber; do
+  for bad in ../../etc notanumber ''; do
     if run_herdr_lock_fn_as_uid "$bad" fm_backend_herdr_presentation_lock_namespace >/dev/null 2>&1; then
-      fail "an unusable inherited account id ($bad) must refuse rather than name a namespace"
+      fail "an unusable account id (${bad:-empty}) must refuse rather than name a namespace"
     fi
   done
-  if env EUID= UID= bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT" >/dev/null 2>&1; then
-    fail "an empty inherited account id must refuse rather than name the fixed shared namespace"
-  fi
   # Another account's namespace present on the machine, at the same mode the
   # ownership check demands, must be inert for this account rather than
   # blocking it.
@@ -2629,31 +2658,125 @@ SH
   pass "herdr presentation lock: the namespace name is per account, so no account can claim another's"
 }
 
+# A namespace directory this run did NOT create and that a different account
+# owns is the real cross-account collision. The ownership is driven apart by
+# reporting a foreign owner for that one directory while every entry this run
+# creates still reports the truth, which is what a second real account owning
+# the name would look like from here.
 test_presentation_lock_namespace_foreign_owner_is_diagnosed() {
-  local dir log resp fb out status fault fault_status owner
+  local dir log resp fb sb out status fault fault_status self ns
   dir="$TMP_ROOT/presentation-namespace-foreign-owner"; mkdir -p "$dir/responses" "$dir/sockdir"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
   : > "$dir/sockdir/fmtest.sock"
   printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
-  # 424243 never owns anything here, so the namespace it resolves is created by
-  # and owned by the real account: exactly the cross-account collision, without
-  # needing a second real account.
-  owner=$(id -u)
-  out=$(env EUID=424243 PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  self=$(id -u)
+  ns="/tmp/firstmate-herdr-presentation-$self"
+  mkdir -m 700 "$ns" 2>/dev/null || true
+  [ -d "$ns" ] || fail "could not stage the namespace this account owns at $ns"
+  sb=$(make_herdr_uid_stat_bin "$dir" "$ns" 424243)
+  out=$(PATH="$sb:$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a foreign-owned lock namespace must refuse rather than return a path: $out"
-  fault=$(env EUID=424243 PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  fault=$(PATH="$sb:$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace_fault' "$ROOT" 2>&1)
   fault_status=$?
   [ "$fault_status" -eq 0 ] \
     || fail "a foreign-owned lock namespace must be reported as a permanent fault, not a retryable one"
-  assert_contains "$fault" "owned by uid $owner" "the fault did not name the owning account: $fault"
-  assert_contains "$fault" "this account is uid 424243" "the fault did not name this account: $fault"
+  assert_contains "$fault" "owned by uid 424243" "the fault did not name the owning account: $fault"
+  assert_contains "$fault" "this account is uid $self" "the fault did not name this account: $fault"
   assert_contains "$fault" "remove that directory" "the fault did not name the remedy: $fault"
-  rmdir "/tmp/firstmate-herdr-presentation-424243" 2>/dev/null || true
+  case "$fault" in
+    *"created by this run"*) fail "a namespace this run did not create was blamed on its own account id: $fault" ;;
+  esac
   pass "herdr presentation lock: a foreign-owned namespace is diagnosed as permanent and names its remedy"
+}
+
+# The account id the lock resolves is read back from an entry this process
+# created, so a namespace THIS RUN created that then reports another owner
+# proves the id itself cannot be trusted - it names no foreign account. Printing
+# the foreign-owner remedy there would be unclearable: removing a directory this
+# account recreates identically, or becoming an account it already is.
+test_presentation_lock_namespace_untrustworthy_account_id_is_diagnosed() {
+  local dir log resp fb sb fault fault_status ns
+  dir="$TMP_ROOT/presentation-namespace-untrusted-id"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  ns=/tmp/firstmate-herdr-presentation-424251
+  rmdir "$ns" 2>/dev/null || true
+  [ ! -e "$ns" ] || fail "the staged namespace name unexpectedly exists: $ns"
+  sb=$(make_herdr_uid_stat_bin "$dir" '/tmp/firstmate-herdr-lock-uid.*' 424251 "$ns" 424252)
+  fault=$(PATH="$sb:$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace_fault' "$ROOT" 2>&1)
+  fault_status=$?
+  rmdir "$ns" 2>/dev/null || true
+  [ "$fault_status" -eq 0 ] \
+    || fail "a namespace that contradicts this run's own account id must be a permanent fault: $fault"
+  assert_contains "$fault" "created by this run" "the fault did not say the run created the namespace: $fault"
+  assert_contains "$fault" "cannot be trusted" "the fault did not name the untrustworthy account id: $fault"
+  assert_contains "$fault" "no later attempt will clear it" \
+    "the fault did not say that rerunning cannot clear it: $fault"
+  case "$fault" in
+    *"remove that directory"* | *"have uid"*)
+      fail "the unclearable foreign-owner remedy was printed for a directory this run created: $fault" ;;
+  esac
+  pass "herdr presentation lock: an account id its own new namespace contradicts is diagnosed, not blamed on a foreign owner"
+}
+
+# The account id must never come from the environment. bash imports an EUID
+# handed to it by a non-bash parent as an ordinary variable, so an inherited id
+# can be numeric and still be wrong. When it was trusted, the namespace it named
+# was created by and owned by the REAL account, the ownership check then refused,
+# and the remedy printed - become the owning account, or have that directory
+# removed - reproduced itself byte for byte on every rerun. That is a permanent
+# refusal against the account itself, which is the exact fault this namespace
+# exists to remove, so the environment must not be able to reach it at all.
+test_presentation_lock_namespace_ignores_an_inherited_account_id() {
+  local dir log resp fb spoof n path status fault fault_status ns
+  dir="$TMP_ROOT/presentation-namespace-inherited-id"; mkdir -p "$dir/responses" "$dir/sockdir" "$dir/idbin"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  : > "$dir/sockdir/fmtest.sock"
+  for n in 1 2 3 4; do
+    printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/$n.out"
+  done
+  fb=$(make_herdr_fakebin "$dir")
+  ns="/tmp/firstmate-herdr-presentation-$(id -u)"
+  cat > "$dir/idbin/id" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -u ] && [ $# -eq 1 ]; then printf '%s\n' 424248; exit 0; fi
+exec /usr/bin/id "$@"
+SH
+  chmod +x "$dir/idbin/id"
+  for spoof in 424998 424999; do
+    rmdir "/tmp/firstmate-herdr-presentation-$spoof" 2>/dev/null || true
+    [ ! -e "/tmp/firstmate-herdr-presentation-$spoof" ] \
+      || fail "the inherited id namespace name unexpectedly exists for $spoof"
+    path=$(env "EUID=$spoof" "UID=$spoof" PATH="$dir/idbin:$fb:$PATH" \
+      FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT" 2>&1)
+    status=$?
+    [ "$status" -eq 0 ] \
+      || fail "an inherited account id ($spoof) turned this account's own lock into a refusal: $path"
+    case "$path" in
+      "$ns"/order-*.lock) ;;
+      *) fail "an inherited account id ($spoof) moved this account's lock out of $ns: $path" ;;
+    esac
+    [ ! -e "/tmp/firstmate-herdr-presentation-$spoof" ] \
+      || fail "an inherited account id ($spoof) named a namespace of its own"
+    fault=$(env "EUID=$spoof" "UID=$spoof" PATH="$dir/idbin:$fb:$PATH" \
+      FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace_fault' "$ROOT" 2>&1)
+    fault_status=$?
+    [ "$fault_status" -ne 0 ] \
+      || fail "an inherited account id ($spoof) produced a permanent namespace fault: $fault"
+    case "$fault" in
+      *"owned by uid"* | *"remove that directory"*)
+        fail "an inherited account id ($spoof) produced the unclearable foreign-owner remedy: $fault" ;;
+    esac
+    [ -z "$fault" ] || fail "an inherited account id ($spoof) produced a diagnosis at all: $fault"
+  done
+  pass "herdr presentation lock: an inherited account id can neither move the namespace nor refuse this account out of it"
 }
 
 # A namespace that is absent because it cannot be created - a read-only or full
@@ -2663,7 +2786,7 @@ test_presentation_lock_namespace_foreign_owner_is_diagnosed() {
 # can clear, so it must be diagnosed too. An over-long account id makes the
 # creation fail for real, without needing a read-only /tmp.
 test_presentation_lock_namespace_uncreatable_is_diagnosed() {
-  local dir log resp fb long dir_name fault fault_status path path_status
+  local dir log resp fb sb long dir_name fault fault_status path path_status
   dir="$TMP_ROOT/presentation-namespace-uncreatable"; mkdir -p "$dir/responses" "$dir/sockdir"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
   : > "$dir/sockdir/fmtest.sock"
@@ -2672,12 +2795,13 @@ test_presentation_lock_namespace_uncreatable_is_diagnosed() {
   long=$(printf '%0300d' 9)
   dir_name="/tmp/firstmate-herdr-presentation-$long"
   [ ! -e "$dir_name" ] || fail "the uncreatable namespace name unexpectedly exists: $dir_name"
-  path=$(env "EUID=$long" PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  sb=$(make_herdr_uid_stat_bin "$dir" '/tmp/firstmate-herdr-*' "$long")
+  path=$(PATH="$sb:$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT" 2>&1)
   path_status=$?
   [ "$path_status" -ne 0 ] \
     || fail "an uncreatable lock namespace must refuse rather than return a path: $path"
-  fault=$(env "EUID=$long" PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  fault=$(PATH="$sb:$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace_fault' "$ROOT" 2>&1)
   fault_status=$?
   [ "$fault_status" -eq 0 ] \
@@ -2693,7 +2817,7 @@ test_presentation_lock_namespace_uncreatable_is_diagnosed() {
 # caller's own retryable wording when there is not, and nothing when the caller
 # has no retryable wording to offer.
 test_presentation_lock_refusal_suffix_separates_the_two_faults() {
-  local dir log resp fb suffix suffix_status long
+  local dir log resp fb sb suffix suffix_status long
   dir="$TMP_ROOT/presentation-refusal-suffix"; mkdir -p "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
@@ -2708,7 +2832,8 @@ test_presentation_lock_refusal_suffix_separates_the_two_faults() {
   [ "$suffix" = " - retry later" ] \
     || fail "a usable namespace must yield the caller's own retryable tail: $suffix"
   long=$(printf '%0300d' 9)
-  suffix=$(env "EUID=$long" PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  sb=$(make_herdr_uid_stat_bin "$dir" '/tmp/firstmate-herdr-*' "$long")
+  suffix=$(PATH="$sb:$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_refusal_suffix "retry later"' "$ROOT" 2>&1) \
     || fail "the refusal suffix must always succeed"
   case "$suffix" in
@@ -4677,6 +4802,8 @@ test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_lock_namespace_is_per_account
 test_presentation_lock_namespace_foreign_owner_is_diagnosed
+test_presentation_lock_namespace_untrustworthy_account_id_is_diagnosed
+test_presentation_lock_namespace_ignores_an_inherited_account_id
 test_presentation_lock_namespace_uncreatable_is_diagnosed
 test_presentation_lock_refusal_suffix_separates_the_two_faults
 test_presentation_lock_namespace_usable_reports_no_fault
