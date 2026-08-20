@@ -92,7 +92,7 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-session-lock-ancestry.test.sh` covers matching and differing structured identities, identity-unavailable ancestry fallback, atomic PID refresh after reparenting, and legacy bare-PID compatibility.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, the exact competing-session refusal, `fm-lock.sh status` agreement after reparenting, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
-`tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset.
+`tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic failed-epoch progression, the integrated bounded fail-open, the distinct guard-recorded structural episode that preserves the auto-arm's one loud failure notice, post-alarm continuation suppression, and positive recovery reset.
 
 ## Active limits and verification
 

@@ -58,7 +58,10 @@
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
 #   3. only when neither materializes is the auto-arm genuinely absent: record
-#      that structurally unclaimed recovery as a verified failure episode, then
+#      that structurally unclaimed recovery as a verified failure episode under
+#      its own state/.claude-autoarm-failure-unclaimed marker - never the
+#      auto-arm's delivered-notice marker, so a late arm that then genuinely
+#      fails still gets its one loud operator notice - then
 #      re-block with the repair banner at most
 #      FM_CLAUDE_TURNEND_BLOCK_BUDGET (default 3) consecutive times per session -
 #      safely below Claude Code's hard 8-consecutive-block override - before one
@@ -154,8 +157,16 @@ BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
+FAILURE_UNCLAIMED="$STATE/.claude-autoarm-failure-unclaimed"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+# A failure episode is open once either the auto-arm has delivered its one
+# operator notice or this guard has recorded a structurally unclaimed recovery.
+# The two markers stay distinct so a guard-recorded episode never consumes the
+# auto-arm's single loud notice for a real failure that lands afterwards.
+failure_episode_open() {
+  [ -e "$FAILURE_NOTICE" ] || [ -e "$FAILURE_UNCLAIMED" ]
+}
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0
@@ -165,7 +176,7 @@ budget_reset() {
 
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
-  [ -e "$FAILURE_NOTICE" ] || budget_reset
+  failure_episode_open || budget_reset
   exit 0
 fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
@@ -270,7 +281,7 @@ autoarm_owns_recovery() {
   pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   if fm_pid_alive "$pid" && [ "$role" = autoarm ]; then
-    [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
+    ! failure_episode_open || budget_account_current_epoch || true
     return 0
   fi
   outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
@@ -278,7 +289,7 @@ autoarm_owns_recovery() {
     rewake)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
       if [ "$age" -lt "$EPOCH_FRESH" ]; then
-        [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
+        ! failure_episode_open || budget_account_current_epoch || true
         return 0
       fi
       ;;
@@ -357,7 +368,7 @@ terminal_fail_open() {
 failure_episode_verified() {
   local outcome
   [ ! -e "$STATE/.afk" ] || return 1
-  [ -e "$FAILURE_NOTICE" ] || return 1
+  failure_episode_open || return 1
   outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
     failed|failed-suppressed|failed-unclaimed) return 0 ;;
@@ -394,7 +405,7 @@ record_structurally_unclaimed_failure() {
   case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
   seq=$((seq + 1))
   tmp="$STATE/.claude-autoarm-epoch.tmp.${BASHPID:-$$}"
-  if ! : > "$FAILURE_NOTICE" 2>/dev/null \
+  if ! : > "$FAILURE_UNCLAIMED" 2>/dev/null \
     || ! printf 'epoch=%s owner_pid=%s outcome=failed-unclaimed updated_at=%s\n' \
       "$seq" "${BASHPID:-$$}" "$(date +%s)" > "$tmp" 2>/dev/null \
     || ! mv -f "$tmp" "$STATE/.claude-autoarm-epoch" 2>/dev/null; then

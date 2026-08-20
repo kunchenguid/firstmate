@@ -1381,9 +1381,10 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
 
   out=$(run_integrated_autoarm "$dir"); status=$?
   expect_code 2 "$status" "a later failure after positive recovery must continue the new episode"
-  [ -z "$out" ] || fail "the guard-recorded new failure episode repeated an operator notice: $out"
-  [ "$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$dir/state/.claude-autoarm-epoch")" = failed-suppressed ] \
-    || fail "the later auto-arm did not continue the guard-recorded failure episode"
+  assert_contains "$out" "automatic supervision mechanism is broken" \
+    "the guard-recorded structural episode swallowed the auto-arm's one operator notice"
+  [ "$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$dir/state/.claude-autoarm-epoch")" = failed ] \
+    || fail "the later auto-arm did not record its own delivered failure outcome"
   pass "fm-turnend-guard --claude: integrated fresh failures reach one bounded fail-open, stop continuation, and reset on recovery"
 }
 
@@ -1554,6 +1555,36 @@ test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
   pass "fm-turnend-guard --claude: verified fail-open is loud, bounded, attended, and non-repeating"
 }
 
+# Regression: the guard's structurally unclaimed record must not consume the
+# auto-arm's single loud failure notice. An arm that claims after the guard's
+# sync wait and then genuinely fails still owes the operator that notice.
+test_hook_claude_mode_structural_record_preserves_late_arm_failure_notice() {
+  local dir guard_out guard_status out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-structural-notice")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_integrated_failed_arm "$dir"
+
+  guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); guard_status=$?
+  expect_code 2 "$guard_status" "an unclaimed Stop must block after recording the structural episode"
+  assert_contains "$guard_out" 'TURN WOULD END BLIND' "the structural block omitted the blind-turn banner"
+  assert_present "$dir/state/.claude-autoarm-failure-unclaimed" "the guard did not record its structural failure episode"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "the guard consumed the auto-arm delivered-notice marker"
+  [ "$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$dir/state/.claude-autoarm-epoch")" = failed-unclaimed ] \
+    || fail "the guard did not publish the structural outcome"
+
+  out=$(run_integrated_autoarm "$dir"); status=$?
+  expect_code 2 "$status" "the late arm's genuine failure must still hand back an automatic continuation"
+  assert_contains "$out" "automatic supervision mechanism is broken" \
+    "the late arm's one loud failure notice was suppressed by the guard's structural record"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "the late arm did not record its delivered notice"
+
+  out=$(run_integrated_autoarm "$dir"); status=$?
+  expect_code 2 "$status" "a later failure in the same episode must keep the retry handoff"
+  [ -z "$out" ] || fail "the delivered failure notice repeated in one episode: $out"
+  pass "fm-turnend-guard --claude: a structural episode preserves the late arm's one loud failure notice"
+}
+
 test_hook_claude_mode_partial_failure_records_converge_to_structural_episode() {
   local no_notice notice_only out status
   no_notice=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-no-notice")
@@ -1564,7 +1595,8 @@ test_hook_claude_mode_partial_failure_records_converge_to_structural_episode() {
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$no_notice" true); status=$?
   expect_code 0 "$status" "a missing notice after an exhausted block budget must become a structural episode"
   assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "missing-notice repair did not fail open loudly"
-  assert_present "$no_notice/state/.claude-autoarm-failure-notified" "missing-notice repair did not complete the episode"
+  assert_present "$no_notice/state/.claude-autoarm-failure-unclaimed" "missing-notice repair did not complete the episode"
+  assert_absent "$no_notice/state/.claude-autoarm-failure-notified" "guard repair claimed the auto-arm's delivered-notice marker"
 
   notice_only=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-no-epoch")
   : > "$notice_only/state/task1.meta"
@@ -1722,6 +1754,7 @@ test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_structurally_unclaimed_recovery_is_bounded
 test_hook_claude_mode_late_claim_after_structural_record_does_not_block
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
+test_hook_claude_mode_structural_record_preserves_late_arm_failure_notice
 test_hook_claude_mode_partial_failure_records_converge_to_structural_episode
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
