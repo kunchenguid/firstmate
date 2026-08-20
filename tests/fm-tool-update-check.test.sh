@@ -335,6 +335,31 @@ SH
   pass "an announcement source the budget could not reach is reported, not read as current"
 }
 
+test_an_announcement_probe_that_does_not_answer_is_reported() {
+  local home dir out report
+  # no-mistakes learns about a new release from the network, so the command that
+  # carries the announcement is exactly the one that stalls on a flaky link. A
+  # source that was asked and never answered must not read as a clean sweep.
+  home=$(make_home announce-mute)
+  dir="$TMP_ROOT/announce-mute/bin"
+  mkdir -p "$dir"
+  cat > "$dir/no-mistakes-fixture" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf 'no-mistakes version v1.46.0\n'
+  exit 0
+fi
+sleep 30
+SH
+  chmod 0755 "$dir/no-mistakes-fixture"
+  write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  report=$(cat "$out")
+  assert_contains "$report" "no-mistakes check failed: $dir/no-mistakes-fixture did not answer when asked for its update announcement" "an announcement probe that never answered was read as a clean sweep"
+  pass "an announcement probe that does not answer is reported, not read as current"
+}
+
 test_quiet_tool_with_announce_pattern_is_silent() {
   local home dir out
   home=$(make_home announce-quiet)
@@ -663,6 +688,35 @@ test_an_overlong_report_says_it_was_cut() {
   pass "an over-long report is cut with the shared truncation marker"
 }
 
+test_a_finding_past_the_cut_is_still_reported() {
+  local home stale fresh out report i tools=
+  # Once a report is long enough to be cut, a new finding lands past the cut and
+  # leaves the printed line unchanged. It still has to count as news, or the PATH
+  # skew this check exists for would be suppressed for good on a busy home.
+  home=$(make_home past-cut)
+  stale="$TMP_ROOT/past-cut/mise/installs/herdr/latest/bin"
+  fresh="$TMP_ROOT/past-cut/local/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  for i in $(seq 1 30); do
+    [ -z "$tools" ] || tools="$tools,"
+    tools="$tools{\"name\":\"absent-tool-$i\",\"command\":\"fm-absent-fixture-$i\"}"
+  done
+  out="$home/out.txt"
+  write_config "$home" "{\"tools\":[$tools]}"
+  run_check "$home" "$(fixture_path "$stale:$fresh")" "$out"
+  assert_contains "$(cat "$out")" "[truncated]" "the first report was not long enough to be cut, so this case proves nothing"
+
+  # The skew tool goes last, so its finding falls past the cut and the printed
+  # line is byte identical to the one the first sweep already recorded.
+  write_config "$home" "{\"tools\":[$tools,{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  run_check "$home" "$(fixture_path "$stale:$fresh")" "$out"
+  report=$(cat "$out")
+  [ -n "$report" ] || fail "a finding past the cut produced no report at all, so it can never reach the watcher"
+  assert_contains "$report" "[truncated]" "the second report was not cut, so the finding was not past the cut"
+  pass "a finding that lands past the cut is still reported as news"
+}
+
 test_probes_are_skipped_between_intervals() {
   local home dir out status now
   home=$(make_home cadence)
@@ -841,9 +895,10 @@ test_a_failed_registration_leaves_no_unregistered_shim() {
   assert_absent "$home/state/tool-updates.check.sh" "a failed registration left an unregistered check shim behind"
   [ "$(cat "$target")" = 'a file the trust binding must not touch' ] || fail "arm wrote through the trust symlink"
 
-  # A shim that was already there comes back byte for byte, because deleting it
-  # would leave a home that was armed silently unarmed, and rewriting it would
-  # break the trust binding that matched the original bytes.
+  # A shim that was already there is only kept when its trust binding is still
+  # intact. Here the binding is unusable, so putting the old bytes back would
+  # leave exactly the unbound shim the watcher wakes about, and the home has to
+  # end plainly not armed instead.
   stale_shim="$TMP_ROOT/arm-register-fail/shim-armed-earlier"
   printf '#!/usr/bin/env bash\n# a shim armed earlier\nexit 0\n' > "$stale_shim"
   cp "$stale_shim" "$home/state/tool-updates.check.sh"
@@ -851,9 +906,39 @@ test_a_failed_registration_leaves_no_unregistered_shim() {
   status=0
   FM_HOME="$home" "$CHECK" arm >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "arm over an existing shim with an unusable trust path exit"
-  cmp -s "$stale_shim" "$home/state/tool-updates.check.sh" \
-    || fail "the shim that was already there was not put back byte for byte"
-  pass "a failed registration leaves no unregistered shim and restores what it found"
+  assert_absent "$home/state/tool-updates.check.sh" "a failed arm left a shim behind that no trust binding covers"
+  pass "a failed registration never leaves a shim without a matching trust binding"
+}
+
+test_a_failed_rearm_leaves_no_shim_the_trust_binding_lost() {
+  local home dir fake status
+  # The register removes an existing trust binding when its own post-write check
+  # fails, so an arm that fails there would leave a home that WAS armed holding a
+  # shim with no binding, which the watcher rejects on every cycle. The home must
+  # end plainly not armed instead.
+  home=$(make_home arm-rearm-fail)
+  dir="$TMP_ROOT/arm-rearm-fail/bin"
+  make_copy "$dir" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  FM_HOME="$home" "$CHECK" arm >/dev/null || fail "the first arm failed"
+  assert_present "$home/state/tool-updates.check-trust" "the first arm did not bind the shim"
+
+  # A hash tool that answers with nothing makes the register write a binding it
+  # then rejects, and it removes the old binding on the way out.
+  fake="$TMP_ROOT/arm-rearm-fail/fake-hash"
+  mkdir -p "$fake"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fake/shasum"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fake/sha256sum"
+  chmod 0755 "$fake/shasum" "$fake/sha256sum"
+  printf '#!/usr/bin/env bash\n# a shim armed earlier\nexit 0\n' > "$home/state/tool-updates.check.sh"
+  chmod 0700 "$home/state/tool-updates.check.sh"
+
+  status=0
+  env FM_HOME="$home" PATH="$(fixture_path "$fake")" "$CHECK" arm >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "arm whose registration cannot hash exit"
+  assert_absent "$home/state/tool-updates.check.sh" "a failed re-arm left a shim behind after the trust binding was removed"
+  assert_absent "$home/state/tool-updates.check-trust" "the failed registration left a trust binding behind"
+  pass "a re-arm that loses the trust binding leaves no shim behind"
 }
 
 test_arm_resolves_a_relative_home_into_the_shim() {
@@ -920,6 +1005,7 @@ test_announcement_is_read_from_a_second_command
 test_unusable_announce_pattern_is_reported_not_read_as_silence
 test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep
 test_an_unchecked_announcement_source_is_not_read_as_current
+test_an_announcement_probe_that_does_not_answer_is_reported
 test_quiet_tool_with_announce_pattern_is_silent
 test_commits_behind_origin_are_reported
 test_default_branch_is_detected_when_branch_is_omitted
@@ -935,11 +1021,13 @@ test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
 test_an_overlong_report_says_it_was_cut
+test_a_finding_past_the_cut_is_still_reported
 test_probes_are_skipped_between_intervals
 test_an_oversized_budget_is_cut_to_fit_and_reported
 test_invalid_environment_and_action_refuse
 test_arm_registers_the_check_and_disarm_removes_it
 test_arm_refuses_a_symlink_at_the_shim_path
 test_a_failed_registration_leaves_no_unregistered_shim
+test_a_failed_rearm_leaves_no_shim_the_trust_binding_lost
 test_arm_resolves_a_relative_home_into_the_shim
 test_armed_check_wakes_the_watcher_with_the_skew_report

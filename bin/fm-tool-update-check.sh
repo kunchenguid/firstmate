@@ -57,9 +57,10 @@
 # refused outright.
 #
 # The report record state/.tool-updates is written only after a complete sweep,
-# and it carries the last reported line so the same pending update is reported
-# once rather than on every poll. A sweep killed part way through therefore
-# leaves no record and is retried, instead of silently suppressing its finding.
+# and it carries the whole finding set the last report was made from, uncut, so
+# the same pending update is reported once rather than on every poll while a new
+# finding that lands past the one-line cut is still news. A sweep killed part way
+# through leaves no record and is retried, instead of suppressing its finding.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
@@ -86,6 +87,8 @@ MAX_LINE=1000
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -457,6 +460,13 @@ EOF
       else
         # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
         announce_out=$(probe_output "$resolved_path" $announce_args)
+        status=$?
+        if [ "$status" -eq 124 ]; then
+          # A source that was asked and never answered is not a source that had
+          # nothing to say. The one that answers with nothing stays silent below.
+          emit "$name check failed: $resolved_path did not answer when asked for its update announcement"
+          announce_out=
+        fi
       fi
     fi
     if [ -n "$announce_out" ]; then
@@ -492,20 +502,46 @@ EOF
 
 # --- git probes -------------------------------------------------------------
 
-# One bounded read-only git probe, cut down to whatever the sweep budget has
-# left so a slow repository or remote cannot outlast the sweep.
+# A probe the sweep budget can no longer afford is never issued, and says so with
+# a status of its own rather than a git status, so no caller can read it as an
+# answer. Neither git nor the bounded runner uses this value.
+GIT_PROBE_NOT_ISSUED=3
+
+# One bounded read-only git probe. The budget check lives here rather than in the
+# callers, so no probe can be issued past the sweep deadline whatever a caller
+# does, and the budget only has to leave room for the one probe that was already
+# running when the deadline passed.
 git_probe() {
   local repo=$1
   shift
+  budget_exhausted && return "$GIT_PROBE_NOT_ISSUED"
   fm_run_timed "$(probe_bound)" git -C "$repo" "$@"
 }
 
-# Read-only throughout: nothing here writes to the watched repository. Every
-# probe consults the sweep budget first, because this is the one tool kind that
-# issues several probes in a row, two of them over the network.
+# The single place that reads a probe status as no answer at all, so every probe
+# reports an unanswered read the same way instead of taking it for the answer no.
+git_probe_answered() {
+  local status=$1 name=$2 subject=$3 question=$4
+  case "$status" in
+    "$GIT_PROBE_NOT_ISSUED")
+      emit "$name check failed: the time budget ran out before $subject was asked $question"
+      return 1
+      ;;
+    124)
+      emit "$name check failed: $subject did not answer $question"
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# Read-only throughout: nothing here writes to the watched repository. This is the
+# one tool kind that issues several probes in a row, two of them over the network,
+# and each of them goes through git_probe, which owns both the bound and the
+# budget check, so the sweep cannot outrun its deadline here.
 git_findings() {
   local name=$1 repo=$2 remote=$3 branch=$4
-  local status remote_sha local_sha local_label count short bound
+  local status remote_sha local_sha local_label count short symref
 
   if ! command -v git >/dev/null 2>&1; then
     emit "$name check failed: git is not installed"
@@ -518,31 +554,24 @@ git_findings() {
   budget_allows "$name" || return 0
   git_probe "$repo" rev-parse --git-dir >/dev/null 2>&1
   status=$?
-  if [ "$status" -eq 124 ]; then
-    emit "$name check failed: $repo did not answer whether it is a git repository"
-    return 0
-  fi
+  git_probe_answered "$status" "$name" "$repo" "whether it is a git repository" || return 0
   if [ "$status" -ne 0 ]; then
     emit "$name check failed: $repo is not a git repository"
     return 0
   fi
 
   if [ -z "$branch" ]; then
-    budget_allows "$name" || return 0
     branch=$(git_probe "$repo" symbolic-ref --short "refs/remotes/$remote/HEAD" 2>/dev/null)
-    status=$?
-    if [ "$status" -eq 124 ]; then
-      emit "$name check failed: $repo did not answer which branch it records for $remote"
-      return 0
-    fi
+    git_probe_answered "$?" "$name" "$repo" "which branch it records for $remote" || return 0
     branch=${branch#"$remote/"}
   fi
   if [ -z "$branch" ]; then
     # A clone made with --single-branch, or one that never ran remote set-head,
     # has no local record of the remote's default branch. Ask the remote itself
     # rather than reporting a check failure the operator cannot act on.
-    budget_allows "$name" || return 0
-    branch=$(git_probe "$repo" ls-remote --symref "$remote" HEAD 2>/dev/null \
+    symref=$(git_probe "$repo" ls-remote --symref "$remote" HEAD 2>/dev/null)
+    git_probe_answered "$?" "$name" "$remote" "which branch it uses by default" || return 0
+    branch=$(printf '%s\n' "$symref" \
       | awk '$1 == "ref:" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
   fi
   if [ -z "$branch" ]; then
@@ -550,14 +579,9 @@ git_findings() {
     return 0
   fi
 
-  budget_allows "$name" || return 0
-  bound=$(probe_bound)
-  remote_sha=$(fm_run_timed "$bound" git -C "$repo" ls-remote "$remote" "refs/heads/$branch" 2>/dev/null)
+  remote_sha=$(git_probe "$repo" ls-remote "$remote" "refs/heads/$branch" 2>/dev/null)
   status=$?
-  if [ "$status" -eq 124 ]; then
-    emit "$name check failed: $remote did not answer within ${bound}s"
-    return 0
-  fi
+  git_probe_answered "$status" "$name" "$remote" "where $branch points" || return 0
   if [ "$status" -ne 0 ]; then
     # The probe itself failed, so nothing at all is known about the branch. An
     # offline host and a deleted branch are different problems, and reporting a
@@ -574,22 +598,13 @@ git_findings() {
   # Each probe below is bounded, so a non-zero status means either the answer no
   # or no answer at all. They are kept apart: reading a bound that was hit as an
   # answer would report an update this check never established.
-  budget_allows "$name" || return 0
   local_sha=$(git_probe "$repo" rev-parse --verify --quiet "refs/heads/$branch" 2>/dev/null)
-  status=$?
-  if [ "$status" -eq 124 ]; then
-    emit "$name check failed: $repo did not answer where $branch points"
-    return 0
-  fi
+  git_probe_answered "$?" "$name" "$repo" "where $branch points" || return 0
   if [ -n "$local_sha" ]; then
     local_label="local $branch"
   else
     local_sha=$(git_probe "$repo" rev-parse --verify --quiet HEAD 2>/dev/null)
-    status=$?
-    if [ "$status" -eq 124 ]; then
-      emit "$name check failed: $repo did not answer where HEAD points"
-      return 0
-    fi
+    git_probe_answered "$?" "$name" "$repo" "where HEAD points" || return 0
     if [ -z "$local_sha" ]; then
       emit "$name check failed: $repo has no commit to compare"
       return 0
@@ -601,29 +616,18 @@ git_findings() {
 
   short=$(printf '%s' "$remote_sha" | cut -c1-12)
 
-  budget_allows "$name" || return 0
   git_probe "$repo" cat-file -e "$remote_sha^{commit}" 2>/dev/null
   status=$?
-  if [ "$status" -eq 124 ]; then
-    emit "$name check failed: $repo did not answer whether it already has $short"
-    return 0
-  fi
+  git_probe_answered "$status" "$name" "$repo" "whether it already has $short" || return 0
   if [ "$status" -eq 0 ]; then
     # The local copy may be ahead of, or diverged from, the remote branch; only
     # commits it does not have yet are an available update.
     git_probe "$repo" merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null
     status=$?
-    if [ "$status" -eq 124 ]; then
-      emit "$name check failed: $repo did not answer how its history compares with $remote/$branch"
-      return 0
-    fi
+    git_probe_answered "$status" "$name" "$repo" "how its history compares with $remote/$branch" || return 0
     [ "$status" -ne 0 ] || return 0
     count=$(git_probe "$repo" rev-list --count "$local_sha..$remote_sha" 2>/dev/null)
-    status=$?
-    if [ "$status" -eq 124 ]; then
-      emit "$name check failed: $repo did not finish counting the commits behind $remote/$branch"
-      return 0
-    fi
+    git_probe_answered "$?" "$name" "$repo" "how many commits it is behind $remote/$branch" || return 0
     case "$count" in
       ''|*[!0-9]*|0) count= ;;
     esac
@@ -721,12 +725,16 @@ action_check() {
     line=$FM_LINE_CAP_LINE
   fi
 
+  # The cut line is what gets printed, but the whole finding set is what decides
+  # whether this is news, because a finding that lands past the cut leaves the
+  # printed line unchanged and would otherwise be suppressed for good.
+  #
   # Report before recording, so a record that cannot be written costs a repeated
   # report rather than a lost one.
-  if [ -n "$line" ] && [ "$line" != "$RECORD_REPORTED" ]; then
+  if [ -n "$line" ] && [ "$FINDINGS" != "$RECORD_REPORTED" ]; then
     printf '%s\n' "$line"
   fi
-  record_write "$line" || true
+  record_write "$FINDINGS" || true
   return 0
 }
 
@@ -747,6 +755,8 @@ shim_content() {
 # guards run before anything is written, so a symlink at the shim path is
 # refused instead of followed, and the bytes arrive by rename so the watcher
 # never reads a half-written shim and rejects it as unauthenticated.
+SHIM_WRITE_TMP=
+
 shim_write() {
   local want=$1 device tmp
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
@@ -758,24 +768,28 @@ shim_write() {
     return 0
   fi
   tmp=$(umask 077; mktemp "$STATE/.fm-tool-updates-check.XXXXXX" 2>/dev/null) || return 1
+  SHIM_WRITE_TMP=$tmp
   if ! printf '%s\n' "$want" > "$tmp" \
     || ! chmod 0700 "$tmp" \
     || ! fm_pr_private_file_valid "$tmp" 700 "$device"; then
     rm -f -- "$tmp"
+    SHIM_WRITE_TMP=
     return 1
   fi
   if ! fm_pr_regular_destination_on_device_or_absent "$CHECK_SHIM" "$device" \
     || ! mv -f -- "$tmp" "$CHECK_SHIM"; then
     rm -f -- "$tmp"
+    SHIM_WRITE_TMP=
     return 1
   fi
+  SHIM_WRITE_TMP=
   fm_pr_private_file_valid "$CHECK_SHIM" 700 "$device"
 }
 
 # Keep a byte copy of a shim that is already in place, so a failed arm can put
-# back exactly what it found. Restoring re-written bytes instead would break the
-# trust binding that matched the original, which is the same false wake a
-# leftover shim causes.
+# back the shim a working home was already using rather than an equivalent
+# rewrite. The trust binding is over the bytes, so a rewrite would satisfy it
+# too, but a home that was armed stays armed with what it had.
 shim_backup() {
   local device tmp
   device=$(fm_pr_file_device "$STATE") || return 1
@@ -790,20 +804,36 @@ shim_backup() {
   printf '%s\n' "$tmp"
 }
 
+ARM_BACKUP=
+
 # An unregistered shim is not inert: the watcher rejects it on every cycle and
-# wakes firstmate about unauthenticated state checks. So a home that could not be
-# armed goes back to the state it was in, and the failure is still reported.
-shim_restore() {
-  local backup=$1
-  if [ -z "$backup" ]; then
-    rm -f -- "$CHECK_SHIM"
-    return 0
+# wakes firstmate about unauthenticated state checks. So the one rule after a
+# failed or interrupted arm is that the home never holds a shim without a
+# matching trust binding. The shim a working home had is put back and kept only
+# when it is still bound; otherwise the shim goes, so the home is plainly not
+# armed and the failure is the only thing the operator has to act on.
+arm_rollback() {
+  [ -z "$SHIM_WRITE_TMP" ] || rm -f -- "$SHIM_WRITE_TMP"
+  SHIM_WRITE_TMP=
+  if [ -n "$ARM_BACKUP" ]; then
+    mv -f -- "$ARM_BACKUP" "$CHECK_SHIM" 2>/dev/null || rm -f -- "$ARM_BACKUP"
+    ARM_BACKUP=
+    if fm_custom_check_registered "$STATE" "$CHECK_ID"; then
+      return 0
+    fi
   fi
-  mv -f -- "$backup" "$CHECK_SHIM" || { rm -f -- "$backup"; return 1; }
+  rm -f -- "$CHECK_SHIM"
+}
+
+# shellcheck disable=SC2329  # Registered by action_arm's signal trap.
+arm_interrupted() {
+  arm_rollback
+  printf 'fm-tool-update-check: arming was interrupted, so state/%s.check.sh is not armed\n' "$CHECK_ID" >&2
+  exit 1
 }
 
 action_arm() {
-  local want home backup=
+  local want home
   if [ ! -f "$CONFIG" ]; then
     printf 'fm-tool-update-check: no watched tool registry at %s\n' "$CONFIG" >&2
     return 1
@@ -823,24 +853,31 @@ action_arm() {
       ;;
   esac
   want=$(shim_content "$home")
+  ARM_BACKUP=
   if [ -f "$CHECK_SHIM" ] && [ ! -L "$CHECK_SHIM" ]; then
-    backup=$(shim_backup) || {
+    ARM_BACKUP=$(shim_backup) || {
       printf 'fm-tool-update-check: could not save the existing %s\n' "$CHECK_SHIM" >&2
       return 1
     }
   fi
-  shim_write "$want" || {
-    [ -z "$backup" ] || rm -f -- "$backup"
+  # The shim exists unbound from the rename until the register returns, so a
+  # signal in that window rolls back the same way a failure does.
+  trap arm_interrupted HUP INT TERM
+  if ! shim_write "$want"; then
+    trap - HUP INT TERM
+    arm_rollback
     printf 'fm-tool-update-check: could not write %s\n' "$CHECK_SHIM" >&2
     return 1
-  }
+  fi
   if ! FM_HOME="$home" "$REGISTER_BIN" "$CHECK_ID" >/dev/null; then
-    shim_restore "$backup" \
-      || printf 'fm-tool-update-check: could not restore %s\n' "$CHECK_SHIM" >&2
+    trap - HUP INT TERM
+    arm_rollback
     printf 'fm-tool-update-check: could not register %s\n' "$CHECK_SHIM" >&2
     return 1
   fi
-  [ -z "$backup" ] || rm -f -- "$backup"
+  trap - HUP INT TERM
+  [ -z "$ARM_BACKUP" ] || rm -f -- "$ARM_BACKUP"
+  ARM_BACKUP=
   printf 'armed: state/%s.check.sh\n' "$CHECK_ID"
   return 0
 }
