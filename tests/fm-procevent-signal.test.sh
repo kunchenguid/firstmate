@@ -86,8 +86,14 @@ document = json.load(sys.stdin)
 if document.get("jsonrpc") != "2.0" or document.get("method") != "send" or document.get("id") != "fm-send":
     raise SystemExit(98)
 params = document.get("params")
-if not isinstance(params, dict) or not isinstance(params.get("groupId"), str) or not isinstance(params.get("message"), str):
+expected_account = os.environ.get("FM_FAKE_SIGNAL_EXPECTED_ACCOUNT", "+10000000000")
+if (not isinstance(params, dict)
+        or params.get("account") != expected_account
+        or not isinstance(params.get("groupId"), str)
+        or not isinstance(params.get("message"), str)):
     raise SystemExit(98)
+with open(os.path.join(os.environ["FM_FAKE_SIGNAL_ROOT"], "sent-account"), "w", encoding="ascii") as target:
+    target.write(params["account"])
 with open(os.path.join(os.environ["FM_FAKE_SIGNAL_ROOT"], "sent-group"), "w", encoding="utf-8") as target:
     target.write(params["groupId"])
 with open(os.path.join(os.environ["FM_FAKE_SIGNAL_ROOT"], "sent-body"), "w", encoding="utf-8") as target:
@@ -329,6 +335,7 @@ FM_FAKE_SIGNAL_RECEIVE_START_DELAY=0.5 \
   || fail "supported send ordering failed"
 [ -s "$SIGNAL_ROOT/sent.log" ] || fail "successful send was not recorded"
 assert_contains "$(cat "$SIGNAL_ROOT/sent-body")" "Fixture: reply fixture" "configured label is prepended once"
+assert_contains "$(cat "$SIGNAL_ROOT/sent-account")" "+10000000000" "discovered account is delivered through JSON-RPC stdin"
 assert_contains "$(cat "$SIGNAL_ROOT/sent-group")" "group-fixture-id" "configured group is delivered through JSON-RPC stdin"
 assert_not_contains "$(cat "$SIGNAL_ROOT/cli.log")" "reply fixture" "message content never reaches a CLI argv record"
 assert_not_contains "$(cat "$SIGNAL_ROOT/cli.log")" "group-fixture-id" "group identifier never reaches a CLI argv record"

@@ -88,7 +88,7 @@ Never at-least-once, no-loss, or lossless.
 ## What the runner does prove
 
 The Signal adapter regression suite uses real receive, retirement, account-discovery, send, and re-arm processes against a fake CLI.
-It proves that account discovery stalls while the receive owner holds the fake account lock, every CLI operation uses private home-local state, the supported send retires first and succeeds through JSON-RPC standard input, both send outcomes re-arm the source, configured outbound labels are inserted once, live routing replacements are revalidated, unrelated messages do not publish captures, inbound message bytes remain unchanged, private identifiers and message bytes never enter an argv record, and repeated lifecycle commands leave one live owner.
+It proves that account discovery stalls while the receive owner holds the fake account lock, every CLI operation uses private home-local state, the supported send carries its validated account and group through JSON-RPC standard input, both send outcomes re-arm the source, configured outbound labels are inserted once, live routing replacements are revalidated, unrelated messages do not publish captures, inbound message bytes remain unchanged, private identifiers and message bytes never enter an argv record, and repeated lifecycle commands leave one live owner.
 
 Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose completion is a process event, not a timer; for the two supervision-delivery rows below, by `tests/fm-watch-triage.test.sh` driving a real `bin/fm-watch.sh` over a real capture; and for adapter-owned application, by `tests/fm-remote-reply.test.sh` driving the real remote-reply relay end to end in an isolated home:
 

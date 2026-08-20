@@ -170,7 +170,7 @@ account_from_output() {
 }
 
 validate_single_account() {
-  local output discovered
+  local target=${1-} output discovered
   positive_int "$SEND_TIMEOUT" || die "FM_SIGNAL_COMMAND_TIMEOUT must be a positive integer"
   require_signal_account_access
   ensure_signal_data_dir || die "cannot create private Signal data state"
@@ -190,6 +190,7 @@ validate_single_account() {
       ;;
     *) die "Signal account discovery returned no usable account" ;;
   esac
+  [ -z "$target" ] || printf -v "$target" '%s' "$discovered"
 }
 
 signal_routes() {
@@ -276,12 +277,15 @@ if mode == "request":
     if route is None:
         raise SystemExit(4)
     try:
+        account = sys.stdin.buffer.readline().decode("ascii").rstrip("\n")
         with open(os.environ["FM_SIGNAL_MESSAGE"], "rb") as source:
             body = source.read().decode("utf-8")
     except (OSError, UnicodeDecodeError):
         raise SystemExit(4)
+    if not re.fullmatch(r"\+[0-9]+", account):
+        raise SystemExit(4)
     json.dump({"jsonrpc": "2.0", "method": "send", "params": {
-        "groupId": route[0], "message": body}, "id": "fm-send"}, sys.stdout,
+        "account": account, "groupId": route[0], "message": body}, "id": "fm-send"}, sys.stdout,
         ensure_ascii=True, separators=(",", ":"))
     sys.stdout.write("\n")
     raise SystemExit(0)
@@ -397,12 +401,12 @@ cmd_retire() {
 }
 
 cmd_send_locked() {
-  local selector=$1 message=${2:--} raw prefixed request response ownership_status
+  local selector=$1 message=${2:--} account raw prefixed request response ownership_status
   [ "$message" = - ] || { [ -f "$message" ] && [ ! -L "$message" ] || die "message file is not a regular file"; }
   validate_routes || die "Signal group configuration is invalid"
   validate_route_selector "$selector" || die "Signal group selector is not configured"
   cmd_retire_locked "$selector" >/dev/null || die "could not retire Signal receive source"
-  validate_single_account || exit 1
+  validate_single_account account || exit 1
   private_tempfile raw fm-signal-raw || die "cannot create private Signal message"
   if [ "$message" = - ]; then
     cat >"$raw" || { rm -f "$raw"; die "cannot read Signal message"; }
@@ -415,7 +419,7 @@ cmd_send_locked() {
     || { rm -f "$raw" "$prefixed"; die "cannot prefix Signal message"; }
   rm -f "$raw"
   private_tempfile request fm-signal-request || { rm -f "$prefixed"; die "cannot create private Signal request"; }
-  signal_routes request "$selector" "$prefixed" >"$request" \
+  printf '%s\n' "$account" | signal_routes request "$selector" "$prefixed" >"$request" \
     || { rm -f "$prefixed" "$request"; die "cannot create private Signal request"; }
   private_tempfile response fm-signal-response \
     || { rm -f "$prefixed" "$request"; die "cannot create private Signal response"; }

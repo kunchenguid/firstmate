@@ -656,7 +656,7 @@ All configured selectors share one account-scoped receive source, which routes e
 The adapter retires the receive source before every `signal-cli` account or send operation and restores it after success or failure.
 The adapter prefixes outbound content with the configured display label and colon exactly once, so each group can use its own private attribution label.
 The group mapping, account identifiers, message content, credentials, and captured Signal state remain home-local and are never printed in normal adapter output.
-Account and group identifiers are omitted from signal-cli process arguments, and outbound group and message values enter signal-cli only through its JSON-RPC standard input.
+Account and group identifiers are omitted from signal-cli process arguments, and outbound account, group, and message values enter signal-cli only through its JSON-RPC standard input.
 
 The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action at most once before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs.
