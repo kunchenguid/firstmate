@@ -25,7 +25,7 @@ Self-review defeats the gate: the whole reason this stage exists is a second, in
 1. **Story frontmatter is standard - this is a hard gate, and it is executable.**
    Run `bin/fm-epic-lint.sh <epic-dir>` on the epic directory; it is the single owner of the epic/story contract and the same check `fm-umbrella-promote.sh` runs at promote time.
    A non-zero exit is an automatic **FAIL**: copy its numbered problem list into your findings verbatim and stop treating the epic as passable until they are fixed and the lint is green.
-   It enforces, mechanically, exactly the contract in the block below - the seven keys and nothing ad-hoc (`story:`/`phase:` are rejected), lower-kebab unique ids that match their filenames, matching `epic:`, registered `repo:`, valid `pr_base:`, exactly one `gate: true`, `depends:` naming real stories with no cycle, and a resolving plan pointer - so this is the failure the whole pipeline exists to prevent, checked first and not negotiable.
+   It enforces, mechanically, exactly the contract in the block below - the seven required keys plus an optional `delivery:` mode and nothing else ad-hoc (`story:`/`phase:` are rejected), lower-kebab unique ids that match their filenames, matching `epic:`, registered `repo:`, valid `pr_base:`, exactly one `gate: true`, `depends:` naming real stories with no cycle, a resolving plan pointer, and a known `delivery:` value when that optional key is present - so this is the failure the whole pipeline exists to prevent, checked first and not negotiable.
    `fm-epic-lint.sh --help` documents the full contract; run it, do not re-derive the rules by eye.
 
 2. **The contract is concrete and landable-first.**
@@ -58,11 +58,16 @@ Every `stories/<id>.md` file starts with exactly this YAML frontmatter and nothi
     depends: []             # ids of stories that must land first, or [] for none
     kind: ship              # ship (produces a PR) or scout (produces a report); defaults to ship
     gate: false             # true only on the one contract-gate story that must land before its dependents
+    delivery: no-mistakes   # OPTIONAL: no-mistakes | direct-PR | local-only; omit to resolve the mode at dispatch
     ---
 
-Do not use `story:`, `phase:`, or any other key in place of these seven.
+Do not use `story:`, `phase:`, or any other key in place of the seven required keys; the only allowed optional key is `delivery:`, and it may be omitted.
 A missing `id:`, a `pr_base:` that is not the epic branch, or an `epic:` that does not match `epic.md` is exactly what produced orphan tasks and a doubled epic before this pipeline existed.
 The promotion engine derives each backlog id, `[<epic>]` tag, and repo straight from `id:`/`epic:`/`repo:` (and reads `kind:`, defaulting to `ship`), so that part of the frontmatter IS the contract - get it right here and the backlog matches by construction; `depends:` and `gate:` drive the review gate and dispatch ordering.
+The optional `delivery:` records the story's intended delivery mode when it is known at authoring time, so the author's intent is captured once instead of re-decided by judgment at dispatch.
+Omit it and firstmate resolves the mode at dispatch from the repo's registered posture, exactly as before.
+`fm-epic-lint` validates a present value against those three modes and warns (never fails) when a `no-mistakes-prod-only` repo's story is marked `direct-PR`, since that mode fits only an internal-only surface.
+The mode stays overridable by an explicit captain instruction at dispatch - it is never a hard lock.
 
 ## Output
 
