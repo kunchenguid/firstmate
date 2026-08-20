@@ -26,6 +26,7 @@ TMP_ROOT=$(fm_test_tmproot fm-merge-local)
 git_q() { git -C "$1" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' "${@:2}"; }
 
 commit_file() {  # <repo> <path> <content> <message>
+  mkdir -p "$(dirname "$1/$2")"
   printf '%s\n' "$3" > "$1/$2"
   git_q "$1" add -A
   git_q "$1" commit -qm "$4"
@@ -93,6 +94,10 @@ EOF
     *"carried main into $origin"*) ;;
     *) fail "landing did not report carrying the branch into the origin folder: $out" ;;
   esac
+  # An origin already spelled absolutely needs no advice, so it must not get any.
+  case "$out" in
+    *"re-point it at"*) fail "an absolute origin was told to re-point itself: $out" ;;
+  esac
   # His own uncommitted work is the thing this must never touch.
   [ "$(cat "$origin/CV.tex")" = "cv edited by hand" ] || fail "the landing overwrote an uncommitted edit"
   [ -f "$origin/Notes.md" ] || fail "the landing removed an untracked file"
@@ -130,7 +135,7 @@ EOF
     fail "landing proceeded over uncommitted work on a path it changes: $out"
   fi
   case "$out" in
-    *REFUSED*"uncommitted work on paths this landing would change"*"CV.tex"*) ;;
+    *REFUSED*"has work of its own on paths this landing would change"*"CV.tex"*) ;;
     *) fail "refusal did not name the colliding path: $out" ;;
   esac
   [ "$(cat "$origin/CV.tex")" = "cv the captain is still editing" ] \
@@ -340,6 +345,10 @@ EOF
     *REFUSED*"Cover.pdf"*) ;;
     *) fail "refusal did not name the ignored path: $out" ;;
   esac
+  case "$out" in
+    *"!! Cover.pdf"*) ;;
+    *) fail "refusal did not mark the colliding path as one the folder ignores: $out" ;;
+  esac
   [ "$(cat "$origin/Cover.pdf")" = "the cover letter he wrote by hand" ] \
     || fail "the refused landing still overwrote the ignored file"
   [ "$(head_of "$origin")" = "$before_head" ] || fail "the refused landing still moved the origin folder"
@@ -365,6 +374,51 @@ EOF
   pass "an ignored file outside the landing's paths does not refuse the carry"
 }
 
+test_landing_adds_a_file_inside_a_wholly_ignored_directory() {
+  local home origin clone out
+  IFS='|' read -r home origin clone <<EOF
+$(make_landing ignoreddir)
+EOF
+  ready_branch "$home" "$clone" task-r renders/Cover.pdf "a render the worker committed"
+  # git reports a wholly-ignored directory as one entry, so asking about a path
+  # that is not there would refuse this landing forever over scratch work of his
+  # own that the fast-forward never touches.
+  printf '%s\n' 'renders/' >> "$origin/.git/info/exclude"
+  mkdir -p "$origin/renders"
+  printf '%s\n' "a render he made himself" > "$origin/renders/CV.pdf"
+
+  out=$(run_merge "$home" task-r) \
+    || fail "landing refused to add a file beside the folder's own ignored work: $out"
+  [ -f "$origin/renders/Cover.pdf" ] || fail "the landed file never reached the ignored directory"
+  [ "$(cat "$origin/renders/CV.pdf")" = "a render he made himself" ] \
+    || fail "the landing disturbed his own ignored file in that directory"
+  pass "a landing that only adds a file inside a wholly-ignored directory goes through"
+}
+
+test_landing_refuses_an_ignored_file_inside_a_wholly_ignored_directory() {
+  local home origin clone out before_head
+  IFS='|' read -r home origin clone <<EOF
+$(make_landing ignoreddircollide)
+EOF
+  ready_branch "$home" "$clone" task-s renders/Cover.pdf "a render the worker committed"
+  printf '%s\n' 'renders/' >> "$origin/.git/info/exclude"
+  mkdir -p "$origin/renders"
+  printf '%s\n' "the render he made himself" > "$origin/renders/Cover.pdf"
+  before_head=$(head_of "$origin")
+
+  if out=$(run_merge "$home" task-s); then
+    fail "landing overwrote an ignored file inside an ignored directory: $out"
+  fi
+  case "$out" in
+    *REFUSED*"!! renders/Cover.pdf"*) ;;
+    *) fail "refusal did not name the ignored file inside the ignored directory: $out" ;;
+  esac
+  [ "$(cat "$origin/renders/Cover.pdf")" = "the render he made himself" ] \
+    || fail "the refused landing still overwrote the ignored file"
+  [ "$(head_of "$origin")" = "$before_head" ] || fail "the refused landing still moved the origin folder"
+  pass "an ignored file that is really there still refuses, named path and all"
+}
+
 test_landing_follows_an_origin_spelled_relative_to_the_clone() {
   local home origin clone out
   IFS='|' read -r home origin clone <<EOF
@@ -383,6 +437,12 @@ EOF
     *"carried main into $origin"*) ;;
     *) fail "landing did not report the resolved origin folder: $out" ;;
   esac
+  # A relative origin cannot be fetched from a linked worktree, so a clone spelled
+  # that way lands but can never be spawned into. Saying so is the whole point.
+  case "$out" in
+    *"note: $clone names its origin as ../../../JobSearch; re-point it at $origin"*) ;;
+    *) fail "landing did not advise re-pointing the relative origin: $out" ;;
+  esac
   pass "an origin spelled relative to the clone is anchored and landed into"
 }
 
@@ -400,6 +460,10 @@ EOF
   [ -f "$origin/Cover.tex" ] || fail "the landed file never reached the origin folder"
   [ "$(head_of "$origin")" = "$(head_of "$clone")" ] \
     || fail "the origin folder is not at the landed commit"
+  case "$out" in
+    *"note: $clone names its origin as ~/JobSearch; re-point it at $origin"*) ;;
+    *) fail "landing did not advise re-pointing the tilde-spelled origin: $out" ;;
+  esac
   pass "a tilde-spelled origin expands against the invoking user's home and lands"
 }
 
@@ -437,6 +501,8 @@ test_landing_reports_a_remote_origin_url
 test_landing_still_refuses_a_task_that_is_not_local_only
 test_landing_refuses_a_gitignored_file_it_would_overwrite
 test_landing_allows_an_ignored_file_it_would_not_touch
+test_landing_adds_a_file_inside_a_wholly_ignored_directory
+test_landing_refuses_an_ignored_file_inside_a_wholly_ignored_directory
 test_landing_follows_an_origin_spelled_relative_to_the_clone
 test_landing_follows_an_origin_spelled_with_a_tilde
 test_landing_refuses_a_path_shaped_origin_it_cannot_anchor
