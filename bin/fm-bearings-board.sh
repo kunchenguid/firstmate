@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# fm-bearings-board.sh - build and arm the /bearings lavish fleet board.
+#
+# The board is the captain-facing interactive surface of /bearings lavish: the
+# shipped template (.agents/skills/bearings/assets/board-template.html) plus one
+# injected fm-bearings-board.v1 JSON payload. This script owns the mechanics so
+# the invoking agent's per-run work stays "compose the JSON, run build" - the
+# agent never authors board UI at invocation time.
+#
+# Usage:
+#   fm-bearings-board.sh build <data.json>
+#   fm-bearings-board.sh path
+#
+# build      Validate the payload, inject it into a fresh copy of the shipped
+#            template at the stable board path, bind the board's answer source
+#            to the any-origin keyed-answer intake, then arm it as a Lavish
+#            process-event source when it is not already registered. Bind
+#            ALWAYS precedes arm, so the board can never produce an answer that
+#            has nowhere to go (decision-hold-lifecycle's ordering rule,
+#            enforced here rather than left to agent memory). Output lines:
+#              board: <path>
+#              bound: <source-id> (any-origin)
+#              armed: <source-id>            (first registration)
+#              already-armed: <source-id>    (registration already present)
+# path       Print the stable board path for this home.
+#
+# Validation is fail-closed: the payload must be valid JSON with
+# schema=fm-bearings-board.v1; string `home` and `generated`; boolean
+# `prs_live`; arrays `captains_call`, `underway`, `landed`, and `charted`;
+# every captains_call item carries a slug `key` of at most 128 characters
+# (matching the Lavish adapter's question cap), a `type` of decision, merge, or
+# credential, and an `options` array; every charted item carries a boolean
+# `dispatchable`. Anything else refuses before the existing board is touched.
+#
+# The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
+# re-invocation rebuilds the same file in place, which keeps the same Lavish
+# session URL and the same canonical process-event source id. Injection escapes
+# every `<` in the compact JSON as the \u003c string escape, so a payload string
+# containing "</script>" can never terminate the data block early.
+#
+# FM_BEARINGS_BOARD_TEMPLATE overrides the shipped template path (tests only).
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-$FM_ROOT}"
+
+TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
+PLACEHOLDER='__FM_BEARINGS_BOARD_DATA__'
+BOARD_SCHEMA=fm-bearings-board.v1
+
+usage() {
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0"
+}
+
+fail() {
+  printf 'fm-bearings-board: %s\n' "$*" >&2
+  exit 1
+}
+
+board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
+
+validate_payload() {  # <data.json>
+  jq -e --arg schema "$BOARD_SCHEMA" '
+    (.schema == $schema)
+    and (.home | type == "string")
+    and (.generated | type == "string")
+    and (.prs_live | type == "boolean")
+    and (.captains_call | type == "array")
+    and (.underway | type == "array")
+    and (.landed | type == "array")
+    and (.charted | type == "array")
+    and ([.captains_call[]
+      | ((.key | type == "string") and (.key | test("^[A-Za-z0-9._-]{1,128}$")))
+        and (.type == "decision" or .type == "merge" or .type == "credential")
+        and (.options | type == "array")] | all)
+    and ([.charted[] | (.dispatchable | type == "boolean")] | all)
+  ' "$1" >/dev/null
+}
+
+command_build() {
+  local data=${1-} board json tmp sid extracted
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  command -v jq >/dev/null 2>&1 || fail "jq is required"
+  [ -f "$data" ] || fail "board data does not exist: $data"
+  jq empty "$data" 2>/dev/null || fail "board data is not valid JSON: $data"
+  validate_payload "$data" || fail "board data does not satisfy $BOARD_SCHEMA: $data"
+  [ -f "$TEMPLATE" ] && [ ! -L "$TEMPLATE" ] || fail "board template is missing: $TEMPLATE"
+  [ "$(grep -cxF "$PLACEHOLDER" "$TEMPLATE")" -eq 1 ] \
+    || fail "board template does not carry exactly one data slot: $TEMPLATE"
+
+  json=$(jq -c . "$data") || fail "cannot compact the board data"
+  # `<` never appears in JSON syntax outside strings, so escaping every
+  # occurrence keeps the payload valid JSON while making </script> inert.
+  json=${json//</\\u003c}
+
+  board=$(board_path)
+  (umask 077; mkdir -p "${board%/*}") || fail "cannot create ${board%/*}"
+  tmp=$(umask 077; mktemp "${board%/*}/.board.XXXXXX") || fail "cannot stage the board"
+  if ! BOARD_JSON="$json" perl -pe "s/^\\Q$PLACEHOLDER\\E\$/\$ENV{BOARD_JSON}/" "$TEMPLATE" > "$tmp"; then
+    rm -f -- "$tmp"
+    fail "cannot inject the board data"
+  fi
+  if grep -qxF "$PLACEHOLDER" "$tmp"; then
+    rm -f -- "$tmp"
+    fail "the board data slot survived injection"
+  fi
+  # Round-trip the injected payload back out of the built page, so a board that
+  # would fail to parse in the browser fails here instead.
+  extracted=$(sed -n '/<script id="bearings-data" type="application\/json">/,/<\/script>/p' "$tmp" \
+    | sed '1d;$d')
+  if ! printf '%s\n' "$extracted" | jq -e --arg schema "$BOARD_SCHEMA" '.schema == $schema' >/dev/null 2>&1; then
+    rm -f -- "$tmp"
+    fail "the built board does not carry a readable $BOARD_SCHEMA payload"
+  fi
+  if ! { chmod 0600 "$tmp" && mv -f -- "$tmp" "$board"; }; then
+    rm -f -- "$tmp"
+    fail "cannot publish the board"
+  fi
+  printf 'board: %s\n' "$board"
+
+  sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \
+    || fail "cannot derive the board source id"
+  "$SCRIPT_DIR/fm-decision-hold.sh" bind "$sid" --any-origin >/dev/null \
+    || fail "cannot bind the board source to the any-origin intake"
+  printf 'bound: %s (any-origin)\n' "$sid"
+
+  if "$SCRIPT_DIR/fm-procevent.sh" list | awk 'NR > 1 { print $1 }' | grep -Fxq "$sid"; then
+    printf 'already-armed: %s\n' "$sid"
+  else
+    "$SCRIPT_DIR/fm-procevent-lavish.sh" arm "$board" >/dev/null \
+      || fail "cannot arm the board as a process-event source"
+    printf 'armed: %s\n' "$sid"
+  fi
+}
+
+case "${1-}" in
+  build) shift; command_build "$@" ;;
+  path) board_path ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac
