@@ -44,7 +44,18 @@
 #      un-executed). A bare Enter press therefore sends a single space as
 #      --text without --no-submit: the CLI's normal "type then submit"
 #      behavior presses Enter after it, and a lone trailing space is inert
-#      to every shell and agent composer this adapter targets.
+#      to every shell and agent composer this adapter targets. There is no
+#      true "press Enter only" primitive: a space+DEL (0x20 0x7f) compensation
+#      was tried live to neutralize the injected space before submit, and
+#      verified NOT to work - 0x7f is inserted as a literal DEL control byte
+#      (rendered ^?), not interpreted as a backspace/delete-previous-character
+#      edit, so it strictly worsens the injection rather than canceling it.
+#      Known caveat: bin/fm-composer-lib.sh's fm_composer_submit_retry_core
+#      calls this adapter's send-key(Enter) again on every retry without
+#      retyping the original text, so if an intermediate Enter is swallowed by
+#      a popup/autocomplete instead of submitting, each retry injects one more
+#      stray space into whatever is still staged in the composer (e.g. a
+#      slash-command popup argument placeholder), rather than being a no-op.
 #   5. Unlike embedded text bytes, \x03 (Ctrl-C) IS specially recognized by
 #      `terminals send --text` and delivers a real interrupt - verified
 #      live: sending it to a terminal running `sleep 60` produced the
@@ -113,7 +124,7 @@ process.exit(1);
 # JSON is flat and already live-verified per call site (see the header
 # findings), so this is a thin per-field switch, not Orca's defensive
 # multi-shape parser. Fields: create-workspace-id worktree-path terminal-id
-# text project-id.
+# text.
 fm_backend_superset_json_get() {  # <field>
   local field=$1
   # shellcheck disable=SC2016
@@ -126,7 +137,6 @@ if (field === "create-workspace-id") v = (data.workspace || {}).id || "";
 if (field === "worktree-path") v = data.worktreePath || "";
 if (field === "terminal-id") v = data.terminalId || "";
 if (field === "text") v = (typeof data.text === "string") ? data.text : "";
-if (field === "project-id") v = data.id || "";
 if (field !== "text" && !v) process.exit(1);
 process.stdout.write(String(v));
 ' "$field"
@@ -277,6 +287,11 @@ fm_backend_superset_send_key() {  # <target> <key>
   local key=$2
   case "$key" in
     Enter|enter)
+      # Single space is the only non-empty --text the CLI accepts (finding #4);
+      # a live-verified space+DEL compensation does not neutralize it (0x7f
+      # inserts as a literal control byte, not a backspace). A retry from
+      # fm_composer_submit_retry_core re-sends this space on top of whatever
+      # is still staged, so it is a no-op only when the prior Enter submitted.
       superset terminals send --workspace "$FM_BACKEND_SUPERSET_WORKSPACE" --terminal "$FM_BACKEND_SUPERSET_TERMINAL" --text " " --json >/dev/null
       ;;
     C-c|ctrl+c|Ctrl-c|Ctrl-C)
