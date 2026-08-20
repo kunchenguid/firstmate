@@ -264,22 +264,71 @@ test_unusable_announce_pattern_is_reported_not_read_as_silence() {
   local home dir out status
   # A pattern the search cannot use answers exactly like a tool with nothing to
   # announce, which is the silently dead update source this check exists to
-  # prevent. It is a registry problem, so it is reported with the tool named.
+  # prevent. It is reported as that tool's own check failure.
   home=$(make_home bad-pattern)
   dir="$TMP_ROOT/bad-pattern/bin"
   make_copy "$dir" no-mistakes-fixture 'no-mistakes version v1.46.0'
   write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","announce_pattern":"A new version of no-mistakes is available: ([^ ]+ -> [^ ]+"}]}'
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$dir")" "$out"
-  assert_contains "$(cat "$out")" "tool no-mistakes announce_pattern is not a usable extended regular expression" "a pattern that cannot be used was read as nothing to announce"
+  assert_contains "$(cat "$out")" "no-mistakes check failed: announce_pattern is not a usable extended regular expression" "a pattern that cannot be used was read as nothing to announce"
 
-  # Arming refuses the same registry rather than arming a check with a source
-  # that can never fire.
+  # Arming is a deliberate operator action, so the same registry refuses it
+  # rather than arming a check with a source that can never fire.
   status=0
   FM_HOME="$home" "$CHECK" arm >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "arm with an unusable announce_pattern exit"
   assert_absent "$home/state/tool-updates.check.sh" "arm registered a check whose announcement source cannot fire"
   pass "an announce_pattern that cannot be used is reported instead of read as silence"
+}
+
+test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep() {
+  local home stale fresh dir out report
+  # A one character typo in one tool's pattern must not turn off the detector for
+  # every other tool. The PATH skew below is the whole reason this check exists,
+  # so it has to be reported in the same sweep as the pattern problem.
+  home=$(make_home pattern-blind)
+  stale="$TMP_ROOT/pattern-blind/mise/installs/herdr/latest/bin"
+  fresh="$TMP_ROOT/pattern-blind/local/bin"
+  dir="$TMP_ROOT/pattern-blind/announce/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  make_copy "$dir" no-mistakes-fixture 'no-mistakes version v1.46.0'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"},{\"name\":\"no-mistakes\",\"command\":\"no-mistakes-fixture\",\"announce_pattern\":\"A new version of no-mistakes is available: ([^ ]+ -> [^ ]+\"}]}"
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$stale:$fresh:$dir")" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "herdr update not in effect: PATH resolves 0.8.0 at $stale/$TOOL" "a broken pattern on another tool suppressed the PATH skew report"
+  assert_contains "$report" "no-mistakes check failed: announce_pattern is not a usable extended regular expression" "the tool whose pattern cannot be used was not named"
+  [ "$(wc -l < "$out")" = 1 ] || fail "the report must stay exactly one line"
+  pass "a broken pattern is reported for its own tool and the rest of the sweep still reports"
+}
+
+test_an_unchecked_announcement_source_is_not_read_as_current() {
+  local home dir out report
+  # When the budget is gone the separate announcement command cannot run, and the
+  # version probe's output never carries the announcement. Searching that output
+  # anyway would present a source that was never asked as a clean result, which is
+  # the same silently dead source announce_args was added to close.
+  home=$(make_home announce-budget)
+  dir="$TMP_ROOT/announce-budget/bin"
+  mkdir -p "$dir"
+  cat > "$dir/no-mistakes-fixture" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf 'no-mistakes version v1.46.0\n'
+  sleep 30
+  exit 0
+fi
+printf 'A new version of no-mistakes is available: v1.46.0 -> v1.53.0\n' >&2
+SH
+  chmod 0755 "$dir/no-mistakes-fixture"
+  write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
+  report=$(cat "$out")
+  assert_contains "$report" "no-mistakes check failed: the time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
+  pass "an announcement source the budget could not reach is reported, not read as current"
 }
 
 test_quiet_tool_with_announce_pattern_is_silent() {
@@ -449,6 +498,44 @@ test_git_probes_stop_when_the_sweep_budget_is_gone() {
   pass "git probes stop and name their tool once the sweep budget is gone"
 }
 
+test_a_git_probe_that_does_not_answer_is_not_an_update() {
+  local home work dir out report head_before
+  # The local git probes are bounded too, so a bound that is hit must not be read
+  # as the answer "this clone does not have that commit". This clone is ahead of
+  # its remote branch, which is silent when the probes answer, so any claim of an
+  # available update here was never established.
+  home=$(make_home git-mute)
+  work=$(git_fixture git-mute-repo)
+  printf 'local only\n' > "$work/f4"
+  git -C "$work" add f4
+  git -C "$work" commit -qm four
+  head_before=$(git -C "$work" rev-parse HEAD)
+
+  # A git that answers everything except the object query, which never answers.
+  dir="$TMP_ROOT/git-mute/bin"
+  mkdir -p "$dir"
+  cat > "$dir/git" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = cat-file ]; then
+    sleep 30
+    exit 0
+  fi
+done
+exec $(command -v git) "\$@"
+SH
+  chmod 0755 "$dir/git"
+
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  report=$(cat "$out")
+  assert_not_contains "$report" "update available" "a probe that never answered was reported as an available update"
+  assert_contains "$report" "firstmate check failed" "a probe that never answered was not reported at all"
+  [ "$(git -C "$work" rev-parse HEAD)" = "$head_before" ] || fail "the check moved the watched repository's HEAD"
+  pass "a git probe that does not answer is reported as a failure, never as an update"
+}
+
 # --- registry and reporting contract ----------------------------------------
 
 test_absent_registry_is_silent() {
@@ -565,6 +652,38 @@ test_probes_are_skipped_between_intervals() {
   expect_code 0 "$status" "due cadence run exit"
   assert_contains "$(cat "$out")" "did not report a version" "the run after the interval did not probe"
   pass "probes run once per interval, not on every poll"
+}
+
+test_an_oversized_budget_is_cut_to_fit_and_reported() {
+  local home stale fresh out report status
+  # A sweep budget larger than the watcher's own per check bound lets the watcher
+  # kill the run, which prints nothing and records nothing, so the same silence
+  # repeats on every poll. Cutting it keeps the detector alive, and the cut is
+  # reported so the operator can see the setting was not used as written.
+  home=$(make_home budget-cut)
+  stale="$TMP_ROOT/budget-cut/mise/installs/herdr/latest/bin"
+  fresh="$TMP_ROOT/budget-cut/local/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  status=0
+  env FM_HOME="$home" PATH="$(fixture_path "$stale:$fresh")" FM_TOOL_UPDATE_INTERVAL=0 \
+    FM_TOOL_UPDATE_BUDGET_SECS=60 FM_CHECK_TIMEOUT=30 "$CHECK" >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "oversized budget exit"
+  report=$(cat "$out")
+  assert_contains "$report" "sweep budget 60s cut to 29s to stay inside the watcher check timeout of 30s" "a budget that cannot fit the watcher bound was not cut and reported"
+  assert_contains "$report" "herdr update not in effect" "the detector went quiet instead of sweeping with the cut budget"
+
+  # A budget the watcher bound has room for is used as written.
+  status=0
+  env FM_HOME="$home" PATH="$(fixture_path "$stale:$fresh")" FM_TOOL_UPDATE_INTERVAL=0 \
+    FM_TOOL_UPDATE_BUDGET_SECS=60 FM_CHECK_TIMEOUT=120 "$CHECK" >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "fitting budget exit"
+  report=$(cat "$out")
+  assert_not_contains "$report" "sweep budget" "a budget that fits the watcher bound was cut anyway"
+  assert_contains "$report" "herdr update not in effect" "the sweep stopped reporting with a budget that fits"
+  pass "a budget that cannot fit the watcher bound is cut and reported, and the sweep keeps working"
 }
 
 test_invalid_environment_and_action_refuse() {
@@ -706,6 +825,8 @@ test_missing_command_is_reported
 test_announced_update_is_reported_from_the_tool_itself
 test_announcement_is_read_from_a_second_command
 test_unusable_announce_pattern_is_reported_not_read_as_silence
+test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep
+test_an_unchecked_announcement_source_is_not_read_as_current
 test_quiet_tool_with_announce_pattern_is_silent
 test_commits_behind_origin_are_reported
 test_default_branch_is_detected_when_branch_is_omitted
@@ -715,11 +836,13 @@ test_unusable_git_source_is_reported
 test_unreadable_remote_is_not_reported_as_a_missing_branch
 test_missing_branch_on_a_readable_remote_is_still_reported
 test_git_probes_stop_when_the_sweep_budget_is_gone
+test_a_git_probe_that_does_not_answer_is_not_an_update
 test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
 test_an_overlong_report_says_it_was_cut
 test_probes_are_skipped_between_intervals
+test_an_oversized_budget_is_cut_to_fit_and_reported
 test_invalid_environment_and_action_refuse
 test_arm_registers_the_check_and_disarm_removes_it
 test_arm_refuses_a_symlink_at_the_shim_path

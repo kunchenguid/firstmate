@@ -45,8 +45,16 @@
 # FM_TOOL_UPDATE_INTERVAL (default 900, 0 disables the gate, otherwise 60..86400)
 # and stays silent in between. Each probe is bounded by
 # FM_TOOL_UPDATE_PROBE_SECS (default 5, valid 1..30) and a whole sweep by
-# FM_TOOL_UPDATE_BUDGET_SECS (default 20, valid 1..120) so the run finishes
-# inside the watcher's FM_CHECK_TIMEOUT.
+# FM_TOOL_UPDATE_BUDGET_SECS (default 20, valid 1..120).
+#
+# The sweep has to finish inside the watcher's own per check bound, because a run
+# the watcher kills prints nothing and writes no record, so it would repeat that
+# silence on every poll. That coupling is enforced rather than assumed: a budget
+# larger than FM_CHECK_TIMEOUT (default 30, read from this check's own
+# environment because the watcher runs it as a direct child) allows is cut down
+# to what fits, and the cut is reported in the report line so the operator sees
+# it. A budget that cannot be read as a whole number from 1 to 120 is still
+# refused outright.
 #
 # The report record state/.tool-updates is written only after a complete sweep,
 # and it carries the last reported line so the same pending update is reported
@@ -134,6 +142,30 @@ if [ "$BUDGET_SECS" -gt 120 ]; then
   exit 2
 fi
 
+# The smallest bound a probe can be given, because fm_run_timed treats a
+# non-positive bound as no bound. It is also the margin a sweep can still need
+# after its deadline, since a probe started just inside the budget is given this
+# bound, so it is what the budget has to leave the watcher's own bound.
+PROBE_MIN_SECS=1
+
+# The watcher's per check bound, read from this check's own environment. The
+# watcher runs the check as a direct child, so an operator who raised it is seen
+# here too, and when it is unset both sides resolve the same default.
+CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
+case "$CHECK_TIMEOUT" in
+  ''|*[!0-9]*|0) CHECK_TIMEOUT=30 ;;
+esac
+BUDGET_MAX=$((CHECK_TIMEOUT - PROBE_MIN_SECS))
+[ "$BUDGET_MAX" -ge 1 ] || BUDGET_MAX=1
+# Cut rather than refuse. A refusal is reported once and then suppressed by the
+# no-nag gate, which leaves the detector dead and quiet, and a check that goes
+# silent is worse than a check that reports something awkward.
+BUDGET_CUT_FROM=
+if [ "$BUDGET_SECS" -gt "$BUDGET_MAX" ]; then
+  BUDGET_CUT_FROM=$BUDGET_SECS
+  BUDGET_SECS=$BUDGET_MAX
+fi
+
 # --- small helpers ----------------------------------------------------------
 
 # The record epoch is overridable so a test can drive the cadence gate; the
@@ -182,12 +214,12 @@ budget_allows() {
 
 # The bound for one probe: the probe bound, cut down to whatever the sweep
 # budget has left, so no probe can run past the end of the sweep. Never below
-# one second, because fm_run_timed treats a non-positive bound as no bound.
+# PROBE_MIN_SECS, because fm_run_timed treats a non-positive bound as no bound.
 probe_bound() {
   local left
   left=$((DEADLINE - $(real_epoch)))
-  if [ "$left" -lt 1 ]; then
-    printf '1\n'
+  if [ "$left" -lt "$PROBE_MIN_SECS" ]; then
+    printf '%s\n' "$PROBE_MIN_SECS"
   elif [ "$left" -lt "$PROBE_SECS" ]; then
     printf '%s\n' "$left"
   else
@@ -235,8 +267,7 @@ CONFIG_PROBLEM=
 # jq can check that an announce_pattern is a non-empty single-line string, but
 # only grep can say whether it compiles as an extended regular expression. A
 # pattern grep refuses would silently disable that tool's update source, which is
-# the exact failure this script exists to prevent, so it is a registry problem
-# reported with the tool named.
+# the exact failure this script exists to prevent.
 announce_pattern_usable() {
   local pattern=$1 status
   printf '%s' '' | grep -qE -- "$pattern" 2>/dev/null
@@ -244,8 +275,25 @@ announce_pattern_usable() {
   [ "$status" -le 1 ]
 }
 
+# Deliberately separate from config_validate, and asked only by arm. Arming is a
+# deliberate operator action that should fail loudly, but a sweep must not treat
+# one tool's unusable pattern as a reason to stop watching every other tool: that
+# would let a one character typo turn the PATH skew detector off. So `check`
+# reports this per tool instead, in command_findings.
+config_announce_patterns_usable() {
+  local name announce
+  while IFS=$FIELD_SEP read -r name _ _ announce _; do
+    [ -n "$announce" ] || continue
+    if ! announce_pattern_usable "$announce"; then
+      CONFIG_PROBLEM="tool $name announce_pattern is not a usable extended regular expression"
+      return 1
+    fi
+  done < <(config_records)
+  return 0
+}
+
 config_validate() {
-  local problem status name announce
+  local problem status
   if ! command -v jq >/dev/null 2>&1; then
     CONFIG_PROBLEM='jq is required to read the watched tool registry'
     return 1
@@ -289,13 +337,6 @@ config_validate() {
     CONFIG_PROBLEM=$problem
     return 1
   fi
-  while IFS=$FIELD_SEP read -r name _ _ announce _; do
-    [ -n "$announce" ] || continue
-    if ! announce_pattern_usable "$announce"; then
-      CONFIG_PROBLEM="tool $name announce_pattern is not a usable extended regular expression"
-      return 1
-    fi
-  done < <(config_records)
   CONFIG_PROBLEM=
   return 0
 }
@@ -355,6 +396,13 @@ command_findings() {
   local resolved_path='' resolved_version='' resolved_out=''
   local best_path='' best_version='' unreadable='' hits=''
 
+  # This tool's announcement source is dead if its pattern cannot be used, which
+  # is reported here, for this tool alone, so the rest of the sweep still runs.
+  if [ -n "$announce" ] && ! announce_pattern_usable "$announce"; then
+    emit "$name check failed: announce_pattern is not a usable extended regular expression"
+    announce=
+  fi
+
   hits=$(path_hits "$command_name")
   if [ -z "$hits" ]; then
     emit "$name check failed: $command_name is not on PATH"
@@ -393,9 +441,16 @@ EOF
     # release on its other commands. So announce_args may name a second command,
     # and it is asked of the copy PATH actually resolves.
     announce_out=$resolved_out
-    if [ "$announce_args" != "$args_joined" ] && ! budget_exhausted; then
-      # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
-      announce_out=$(probe_output "$resolved_path" $announce_args)
+    if [ "$announce_args" != "$args_joined" ]; then
+      if budget_exhausted; then
+        # The version probe's output cannot carry the announcement, so searching
+        # it would present a source that was never asked as a clean result.
+        emit "$name check failed: the time budget ran out before the update announcement was checked"
+        announce_out=
+      else
+        # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
+        announce_out=$(probe_output "$resolved_path" $announce_args)
+      fi
     fi
     if [ -n "$announce_out" ]; then
       # Not a pipeline, so grep's own status is still readable here: a pattern
@@ -411,7 +466,9 @@ EOF
   fi
 
   if [ -z "$resolved_version" ]; then
-    emit "$name check failed: $resolved_path did not report a version"
+    # No copy was probed at all when the path is empty, and the budget report
+    # already covers that, so do not blame a copy that was never asked.
+    [ -z "$resolved_path" ] || emit "$name check failed: $resolved_path did not report a version"
     return 0
   fi
 
@@ -496,26 +553,59 @@ git_findings() {
     return 0
   fi
 
+  # Each probe below is bounded, so a non-zero status means either the answer no
+  # or no answer at all. They are kept apart: reading a bound that was hit as an
+  # answer would report an update this check never established.
   budget_allows "$name" || return 0
-  if local_sha=$(git_probe "$repo" rev-parse --verify --quiet "refs/heads/$branch" 2>/dev/null) && [ -n "$local_sha" ]; then
-    local_label="local $branch"
-  elif local_sha=$(git_probe "$repo" rev-parse --verify --quiet HEAD 2>/dev/null) && [ -n "$local_sha" ]; then
-    local_label='local HEAD'
-  else
-    emit "$name check failed: $repo has no commit to compare"
+  local_sha=$(git_probe "$repo" rev-parse --verify --quiet "refs/heads/$branch" 2>/dev/null)
+  status=$?
+  if [ "$status" -eq 124 ]; then
+    emit "$name check failed: $repo did not answer where $branch points"
     return 0
+  fi
+  if [ -n "$local_sha" ]; then
+    local_label="local $branch"
+  else
+    local_sha=$(git_probe "$repo" rev-parse --verify --quiet HEAD 2>/dev/null)
+    status=$?
+    if [ "$status" -eq 124 ]; then
+      emit "$name check failed: $repo did not answer where HEAD points"
+      return 0
+    fi
+    if [ -z "$local_sha" ]; then
+      emit "$name check failed: $repo has no commit to compare"
+      return 0
+    fi
+    local_label='local HEAD'
   fi
 
   [ "$local_sha" != "$remote_sha" ] || return 0
 
+  short=$(printf '%s' "$remote_sha" | cut -c1-12)
+
   budget_allows "$name" || return 0
-  if git_probe "$repo" cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+  git_probe "$repo" cat-file -e "$remote_sha^{commit}" 2>/dev/null
+  status=$?
+  if [ "$status" -eq 124 ]; then
+    emit "$name check failed: $repo did not answer whether it already has $short"
+    return 0
+  fi
+  if [ "$status" -eq 0 ]; then
     # The local copy may be ahead of, or diverged from, the remote branch; only
     # commits it does not have yet are an available update.
-    if git_probe "$repo" merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+    git_probe "$repo" merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null
+    status=$?
+    if [ "$status" -eq 124 ]; then
+      emit "$name check failed: $repo did not answer how its history compares with $remote/$branch"
       return 0
     fi
+    [ "$status" -ne 0 ] || return 0
     count=$(git_probe "$repo" rev-list --count "$local_sha..$remote_sha" 2>/dev/null)
+    status=$?
+    if [ "$status" -eq 124 ]; then
+      emit "$name check failed: $repo did not finish counting the commits behind $remote/$branch"
+      return 0
+    fi
     case "$count" in
       ''|*[!0-9]*|0) count= ;;
     esac
@@ -525,7 +615,6 @@ git_findings() {
     fi
   fi
 
-  short=$(printf '%s' "$remote_sha" | cut -c1-12)
   emit "$name update available: $remote/$branch is at $short which this copy does not have"
   return 0
 }
@@ -589,6 +678,10 @@ action_check() {
   fi
 
   DEADLINE=$(($(real_epoch) + BUDGET_SECS))
+
+  if [ -n "$BUDGET_CUT_FROM" ]; then
+    emit "sweep budget ${BUDGET_CUT_FROM}s cut to ${BUDGET_SECS}s to stay inside the watcher check timeout of ${CHECK_TIMEOUT}s"
+  fi
 
   if ! config_validate; then
     emit "watched tool registry: $CONFIG_PROBLEM"
@@ -667,7 +760,7 @@ action_arm() {
     printf 'fm-tool-update-check: no watched tool registry at %s\n' "$CONFIG" >&2
     return 1
   fi
-  if ! config_validate; then
+  if ! config_validate || ! config_announce_patterns_usable; then
     printf 'fm-tool-update-check: %s (%s)\n' "$CONFIG_PROBLEM" "$CONFIG" >&2
     return 1
   fi
