@@ -644,6 +644,35 @@ test_fm_lock_refuses_different_live_identity_with_existing_wording() {
   pass "fm-lock: a genuinely different live identity is refused with the existing wording"
 }
 
+test_fm_lock_reclaims_an_unparseable_record() {
+  local dir out status shape content
+  dir=$(make_primary_dir "$TMP_ROOT/lock-unparseable")
+  # state/.lock is a persisted record this fleet owns. A truncated write or an
+  # external mangling leaves bytes that name no owner; acquisition must reclaim
+  # them like a dead owner instead of stranding the home read-only forever.
+  for shape in empty truncated junk pid-one; do
+    case "$shape" in
+      empty) content='' ;;
+      truncated) content=$'\n' ;;
+      junk) content=$'not-a-pid\nharness=claude\n' ;;
+      pid-one) content=$'1\nharness=claude\n' ;;
+    esac
+    printf '%s' "$content" > "$dir/state/.lock"
+    out=$(FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/expected-owner"
+        "$FM_HOME/bin/fm-lock.sh"
+      ' 2>&1); status=$?
+    expect_code 0 "$status" "$shape: an unparseable session lock must be reclaimable"
+    [ "$out" = "lock acquired: harness pid $(cat "$dir/state/expected-owner")" ] \
+      || fail "$shape: reclaiming an unparseable record did not report ownership: $out"
+    [ "$(sed -n '1p' "$dir/state/.lock")" = "$(cat "$dir/state/expected-owner")" ] \
+      || fail "$shape: the reclaimed record does not name the acquiring session: $(cat "$dir/state/.lock")"
+    [ "$(sed -n '2p' "$dir/state/.lock")" = harness=claude ] \
+      || fail "$shape: the reclaimed record lost the verified harness: $(cat "$dir/state/.lock")"
+  done
+  pass "fm-lock: an unparseable record is reclaimed rather than stranding the home read-only"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -675,4 +704,5 @@ test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_fm_lock_status_agrees_with_identity_reparent_and_refreshes_pid
 test_fm_lock_refuses_different_live_identity_with_existing_wording
+test_fm_lock_reclaims_an_unparseable_record
 test_fm_lock_status_still_works_with_shared_lib

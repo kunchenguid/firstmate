@@ -21,6 +21,7 @@ A legacy bare numeric lock, or a current record for which either side lacks iden
 A bridged identity is exported into ordinary commands, so a nested session of the same harness inherits it; SessionStart therefore publishes the pid that published the identity, and an identity with no such provenance, or one whose publisher hosts this process from outside its own harness run, is refused and judged by ancestry alone.
 A nested session that ran its own SessionStart bridge published its own provenance and keeps full identity ownership.
 A recorded owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while an absent or malformed lock remains inert.
+`bin/fm-lock.sh` itself refuses only a lock whose bytes cannot be read at all: a readable record that does not parse names no owner, so acquisition reclaims it under the acquisition lock exactly like a dead owner rather than leaving the home permanently read-only.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
 A cycle-end failure is benign when that live-watcher predicate is true, and the hook suppresses the arm output and continues silently.
