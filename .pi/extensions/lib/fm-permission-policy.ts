@@ -122,7 +122,15 @@ export const DESTRUCTIVE_SHELL_PATTERNS: readonly RegExp[] = [
   /\bmount\b/i,
   /\bumount\b/i,
   /\b(vim?|nano|emacs|code|subl|micro|ed)\b/i,
+  /\bfind\b[\s\S]*\s-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)\b/i,
+  /\bsed\b[\s\S]*\s(--in-place(?:=\S*)?|-i(?:\S*)?)\b/i,
+  /\bsort\b[\s\S]*\s(--output(?:=\S*)?|-o)\b/i,
+  /\bgit\s+(log|diff|show|blame|shortlog)[\s\S]*\s--output(?:=|\s)/i,
+  /\b(npm|pnpm)\s+audit[\s\S]*\s--fix\b/i,
+  /\bdate\b[\s\S]*\s(--set(?:=\S*)?|-s)\b/i,
 ];
+
+const UNSAFE_SHELL_SYNTAX = /[\n\r;&|`<>]|\$\(|\$\{|\\\n/;
 
 /**
  * Patterns that mark a bash command as genuinely read-only. Anchored at the
@@ -131,77 +139,16 @@ export const DESTRUCTIVE_SHELL_PATTERNS: readonly RegExp[] = [
  * of these AND no destructive pattern matches.
  */
 export const READ_ONLY_SHELL_PATTERNS: readonly RegExp[] = [
-  /^\s*cat\b/,
-  /^\s*head\b/,
-  /^\s*tail\b/,
-  /^\s*less\b/,
-  /^\s*more\b/,
-  /^\s*grep\b/,
-  /^\s*egrep\b/,
-  /^\s*fgrep\b/,
-  /^\s*rg\b/,
-  /^\s*find\b/,
-  /^\s*fd\b/,
-  /^\s*ls\b/,
-  /^\s*pwd\b/,
-  /^\s*echo\b/,
-  /^\s*printf\b/,
-  /^\s*wc\b/,
-  /^\s*sort\b/,
-  /^\s*uniq\b/,
-  /^\s*diff\b/,
-  /^\s*comm\b/,
-  /^\s*cmp\b/,
-  /^\s*file\b/,
-  /^\s*stat\b/,
-  /^\s*du\b/,
-  /^\s*df\b/,
-  /^\s*tree\b/,
-  /^\s*which\b/,
-  /^\s*whereis\b/,
-  /^\s*type\b/,
-  /^\s*command\s+-v\b/,
-  /^\s*env\b/,
-  /^\s*printenv\b/,
-  /^\s*uname\b/,
-  /^\s*whoami\b/,
-  /^\s*id\b/,
-  /^\s*date\b/,
-  /^\s*cal\b/,
-  /^\s*uptime\b/,
-  /^\s*hostname\b/,
-  /^\s*ps\b/,
-  /^\s*top\b/,
-  /^\s*htop\b/,
-  /^\s*free\b/,
-  /^\s*vmstat\b/,
-  /^\s*iostat\b/,
-  /^\s*git\s+(status|log|diff|show|blame|branch|remote|describe|rev-parse|shortlog|ls-files|ls-remote|config\s+--get|symbolic-ref)\b/i,
-  /^\s*git\s+rev-parse\b/i,
-  /^\s*npm\s+(list|ls|view|info|search|outdated|audit|ping)/i,
-  /^\s*yarn\s+(list|info|why|audit)/i,
-  /^\s*pnpm\s+(list|why|audit)/i,
-  /^\s*node\s+--version/i,
-  /^\s*node\s+-v\b/i,
-  /^\s*python3?\s+--version/i,
-  /^\s*python3?\s+-V\b/i,
-  /^\s*rustc\s+--version/i,
-  /^\s*cargo\s+--version/i,
-  /^\s*go\s+version\b/i,
-  /^\s*git\s+--version/i,
-  /^\s*jq\b/,
-  /^\s*sed\s+-n\b/,
-  /^\s*awk\b/,
-  /^\s*bash\s+--version/i,
-  /^\s*zsh\s+--version/i,
-  /^\s*realpath\b/,
-  /^\s*readlink\b/,
-  /^\s*basename\b/,
-  /^\s*dirname\b/,
-  /^\s*seq\b/,
-  /^\s*yes\s+--help/i,
-  /^\s*man\b/,
-  /^\s*help\b/,
+  /^\s*(cat|head|tail|grep|egrep|fgrep|rg|find|fd|ls|pwd|echo|printf|wc|sort|uniq|diff|comm|cmp|file|stat|du|df|tree|which|whereis|type|printenv|uname|whoami|id|date|cal|uptime|ps|free|vmstat|iostat|jq|realpath|readlink|basename|dirname|seq)(?:\s+[\s\S]*)?\s*$/,
+  /^\s*command\s+-v(?:\s+[\s\S]*)?\s*$/,
+  /^\s*git\s+(status|log|diff|show|blame|describe|rev-parse|shortlog|ls-files|ls-remote)(?:\s+[\s\S]*)?\s*$/i,
+  /^\s*git\s+branch(?:\s+(?:--list|--show-current|-a|-r|-v|-vv|--contains(?:=\S+)?|--no-contains(?:=\S+)?|--merged(?:=\S+)?|--no-merged(?:=\S+)?|--sort=\S+|--format=\S+|--color(?:=\S+)?|--no-color))*\s*$/i,
+  /^\s*git\s+remote(?:\s+(?:-v|show(?:\s+\S+)?|get-url(?:\s+--all)?\s+\S+))?\s*$/i,
+  /^\s*git\s+config\s+--get(?:-all|-regexp)?\s+\S+(?:\s+\S+)?\s*$/i,
+  /^\s*git\s+symbolic-ref(?:\s+(?:--quiet|-q|--short))*\s+\S+\s*$/i,
+  /^\s*(npm\s+(list|ls|view|info|search|outdated|audit|ping)|yarn\s+(list|info|why|audit)|pnpm\s+(list|why|audit))(?:\s+[\s\S]*)?\s*$/i,
+  /^\s*(node\s+(--version|-v)|python3?\s+(--version|-V)|rustc\s+--version|cargo\s+--version|go\s+version|git\s+--version|bash\s+--version|zsh\s+--version|yes\s+--help)\s*$/i,
+  /^\s*sed\s+-n(?:\s+[\s\S]*)?\s*$/,
 ];
 
 /**
@@ -215,6 +162,7 @@ export function isReadOnlyShellCommand(command: string | undefined): boolean {
   if (typeof command !== "string" || command.trim() === "") {
     return false;
   }
+  if (UNSAFE_SHELL_SYNTAX.test(command)) return false;
   const isDestructive = DESTRUCTIVE_SHELL_PATTERNS.some((p) => p.test(command));
   if (isDestructive) return false;
   return READ_ONLY_SHELL_PATTERNS.some((p) => p.test(command));

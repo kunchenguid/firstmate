@@ -128,6 +128,7 @@ export default function (pi: ExtensionAPI): void {
   // entry and stays at the default (off). This is session-persisted state via
   // Pi's appendEntry API, not a global config file.
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
+    mode = DEFAULT_PERMISSION_MODE;
     try {
       const entries = ctx.sessionManager.getEntries();
       let restored: PermissionMode | undefined;
@@ -143,9 +144,7 @@ export default function (pi: ExtensionAPI): void {
           }
         }
       }
-      if (restored !== undefined) {
-        mode = restored;
-      }
+      mode = restored ?? DEFAULT_PERMISSION_MODE;
     } catch {
       // sessionManager may be unavailable in synthetic contexts; stay at off.
     }

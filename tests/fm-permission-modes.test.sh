@@ -97,7 +97,7 @@ check(policy.classifyToolMutation("fm_watch_arm_pi") === "neutral", "watcher too
 for (const ok of ["ls -la", "git status", "git log --oneline", "cat README.md", "rg TODO .", "grep -r foo .", "find . -name '*.ts'", "echo hello", "node --version", "jq '.x' f.json", "ps aux"]) {
   check(policy.isReadOnlyShellCommand(ok), `read-only command blocked: ${ok}`);
 }
-for (const bad of ["rm file", "rm -rf /", "git push", "git commit -m x", "echo hi; rm x", "cat f > /etc/passwd", "mkdir d", "chmod 777 .", "sudo ls", "npm install pkg", "vim file", "echo hi > f", "git checkout -b branch"]) {
+for (const bad of ["rm file", "rm -rf /", "git push", "git commit -m x", "echo hi; rm x", "cat f > /etc/passwd", "mkdir d", "chmod 777 .", "sudo ls", "npm install pkg", "vim file", "echo hi > f", "git checkout -b branch", "find . -delete", "find . -exec touch {} ;", "git branch new", "git remote add origin x", "ls; python -c \"open('x','w').write('x')\"", "git status && touch x", "sed -n -i file", "sort input -o output", "npm audit --fix"]) {
   check(!policy.isReadOnlyShellCommand(bad), `mutating command allowed: ${bad}`);
 }
 check(!policy.isReadOnlyShellCommand("totallyUnknownCmd --flag"), "unknown command allowed (must default to non-read-only)");
@@ -428,7 +428,6 @@ await sessionStart({ type: "session_start", reason: "resume" }, restoredCtx);
 }
 
 // Malformed persisted mode is ignored, leaving the mode at off after a reset.
-await commands["fm-permissions"].handler("off", ctx);
 const freshCtx = mkCtx([{ type: "custom", customType: "fm-permission-modes", data: { mode: "bogus" } }]);
 await sessionStart({ type: "session_start", reason: "startup" }, freshCtx);
 {
@@ -437,7 +436,8 @@ await sessionStart({ type: "session_start", reason: "startup" }, freshCtx);
   if (r && r.block) throw new Error(`malformed persisted mode restored a blocking mode: ${JSON.stringify(r)}`);
 }
 
-// A fresh session with no entries stays off.
+// A fresh session with no entries resets a previously restored mode to off.
+await sessionStart({ type: "session_start", reason: "resume" }, restoredCtx);
 const emptyCtx = mkCtx([]);
 await sessionStart({ type: "session_start", reason: "new" }, emptyCtx);
 {
