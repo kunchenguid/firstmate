@@ -40,11 +40,48 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 
+harness_path_name() {
+  local path=$1 name base
+  [ -n "$path" ] || return 1
+  base=$(basename -- "$path")
+  case "$base" in
+    claude|codex|opencode|grok|kimi|pi|pi-signed|muse)
+      printf '%s\n' "$base"
+      return 0
+      ;;
+    muse-bin-*)
+      printf 'muse\n'
+      return 0
+      ;;
+  esac
+  for name in claude codex opencode grok kimi pi-signed pi; do
+    case "/$path/" in
+      */"$name"/*) printf '%s\n' "$name"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+harness_interpreter_script_name() {
+  local args=$1 token name
+  local -a words=()
+  read -r -a words <<< "$args"
+  for token in "${words[@]:1}"; do
+    case "$token" in
+      ''|-*) continue ;;
+    esac
+    name=$(harness_path_name "$token" 2>/dev/null || true)
+    [ -n "$name" ] && { printf '%s\n' "$name"; return 0; }
+    return 1
+  done
+  return 1
+}
+
 # Layer 1: walk the parent chain and match the command name. Prints the
 # innermost harness ancestor's verdict, or "unknown" when no harness ancestor
 # is visible within the walk depth (or before FM_HARNESS_ANCESTRY_BOUNDARY).
 detect_ancestry() {
-  local pid=$$ comm args argv0
+  local pid=$$ comm args argv0 name
   for _ in 1 2 3 4 5 6 7 8; do
     if [ -n "${FM_HARNESS_ANCESTRY_BOUNDARY:-}" ] && [ "$pid" = "$FM_HARNESS_ANCESTRY_BOUNDARY" ]; then
       break
@@ -70,15 +107,9 @@ detect_ancestry() {
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
       node*|python*)
-        # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
-        case "$args" in
-          *claude*) echo claude; return ;;
-          *codex*) echo codex; return ;;
-          *opencode*) echo opencode; return ;;
-          *grok*) echo grok; return ;;
-          *" pi "*|*/pi) echo pi; return ;;
-        esac ;;
+        name=$(harness_interpreter_script_name "$args")
+        [ -n "$name" ] && { echo "$name"; return; }
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     if [ -z "$pid" ] || [ "$pid" -le 1 ]; then

@@ -80,6 +80,22 @@ test_cursor_ancestry_detects_cursor_even_with_inherited_claudecode() {
   pass "cursor ancestry detects cursor even when only a foreign CLAUDECODE marker is present"
 }
 
+test_interpreter_argument_substring_does_not_establish_ancestry() {
+  local out
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "skip: python3 not found for interpreter ancestry boundary test"
+    return 0
+  fi
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT \
+    -u FM_PI_HARNESS -u GROK_AGENT CLAUDECODE=1 \
+    FM_HARNESS_ANCESTRY_BOUNDARY=$$ HARNESS="$HARNESS" \
+    python3 -c 'import os, subprocess; print(subprocess.check_output([os.environ["HARNESS"]], env=os.environ, text=True), end="")' \
+    /work/codex-tools/run.py)
+  [ "$out" = claude ] \
+    || fail "a python argument containing codex must not establish codex ancestry, got '$out'"
+  pass "interpreter arguments require an executable boundary before ancestry wins"
+}
+
 # --- 2. Markers remain the fallback when no harness ancestry is visible ------
 
 test_markers_remain_fallback_without_harness_ancestry() {
@@ -125,5 +141,6 @@ test_pi_signed_refinement_survives_ancestry_detection() {
 test_codex_ancestry_outranks_inherited_cursor_markers
 test_codex_ancestry_outranks_inherited_claudecode
 test_cursor_ancestry_detects_cursor_even_with_inherited_claudecode
+test_interpreter_argument_substring_does_not_establish_ancestry
 test_markers_remain_fallback_without_harness_ancestry
 test_pi_signed_refinement_survives_ancestry_detection
