@@ -365,6 +365,19 @@ The one recovery is `bin/fm-quota-cooldown.sh recover`, which refuses a store th
 Recovery therefore drops every suppression: read the quarantined file and record each still-active cooldown again from its provider evidence through the owner script.
 Hand-editing the durable file is never the repair, and never routine maintenance.
 
+## Quota utilization check
+
+`bin/fm-quota-utilization.sh` is the single owner of the weekly utilization check.
+It reads existing `quota-axi` snapshots and never creates a daemon, dashboard, auto-tuner, second router, or work-holding gate.
+The check reports each account's tightest all_models window as utilization percent plus reset countdown, the same widget metric as the personal/public `ai-quota-widget` design.
+Account-wide weekly windows bind every model, named-model windows are additional bounds, and a short idle window is not spare capacity when its binding weekly window is ahead of pace.
+`--accounts-from-config` measures each account named in [`config/claude-account-profiles`](#claude-account-profiles-configclaude-account-profiles) by re-reading quota-axi under that profile's `CLAUDE_CONFIG_DIR`, and ambient `CODEX_HOME` is forwarded because quota-axi already reads `$CODEX_HOME/auth.json`.
+That read is measurement only and is bounded per profile: an unusable account home is one skip line rather than a refusal of the whole mapping, and a measured profile is not thereby proven selectable, because `fm-spawn.sh --account-profile` still applies the full mapping validation and native authentication preflight above.
+A missing or failed reader prints one skip line naming the exact cause and the check exits 0 so delivery continues.
+`AGENTS.md` section 4 and `quota-array-dispatch` consume binding-window reserve and usable runway at the intake that already reads quota; they never hold ready work or weaken the required reasoning class.
+End-of-window outcomes are a mechanically reproducible table from observation JSONL: expired unused percent versus exhausted-early seconds.
+The script header owns commands, flags, and the test-only clock.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

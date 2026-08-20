@@ -85,6 +85,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-launch-axis-lib.sh`  | Shared per-harness effort-axis table: which effort levels reach a verified adapter's launch command |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
 | `fm-quota-axi-lib.sh`    | Shared `quota-axi` compatibility floor for the bootstrap diagnostic                  |
+| `fm-quota-utilization.sh` | Weekly quota utilization, binding-window reserve, and end-of-window outcome table     |
 | `fm-quota-cooldown.sh`   | Own evidence-backed durable routing cooldowns, automatic expiry, and captain overrides |
 | `fm-vendor-auth-probe.sh`| Run one hard-bounded, non-destructive authentication probe of a named vendor CLI and report the fact |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes, emit bounded best-effort status-event annotations and a fleet-wide OPEN DECISIONS section, then assert supervision health |

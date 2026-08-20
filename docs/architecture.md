@@ -173,6 +173,7 @@ The session-start bootstrap step keeps valid dispatch configuration silent unles
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness and without an attestation recording how that harness was chosen, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 The attestation flags, the refusals, and the resulting task-meta record are owned by [configuration.md](configuration.md#crew-dispatch-profiles-configcrew-dispatchjson).
 The same pre-launch boundary checks home-local durable quota cooldowns through `bin/fm-quota-cooldown.sh`; this is a direct evidence safety gate with automatic expiry, not a model-ranking loop or a rewrite of dispatch profiles.
+Weekly utilization, binding-window reserve, and end-of-window outcomes are owned by `bin/fm-quota-utilization.sh` and consumed at that same intake; they never hold ready work.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, grok, pi, opencode, and kimi while preserving the requested profile for later audit.

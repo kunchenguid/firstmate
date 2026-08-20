@@ -156,8 +156,9 @@ fm_test_reap_orphans
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to
-# shadow real tools with stubs. fm_fake_exit0 drops trivial exit-0 stubs for the
-# named tools into a fakebin dir. fm_fake_version_tool drops a stub for a tool
+# shadow real tools with stubs. fm_fake_quota_axi drops a quota-axi stub that
+# keeps a real session start from making live provider reads. fm_fake_exit0
+# drops trivial exit-0 stubs for the named tools into a fakebin dir. fm_fake_version_tool drops a stub for a tool
 # whose installed version bootstrap gates, so a fixture cannot be reported as an
 # unparseable build simply for answering `--version` with nothing.
 
@@ -193,6 +194,24 @@ fm_test_hide_host_commands() { # <fixture-root> <command...>
     builtin command "$@"
   }
   export -f command
+}
+
+# fm_fake_quota_axi <fakebin> drops a quota-axi stub answering the compatibility
+# floor probe and reporting no providers. A test that drives a real session start
+# needs it: the startup digest reads live quota utilization, and an unshimmed
+# host binary would make credential and network provider reads from the suite.
+fm_fake_quota_axi() {
+  local fakebin=$1
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.28'
+  exit 0
+fi
+printf '%s\n' '{"schemaVersion":3,"generatedAt":"2026-08-18T00:00:00Z","providers":[]}'
+exit 0
+SH
+  chmod +x "$fakebin/quota-axi"
 }
 
 fm_fake_exit0() {

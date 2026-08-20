@@ -57,6 +57,10 @@
 # tracked primary extensions are loaded and prints a PI_WATCH_EXTENSION
 # reminder line when one is missing.
 #
+# The fleet digest also prints one bounded weekly quota-utilization block
+# owned by bin/fm-quota-utilization.sh. A missing or failed reader prints one
+# skip line and the digest continues.
+#
 # Why lock first: the old documented order (bootstrap, THEN lock) let a
 # SECOND concurrent session run bootstrap's mutating sweeps - converging
 # secondmate homes, retrying pending handoff outboxes, writing X-mode artifacts,
@@ -504,6 +508,15 @@ fm_record_contradictions_observe_backlog "$STATE"
 RECORD_CONTRADICTIONS=$(fm_record_contradictions_format 2>/dev/null) || RECORD_CONTRADICTIONS=
 if [ -n "$RECORD_CONTRADICTIONS" ]; then
   printf '\n%s\n' "$RECORD_CONTRADICTIONS"
+fi
+
+subsection "Quota utilization"
+QUOTA_UTILIZATION=$("$SCRIPT_DIR/fm-quota-utilization.sh" report 2>/dev/null) || \
+  QUOTA_UTILIZATION='quota: check skipped: utilization reader failed'
+if [ -n "$QUOTA_UTILIZATION" ]; then
+  printf '%s\n' "$QUOTA_UTILIZATION"
+else
+  printf '%s\n' '(none)'
 fi
 
 subsection "AFK"

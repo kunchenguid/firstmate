@@ -169,6 +169,7 @@ family_for_basename() {
     fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|fm-macos-scope.test.sh|\
     fm-model-telemetry.test.sh|fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-ci-water7.test.sh|fm-install-chrome.test.sh|\
+    fm-quota-utilization.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
@@ -968,6 +969,10 @@ families_for_changed_path() {
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-tangle*|bin/fm-update.sh|\
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
+      printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-quota-utilization.sh|bin/fm-quota-utilization.mjs)
+      printf '%s\n' pure-contract-unit
       printf '%s\n' session-bootstrap
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\

@@ -32,6 +32,7 @@ command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit
 make_fake_curl() {  # <home>
   local fakebin
   fakebin=$(fm_fakebin "$1")
+  fm_fake_quota_axi "$fakebin"
   cat > "$fakebin/curl" <<'SH'
 #!/usr/bin/env bash
 ofile="" url="" data=""

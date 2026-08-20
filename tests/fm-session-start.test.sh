@@ -15,6 +15,7 @@
 #     restore and bounding, and the switch-predicate oracle plus mutation kills
 #   - orphan status logs whose task meta has already disappeared
 #   - contradictions across backlog, metadata, status, endpoint, and PR reality
+#   - the weekly quota-utilization block in the fleet digest
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
@@ -101,6 +102,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
+  fm_fake_quota_axi "$fakebin"
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -1691,12 +1693,29 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.28'
+  exit 0
+fi
+printf '%s\n' '{"schemaVersion":3,"generatedAt":"2026-08-18T00:00:00Z","providers":[{"provider":"claude","label":"Claude","source":"oauth","state":{"status":"fresh","stale":false},"windows":[{"id":"seven_day","label":"week","kind":"weekly","percentUsed":42,"percentRemaining":58,"resetsAt":"2099-01-01T00:00:00Z","pace":{"status":"behind","reservePercentPoints":30}}],"quotaSemantics":{"status":"known","description":"","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":58,"boundedBy":["seven_day"],"limitingWindowIds":["seven_day"],"pace":{"status":"behind","worstReservePercentPoints":30,"worstReserveWindowId":"seven_day"},"runway":{"status":"through_reset","usableRunwaySeconds":604800,"limitingWindowId":"seven_day"}}]}}]}'
+exit 0
+SH
+  chmod +x "$fakebin/quota-axi"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "(none)" "empty fleet did not report (none) for in-flight tasks"
   assert_contains "$out" "absent" "empty fleet's AFK section did not report absent"
+  assert_contains "$out" "Quota utilization" "empty fleet omitted the weekly quota-utilization block"
+  assert_contains "$out" "quota: claude default: 42% used (seven_day) resets in" \
+    "the digest did not render the measured utilization line from the quota reader"
+  assert_contains "$out" "SPEND reserve=30 hold=no" \
+    "the digest did not carry the binding weekly reserve and no-hold contract"
+  assert_not_contains "$out" "utilization reader failed" \
+    "the quota reader failed instead of reporting the stubbed account"
 
-  pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
+  pass "an empty fleet reports (none) for in-flight tasks, an absent AFK flag, and the measured quota-utilization line"
 }
 
 test_fleet_digest_lists_bounded_standing_checks() {

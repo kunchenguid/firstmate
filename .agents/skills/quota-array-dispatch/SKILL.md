@@ -115,8 +115,11 @@ Never use headroom, runway, pace, or reserve to silently replace that reasoning 
    Do not invent a generic percentage floor or treat a low percentage as an automatic failure.
 4. Keep the strongest-reasoning class when every candidate is tight or completion evidence is poor.
    Dispatch inside that class when a candidate can proceed, or report that its strongest-class choice cannot proceed rather than downgrading it to conserve quota.
-5. Compare comparable-fit candidates on their applicable effective headroom and usable runway.
-   Eliminate a candidate only when another candidate Pareto-dominates it on both dimensions, with at least one dimension strictly better.
+5. Compare comparable-fit candidates on their applicable effective headroom, usable runway, and binding-window reserve.
+   Identify each candidate's binding windows from `effectiveAvailability.boundedBy` and `limitingWindowIds`, or from `bin/fm-quota-utilization.sh --intake`.
+   Prefer the healthier binding weekly reserve.
+   A short idle window is not spare capacity when its binding weekly window is ahead of pace, and is only a secondary tie-break when that weekly window is on or behind pace.
+   Eliminate a candidate only when another candidate Pareto-dominates it on the comparable known dimensions, with at least one dimension strictly better.
    Establish dominance only from comparable known evidence, never by treating absent, `unknown`, or unmeasurable headroom or runway as zero or as a healthy value.
 6. Prefer supported runway evidence that projects availability through the inspectable likely-completion horizon.
    Known evidence that does not reach that horizon is inferior to known evidence that does, even when its signed reserve is less negative.
@@ -124,15 +127,16 @@ Never use headroom, runway, pace, or reserve to silently replace that reasoning 
 7. Resolve remaining uncertainty explicitly.
    An authenticated candidate with unknown or unmeasurable headroom or runway stays eligible and cannot be silently excluded or assumed sustainable.
    Prefer known viable evidence when otherwise comparable, and report uncertainty or ask the captain when it still prevents a justified choice.
-8. Use pace and signed reserve only as later diagnostic tie-break evidence among candidates still unresolved after headroom, runway, likely-completion viability, and uncertainty.
+8. Use remaining pace and signed reserve only as later diagnostic tie-break evidence among candidates still unresolved after binding-weekly reserve, headroom, runway, likely-completion viability, and uncertainty.
    Pace and reserve never rescue a clearly inferior completion prospect.
    Do not collapse these facts into an opaque composite score.
+   Do not hold ready work, and do not weaken the required reasoning class, even when every remaining equivalent candidate is tight: report the pressure and continue.
 9. Older schemas or absent runway/pace fields: do not crash, fabricate runway or pace, treat absence as healthy, or silently exclude a candidate.
    State which evidence is unavailable, retain the candidate, and apply only the comparisons the snapshot supports.
 10. Genuine ties: stop and report every tied candidate for captain choice.
    Do not select by array order, harness name, or another arbitrary identity ordering.
    Report duplicate concrete profiles as a configuration error.
 
-Account for every candidate visibly before selecting or escalating, naming its catalog evidence, provider relation, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, effective headroom, usable runway, likely-completion reasoning, and later pace or reserve evidence when used.
+Account for every candidate visibly before selecting or escalating, naming its catalog evidence, provider relation, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, effective headroom, usable runway, binding-window reserve, likely-completion reasoning, and later pace or reserve evidence when used.
 A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence; never emit a bare `Grok unauthenticated` statement.
 Never conclude with an unexplained "best quota" label.

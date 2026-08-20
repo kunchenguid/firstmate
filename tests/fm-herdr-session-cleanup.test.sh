@@ -19,6 +19,7 @@ touch "$FM_CONFIG_OVERRIDE/herdr-presentation-spaces"
 printf '%s\n' herdr > "$FM_CONFIG_OVERRIDE/backend"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 fm_fake_exit0 "$FAKEBIN" herdr
+fm_fake_quota_axi "$FAKEBIN"
 export PATH="$FAKEBIN:$PATH"
 export FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY=1
 # shellcheck source=/dev/null
