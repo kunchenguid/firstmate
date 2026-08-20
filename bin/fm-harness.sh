@@ -41,7 +41,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 
 harness_path_name() {
-  local path=$1 name base
+  local path=$1 base
   [ -n "$path" ] || return 1
   base=$(basename -- "$path")
   case "$base" in
@@ -54,11 +54,6 @@ harness_path_name() {
       return 0
       ;;
   esac
-  for name in claude codex opencode grok kimi pi-signed pi; do
-    case "/$path/" in
-      */"$name"/*) printf '%s\n' "$name"; return 0 ;;
-    esac
-  done
   return 1
 }
 

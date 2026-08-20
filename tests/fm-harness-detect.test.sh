@@ -90,6 +90,16 @@ test_non_harness_basename_falls_back_to_markers() {
   pass "non-harness command basenames do not establish ancestry identity"
 }
 
+test_harness_path_component_does_not_establish_ancestry() {
+  local runner="$TMP_ROOT/codex/tools/runner" out
+  mkdir -p "$(dirname "$runner")"
+  cp "$(command -v bash)" "$runner"
+  out=$(probe_under "$runner" CLAUDECODE=1)
+  [ "$out" = claude ] \
+    || fail "a codex directory component must fall back to CLAUDECODE, got '$out'"
+  pass "harness directory components do not establish ancestry identity"
+}
+
 test_interpreter_arguments_do_not_establish_ancestry() {
   local out module_dir node_dir
   if command -v python3 >/dev/null 2>&1; then
@@ -171,6 +181,7 @@ test_codex_ancestry_outranks_inherited_cursor_markers
 test_codex_ancestry_outranks_inherited_claudecode
 test_cursor_ancestry_detects_cursor_even_with_inherited_claudecode
 test_non_harness_basename_falls_back_to_markers
+test_harness_path_component_does_not_establish_ancestry
 test_interpreter_arguments_do_not_establish_ancestry
 test_markers_remain_fallback_without_harness_ancestry
 test_pi_signed_refinement_survives_ancestry_detection
