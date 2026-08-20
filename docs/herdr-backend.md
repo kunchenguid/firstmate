@@ -316,6 +316,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 
 - Herdr remains experimental.
 - Presentation ordering needs protocol 16 and Python and is best-effort only.
+- On Herdr 0.8.2 a projected task cleanup does not remove that task's presentation workspace, so one orphaned workspace is left behind per cleanup; `herdr-082-projection-orphan-o4` owns that defect.
 - Mutable labels can collide; they are never placement or destructive authority.
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
