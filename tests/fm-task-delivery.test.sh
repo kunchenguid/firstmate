@@ -50,6 +50,28 @@ write_brief() {  # <home> <id> [<recorded-mode>]
   } > "$home/data/$id/brief.md"
 }
 
+append_legacy_ship_scaffold() {  # <brief> <task> <mode>
+  cat >> "$1" <<EOF
+You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+# Task
+$2
+
+# Setup
+Prepare the disposable worktree.
+
+# Rules
+Stay inside the worktree and report material status changes.
+
+# Project memory
+Record only durable project knowledge.
+
+# Definition of done
+Delivery contract: mode=$3
+Complete the selected delivery path.
+EOF
+}
+
 run_spawn() {  # <home> <fakebin> <spawn-args...>
   local home=$1 fakebin=$2
   shift 2
@@ -181,6 +203,41 @@ EOF
   pass "fm-spawn: an appended scaffold signature is refused"
 }
 
+test_spawn_refuses_legacy_scaffold_signatures() {
+  local shape rec home proj fakebin id brief out status
+  for shape in legacy-only mixed; do
+    rec=$(make_home "legacy-duplicated-$shape")
+    IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+    id="delivery-legacy-duplicated-$shape"
+    mkdir -p "$home/data/$id"
+    brief="$home/data/$id/brief.md"
+    case "$shape" in
+      legacy-only)
+        : > "$brief"
+        append_legacy_ship_scaffold "$brief" "Original legacy task." no-mistakes
+        append_legacy_ship_scaffold "$brief" "Appended legacy task." direct-PR
+        ;;
+      mixed)
+        FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null
+        append_legacy_ship_scaffold "$brief" "Appended legacy task." direct-PR
+        ;;
+    esac
+
+    out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$shape duplicated scaffold should exit non-zero"
+    assert_contains "$out" "multiple generated scaffold signatures" \
+      "$shape duplicated scaffold was not identified structurally"
+    assert_contains "$out" "--replace" \
+      "$shape duplicated scaffold refusal omitted the supported regeneration path"
+    assert_absent "$home/state/$id.meta" \
+      "$shape duplicated scaffold spawn wrote task metadata"
+  done
+  pass "fm-spawn: legacy and mixed appended scaffolds are refused"
+}
+
 test_spawn_accepts_legitimate_repeated_task_headings() {
   local rec home proj fakebin brief marker suffix out status
   rec=$(make_home legitimate-headings)
@@ -211,6 +268,8 @@ EOF
     "task-body Setup and Rules headings did not reach endpoint launch"
   assert_not_contains "$out" "multiple generated scaffold markers" \
     "task-body Setup and Rules headings were falsely refused"
+  assert_not_contains "$out" "multiple generated scaffold signatures" \
+    "task-body Setup and Rules headings matched a legacy scaffold signature"
 
   for marker in '```' '~~~'; do
     case "$marker" in '```') suffix=backticks ;; *) suffix=tildes ;; esac
@@ -223,8 +282,12 @@ EOF
       printf '\n# Definition of done\nDelivery contract: mode=no-mistakes\n'
     } > "$brief"
     out=$(run_spawn "$home" "$fakebin" "delivery-fenced-$suffix-d3" "$proj" claude --mode no-mistakes --yolo off)
+    assert_contains "$out" "task headings reached endpoint launch" \
+      "$marker fenced headings did not reach endpoint launch"
     assert_not_contains "$out" "multiple generated scaffold markers" \
       "$marker fenced scaffold-looking headings were falsely refused"
+    assert_not_contains "$out" "multiple generated scaffold signatures" \
+      "$marker fenced headings matched a legacy scaffold signature"
   done
   pass "fm-spawn: legitimate task headings clear the scaffold-signature guard"
 }
@@ -403,6 +466,7 @@ test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_refuses_an_appended_scaffold_signature
+test_spawn_refuses_legacy_scaffold_signatures
 test_spawn_accepts_legitimate_repeated_task_headings
 test_secondmate_duplicate_guidance_names_the_charter_publisher
 test_spawn_notices_a_rigor_downgrade_against_the_registry

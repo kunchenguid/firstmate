@@ -14,10 +14,10 @@
 #   scaffolded before that line existed warns once and launches on the flag. When
 #   the explicit mode carries less rigor than the project's standing posture, a
 #   loud one-line deviation notice is printed and the spawn continues.
-#   Every spawn also refuses more than one generated-scaffold marker. Task Markdown
-#   may legitimately repeat scaffold heading names, so headings are not treated as
-#   generation identity. Regenerate a duplicated scaffold with bin/fm-brief.sh
-#   --replace instead.
+#   Every spawn also refuses more than one generated-scaffold marker, or more than
+#   one complete ordered legacy scaffold signature outside fenced code. Task
+#   Markdown may legitimately repeat individual scaffold heading names. Regenerate
+#   a duplicated scaffold with bin/fm-brief.sh --replace instead.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
@@ -1700,12 +1700,85 @@ duplicate_brief_recovery_guidance() {
   echo "regenerate the parent charter with bin/fm-brief.sh --replace, then republish $PROJ_ABS/data/charter.md with its route's bin/fm-home-seed.sh or bin/fm-remote-home-seed.sh instead of appending a second copy" >&2
 }
 
+legacy_scaffold_signature_count() {
+  awk -v kind="$KIND" '
+    function trim_fence_indent(text, i) {
+      for (i = 0; i < 3 && substr(text, 1, 1) == " "; i++) text = substr(text, 2)
+      return text
+    }
+    function fence_marker_run(text, marker, i) {
+      marker = substr(text, 1, 1)
+      if (marker != "`" && marker != "~") return 0
+      for (i = 1; substr(text, i, 1) == marker; i++) {}
+      return i - 1
+    }
+    {
+      candidate = trim_fence_indent($0)
+      run = fence_marker_run(candidate)
+      marker = substr(candidate, 1, 1)
+      if (fence_marker == "") {
+        if (run >= 3) {
+          fence_marker = marker
+          fence_length = run
+          next
+        }
+      } else {
+        if (marker == fence_marker && run >= fence_length &&
+            substr(candidate, run + 1) ~ /^[[:space:]]*$/) {
+          fence_marker = ""
+          fence_length = 0
+        }
+        next
+      }
+      if ($0 !~ /^# /) next
+      if (kind == "secondmate") {
+        if ($0 == "# Charter") {
+          step = 1
+          next
+        }
+        if (step == 1 && $0 == "# Routing scope") {
+          step = 2
+          next
+        }
+        if (step == 2 && $0 == "# Operating model") {
+          step = 3
+          next
+        }
+      } else {
+        if ($0 == "# Task") {
+          step = 1
+          next
+        }
+        if (step == 1 && $0 == "# Setup") {
+          step = 2
+          next
+        }
+        if (step == 2 && $0 == "# Rules") {
+          step = 3
+          next
+        }
+      }
+      if (step == 3 && $0 == "# Definition of done") {
+        signatures++
+        step = 0
+      }
+    }
+    END { print signatures + 0 }
+  ' "$1"
+}
+
 # Each generated scaffold carries one fixed marker. Appending another generated
 # scaffold therefore has an unambiguous signature that cannot drift with section
 # names, while arbitrary task headings remain valid Markdown.
 SCAFFOLD_MARKER_COUNT=$(grep -Fxc "$FM_BRIEF_SCAFFOLD_MARKER" "$BRIEF" 2>/dev/null || true)
 if [ "$SCAFFOLD_MARKER_COUNT" -gt 1 ]; then
   echo "error: $BRIEF_SOURCE contains multiple generated scaffold markers, so which copy governs is undefined" >&2
+  duplicate_brief_recovery_guidance
+  exit 1
+fi
+LEGACY_SCAFFOLD_COUNT=$(legacy_scaffold_signature_count "$BRIEF") || exit 1
+if [ "$LEGACY_SCAFFOLD_COUNT" -gt 1 ]; then
+  echo "error: $BRIEF_SOURCE contains multiple generated scaffold signatures, so which copy governs is undefined" >&2
   duplicate_brief_recovery_guidance
   exit 1
 fi
