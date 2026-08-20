@@ -78,6 +78,7 @@ fm-secondmate-harness.test.sh	hermetic
 fm-secondmate-lifecycle-e2e.test.sh	hermetic
 fm-secondmate-liveness.test.sh	hermetic
 fm-secondmate-safety.test.sh	hermetic
+fm-secondmate-session.test.sh	hermetic
 fm-secondmate-sync.test.sh	hermetic
 fm-send-popup-settle.test.sh	hermetic
 fm-send-secondmate-marker-herdr-e2e.test.sh	herdr-lab

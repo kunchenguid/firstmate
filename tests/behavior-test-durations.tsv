@@ -85,6 +85,7 @@
 37513	tests/fm-secondmate-lifecycle-e2e.test.sh
 6623	tests/fm-secondmate-liveness.test.sh
 193035	tests/fm-secondmate-safety.test.sh
+25000	tests/fm-secondmate-session.test.sh
 5767	tests/fm-secondmate-sync.test.sh
 1337	tests/fm-send-popup-settle.test.sh
 14	tests/fm-send-secondmate-marker-herdr-e2e.test.sh
