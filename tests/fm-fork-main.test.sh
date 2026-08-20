@@ -1559,6 +1559,83 @@ SH
   pass "fork integration: isolated no-mistakes registration is proven without reconfiguring the live one"
 }
 
+# Stating a problem upstream as an issue is a real upstream route, so a
+# divergence raised that way registers as `pending` exactly as one carrying a
+# pull request does. Widening the accepted value must not widen it to anything:
+# an absent or malformed route is still refused, and these cases exercise that
+# refusal rather than reading it off the source.
+test_upstream_route_accepts_an_issue_and_still_refuses_a_missing_one() {
+  local w admin candidate before out rc bad
+  w=$(new_world upstream-route)
+  admin="$w/admin"
+  git clone -q "$w/fork.git" "$admin"
+  configure_fork_clone "$admin" "$w"
+  for id in raised declined; do
+    git -C "$admin" switch -qC "fm/divergence/$id" upstream/main
+    printf '%s\n' "$id" > "$admin/$id.txt"
+    git -C "$admin" add -- "$id.txt"
+    git -C "$admin" commit -qm "$id"
+    git -C "$admin" push -q origin "fm/divergence/$id"
+  done
+
+  candidate=$(new_candidate "$w" route-refusals)
+  before=$(git -C "$candidate" rev-parse HEAD)
+
+  # No upstream route at all stays refused. This is the check the widening must
+  # not dissolve, so it is proven here rather than assumed.
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id raised \
+    --summary 'Carries raised behavior.' --class pending --topic fm/divergence/raised \
+    --retire-when 'Upstream ships equivalent raised behavior.' --path raised.txt 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a divergence with no upstream route was registered"
+  assert_contains "$out" "requires a full GitHub upstream pull-request or issue URL" \
+    "the empty-route refusal did not name what is missing"
+
+  # Only the two named forms count as a route.
+  for bad in \
+    https://github.com/example/firstmate/discussions/5 \
+    https://github.com/example/firstmate/issues/abc \
+    https://github.com/example/firstmate/issues \
+    https://evil.example/example/firstmate/issues/7 \
+    https://github.com/example/firstmate/pull/10/files; do
+    set +e
+    out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id raised \
+      --summary 'Carries raised behavior.' --class pending --topic fm/divergence/raised \
+      --retire-when 'Upstream ships equivalent raised behavior.' --path raised.txt \
+      --pr-url "$bad" --pr-disposition open 2>&1); rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "a malformed upstream route was accepted: $bad"
+  done
+  [ "$(git -C "$candidate" rev-parse HEAD)" = "$before" ] || fail "refused routes moved the candidate"
+  [ -z "$(git -C "$candidate" status --porcelain)" ] || fail "refused routes dirtied the candidate"
+
+  # An issue is accepted as the upstream route of a pending divergence.
+  candidate=$(new_candidate "$w" route-issue)
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id raised \
+    --summary 'Carries raised behavior.' --class pending --topic fm/divergence/raised \
+    --retire-when 'Upstream confirms and ships equivalent raised behavior.' --path raised.txt \
+    --pr-url https://github.com/example/firstmate/issues/77 --pr-disposition open 2>&1) \
+    || fail "an issue-routed divergence was refused: $out"
+  assert_contains "$out" "branch-level merge" "issue-routed divergence was not integrated as a merge unit"
+  assert_contains "$out" "pending=1" "issue-routed divergence was not counted as pending"
+  assert_contains "$out" "errors=0" "issue-routed divergence created a health error"
+  jq -e '.divergences[0].upstream_pr.url == "https://github.com/example/firstmate/issues/77"
+    and .divergences[0].class == "pending"' "$candidate/fork-divergences.json" >/dev/null \
+    || fail "manifest did not record the issue as the upstream route"
+  land_candidate_as_regular_pr "$w" "$candidate" route-issue
+
+  # An issue upstream closed without action still reaches the retained class.
+  candidate=$(new_candidate "$w" route-issue-declined)
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id declined \
+    --summary 'Carries declined behavior.' --class rejected-but-retained --topic fm/divergence/declined \
+    --retire-when 'Upstream ships equivalent declined behavior.' --path declined.txt \
+    --pr-url https://github.com/example/firstmate/issues/78 --pr-disposition rejected 2>&1) \
+    || fail "an issue-routed rejection was refused: $out"
+  assert_contains "$out" "rejected-but-retained=1" "issue-routed rejection was not counted"
+  pass "fork manifest: an issue is a real upstream route and a missing one is still refused"
+}
+
 test_startup_upstream_probe_requires_validated_topology
 test_remote_topology_is_explicit_and_reversible
 test_remote_topology_inheritance_refuses_unrelated_clones
@@ -1571,6 +1648,7 @@ test_health_uses_git_cherry_equivalence_and_exposes_drift
 test_health_requires_declared_paths_to_cover_the_canonical_patch
 test_health_attributes_pipeline_fixes_and_supports_disposition_transition
 test_manifest_class_disposition_pairs_are_enforced
+test_upstream_route_accepts_an_issue_and_still_refuses_a_missing_one
 test_refresh_parses_current_gh_axi_scalar_envelope
 test_topics_are_independently_revertible_units
 test_topic_integration_conflict_has_receipt_bound_continuation

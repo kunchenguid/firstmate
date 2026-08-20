@@ -8,16 +8,18 @@
 # `git cherry upstream/<default> origin/<default>` supplies one fact only: which
 # commits have no equivalent upstream patch. The tracked fork-divergences.json
 # manifest supplies meaning: the canonical topic patches the fork intends to
-# carry, their class, pull-request disposition, retirement condition, paths, and
-# integration merges. A raw non-upstream commit outside those topics is a visible
+# carry, their class, upstream review disposition, retirement condition, paths,
+# and integration merges. That review is a pull request or an issue; the record
+# is still spelled upstream_pr for the reason docs/fork-main.md gives. A raw non-upstream commit outside those topics is a visible
 # signal, not automatically a carried divergence or a health failure. Descendant
 # validation fixes and manifest-only governance commits are attributed as
 # integration artifacts. retired_upstream records add the one equivalence fact
 # Git can no longer recompute after an integration merge, and every one of them
 # is re-proved here before its patch leaves the factual non-upstream count.
 #
-# --refresh fetches origin and upstream and verifies recorded GitHub PR
-# dispositions with gh-axi. Without it, the report is network-free and uses
+# --refresh fetches origin and upstream and verifies recorded GitHub pull-request
+# and issue dispositions with gh-axi, asking whichever endpoint the recorded URL
+# names. Without it, the report is network-free and uses
 # local refs plus recorded dispositions. gh-axi's current API serializer is
 # parsed as one complete, untruncated scalar envelope rather than compared as
 # raw stdout.
@@ -120,6 +122,10 @@ git -C "$REPO" ls-files --error-unmatch -- "$MANIFEST_REL" >/dev/null 2>&1 \
 command -v jq >/dev/null 2>&1 || die "jq is required"
 
 if ! jq -e '
+  # A divergence names its upstream route in one of exactly two accepted forms:
+  # a GitHub pull request, or a GitHub issue stating the problem before any pull
+  # request exists. Nothing else counts as a route.
+  def upstream_route_url: type == "string" and test("^https://github\\.com/[^/]+/[^/]+/(pull|issues)/[0-9]+$");
   .schema == "firstmate.fork-divergences.v1" and
   (.upstream_syncs | type == "array" and length <= 20) and
   (.divergences | type == "array") and
@@ -134,9 +140,9 @@ if ! jq -e '
     (.retire_when | type == "string" and length >= 12 and (test("[[:cntrl:]]") | not) and (test("(?i)(review periodically|revisit later|monitor this|^tbd$|^todo$)") | not)) and
     (.paths | type == "array" and length > 0 and all(.[]; type == "string" and length > 0 and (test("[[:cntrl:]]") | not) and (startswith("/") | not) and (contains("..") | not))) and
     (if .class == "private" then .upstream_pr == null
-     elif .class == "pending" then (.upstream_pr | type == "object" and (.url | type == "string" and test("^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+$")) and .disposition == "open")
-     elif .class == "rejected-but-retained" then (.upstream_pr | type == "object" and (.url | type == "string" and test("^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+$")) and .disposition == "rejected")
-     else (.upstream_pr | type == "object" and (.url | type == "string" and test("^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+$")) and (.disposition == "open" or .disposition == "rejected" or .disposition == "merged" or .disposition == "closed")) end)
+     elif .class == "pending" then (.upstream_pr | type == "object" and (.url | upstream_route_url) and .disposition == "open")
+     elif .class == "rejected-but-retained" then (.upstream_pr | type == "object" and (.url | upstream_route_url) and .disposition == "rejected")
+     else (.upstream_pr | type == "object" and (.url | upstream_route_url) and (.disposition == "open" or .disposition == "rejected" or .disposition == "merged" or .disposition == "closed")) end)
   ) and
   all((.retired_upstream // [])[];
     (.id | type == "string" and test("^[a-z0-9][a-z0-9-]*$")) and
@@ -409,17 +415,24 @@ if [ "$REFRESH" -eq 1 ]; then
     [ -n "$url" ] || continue
     path=${url#https://github.com/}
     owner=${path%%/*}; path=${path#*/}; repo_name=${path%%/*}; number=${url##*/}
-    live_output=$(gh-axi api "/repos/$owner/$repo_name/pulls/$number" \
-      --jq 'if .merged_at != null then "merged" elif .state == "open" then "open" else "closed" end' 2>/dev/null || true)
+    case "$url" in
+      */issues/*)
+        # A GitHub issue has no merge state; it is open or closed.
+        live_output=$(gh-axi api "/repos/$owner/$repo_name/issues/$number" \
+          --jq 'if .state == "open" then "open" else "closed" end' 2>/dev/null || true) ;;
+      *)
+        live_output=$(gh-axi api "/repos/$owner/$repo_name/pulls/$number" \
+          --jq 'if .merged_at != null then "merged" elif .state == "open" then "open" else "closed" end' 2>/dev/null || true) ;;
+    esac
     live=$(printf '%s\n' "$live_output" | fm_fork_gh_axi_scalar || true)
     case "$live" in
       open|closed|merged) ;;
-      *) add_error "manifest unit $id pull request disposition could not be refreshed from gh-axi's scalar API envelope"; continue ;;
+      *) add_error "manifest unit $id upstream review disposition could not be refreshed from gh-axi's scalar API envelope"; continue ;;
     esac
     if [ "$recorded" = rejected ]; then
-      [ "$live" = closed ] || add_error "manifest unit $id records rejected but live pull request is $live"
+      [ "$live" = closed ] || add_error "manifest unit $id records rejected but its live upstream review is $live"
     elif [ "$recorded" != "$live" ]; then
-      add_error "manifest unit $id records pull request $recorded but live pull request is $live"
+      add_error "manifest unit $id records $recorded but its live upstream review is $live"
     fi
   done < <(jq -r '.divergences[] | select(.upstream_pr != null) | [.id,.upstream_pr.url,.upstream_pr.disposition] | @tsv' "$MANIFEST")
 fi

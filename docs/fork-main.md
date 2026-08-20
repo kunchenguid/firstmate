@@ -82,6 +82,7 @@ The captain's 2026-08-14 ruling requires DAILY official-upstream synchronization
 
 Prepare a divergence integration only in an isolated worktree of the private integration clone.
 The helper requires fetched fork main as the exact starting point, one `git cherry` non-equivalent commit on the canonical topic, complete manifest path coverage, and a concrete retirement condition.
+`--pr-url` accepts the divergence's upstream pull request or its upstream issue.
 
 ```sh
 bin/fm-fork-topic.sh integrate \
@@ -136,14 +137,29 @@ Every divergence records:
 - exactly one class: `pending`, `rejected-but-retained`, `private`, or `superseded`;
 - its canonical topic branch;
 - introduction date;
-- upstream pull request and recorded disposition when it is not private;
+- one upstream review and its recorded disposition when it is not private, either a pull request or an issue;
 - the concrete falsifiable condition that retires it;
 - every exact path or directory prefix its patch touches.
 
-`pending` means upstream review remains open and therefore pairs only with pull-request disposition `open`.
-`rejected-but-retained` means upstream declined it but current evidence still justifies carrying it, so it pairs only with pull-request disposition `rejected`.
-`private` means it is intentionally not proposed upstream, carries no pull-request record, and should remain small.
+`pending` means upstream review remains open and therefore pairs only with disposition `open`.
+`rejected-but-retained` means upstream declined it but current evidence still justifies carrying it, so it pairs only with disposition `rejected`.
+`private` means the fork has decided never to propose it upstream, so it carries no upstream review of any kind and should remain small.
 `superseded` is immediate removal debt and must be empty after an upstream integration.
+
+The upstream review is a pull request or an issue, and the class does not depend on which.
+Stating the problem as an issue and waiting for it to be confirmed is a real upstream route, so a divergence raised that way is `pending` exactly as one carrying a pull request is.
+The accepted forms are exactly two, `https://github.com/<owner>/<repo>/pull/<number>` and `https://github.com/<owner>/<repo>/issues/<number>`, and nothing else is treated as a route.
+An absent or malformed route is refused for every class but `private`, which is the check that stops a divergence being registered with no upstream story at all.
+
+`private` is not the place to park work that is merely unraised.
+It records a decision never to propose, so classifying an intended-but-unraised divergence as private would assert an intent the fork does not hold, and the manifest is later read as though it were true.
+A divergence the fork means to raise is registered once its issue exists, which is the order the contribution model asks for anyway.
+
+The field is named `upstream_pr` and the flag is named `--pr-url`, and both now also carry issues.
+That naming is inaccurate and known to be so.
+Correcting it means rewriting the existing entries in [`fork-divergences.json`](../fork-divergences.json), and `bin/fm-fork-topic.sh` refuses any divergence topic that edits that manifest, so the rename cannot travel with the change that widened the field.
+It is worth its own change, which would move the data and the name together.
+Until then, read `upstream_pr` as "the upstream review" and trust the URL rather than the key.
 
 An upstream-sync record keeps the pre-merge fork SHA, previous and incoming upstream SHA, date, touched divergence IDs, and an optional validation pull-request URL.
 Counts are derived from Git rather than copied into the manifest.
@@ -279,7 +295,7 @@ After the fork pull request lands, `/updatefirstmate` performs only safe fast-fo
 Upstream review is evidence, not the local shipping gate.
 A change enters use only after its topic validation, fork merge candidate validation, green fork CI, captain-approved fork pull request, and safe fleet update.
 
-If upstream rejects a useful running change, reclassify it from `pending` to `rejected-but-retained` in the next validated fork integration through the supported interface:
+If upstream rejects a useful running change, whether by closing its pull request unmerged or closing its issue without action, reclassify it from `pending` to `rejected-but-retained` in the next validated fork integration through the supported interface:
 
 ```sh
 bin/fm-fork-topic.sh disposition \

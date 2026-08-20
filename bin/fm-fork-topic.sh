@@ -14,6 +14,19 @@
 #   fm-fork-topic.sh discard --id <id> [--repo <isolated-worktree>]
 #   fm-fork-topic.sh continue --decisions <json> [--repo <isolated-worktree>]
 #
+# A non-private divergence must name one real upstream route, and the accepted
+# forms are exactly two: a GitHub pull request, or a GitHub issue raised to state
+# the problem before any pull request exists. An absent or malformed route stays
+# refused, because that refusal is what stops a divergence being registered with
+# no upstream story at all. Only `private` carries no route, and `private` means
+# the fork decided never to propose it.
+#
+# The record is still spelled `upstream_pr`, and `--pr-url` still names the flag,
+# although either may now hold an issue. Renaming them needs the existing entries
+# in fork-divergences.json rewritten, and a divergence topic is forbidden to edit
+# that manifest, so the rename cannot travel with this change. The name is known
+# to be inaccurate rather than silently wrong; docs/fork-main.md records it.
+#
 # integrate requires a clean named candidate branch at fetched origin/main and a
 # canonical topic whose `git cherry upstream/main <topic>` result contains
 # exactly one non-equivalent commit. This one-aggregate-patch invariant is what
@@ -166,8 +179,8 @@ validate_integrate_inputs() {
     [ -z "$PR_URL$PR_DISPOSITION" ] || die "private divergence must not carry an upstream pull-request record"
     return 0
   fi
-  jq -en --arg url "$PR_URL" '$url | test("^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+$")' >/dev/null \
-    || die "non-private divergence requires a full GitHub upstream PR URL"
+  jq -en --arg url "$PR_URL" '$url | test("^https://github\\.com/[^/]+/[^/]+/(pull|issues)/[0-9]+$")' >/dev/null \
+    || die "non-private divergence requires a full GitHub upstream pull-request or issue URL"
   case "$CLASS:$PR_DISPOSITION" in
     pending:open|rejected-but-retained:rejected) ;;
     pending:*) die "pending requires pull-request disposition open" ;;
