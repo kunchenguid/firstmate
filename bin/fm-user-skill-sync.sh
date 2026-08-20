@@ -12,7 +12,9 @@
 # broken link, special file, malformed skill directory, unexpected root entry,
 # overlapping managed roots, or ambiguous tree refuses the whole run before any
 # mutation. Skill trees may contain directories and regular files only and must
-# include SKILL.md.
+# include SKILL.md. Managed roots are compared by filesystem identity rather than
+# path spelling, so a case-insensitive volume or an aliased path cannot present
+# one directory under two ownership roles.
 #
 # Preflight refusal is total: nothing is mutated. Once --apply begins executing
 # the accepted plan, each step is re-verified against the live filesystem and a
@@ -127,8 +129,64 @@ OPENCODE_CONFIG="$HOME/.config/opencode/skills"
 OPENCODE_LEGACY="$HOME/.opencode/skills"
 PI="$HOME/.pi/agent/skills"
 
-# Each managed root must be a distinct, non-overlapping path, otherwise one root
-# would be scanned under two ownership roles and planned against itself.
+# Ownership boundaries compare filesystem identity rather than path spelling, so
+# a case-insensitive volume or an aliased path cannot present one directory
+# under two managed roles. Identity is taken without dereferencing, because a
+# whole-root link to the canonical store is a supported input this run converges
+# rather than an ownership collision. GNU stat is probed before BSD stat because
+# BSD's -f prints inode fields while GNU's -f prints filesystem fields.
+path_identity() {
+  stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1" 2>/dev/null
+}
+
+nearest_existing_ancestor() {
+  local probe=$1
+  while [ ! -e "$probe" ] && [ ! -L "$probe" ]; do
+    probe=${probe%/*}
+    [ -n "$probe" ] || probe=/
+  done
+  printf '%s\n' "$probe"
+}
+
+# Remaining components below the nearest existing ancestor, compared without
+# case so two roots that would collide once created are refused in advance.
+unresolved_suffix() {
+  local probe=$1 anchor suffix
+  anchor=$(nearest_existing_ancestor "$probe")
+  if [ "$anchor" = "$probe" ]; then
+    printf '\n'
+    return 0
+  fi
+  if [ "$anchor" = / ]; then suffix=$probe; else suffix=${probe#"$anchor"}; fi
+  printf '%s' "$suffix" | tr '[:upper:]' '[:lower:]'
+  printf '\n'
+}
+
+path_contains_identity() {
+  local probe=$1 wanted=$2 id
+  while :; do
+    if [ -e "$probe" ] || [ -L "$probe" ]; then
+      id=$(path_identity "$probe") || id=
+      [ -z "$id" ] || [ "$id" != "$wanted" ] || return 0
+    fi
+    [ "$probe" != / ] || break
+    probe=${probe%/*}
+    [ -n "$probe" ] || probe=/
+  done
+  return 1
+}
+
+path_self_identity() {
+  local path=$1 id
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    id=$(path_identity "$path") || id=
+    [ -n "$id" ] || die "cannot resolve managed skill path identity: $path"
+    printf '%s\n' "$id"
+  fi
+}
+
+# Each managed root must be a distinct, non-overlapping directory, otherwise one
+# root would be scanned under two ownership roles and planned against itself.
 MANAGED_ROLES="canonical claude codex gemini opencode-config opencode-legacy pi"
 managed_root_for_role() {
   case $1 in
@@ -143,15 +201,30 @@ managed_root_for_role() {
   esac
 }
 for role_a in $MANAGED_ROLES; do
+  root_a=$(managed_root_for_role "$role_a")
+  self_a=$(path_self_identity "$root_a")
+  anchor_a=$(path_identity "$(nearest_existing_ancestor "$root_a")") \
+    || die "cannot resolve managed skill root ancestor: $root_a"
+  [ -n "$anchor_a" ] || die "cannot resolve managed skill root ancestor: $root_a"
+  suffix_a=$(unresolved_suffix "$root_a")
   for role_b in $MANAGED_ROLES; do
     [ "$role_a" != "$role_b" ] || continue
-    root_a=$(managed_root_for_role "$role_a")
     root_b=$(managed_root_for_role "$role_b")
-    [ "$root_a" != "$root_b" ] \
-      || die "managed skill roots $role_a and $role_b resolve to the same path: $root_a"
-    case "$root_b/" in
-      "$root_a"/*) die "managed skill root $role_b is nested inside $role_a: $root_b" ;;
-    esac
+    self_b=$(path_self_identity "$root_b")
+    if [ -n "$self_a" ] && [ "$self_a" = "$self_b" ]; then
+      die "managed skill roots $role_a and $role_b are the same directory: $root_a and $root_b"
+    fi
+    if [ -n "$self_a" ] && path_contains_identity "$root_b" "$self_a"; then
+      die "managed skill root $role_b is nested inside $role_a: $root_b"
+    fi
+    anchor_b=$(path_identity "$(nearest_existing_ancestor "$root_b")") || anchor_b=
+    if [ -n "$anchor_b" ] && [ "$anchor_a" = "$anchor_b" ]; then
+      [ "$suffix_a" != "$(unresolved_suffix "$root_b")" ] \
+        || die "managed skill roots $role_a and $role_b resolve to the same directory: $root_a and $root_b"
+      case "$(unresolved_suffix "$root_b")" in
+        "$suffix_a"/*) die "managed skill root $role_b is nested inside $role_a: $root_b" ;;
+      esac
+    fi
   done
 done
 
@@ -165,8 +238,12 @@ done
 
 # The operator command owns user homes only. Refuse a synthetic HOME or
 # CODEX_HOME that points its managed roots into this repository.
+ROOT_IDENTITY=$(path_identity "$ROOT") || die "cannot resolve the Firstmate repository root: $ROOT"
+[ -n "$ROOT_IDENTITY" ] || die "cannot resolve the Firstmate repository root: $ROOT"
 for managed in "$CANON" "$CLAUDE" "$CODEX" "$GEMINI" "$OPENCODE_CONFIG" "$OPENCODE_LEGACY" "$PI"; do
-  case "$managed/" in "$ROOT/"*) die "managed user root overlaps the Firstmate repository: $managed" ;; esac
+  if path_contains_identity "$managed" "$ROOT_IDENTITY"; then
+    die "managed user root overlaps the Firstmate repository: $managed"
+  fi
 done
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-user-skill-sync.XXXXXX") || die "cannot create preflight workspace"

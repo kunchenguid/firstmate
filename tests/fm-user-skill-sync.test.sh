@@ -185,7 +185,7 @@ test_colliding_managed_roots_refuse() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "colliding Codex and canonical roots were not refused"
-  assert_contains "$out" "resolve to the same path" "collision refusal lacked diagnosis"
+  assert_contains "$out" "same directory" "collision refusal lacked diagnosis"
 
   set +e
   out=$(HOME="$home" CODEX_HOME="$home/.agents" "$SCRIPT" --apply 2>&1)
@@ -203,6 +203,46 @@ test_colliding_managed_roots_refuse() {
   assert_contains "$out" "nested inside" "nested-root refusal lacked diagnosis"
   [ -f "$home/.agents/skills/alpha/SKILL.md" ] || fail "nested apply destroyed the canonical skill"
   pass "colliding or nested managed roots refuse before any mutation"
+}
+
+# A managed root that differs only in spelling still names one directory on a
+# case-insensitive volume, which is the captain's default macOS filesystem.
+filesystem_is_case_insensitive() {
+  local probe=$1
+  mkdir -p "$probe/casefold"
+  [ -d "$probe/CASEFOLD" ]
+}
+
+test_aliased_managed_roots_refuse() {
+  local home out rc probe
+  home=$(new_home)
+
+  set +e
+  out=$(HOME="$home" CODEX_HOME="$home/.Agents" "$SCRIPT" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "case-variant Codex root was not refused before the roots existed"
+  assert_contains "$out" "same directory" "case-variant refusal lacked diagnosis"
+  [ ! -e "$home/.agents" ] || fail "refused run created the canonical root"
+
+  probe=$(new_home)
+  if ! filesystem_is_case_insensitive "$probe"; then
+    pass "case-variant managed roots refuse before creation (case-sensitive volume: alias case skipped)"
+    return 0
+  fi
+
+  home=$(new_home)
+  make_skill "$home/.agents/skills" alpha body
+
+  set +e
+  out=$(HOME="$home" CODEX_HOME="$home/.Agents" "$SCRIPT" --apply 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "case-variant Codex root aliasing the canonical store was applied"
+  assert_contains "$out" "same directory" "aliased-root refusal lacked diagnosis"
+  [ -f "$home/.agents/skills/alpha/SKILL.md" ] || fail "aliased apply destroyed the canonical skill"
+  [ ! -L "$home/.agents/skills/alpha" ] || fail "aliased apply replaced the canonical skill with a link"
+  pass "aliased managed roots that name one directory refuse before any mutation"
 }
 
 test_remote_routes_through_registered_home() {
@@ -246,4 +286,5 @@ test_links_and_unexpected_entries_refuse
 test_safe_whole_root_links_converge
 test_codex_relative_link_resolves_in_isolated_home
 test_colliding_managed_roots_refuse
+test_aliased_managed_roots_refuse
 test_remote_routes_through_registered_home
