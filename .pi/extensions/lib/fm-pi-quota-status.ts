@@ -801,6 +801,11 @@ function compactNumber(value: number): string {
   return value.toFixed(1).replace(/\.0$/, "");
 }
 
+function compactPositiveNumber(value: number): string {
+  const compact = compactNumber(value);
+  return value > 0 && Number(compact) === 0 ? "<0.1" : compact;
+}
+
 function formatReset(window: QuotaWindowView, nowMs: number): string {
   if (window.resetsAtMs !== null) {
     const deltaMs = window.resetsAtMs - nowMs;
@@ -822,11 +827,7 @@ function formatCredits(credits: QuotaCreditsView): string {
   if (credits.unlimited === true) return "credits unlimited";
   if (credits.remaining !== null) {
     const unit = credits.unit && credits.unit !== "credits" ? ` ${credits.unit}` : "";
-    const compactRemaining = compactNumber(credits.remaining);
-    const remaining = credits.remaining > 0 && Number(compactRemaining) === 0
-      ? "<0.1"
-      : compactRemaining;
-    return `credits ${remaining}${unit}`;
+    return `credits ${compactPositiveNumber(credits.remaining)}${unit}`;
   }
   return credits.unlimited === false ? "credits unavailable" : "credits unknown";
 }
@@ -950,7 +951,7 @@ export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.n
     for (const window of view.windows) {
       const remaining = window.percentRemaining === null
         ? "remaining unknown"
-        : `${compactNumber(window.percentRemaining)}% left`;
+        : `${compactPositiveNumber(window.percentRemaining)}% left`;
       const part = `${window.label} ${remaining} ${formatReset(window, nowMs).replace(/^resets /, "reset ")}`;
       if (!append(part)) return narrow();
     }
@@ -963,30 +964,53 @@ export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.n
   return full;
 }
 
+type FormattedQuotaCacheEntry = {
+  formatted: string;
+  computedAtMs: number;
+  validUntilMs: number;
+};
+
+function nextResetFormatTransitionMs(view: QuotaView, nowMs: number): number {
+  if (view.kind !== "fresh" || !Number.isFinite(nowMs)) return Number.POSITIVE_INFINITY;
+  let nextTransitionMs = Number.POSITIVE_INFINITY;
+  for (const window of view.windows) {
+    if (window.resetsAtMs === null || window.resetsAtMs <= nowMs) continue;
+    const minutes = Math.max(1, Math.ceil((window.resetsAtMs - nowMs) / 60_000));
+    const transitionMs = window.resetsAtMs - (minutes - 1) * 60_000;
+    nextTransitionMs = Math.min(nextTransitionMs, transitionMs);
+  }
+  return nextTransitionMs;
+}
+
 export function createQuotaStatusFormatter(maxEntriesPerView = 8) {
   const entryLimit = Number.isFinite(maxEntriesPerView)
     ? Math.max(1, Math.floor(maxEntriesPerView))
     : 8;
-  const cache = new WeakMap<QuotaView, Map<string, string>>();
+  const cache = new WeakMap<QuotaView, Map<number, FormattedQuotaCacheEntry>>();
   return (view: QuotaView, width: number, nowMs = Date.now()): string => {
     const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
-    const timeBucket = view.kind === "fresh" && Number.isFinite(nowMs)
-      ? Math.floor(nowMs / 60_000)
-      : 0;
-    const key = `${safeWidth}:${timeBucket}`;
     let entries = cache.get(view);
-    const cached = entries?.get(key);
-    if (cached !== undefined) return cached;
+    const cached = entries?.get(safeWidth);
+    if (
+      cached !== undefined &&
+      nowMs >= cached.computedAtMs &&
+      nowMs < cached.validUntilMs
+    ) return cached.formatted;
     const formatted = formatQuotaStatus(view, safeWidth, nowMs);
     if (!entries) {
       entries = new Map();
       cache.set(view, entries);
     }
-    if (entries.size >= entryLimit) {
+    if (!entries.has(safeWidth) && entries.size >= entryLimit) {
       const oldest = entries.keys().next().value;
       if (oldest !== undefined) entries.delete(oldest);
     }
-    entries.set(key, formatted);
+    entries.delete(safeWidth);
+    entries.set(safeWidth, {
+      formatted,
+      computedAtMs: nowMs,
+      validUntilMs: nextResetFormatTransitionMs(view, nowMs),
+    });
     return formatted;
   };
 }

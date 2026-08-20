@@ -406,9 +406,42 @@ const countedFormattingView = {
 };
 const cachedFormatter = createQuotaStatusFormatter();
 const firstCachedFormat = cachedFormatter(countedFormattingView, 400, now);
+const iterationsAfterFirstFormat = formattedWindowIterations;
 const secondCachedFormat = cachedFormatter(countedFormattingView, 400, now);
 assert(firstCachedFormat === secondCachedFormat, "cached formatter changed stable quota output");
-assert(formattedWindowIterations === 1, "stable footer redraw reprocessed every quota window");
+assert(
+  formattedWindowIterations === iterationsAfterFirstFormat,
+  "stable footer redraw reprocessed every quota window",
+);
+const resetCacheNow = Math.floor(now / 60_000) * 60_000;
+let resetWindowIterations = 0;
+const resetRelativeView = {
+  ...codex,
+  windows: new Proxy([
+    { ...codex.windows[0], resetsAtMs: resetCacheNow + 150_000 },
+  ], {
+    get(target, property, receiver) {
+      if (property === Symbol.iterator) resetWindowIterations += 1;
+      return Reflect.get(target, property, receiver);
+    },
+  }),
+};
+const resetRelativeFormatter = createQuotaStatusFormatter();
+const resetThreeMinutes = resetRelativeFormatter(resetRelativeView, 400, resetCacheNow);
+assert(resetThreeMinutes.includes("reset 3m"), `initial reset countdown was inaccurate: ${resetThreeMinutes}`);
+const resetIterationsBeforeBoundary = resetWindowIterations;
+const resetBeforeBoundary = resetRelativeFormatter(resetRelativeView, 400, resetCacheNow + 29_999);
+assert(resetBeforeBoundary === resetThreeMinutes, "reset countdown cache expired before its relative boundary");
+assert(
+  resetWindowIterations === resetIterationsBeforeBoundary,
+  "stable reset countdown reprocessed every quota window",
+);
+const resetTwoMinutes = resetRelativeFormatter(resetRelativeView, 400, resetCacheNow + 30_000);
+assert(resetTwoMinutes.includes("reset 2m"), `reset countdown remained cached across its relative boundary: ${resetTwoMinutes}`);
+assert(
+  resetWindowIterations > resetIterationsBeforeBoundary,
+  "reset countdown boundary did not refresh formatted quota",
+);
 const tinyCreditReport = report(now);
 tinyCreditReport.providers[1].credits.remaining = 0.04;
 const tinyCreditParsed = parseQuotaAxiJson(JSON.stringify(tinyCreditReport));
@@ -417,6 +450,14 @@ const tinyCreditView = selectActiveProviderQuota(tinyCreditParsed, "openai-codex
 const tinyCreditText = formatQuotaStatus(tinyCreditView, 400, now);
 assert(tinyCreditText.includes("credits <0.1"), `small positive credits rounded to zero: ${tinyCreditText}`);
 assert(!tinyCreditText.includes("credits 0"), `positive credits were presented as zero: ${tinyCreditText}`);
+const tinyPercentReport = report(now);
+tinyPercentReport.providers[1].windows[0].percentRemaining = 0.04;
+const tinyPercentParsed = parseQuotaAxiJson(JSON.stringify(tinyPercentReport));
+assert(tinyPercentParsed, "small positive percentage fixture did not parse structurally");
+const tinyPercentView = selectActiveProviderQuota(tinyPercentParsed, "openai-codex", { nowMs: now });
+const tinyPercentText = formatQuotaStatus(tinyPercentView, 400, now);
+assert(tinyPercentText.includes("week <0.1% left"), `small positive quota rounded to zero: ${tinyPercentText}`);
+assert(!tinyPercentText.includes("week 0% left"), `positive quota was presented as exhausted: ${tinyPercentText}`);
 const matchedAccount = selectActiveProviderQuota(parsed, "openai-codex", {
   nowMs: now,
   expectedAccountId: "fixture-codex-account",
@@ -972,6 +1013,7 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
     },
   };
   async function emit(event, payload = {}, overrideCtx = ctx) {
+    if (event === "model_select" && payload.model && overrideCtx === ctx) ctx.model = payload.model;
     for (const handler of handlers.get(event) ?? []) await handler(payload, overrideCtx);
   }
   function widgetText(width = 200, key = "firstmate-quota") {
@@ -1135,6 +1177,38 @@ await waitFor(
   "custom-endpoint model did not resolve to unavailable",
 );
 await resolvingTransition.emit("session_shutdown", { reason: "quit" });
+
+const liveReconfiguration = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 500,
+}));
+await liveReconfiguration.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => liveReconfiguration.widgetText(400).includes("week 94% left"),
+  "live-reconfiguration fixture did not publish official quota",
+);
+liveReconfiguration.ctx.model = fixtureModel(
+  "openai-codex",
+  "fixture-model",
+  "https://proxy.example.invalid",
+);
+const reconfiguredText = liveReconfiguration.widgetText(400);
+assert(reconfiguredText.includes("refreshing"), `live endpoint reconfiguration was not detected: ${reconfiguredText}`);
+assert(!reconfiguredText.includes("94%"), "live endpoint reconfiguration retained official quota");
+await waitFor(
+  () => liveReconfiguration.widgetText(240).includes("custom endpoint"),
+  `live endpoint reconfiguration was not classified explicitly: ${liveReconfiguration.widgetText(240)}`,
+);
+liveReconfiguration.ctx.model = fixtureModel("openai-codex");
+assert(
+  !liveReconfiguration.widgetText(400).includes("94%"),
+  "restoring a provider endpoint resurrected quota from a different endpoint revision",
+);
+await waitFor(
+  () => liveReconfiguration.widgetText(400).includes("week 94% left"),
+  "restored official endpoint did not refresh quota",
+);
+await liveReconfiguration.emit("session_shutdown", { reason: "quit" });
 
 const authTimeout = makePi(
   createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 40 }),

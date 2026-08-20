@@ -94,14 +94,20 @@ type ResolvedOAuthAuth = {
 };
 
 type QuotaTarget =
-  | { kind: "resolving"; piProvider: string }
+  | { kind: "resolving"; piProvider: string; modelRevision: string }
   | {
       kind: "supported";
       piProvider: string;
       verification: QuotaVerification;
       credentialRevision: string;
+      modelRevision: string;
+      endpointRevision: string;
     }
-  | { kind: "unsupported"; view: Extract<QuotaView, { kind: "unsupported" }> };
+  | {
+      kind: "unsupported";
+      view: Extract<QuotaView, { kind: "unsupported" }>;
+      modelRevision: string;
+    };
 
 type CompatibleModelRegistry = {
   getProvider?: (provider: string) => {
@@ -123,11 +129,12 @@ type CachedQuota = {
   view: QuotaView;
   piProvider: string;
   credentialRevision: string;
+  modelRevision: string;
+  endpointRevision: string;
 };
 
 type ActiveSession = {
   ctx: ExtensionContext;
-  model: ActiveModel | undefined;
   generation: number;
   target: QuotaTarget;
   quota: CachedQuota | null;
@@ -140,6 +147,7 @@ type ActiveSession = {
   refreshPending: boolean;
   refreshTimer: unknown | null;
   expiryTimer: unknown | null;
+  modelRefreshTimer: unknown | null;
 };
 
 function positiveNumber(value: number | undefined, fallback: number): number {
@@ -225,6 +233,16 @@ function isOfficialProviderBaseUrl(provider: string, value: string): boolean {
   }
   const expected = OFFICIAL_PROVIDER_BASE_URLS[provider];
   return Boolean(expected && canonical === canonicalBaseUrl(expected));
+}
+
+function activeModelRevision(model: ActiveModel | undefined): string {
+  if (!model) return "no-model";
+  const endpoint = canonicalBaseUrl(model.baseUrl) ?? model.baseUrl;
+  return JSON.stringify([model.provider, model.id, endpoint]);
+}
+
+function effectiveEndpointRevision(provider: string, endpoint: string): string {
+  return JSON.stringify([provider, canonicalBaseUrl(endpoint) ?? endpoint]);
 }
 
 function exactAccountId(value: unknown): string | null {
@@ -509,9 +527,20 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     }
 
     function preflightTarget(ctx: ExtensionContext, model: ActiveModel | undefined): QuotaTarget {
-      if (!model) return { kind: "unsupported", view: unsupportedView("no model", "no-model") };
+      const modelRevision = activeModelRevision(model);
+      if (!model) {
+        return {
+          kind: "unsupported",
+          view: unsupportedView("no model", "no-model"),
+          modelRevision,
+        };
+      }
       if (!quotaProviderForPiProvider(model.provider)) {
-        return { kind: "unsupported", view: unsupportedProvider(model.provider) };
+        return {
+          kind: "unsupported",
+          view: unsupportedProvider(model.provider),
+          modelRevision,
+        };
       }
       const registry = ctx.modelRegistry as unknown as CompatibleModelRegistry;
       if (
@@ -521,6 +550,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         return {
           kind: "unsupported",
           view: unsupportedView(model.provider, "auth-inspection"),
+          modelRevision,
         };
       }
       const provider = registry.getProvider.call(ctx.modelRegistry, model.provider);
@@ -529,20 +559,22 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           return {
             kind: "unsupported",
             view: unsupportedView(model.provider, "non-subscription-auth"),
+            modelRevision,
           };
         }
-        return { kind: "resolving", piProvider: model.provider };
+        return { kind: "resolving", piProvider: model.provider, modelRevision };
       }
       if (
         model.provider === "kimi-coding" &&
         typeof registry.getProviderAuthStatus === "function" &&
         registry.getProviderAuthStatus.call(ctx.modelRegistry, model.provider).source === "stored"
       ) {
-        return { kind: "resolving", piProvider: model.provider };
+        return { kind: "resolving", piProvider: model.provider, modelRevision };
       }
       return {
         kind: "unsupported",
         view: unsupportedView(model.provider, "non-subscription-auth"),
+        modelRevision,
       };
     }
 
@@ -553,7 +585,13 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     ): Promise<QuotaTarget> {
       const preflight = preflightTarget(ctx, model);
       if (preflight.kind !== "resolving") return preflight;
-      if (!model) return { kind: "unsupported", view: unsupportedView("no model", "no-model") };
+      if (!model) {
+        return {
+          kind: "unsupported",
+          view: unsupportedView("no model", "no-model"),
+          modelRevision: preflight.modelRevision,
+        };
+      }
 
       const registry = ctx.modelRegistry as unknown as CompatibleModelRegistry;
       const credentialResult = await readStoredCredential(model.provider, signal);
@@ -568,6 +606,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         return {
           kind: "unsupported",
           view: unsupportedView(model.provider, reason),
+          modelRevision: preflight.modelRevision,
         };
       }
       const rawCredential = credentialResult.credential;
@@ -582,6 +621,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           return {
             kind: "unsupported",
             view: unsupportedView(model.provider, "auth-unavailable"),
+            modelRevision: preflight.modelRevision,
           };
         }
       } else {
@@ -591,6 +631,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           return {
             kind: "unsupported",
             view: unsupportedView(model.provider, "auth-inspection"),
+            modelRevision: preflight.modelRevision,
           };
         }
         const credential = storedOAuthCredential(rawCredential);
@@ -598,6 +639,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           return {
             kind: "unsupported",
             view: unsupportedView(model.provider, "auth-unavailable"),
+            modelRevision: preflight.modelRevision,
           };
         }
         const authResult = await resolveOAuthAuth(oauth, credential, signal);
@@ -610,6 +652,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           return {
             kind: "unsupported",
             view: unsupportedView(model.provider, reason),
+            modelRevision: preflight.modelRevision,
           };
         }
         resolvedAuth = authResult.auth;
@@ -620,6 +663,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         return {
           kind: "unsupported",
           view: unsupportedView(model.provider, "custom-endpoint"),
+          modelRevision: preflight.modelRevision,
         };
       }
       const verification = quotaVerification(model.provider, resolvedAuth.apiKey);
@@ -627,6 +671,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         return {
           kind: "unsupported",
           view: unsupportedView(model.provider, "account-correlation"),
+          modelRevision: preflight.modelRevision,
         };
       }
       return {
@@ -634,6 +679,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         piProvider: model.provider,
         verification,
         credentialRevision: credentialResult.revision,
+        modelRevision: preflight.modelRevision,
+        endpointRevision: effectiveEndpointRevision(model.provider, effectiveBaseUrl),
       };
     }
 
@@ -651,11 +698,68 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       });
     }
 
+    function targetMatchesLiveModel(session: ActiveSession): boolean {
+      return session.target.modelRevision === activeModelRevision(session.ctx.model);
+    }
+
+    function viewForTarget(target: QuotaTarget): QuotaView {
+      return target.kind === "unsupported"
+        ? target.view
+        : { kind: "refreshing", provider: target.piProvider };
+    }
+
+    function credentialMonitoringView(session: ActiveSession): QuotaTarget {
+      const model = session.ctx.model;
+      return {
+        kind: "unsupported",
+        view: unsupportedView(model?.provider ?? "no model", "credential-monitoring"),
+        modelRevision: activeModelRevision(model),
+      };
+    }
+
+    function resetForLiveModel(session: ActiveSession): void {
+      session.generation += 1;
+      session.target = session.credentialMonitoringAvailable
+        ? preflightTarget(session.ctx, session.ctx.model)
+        : credentialMonitoringView(session);
+      session.quota = null;
+      session.lastFailure = null;
+      cancelProcess(session);
+      render(session);
+    }
+
+    function scheduleLiveModelRefresh(session: ActiveSession): void {
+      if (session.modelRefreshTimer !== null || active !== session) return;
+      let timer: unknown;
+      timer = timers.setTimeout(() => {
+        if (active !== session || session.modelRefreshTimer !== timer) return;
+        session.modelRefreshTimer = null;
+        if (targetMatchesLiveModel(session)) return;
+        resetForLiveModel(session);
+        void refresh(session);
+      }, 0);
+      session.modelRefreshTimer = timer;
+      unrefTimer(timer);
+    }
+
+    function changedLiveModelView(session: ActiveSession): QuotaView | null {
+      if (targetMatchesLiveModel(session)) return null;
+      scheduleLiveModelRefresh(session);
+      const target = session.credentialMonitoringAvailable
+        ? preflightTarget(session.ctx, session.ctx.model)
+        : credentialMonitoringView(session);
+      return viewForTarget(target);
+    }
+
     function cachedQuotaView(session: ActiveSession, nowMs: number): QuotaView | null {
-      if (session.target.kind !== "supported" || !session.quota) return null;
+      if (changedLiveModelView(session) || session.target.kind !== "supported" || !session.quota) {
+        return null;
+      }
       if (
         session.quota.piProvider !== session.target.piProvider ||
-        session.quota.credentialRevision !== session.target.credentialRevision
+        session.quota.credentialRevision !== session.target.credentialRevision ||
+        session.quota.modelRevision !== session.target.modelRevision ||
+        session.quota.endpointRevision !== session.target.endpointRevision
       ) return null;
       const cached = session.quota.view;
       if (cached.kind !== "fresh") return cached;
@@ -670,6 +774,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     }
 
     function currentView(session: ActiveSession, nowMs = now()): QuotaView {
+      const changedModel = changedLiveModelView(session);
+      if (changedModel) return changedModel;
       if (session.target.kind === "unsupported") return session.target.view;
       if (session.target.kind === "resolving") {
         return { kind: "refreshing", provider: session.target.piProvider };
@@ -690,14 +796,6 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     function clearExpiry(session: ActiveSession): void {
       if (session.expiryTimer !== null) timers.clearTimeout(session.expiryTimer);
       session.expiryTimer = null;
-    }
-
-    function credentialMonitoringView(session: ActiveSession): QuotaTarget {
-      const provider = session.model?.provider ?? "no model";
-      return {
-        kind: "unsupported",
-        view: unsupportedView(provider, "credential-monitoring"),
-      };
     }
 
     function failCredentialMonitoring(session: ActiveSession): void {
@@ -723,7 +821,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           if (filename !== null && String(filename) !== basename(authFile)) return;
           if (active !== session) return;
           session.generation += 1;
-          session.target = preflightTarget(session.ctx, session.model);
+          session.target = preflightTarget(session.ctx, session.ctx.model);
           session.quota = null;
           session.lastFailure = null;
           cancelProcess(session);
@@ -764,7 +862,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             ? Math.min(boundedComponentWidth, Math.floor(configuredWidth))
             : boundedComponentWidth;
           const renderNowMs = now();
-          const renderView = view.kind === "fresh" ? currentView(session, renderNowMs) : view;
+          const changedModel = changedLiveModelView(session);
+          const renderView = changedModel ?? (view.kind === "fresh" ? currentView(session, renderNowMs) : view);
           const plain = formatStatus(renderView, availableWidth, renderNowMs);
           return plain ? [theme.fg("dim", plain)] : [];
         },
@@ -793,13 +892,21 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         return;
       }
 
+      if (!targetMatchesLiveModel(session)) resetForLiveModel(session);
       session.refreshInFlight = true;
       const generation = session.generation;
       const operationAbort = new AbortController();
       session.operationAbort = operationAbort;
+      const startingModel = session.ctx.model;
+      const startingModelRevision = activeModelRevision(startingModel);
       try {
-        const target = await resolveTarget(session.ctx, session.model, operationAbort.signal);
+        const target = await resolveTarget(session.ctx, startingModel, operationAbort.signal);
         if (active !== session || session.generation !== generation) return;
+        if (activeModelRevision(session.ctx.model) !== startingModelRevision) {
+          resetForLiveModel(session);
+          session.refreshPending = true;
+          return;
+        }
         const previousTarget = session.target;
         session.target = target;
         if (target.kind === "unsupported") {
@@ -811,7 +918,9 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         if (
           previousTarget.kind !== "supported" ||
           previousTarget.piProvider !== target.piProvider ||
-          previousTarget.credentialRevision !== target.credentialRevision
+          previousTarget.credentialRevision !== target.credentialRevision ||
+          previousTarget.modelRevision !== target.modelRevision ||
+          previousTarget.endpointRevision !== target.endpointRevision
         ) {
           session.quota = null;
           session.lastFailure = null;
@@ -824,7 +933,11 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
 
         const quotaProvider = quotaProviderForPiProvider(piProvider);
         if (!quotaProvider) {
-          session.target = { kind: "unsupported", view: unsupportedProvider(piProvider) };
+          session.target = {
+            kind: "unsupported",
+            view: unsupportedProvider(piProvider),
+            modelRevision: target.modelRevision,
+          };
           render(session);
           return;
         }
@@ -842,13 +955,25 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           session.generation !== generation ||
           session.process !== running
         ) return;
+        if (activeModelRevision(session.ctx.model) !== startingModelRevision) {
+          resetForLiveModel(session);
+          session.refreshPending = true;
+          return;
+        }
 
-        const completedTarget = await resolveTarget(session.ctx, session.model, operationAbort.signal);
+        const completedModel = session.ctx.model;
+        const completedModelRevision = activeModelRevision(completedModel);
+        const completedTarget = await resolveTarget(session.ctx, completedModel, operationAbort.signal);
         if (
           active !== session ||
           session.generation !== generation ||
           session.process !== running
         ) return;
+        if (activeModelRevision(session.ctx.model) !== completedModelRevision) {
+          resetForLiveModel(session);
+          session.refreshPending = true;
+          return;
+        }
         session.process = null;
         session.target = completedTarget;
         if (completedTarget.kind === "unsupported") {
@@ -857,7 +982,11 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           render(session);
           return;
         }
-        if (completedTarget.credentialRevision !== target.credentialRevision) {
+        if (
+          completedTarget.credentialRevision !== target.credentialRevision ||
+          completedTarget.modelRevision !== target.modelRevision ||
+          completedTarget.endpointRevision !== target.endpointRevision
+        ) {
           session.quota = null;
           session.refreshPending = true;
           render(session, { kind: "refreshing", provider: completedTarget.piProvider });
@@ -875,6 +1004,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             view: selected,
             piProvider: completedProvider,
             credentialRevision: completedTarget.credentialRevision,
+            modelRevision: completedTarget.modelRevision,
+            endpointRevision: completedTarget.endpointRevision,
           };
           render(session);
         } else if (result.kind !== "cancelled") {
@@ -901,6 +1032,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     function stop(session: ActiveSession): void {
       if (session.refreshTimer !== null) timers.clearInterval(session.refreshTimer);
       session.refreshTimer = null;
+      if (session.modelRefreshTimer !== null) timers.clearTimeout(session.modelRefreshTimer);
+      session.modelRefreshTimer = null;
       clearExpiry(session);
       session.refreshPending = false;
       const watcher = session.credentialWatcher;
@@ -916,12 +1049,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (active) stop(active);
       if (ctx.mode !== "tui") return;
 
-      const model = ctx.model;
       const session: ActiveSession = {
         ctx,
-        model,
         generation: 0,
-        target: preflightTarget(ctx, model),
+        target: preflightTarget(ctx, ctx.model),
         quota: null,
         lastFailure: null,
         process: null,
@@ -932,6 +1063,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         refreshPending: false,
         refreshTimer: null,
         expiryTimer: null,
+        modelRefreshTimer: null,
       };
       active = session;
       watchCredentials(session);
@@ -946,16 +1078,15 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     pi.on("session_start", (_event, ctx) => {
       start(ctx);
     });
-    pi.on("model_select", (event, ctx) => {
+    pi.on("model_select", (_event, ctx) => {
       if (!active) {
         start(ctx);
         return;
       }
       active.ctx = ctx;
-      active.model = event.model;
       active.generation += 1;
       active.target = active.credentialMonitoringAvailable
-        ? preflightTarget(ctx, event.model)
+        ? preflightTarget(ctx, ctx.model)
         : credentialMonitoringView(active);
       active.quota = null;
       active.lastFailure = null;
