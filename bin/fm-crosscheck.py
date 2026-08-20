@@ -3317,6 +3317,18 @@ def pi_review_result(output: str) -> tuple[dict[str, Any], int]:
             if agent_ended:
                 tool_fail("Pi reviewer emitted duplicate agent completion")
             agent_ended = True
+        elif event_type == "auto_retry_start":
+            # Pi's own retry contract for retryable provider errors (429s and
+            # transient 5xx): the failed attempt closes with agent_end, then
+            # auto_retry_start opens a continuation of the SAME review. Without
+            # this reset every rate-limited review was refused as "a turn after
+            # agent completion", masking the provider error that actually
+            # happened (observed live against the 25K-TPM GLM deployment,
+            # 2026-08-20). A turn after agent_end WITHOUT this marker is still
+            # refused above, so the original defense stands.
+            if not agent_ended:
+                tool_fail("Pi reviewer announced a retry while its agent was still running")
+            agent_ended = False
     if turn_count == 0:
         tool_fail("Pi reviewer completed without executing a turn")
     if not agent_ended:

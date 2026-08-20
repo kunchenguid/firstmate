@@ -1548,6 +1548,108 @@ PY
   pass "Pi accepts only a successful terminal assistant turn"
 }
 
+test_pi_reviewer_follows_auto_retry_contract() {
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
+    || fail "Pi auto-retry stream handling regressed"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+
+def assistant_turn(text, stop_reason, error=None):
+    message = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+        "stopReason": stop_reason,
+    }
+    if error is not None:
+        message["errorMessage"] = error
+    return {"type": "turn_end", "message": message, "toolResults": []}
+
+
+def stream(events):
+    return "\n".join(json.dumps(event) for event in events) + "\n"
+
+
+RATE_LIMIT = '429: {"code":"RateLimitReached","message":"exceeded rate limit"}'
+verdict_text = json.dumps({"verdict": "clear"})
+
+# A rate-limited attempt that pi retries into a successful completion is one
+# review: the interleaved agent_end/auto_retry_start pair is pi's own retry
+# contract, not a second agent.
+verdict, turn_count = module.pi_review_result(stream([
+    {"type": "agent_start"},
+    assistant_turn("", "error", RATE_LIMIT),
+    {"type": "agent_end", "messages": []},
+    {"type": "auto_retry_start"},
+    assistant_turn(verdict_text, "stop"),
+    {"type": "agent_end", "messages": []},
+]))
+assert verdict == {"verdict": "clear"}, verdict
+assert turn_count == 2, turn_count
+
+# Exhausted retries surface the PROVIDER error, never the retry mechanics.
+try:
+    module.pi_review_result(stream([
+        {"type": "agent_start"},
+        assistant_turn("", "error", RATE_LIMIT),
+        {"type": "agent_end", "messages": []},
+        {"type": "auto_retry_start"},
+        assistant_turn("", "error", RATE_LIMIT),
+        {"type": "agent_end", "messages": []},
+    ]))
+except module.CrosscheckToolError as exc:
+    assert "stopReason='error'" in str(exc) and "RateLimitReached" in str(exc), str(exc)
+else:
+    raise AssertionError("exhausted retries were accepted as a verdict")
+
+# The original defenses stand: a turn or duplicate completion arriving with NO
+# retry marker still refuses.
+try:
+    module.pi_review_result(stream([
+        {"type": "agent_start"},
+        assistant_turn(verdict_text, "stop"),
+        {"type": "agent_end", "messages": []},
+        assistant_turn(verdict_text, "stop"),
+    ]))
+except module.CrosscheckToolError as exc:
+    assert "turn after agent completion" in str(exc), str(exc)
+else:
+    raise AssertionError("an unmarked post-completion turn was accepted")
+
+try:
+    module.pi_review_result(stream([
+        {"type": "agent_start"},
+        assistant_turn(verdict_text, "stop"),
+        {"type": "agent_end", "messages": []},
+        {"type": "agent_end", "messages": []},
+    ]))
+except module.CrosscheckToolError as exc:
+    assert "duplicate agent completion" in str(exc), str(exc)
+else:
+    raise AssertionError("a duplicate completion was accepted")
+
+# A retry announcement while the agent is still running is malformed.
+try:
+    module.pi_review_result(stream([
+        {"type": "agent_start"},
+        {"type": "auto_retry_start"},
+        assistant_turn(verdict_text, "stop"),
+        {"type": "agent_end", "messages": []},
+    ]))
+except module.CrosscheckToolError as exc:
+    assert "retry while its agent was still running" in str(exc), str(exc)
+else:
+    raise AssertionError("a mid-agent retry announcement was accepted")
+PY
+  pass "Pi auto-retry continuations parse as one review and surface the provider error"
+}
+
 test_pi_reviewer_pins_sibling_node_before_path() {
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
     || fail "Pi did not pin its installed sibling Node runtime"
@@ -4335,6 +4437,7 @@ test_same_model_relaxation_does_not_require_author_identity
 test_reviewer_binary_never_resolves_from_working_directory
 test_gate_refuses_an_unsupported_interpreter
 test_pi_reviewer_accepts_only_successful_terminal_turn
+test_pi_reviewer_follows_auto_retry_contract
 test_pi_reviewer_pins_sibling_node_before_path
 test_pi_reviewer_executes_bound_policy_profile
 test_pi_reviewer_failures_are_tool_failures
