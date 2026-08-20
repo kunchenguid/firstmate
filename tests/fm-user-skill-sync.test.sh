@@ -175,6 +175,36 @@ test_codex_relative_link_resolves_in_isolated_home() {
   pass "isolated Codex per-skill link resolves and exposes SKILL.md"
 }
 
+test_colliding_managed_roots_refuse() {
+  local home out rc
+  home=$(new_home)
+  make_skill "$home/.agents/skills" alpha body
+
+  set +e
+  out=$(HOME="$home" CODEX_HOME="$home/.agents" "$SCRIPT" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "colliding Codex and canonical roots were not refused"
+  assert_contains "$out" "resolve to the same path" "collision refusal lacked diagnosis"
+
+  set +e
+  out=$(HOME="$home" CODEX_HOME="$home/.agents" "$SCRIPT" --apply 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "colliding roots were applied"
+  [ -f "$home/.agents/skills/alpha/SKILL.md" ] || fail "colliding apply destroyed the canonical skill"
+  [ ! -L "$home/.agents/skills/alpha" ] || fail "colliding apply replaced the canonical skill with a link"
+
+  set +e
+  out=$(HOME="$home" CODEX_HOME="$home/.agents/skills" "$SCRIPT" --apply 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "nested Codex root inside the canonical root was applied"
+  assert_contains "$out" "nested inside" "nested-root refusal lacked diagnosis"
+  [ -f "$home/.agents/skills/alpha/SKILL.md" ] || fail "nested apply destroyed the canonical skill"
+  pass "colliding or nested managed roots refuse before any mutation"
+}
+
 test_remote_routes_through_registered_home() {
   local home fakebin argv encoded decoded home_encoded remote_home
   home=$(new_home)
@@ -215,4 +245,5 @@ test_codex_system_preserved
 test_links_and_unexpected_entries_refuse
 test_safe_whole_root_links_converge
 test_codex_relative_link_resolves_in_isolated_home
+test_colliding_managed_roots_refuse
 test_remote_routes_through_registered_home

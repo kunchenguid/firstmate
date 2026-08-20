@@ -10,8 +10,15 @@
 # Every local run performs a complete read-only preflight before acting. Dry-run
 # is the default; --apply is the only mutation switch. A conflict, unsafe or
 # broken link, special file, malformed skill directory, unexpected root entry,
-# or ambiguous tree refuses the whole run before any mutation. Skill trees may
-# contain directories and regular files only and must include SKILL.md.
+# overlapping managed roots, or ambiguous tree refuses the whole run before any
+# mutation. Skill trees may contain directories and regular files only and must
+# include SKILL.md.
+#
+# Preflight refusal is total: nothing is mutated. Once --apply begins executing
+# the accepted plan, each step is re-verified against the live filesystem and a
+# step that no longer matches the plan stops the run there, leaving the earlier
+# steps applied. Each step is individually safe and convergent, so rerunning the
+# command after resolving the interference replans from the current state.
 #
 # Remote operation is routed only through a registered remote secondmate record
 # and bin/fm-on.sh, which binds the configured SSH host, code root, and remote
@@ -119,6 +126,34 @@ GEMINI="$HOME/.gemini/skills"
 OPENCODE_CONFIG="$HOME/.config/opencode/skills"
 OPENCODE_LEGACY="$HOME/.opencode/skills"
 PI="$HOME/.pi/agent/skills"
+
+# Each managed root must be a distinct, non-overlapping path, otherwise one root
+# would be scanned under two ownership roles and planned against itself.
+MANAGED_ROLES="canonical claude codex gemini opencode-config opencode-legacy pi"
+managed_root_for_role() {
+  case $1 in
+    canonical) printf '%s\n' "$CANON" ;;
+    claude) printf '%s\n' "$CLAUDE" ;;
+    codex) printf '%s\n' "$CODEX" ;;
+    gemini) printf '%s\n' "$GEMINI" ;;
+    opencode-config) printf '%s\n' "$OPENCODE_CONFIG" ;;
+    opencode-legacy) printf '%s\n' "$OPENCODE_LEGACY" ;;
+    pi) printf '%s\n' "$PI" ;;
+    *) die "internal error: unknown managed root role $1" ;;
+  esac
+}
+for role_a in $MANAGED_ROLES; do
+  for role_b in $MANAGED_ROLES; do
+    [ "$role_a" != "$role_b" ] || continue
+    root_a=$(managed_root_for_role "$role_a")
+    root_b=$(managed_root_for_role "$role_b")
+    [ "$root_a" != "$root_b" ] \
+      || die "managed skill roots $role_a and $role_b resolve to the same path: $root_a"
+    case "$root_b/" in
+      "$root_a"/*) die "managed skill root $role_b is nested inside $role_a: $root_b" ;;
+    esac
+  done
+done
 
 for parent in \
   "$HOME/.agents" "$HOME/.claude" "$HOME/.gemini" "$HOME/.config" \
@@ -298,7 +333,7 @@ while IFS=$'\t' read -r action first second; do
     mkdir) printf '%s %s\n' "$action" "$first" ;;
     copy) printf '%s %s -> %s\n' "$action" "$first" "$second" ;;
     remove|unlink-root) printf '%s %s\n' "$action" "$first" ;;
-    link) printf '%s -> %s\n' "$second" "$first" ;;
+    link) printf 'link %s -> %s\n' "$second" "$first" ;;
   esac
 done < "$PLAN"
 

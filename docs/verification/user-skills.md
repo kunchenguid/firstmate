@@ -5,7 +5,7 @@ This record owns the current empirical verification boundary.
 
 ## Isolated filesystem verification
 
-On 2026-08-20, the focused temporary-home suite exercised canonicalization, relative Claude and Codex links, verified whole-root link conversion, duplicate removal, conflict refusal, `.system` preservation, default dry-run behavior, idempotence, unsafe-entry refusal, and registered-remote command construction.
+On 2026-08-20, the focused temporary-home suite exercised canonicalization, relative Claude and Codex links, verified whole-root link conversion, duplicate removal, conflict refusal, `.system` preservation, default dry-run behavior, idempotence, unsafe-entry refusal, colliding and nested managed-root refusal, and registered-remote command construction.
 
 Command:
 
@@ -24,10 +24,11 @@ ok - Codex vendor-managed .system is preserved
 ok - broken links and unexpected entries refuse conservatively
 ok - verified whole-root canonical links converge without touching their target
 ok - isolated Codex per-skill link resolves and exposes SKILL.md
+ok - colliding or nested managed roots refuse before any mutation
 ok - remote invocation binds the registered host and forwards explicit apply
 ```
 
 The Codex probe creates one isolated skill under a temporary `CODEX_HOME`, verifies that its relative link resolves to the canonical tree, and reads `SKILL.md` through that link.
 No live Codex process was started because doing so could create account configuration or session state in the captain's environment.
 Codex discovery through a live authenticated process therefore remains unverified.
-The operator command remains conservative: it defaults to a complete read-only plan, requires explicit `--apply`, refuses links it cannot prove target an existing canonical skill, and never inspects or changes `.system`.
+The operator command remains conservative: it defaults to a complete read-only plan, requires explicit `--apply`, refuses links it cannot prove target an existing canonical skill, refuses before any mutation when two managed roots resolve to the same or a nested path, and never inspects or changes `.system`.
