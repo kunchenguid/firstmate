@@ -400,6 +400,53 @@ assert_not_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
 unset FM_PENDING_REPLY_GRACE_SECS
 pass "a reply that arrives after escalation resolves it and clears the open decision"
 
+rm -f -- "$PARENT/state/remote-replies/ios.caught-up"
+remote_env "$ADAPTER" source ios > "$TMP_ROOT/preempted-source.out" 2>&1 &
+PREEMPTED_SOURCE=$!
+running_poll=''
+for _ in $(seq 1 100); do
+  for job in "$TMP_ROOT"/remote-jobs/jobs/job-*; do
+    [ -d "$job" ] || continue
+    if [ "$(fm_remote_job_read_state "$job" 2>/dev/null || true)" = running ]; then
+      running_poll=$job
+      break 2
+    fi
+  done
+  sleep 0.05
+done
+[ -n "$running_poll" ] || fail "the reply poll did not begin running before preemption"
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-file.sh get data/reply/report.md 262144 >/dev/null
+set +e
+wait "$PREEMPTED_SOURCE"
+preempted_rc=$?
+set -e
+[ "$preempted_rc" -eq "$FM_REMOTE_JOB_PREEMPTED_EXIT" ] \
+  || fail "the reply poll did not expose remote-job preemption: $preempted_rc"
+assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
+  "a preempted reply poll published a caught-up watermark"
+pass "a preempted reply poll cannot publish channel freshness"
+
+# A quiet window is the one moment this channel can prove it is NOT behind, and
+# the parent's pending-reply guard needs that proof: a remote report that exists
+# but has not been mirrored yet must never be mistaken for a report the mate
+# never wrote. The window opened with the log matching the committed cursor, so
+# the published watermark is the window's start.
+watermark_before=$(date +%s)
+set +e
+FM_REMOTE_REPLY_WAIT_SECONDS=1 remote_env "$ADAPTER" source ios >/dev/null 2>&1
+quiet_rc=$?
+set -e
+[ "$quiet_rc" -eq 75 ] || fail "a quiet reply window exited with an unexpected status: $quiet_rc"
+watermark_after=$(date +%s)
+caught_up=$(FM_STATE_OVERRIDE="$PARENT/state" bash -c '
+  . "$1/bin/fm-pending-reply-lib.sh"
+  fm_pending_reply_remote_channel_epoch "$2/state" ios
+' _ "$ROOT" "$PARENT")
+[ -n "$caught_up" ] || fail "a quiet reply window published no caught-up watermark"
+[ "$caught_up" -ge "$watermark_before" ] && [ "$caught_up" -le "$watermark_after" ] \
+  || fail "the caught-up watermark ($caught_up) is outside the quiet window"
+pass "a quiet reply window publishes the caught-up watermark the reply guard reads"
+
 # The observed already-handled replay class: a lost cursor (an update or
 # convergence retire) makes the next armed source recapture the WHOLE remote
 # log from offset 0. Every line is already mirrored, so the at-most-once
@@ -467,6 +514,8 @@ remote_env "$ADAPTER" handle ios 12 "$RESULT_TWELVE" >/dev/null 2>&1 || [ "$?" -
   || fail "pending continuity result could not be acknowledged after retirement refusal"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
+assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
+  "adapter retirement left a caught-up watermark a later route could inherit"
 pass "remote reply retirement quiesces and refuses unhandled captured results"
 
 echo "ALL TESTS PASSED"

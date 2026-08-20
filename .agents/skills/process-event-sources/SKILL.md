@@ -25,7 +25,7 @@ Firstmate registers a source, keeps working, and is woken when that process comp
 ## Arming a source
 
 Use the adapter, not the generic runner, for a real source.
-For a Lavish review artifact:
+For a Lavish review artifact firstmate owns (a live investigating scout should host its own loop):
 
 ```sh
 bin/fm-procevent-lavish.sh arm <artifact.html>
