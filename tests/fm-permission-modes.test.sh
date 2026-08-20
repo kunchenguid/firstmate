@@ -94,10 +94,10 @@ check(policy.classifyToolMutation("custom_thing") === "neutral", "custom tool no
 check(policy.classifyToolMutation("fm_watch_arm_pi") === "neutral", "watcher tool not neutral");
 
 // isReadOnlyShellCommand: genuinely read-only, clearly mutating, chained, and unknown.
-for (const ok of ["ls -la", "git status", "git log --oneline", "cat README.md", "rg TODO .", "grep -r foo .", "find . -name '*.ts'", "echo hello", "node --version", "jq '.x' f.json", "ps aux"]) {
+for (const ok of ["ls -la", "git status", "git log --oneline", "cat README.md", "head -20 README.md", "tail -20 README.md", "wc -l README.md", "rg TODO .", "grep -r foo .", "find . -name '*.ts'", "echo hello", "node --version", "jq '.x' f.json", "ps aux"]) {
   check(policy.isReadOnlyShellCommand(ok), `read-only command blocked: ${ok}`);
 }
-for (const bad of ["rm file", "rm -rf /", "git push", "git commit -m x", "echo hi; rm x", "cat f > /etc/passwd", "mkdir d", "chmod 777 .", "sudo ls", "npm install pkg", "vim file", "echo hi > f", "git checkout -b branch", "find . -delete", "find . -exec touch {} ;", "git branch new", "git remote add origin x", "ls; python -c \"open('x','w').write('x')\"", "git status && touch x", "sed -n -i file", "sort input -o output", "npm audit --fix"]) {
+for (const bad of ["rm file", "rm -rf /", "git push", "git commit -m x", "echo hi; rm x", "cat f > /etc/passwd", "mkdir d", "chmod 777 .", "sudo ls", "npm install pkg", "vim file", "echo hi > f", "git checkout -b branch", "find . -delete", "find . -exec touch {} +", "find . -execdir touch {} +", "fd -x ./mutator", "rg --pre ./mutator pattern .", "rg --hostname-bin ./mutator pattern .", "git branch new", "git remote add origin x", "git log --output=out", "git diff --ext-diff", "ls; python -c \"open('x','w').write('x')\"", "git status && touch x", "sed -n 'w out' input", "sed -n 'W out' input", "sed -n -i file", "sort input -o output", "sort input -ooutput", "date -s @0", "date -s@0", "awk 'BEGIN { system(\"touch x\") }'", "npm audit --fix"]) {
   check(!policy.isReadOnlyShellCommand(bad), `mutating command allowed: ${bad}`);
 }
 check(!policy.isReadOnlyShellCommand("totallyUnknownCmd --flag"), "unknown command allowed (must default to non-read-only)");
@@ -225,6 +225,11 @@ await expectBlock("bash", { command: "git push" }, "git-push");
 await expectBlock("bash", { command: "echo hi; rm x" }, "chained-rm");
 await expectBlock("bash", { command: "cat f > /etc/passwd" }, "redirect");
 await expectBlock("bash", { command: "npm install pkg" }, "npm-install");
+await expectBlock("bash", { command: "sed -n 'w out' input" }, "sed-write");
+await expectBlock("bash", { command: "fd -x ./mutator" }, "fd-exec");
+await expectBlock("bash", { command: "sort input -ooutput" }, "sort-output");
+await expectBlock("bash", { command: "date -s@0" }, "date-set");
+await expectBlock("bash", { command: "awk 'BEGIN { system(\"touch x\") }'" }, "awk-system");
 JS
 )
   status=$?

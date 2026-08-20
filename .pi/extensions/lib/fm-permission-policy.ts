@@ -132,24 +132,159 @@ export const DESTRUCTIVE_SHELL_PATTERNS: readonly RegExp[] = [
 
 const UNSAFE_SHELL_SYNTAX = /[\n\r;&|`<>]|\$\(|\$\{|\\\n/;
 
-/**
- * Patterns that mark a bash command as genuinely read-only. Anchored at the
- * start so a mutation chained after a read-only leader is still caught by the
- * destructive patterns above. A command is read-only only when it matches one
- * of these AND no destructive pattern matches.
- */
-export const READ_ONLY_SHELL_PATTERNS: readonly RegExp[] = [
-  /^\s*(cat|head|tail|grep|egrep|fgrep|rg|find|fd|ls|pwd|echo|printf|wc|sort|uniq|diff|comm|cmp|file|stat|du|df|tree|which|whereis|type|printenv|uname|whoami|id|date|cal|uptime|ps|free|vmstat|iostat|jq|realpath|readlink|basename|dirname|seq)(?:\s+[\s\S]*)?\s*$/,
-  /^\s*command\s+-v(?:\s+[\s\S]*)?\s*$/,
-  /^\s*git\s+(status|log|diff|show|blame|describe|rev-parse|shortlog|ls-files|ls-remote)(?:\s+[\s\S]*)?\s*$/i,
-  /^\s*git\s+branch(?:\s+(?:--list|--show-current|-a|-r|-v|-vv|--contains(?:=\S+)?|--no-contains(?:=\S+)?|--merged(?:=\S+)?|--no-merged(?:=\S+)?|--sort=\S+|--format=\S+|--color(?:=\S+)?|--no-color))*\s*$/i,
-  /^\s*git\s+remote(?:\s+(?:-v|show(?:\s+\S+)?|get-url(?:\s+--all)?\s+\S+))?\s*$/i,
-  /^\s*git\s+config\s+--get(?:-all|-regexp)?\s+\S+(?:\s+\S+)?\s*$/i,
-  /^\s*git\s+symbolic-ref(?:\s+(?:--quiet|-q|--short))*\s+\S+\s*$/i,
-  /^\s*(npm\s+(list|ls|view|info|search|outdated|audit|ping)|yarn\s+(list|info|why|audit)|pnpm\s+(list|why|audit))(?:\s+[\s\S]*)?\s*$/i,
-  /^\s*(node\s+(--version|-v)|python3?\s+(--version|-V)|rustc\s+--version|cargo\s+--version|go\s+version|git\s+--version|bash\s+--version|zsh\s+--version|yes\s+--help)\s*$/i,
-  /^\s*sed\s+-n(?:\s+[\s\S]*)?\s*$/,
-];
+const READ_ONLY_COMMANDS = new Set([
+  "basename",
+  "cal",
+  "cat",
+  "cmp",
+  "comm",
+  "df",
+  "dirname",
+  "du",
+  "echo",
+  "egrep",
+  "fgrep",
+  "free",
+  "grep",
+  "head",
+  "id",
+  "iostat",
+  "jq",
+  "ls",
+  "printenv",
+  "ps",
+  "pwd",
+  "readlink",
+  "realpath",
+  "seq",
+  "stat",
+  "tail",
+  "type",
+  "uname",
+  "uptime",
+  "vmstat",
+  "wc",
+  "whereis",
+  "which",
+  "whoami",
+]);
+
+function parseSimpleShellWords(command: string): string[] | undefined {
+  if (UNSAFE_SHELL_SYNTAX.test(command) || command.includes("$")) return undefined;
+
+  const words: string[] = [];
+  let word = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  let started = false;
+
+  for (const character of command) {
+    if (escaped) {
+      word += character;
+      escaped = false;
+      started = true;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      started = true;
+      continue;
+    }
+    if (quote !== undefined) {
+      if (character === quote) quote = undefined;
+      else word += character;
+      started = true;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (started) {
+        words.push(word);
+        word = "";
+        started = false;
+      }
+      continue;
+    }
+    word += character;
+    started = true;
+  }
+
+  if (escaped || quote !== undefined) return undefined;
+  if (started) words.push(word);
+  return words;
+}
+
+function hasOption(args: readonly string[], ...options: readonly string[]): boolean {
+  return args.some((arg) => options.some((option) => arg === option || arg.startsWith(`${option}=`)));
+}
+
+function isReadOnlyFind(args: readonly string[]): boolean {
+  return !hasOption(
+    args,
+    "-delete",
+    "-exec",
+    "-execdir",
+    "-fls",
+    "-fprint",
+    "-fprint0",
+    "-fprintf",
+    "-ok",
+    "-okdir",
+  );
+}
+
+function isReadOnlyRipgrep(args: readonly string[]): boolean {
+  return !hasOption(args, "--hostname-bin", "--pre");
+}
+
+function isReadOnlyGit(args: readonly string[]): boolean {
+  const [subcommand, ...rest] = args;
+  if (subcommand === "--version") return rest.length === 0;
+  if (["describe", "ls-files", "rev-parse", "status"].includes(subcommand ?? "")) return true;
+  if (["blame", "diff", "log", "shortlog", "show"].includes(subcommand ?? "")) {
+    return !hasOption(rest, "--ext-diff", "--output", "--textconv");
+  }
+  if (subcommand === "branch") {
+    return rest.every((arg) =>
+      /^(--list|--show-current|-a|-r|-v|-vv|--contains(?:=\S+)?|--no-contains(?:=\S+)?|--merged(?:=\S+)?|--no-merged(?:=\S+)?|--sort=\S+|--format=\S+|--color(?:=\S+)?|--no-color)$/.test(
+        arg,
+      ),
+    );
+  }
+  if (subcommand === "remote") {
+    return (
+      rest.length === 0 ||
+      (rest.length === 1 && rest[0] === "-v") ||
+      (rest[0] === "show" && rest.length <= 2) ||
+      (rest[0] === "get-url" && rest.length >= 2 && rest.length <= 3 && rest[1] === "--all") ||
+      (rest[0] === "get-url" && rest.length === 2)
+    );
+  }
+  if (subcommand === "config") {
+    return rest.length >= 2 && rest.length <= 3 && /^--get(?:-all|-regexp)?$/.test(rest[0] ?? "");
+  }
+  if (subcommand === "symbolic-ref") {
+    const references = rest.filter((arg) => !["--quiet", "-q", "--short"].includes(arg));
+    return references.length === 1;
+  }
+  return false;
+}
+
+function hasExactVersionArgs(command: string, args: readonly string[]): boolean {
+  if (["bash", "cargo", "rustc", "zsh"].includes(command)) {
+    return args.length === 1 && args[0] === "--version";
+  }
+  if (command === "go") return args.length === 1 && args[0] === "version";
+  if (command === "node") return args.length === 1 && ["--version", "-v"].includes(args[0] ?? "");
+  if (/^python3?$/.test(command)) {
+    return args.length === 1 && ["--version", "-V"].includes(args[0] ?? "");
+  }
+  return false;
+}
 
 /**
  * Whether a bash command is genuinely read-only. Advisory heuristic, not a
@@ -162,10 +297,17 @@ export function isReadOnlyShellCommand(command: string | undefined): boolean {
   if (typeof command !== "string" || command.trim() === "") {
     return false;
   }
-  if (UNSAFE_SHELL_SYNTAX.test(command)) return false;
   const isDestructive = DESTRUCTIVE_SHELL_PATTERNS.some((p) => p.test(command));
   if (isDestructive) return false;
-  return READ_ONLY_SHELL_PATTERNS.some((p) => p.test(command));
+  const words = parseSimpleShellWords(command);
+  if (words === undefined || words.length === 0) return false;
+  const [executable, ...args] = words;
+  if (READ_ONLY_COMMANDS.has(executable ?? "")) return true;
+  if (executable === "command") return args.length >= 2 && args[0] === "-v";
+  if (executable === "find") return isReadOnlyFind(args);
+  if (executable === "rg") return isReadOnlyRipgrep(args);
+  if (executable === "git") return isReadOnlyGit(args);
+  return hasExactVersionArgs(executable ?? "", args);
 }
 
 /**
