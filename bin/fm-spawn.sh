@@ -1876,22 +1876,38 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
-  if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
+  local worktree=$1 default upstream tracked_remote target expected actual status
+  # Resolve the default branch name. Try the existing fallback chain first
+  # (origin/HEAD, then local main, then master). If origin/HEAD is not set,
+  # try auto-detecting it so non-standard names (e.g. trunk) are found.
   default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+    # Fall back to auto-detecting via origin (any available remote).
+    # This only resolves the branch NAME; we do NOT use origin as the fetch
+    # target - that comes from the tracking configuration below.
+    git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1 || true
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine the default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
   }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+  # Derive the tracked remote from the default branch's upstream configuration.
+  # In a fork fleet the default branch tracks fork/main, not origin/main; hardcoding
+  # origin would reset the worktree to the wrong remote's tip and produce a diverged
+  # base that no distance check can distinguish from a merely stale one.
+  upstream=$(git -C "$worktree" rev-parse --abbrev-ref "${default}@{upstream}" 2>/dev/null) || true
+  if [ -n "$upstream" ]; then
+    tracked_remote="${upstream%%/*}"
+  fi
+  # When there is no upstream tracking or the remote cannot be extracted, fall
+  # back to origin. Single-remote repos and legacy pools without tracking work
+  # unchanged; the fork-fleet fix only activates when tracking IS configured.
+  if [ -z "${tracked_remote:-}" ]; then
+    tracked_remote=origin
+    upstream="origin/$default"
+  fi
+  target="$upstream"
+  if ! git -C "$worktree" fetch --quiet "$tracked_remote"; then
+    echo "error: could not fetch '$tracked_remote' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
@@ -1913,6 +1929,12 @@ freshen_spawn_worktree_base() {  # <worktree>
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+    return 1
+  fi
+  # Wrong-remote backstop: a positive ancestry assertion that refuses on divergence.
+  # The assertion sits AFTER the refresh, so it is a post-condition and cannot false-positive.
+  if ! git -C "$worktree" merge-base --is-ancestor "$target" HEAD 2>/dev/null; then
+    echo "error: pooled worktree '$worktree' has HEAD diverged from tracked '$target'; base is on the wrong remote - refusing to launch" >&2
     return 1
   fi
 }
