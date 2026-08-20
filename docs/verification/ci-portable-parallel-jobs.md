@@ -5,6 +5,7 @@ Audience: maintainer verification.
 This record supports the bounded in-lane parallelism added to Water 7 CI for `portable-parallel-1` only.
 `portable-parallel-2` remains serial because `N=2` failed the acceptance oracle on commit `f2fc52e` and again on follow-up reruns.
 Task chronology and delivery evidence beyond the measured runs stay in the PR.
+The Water 7 timing-summary regression behavior is covered by `tests/fm-ci-water7.test.sh`.
 
 ## Acceptance oracle
 

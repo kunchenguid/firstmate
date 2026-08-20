@@ -25,7 +25,10 @@
 #   fm-test-run.sh --aggregate-json <out.json> <lane.json> [more lane.json...]
 #
 # Options:
-#   --json <path>   write a deterministic timing artifact after the run
+#   --json <path>   write a deterministic timing artifact after the run. The
+#                   artifact is written after the FM_TEST_SUMMARY verdict and
+#                   an unwritable artifact is reported without changing the
+#                   exit status.
 #   --list          print selected script paths (one per line) and exit 0
 #   --base <ref>    with --changed, compare against this ref (default: origin/main)
 #   --exclude-family <name>
@@ -747,7 +750,13 @@ skipped = 0
 total = 0
 wall_ms = 0
 for path in inputs:
-    doc = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(
+            f"fm-test-run: aggregate input is not valid timing JSON: {path}: {exc}\n"
+        )
+        raise SystemExit(2)
     summary = doc.get("summary") or {}
     lane = {
         "path": str(path),
@@ -1247,6 +1256,24 @@ with open(out, "w", encoding="utf-8") as fh:
 PY
 }
 
+# The FM_TEST_SUMMARY trailer is the run's verdict and the timing artifact is
+# written after it, so an unwritable artifact is reported and contained rather
+# than reclassifying a finished run. The subshell keeps a die() inside the
+# writer from taking the run with it, and disables set -e for its own body, so
+# every step here reports its own failure.
+emit_timing_artifact() {
+  local out=$1
+  shift
+  if (
+    mkdir -p "$(dirname "$out")" || exit 1
+    write_json_artifact "$out" "$@"
+  ); then
+    log "wrote timing artifact: $out"
+  else
+    log "could not write timing artifact: $out"
+  fi
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --all)
@@ -1480,8 +1507,8 @@ if [ "${#SCRIPTS[@]}" -eq 0 ]; then
     : >"$empty_rec"
     : >"$empty_fam"
     started=$(now_iso)
-    mkdir -p "$(dirname "$JSON_PATH")"
-    write_json_artifact "$JSON_PATH" "$started" "$started" "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$empty_fam"
+    emit_timing_artifact "$JSON_PATH" "$started" "$started" "empty" 0 0 0 0 \
+      "$SELECTION_DESC" "$empty_rec" "$empty_fam"
     rm -f "$empty_rec" "$empty_fam"
   fi
   exit 0
@@ -1759,18 +1786,16 @@ if [ -s "$RECORDS" ]; then
 fi
 
 if [ -n "$JSON_PATH" ]; then
-  mkdir -p "$(dirname "$JSON_PATH")"
   # Families file may be unsorted; write_json reads as-is (deterministic sort in python).
   if [ -s "$FAMILIES_TSV" ]; then
-    sort -t$'\t' -k1,1 "$FAMILIES_TSV" -o "$FAMILIES_TSV"
+    sort -t$'\t' -k1,1 "$FAMILIES_TSV" -o "$FAMILIES_TSV" || true
   else
-    : >"$FAMILIES_TSV"
+    : >"$FAMILIES_TSV" || true
   fi
-  write_json_artifact "$JSON_PATH" \
+  emit_timing_artifact "$JSON_PATH" \
     "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
     "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION" \
     "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV"
-  log "wrote timing artifact: $JSON_PATH"
 fi
 
 exit "$AGG_RC"

@@ -6,7 +6,16 @@
 # docs/fm-test-portable-shards.md and docs/verification/ci-portable-parallel-jobs.md.
 #
 # When FM_CI_FAST_LANE_BASE is set by the trusted pull-request workflow, run the
-# conservative diff-scoped test selection before the complete merge gate.
+# conservative diff-scoped test selection before the complete serial merge gate.
+#
+# When GITHUB_STEP_SUMMARY is set, each lane additionally emits its fm-test-run.sh
+# timing JSON into a temporary directory under RUNNER_TEMP that an EXIT trap
+# discards, and a compact report - the four lane totals, the ten slowest tests,
+# tool-bootstrap time, and GITHUB_RUN_ID (literal 'unavailable' when GitHub run
+# metadata is absent) - is appended to that file. Without GITHUB_STEP_SUMMARY the
+# policy runs ordinary local execution and emits no timing artifacts.
+# docs/fm-test-portable-shards.md owns the non-blocking, success-only timing
+# contract this path implements.
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,10 +25,29 @@ cd "$ROOT" || exit 1
 . "$ROOT/bin/fm-backend.sh"
 
 FM_CI_HERDR_SESSION=fm-ci-water7
+FM_CI_SUMMARY_DIR=
+FM_CI_SUMMARY_ENABLED=0
+FM_CI_BOOTSTRAP_MS=0
+
+now_ms() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import time; print(int(time.time() * 1000))'
+  else
+    # Second precision only when python3 is unavailable.
+    echo $(($(date +%s) * 1000))
+  fi
+}
 
 die() {
   printf 'fm-ci: %s\n' "$*" >&2
   exit 1
+}
+
+# The summary directory is optional scratch, so its removal can neither fail the
+# policy verdict nor depend on reaching the end of the script.
+discard_summary_dir() {
+  [ -n "$FM_CI_SUMMARY_DIR" ] || return 0
+  rm -rf "$FM_CI_SUMMARY_DIR" || true
 }
 
 require_command() {
@@ -166,15 +194,87 @@ run_pr_fast_lane() {
   bin/fm-test-run.sh --changed --base "$base" --fail-on-gate-skip 'herdr not found'
 }
 
+run_lane() {
+  local name=$1
+  shift
+  if [ "$FM_CI_SUMMARY_ENABLED" -eq 1 ]; then
+    bin/fm-test-run.sh "$@" --json "$FM_CI_SUMMARY_DIR/$name.json"
+  else
+    bin/fm-test-run.sh "$@"
+  fi
+}
+
+write_step_summary() {
+  [ "$FM_CI_SUMMARY_ENABLED" -eq 1 ] || return 0
+  local aggregate="$FM_CI_SUMMARY_DIR/aggregate.json"
+  bin/fm-test-run.sh --aggregate-json "$aggregate" \
+    "$FM_CI_SUMMARY_DIR/portable-parallel-1.json" \
+    "$FM_CI_SUMMARY_DIR/portable-parallel-2.json" \
+    "$FM_CI_SUMMARY_DIR/portable-serial.json" \
+    "$FM_CI_SUMMARY_DIR/real-herdr-gated.json" >/dev/null || return 1
+  python3 - "$GITHUB_STEP_SUMMARY" "$FM_CI_BOOTSTRAP_MS" "${GITHUB_RUN_ID:-unavailable}" "$aggregate" <<'PY'
+import json
+import sys
+
+out, bootstrap_ms, run_id, aggregate_path = sys.argv[1:]
+
+
+def step_aside(message):
+    sys.stderr.write(f"fm-ci: {message}\n")
+    raise SystemExit(1)
+
+
+try:
+    with open(aggregate_path, encoding="utf-8") as fh:
+        aggregate = json.load(fh)
+except (OSError, ValueError) as exc:
+    step_aside(f"unusable aggregate timing JSON {aggregate_path}: {exc}")
+lanes = []
+for lane in aggregate.get("lanes") or []:
+    selection = lane.get("selection", "")
+    name = selection.split("=", 1)[-1].split(";", 1)[0]
+    lanes.append((name, int((lane.get("summary") or {}).get("duration_ms") or 0)))
+try:
+    with open(out, "a", encoding="utf-8") as fh:
+        fh.write("## Water 7 CI timing\n\n")
+        fh.write("| Lane | Total |\n| --- | ---: |\n")
+        for name, duration in lanes:
+            fh.write(f"| {name} | {duration} ms |\n")
+        fh.write("\n")
+        fh.write(f"Tool bootstrap: {int(bootstrap_ms)} ms\n")
+        fh.write(f"GitHub run id: {run_id}\n\n")
+        fh.write("| Rank | Test | Timing |\n| ---: | --- | ---: |\n")
+        for rank, row in enumerate((aggregate.get("slowest") or [])[:10], 1):
+            fh.write(f"| {rank} | {row.get('path', 'unknown')} | {int(row.get('duration_ms') or 0)} ms |\n")
+except OSError as exc:
+    step_aside(f"could not write the GitHub step summary {out}: {exc}")
+PY
+}
+
 require_water7_host
 require_git_identity
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  if FM_CI_SUMMARY_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/fm-ci-summary.XXXXXX"); then
+    trap discard_summary_dir EXIT
+    FM_CI_SUMMARY_ENABLED=1
+    bootstrap_started=$(now_ms)
+  else
+    printf 'fm-ci: could not prepare optional GitHub step summary\n' >&2
+  fi
+fi
 ensure_tools
+if [ "$FM_CI_SUMMARY_ENABLED" -eq 1 ]; then
+  FM_CI_BOOTSTRAP_MS=$(( $(now_ms) - bootstrap_started ))
+fi
 require_macos_properties
 run_invariants
 bin/fm-lint.sh
 bin/fm-test-run.sh --check-coverage
 run_pr_fast_lane
-bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1
-bin/fm-test-run.sh --lane portable-parallel-2
-bin/fm-test-run.sh --lane portable-serial
-bin/fm-test-run.sh --family real-herdr-gated --fail-on-gate-skip 'herdr not found'
+run_lane portable-parallel-1 --jobs 2 --lane portable-parallel-1
+run_lane portable-parallel-2 --lane portable-parallel-2
+run_lane portable-serial --lane portable-serial
+run_lane real-herdr-gated --family real-herdr-gated --fail-on-gate-skip 'herdr not found'
+if ! write_step_summary; then
+  printf 'fm-ci: could not publish optional GitHub step summary\n' >&2
+fi

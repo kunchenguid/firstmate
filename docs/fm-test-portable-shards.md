@@ -72,10 +72,13 @@ It separately verifies that the portable serial CI shards are non-empty, disjoin
 
 ## Timing artifacts
 
-Portable shards, each portable serial shard, and the Herdr lane upload runner-generated timing JSON.
-CI stops there: merging those lanes is not a landing gate, so it no longer gets its own billed runner.
-Download the `fm-test-timing-*` artifacts and run `bin/fm-test-run.sh --aggregate-json out.json fm-test-timing-*.json` for critical-path review.
-`.github/workflows/ci.yml` owns the exact artifact names.
+`bin/fm-test-run.sh --json <path>` writes one lane's runner-generated timing JSON, and `bin/fm-test-run.sh --aggregate-json out.json <lane>.json ...` merges lanes for critical-path review.
+Water 7 uses that same flag for job-summary observability rather than uploaded artifacts: when `GITHUB_STEP_SUMMARY` is set, `bin/fm-ci.sh` collects one timing JSON per lane in a temporary directory under `RUNNER_TEMP` and appends a compact lane report to the job summary.
+`bin/fm-test-run.sh --aggregate-json` remains the single owner of cross-lane merging and slowest-test ranking, while `bin/fm-ci.sh` only renders those aggregate fields for the job summary.
+Both collection and publication are non-blocking: `bin/fm-test-run.sh` reports an unwritable timing artifact without changing the suite exit status it already decided, and `bin/fm-ci.sh` reports a publish failure without changing the policy verdict.
+Publication is success-only: a failing lane still fails the policy at that lane, so a job summary carries a timing report only when every lane passed.
+CI stops there: merging those lanes is not a landing gate, and no timing JSON outlives the job.
+`bin/fm-ci.sh` owns the exact summary contents and GitHub presentation only.
 
 ## Local entry points
 

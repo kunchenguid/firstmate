@@ -147,6 +147,85 @@ printf 'test-run %s\n' "$*" >> "$FM_CI_CALLS"
 printf 'SHELL=%s|HERDR_SESSION=%s|FM_HERDR_LAB_PROTECTED_SESSION=%s\n' \
   "${SHELL:-}" "${HERDR_SESSION:-}" "${FM_HERDR_LAB_PROTECTED_SESSION:-}" >> "$FM_CI_SUITE_ENV"
 printf 'FM_CHROME_BIN=%s\n' "${FM_CHROME_BIN:-}" >> "$FM_CI_SUITE_ENV"
+json=
+aggregate=
+aggregate_inputs=()
+selection=
+gate_skip=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --json) json=$2; shift 2; continue ;;
+    --aggregate-json) aggregate=$2; shift 2; continue ;;
+    --lane) selection="lane=$2"; shift 2; continue ;;
+    --family) selection="family=$2"; shift 2; continue ;;
+    --changed) selection=changed; shift; continue ;;
+    --fail-on-gate-skip) gate_skip=$2; shift 2; continue ;;
+  esac
+  [ -n "$aggregate" ] && aggregate_inputs+=("$1")
+  shift
+done
+[ -z "$gate_skip" ] || selection="$selection;fail-on-gate-skip=$gate_skip"
+if [ -n "$aggregate" ]; then
+  # The real owner refuses an unusable input with one concise line and a
+  # non-zero status, so the fixture must too: a fake that exits 0 after a
+  # failed merge would hide the boundary bin/fm-ci.sh relies on.
+  for input in "${aggregate_inputs[@]}"; do
+    [ -f "$input" ] || {
+      printf 'fm-test-run: aggregate input not found: %s\n' "$input" >&2
+      exit 2
+    }
+  done
+  python3 - "$aggregate" "${aggregate_inputs[@]}" <<'PY'
+import json, sys
+out, *inputs = sys.argv[1:]
+lanes = []
+slowest = []
+for path in inputs:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"fm-test-run: aggregate input is not valid timing JSON: {path}: {exc}\n")
+        raise SystemExit(2)
+    lanes.append({"selection": doc["selection"], "summary": doc["summary"]})
+    slowest.extend(doc.get("scripts", []))
+slowest.sort(key=lambda row: (-row["duration_ms"], row["path"]))
+with open(out, "w", encoding="utf-8") as fh:
+    json.dump({"lanes": lanes, "slowest": slowest[:15]}, fh)
+PY
+  exit $?
+fi
+# Keyed off the selection this run actually received, never off the artifact
+# name, so a lane label that disagrees with its selection shows up as a wrong
+# total in the published report.
+case "$selection" in
+  lane=portable-parallel-1) duration=101; start=1 ;;
+  lane=portable-parallel-2) duration=202; start=4 ;;
+  lane=portable-serial) duration=303; start=7 ;;
+  'family=real-herdr-gated;fail-on-gate-skip=herdr not found') duration=404; start=10 ;;
+  *) duration=0; start=1 ;;
+esac
+failed=0
+if [ -n "${FM_TEST_LANE_SUITE_FAIL:-}" ] && [ "$FM_TEST_LANE_SUITE_FAIL" = "$selection" ]; then
+  failed=1
+fi
+if [ -n "$json" ]; then
+  # The real runner contains an unwritable artifact and still exits on its own
+  # suite verdict, so the fixture must not fail the lane for one either.
+  if [ -n "${FM_TEST_LANE_ARTIFACT_FAIL:-}" ] && [ "$FM_TEST_LANE_ARTIFACT_FAIL" = "$selection" ]; then
+    printf 'fm-test-run: could not write timing artifact: %s\n' "$json" >&2
+    [ "$failed" -eq 0 ] || exit 1
+    exit 0
+  fi
+  python3 - "$json" "$selection" "$duration" "$start" <<'PY'
+import json, sys
+out, selection, duration, start = sys.argv[1:]
+scripts = [{"path": f"tests/test-{i}.test.sh", "duration_ms": i} for i in range(int(start), int(start) + 3)]
+with open(out, "w", encoding="utf-8") as fh:
+    json.dump({"selection": selection, "summary": {"duration_ms": int(duration)}, "scripts": scripts}, fh)
+PY
+fi
+[ "$failed" -eq 0 ] || exit 1
 SH
   chmod +x "$repo"/bin/*.sh
 
@@ -220,10 +299,20 @@ SH
 
 run_policy_fixture() {
   local repo=$1 fakebin=$2 calls=$3
-  # Scrub the ambient Herdr selection so the fixture proves what the policy
-  # itself hands the suite, not what the developer's shell happened to export.
+  local policy_env=()
+  # Scrub every ambient input the policy itself reads - the Herdr selection,
+  # the workflow's fast-lane base, and the job-summary metadata a real Water 7
+  # step exports - so each test states the environment it is proving, not what
+  # the surrounding shell or CI job happened to export.
+  [ -z "${FM_TEST_STEP_SUMMARY:-}" ] \
+    || policy_env+=("GITHUB_STEP_SUMMARY=$FM_TEST_STEP_SUMMARY")
+  [ -z "${FM_TEST_RUN_ID:-}" ] || policy_env+=("GITHUB_RUN_ID=$FM_TEST_RUN_ID")
+  [ -z "${FM_TEST_FAST_LANE_BASE:-}" ] \
+    || policy_env+=("FM_CI_FAST_LANE_BASE=$FM_TEST_FAST_LANE_BASE")
   env -u HERDR_SESSION -u FM_HERDR_LAB_PROTECTED_SESSION \
     -u FM_CHROME_BIN \
+    -u GITHUB_STEP_SUMMARY -u GITHUB_RUN_ID -u FM_CI_FAST_LANE_BASE \
+    "${policy_env[@]+"${policy_env[@]}"}" \
     PATH="$fakebin:$PATH" \
     FM_CI_CALLS="$calls" \
     FM_CI_SUITE_ENV="$calls.suite-env" \
@@ -269,6 +358,172 @@ EOF
   pass "the command owner runs lint, coverage, portable-parallel-1 with --jobs 2, serial remainder lanes, then real Herdr"
 }
 
+test_policy_publishes_nonblocking_timing_summary() {
+  local tmp repo fakebin calls summary
+  tmp=$(fm_test_tmproot fm-ci-water7-summary)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  summary="$tmp/summary.md"
+  make_policy_fixture "$repo" "$fakebin"
+  FM_TEST_STEP_SUMMARY="$summary" FM_TEST_RUN_ID=9876 run_policy_fixture "$repo" "$fakebin" "$calls" \
+    || fail "Water 7 command policy rejected its valid summary fixture"
+  assert_contains "$(cat "$summary")" '| portable-parallel-1 | 101 ms |' \
+    "summary omitted the first lane timing"
+  assert_contains "$(cat "$summary")" '| real-herdr-gated | 404 ms |' \
+    "summary omitted the Herdr lane timing"
+  [ "$(grep -c '^| [0-9][0-9]* | tests/test-' "$summary")" -eq 10 ] \
+    || fail "summary did not contain exactly ten slowest tests"
+  assert_contains "$(cat "$summary")" 'Tool bootstrap:' "summary omitted tool bootstrap timing"
+  assert_contains "$(cat "$summary")" 'GitHub run id: 9876' "summary omitted the GitHub run id"
+  assert_contains "$(cat "$calls")" 'test-run --aggregate-json' \
+    "summary did not use the existing aggregate timing owner"
+  # The job summary is generated GitHub-Flavored Markdown, so assert its block
+  # structure rather than bare substrings: a table only ends at a blank line, so
+  # a bootstrap or run-id line without one renders as another lane row.
+  python3 - "$summary" <<'PY' || fail "the published summary is not a well-formed GFM timing report"
+import sys
+
+blocks = [
+    block.splitlines()
+    for block in open(sys.argv[1], encoding="utf-8").read().split("\n\n")
+    if block.strip()
+]
+tables = [block for block in blocks if block[0].startswith("|")]
+assert len(tables) == 2, blocks
+
+lanes, slowest = tables
+assert lanes[0].split("|")[1:3] == [" Lane ", " Total "], lanes[0]
+lane_rows = lanes[2:]
+assert [row.split("|")[1].strip() for row in lane_rows] == [
+    "portable-parallel-1",
+    "portable-parallel-2",
+    "portable-serial",
+    "real-herdr-gated",
+], lane_rows
+assert [row.split("|")[2].strip() for row in lane_rows] == [
+    "101 ms",
+    "202 ms",
+    "303 ms",
+    "404 ms",
+], lane_rows
+assert len(slowest[2:]) == 10, slowest
+
+facts = [line for block in blocks if not block[0].startswith("|") for line in block]
+bootstrap = [line for line in facts if line.startswith("Tool bootstrap: ")]
+assert len(bootstrap) == 1, facts
+assert bootstrap[0].split()[2].isdigit() and bootstrap[0].endswith(" ms"), bootstrap
+assert [line for line in facts if line == "GitHub run id: 9876"], facts
+PY
+  pass "Water 7 publishes the compact lane timing summary"
+}
+
+test_policy_publishes_the_summary_without_github_run_metadata() {
+  local tmp repo fakebin calls summary
+  tmp=$(fm_test_tmproot fm-ci-water7-summary-no-run-id)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  summary="$tmp/summary.md"
+  make_policy_fixture "$repo" "$fakebin"
+  # A summary file with no GITHUB_RUN_ID beside it: the report still publishes
+  # and names the missing metadata rather than emitting a blank or partial run.
+  FM_TEST_STEP_SUMMARY="$summary" run_policy_fixture "$repo" "$fakebin" "$calls" \
+    || fail "Water 7 command policy rejected a run without GitHub run metadata"
+  python3 - "$summary" <<'PY' || fail "the report lost its shape when GitHub run metadata was absent"
+import sys
+
+blocks = [
+    block.splitlines()
+    for block in open(sys.argv[1], encoding="utf-8").read().split("\n\n")
+    if block.strip()
+]
+lanes, slowest = [block for block in blocks if block[0].startswith("|")]
+assert [row.split("|")[1].strip() for row in lanes[2:]] == [
+    "portable-parallel-1",
+    "portable-parallel-2",
+    "portable-serial",
+    "real-herdr-gated",
+], lanes
+assert len(slowest[2:]) == 10, slowest
+facts = [line for block in blocks if not block[0].startswith("|") for line in block]
+assert [line for line in facts if line.startswith("Tool bootstrap: ")], facts
+assert [line for line in facts if line.startswith("GitHub run id: ")] == [
+    "GitHub run id: unavailable"
+], facts
+PY
+  pass "the summary names absent GitHub run metadata instead of publishing a blank"
+}
+
+test_policy_summary_failure_does_not_fail_delivery() {
+  local tmp repo fakebin calls summary rc
+  tmp=$(fm_test_tmproot fm-ci-water7-summary-failure)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  summary="$tmp/summary-dir"
+  mkdir "$summary"
+  make_policy_fixture "$repo" "$fakebin"
+  rc=0
+  out=$(FM_TEST_STEP_SUMMARY="$summary" run_policy_fixture "$repo" "$fakebin" "$calls" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "an optional summary write failure wedged the policy"
+  assert_contains "$out" 'fm-ci: could not publish optional GitHub step summary' \
+    "the failing publish path did not report that it stepped aside"
+  assert_contains "$out" "fm-ci: could not write the GitHub step summary $summary" \
+    "the publish failure discarded the evidence naming what could not be written"
+  assert_not_contains "$out" 'Traceback (most recent call last)' \
+    "the publish failure dumped a Python traceback into an otherwise green job log"
+  assert_contains "$(cat "$calls")" 'test-run --family real-herdr-gated' \
+    "the policy did not finish its lanes before the optional summary failed"
+  pass "Water 7 steps aside when optional summary publication fails"
+}
+
+test_policy_delivers_when_a_lane_timing_artifact_cannot_be_written() {
+  local tmp repo fakebin calls summary out rc
+  tmp=$(fm_test_tmproot fm-ci-water7-artifact-failure)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  summary="$tmp/summary.md"
+  make_policy_fixture "$repo" "$fakebin"
+  rc=0
+  out=$(FM_TEST_STEP_SUMMARY="$summary" FM_TEST_RUN_ID=9876 \
+    FM_TEST_LANE_ARTIFACT_FAIL=lane=portable-serial \
+    run_policy_fixture "$repo" "$fakebin" "$calls" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "an optional lane timing artifact failure wedged a green policy: $out"
+  assert_contains "$out" 'could not write timing artifact' \
+    "the lost optional timing artifact was not reported by the lane that lost it"
+  assert_contains "$out" 'fm-ci: could not publish optional GitHub step summary' \
+    "the policy did not report that it stepped aside from an incomplete lane set"
+  assert_not_contains "$out" 'Traceback (most recent call last)' \
+    "an incomplete lane set dumped a Python traceback into an otherwise green job log"
+  assert_contains "$(cat "$calls")" 'test-run --family real-herdr-gated' \
+    "a lost optional timing artifact stopped the remaining lanes"
+  [ ! -s "$summary" ] \
+    || fail "the report was published from an incomplete lane set: $(cat "$summary")"
+  pass "a lane that loses its optional timing artifact still delivers its green verdict"
+}
+
+test_policy_fails_when_a_lane_suite_fails_under_the_summary() {
+  local tmp repo fakebin calls summary out rc
+  tmp=$(fm_test_tmproot fm-ci-water7-lane-failure)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  summary="$tmp/summary.md"
+  make_policy_fixture "$repo" "$fakebin"
+  rc=0
+  out=$(FM_TEST_STEP_SUMMARY="$summary" FM_TEST_RUN_ID=9876 \
+    FM_TEST_LANE_SUITE_FAIL=lane=portable-parallel-2 \
+    run_policy_fixture "$repo" "$fakebin" "$calls" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the optional timing path swallowed a failing lane suite: $out"
+  assert_not_contains "$(cat "$calls")" 'test-run --lane portable-serial' \
+    "the policy continued past a failing lane"
+  [ ! -s "$summary" ] \
+    || fail "a failing lane still published a timing report: $(cat "$summary")"
+  pass "a failing lane suite still fails the policy while the summary is enabled"
+}
+
 test_policy_runs_pr_fast_lane_before_complete_suite() {
   local tmp repo fakebin calls expected
   tmp=$(fm_test_tmproot fm-ci-water7-fast-lane)
@@ -276,7 +531,7 @@ test_policy_runs_pr_fast_lane_before_complete_suite() {
   fakebin="$tmp/fakebin"
   calls="$tmp/calls"
   make_policy_fixture "$repo" "$fakebin"
-  FM_CI_FAST_LANE_BASE=base-sha run_policy_fixture "$repo" "$fakebin" "$calls" \
+  FM_TEST_FAST_LANE_BASE=base-sha run_policy_fixture "$repo" "$fakebin" "$calls" \
     || fail "Water 7 command policy rejected its valid PR fast-lane fixture"
   expected=$(cat <<'EOF'
 lint
@@ -405,6 +660,11 @@ chrome" ] || fail "bounded bootstrap did not use exactly the three tracked insta
 test_workflows_are_static_and_water7_only
 test_policy_runs_every_family_serially
 test_policy_runs_pr_fast_lane_before_complete_suite
+test_policy_publishes_nonblocking_timing_summary
+test_policy_publishes_the_summary_without_github_run_metadata
+test_policy_summary_failure_does_not_fail_delivery
+test_policy_delivers_when_a_lane_timing_artifact_cannot_be_written
+test_policy_fails_when_a_lane_suite_fails_under_the_summary
 test_policy_refuses_semantically_unsafe_systemd_limits
 test_policy_refuses_a_cpu_quota_below_its_own_concurrency
 test_policy_uses_only_bounded_ci_bootstrap

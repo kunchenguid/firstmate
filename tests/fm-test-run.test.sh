@@ -287,6 +287,126 @@ assert "family" in doc["scripts"][0]
   pass "timing markers and JSON artifact are valid"
 }
 
+test_unwritable_timing_artifact_keeps_the_suite_verdict() {
+  local tmp fixture red out err json rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-artifact.XXXXXX")
+  fixture="$tmp/ok.test.sh"
+  red="$tmp/red.test.sh"
+  out="$tmp/out.txt"
+  err="$tmp/err.txt"
+  # A path whose parent is a regular file can never be created or written.
+  : >"$tmp/blocked"
+  json="$tmp/blocked/timing.json"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fixture"
+exit 0
+SH
+  cat >"$red" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - fixture"
+exit 1
+SH
+  chmod +x "$fixture" "$red"
+
+  rc=0
+  "$RUNNER" --json "$json" "$fixture" >"$out" 2>"$err" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || { rm -rf "$tmp"; fail "an unwritable timing artifact reclassified a green run: rc=$rc"; }
+  grep -Eq '^FM_TEST_SUMMARY total=1 failed=0 ' "$out" \
+    || { rm -rf "$tmp"; fail "the green run lost its verdict trailer: $(cat "$out")"; }
+  assert_contains "$(cat "$err")" "could not write timing artifact: $json" \
+    "the contained artifact failure was not reported"
+  [ ! -e "$json" ] || { rm -rf "$tmp"; fail "an artifact appeared at an unwritable path"; }
+
+  rc=0
+  "$RUNNER" --json "$json" "$red" >"$out" 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "a contained artifact failure also swallowed a failing script"; }
+  grep -Eq '^FM_TEST_SUMMARY total=1 failed=1 ' "$out" \
+    || { rm -rf "$tmp"; fail "the red run lost its verdict trailer: $(cat "$out")"; }
+  rm -rf "$tmp"
+  pass "an unwritable timing artifact is reported without changing the suite verdict"
+}
+
+test_lane_selection_grammar_is_the_published_lane_label() {
+  local tmp repo runner proven
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-selection.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  # fm-daemon is neither proven-isolated nor Herdr-gated, so it is the whole
+  # portable serial remainder here; the smoke suite is the whole Herdr family.
+  printf '#!/usr/bin/env bash\necho "ok - serial fixture"\n' >"$repo/tests/fm-daemon.test.sh"
+  printf '#!/usr/bin/env bash\necho "ok - herdr fixture"\n' \
+    >"$repo/tests/fm-backend-herdr-smoke.test.sh"
+  chmod +x "$runner" "$repo/tests/fm-daemon.test.sh" "$repo/tests/fm-backend-herdr-smoke.test.sh"
+  # The proven-isolated members of portable-parallel-1, so the one production
+  # lane that runs with bounded in-lane parallelism can be selected for real.
+  while IFS= read -r proven; do
+    printf '#!/usr/bin/env bash\necho "ok - proven fixture"\n' >"$repo/$proven"
+    chmod +x "$repo/$proven"
+  done < <("$RUNNER" --list --lane portable-parallel-1)
+
+  (cd "$repo" && bin/fm-test-run.sh --lane portable-serial --json "$tmp/lane.json") >/dev/null 2>&1 \
+    || { rm -rf "$tmp"; fail "a lane-selected run over a green fixture must pass"; }
+  (cd "$repo" && bin/fm-test-run.sh --lane portable-serial \
+    --fail-on-gate-skip 'herdr not found' --json "$tmp/lane-suffix.json") >/dev/null 2>&1 \
+    || { rm -rf "$tmp"; fail "a lane-selected run with a gate-skip token must pass"; }
+  (cd "$repo" && bin/fm-test-run.sh --family real-herdr-gated \
+    --fail-on-gate-skip 'herdr not found' --json "$tmp/family.json") >/dev/null 2>&1 \
+    || { rm -rf "$tmp"; fail "a family-selected run with a gate-skip token must pass"; }
+  (cd "$repo" && bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1 \
+    --json "$tmp/jobs.json") >/dev/null 2>&1 \
+    || { rm -rf "$tmp"; fail "a bounded-parallel lane run over green fixtures must pass"; }
+
+  # bin/fm-ci.sh labels each row of the published Water 7 timing table by reading
+  # this emitted selection as <kind>=<name>[;<suffix>...]. The exact strings are
+  # pinned at the emitter, so changing the grammar fails this suite instead of
+  # silently mislabelling a job summary.
+  python3 -c '
+import json, sys
+lane, lane_suffix, family, jobs = (
+    json.load(open(path, encoding="utf-8"))["selection"] for path in sys.argv[1:]
+)
+assert lane == "lane=portable-serial", lane
+assert lane_suffix == "lane=portable-serial;fail-on-gate-skip=herdr not found", lane_suffix
+assert family == "family=real-herdr-gated;fail-on-gate-skip=herdr not found", family
+assert jobs == "lane=portable-parallel-1;jobs=2", jobs
+' "$tmp/lane.json" "$tmp/lane-suffix.json" "$tmp/family.json" "$tmp/jobs.json" \
+    || { rm -rf "$tmp"; fail "the emitted selection no longer carries the lane label fm-ci.sh publishes"; }
+  rm -rf "$tmp"
+  pass "the emitted selection pins the lane label the job summary publishes"
+}
+
+test_aggregate_json_contains_an_unusable_input() {
+  local tmp out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-aggmissing.XXXXXX")
+  printf '%s\n' '{"run_id": "a", "selection": "lane=portable-serial", "summary": {"total": 0, "failed": 0, "skipped_gate": 0, "duration_ms": 0}, "scripts": []}' \
+    >"$tmp/a.json"
+  rc=0
+  out=$("$RUNNER" --aggregate-json "$tmp/out.json" "$tmp/a.json" "$tmp/absent.json" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "aggregating a never-written lane artifact must fail"; }
+  assert_contains "$out" "aggregate input not found: $tmp/absent.json" \
+    "the missing aggregate input was not named"
+  assert_not_contains "$out" 'Traceback (most recent call last)' \
+    "a missing aggregate input raised a Python traceback into the job log"
+  [ ! -e "$tmp/out.json" ] \
+    || { rm -rf "$tmp"; fail "a partial aggregate was written from an incomplete lane set"; }
+
+  printf '%s' '{"run_id": "a", "selection": "lane=portab' >"$tmp/truncated.json"
+  rc=0
+  out=$("$RUNNER" --aggregate-json "$tmp/out.json" "$tmp/truncated.json" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "aggregating a truncated lane artifact must fail"; }
+  assert_contains "$out" "aggregate input is not valid timing JSON: $tmp/truncated.json" \
+    "the unparsable aggregate input was not named"
+  assert_not_contains "$out" 'Traceback (most recent call last)' \
+    "a truncated aggregate input raised a Python traceback into the job log"
+  rm -rf "$tmp"
+  pass "a missing or unparsable aggregate input is reported without a traceback"
+}
+
 test_aggregate_exit_behavior() {
   local tmp pass_f fail_f rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-agg.XXXXXX")
@@ -765,6 +885,17 @@ assert doc["summary"]["total"]==3
 assert doc["summary"]["failed"]==1
 assert doc["summary"]["critical_path_duration_ms"]==2000
 assert len(doc["scripts"])==3
+# Fields bin/fm-ci.sh renders into the Water 7 job summary. They are pinned here,
+# at the owner that emits them, so renaming one fails this suite instead of
+# silently emptying a published report.
+assert [lane["selection"] for lane in doc["lanes"]]==[
+    "lane=portable-parallel-1", "lane=portable-serial"], doc["lanes"]
+assert [lane["summary"]["duration_ms"] for lane in doc["lanes"]]==[1000, 2000], doc["lanes"]
+assert [(row["path"], row["duration_ms"]) for row in doc["slowest"]]==[
+    ("tests/b.test.sh", 1500),
+    ("tests/a.test.sh", 1000),
+    ("tests/c.test.sh", 500),
+], doc["slowest"]
 ' "$tmp/out.json" || { rm -rf "$tmp"; fail "aggregate JSON shape wrong"; }
   rm -rf "$tmp"
   pass "aggregate-json merges lane timing artifacts"
@@ -777,6 +908,9 @@ test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
 test_timing_markers_and_json
+test_unwritable_timing_artifact_keeps_the_suite_verdict
+test_lane_selection_grammar_is_the_published_lane_label
+test_aggregate_json_contains_an_unusable_input
 test_aggregate_exit_behavior
 test_serial_runner_sanitizes_firstmate_overrides
 test_gate_skip_accounting_under_unsupported_inherited_locale
