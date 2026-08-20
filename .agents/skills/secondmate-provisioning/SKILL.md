@@ -55,7 +55,7 @@ If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholde
 Pass `--no-projects` instead of a project list to scaffold a project-less charter for a domain whose subject is the firstmate repo itself, whose home is a firstmate worktree and whose crews take pooled worktrees of the same repo.
 `--no-projects` is mutually exclusive with a project list, and omitting both still fails loudly, so an accidental omission is never mistaken for a deliberate project-less seed.
 Re-seeding a populated home as project-less is refused non-destructively when the home contains project clones or `data/projects.md` entries.
-Retire or clean that home first, and re-scaffold a stale project-bearing charter with `--no-projects` before seeding.
+Retire or clean that home first, then use the scaffold's documented `--replace` path with `--no-projects` to replace a stale project-bearing charter before seeding.
 Keep custom charter text focused on the persistent responsibility, available project clones, and genuinely domain-specific hard rules.
 The scaffolded charter, later copied to `data/charter.md`, owns the standard lifecycle and escalation wording.
 Preserve the generated charter sections unless the domain genuinely needs a hard rule.

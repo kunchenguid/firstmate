@@ -176,7 +176,7 @@ For remote provisioning, including supplied project origins, follow [Remote seco
 Use the deliberate `--no-projects` signal only for a firstmate-repo domain that needs no separate project clones.
 It cannot be combined with a project list, and omitting both still fails loudly.
 A project-less seed requires no existing project clones or `data/projects.md` entries in the home, so it refuses a populated-home conversion without changing that home.
-A preexisting project-bearing charter is also refused until it is re-scaffolded with `--no-projects` or removed.
+A preexisting project-bearing charter is also refused until it is re-scaffolded through the `--replace` path documented by `bin/fm-brief.sh --help`, with `--no-projects` as the new charter's project contract.
 The lease is held under the secondmate id until explicit retirement or seed rollback returns it, so normal restarts do not free or recycle the home.
 Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
 Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
