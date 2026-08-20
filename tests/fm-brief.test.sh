@@ -390,10 +390,11 @@ test_pr_modes_require_recording_the_measured_commit() {
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "## Record the commit your evidence was measured on" "$brief" \
       "$id: PR-based brief lost the evidence-recording contract"
-    # The recorded form is the one the merge guard reads: task id, then the
-    # commit, resolved in the worktree at measurement time.
-    assert_grep "bin/fm-evidence-record.sh $id \"\$(git rev-parse HEAD)\"" "$brief" \
-      "$id: brief must show the exact recording command, resolving the commit in the worktree"
+    # The recorded form is the one the merge guard reads: the home this brief was
+    # scaffolded against, then the task id, then the commit resolved in the
+    # worktree at measurement time.
+    assert_grep "FM_HOME='$home' '$ROOT/bin/fm-evidence-record.sh' '$id' \"\$(git rev-parse HEAD)\"" "$brief" \
+      "$id: brief must show the exact recording command, bound to this home and resolving the commit in the worktree"
     assert_grep "Record it again after EVERY re-measurement" "$brief" \
       "$id: brief must require re-recording, which is what a final-head instruction cannot win"
     assert_grep "The merge refuses when the recorded commit is not the pull request's head" "$brief" \
@@ -419,6 +420,49 @@ test_pr_modes_require_recording_the_measured_commit() {
       "$id: a scaffold that never reaches the PR merge guard must not carry its recording contract"
   done
   pass "fm-brief.sh: PR-based ship briefs require recording the commit their evidence was measured on"
+}
+
+# The scaffolded recording command is the worker's half of the merge guard: the
+# guard refuses until it runs, so an unrunnable command strands the task. Two
+# ways it can be unrunnable, both invisible to a substring assertion: a firstmate
+# root or home whose path holds a space or an apostrophe, and a crew pane that
+# inherits no FM_HOME and would otherwise record into whichever home the
+# recorder resolves for itself. Run the command exactly as the brief prints it,
+# from a worktree, with none of the firstmate variables in the environment.
+test_evidence_record_command_runs_as_printed_from_a_foreign_home() {
+  local home foreign_root id brief cmd repo head
+  home="$TMP_ROOT/firstmate helper's home"
+  foreign_root="$TMP_ROOT/firstmate helper's root"
+  repo="$TMP_ROOT/evidence-command-worktree"
+  id="brief-evidence-foreign-d3"
+  mkdir -p "$home/data" "$home/state" "$foreign_root"
+  ln -s "$ROOT/bin" "$foreign_root/bin"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" \
+    "$ROOT/bin/fm-brief.sh" "$id" foreign --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "foreign-home: brief was not scaffolded"
+
+  # The durable record the command writes into, and a worktree for the commit it
+  # resolves - the two things a real crewmate already has when it measures.
+  fm_write_meta "$home/state/$id.meta" \
+    "window=fm-$id" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fm_git_init_commit "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+
+  cmd=$(grep -F 'fm-evidence-record.sh' "$brief" | head -1)
+  [ -n "$cmd" ] || fail "foreign-home: the brief carries no recording command to run"
+  (
+    cd "$repo" || exit 1
+    unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE
+    bash -c "$cmd"
+  ) >/dev/null 2>"$TMP_ROOT/foreign-home.err" \
+    || fail "foreign-home: the scaffolded recording command did not run as printed: $(cat "$TMP_ROOT/foreign-home.err")"
+
+  assert_grep "evidence_head=$head" "$home/state/$id.meta" \
+    "foreign-home: the recording command did not reach the home the brief was scaffolded against"
+  pass "fm-brief.sh: the scaffolded recording command runs as printed and records into its own home"
 }
 
 test_ship_project_memory_wording() {
@@ -789,6 +833,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_pr_modes_require_recording_the_measured_commit
+test_evidence_record_command_runs_as_printed_from_a_foreign_home
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

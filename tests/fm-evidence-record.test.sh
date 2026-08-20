@@ -9,7 +9,9 @@
 #   (b) re-measuring replaces the record instead of stacking a second one
 #   (c) the note is stored verbatim and read back by the merge guard's reader
 #   (d) a short, uppercase, or non-hex commit is refused before any write
-#   (e) a note carrying a newline is refused rather than silently trimmed
+#   (e) a note carrying a newline, tab, or escape is refused rather than trimmed
+#   (e2) an ordinary non-ASCII note is accepted, stored verbatim, and bounded by
+#        characters rather than by the bytes a UTF-8 sequence occupies
 #   (f) a missing task metadata file is refused
 #   (g) an unsafe task id never constructs a path
 #   (h) fm-pr-check.sh's own metadata rewrite preserves the record
@@ -175,22 +177,65 @@ test_refuses_malformed_commit() {
   pass "fm-evidence-record.sh refuses a commit that is not a full SHA, before writing anything"
 }
 
-test_refuses_multiline_note() {
-  local case_dir rc
+test_refuses_control_character_notes() {
+  local case_dir rc label bad
   case_dir=$(make_case bad-note)
 
+  # A newline splits the record outright; a tab or an escape survives into a
+  # refusal message that is printed to a terminal. All three are control
+  # characters, which is exactly what the refusal now claims it refuses.
+  for label in newline tab escape; do
+    case "$label" in
+      newline) bad=$(printf 'suite pass\nevidence_head=%s' "$SHA_B") ;;
+      tab) bad=$(printf 'suite\tpass') ;;
+      *) bad=$(printf 'suite \033[31mpass') ;;
+    esac
+    set +e
+    run_record "$case_dir" task-e1 "$SHA_A" "$bad" > "$case_dir/out" 2> "$case_dir/err"
+    rc=$?
+    set -e
+
+    expect_code 2 "$rc" "bad-note: a note carrying a $label should be refused"
+    assert_grep 'no control characters' "$case_dir/err" \
+      "bad-note: the $label refusal did not state the note contract"
+    assert_grep 'non-ASCII text such as an em dash is accepted' "$case_dir/err" \
+      "bad-note: the $label refusal did not say what IS accepted, which is how a worker learns the constraint"
+    assert_no_grep 'evidence_head=' "$case_dir/state/task-e1.meta" \
+      "bad-note: a refused $label note still reached the metadata"
+  done
+  pass "fm-evidence-record.sh refuses a note that could split the record or drive the terminal"
+}
+
+# Workers write notes in ordinary prose, and ordinary prose carries an em dash or
+# an accented word. A guard that refuses valid work is worked around rather than
+# fixed, so a non-ASCII note is accepted, stored byte for byte, and read back by
+# the merge guard exactly as written - and the length bound counts characters,
+# not the bytes a UTF-8 sequence happens to occupy.
+test_accepts_non_ascii_note() {
+  local case_dir note got long rc
+  case_dir=$(make_case unicode-note)
+  note='suite 4208 pass — café exploit blocked ✅'
+
+  run_record "$case_dir" task-e1 "$SHA_A" "$note" > /dev/null \
+    || fail "unicode-note: a note carrying ordinary non-ASCII punctuation was refused"
+  got=$(read_back "$case_dir/state/task-e1.meta") \
+    || fail "unicode-note: the merge guard's reader rejected a non-ASCII note it had just written"
+  [ "$got" = "$SHA_A|$note" ] || fail "unicode-note: the guard read '$got'"
+
+  # 200 em dashes are 600 bytes but 200 characters, so a byte bound would refuse
+  # a note the refusal message calls acceptable.
+  long=$(awk 'BEGIN { while (i++ < 200) printf "%s", "\342\200\224" }')
+  run_record "$case_dir" task-e1 "$SHA_B" "$long" > /dev/null \
+    || fail "unicode-note: a 200-character note was refused by a byte-counting bound"
+
   set +e
-  run_record "$case_dir" task-e1 "$SHA_A" "$(printf 'suite pass\nevidence_head=%s' "$SHA_B")" \
-    > "$case_dir/out" 2> "$case_dir/err"
+  run_record "$case_dir" task-e1 "$SHA_B" "${long}—" > "$case_dir/out" 2> "$case_dir/err"
   rc=$?
   set -e
-
-  expect_code 2 "$rc" "bad-note: a multi-line note should be refused"
-  assert_grep 'one printable line' "$case_dir/err" \
-    "bad-note: refusal did not state the note contract"
-  assert_no_grep 'evidence_head=' "$case_dir/state/task-e1.meta" \
-    "bad-note: a refused note still reached the metadata"
-  pass "fm-evidence-record.sh refuses a note that could split the record it is stored in"
+  expect_code 2 "$rc" "unicode-note: a 201-character note should still be refused"
+  assert_grep 'at most 200 characters' "$case_dir/err" \
+    "unicode-note: the length refusal did not state the bound it enforces"
+  pass "fm-evidence-record.sh accepts a non-ASCII note and bounds it by characters, as its refusal says"
 }
 
 test_refuses_missing_and_unsafe_tasks() {
@@ -372,7 +417,8 @@ test_records_and_preserves_other_meta
 test_re_measurement_replaces_the_record
 test_record_reads_back_through_the_guard_helper
 test_refuses_malformed_commit
-test_refuses_multiline_note
+test_refuses_control_character_notes
+test_accepts_non_ascii_note
 test_refuses_missing_and_unsafe_tasks
 test_record_survives_pr_metadata_rewrite
 test_unrecognised_appended_keys_keep_the_armed_poll_valid

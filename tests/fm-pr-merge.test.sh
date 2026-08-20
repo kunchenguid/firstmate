@@ -396,7 +396,7 @@ test_matching_evidence_commit_merges() {
 }
 
 test_stale_evidence_commit_refuses_naming_both() {
-  local case_dir rc
+  local case_dir rc cmd
   case_dir=$(make_case evidence-stale)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" "$EVIDENCE_LIVE_HEAD"
@@ -416,15 +416,34 @@ test_stale_evidence_commit_refuses_naming_both() {
     "evidence-stale: the refusal did not name the live pull request head"
   assert_grep 'full suite 4202 pass' "$case_dir/stderr" \
     "evidence-stale: the refusal did not say what has to be re-measured"
-  assert_grep "fm-evidence-record.sh task-x1 $EVIDENCE_LIVE_HEAD" "$case_dir/stderr" \
+  assert_grep "fm-evidence-record.sh' 'task-x1' $EVIDENCE_LIVE_HEAD" "$case_dir/stderr" \
     "evidence-stale: the refusal did not name the command that records the re-measurement"
+
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "evidence-stale: gh-axi pr merge was invoked despite stale evidence"
   assert_no_grep 'pr=https://github.com/example/repo/pull/119' "$case_dir/state/task-x1.meta" \
     "evidence-stale: a refused merge still recorded PR metadata"
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "evidence-stale: a refused merge still armed a merge poll"
-  pass "fm-pr-merge refuses stale evidence and names both the measured commit and the head"
+
+  # The printed command IS the whole remedy, so it has to run exactly as printed
+  # from a shell carrying none of this merge's environment - a firstmate home
+  # holding a space, or a reader whose FM_HOME names a different home, would
+  # otherwise leave the refusal unclearable. Run it verbatim, then merge again:
+  # the round trip is what proves the refusal names a way out.
+  cmd=$(grep -F 'fm-evidence-record.sh' "$case_dir/stderr" | head -1)
+  [ -n "$cmd" ] || fail "evidence-stale: the refusal printed no recording command"
+  (
+    unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE
+    bash -c "$cmd"
+  ) > /dev/null 2> "$case_dir/record-err" \
+    || fail "evidence-stale: the printed recording command did not run as printed: $(cat "$case_dir/record-err")"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/119 \
+    > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "evidence-stale: the merge stayed refused after the command the refusal printed was run"
+  grep -qxF 'pr merge 119 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "evidence-stale: the merge did not proceed after the re-measurement was recorded"
+  pass "fm-pr-merge refuses stale evidence, names both commits, and prints a remedy that runs as printed"
 }
 
 test_absent_evidence_record_refuses_actionably() {
@@ -443,8 +462,10 @@ test_absent_evidence_record_refuses_actionably() {
   expect_code 1 "$rc" "evidence-absent: fm-pr-merge should refuse when no evidence commit is recorded"
   assert_grep 'no verification evidence commit is recorded' "$case_dir/stderr" \
     "evidence-absent: the refusal did not say the record is missing"
-  assert_grep 'fm-evidence-record.sh task-x1' "$case_dir/stderr" \
+  assert_grep "fm-evidence-record.sh' 'task-x1'" "$case_dir/stderr" \
     "evidence-absent: the refusal did not name the command that records the evidence"
+  assert_grep "FM_HOME=" "$case_dir/stderr" \
+    "evidence-absent: the printed command must bind the home it records into, which a reader does not inherit"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "evidence-absent: gh-axi pr merge was invoked with no evidence recorded"
   assert_no_grep 'pr=https://github.com/example/repo/pull/160' "$case_dir/state/task-x1.meta" \

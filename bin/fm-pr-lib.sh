@@ -226,13 +226,24 @@ FM_PR_EVIDENCE_TMP=
 FM_PR_EVIDENCE_LOCK=
 FM_PR_EVIDENCE_LOCK_HELD=0
 
-# fm_pr_evidence_note_valid <note>: a note is one printable line, bounded, so it
-# can never split the key=value record it is stored in.
+# fm_pr_evidence_note_valid <note>: a note is one line of at most 200
+# characters carrying no control character, so it can never split the key=value
+# record it is stored in nor drive the terminal a refusal is printed to.
+# The text itself is not restricted to ASCII, because workers routinely write an
+# em dash or an accented word and a guard that refuses valid work is worked
+# around rather than fixed. The bound counts characters, which is what the
+# refusal claims it counts: matching is byte-wise under LC_ALL=C, so a UTF-8
+# sequence is folded to its single leading byte by dropping continuation bytes
+# before the length is taken.
 fm_pr_evidence_note_valid() {
   local note=${1-}
   local LC_ALL=C
-  [ "${#note}" -le 200 ] || return 1
-  [[ "$note" =~ ^[[:print:]]*$ ]]
+  local characters
+  if [[ "$note" =~ [[:cntrl:]] ]]; then
+    return 1
+  fi
+  characters=${note//[$'\x80'-$'\xbf']/}
+  [ "${#characters}" -le 200 ]
 }
 
 # fm_pr_evidence_read <meta>: load the task's evidence record into

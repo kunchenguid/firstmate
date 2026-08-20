@@ -16,10 +16,12 @@
 # describes, and run it again after every re-measurement:
 #   bin/fm-evidence-record.sh <task-id> "$(git rev-parse HEAD)" 'full suite 4208 pass; injection exploit blocked'
 #
-# The note is one printable line of at most 200 characters and is quoted into
-# the refusal message so a stale merge says what has to be re-measured. A note
-# carrying a newline or control character is refused rather than trimmed,
-# because a silently trimmed note is a silently wrong instruction.
+# The note is one line of at most 200 characters and is quoted into the refusal
+# message so a stale merge says what has to be re-measured. Its text is not
+# restricted to ASCII: an em dash or an accented word is ordinary in a note and
+# is accepted as written. A note carrying a newline, a tab, or any other control
+# character is refused rather than trimmed, because a silently trimmed note is a
+# silently wrong instruction.
 # Usage: fm-evidence-record.sh <task-id> <commit-sha> [one-line note]
 set -eu
 
@@ -71,7 +73,8 @@ if ! fm_pr_head_valid "$HEAD_SHA"; then
   exit 2
 fi
 if ! fm_pr_evidence_note_valid "$NOTE"; then
-  echo "error: the note must be one printable line of at most 200 characters" >&2
+  echo "error: the note must be a single line of at most 200 characters with no control characters" >&2
+  echo "  non-ASCII text such as an em dash is accepted; a line break, a tab, or an escape is not" >&2
   exit 2
 fi
 

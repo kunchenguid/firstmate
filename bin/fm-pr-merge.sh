@@ -83,6 +83,22 @@ reject_repo_overrides() {
 
 reject_repo_overrides "$@" || exit 1
 
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+# Every refusal below prints the command that clears it, and that command is the
+# whole remedy, so it must run exactly as printed: quoted against a path holding
+# a space, and bound to the home and state directory this merge read, not to
+# whichever home the reader's environment happens to name.
+EVIDENCE_RECORD_CMD="FM_HOME=$(shell_quote "$FM_HOME")"
+if [ "$STATE" != "$FM_HOME/state" ]; then
+  EVIDENCE_RECORD_CMD="$EVIDENCE_RECORD_CMD FM_STATE_OVERRIDE=$(shell_quote "$STATE")"
+fi
+EVIDENCE_RECORD_CMD="$EVIDENCE_RECORD_CMD $(shell_quote "$SCRIPT_DIR/fm-evidence-record.sh") $(shell_quote "$ID")"
+
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ]; then
@@ -95,7 +111,7 @@ fi
 if ! fm_pr_evidence_read "$META"; then
   echo "error: refusing to merge $URL: the evidence record for task $ID is unreadable or malformed" >&2
   echo "  fix: re-record the commit the reported verification was measured on:" >&2
-  echo "    $SCRIPT_DIR/fm-evidence-record.sh $ID <commit it was measured on> '<what was measured>'" >&2
+  echo "    $EVIDENCE_RECORD_CMD <commit it was measured on> '<what was measured>'" >&2
   exit 1
 fi
 EVIDENCE_HEAD=$FM_PR_EVIDENCE_HEAD
@@ -106,7 +122,7 @@ if [ -z "$EVIDENCE_HEAD" ]; then
   echo "  expected: the commit the reported verification was measured on" >&2
   echo "  found:    no evidence record" >&2
   echo "  fix: re-run the verification you intend to merge on, then record it:" >&2
-  echo "    $SCRIPT_DIR/fm-evidence-record.sh $ID <commit it was measured on> '<what was measured>'" >&2
+  echo "    $EVIDENCE_RECORD_CMD <commit it was measured on> '<what was measured>'" >&2
   exit 1
 fi
 
@@ -141,7 +157,7 @@ if [ "$LIVE_HEAD" != "$EVIDENCE_HEAD" ]; then
   fi
   echo "  pull request head:    $LIVE_HEAD" >&2
   echo "  fix: re-run that verification on $LIVE_HEAD, then record the result:" >&2
-  echo "    $SCRIPT_DIR/fm-evidence-record.sh $ID $LIVE_HEAD '<what was measured>'" >&2
+  echo "    $EVIDENCE_RECORD_CMD $LIVE_HEAD '<what was measured>'" >&2
   exit 1
 fi
 
