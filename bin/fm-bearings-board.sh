@@ -18,9 +18,8 @@
 #            Bind to the any-origin keyed-answer intake ALWAYS precedes arm, so
 #            the board can never produce an answer that has nowhere to go
 #            (decision-hold-lifecycle's ordering rule, enforced here rather
-#            than left to agent memory). Output lines include lavish-axi's
-#            session URL followed by:
-#              board: <path>
+#            than left to agent memory). Output starts with `board: <path>`,
+#            then includes lavish-axi's session output and the remaining status:
 #              served: <path>
 #              bound: <source-id> (any-origin)
 #              armed: <source-id>            (first registration)

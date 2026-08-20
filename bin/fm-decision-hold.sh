@@ -95,8 +95,8 @@
 # skipping is never forced closure, and the command exits nonzero when any key
 # was skipped.
 #
-# `bind`, `unbind`, and `binding` record which origin a captured-answer SOURCE
-# belongs to, for any channel whose answers arrive detached from the origin (a
+# `bind`, `unbind`, and `binding` record whether a captured-answer SOURCE belongs
+# to one origin or uses the any-origin intake, for any channel whose answers arrive detached from the origin (a
 # process-event source id, for example). The binding is a private record under
 # `state/decision-bindings/`; a source with no binding feeds nothing, so this
 # whole path is opt-in per source and an unbound source behaves as if it did not
