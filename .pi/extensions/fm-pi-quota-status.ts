@@ -54,8 +54,7 @@ type ActiveModel = NonNullable<ExtensionContext["model"]>;
 
 type QuotaVerification =
   | { kind: "account"; accountId: string | null }
-  | { kind: "source"; source: string }
-  | { kind: "unavailable" };
+  | { kind: "source"; source: string };
 
 type QuotaTarget =
   | { kind: "resolving"; piProvider: string }
@@ -164,13 +163,12 @@ function activeAccountId(provider: string, apiKey: string | undefined): string |
   return null;
 }
 
-function quotaVerification(provider: string, apiKey: string | undefined): QuotaVerification {
+function quotaVerification(provider: string, apiKey: string | undefined): QuotaVerification | null {
   if (provider === "openai-codex") {
     return { kind: "account", accountId: activeAccountId(provider, apiKey) };
   }
   if (provider === "kimi-coding") return { kind: "source", source: "pi:kimi-coding" };
-  if (provider === "xai") return { kind: "source", source: "pi:xai" };
-  return { kind: "unavailable" };
+  return null;
 }
 
 function killProcess(child: ChildProcess, processGroupId: number | null): void {
@@ -282,7 +280,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
 
     function unsupportedProvider(piProvider: string): Extract<QuotaView, { kind: "unsupported" }> {
       const view = selectActiveProviderQuota(
-        { generatedAtMs: now(), schemaVersion: 3, providers: [] },
+        { generatedAtMs: now(), schemaVersion: 3, projection: "default", providers: [] },
         piProvider,
         { nowMs: now(), freshnessMs },
       );
@@ -352,11 +350,17 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           view: { kind: "unsupported", provider: `${model.provider} (custom endpoint)` },
         };
       }
-      return {
-        kind: "supported",
-        piProvider: model.provider,
-        verification: quotaVerification(model.provider, auth.auth.apiKey),
-      };
+      const verification = quotaVerification(model.provider, auth.auth.apiKey);
+      if (!verification) {
+        return {
+          kind: "unsupported",
+          view: {
+            kind: "unsupported",
+            provider: `${model.provider} (account correlation unavailable)`,
+          },
+        };
+      }
+      return { kind: "supported", piProvider: model.provider, verification };
     }
 
     function currentView(session: ActiveSession, nowMs = now()): QuotaView {
@@ -369,11 +373,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       return selectActiveProviderQuota(session.report, session.target.piProvider, {
         nowMs,
         freshnessMs,
-        expectedAccountId: verification.kind === "account"
-          ? verification.accountId
-          : verification.kind === "unavailable"
-            ? null
-            : undefined,
+        expectedAccountId: verification.kind === "account" ? verification.accountId : undefined,
         expectedSuccessfulSource: verification.kind === "source" ? verification.source : undefined,
       });
     }
@@ -477,7 +477,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
 
         const completedProvider = completedTarget.piProvider;
         if (result.kind === "ok") {
-          const report = parseQuotaAxiJson(result.stdout);
+          const report = parseQuotaAxiJson(result.stdout, { projection: "full" });
           if (report) {
             session.report = report;
             render(session);

@@ -14,7 +14,7 @@ fail() {
   exit 1
 }
 
-command -v expect >/dev/null 2>&1 || fail "expect not found"
+command -v tmux >/dev/null 2>&1 || fail "tmux not found"
 command -v node >/dev/null 2>&1 || fail "node not found"
 
 LAB="$ROOT/.pi-quota-live.$$"
@@ -79,18 +79,24 @@ chmod 600 "$PI_CONFIG/auth.json"
 
 checked=0
 cleanup() {
+  local session
+  while IFS= read -r session; do
+    case "$session" in
+      fm-pi-quota-live.$$.*) tmux kill-session -t "$session" 2>/dev/null || true ;;
+    esac
+  done < <(tmux list-sessions -F '#S' 2>/dev/null || true)
   rm -rf "$LAB"
 }
 trap cleanup EXIT
 
 run_harness() {
-  local harness=$1 binary=$2 version project calls stdin_log capture_log expect_script launch_script pane status=0
+  local harness=$1 binary=$2 version project calls stdin_log capture_log launch_script
+  local pane session launch_command attempt pane_dead pane_status
   version=$($binary --version 2>/dev/null) || fail "$harness version probe failed"
   project="$LAB/project-$harness"
   calls="$LIVE_CALLS"
   stdin_log="$LIVE_STDIN"
   capture_log="$LAB/$harness.capture"
-  expect_script="$LAB/$harness.expect"
   launch_script="$LAB/$harness-launch.sh"
   mkdir -p "$project/.pi/extensions" "$project/.pi/quota-fixture/lib"
   cp "$ROOT/.pi/extensions/fm-pi-quota-status.ts" "$project/.pi/quota-fixture/"
@@ -117,35 +123,37 @@ TS
 
   cat > "$launch_script" <<EOF
 #!/usr/bin/env bash
+export COLUMNS=260 LINES=40
+export PATH="$FAKEBIN:$PATH"
+export PI_CODING_AGENT_DIR="$PI_CONFIG" PI_OFFLINE=1
 sleep 0.5
 exec "$binary" --approve --no-session --no-context-files --no-skills --model openai-codex/gpt-5.3-codex-spark --tui-mode regular
 EOF
   chmod +x "$launch_script"
-  cat > "$expect_script" <<EOF
-log_user 1
-log_file -noappend "$capture_log"
-set timeout 45
-spawn -noecho env COLUMNS=260 LINES=40 PATH="$FAKEBIN:$PATH" PI_CODING_AGENT_DIR="$PI_CONFIG" PI_OFFLINE=1 "$launch_script"
-stty columns 260 rows 40
-expect {
-  -exact "GPT-5.3-Codex-Spark week" {}
-  timeout { exit 124 }
-  eof { exit 125 }
-}
-send -- "/quit\r"
-expect {
-  eof {}
-  timeout { exit 126 }
-}
-set wait_result [wait]
-exit [lindex \$wait_result 3]
-EOF
-  (cd "$project" && expect "$expect_script" >/dev/null) || status=$?
-  [ "$status" -eq 0 ] || {
-    tr -d '\r' < "$capture_log" >&2 || true
-    fail "$harness live Pi process failed with status $status"
-  }
-  pane=$(tr -d '\r' < "$capture_log")
+  session="fm-pi-quota-live.$$.$harness"
+  printf -v launch_command 'exec %q' "$launch_script"
+  tmux new-session -d -s "$session" -x 260 -y 40 -c "$project" "$launch_command" \
+    || fail "$harness live tmux session did not start"
+  tmux set-window-option -t "$session:0" remain-on-exit on >/dev/null \
+    || fail "$harness live tmux session could not retain its final screen"
+  pane=
+  for attempt in $(seq 1 450); do
+    pane=$(tmux capture-pane -p -t "$session:0.0" 2>/dev/null | tr -d '\r')
+    case "$pane" in
+      *"GPT-5.3-Codex-Spark week"*) break ;;
+    esac
+    pane_dead=$(tmux display-message -p -t "$session:0.0" '#{pane_dead}' 2>/dev/null || printf 1)
+    [ "$pane_dead" != 1 ] || break
+    sleep 0.1
+  done
+  printf '%s\n' "$pane" > "$capture_log"
+  case "$pane" in
+    *"GPT-5.3-Codex-Spark week"*) ;;
+    *)
+      printf '%s\n' "$pane" >&2
+      fail "$harness live Pi process did not render quota in its final terminal screen"
+      ;;
+  esac
   printf '%s\n' "$pane" | grep -Fq '(quota-live)' \
     || fail "$harness quota extension hid Pi's built-in cwd/git footer information"
   printf '%s\n' "$pane" | grep -Fq 'gpt-5.3-codex-spark' \
@@ -169,6 +177,21 @@ EOF
     && fail "$harness used unexpected quota-axi argv: $(tr '\n' '|' < "$calls")"
   grep -Fvx -- eof "$stdin_log" >/dev/null \
     && fail "$harness left quota-axi stdin readable: $(tr '\n' '|' < "$stdin_log")"
+
+  tmux send-keys -t "$session:0.0" -l '/quit' \
+    || fail "$harness live Pi process did not accept quit input"
+  tmux send-keys -t "$session:0.0" Enter \
+    || fail "$harness live Pi process did not accept quit submission"
+  pane_dead=0
+  for attempt in $(seq 1 200); do
+    pane_dead=$(tmux display-message -p -t "$session:0.0" '#{pane_dead}' 2>/dev/null || printf 1)
+    [ "$pane_dead" != 1 ] || break
+    sleep 0.1
+  done
+  [ "$pane_dead" = 1 ] || fail "$harness live Pi process did not exit after /quit"
+  pane_status=$(tmux display-message -p -t "$session:0.0" '#{pane_dead_status}' 2>/dev/null)
+  [ "$pane_status" = 0 ] || fail "$harness live Pi process failed with status $pane_status"
+  tmux kill-session -t "$session" 2>/dev/null || true
 
   printf 'ok - %s %s auto-discovered complete quota in a width-aware row while preserving the built-in footer and unrelated status\n' "$harness" "$version"
   checked=$((checked + 1))

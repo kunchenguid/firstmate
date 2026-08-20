@@ -158,7 +158,10 @@ const allProviders = [
     ],
     ...(full ? {
       account: { email: "fixture@example.invalid" },
-      attempts: [{ source: "pi:xai", status: "success" }],
+      attempts: [
+        { source: "web", status: "success" },
+        { source: "pi:xai", status: "skipped", error: "model_auth_only", credentialPresent: true },
+      ],
     } : {}),
   }),
   provider("kimi", "Kimi", "api", {
@@ -299,6 +302,24 @@ assert(parsedCurrentSchema, "quota-axi schema-5 default JSON was rejected");
 const currentCodex = selectActiveProviderQuota(parsedCurrentSchema, "openai-codex", { nowMs: now });
 assert(currentCodex.kind === "fresh", `quota-axi schema-5 default provider was not fresh: ${currentCodex.kind}`);
 assert(currentCodex.label === "Codex", "schema-5 default provider label was not supplied safely");
+const schema5Full = report(now);
+schema5Full.schemaVersion = 5;
+const parsedSchema5Full = parseQuotaAxiJson(JSON.stringify(schema5Full), { projection: "full" });
+assert(parsedSchema5Full, "quota-axi schema-5 full JSON was rejected");
+assert(
+  selectActiveProviderQuota(parsedSchema5Full, "openai-codex", { nowMs: now }).kind === "fresh",
+  "valid quota-axi schema-5 full provider was not fresh",
+);
+for (const field of ["label", "source"]) {
+  const missingFullField = structuredClone(schema5Full);
+  delete missingFullField.providers[1][field];
+  const missingFullParsed = parseQuotaAxiJson(JSON.stringify(missingFullField), { projection: "full" });
+  assert(missingFullParsed, `schema-5 full fixture missing ${field} did not parse structurally`);
+  assert(
+    selectActiveProviderQuota(missingFullParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+    `schema-5 full output missing ${field} was accepted as fresh`,
+  );
+}
 assert(quotaProviderForPiProvider("openai-codex") === "codex", "openai-codex provider mapping failed");
 assert(quotaProviderForPiProvider("anthropic") === "claude", "anthropic provider mapping failed");
 assert(quotaProviderForPiProvider("github-copilot") === "copilot", "GitHub Copilot provider mapping failed");
@@ -419,6 +440,16 @@ const stale = selectActiveProviderQuota(staleParsed, "openai-codex", { nowMs: no
 assert(stale.kind === "stale", "old report was not classified stale");
 const staleText = formatQuotaStatus(stale, 100, now);
 assert(staleText.includes("stale") && !staleText.includes("94%"), "stale values were presented as fresh");
+const resettingRaw = report(now);
+resettingRaw.providers[1].windows[0].resetsAt = new Date(now + 60_000).toISOString();
+const resettingParsed = parseQuotaAxiJson(JSON.stringify(resettingRaw));
+assert(resettingParsed, "reset-expiry fixture did not parse structurally");
+const beforeReset = selectActiveProviderQuota(resettingParsed, "openai-codex", { nowMs: now });
+assert(beforeReset.kind === "fresh", "quota became stale before its supplied window reset");
+assert(beforeReset.freshUntilMs === now + 60_000, "window reset did not bound quota freshness");
+const afterReset = selectActiveProviderQuota(resettingParsed, "openai-codex", { nowMs: now + 60_000 });
+assert(afterReset.kind === "stale", "post-reset quota percentage remained fresh");
+assert(!formatQuotaStatus(afterReset, 200, now + 60_000).includes("94%"), "post-reset quota exposed old percentages");
 assert(parseQuotaAxiJson("{broken") === null, "malformed JSON was accepted");
 const malformed = report(now);
 malformed.providers[1].windows[0].percentRemaining = 101;
@@ -508,6 +539,24 @@ assert(directReport?.schemaVersion === 5, "fake default quota-axi output did not
 assert(
   directReport && selectActiveProviderQuota(directReport, "openai-codex").kind === "fresh",
   "fake default quota-axi projection was not consumable",
+);
+const grokProcess = runQuotaAxiJson({
+  timeoutMs: 1000,
+  maxOutputBytes: 1024 * 1024,
+  full: true,
+  provider: "grok",
+});
+const grokResult = await grokProcess.promise;
+assert(grokResult.kind === "ok", `fake full Grok process failed: ${grokResult.kind}`);
+const grokReport = grokResult.kind === "ok"
+  ? parseQuotaAxiJson(grokResult.stdout, { projection: "full" })
+  : null;
+assert(grokReport, "fake full Grok output was not consumable");
+assert(
+  selectActiveProviderQuota(grokReport, "xai", {
+    expectedSuccessfulSource: "pi:xai",
+  }).kind === "unverified",
+  "model-auth-only Pi xAI attempt was treated as consumer-quota provenance",
 );
 
 const officialBaseUrls = {
@@ -630,12 +679,16 @@ assert(lifecycle.statuses.get("aaa-unrelated") === "UNRELATED_STATUS", "quota wi
 assert(lifecycle.footer === "BUILTIN_FOOTER", "quota widget replaced Pi's built-in footer");
 assert(process.stdout.listenerCount("resize") === baselineResizeListeners, "session start installed a direct resize listener");
 
+const callsBeforeClaude = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 await lifecycle.emit("model_select", { model: fixtureModel("anthropic", "claude-fixture") });
 await waitFor(
-  () => lifecycle.widgetText(240).includes("account unverified"),
-  "model change did not refuse uncorrelated Claude account quota",
+  () => lifecycle.widgetText(240).includes("account correlation unavailable"),
+  "model change did not classify uncorrelatable Claude quota explicitly",
 );
 assert(!lifecycle.widgetText(240).includes("72.5%"), "uncorrelated Claude quota was presented as active");
+await sleep(30);
+const callsAfterClaude = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+assert(callsAfterClaude === callsBeforeClaude, "uncorrelatable Claude auth invoked quota-axi");
 await lifecycle.emit("model_select", { model: fixtureModel("kimi-coding", "kimi-fixture") });
 await waitFor(
   () => lifecycle.widgetText(240).includes("week 83% left"),
@@ -688,11 +741,11 @@ await waitFor(
 await resolvingTransition.emit("session_shutdown", { reason: "quit" });
 
 for (const reason of ["reload", "new", "resume", "fork"]) {
-  lifecycle.ctx.model = fixtureModel("xai", "grok-fixture");
+  lifecycle.ctx.model = fixtureModel("kimi-coding", "kimi-fixture");
   await lifecycle.emit("session_start", { reason });
   await waitFor(
-    () => lifecycle.widgetText(240).includes("credits 48% left"),
-    `${reason} did not correlate the active Pi xAI source`,
+    () => lifecycle.widgetText(240).includes("week 83% left"),
+    `${reason} did not correlate the active Pi Kimi source`,
   );
   assert(process.stdout.listenerCount("resize") === baselineResizeListeners, `${reason} changed resize listeners`);
   await lifecycle.emit("session_shutdown", { reason: "reload" });
@@ -798,6 +851,21 @@ for (const [description, providerOptions, expected] of [
 }
 
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const callsBeforeXai = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+const uncorrelatableXai = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 100 }),
+  "xai",
+);
+await uncorrelatableXai.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => uncorrelatableXai.widgetText(240).includes("account correlation unavailable"),
+  `Pi xAI consumer quota was not classified explicitly: ${uncorrelatableXai.widgetText(240)}`,
+);
+await sleep(30);
+const callsAfterXai = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+assert(callsAfterXai === callsBeforeXai, "uncorrelatable Pi xAI auth invoked quota-axi");
+await uncorrelatableXai.emit("session_shutdown", { reason: "quit" });
+
 const callsBeforeLegacyRegistry = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 const legacyRegistry = makePi(
   createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 100 }),
@@ -828,11 +896,11 @@ for (const endpoint of [
   );
   await instance.emit("session_start", { reason: "startup" });
   await waitFor(
-    () => instance.widgetText(240).includes("account unverified"),
-    `official Copilot endpoint was misclassified: ${endpoint}: ${instance.widgetText(240)}`,
+    () => instance.widgetText(240).includes("account correlation unavailable"),
+    `official Copilot endpoint did not report unverifiable provenance: ${endpoint}: ${instance.widgetText(240)}`,
   );
   const callsAfter = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
-  assert(callsAfter > callsBefore, `official Copilot endpoint did not invoke quota-axi: ${endpoint}`);
+  assert(callsAfter === callsBefore, `uncorrelatable Copilot auth invoked quota-axi: ${endpoint}`);
   await instance.emit("session_shutdown", { reason: "quit" });
 }
 

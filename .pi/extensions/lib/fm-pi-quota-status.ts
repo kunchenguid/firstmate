@@ -39,9 +39,12 @@ export type QuotaView =
   | { kind: "stale"; provider: string; label: string | null }
   | { kind: "malformed"; provider: string };
 
+export type QuotaAxiProjection = "default" | "full";
+
 export type ParsedQuotaAxiReport = {
   generatedAtMs: number;
   schemaVersion: number;
+  projection: QuotaAxiProjection;
   providers: unknown[];
 };
 
@@ -107,7 +110,10 @@ export function quotaProviderForPiProvider(piProvider: string): string | null {
   return PI_PROVIDER_TO_QUOTA_PROVIDER[piProvider] ?? null;
 }
 
-export function parseQuotaAxiJson(raw: string): ParsedQuotaAxiReport | null {
+export function parseQuotaAxiJson(
+  raw: string,
+  options: { projection?: QuotaAxiProjection } = {},
+): ParsedQuotaAxiReport | null {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -128,6 +134,7 @@ export function parseQuotaAxiJson(raw: string): ParsedQuotaAxiReport | null {
   return {
     generatedAtMs,
     schemaVersion,
+    projection: options.projection ?? "default",
     providers: value.providers,
   };
 }
@@ -254,15 +261,16 @@ export function selectActiveProviderQuota(
     return { kind: "unavailable", provider, label: null };
   }
 
-  const label = rawProvider.label === undefined && report.schemaVersion === 5
+  const fullProjection = report.projection === "full";
+  const label = rawProvider.label === undefined && report.schemaVersion === 5 && !fullProjection
     ? QUOTA_PROVIDER_LABELS[provider] ?? null
     : cleanText(rawProvider.label);
-  const source = rawProvider.source === undefined && report.schemaVersion === 5
+  const source = rawProvider.source === undefined && report.schemaVersion === 5 && !fullProjection
     ? null
     : exactEnum(rawProvider.source, QUOTA_PROVIDER_SOURCES);
   if (
     !label ||
-    (report.schemaVersion === 3 && !source) ||
+    ((report.schemaVersion === 3 || fullProjection) && !source) ||
     (rawProvider.source !== undefined && !source) ||
     !isRecord(rawProvider.state)
   ) return malformed(provider);
@@ -300,6 +308,11 @@ export function selectActiveProviderQuota(
     if (!window) return malformed(provider);
     windows.push(window);
   }
+  for (const window of windows) {
+    if (window.resetsAtMs === null) continue;
+    freshUntilMs = Math.min(freshUntilMs, window.resetsAtMs);
+  }
+  if (nowMs >= freshUntilMs) return { kind: "stale", provider, label };
 
   const plan = rawProvider.plan === undefined ? null : cleanText(rawProvider.plan, 48);
   if (rawProvider.plan !== undefined && plan === null) return malformed(provider);
