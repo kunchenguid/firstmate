@@ -12,6 +12,11 @@
 # The optional `delivery:` key (epflow-07) is covered too: absent = no finding,
 # a valid mode passes, an unknown value is RED, and a direct-PR story on a
 # no-mistakes-prod-only repo WARNS (stderr) without failing the lint.
+#
+# One story = one repo (epflow-08) is covered last: a body naming a SECOND
+# registered repo WARNS on a bare mention and FAILS when the mention shares a
+# line with a deliverable verb, detection is word-bounded (no substring hits),
+# and FM_EPIC_LINT_MULTIREPO tunes strictness (off / warn / strict / default).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -328,6 +333,96 @@ test_red_delivery_unknown() {
   pass "an unknown delivery: value is RED"
 }
 
+# --- one story = one repo (epflow-08) ----------------------------------------
+# A registry that registers a SECOND repo (webapp) so the body scan has another
+# repo to find; `svc` stays each story's own repo. Detection: a body naming a
+# registered repo other than its own `repo:` WARNS on a bare mention and FAILS
+# when the mention shares a line with a deliverable verb (it assigns work there).
+MREG="$TMP_ROOT/mrepo-projects.md"
+cat > "$MREG" <<'EOF'
+# Projects
+- svc [direct-PR production=main] - fixture repo (added 260101)
+- webapp [no-mistakes production=main] - second fixture repo (added 260101)
+EOF
+
+# lint_mrepo <epic-dir> -> OUT, RC : lint with the two-repo registry.
+lint_mrepo() { OUT=$(FM_PROJECTS_REG="$MREG" "$LINT" "$1" 2>&1); RC=$?; }
+
+# append_body <story-file> <text> : add a body line to a story.
+append_body() { printf '\n%s\n' "$2" >> "$1"; }
+
+test_green_single_repo_clean() {
+  local d; d=$(fresh mrclean)
+  # Mentions ONLY its own repo (svc) with a deliverable verb: no second repo.
+  append_body "$d/stories/svc-02.md" "This story only touches svc and adds a handler."
+  lint_mrepo "$d"
+  expect_code 0 "$RC" "a single-repo story must pass: $OUT"
+  assert_not_contains "$OUT" "second repo" "a story naming only its own repo must not flag"
+  assert_not_contains "$OUT" "webapp" "no cross-repo finding for a single-repo story"
+  pass "a clean single-repo story (own repo only) passes"
+}
+
+test_warn_benign_cross_repo_mention() {
+  local d; d=$(fresh mrwarn)
+  # svc-02 (repo svc) names webapp with NO deliverable verb: a benign reference.
+  append_body "$d/stories/svc-02.md" "Context: this consumes a flag that webapp exposes."
+  lint_mrepo "$d"
+  expect_code 0 "$RC" "a benign cross-repo mention must WARN, not fail: $OUT"
+  assert_contains "$OUT" "WARNINGS" "the benign mention must surface as a warning"
+  assert_contains "$OUT" "webapp" "the warning must name the extra repo"
+  assert_contains "$OUT" "epic lint OK" "a benign mention must still pass"
+  pass "a benign cross-repo mention WARNS without failing"
+}
+
+test_red_deliverable_second_repo() {
+  local d; d=$(fresh mrfail)
+  # The canonical smuggle: svc-02 (repo svc) assigns work to webapp on one line.
+  append_body "$d/stories/svc-02.md" "Also touches webapp: update the client to read the new flag."
+  lint_mrepo "$d"
+  expect_code 1 "$RC" "a story assigning work to a second repo must FAIL"
+  assert_contains "$OUT" "second repo" "did not flag the second-repo deliverable"
+  assert_contains "$OUT" "webapp" "did not name the smuggled repo"
+  pass "a story assigning deliverables to a second repo is RED (split it)"
+}
+
+test_green_multirepo_word_boundary() {
+  local d; d=$(fresh mrboundary)
+  # `webapp` as a substring of a longer word must NOT trigger, even next to a verb.
+  append_body "$d/stories/svc-02.md" "The change updates the webapplication-agnostic layer."
+  lint_mrepo "$d"
+  expect_code 0 "$RC" "a substring match must not fire: $OUT"
+  assert_not_contains "$OUT" "webapp\"" "webapplication must not match the webapp repo"
+  pass "repo detection is word-bounded (no substring false positives)"
+}
+
+test_off_disables_multirepo() {
+  local d; d=$(fresh mroff)
+  append_body "$d/stories/svc-02.md" "Also touches webapp: update the client."
+  OUT=$(FM_PROJECTS_REG="$MREG" FM_EPIC_LINT_MULTIREPO=off "$LINT" "$d" 2>&1); RC=$?
+  expect_code 0 "$RC" "off must disable the check: $OUT"
+  assert_not_contains "$OUT" "webapp" "off must produce no cross-repo finding"
+  pass "FM_EPIC_LINT_MULTIREPO=off disables the cross-repo check"
+}
+
+test_strict_fails_bare_mention() {
+  local d; d=$(fresh mrstrict)
+  append_body "$d/stories/svc-02.md" "See webapp for the existing pattern."
+  OUT=$(FM_PROJECTS_REG="$MREG" FM_EPIC_LINT_MULTIREPO=strict "$LINT" "$d" 2>&1); RC=$?
+  expect_code 1 "$RC" "strict must fail even a bare mention"
+  assert_contains "$OUT" "second repo" "strict did not upgrade the bare mention to a fail"
+  pass "FM_EPIC_LINT_MULTIREPO=strict fails on any cross-repo mention"
+}
+
+test_warn_mode_downgrades_deliverable() {
+  local d; d=$(fresh mrwarnmode)
+  append_body "$d/stories/svc-02.md" "Also touches webapp: update the client."
+  OUT=$(FM_PROJECTS_REG="$MREG" FM_EPIC_LINT_MULTIREPO=warn "$LINT" "$d" 2>&1); RC=$?
+  expect_code 0 "$RC" "warn mode must never fail: $OUT"
+  assert_contains "$OUT" "WARNINGS" "warn mode must still surface the finding"
+  assert_contains "$OUT" "epic lint OK" "warn mode must pass"
+  pass "FM_EPIC_LINT_MULTIREPO=warn downgrades a deliverable mention to a warning"
+}
+
 # --- structural: bad usage exits 2 -------------------------------------------
 test_structural_errors() {
   lint "$TMP_ROOT/does-not-exist"
@@ -365,6 +460,13 @@ test_green_delivery_valid
 test_warn_delivery_posture_conflict
 test_green_delivery_directpr_ok
 test_red_delivery_unknown
+test_green_single_repo_clean
+test_warn_benign_cross_repo_mention
+test_red_deliverable_second_repo
+test_green_multirepo_word_boundary
+test_off_disables_multirepo
+test_strict_fails_bare_mention
+test_warn_mode_downgrades_deliverable
 test_structural_errors
 
 echo "# all fm-epic-lint tests passed"

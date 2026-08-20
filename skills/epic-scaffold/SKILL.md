@@ -64,7 +64,7 @@ This skill only records a settled design in the standard shape.
    Mark that story `gate: true` and give every dependent story a `depends:` on it, so the concrete contract is in place before the per-repo work builds on it.
 
 7. **Self-check before handing off.**
-   Every story has a unique `id:`; every `epic:` equals `epic.md`'s slug; every `pr_base:` is `epic/<slug>`; every `repo:` is a real repo; exactly one story is the `gate: true` contract story and dependents `depends:` on it; no story uses `story:`, `phase:`, or any other key in place of the required seven.
+   Every story has a unique `id:`; every `epic:` equals `epic.md`'s slug; every `pr_base:` is `epic/<slug>`; every `repo:` is a real repo; exactly one story is the `gate: true` contract story and dependents `depends:` on it; no story uses `story:`, `phase:`, or any other key in place of the required seven; and no story body assigns work to a repo other than its own `repo:` (one story = one repo - see below).
 
 ### Required story frontmatter (identical in epic-scaffold and epic-review)
 
@@ -88,6 +88,12 @@ The optional `delivery:` records the story's intended delivery mode when it is k
 Omit it and firstmate resolves the mode at dispatch from the repo's registered posture, exactly as before.
 `fm-epic-lint` validates a present value against those three modes and warns (never fails) when a `no-mistakes-prod-only` repo's story is marked `direct-PR`, since that mode fits only an internal-only surface.
 The mode stays overridable by an explicit captain instruction at dispatch - it is never a hard lock.
+
+**One story = one repo = one dispatchable unit.**
+A crewmate spawns in ONE worktree, so a story whose body assigns work to a second repo cannot dispatch - it has to be split before it ever reaches a worker.
+`fm-epic-lint` scans each story body against the home's registered repos: it WARNS on a bare mention of a repo other than the story's own `repo:` (the author may reference a dependency benignly) and FAILS when that mention shares a line with a deliverable verb (touch, change, modify, update, add, wire, implement, build, ship, patch, create), because that body is assigning work to a second repo.
+Split a genuinely cross-repo unit into per-repo stories linked by `depends:` - the producer story lands the shared contract, the consumer story `depends:` on it - never one story that names two repos in prose.
+`FM_EPIC_LINT_MULTIREPO` tunes the strictness (`off` disables the scan, `warn` never fails, `strict` fails on any mention); the default layering above is what the review gate and promote-validate run.
 
 ## Output
 
