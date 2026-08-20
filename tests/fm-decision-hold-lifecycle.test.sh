@@ -15,10 +15,24 @@ TASKS_AXI_BIN=$(command -v tasks-axi || true)
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
 
+# The tracked backlog config, copied into a fixture home with this suite's own
+# Done retention pinned into the copy. Several fixtures register more than a
+# handful of decision holds against one origin, complete them, and then read each
+# record back by id. `done_keep` is an operator tunable the tracked config is free
+# to lower, and inheriting it would archive those completed records out from under
+# assertions that are about decision-hold lifecycle, not Done retention.
+write_tasks_config() {  # <home>
+  local home=$1
+  sed 's/^done_keep = .*/done_keep = 100/' "$ROOT/.tasks.toml" > "$home/.tasks.toml" \
+    || fail "could not write the fixture backlog config"
+  grep -q '^done_keep = 100$' "$home/.tasks.toml" \
+    || fail "the tracked backlog config no longer carries a done_keep line for this fixture to pin"
+}
+
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
-  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  write_tasks_config "$home"
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 
@@ -446,7 +460,7 @@ test_secondmate_hold_stays_in_authoritative_home() {
   parent=$(make_home main-routing)
   mate="$TMP_ROOT/sample-mate-home"
   mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects" "$mate/bin"
-  cp "$ROOT/.tasks.toml" "$mate/.tasks.toml"
+  write_tasks_config "$mate"
   printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
   printf 'sample-mate\n' > "$mate/.fm-secondmate-home"
   cat > "$mate/data/backlog.md" <<'EOF'
