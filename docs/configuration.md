@@ -263,7 +263,7 @@ CI exercises this contract only with isolated fixture directories and a fake Cla
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, and kimi are empirically verified for crewmate and secondmate launches.
-cursor-agent is verified for crewmate and scout launches only; it cannot host a primary or secondmate until its supervision adapter is verified.
+cursor-agent is verified for ordinary crew and scout launches; secondmate use is captain-approved only as a degraded production test with the supervision limits documented by `harness-adapters`, while primary-session use remains unverified.
 [README requirements](../README.md#requirements) owns the set supported for the primary session.
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter knowledge - each harness's busy-state source, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
@@ -277,6 +277,7 @@ When pi-signed is selected, Firstmate launches the executable named `pi-signed` 
 Plain Pi launches set `FM_PI_HARNESS=pi`, so a signed primary's environment cannot relabel a plain Pi worker.
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents, optionally followed by model and effort tokens on the same line.
+For `cursor-agent`, the secondmate value is a captain-approved degraded production-test seat; its selected model id is preserved exactly, including model-encoded effort, while native seat session-start delivery and Stop-hook supervision remain unverified.
 The first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>]`.
 A bare `<harness>` preserves the previous behavior: harness only, with no model or effort launch flag.
 When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model or effort is read from that file.

@@ -834,7 +834,7 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor-agent) ;;
     *)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1267,7 +1267,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor-agent)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1337,13 +1337,10 @@ launch_template() {
     # command-approval mode, while --trust bypasses the separate first-workspace
     # dialog that --force does not cover. Cursor effort is encoded in the model
     # selector itself, so __EFFORTFLAG__ is deliberately absent and the requested
-    # axis remains metadata-only. Cursor has no verified primary watcher adapter,
-    # so it cannot host a persistent secondmate yet.
+    # axis remains metadata-only. Persistent secondmates use the same Cursor
+    # lifecycle and busy integration where it already applies, with foreground
+    # checkpoints covering the unverified native seat-start and Stop-hook paths.
     cursor-agent)
-      if [ "$kind" = secondmate ]; then
-        echo "error: cursor-agent is verified for crewmates and scouts, not secondmates; primary supervision remains unverified" >&2
-        return 1
-      fi
       printf '%s' 'cursor-agent --trust --force __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       ;;
     *) return 1 ;;

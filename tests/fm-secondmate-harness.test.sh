@@ -596,29 +596,31 @@ test_spawn_unverified_secondmate_harness_refused() {
   pass "B6 spawn: an unverified resolved secondmate harness is refused (guard intact)"
 }
 
-test_spawn_cursor_agent_secondmate_refused() {
-  local w sm fakebin err rc
+test_spawn_cursor_agent_secondmate_accepts_model_variant() {
+  local w sm fakebin meta
   w="$TMP_ROOT/spawn-cursor-agent-secondmate"
   sm="$w/sm"
   mkdir -p "$w/home/config" "$w/home/state"
-  printf 'cursor-agent\n' > "$w/home/config/secondmate-harness"
+  printf 'cursor-agent cursor-grok-4.6-xhigh\n' > "$w/home/config/secondmate-harness"
   make_seeded_home "$sm" sm
   fakebin=$(make_noop_tmux "$w/tmux")
-  err="$w/spawn.err"
-  rc=0
   PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
     FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>"$err" || rc=$?
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>"$w/spawn.err"
 
-  [ "$rc" -ne 0 ] || fail "cursor-agent secondmate spawn should have failed"
-  assert_contains "$(cat "$err")" \
-    "cursor-agent is verified for crewmates and scouts, not secondmates" \
-    "cursor-agent secondmate refusal did not name the verified support boundary"
-  [ -e "$w/home/state/sm.meta" ] && fail "cursor-agent secondmate refusal still wrote metadata"
-  pass "cursor-agent remains unavailable for secondmates until primary supervision is verified"
+  meta="$w/home/state/sm.meta"
+  [ -f "$meta" ] || fail "cursor-agent secondmate launch did not write metadata"
+  [ "$(meta_harness "$meta")" = cursor-agent ] || fail "cursor-agent secondmate harness was not accepted"
+  [ "$(meta_field "$meta" model)" = cursor-grok-4.6-xhigh ] \
+    || fail "cursor-agent secondmate did not preserve the selected model variant"
+  [ "$(meta_field "$meta" effort)" = default ] \
+    || fail "cursor-agent secondmate invented a separate effort axis"
+  assert_no_grep "primary supervision remains unverified" "$w/spawn.err" \
+    "cursor-agent secondmate launch retained the old refusal"
+  pass "cursor-agent secondmate accepts the selected model id without a separate effort flag"
 }
 
 # ===========================================================================
@@ -2523,7 +2525,7 @@ test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
-test_spawn_cursor_agent_secondmate_refused
+test_spawn_cursor_agent_secondmate_accepts_model_variant
 test_spawn_backend_precedence_over_inherited_config
 test_spawn_explicit_backend_precedence_over_env_and_inherited_config
 test_spawn_bare_harness_no_model_effort_flag

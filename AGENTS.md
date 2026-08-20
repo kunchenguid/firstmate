@@ -184,7 +184,7 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
 The verified ordinary-worker harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, and `cursor-agent`; never dispatch on an unverified adapter.
-`cursor-agent` is not verified for primary or secondmate sessions.
+`cursor-agent` is verified for ordinary crew and scout launches; secondmate use is captain-approved only as a degraded production test with the supervision limits documented by `harness-adapters`, while primary-session use remains unverified.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.

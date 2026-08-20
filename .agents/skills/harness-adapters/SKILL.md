@@ -396,7 +396,7 @@ The tracked Claude Stop hooks skip themselves under `GROK_AGENT`, because Grok a
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol remains background-notify around `bin/fm-watch-arm.sh`; native Stop continuation does not provide Pi-like extension ownership.
 
-## cursor-agent (VERIFIED 2026-08-14 for crewmates and scouts only, Cursor Agent 2026.08.11-e8db854)
+## cursor-agent (VERIFIED 2026-08-14 for ordinary crew and scout launches; secondmate production-test support, Cursor Agent 2026.08.11-e8db854)
 
 Cursor Agent launches with a positional prompt as `cursor-agent --trust --force --model <model> <brief>`.
 `--force` is the unattended command-approval mode, while `--trust` bypasses the separate first-workspace confirmation that still appears under `--force` alone.
@@ -413,7 +413,7 @@ Cursor Agent launches with a positional prompt as `cursor-agent --trust --force 
 | Environment marker | None verified. Detection uses the exact `cursor-agent` command name in process ancestry. |
 | Composer | The idle bordered `→ Add a follow-up` placeholder is dim text and the shared composer reader already classifies it as empty. No `FM_COMPOSER_IDLE_RE` override or new bare glyph is needed. |
 | Effort | Effort lives in the selected model id or parameterized model selector, never in a separate flag. `fm-spawn` records the requested effort metadata while passing the model unchanged. |
-| Secondmate support | None. Cursor has no verified primary watcher, session-start delivery, turn-end guard, or recovery-grade process integration, so `fm-spawn` refuses Cursor secondmates. |
+| Secondmate support | Accepted for persistent seats under the production-test override. Cursor has no verified native seat session-start delivery, Stop-hook supervision, or recovery-grade primary integration. The seat therefore operates with bounded foreground checkpoints in the same degraded shape used for Kimi-style seats; no second watcher or new Cursor control plane is added. |
 
 The model-routing principle is: do not pay Cursor for capacity that a standalone subscription already provides.
 A future model id is classified by asking whether Pedro's standalone Claude Max or Codex Pro subscription already serves that capacity, not merely by checking whether Anthropic or OpenAI made it.
@@ -428,7 +428,7 @@ A controlled listener made the existing global hook observable without editing i
 `fm-spawn` installs that lifecycle in the disposable worktree's `.cursor/hooks.json` and excludes only that generated file through git info/exclude so it cannot surface in project diffs or pull requests while project-owned `.cursor/` files remain reviewable.
 The hooks drive the classifier through the trusted `cursor-hook` source, `SessionEnd` prevents a process exit from stranding busy state, and a successful firstmate Escape records the interrupt close directly.
 The watcher can absorb ordinary turn-end wakes while a new turn is provably active.
-Ordinary Cursor crewmate and scout dispatch is unattended-capable; primary and secondmate support remain unavailable.
+Ordinary Cursor crewmate and scout dispatch is unattended-capable. Cursor secondmate seats are accepted only as a degraded persistent-seat production test: existing lifecycle and busy integration are reused where they already apply, while the supervising firstmate relies on bounded foreground checkpoints because native seat session-start and Stop-hook delivery are not verified. This slice does not add a Cursor primary watcher, Stop-hook adapter, session-start transport, recovery daemon, or second supervision mechanism.
 Never modify Pedro's global Cursor files without his explicit approval.
 
 Cursor's MCP and skill portability are separate follow-up work.

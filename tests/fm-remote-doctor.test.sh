@@ -519,7 +519,7 @@ pass "a non-darwin host skips launch agents and starts its herdr server directly
 # --- --fix may add only owned wrappers for version-manager tools -------------
 
 new_case Linux with-herdr no-gui
-fm_test_hide_host_commands "$TMP_ROOT" tasks-axi codex opencode pi pi-signed grok kimi
+fm_test_hide_host_commands "$TMP_ROOT" tasks-axi codex opencode pi pi-signed grok kimi cursor-agent
 MANAGER_BIN="$CASE_HOME/.nvm/versions/node/v24/bin"
 mkdir -p "$MANAGER_BIN"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$MANAGER_BIN/codex"
