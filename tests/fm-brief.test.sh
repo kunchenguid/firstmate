@@ -1002,6 +1002,37 @@ test_replace_does_not_follow_a_swapped_destination() {
   pass "fm-brief.sh: publication never follows the destination"
 }
 
+test_replace_does_not_move_into_a_swapped_directory() {
+  local home shim real_cp id brief out status
+  home="$TMP_ROOT/rescaffold-directory-swap-home"
+  shim="$TMP_ROOT/rescaffold-directory-swap-bin"
+  mkdir -p "$home/data" "$shim"
+  real_cp=$(command -v cp)
+  id="brief-replace-directory-swap"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    '"$FM_TEST_REAL_CP" "$@" || exit $?' \
+    'rm -f -- "$FM_TEST_BRIEF"' \
+    'mkdir "$FM_TEST_BRIEF"' \
+    'printf "nested sentinel\\n" > "$FM_TEST_BRIEF/brief.md"' > "$shim/cp"
+  chmod +x "$shim/cp"
+
+  out=$(FM_TEST_REAL_CP="$real_cp" FM_TEST_BRIEF="$brief" \
+    PATH="$shim:$PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --replace 2>&1); status=$?
+  expect_code 1 "$status" "--replace must fail when its destination is swapped to a directory"
+  [ -d "$brief" ] || fail "failed publication replaced the swapped destination directory"
+  [ "$(cat "$brief/brief.md")" = "nested sentinel" ] \
+    || fail "publication moved into the swapped destination directory (got: $out)"
+  assert_grep "Delivery contract: mode=no-mistakes" \
+    "$home/data/$id/brief.superseded-1.md" \
+    "publication lost the archived live brief after a directory swap"
+
+  pass "fm-brief.sh: publication never moves into the destination"
+}
+
 # --replace applies to every scaffold kind, so no kind is left with hand-editing
 # as its only regeneration path.
 test_replace_applies_to_every_scaffold_kind() {
@@ -1115,6 +1146,7 @@ test_replace_validates_before_archiving
 test_replace_generation_failure_preserves_live_brief
 test_replace_rejects_non_regular_live_briefs
 test_replace_does_not_follow_a_swapped_destination
+test_replace_does_not_move_into_a_swapped_directory
 test_replace_applies_to_every_scaffold_kind
 test_generated_briefs_carry_each_section_once
 test_scout_and_secondmate_load_decision_hold_policy

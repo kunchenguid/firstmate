@@ -239,7 +239,9 @@ trap cleanup_staged_brief EXIT
 
 replace_staged_brief() {
   case "${OSTYPE:-}" in
-    darwin*) mv -fh -- "$1" "$2" ;;
+    darwin*)
+      perl -e 'rename($ARGV[0], $ARGV[1]) or die "error: cannot replace $ARGV[1]: $!\n"' -- "$1" "$2" || return 1
+      ;;
     linux*) mv -fT -- "$1" "$2" ;;
     *) echo "error: unsupported platform for no-follow brief replacement: ${OSTYPE:-unknown}" >&2; return 1 ;;
   esac
