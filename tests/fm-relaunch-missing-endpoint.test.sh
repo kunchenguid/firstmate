@@ -4,7 +4,8 @@
 #
 # Tests:
 #   1. fm-spawn --relaunch accepts a provably absent (missing) endpoint and
-#      creates a replacement.
+#      creates a replacement, in the worktree the task's own record names
+#      rather than in the project.
 #   2. fm-spawn --relaunch still refuses an unreadable endpoint (mutation check:
 #      treating "I could not check" as "it is gone" must fail).
 #   3. fm-control.sh exit still refuses a missing endpoint when called standalone.
@@ -79,15 +80,18 @@ case "${1:-}" in
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
   new-window)
-    shift
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) shift 2 ;;
-        -n) shift 2 ;;
-        -P) shift ;;
-        -F) shift 2 ;;
-        *) break ;;
-      esac
+    # -c is the created window's starting directory, and a real tmux window
+    # reports it as pane_current_path from then on. Recording it is what keeps
+    # the pane_current_path answer below a consequence of the request rather
+    # than a fixture that would agree with any request at all.
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "-c" ]; then
+        printf '%s' "$a" >> "$D/new-window-cwd"
+        printf '%s' "$a" > "$D/cwd"
+        break
+      fi
+      prev=$a
     done
     printf 'fakepane\n'
     exit 0 ;;
@@ -121,6 +125,7 @@ new_case() {  # <name> <id>
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
+  : > "$dir/fake/new-window-cwd"
   printf 'claude' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
@@ -194,6 +199,18 @@ test_spawn_relaunch_accepts_missing_endpoint() {
     || fail "the replacement meta must preserve the task id"
   [ "$(meta_field "$dir" rl-m1 harness)" = claude ] \
     || fail "the replacement meta must record the harness"
+  # A replacement endpoint is CREATED, so unlike an adopted one it starts
+  # wherever it was created. Created in the project, it starts in the project,
+  # and the worktree assertion below refuses it - which is what made recovery
+  # unreachable for exactly the case it exists for. It must be created in the
+  # worktree the task's own record already names, and must never acquire
+  # another one.
+  [ "$(cat "$dir/fake/new-window-cwd")" = "$dir/wt" ] \
+    || fail "the replacement window was created in '$(cat "$dir/fake/new-window-cwd")', not the recorded worktree '$dir/wt'"
+  assert_not_contains "$out" "refusing to relaunch an agent outside" \
+    "the worktree assertion must have nothing left to refuse"
+  assert_not_contains "$(cat "$dir/fake/keys")" "treehouse get" \
+    "a relaunch must enter the recorded worktree, never acquire another one"
   pass "fm-spawn --relaunch: accepts a provably absent endpoint and creates a replacement"
 }
 

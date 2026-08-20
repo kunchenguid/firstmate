@@ -2,6 +2,13 @@
 # tests/fm-spawn-relaunch.test.sh - placement recovery for a relaunch whose
 # launcher pane died with the endpoint it is recovering.
 #
+# Placement has two halves, and a relaunch needs both. WHICH WORKSPACE the
+# replacement lands in is the first; WHICH DIRECTORY its shell starts in is the
+# second, and the one the worktree assertion measures. Cases 1-7 cover the
+# workspace half. Cases 8-9 cover the directory half: the replacement must be
+# created in the worktree the task already has, and a replacement that lands
+# anywhere else must still be refused.
+#
 # fm-spawn.sh --relaunch presents the task's OWN recorded pane as the launcher,
 # so a replacement lands back in the workspace the task already lived in. When
 # the endpoint is provably absent that pane is gone too, so
@@ -211,8 +218,8 @@ test_a_fresh_spawn_still_refuses_a_dead_launcher_pane() {
 # make_spawn_case builds a real project, a real worktree, a real task record,
 # and a fake herdr keyed on the PANE ASKED FOR, so the destroyed pane and the
 # replacement pane can answer differently in the same run.
-make_spawn_case() {  # <name> <recorded-workspace-still-live: yes|no> -> echoes <dir>
-  local name=$1 live=$2 id=rl-p1 dir workspaces
+make_spawn_case() {  # <name> <recorded-workspace-still-live: yes|no> [honour-cwd: yes|no] -> echoes <dir>
+  local name=$1 live=$2 honour=${3:-yes} id=rl-p1 dir workspaces
   dir="$TMP_ROOT/$name"
   mkdir -p "$dir/fakebin" "$dir/home/state" "$dir/home/data/$id"
   : > "$dir/log"
@@ -257,12 +264,31 @@ case "\${1:-}-\${2:-}" in
       printf '{"error":{"code":"pane_not_found","message":"pane gone"}}\n'
       exit 1
     fi
-    printf '{"result":{"pane":{"pane_id":"\${3:-}","tab_id":"$RECORDED_WS:t9","workspace_id":"$RECORDED_WS","cwd":"$dir/wt","foreground_cwd":"$dir/wt"}}}\n' ;;
+    # A pane reports the directory it was CREATED in. Answering with the
+    # worktree unconditionally would model a backend that places every pane
+    # correctly no matter what it was asked for, which is exactly the
+    # assumption under test.
+    started="$dir/proj"
+    [ ! -f "$dir/created-cwd" ] || started=\$(cat "$dir/created-cwd")
+    printf '{"result":{"pane":{"pane_id":"\${3:-}","tab_id":"$RECORDED_WS:t9","workspace_id":"$RECORDED_WS","cwd":"'"\$started"'","foreground_cwd":"'"\$started"'"}}}\n' ;;
   workspace-list)
     printf '{"result":{"workspaces":[$workspaces]}}\n' ;;
   tab-list)
     printf '{"result":{"tabs":[]}}\n' ;;
   tab-create)
+    want=""
+    prev=""
+    for a in "\$@"; do
+      [ "\$prev" != "--cwd" ] || want=\$a
+      prev=\$a
+    done
+    if [ "$honour" = yes ]; then
+      printf '%s' "\$want" > "$dir/created-cwd"
+    else
+      # A backend that took the request and placed the pane somewhere else
+      # anyway. The relaunch must refuse, not adopt it.
+      printf '%s' "$dir/proj" > "$dir/created-cwd"
+    fi
     printf '{"result":{"tab":{"tab_id":"$RECORDED_WS:t9"},"root_pane":{"pane_id":"$RECORDED_WS:p9"}}}\n' ;;
   agent-get)
     printf '{"error":{"code":"agent_not_found","message":"none"}}\n' ;;
@@ -314,6 +340,57 @@ test_spawn_relaunch_refuses_when_there_is_nothing_to_recover_to() {
   pass "fm-spawn --relaunch: still refuses a destroyed pane whose recorded workspace is gone too"
 }
 
+# --- 8. the replacement comes up in the worktree the task already has --------
+#
+# Placement into the right WORKSPACE (above) still left the replacement pane
+# starting wherever a fresh spawn starts: the project directory. A fresh spawn
+# recovers from that by running `treehouse get`, which acquires a worktree and
+# moves the shell into it. A relaunch must not do that - a second copy for one
+# task is the hazard the worktree assertion exists to prevent - and nothing else
+# moved the pane, so the assertion refused every replacement it created.
+#
+# The replacement is created directly in the recorded worktree instead. That
+# also matters beyond recovery: `projects/` entries are commonly symlinks into
+# real working checkouts, so a replacement that starts in the project starts in
+# the captain's own checkout.
+test_spawn_relaunch_starts_the_replacement_in_the_recorded_worktree() {
+  local dir out rc wt
+  dir=$(make_spawn_case spawn-enters-worktree yes)
+  wt="$dir/wt"
+  out=$(run_spawn_relaunch "$dir"); rc=$?
+  expect_code 0 "$rc" "a replacement created in the recorded worktree must satisfy the worktree assertion"
+  assert_not_contains "$out" "refusing to relaunch an agent outside" \
+    "the worktree assertion must have nothing left to refuse"
+  assert_contains "$(cat "$dir/log")" $'\x1f''--cwd'$'\x1f'"$wt" \
+    "the replacement endpoint must be created in the task's own recorded worktree"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''--cwd'$'\x1f'"$dir/proj" \
+    "no endpoint for this task may be created in the project directory"
+  assert_contains "$(cat "$dir/created-cwd")" "$wt" \
+    "the replacement pane must actually report the recorded worktree as its cwd"
+  assert_not_contains "$out" "treehouse get" \
+    "a relaunch must enter the recorded worktree, never acquire another one"
+  assert_contains "$(cat "$dir/home/state/rl-p1.meta")" "worktree=$wt" \
+    "the replacement must still be recorded against the one worktree holding its work"
+  pass "fm-spawn --relaunch: starts the replacement inside the task's recorded worktree"
+}
+
+# --- 9. and the assertion still refuses a replacement placed elsewhere -------
+#
+# The fix makes the assertion's precondition true; it must not make the
+# assertion vacuous. A backend that accepts the request and puts the pane
+# somewhere else anyway still has to be refused, because the alternative is an
+# agent running in a directory that is not the one holding its work.
+test_spawn_relaunch_refuses_a_replacement_placed_outside_the_worktree() {
+  local dir out rc
+  dir=$(make_spawn_case spawn-misplaced yes no)
+  out=$(run_spawn_relaunch "$dir"); rc=$?
+  expect_code 1 "$rc" "a replacement that did not land in the recorded worktree must refuse"
+  assert_contains "$out" "refusing to relaunch an agent outside the copy holding its work" \
+    "the refusal must name what it is protecting"
+  assert_contains "$out" "$dir/wt" "the refusal must name the recorded worktree it expected"
+  pass "fm-spawn --relaunch: still refuses when the replacement did not land in the recorded worktree"
+}
+
 test_relaunch_recovers_the_recorded_workspace
 test_relaunch_refuses_a_pane_that_is_only_unreadable
 test_relaunch_refuses_when_the_recorded_workspace_is_gone
@@ -321,5 +398,7 @@ test_relaunch_refuses_a_recorded_workspace_from_another_session
 test_a_fresh_spawn_still_refuses_a_dead_launcher_pane
 test_spawn_relaunch_recovers_a_destroyed_pane
 test_spawn_relaunch_refuses_when_there_is_nothing_to_recover_to
+test_spawn_relaunch_starts_the_replacement_in_the_recorded_worktree
+test_spawn_relaunch_refuses_a_replacement_placed_outside_the_worktree
 
 echo "all tests passed"

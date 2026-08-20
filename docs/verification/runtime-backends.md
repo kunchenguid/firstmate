@@ -320,6 +320,49 @@ ok - real herdr E2E: teardown closes only the worker's own pane and leaves the l
 That suite's headline case runs `bin/fm-spawn.sh` inside a real Herdr pane, so the parent identity comes from Herdr's own injection rather than a composed environment.
 Cross-session and contradictory bindings are covered deterministically in `tests/fm-backend-herdr.test.sh`, which can script a second server's socket without provisioning one.
 
+### Relaunch replacement placement
+
+A relaunch that adopts a still-present endpoint inherits the directory that endpoint is already in.
+A relaunch whose recorded endpoint is provably absent creates a replacement, and a created pane starts in the directory it was created with.
+Checked on 2026-08-20 against Herdr 0.8.2 that `tab create --cwd` is what the pane then reports as its own directory:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh
+"$HERDR_LAB_HELPER" run "$LAB" tab create --workspace w1 --cwd "$WT" --label fm-explore --no-focus
+"$HERDR_LAB_HELPER" run "$LAB" pane get w1:p2 | jq -c '.result.pane | {pane_id,cwd,foreground_cwd}'
+```
+
+```text
+{"pane_id":"w1:p2","cwd":"/private/var/folders/.../wt","foreground_cwd":"/private/var/folders/.../wt"}
+```
+
+A directory the pane cannot enter is refused by Herdr at creation rather than silently relocated:
+
+```text
+{"error":{"code":"tab_create_failed","message":"Permission denied (os error 13)"},"id":"cli:tab:create"}
+```
+
+End-to-end placement of a replacement for a genuinely killed pane is owned by:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-spawn-relaunch-worktree-e2e.test.sh
+```
+
+Observed guarantees on 2026-08-20 against Herdr 0.8.2:
+
+```text
+    relaunch| relaunch: endpoint fm-lab-fm-relaunch-wt-93740-16107:w1:p2 is provably absent (backend: herdr); creating a replacement
+    relaunch| spawned rlwt1 harness=sh kind=ship mode=direct-PR yolo=off window=fm-lab-fm-relaunch-wt-93740-16107:w1:p3 worktree=/private/var/folders/.../starts-in-worktree/wt
+    replacement pane w1:p3 cwd: /private/var/folders/.../starts-in-worktree/wt
+ok - fm-spawn --relaunch: a replacement for a genuinely dead pane comes up inside the recorded worktree
+ok - fm-spawn --relaunch: refuses and creates nothing when the recorded worktree cannot be entered
+```
+
+That suite kills the pane's own process, so the endpoint is absent for the same reason it is absent in production, not because a fixture said so.
+The backend-independent half - that the worktree assertion still refuses a replacement placed anywhere else - is pinned deterministically in `tests/fm-spawn-relaunch.test.sh`, which can model a backend that ignores the requested directory where a real Herdr will not.
+The tmux side of the same placement path is pinned in `tests/fm-relaunch-missing-endpoint.test.sh`.
+
 ### Per-home and presentation topology
 
 Per-home behavior is owned by:

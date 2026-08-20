@@ -86,13 +86,16 @@ fm_backend_tmux_container_ensure() {
 #     treehouse cd's into the worktree, which would break name-based targeting.
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
-fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
-  local ses=$1 wname=$2 proj_abs=$3 wid
+# The third argument is the directory the new window's shell STARTS in, which
+# is the project for a fresh spawn and the task's own recorded worktree for a
+# relaunch replacement (fm-spawn.sh's SPAWN_CWD owns that choice).
+fm_backend_tmux_create_task() {  # <session> <window-name> <cwd> -> prints window id
+  local ses=$1 wname=$2 cwd=$3 wid
   if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
-  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
+  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$cwd") || return 1
   tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
   tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
   printf '%s\n' "$wid"
