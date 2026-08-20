@@ -3,7 +3,7 @@
 #
 # Usage:
 #   fm-procevent-signal.sh arm <selector>
-#   fm-procevent-signal.sh source <selector>
+#   fm-procevent-signal.sh source
 #   fm-procevent-signal.sh send <selector> [message-file|-]
 #   fm-procevent-signal.sh retire <selector>
 #   fm-procevent-signal.sh source-id <selector>
@@ -23,6 +23,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GROUPS_FILE="$CONFIG/signal-groups"
 SEND_TIMEOUT=${FM_SIGNAL_COMMAND_TIMEOUT:-30}
+SOURCE_ID=signal-account
 
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
@@ -54,7 +55,7 @@ validate_selector() {
 
 source_id() {
   validate_selector "$1"
-  printf 'signal-%s\n' "$1"
+  printf '%s\n' "$SOURCE_ID"
 }
 
 ensure_groups_file() {
@@ -91,8 +92,7 @@ display_label() {
 }
 
 lifecycle_lock() {
-  validate_selector "$1"
-  printf '%s/signal/%s.lock\n' "$STATE" "$1"
+  printf '%s/signal/account.lock\n' "$STATE"
 }
 
 account_from_output() {
@@ -110,37 +110,56 @@ account_number() {
   account=$(account_from_output "$output")
   rm -f "$output"
   case "$account" in
-    ''|*[!+0-9]*) die "Signal account discovery returned no usable account" ;;
+    +[0-9]*)
+      case "${account#+}" in *[!0-9]*) die "Signal account discovery returned no usable account" ;; esac
+      ;;
+    *) die "Signal account discovery returned no usable account" ;;
   esac
   printf '%s\n' "$account"
 }
 
 emit_message() {
-  local selector=$1 group=$2
-  SIGNAL_GROUP_ID="$group" SIGNAL_SELECTOR="$selector" python3 -c '
+  SIGNAL_GROUPS_FILE="$GROUPS_FILE" python3 -c '
+import json
 import os
+import re
 import sys
 
-group = os.environ["SIGNAL_GROUP_ID"]
-selector = os.environ["SIGNAL_SELECTOR"]
-text = sys.stdin.read()
-message_group = ""
-body = ""
-if "Body:" in text:
-    after_body = text.split("Body:", 1)[1]
-    if after_body.startswith(" "):
-        after_body = after_body[1:]
-    parts = after_body.split("\nGroup info:", 1)
-    body = parts[0]
-    if body.endswith("\n"):
-        body = body[:-1]
-    if len(parts) == 2:
-        for line in parts[1].splitlines():
-            stripped = line.strip()
-            if stripped.startswith("Id:"):
-                message_group = stripped.split(":", 1)[1].strip()
-                break
-if message_group != group or not body:
+groups = {}
+selectors = set()
+with open(os.environ["SIGNAL_GROUPS_FILE"], "rb") as source:
+    for raw in source:
+        line = raw.rstrip(b"\n")
+        if not line.strip() or line.lstrip().startswith(b"#"):
+            continue
+        parts = line.split(b"\t")
+        if len(parts) != 3:
+            raise SystemExit(2)
+        try:
+            selector = parts[0].decode("ascii")
+            group = parts[1].decode("ascii")
+        except UnicodeDecodeError:
+            raise SystemExit(2)
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,48}", selector):
+            raise SystemExit(2)
+        if not re.fullmatch(r"[A-Za-z0-9+/=_-]+", group):
+            raise SystemExit(2)
+        if selector in selectors or group in groups:
+            raise SystemExit(2)
+        selectors.add(selector)
+        groups[group] = selector
+
+try:
+    document = json.load(sys.stdin.buffer)
+    message = document["envelope"]["dataMessage"]
+    group = message["groupInfo"]["groupId"]
+    body = message["message"]
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(2)
+if not isinstance(group, str) or not isinstance(body, str) or not body:
+    raise SystemExit(2)
+selector = groups.get(group)
+if selector is None:
     raise SystemExit(2)
 body_bytes = body.encode()
 sys.stdout.write("schema=fm-signal.v1\n")
@@ -152,34 +171,33 @@ sys.stdout.buffer.write(body_bytes)
 }
 
 cmd_source() {
-  local selector=${1-} group account rc
-  validate_selector "$selector"
-  group=$(group_id "$selector") || exit 1
+  local account
+  local -a receive_status
+  ensure_groups_file
   account=$(account_number) || exit 1
   while :; do
-    if signal-cli -a "$account" receive -t -1 --max-messages 1 \
+    if signal-cli -a "$account" -o json receive -t -1 --max-messages 1 \
       --ignore-attachments --ignore-stories --ignore-avatars --ignore-stickers 2>/dev/null \
-      | emit_message "$selector" "$group"; then
+      | emit_message; then
       return 0
     fi
-    rc=("${PIPESTATUS[@]}")
-    [ "${rc[0]}" -eq 0 ] || sleep 1
+    receive_status=("${PIPESTATUS[@]}")
+    [ "${receive_status[0]}" -eq 0 ] || sleep 1
   done
 }
 
 cmd_arm_locked() {
-  local selector=$1 sid
-  sid=$(source_id "$selector")
+  local selector=$1
   group_id "$selector" >/dev/null
-  "$SCRIPT_DIR/fm-procevent.sh" register signal "$sid" -- \
-    "$SCRIPT_DIR/fm-procevent-signal.sh" source "$selector" || return 1
+  "$SCRIPT_DIR/fm-procevent.sh" register signal "$SOURCE_ID" -- \
+    "$SCRIPT_DIR/fm-procevent-signal.sh" source || return 1
   printf 'armed: Signal source\n'
 }
 
 cmd_arm() {
   local selector=${1-} lock
   validate_selector "$selector"
-  lock=$(lifecycle_lock "$selector")
+  lock=$(lifecycle_lock)
   mkdir -p "${lock%/*}" || die "cannot create Signal lifecycle state"
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock Signal lifecycle"
@@ -189,14 +207,13 @@ cmd_arm() {
 }
 
 cmd_retire_locked() {
-  local selector=$1
-  "$SCRIPT_DIR/fm-procevent.sh" retire "$(source_id "$selector")"
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$SOURCE_ID"
 }
 
 cmd_retire() {
   local selector=${1-} lock
   validate_selector "$selector"
-  lock=$(lifecycle_lock "$selector")
+  lock=$(lifecycle_lock)
   mkdir -p "${lock%/*}" || die "cannot create Signal lifecycle state"
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock Signal lifecycle"
@@ -251,11 +268,23 @@ cmd_send() {
     cat >"$staged" || { rm -f "$staged"; die "cannot read Signal message"; }
     message=$staged
   fi
-  lock=$(lifecycle_lock "$selector")
+  lock=$(lifecycle_lock)
   mkdir -p "${lock%/*}" || die "cannot create Signal lifecycle state"
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock Signal lifecycle"
-    trap 'cmd_arm_locked "$selector" >/dev/null 2>&1 || printf "error: could not restore Signal receive source: %s\n" "$selector" >&2; rm -f "$staged"; fm_lock_release "$lock"' EXIT
+    restore_source() {
+      local status=$?
+      trap - EXIT
+      if ! (cmd_arm_locked "$selector") >/dev/null 2>&1 \
+        || ! "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1; then
+        printf 'error: could not restore Signal receive source: %s\n' "$selector" >&2
+        status=1
+      fi
+      [ -z "$staged" ] || rm -f "$staged"
+      fm_lock_release "$lock"
+      exit "$status"
+    }
+    trap restore_source EXIT
     cmd_send_locked "$selector" "$message" || send_rc=$?
     return "$send_rc"
   )
@@ -269,7 +298,7 @@ cmd_classify() {
 
 case "${1:-}" in
   arm) shift; [ "$#" -eq 1 ] || usage; cmd_arm "$1" ;;
-  source) shift; [ "$#" -eq 1 ] || usage; cmd_source "$1" ;;
+  source) shift; [ "$#" -eq 0 ] || usage; cmd_source ;;
   send) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_send "$@" ;;
   retire) shift; [ "$#" -eq 1 ] || usage; cmd_retire "$1" ;;
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;

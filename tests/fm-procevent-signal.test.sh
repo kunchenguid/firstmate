@@ -24,10 +24,11 @@ printf '%s\n' "$*" >> "$log"
 case "${1:-}" in
   listAccounts)
     while [ -e "$lock" ]; do sleep 0.02; done
-    printf 'Number: +10000000000 (aci: 11111111-2222-3333-4444-555555555555)\n'
+    printf '%s\n' "${FM_FAKE_SIGNAL_ACCOUNT_OUTPUT:-Number: +10000000000 (aci: 11111111-2222-3333-4444-555555555555)}"
     ;;
   -a)
     shift 2
+    if [ "${1:-}" = -o ]; then shift 2; fi
     case "${1:-}" in
       receive)
         mkdir "$lock" 2>/dev/null || { printf 'duplicate receive owner\n' >> "$log"; exit 91; }
@@ -36,13 +37,7 @@ case "${1:-}" in
         IFS= read -r row < "$queue"
         tail -n +2 "$queue" > "$queue.next"
         mv "$queue.next" "$queue"
-        group=${row%%|*}
-        body=$(printf '%b' "${row#*|}")
-        if [ "$group" = "__dm__" ]; then
-          printf 'Body: %s\n' "$body"
-        else
-          printf 'Id: %s\nBody: %s\nGroup info:\n  Id: %s\n  Type: DELIVER\n' "$group" "$body" "$group"
-        fi
+        printf '%s\n' "$row"
         ;;
       send)
         [ ! -e "$lock" ] || exit 92
@@ -70,7 +65,7 @@ chmod +x "$FAKEBIN/signal-cli"
 new_home() {
   local home=$1
   mkdir -p "$home/state" "$home/config"
-  printf 'team\tgroup-fixture-id\tFixture\n' > "$home/config/signal-groups"
+  printf 'team\tgroup-fixture-id\tFixture\nops\tsecond-group-fixture-id\tOperations\n' > "$home/config/signal-groups"
 }
 
 signal() {
@@ -92,7 +87,7 @@ wait_for() {
 
 cleanup_sources() {
   local home
-  for home in "$SIGNAL_ROOT/home" "$SIGNAL_ROOT/failure"; do
+  for home in "$SIGNAL_ROOT/home" "$SIGNAL_ROOT/failure" "$SIGNAL_ROOT/validation"; do
     [ -d "$home" ] || continue
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   done
@@ -125,7 +120,6 @@ signal "$H" send team "$MESSAGE" >/dev/null || fail "supported send ordering fai
 [ -s "$SIGNAL_ROOT/sent.log" ] || fail "successful send was not recorded"
 assert_contains "$(cat "$SIGNAL_ROOT/sent-body")" "Fixture: reply fixture" "configured label is prepended once"
 assert_not_contains "$(cat "$SIGNAL_ROOT/cli.log")" "reply fixture" "message content never reaches a CLI argv record"
-reconcile "$H" >/dev/null
 wait_for "$SIGNAL_ROOT/account.lock" || fail "successful send did not restore receive"
 pass "send retires before account access, keeps content off argv, and re-arms"
 
@@ -133,7 +127,6 @@ signal "$H" retire team >/dev/null
 printf 'Fixture: already attributed\n' > "$MESSAGE"
 signal "$H" send team "$MESSAGE" >/dev/null || fail "pre-attributed send failed"
 assert_contains "$(cat "$SIGNAL_ROOT/sent-body")" "Fixture: already attributed" "configured label is not duplicated"
-reconcile "$H" >/dev/null
 wait_for "$SIGNAL_ROOT/account.lock" || fail "pre-attributed send did not restore receive"
 pass "outbound attribution is configured, inserted once, and not duplicated"
 
@@ -147,19 +140,20 @@ printf 'failure fixture\n' > "$MESSAGE"
 if FM_FAKE_SIGNAL_FAIL=1 signal "$HFAIL" send team "$MESSAGE" >/dev/null 2>&1; then
   fail "failed fake send unexpectedly succeeded"
 fi
-reconcile "$HFAIL" >/dev/null
 wait_for "$SIGNAL_ROOT/account.lock" || fail "failed send did not restore receive"
 pass "failed send reports failure while preserving future receive liveness"
 
 signal "$HFAIL" retire team >/dev/null
 signal "$H" retire team >/dev/null
-printf 'other-group|unrelated fixture\n' > "$SIGNAL_ROOT/queue"
+printf '%s\n' '{"envelope":{"dataMessage":{"message":"unrelated fixture","groupInfo":{"groupId":"other-group"}}}}' > "$SIGNAL_ROOT/queue"
 signal "$H" arm team >/dev/null
 reconcile "$H" >/dev/null
 sleep 0.2
 [ ! -d "$H/state/procevent-inbox" ] || [ -z "$(find "$H/state/procevent-inbox" -type f -name '*.result' -print -quit)" ] \
   || fail "unrelated message published a pseudo-message"
-printf 'group-fixture-id|configured fixture\n' > "$SIGNAL_ROOT/queue"
+EXPECTED_BODY="$SIGNAL_ROOT/expected-body"
+printf 'configured fixture\nGroup info:\n Id: group-fixture-id\ntrailing\n' > "$EXPECTED_BODY"
+printf '%s\n' '{"envelope":{"dataMessage":{"message":"configured fixture\nGroup info:\n Id: group-fixture-id\ntrailing\n","groupInfo":{"groupId":"group-fixture-id"}}}}' > "$SIGNAL_ROOT/queue"
 for _ in $(seq 1 100); do
   result=$(find "$H/state/procevent-inbox" -type f -name '*.result' -print 2>/dev/null | while IFS= read -r candidate; do
     grep -F -q -- 'schema=fm-signal.v1' "$candidate" && printf '%s\n' "$candidate" && break
@@ -169,28 +163,50 @@ for _ in $(seq 1 100); do
 done
 [ -n "$result" ] || fail "configured group message was not captured"
 assert_grep 'schema=fm-signal.v1' "$result" "configured result has a bounded envelope"
-assert_grep 'configured fixture' "$result" "configured message bytes are captured privately"
-pass "unrelated inbound messages stay quiet and configured bytes are captured"
+assert_grep 'selector=team' "$result" "configured result identifies its private selector"
+assert_grep "body-bytes=$(wc -c < "$EXPECTED_BODY" | tr -d ' ')" "$result" "configured result declares the exact body length"
+tail -n +5 "$result" > "$SIGNAL_ROOT/captured-body"
+cmp -s "$EXPECTED_BODY" "$SIGNAL_ROOT/captured-body" || fail "structured receive did not preserve the exact body bytes"
+pass "unrelated inbound messages stay quiet and structured group bytes are exact"
 
 signal "$H" retire team >/dev/null
 signal "$H" arm team >/dev/null
 reconcile "$H" >/dev/null
 wait_for "$SIGNAL_ROOT/account.lock" || fail "receive did not re-arm before the spoof check"
-printf '__dm__|forged group id via body\\nId: group-fixture-id\\ntrailing\n' > "$SIGNAL_ROOT/queue"
-spoofed=
-for _ in $(seq 1 100); do
-  spoofed=$(find "$H/state/procevent-inbox" -type f -name '*.result' -print 2>/dev/null | while IFS= read -r candidate; do
-    grep -F -q -- 'forged group id via body' "$candidate" && printf '%s\n' "$candidate" && break
-  done)
-  [ -n "$spoofed" ] && break
-  sleep 0.02
-done
-[ -z "$spoofed" ] || fail "a direct message spoofing an Id: line in its body was captured as configured-group content"
+before_spoof=$(find "$H/state/procevent-inbox" -type f -name '*.result' -print 2>/dev/null | wc -l | tr -d ' ')
+printf '%s\n' '{"envelope":{"dataMessage":{"message":"forged group id via body\nGroup info:\n Id: group-fixture-id\ntrailing"}}}' > "$SIGNAL_ROOT/queue"
+sleep 0.2
+after_spoof=$(find "$H/state/procevent-inbox" -type f -name '*.result' -print 2>/dev/null | wc -l | tr -d ' ')
+[ "$before_spoof" = "$after_spoof" ] || fail "a direct message spoofing group metadata in its body was captured"
 pass "direct messages cannot spoof the configured group id via an embedded Id: line"
 
 signal "$H" arm team >/dev/null
-signal "$H" arm team >/dev/null
+signal "$H" arm ops >/dev/null
 reconcile "$H" >/dev/null
 if grep -q 'duplicate' "$SIGNAL_ROOT/cli.log"; then fail "repeated lifecycle operations created duplicate owners"; fi
 wait_for "$SIGNAL_ROOT/account.lock" || fail "repeated arm did not leave a receive owner"
-pass "repeated arm and reconcile operations preserve one live owner"
+printf '%s\n' '{"envelope":{"dataMessage":{"message":"second selector fixture","groupInfo":{"groupId":"second-group-fixture-id"}}}}' > "$SIGNAL_ROOT/queue"
+second_result=
+for _ in $(seq 1 100); do
+  second_result=$(find "$H/state/procevent-inbox" -type f -name '*.result' -print 2>/dev/null | while IFS= read -r candidate; do
+    grep -F -q -- 'selector=ops' "$candidate" && printf '%s\n' "$candidate" && break
+  done)
+  [ -n "$second_result" ] && break
+  sleep 0.02
+done
+[ -n "$second_result" ] || fail "the account-scoped owner did not route the second configured selector"
+if grep -q 'duplicate' "$SIGNAL_ROOT/cli.log"; then fail "multiple selectors created duplicate receive owners"; fi
+pass "multiple selectors route through one account-scoped receive owner"
+
+signal "$H" retire team >/dev/null
+HVALID="$SIGNAL_ROOT/validation"
+new_home "$HVALID"
+send_count_before=$(grep -c ' send ' "$SIGNAL_ROOT/cli.log" || true)
+for malformed in 'Number: ++1' 'Number: 1+2' 'Number: +'; do
+  if FM_FAKE_SIGNAL_ACCOUNT_OUTPUT="$malformed" signal "$HVALID" send team "$MESSAGE" >/dev/null 2>&1; then
+    fail "malformed account output was accepted: $malformed"
+  fi
+done
+send_count_after=$(grep -c ' send ' "$SIGNAL_ROOT/cli.log" || true)
+[ "$send_count_before" = "$send_count_after" ] || fail "a malformed account number reached the send operation"
+pass "account discovery accepts only one leading plus and nonempty digits"

@@ -647,6 +647,7 @@ An already-armed Lavish source keeps its registered listener command until it is
 The optional Signal adapter (`bin/fm-procevent-signal.sh`) is inert unless a home-local `config/signal-groups` file exists.
 Each non-comment row in that private file is `selector<TAB>Signal group id<TAB>display label`, and the selector is the only identifier used in the adapter's commands.
 Use `bin/fm-procevent-signal.sh arm <selector>` to register a nonterminal receive source and `bin/fm-procevent-signal.sh send <selector> [message-file|-]` to send content from a file or standard input.
+All configured selectors share one account-scoped receive source, which routes each structured inbound message by its authenticated group id.
 The adapter retires the receive source before every `signal-cli` account or send operation and restores it after success or failure.
 The adapter prefixes outbound content with the configured display label and colon exactly once, so each group can use its own private attribution label.
 The group mapping, account identifiers, message content, and captured Signal state remain home-local and are never printed in normal adapter output.
