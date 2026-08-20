@@ -233,13 +233,15 @@ test_identity_matched_reparented_session_refreshes_and_arms() {
 # Hold the auto-arm owner lock from a separate process under <role>, exactly as
 # bin/fm-turnend-guard.sh does for its own short critical sections. Returns once
 # the lock is really held; the holder releases it after <hold-seconds>.
-hold_owner_lock() {  # <dir> <role> <hold-seconds>
+hold_owner_lock() {  # <dir> <role|unstamped> <hold-seconds>
   local dir=$1 role=$2 seconds=$3 i=0
   rm -f "$dir/state/owner-lock-held"
   bash -c '
       . "$0"
       fm_lock_try_acquire "$1" || exit 1
-      fm_lock_set_role "$1" "$2" || exit 1
+      if [ "$2" != unstamped ]; then
+        fm_lock_set_role "$1" "$2" || exit 1
+      fi
       : > "$4"
       sleep "$3"
       fm_lock_release "$1"
@@ -268,6 +270,22 @@ test_guard_owned_lock_does_not_starve_a_late_autoarm() {
   [ -e "$dir/state/arm-ran" ] || fail "a guard-held owner lock silenced a healthy auto-arm"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "the delayed arm did not record its claimed rewake"
   pass "auto-arm: a guard-owned owner-lock window delays the claim instead of standing it down"
+}
+
+test_unstamped_owner_lock_holder_does_not_stand_the_arm_down() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/owner-lock-unstamped")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  # Every holder takes the lock before it stamps its role, so an absent role
+  # names nobody. Standing down for it would reproduce the inert arm the wait
+  # exists to prevent.
+  hold_owner_lock "$dir" unstamped 0.6
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  wait "$OWNER_LOCK_HOLDER" 2>/dev/null || true
+  expect_code 2 "$status" "an arm must not stand down for an owner lock that names no role"
+  [ -e "$dir/state/arm-ran" ] || fail "an unstamped owner lock silenced a healthy auto-arm"
+  pass "auto-arm: an owner lock with no role yet is waited out, not treated as another arm"
 }
 
 test_another_live_autoarm_still_stands_the_hook_down() {
@@ -742,6 +760,7 @@ test_identity_matched_reparented_session_refreshes_and_arms
 test_reclaims_stale_session_lock_before_arming
 test_guard_owned_lock_does_not_starve_a_late_autoarm
 test_another_live_autoarm_still_stands_the_hook_down
+test_unstamped_owner_lock_holder_does_not_stand_the_arm_down
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates

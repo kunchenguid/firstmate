@@ -130,6 +130,35 @@ chmod 0700 "$SESSION_DIR"
   || fail "a failed publication must not reactivate the prior session's on decision"
 pass "a stale on record is inactive when publication fails in a new locked session"
 
+# An identity-matched reparenting rewrites line 1 of state/.lock for the SAME
+# live session (bin/fm-session-lock-lib.sh). The frozen decision is persisted
+# state bound to that owner, so it must survive the refresh and still retire for
+# a genuinely different session.
+printf '303\nharness=claude\nsession=trace-owner\n' > "$SESSION_DIR/.lock"
+FM_TRACE_CONTEXT=on fm_trace_context_session_start "$CFG_OFF" "$SESSION_STATE"
+[ "$(fm_trace_context_session_effective "$SESSION_STATE")" = on ] \
+  || fail "a freshly published identity-bound decision must be effective"
+[ "$(cat "$SESSION_STATE")" = "303 on session=trace-owner" ] \
+  || fail "publication must bind the decision to the owner identity too (got '$(cat "$SESSION_STATE")')"
+printf '404\nharness=claude\nsession=trace-owner\n' > "$SESSION_DIR/.lock"
+[ "$(fm_trace_context_session_effective "$SESSION_STATE")" = on ] \
+  || fail "a reparented owner's pid refresh must not silently retire its own frozen decision"
+printf '404\nharness=claude\nsession=other-session\n' > "$SESSION_DIR/.lock"
+[ "$(fm_trace_context_session_effective "$SESSION_STATE")" = off ] \
+  || fail "a different live session must not inherit the prior session's frozen decision"
+printf '404\n' > "$SESSION_DIR/.lock"
+[ "$(fm_trace_context_session_effective "$SESSION_STATE")" = off ] \
+  || fail "a legacy lock with no identity must not match an identity-bound record by pid alone"
+printf '303\nharness=claude\nsession=trace-owner\n' > "$SESSION_DIR/.lock"
+printf '303 on session=trace-owner surplus\n' > "$SESSION_STATE"
+[ "$(fm_trace_context_session_effective "$SESSION_STATE")" = off ] \
+  || fail "a record with a surplus trailing field must fail independent and default off"
+printf '303 on binding=trace-owner\n' > "$SESSION_STATE"
+[ "$(fm_trace_context_session_effective "$SESSION_STATE")" = off ] \
+  || fail "an unrecognized third field must fail independent and default off"
+printf '202\n' > "$SESSION_DIR/.lock"
+pass "the frozen decision follows its owner across an identity-matched pid refresh"
+
 printf '202 invalid\n' > "$SESSION_STATE"
 [ "$(fm_trace_context_session_effective "$SESSION_STATE")" = off ] \
   || fail "invalid session state must fail independent and default off"

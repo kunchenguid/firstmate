@@ -171,7 +171,8 @@ fi
 # lock for its own short critical sections (`terminal-check`, `structural-failure`
 # in bin/fm-turnend-guard.sh), and standing down for one of those would convert a
 # merely slow but healthy arm into the inert arm the guard is about to record.
-# Those sections are bounded, so wait them out instead.
+# Those sections are bounded, so wait them out instead, and so is the window
+# between any holder's acquire and its role stamp.
 claim_owner_lock() {
   local waited=0 ticks role
   ticks=$((OWNER_LOCK_WAIT_MS / 100))
@@ -179,7 +180,13 @@ claim_owner_lock() {
     fm_lock_try_acquire "$OWNER_LOCK" && return 0
     role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
     case "$role" in
+      # Guard-owned and bounded: wait it out.
       terminal-check|structural-failure) : ;;
+      # No role yet says nothing about who holds this lock: the holder may have
+      # released between the failed acquire and this read, or may not have
+      # stamped its role yet. Only a role that positively names another arm
+      # stands this firing down.
+      '') : ;;
       *) return 1 ;;
     esac
     [ "$waited" -lt "$ticks" ] || return 1

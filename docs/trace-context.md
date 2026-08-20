@@ -56,6 +56,7 @@ An actual disabled relaunch regenerates the task meta without `traceparent=`, so
 
 Each locked `bin/fm-session-start.sh` run resolves that home's `config/trace-context` plus `FM_TRACE_CONTEXT` exactly once into session-scoped effective state.
 The decision is atomically published through a same-directory temporary file and bound to the current session lock, so a failed publication cannot reactivate a stale `on` record from an earlier session.
+That binding is the lock's pid plus, when the lock record carries one, the owner's stable session identity, because an identity-matched reparenting refreshes the recorded pid for the same live session; either binding proves the same ownership, and a genuinely different session matches neither and gets `off`.
 Every spawn from that home reads only the frozen `on` or `off` decision.
 Later config or environment edits are ignored until that home starts a new session.
 Missing, stale, unreadable, invalid, or unsuccessfully published effective state defaults safely to `off`.

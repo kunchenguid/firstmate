@@ -77,6 +77,9 @@ CLAUDE_MODE=0
 CURSOR_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
+STRUCTURAL_RECHECK_MS=${FM_CLAUDE_AUTOARM_STRUCTURAL_RECHECK_MS:-500}
+case "$STRUCTURAL_RECHECK_MS" in ''|*[!0-9]*) STRUCTURAL_RECHECK_MS=500 ;; esac
+STRUCTURAL_RECHECK_TICKS=$((STRUCTURAL_RECHECK_MS / 100))
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
 case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
@@ -429,6 +432,23 @@ if ! record_structurally_unclaimed_failure; then
   autoarm_owns_recovery && exit 0
   block_stop
 fi
+# An arm that reached its claim while this guard held the owner lock waits that
+# section out (bin/fm-claude-stop-autoarm.sh) instead of standing down, so it can
+# only proceed AFTER the record above. Re-check before consuming the budget:
+# blocking here would report "recovery is NOT already under way" about recovery
+# that now is, and would spend a blocked-stop count on an episode a healthy arm
+# is about to clear.
+i=0
+while [ "$i" -lt "$STRUCTURAL_RECHECK_TICKS" ]; do
+  sleep 0.1
+  if autoarm_owns_recovery; then
+    if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+      fm_failure_episode_reset "$STATE" || exit 2
+    fi
+    exit 0
+  fi
+  i=$((i + 1))
+done
 budget_account_current_epoch || block_stop
 terminal_fail_open
 terminal_status=$?

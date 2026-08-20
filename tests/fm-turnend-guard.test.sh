@@ -1505,6 +1505,36 @@ test_hook_claude_mode_structurally_unclaimed_recovery_is_bounded() {
   pass "fm-turnend-guard --claude: an inert ownership recovery blocks three times, then fails open loudly"
 }
 
+# The Stop auto-arm waits out the guard's own owner-lock sections instead of
+# standing down (bin/fm-claude-stop-autoarm.sh), so a slow but healthy arm can
+# only claim AFTER the guard has written its structural episode. Blocking then
+# would tell the operator recovery is not under way when it is.
+test_hook_claude_mode_late_claim_after_structural_record_does_not_block() {
+  local dir out status holder
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-late-claim")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  # An arm that reaches its claim just after the guard's sync wait elapses.
+  bash -c '
+      sleep 0.3
+      . "$0"
+      fm_lock_try_acquire "$1" || exit 1
+      fm_lock_set_role "$1" autoarm || exit 1
+      sleep 2
+      fm_lock_release "$1"
+    ' "$dir/bin/fm-wake-lib.sh" "$dir/state/.claude-autoarm.lock" &
+  holder=$!
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 0 "$status" "a Stop whose arm claimed during the structural re-check must not be blocked"
+  assert_not_contains "$out" 'recovery is NOT already under way' \
+    "the guard blocked a Stop whose auto-arm had just claimed the home"
+  assert_not_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' \
+    "a late claim was escalated to the attended fail-open"
+  pass "fm-turnend-guard --claude: an arm claiming during the structural re-check window releases the Stop"
+}
+
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
   local dir out out2 status status2
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-verified-alarm")
@@ -1690,6 +1720,7 @@ test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_structurally_unclaimed_recovery_is_bounded
+test_hook_claude_mode_late_claim_after_structural_record_does_not_block
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
 test_hook_claude_mode_partial_failure_records_converge_to_structural_episode
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open

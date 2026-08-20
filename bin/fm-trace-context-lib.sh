@@ -28,6 +28,10 @@
 #
 # Usage: . bin/fm-trace-context-lib.sh
 #
+# The frozen session decision is bound to the home's session lock, whose format
+# and ownership rules belong to bin/fm-session-lock-lib.sh; this library sources
+# it rather than re-deciding what that record means.
+#
 # Public entry points:
 #   fm_trace_context_session_start <config-dir> <effective-state-file>
 #     Resolves config/trace-context plus FM_TRACE_CONTEXT once and atomically
@@ -48,7 +52,10 @@
 #                           non-empty value disables, and unset OR empty defers
 #                           to the file.
 #   Each locked home session resolves these inputs once into
-#   state/.trace-context-effective. The record is atomically published through a
+#   state/.trace-context-effective, bound to that session's lock pid and, when
+#   the lock record carries one, its stable session identity, so an
+#   identity-matched reparenting that refreshes the pid does not silently retire
+#   the decision mid-session. The record is atomically published through a
 #   same-directory temporary file and bound to state/.lock; a failed publication
 #   cannot reactivate a stale on decision. Every spawn reads only that frozen
 #   on/off value, so later config and environment edits take effect only after a
@@ -137,6 +144,9 @@ fm_trace_context_enabled() {  # <config-dir>
   [ -f "$config_dir/trace-context" ]
 }
 
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
+
 # Echo the lock pid that owns the effective-state file's home, or fail when the
 # adjacent session lock is absent or malformed. Binding the decision to this
 # token makes a prior session's record inactive even if publication cannot
@@ -156,18 +166,41 @@ fm_trace_context_session_lock() {  # <effective-state-file>
   printf '%s' "$lock_pid"
 }
 
+# Echo the stable session identity of the home that owns the effective-state
+# file's lock, or nothing. The session-lock library is the single owner of that
+# record's format, so the identity is read through it rather than parsed here.
+fm_trace_context_session_identity() {  # <effective-state-file>
+  local effective_file=$1 state_dir
+  state_dir=${effective_file%/*}
+  [ "$state_dir" = "$effective_file" ] && state_dir=.
+  fm_session_lock_read "$state_dir" 2>/dev/null || return 0
+  [ -n "$FM_SESSION_LOCK_IDENTITY" ] || return 0
+  printf '%s' "$FM_SESSION_LOCK_IDENTITY"
+}
+
 fm_trace_context_session_start() {  # <config-dir> <effective-state-file>
-  local config_dir=$1 effective_file=$2 value=off lock_pid tmp
+  local config_dir=$1 effective_file=$2 value=off lock_pid identity tmp
   lock_pid=$(fm_trace_context_session_lock "$effective_file") || {
     rm -f "$effective_file" 2>/dev/null || true
     return 0
   }
+  # An identity-matched reparenting refreshes the lock's pid for the SAME live
+  # session, so the pid alone would silently retire this decision mid-session.
+  # The owner's stable identity is recorded alongside it when the record carries
+  # one, and either binding proves the same ownership.
+  identity=$(fm_trace_context_session_identity "$effective_file")
   fm_trace_context_enabled "$config_dir" && value=on
   tmp=$(mktemp "$effective_file.tmp.XXXXXX" 2>/dev/null) || {
     rm -f "$effective_file" 2>/dev/null || true
     return 0
   }
-  if ! printf '%s %s\n' "$lock_pid" "$value" > "$tmp" 2>/dev/null \
+  if ! {
+      if [ -n "$identity" ]; then
+        printf '%s %s session=%s\n' "$lock_pid" "$value" "$identity"
+      else
+        printf '%s %s\n' "$lock_pid" "$value"
+      fi
+    } > "$tmp" 2>/dev/null \
     || ! mv -f "$tmp" "$effective_file" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     rm -f "$effective_file" 2>/dev/null || true
@@ -176,19 +209,42 @@ fm_trace_context_session_start() {  # <config-dir> <effective-state-file>
 }
 
 fm_trace_context_session_effective() {  # <effective-state-file>
-  local effective_file=$1 current_lock recorded_lock='' value='' extra=''
+  local effective_file=$1 current_lock recorded_lock='' value='' binding='' extra=''
+  local recorded_identity='' current_identity
   current_lock=$(fm_trace_context_session_lock "$effective_file") || {
     printf '%s' off
     return 0
   }
   if [ -f "$effective_file" ] && [ ! -L "$effective_file" ]; then
-    IFS=' ' read -r recorded_lock value extra < "$effective_file" 2>/dev/null || true
+    IFS=' ' read -r recorded_lock value binding extra < "$effective_file" 2>/dev/null || true
   fi
-  if [ "$recorded_lock" = "$current_lock" ] && [ "$value" = on ] && [ -z "$extra" ]; then
-    printf '%s' on
-  else
+  if [ "$value" != on ] || [ -n "$extra" ]; then
     printf '%s' off
+    return 0
   fi
+  case "$binding" in
+    '') ;;
+    session=?*)
+      recorded_identity=${binding#session=}
+      fm_session_identity_valid "$recorded_identity" || recorded_identity=
+      ;;
+    *)
+      printf '%s' off
+      return 0
+      ;;
+  esac
+  if [ "$recorded_lock" = "$current_lock" ]; then
+    printf '%s' on
+    return 0
+  fi
+  if [ -n "$recorded_identity" ]; then
+    current_identity=$(fm_trace_context_session_identity "$effective_file")
+    if [ -n "$current_identity" ] && [ "$recorded_identity" = "$current_identity" ]; then
+      printf '%s' on
+      return 0
+    fi
+  fi
+  printf '%s' off
 }
 
 # Echo any traceparent already recorded in <meta-file>, else nothing. Used for
