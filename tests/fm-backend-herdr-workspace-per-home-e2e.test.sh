@@ -53,6 +53,10 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# Cleanup returns worktrees by their recorded physical path, which treehouse's
+# own inventory may spell differently on a symlinked home.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-treehouse-lib.sh"
 
 # This suite runs against its own isolated lab session, so a Herdr pane
 # inherited from the terminal it was launched in must not follow spawn into it
@@ -70,8 +74,8 @@ SESSION="fm-lab-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
 WT1=; WT2=
 cleanup_all() {
-  [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT1" >/dev/null 2>&1
-  [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT2" >/dev/null 2>&1
+  [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && fm_treehouse_return_force "" "$WT1" >/dev/null 2>&1
+  [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1 && fm_treehouse_return_force "" "$WT2" >/dev/null 2>&1
   herdr_safe_stop_and_delete "$SESSION"
   rm -rf "$TMP_ROOT"
 }
