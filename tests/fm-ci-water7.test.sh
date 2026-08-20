@@ -253,7 +253,7 @@ test_policy_runs_every_family_serially() {
   fakebin="$tmp/fakebin"
   calls="$tmp/calls"
   make_policy_fixture "$repo" "$fakebin"
-  run_policy_fixture "$repo" "$fakebin" "$calls" \
+  FM_CI_FAST_LANE_BASE='' run_policy_fixture "$repo" "$fakebin" "$calls" \
     || fail "Water 7 command policy rejected its valid host fixture"
   expected=$(cat <<'EOF'
 lint
