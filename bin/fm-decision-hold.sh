@@ -541,9 +541,15 @@ command_hold() {
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
     existing_body=$(show_field "$show" body)
+    # What the identity IS is settled before anything describes it as a captain
+    # decision or sends the operator to repair, which refuses this same row for
+    # exactly these reasons.
+    [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     # A close that never recorded the captain's answer must not be reported as a
     # decision the captain resolved, whether retention has filed the row or not.
     if [ "$state" = "done" ] && ! body_has_resolution_record "$existing_body"; then
+      [ "$(show_field "$show" hold_kind)" = captain ] \
+        || fail "existing backlog identity $id was never held for the captain, so no captain decision was ever recorded on it"
       if [ "$archived" = 1 ]; then
         # verify refuses this origin for either reason, so the consequence is stated
         # whenever one of them holds and omitted when neither does.
@@ -563,7 +569,6 @@ nor a fresh hold on this decision key can record the missing answer$inventoried"
 $(fm_tasks_axi_backlog_path "$FM_HOME"), so use repair to record the captain decision that was made"
     fi
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
-    [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
     task_show "$id" >/dev/null \
       || fail "$(absent_decision_message "$id" 'captain hold'); use a new decision key for a new decision"

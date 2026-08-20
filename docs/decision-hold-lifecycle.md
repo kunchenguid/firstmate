@@ -109,6 +109,8 @@ The archived and live answerless-close refusals stay distinguishable: only the l
 The consequence that an origin stays refused is stated only when the key is in its recorded inventory or carries an open structured decision, and omitted when neither holds.
 An archive this home cannot open is reported as unreadable rather than as absence, and `hold` refuses to create an identity on that unproven absence rather than risking a collision with a record retention already filed.
 The archived record alone decides the `repair` verdict for a retained decision.
+An archive whose directory this home cannot search is unreadable in the same way the mode-000 file is, because a path that cannot be examined establishes no absence, while a home whose retention has never written an archive at all is a genuine absence and still creates its holds normally.
+A closed row that is not a captain hold at all is named as such before any refusal calls it a captain decision or sends the operator to `repair`, which refuses that same identity for exactly that reason.
 
 Three answer-time closure regressions run against the published poll response shape, with synthetic `sample` identities.
 A bound source whose origin exposes six holds captures one review carrying five structured choices plus one freeform message, and the runner feeds it through a fixture adapter that is not the review adapter at all, so what is proven is that any bound channel with an `answers` command gets closure rather than that one channel is wired specially.
@@ -145,6 +147,8 @@ ok - an uninventoried archived decision is refused without a false inventory con
 ok - the archived record alone decides the repair verdict for a retained decision
 ok - an unreadable archive is reported as unreadable rather than as absence
 ok - an unreadable archive refuses to create a hold rather than colliding with the archive
+ok - an archive path this home cannot examine is reported as unreadable rather than as absence
+ok - a closed non-captain row occupying a decision identity is refused as not a captain hold
 ok - an open structured decision carries its own stated consequence in the refusal
 
 $ bash tests/fm-fleet-snapshot-view.test.sh

@@ -229,12 +229,34 @@ fm_tasks_axi_archive_path() {  # <home>
   printf '%s/done-archive.md\n' "$(dirname "$(fm_tasks_axi_backlog_path "$home")")"
 }
 
+# 0 when this home can examine <path> well enough for its absence to mean
+# something, 1 when a directory above it cannot be searched, so a stat that
+# reports the path as missing establishes nothing at all.
+fm_tasks_axi_path_examinable() {  # <path>
+  local dir=$1
+  while :; do
+    case "$dir" in
+      */*) dir=${dir%/*}; [ -n "$dir" ] || dir=/ ;;
+      *) return 0 ;;
+    esac
+    if [ -d "$dir" ]; then
+      [ -x "$dir" ] || return 1
+      return 0
+    fi
+    # An ancestor that does not appear to exist is either genuinely missing or
+    # hidden behind one that cannot be searched, so keep climbing until a
+    # directory this home can see answers the question.
+    [ "$dir" != / ] || return 0
+  done
+}
+
 # `tasks-axi show <id> --full` for a row retention has already archived, rendered
 # by tasks-axi itself against a private throwaway copy. Nonzero with no output
 # whenever <home> has no archived record for that id, and the two failures are
-# kept apart: 1 means the archive was read and does not hold that id, 2 means the
-# archive could not be read at all, so absence was never established. A caller
-# that turns this into a message must never report 2 as proof of absence.
+# kept apart: 1 means the archive was read and does not hold that id, including
+# the home whose retention has never written an archive file at all, and 2 means
+# the archive could not be read, so absence was never established. A caller that
+# turns this into a message must never report 2 as proof of absence.
 fm_tasks_axi_archive_show() {  # <home> <id>
   local home=$1 id=$2 archive dir view output status=0
   case "$id" in
@@ -243,7 +265,13 @@ fm_tasks_axi_archive_show() {  # <home> <id>
   command -v tasks-axi >/dev/null 2>&1 || return 2
   archive=$(fm_tasks_axi_archive_path "$home")
   [ -n "$archive" ] || return 2
-  [ -f "$archive" ] || return 1
+  if [ ! -f "$archive" ]; then
+    # No archive file is the ordinary state of a home retention has not pruned
+    # into yet, and that is a genuine absence. A path this home cannot examine
+    # is not: it proves nothing either way, so it reports as an unread archive.
+    fm_tasks_axi_path_examinable "$archive" || return 2
+    return 1
+  fi
   dir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-tasks-archive.XXXXXX") || return 2
   view="$dir/archived-backlog.md"
   # The copy lives in its own directory so tasks-axi's default archive path for

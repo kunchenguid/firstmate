@@ -1152,6 +1152,133 @@ test_unreadable_archive_refuses_to_create_a_colliding_hold() {
   pass "an unreadable archive refuses to create a hold rather than colliding with the archive"
 }
 
+# The archive file is not the only thing that can hide it: a directory above it
+# this home cannot search makes the file un-stat-able, and a stat that cannot see
+# the path establishes no absence at all. A home retention has simply never
+# written an archive for is the opposite case and stays a genuine absence.
+test_unexaminable_archive_path_is_reported_as_unreadable() {
+  local home id hold attic archive before rc=0 verify_rc=0
+  home=$(make_home unexaminable-archive)
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/attic/done-archive.md"
+done_keep = 10
+EOF
+  id=sample-unexaminable-archive-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample unexaminable archive" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the unexaminable-archive origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample unexaminable archive\n\nOne captain choice was raised.\n' \
+    > "$home/data/$id/report.md"
+
+  # No archive file exists yet, which is a genuine absence and must not stop a
+  # hold from being created.
+  [ ! -e "$home/data/attic" ] || fail "the fixture archive existed before retention ran"
+  hold=$(run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample) \
+    || fail "a home with no archive file at all refused to create a hold"
+  run_decisions "$home" complete "$id" placement >/dev/null \
+    || fail "completion failed before the captain answer was recorded"
+  printf 'Place the sample control on the left.\n' > "$home/placement-decision.txt"
+  run_decisions "$home" answer "$id" placement --decision-file "$home/placement-decision.txt" >/dev/null \
+    || fail "could not record the captain answer on the placement decision"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  attic="$home/data/attic"
+  archive="$attic/done-archive.md"
+  assert_present "$archive" "retention did not file the answered decision into the nested archive"
+  assert_no_grep "$hold" "$home/data/backlog.md" \
+    "retention did not remove the answered decision from the active backlog"
+
+  before=$(cat "$home/data/backlog.md")
+  chmod 000 "$attic" || fail "could not take search permission off the archive directory"
+  if cat "$archive" >/dev/null 2>&1; then
+    # A user who traverses a mode-000 directory cannot stage this fixture at all.
+    chmod 755 "$attic"
+    pass "skipped: this user reaches the archive regardless of its directory mode"
+    return 0
+  fi
+  run_decisions "$home" verify "$id" > "$home/unexaminable-verify.out" 2> "$home/unexaminable-verify.err" || verify_rc=$?
+  run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample \
+    > "$home/unexaminable-hold.out" 2> "$home/unexaminable-hold.err" || rc=$?
+  # Restored before anything can fail, so a refused assertion never leaves an
+  # unremovable fixture directory behind.
+  chmod 755 "$attic"
+
+  expect_code 1 "$verify_rc" "an unexaminable archive path changed how the gate refuses"
+  assert_grep "could not be read" "$home/unexaminable-verify.err" \
+    "the gate did not report that the done archive could not be read"
+  assert_no_grep "and its done archive" "$home/unexaminable-verify.err" \
+    "the gate claimed the decision was absent from an archive it could never examine"
+
+  expect_code 1 "$rc" "an unexaminable archive path did not refuse the re-hold"
+  assert_grep "could not be read" "$home/unexaminable-hold.err" \
+    "the refusal did not report that the done archive could not be read"
+  assert_no_grep "and its done archive" "$home/unexaminable-hold.err" \
+    "the refusal claimed the identity was absent from an archive it could never examine"
+  assert_no_grep "$hold" "$home/data/backlog.md" \
+    "an unexaminable archive path let the hold recreate a live row that collides with the archived one"
+  [ "$before" = "$(cat "$home/data/backlog.md")" ] \
+    || fail "the refused hold changed the active backlog"
+
+  # The path was the only problem: once it can be examined again the same record
+  # satisfies the same gate.
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "the gate kept refusing an answered decision after its archive became examinable again"
+  pass "an archive path this home cannot examine is reported as unreadable rather than as absence"
+}
+
+# `hold` describes what it refuses, so an identity that is not a captain hold at
+# all must be named as such before any message calls it a captain decision or
+# sends the operator to repair, which refuses that same row for this very reason.
+test_closed_non_captain_identity_is_refused_as_not_a_captain_hold() {
+  local home id ident rc=0
+  home=$(make_home non-captain-identity)
+  id=sample-non-captain-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample non-captain identity" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the non-captain-identity origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample non-captain identity\n\nOne captain choice was raised.\n' \
+    > "$home/data/$id/report.md"
+  ident=$(run_decisions "$home" id "$id" placement) \
+    || fail "could not derive the decision identity"
+  tasks_in "$home" add "$ident" "Choose the sample placement" --kind ship --repo sample >/dev/null \
+    || fail "could not occupy the decision identity with a non-captain row"
+  tasks_in "$home" "done" "$ident" >/dev/null \
+    || fail "could not close the non-captain row occupying the decision identity"
+
+  run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample \
+    > "$home/non-captain-hold.out" 2> "$home/non-captain-hold.err" || rc=$?
+  expect_code 1 "$rc" "a closed non-captain row occupying a decision identity did not refuse the hold"
+  assert_grep "is not kind captain" "$home/non-captain-hold.err" \
+    "the refusal did not report that the occupying identity is not kind captain"
+  assert_no_grep "captain decision" "$home/non-captain-hold.err" \
+    "the refusal called a non-captain row a captain decision"
+  assert_no_grep "repair" "$home/non-captain-hold.err" \
+    "the refusal pointed at repair, which refuses this same identity for not being kind captain"
+
+  # The message must match what repair actually does with it.
+  rc=0
+  printf 'Place the sample control on the left.\n' > "$home/placement-decision.txt"
+  run_decisions "$home" repair "$id" placement --decision-file "$home/placement-decision.txt" \
+    > "$home/non-captain-repair.out" 2> "$home/non-captain-repair.err" || rc=$?
+  expect_code 1 "$rc" "repair accepted an identity that is not kind captain"
+  assert_grep "is not kind captain" "$home/non-captain-repair.err" \
+    "repair refused the non-captain identity for a different reason than hold reported"
+  pass "a closed non-captain row occupying a decision identity is refused as not a captain hold"
+}
+
 # The recorded inventory is not the only thing that keeps an origin refused: an
 # open structured decision in its status log does too. The consequence the refusal
 # states must follow from whichever one actually holds.
@@ -1766,4 +1893,6 @@ test_archived_unanswered_hold_outside_the_inventory_states_no_false_consequence
 test_archived_record_decides_the_repair_verdict
 test_unreadable_archive_is_reported_as_unreadable_rather_than_absence
 test_unreadable_archive_refuses_to_create_a_colliding_hold
+test_unexaminable_archive_path_is_reported_as_unreadable
+test_closed_non_captain_identity_is_refused_as_not_a_captain_hold
 test_archived_unanswered_hold_states_the_open_structured_decision_consequence
