@@ -215,6 +215,53 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
 }
 
+# 2026-08-19 shape: a worker writes `blocked: <text> [key=slug]` with the key
+# token trailing the note instead of in either documented position (before-colon
+# or note-head). The parser correctly ignores it (the stored key is "default"),
+# but the fold must render [key=default] so the generic --resolve-key hint is
+# actionable. Previously the default key was hidden and the visible [key=slug]
+# in the note misled the reader into trying --resolve-key slug, which failed.
+test_trailing_key_renders_with_default_key_visible() {
+  local dir state out
+  dir=$(make_case trailing-key)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'blocked: launched in primary checkout, not an isolated worktree [key=primary-checkout]\n' \
+    > "$state/task-trailing.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a trailing-key blocked line"
+
+  grep -F 'OPEN DECISIONS' "$out" >/dev/null \
+    || fail "the trailing-key blocked line produced no OPEN DECISIONS section"
+  # The stored key is "default" because the trailing [key=...] is prose, not a
+  # stated key. The listing must show [key=default] so --resolve-key default works.
+  grep -F 'task-trailing [key=default] blocked:' "$out" >/dev/null \
+    || fail "the trailing-key decision did not render with [key=default] visible: $(cat "$out")"
+  # The note must still include the trailing [key=...] as prose, unchanged.
+  grep -F '[key=primary-checkout]' "$out" >/dev/null \
+    || fail "the trailing [key=primary-checkout] prose was stripped from the note: $(cat "$out")"
+  # The hint must be present and reference --resolve-key.
+  grep -F "close one by answering it: bin/fm-send.sh <task> --resolve-key <key>" "$out" >/dev/null \
+    || fail "open section is missing the answerer-closes hint"
+  pass "a trailing-key blocked line renders with [key=default] and an actionable --resolve-key hint"
+}
+
+# A plain keyless decision (no [key=...] anywhere) must also render [key=default]
+# so the reader knows which key to pass to --resolve-key.
+test_keyless_decision_shows_default_key() {
+  local dir state out
+  dir=$(make_case keyless-default)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'needs-decision: which database to use\n' > "$state/task-keyless.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a keyless needs-decision"
+
+  grep -F 'task-keyless [key=default] needs-decision: which database to use' "$out" >/dev/null \
+    || fail "a keyless needs-decision did not render with [key=default]: $(cat "$out")"
+  pass "a keyless decision renders with [key=default] visible"
+}
+
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it
@@ -224,3 +271,5 @@ test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
+test_trailing_key_renders_with_default_key_visible
+test_keyless_decision_shows_default_key

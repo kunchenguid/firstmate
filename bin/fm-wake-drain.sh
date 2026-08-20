@@ -141,7 +141,7 @@ print_open_decisions_section() {
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
     line="$task"
-    [ "$key" = default ] || line="$line [key=$key]"
+    line="$line [key=$key]"
     line="$line $verb: $note"
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
