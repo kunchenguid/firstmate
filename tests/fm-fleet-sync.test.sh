@@ -603,6 +603,103 @@ test_non_signature_fetch_failure_is_not_retried() {
   pass "a non-packed-refs.lock fetch failure keeps today's behavior (no retry)"
 }
 
+# --- fork-tracking fixtures -------------------------------------------------
+
+# build_fork_pair <home> <name>: create projects/<name>, a clone whose main
+# tracks fork/main (not origin/main).  origin still exists but points at a
+# separate bare repo that can diverge independently - the exact topology of a
+# fork whose upstream (origin) is read-only and whose fork remote is where work
+# lands.  Echoes the clone path.
+build_fork_pair() {
+  local home=$1 name=$2 work_origin work_fork remote_origin remote_fork clone
+  work_origin="$home/work-origin-$name"
+  work_fork="$home/work-fork-$name"
+  remote_origin="$home/remotes/origin-$name.git"
+  remote_fork="$home/remotes/fork-$name.git"
+  clone="$home/projects/$name"
+  mkdir -p "$home/remotes"
+
+  # Build origin bare repo with one commit.
+  git init -q "$work_origin"
+  git -C "$work_origin" symbolic-ref HEAD refs/heads/main
+  commit_file "$work_origin" file.txt v0 C0
+  git clone --quiet --bare "$work_origin" "$remote_origin"
+  local origin_abs fork_abs
+  origin_abs=$(cd "$remote_origin" && pwd)
+
+  # Build fork bare repo as a separate clone of origin (same initial commit).
+  git clone --quiet --bare "$origin_abs" "$remote_fork"
+  fork_abs=$(cd "$remote_fork" && pwd)
+
+  # Build a work repo for advancing the fork.
+  git clone --quiet "file://$fork_abs" "$work_fork"
+
+  # Clone from origin, then add fork as a second remote and re-track main to
+  # fork/main - mirroring the fleet's firstmate checkout topology.
+  git clone --quiet "file://$origin_abs" "$clone"
+  git -C "$clone" remote add fork "file://$fork_abs"
+  git -C "$clone" fetch -q fork
+  git -C "$clone" branch --set-upstream-to=fork/main main >/dev/null
+
+  printf '%s\n' "$clone"
+}
+
+# advance_fork <home> <name> <msg>: push one more commit to <name>'s fork
+# remote via its work-fork repo.
+advance_fork() {
+  local home=$1 name=$2 msg=$3 work
+  work="$home/work-fork-$name"
+  commit_file "$work" file.txt "$msg" "$msg"
+  git -C "$work" push -q origin main
+}
+
+# diverge_origin <home> <name> <msg>: push an independent commit to <name>'s
+# origin remote so it diverges from the fork (simulating a squash merge on
+# upstream that the fork does not follow).
+diverge_origin() {
+  local home=$1 name=$2 msg=$3 work_origin remote_origin origin_abs
+  work_origin="$home/work-origin-$name"
+  remote_origin="$home/remotes/origin-$name.git"
+  origin_abs=$(cd "$remote_origin" && pwd)
+  git -C "$work_origin" remote set-url origin "file://$origin_abs" 2>/dev/null \
+    || git -C "$work_origin" remote add origin "file://$origin_abs"
+  commit_file "$work_origin" file.txt "$msg" "$msg"
+  git -C "$work_origin" push -q origin main
+}
+
+# --- fork-tracking tests ----------------------------------------------------
+
+test_fork_tracking_already_current() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_fork_pair "$home" phi)
+  # Diverge origin so origin/main != fork/main; clone is current with fork/main.
+  diverge_origin "$home" phi "origin-only commit"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "phi: already current" "fork-tracking clone at its tracked upstream is reported current"
+  assert_not_contains "$out" "STUCK" "fork-tracking clone at its tracked upstream is not flagged STUCK"
+  pass "clone tracking fork/main (not origin) is reported healthy when current with fork/main"
+}
+
+test_fork_tracking_fast_forwards() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_fork_pair "$home" psi)
+  # Advance fork and diverge origin.
+  advance_fork "$home" psi C1
+  diverge_origin "$home" psi "origin-only commit"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "psi: synced" "fork-tracking clone behind fork/main is fast-forwarded"
+  assert_not_contains "$out" "STUCK" "fork-tracking clone behind fork/main is not flagged STUCK"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse fork/main)" ] \
+    || fail "fork-tracking clone HEAD not at fork/main after sync"
+  pass "clone tracking fork/main fast-forwards to fork/main (not origin/main)"
+}
+
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
@@ -625,3 +722,5 @@ test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal
 test_transient_packed_refs_lock_self_clears
 test_non_signature_fetch_failure_is_not_retried
+test_fork_tracking_already_current
+test_fork_tracking_fast_forwards
