@@ -98,6 +98,86 @@ test_predicate_source_needs_supervision() {
   pass "fm_supervision_unhealthy: source-only home needs supervision"
 }
 
+test_predicate_idle_secondmate_done_does_not_need_supervision() {
+  local state="$TMP_ROOT/pred-idle-secondmate/state"
+  mkdir -p "$state"
+  printf 'kind=secondmate\n' > "$state/studio.meta"
+  printf 'done [corr=abcdef0123456789]: orientation summary delivered\n' > "$state/studio.status"
+  if fm_supervision_needed "$state" 300; then
+    fail "idle secondmate with a done status must not require supervision"
+  fi
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "idle secondmate must not count as in-flight"
+  pass "fm_supervision_needed: idle secondmate with done status is quiet"
+}
+
+test_predicate_remote_reply_without_pending_is_quiet() {
+  local state="$TMP_ROOT/pred-remote-reply-idle/state"
+  mkdir -p "$state/procevent"
+  : > "$state/procevent/remote-reply-studio.source"
+  if fm_supervision_needed "$state" 300; then
+    fail "idle remote-reply source without an open pending reply must not require supervision"
+  fi
+  [ "$FM_SUP_SOURCES" -eq 0 ] || fail "idle remote-reply source must not count as active"
+  pass "fm_supervision_needed: idle remote-reply source is quiet"
+}
+
+test_predicate_remote_reply_with_unhandled_capture_needs_supervision() {
+  local state="$TMP_ROOT/pred-remote-reply-unhandled/state"
+  mkdir -p "$state/procevent-inbox"
+  printf 'reply captured before acknowledgement\n' > "$state/procevent-inbox/remote-reply-studio.7.result"
+  printf 'remote-reply\n' > "$state/procevent-inbox/remote-reply-studio.7.adapter"
+  fm_supervision_needed "$state" 300 \
+    || fail "retired remote-reply source with an unhandled captured result must require supervision"
+  [ "$FM_SUP_SOURCES" -eq 1 ] || fail "unhandled remote-reply capture must count as active process-event work"
+  : > "$state/procevent-inbox/remote-reply-studio.7.handled"
+  if fm_supervision_needed "$state" 300; then
+    fail "handled remote-reply capture without an open pending reply must be quiet"
+  fi
+  [ "$FM_SUP_SOURCES" -eq 0 ] || fail "handled remote-reply capture must not count as active process-event work"
+  pass "fm_supervision_needed: unhandled retired remote-reply captures keep supervision armed"
+}
+
+test_predicate_remote_reply_with_pending_needs_supervision() {
+  local state="$TMP_ROOT/pred-remote-reply-pending/state"
+  mkdir -p "$state/procevent" "$state/pending-replies"
+  : > "$state/procevent/remote-reply-studio.source"
+  {
+    printf 'schema=fm-pending-reply.v1\n'
+    printf 'corr_id=abcdef0123456789\n'
+    printf 'task_id=studio\n'
+    printf 'phase=awaiting_report\n'
+  } > "$state/pending-replies/abcdef0123456789"
+  fm_supervision_needed "$state" 300 || fail "remote-reply source with an open pending reply must require supervision"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "remote-reply source must not count as an in-flight task"
+  [ "$FM_SUP_SOURCES" -eq 1 ] || fail "open remote-reply source must count as active"
+  pass "fm_supervision_needed: remote-reply source with pending reply needs supervision"
+}
+
+test_predicate_resolved_pending_reply_close_needs_supervision() {
+  local state="$TMP_ROOT/pred-resolved-pending-close/state"
+  mkdir -p "$state/pending-replies"
+  printf 'kind=secondmate\n' > "$state/studio.meta"
+  printf 'done [corr=abcdef0123456789]: orientation summary delivered\n' > "$state/studio.status"
+  {
+    printf 'schema=fm-pending-reply.v1\n'
+    printf 'corr_id=abcdef0123456789\n'
+    printf 'task_id=studio\n'
+    printf 'phase=resolved\n'
+    printf 'escalated_epoch=4200\n'
+    printf 'escalation_closed_epoch=\n'
+  } > "$state/pending-replies/abcdef0123456789"
+  fm_supervision_needed "$state" 300 \
+    || fail "resolved pending reply with an unclosed escalation must require supervision"
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "unclosed escalation cleanup must keep the secondmate active"
+  printf 'resolved [key=pending-reply-abcdef0123456789]: pending-reply-resolved: task=studio pending-reply-id=abcdef0123456789 via=status\n' >> "$state/studio.status"
+  printf 'escalation_closed_epoch=4300\n' >> "$state/pending-replies/abcdef0123456789"
+  if fm_supervision_needed "$state" 300; then
+    fail "closed escalation cleanup after a decision-resolution event must be quiet"
+  fi
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "closed escalation cleanup must let the completed secondmate idle"
+  pass "fm_supervision_needed: resolved pending-reply cleanup keeps supervision armed"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -246,7 +326,7 @@ test_hook_blocks_source_only_home() {
   : > "$dir/state/procevent/source-only.source"
   out=$(run_hook "$dir" false); status=$?
   expect_code 2 "$status" "non-Claude hook must block when a source-only home has no watcher"
-  assert_contains "$out" "1 process-event source(s) registered" "block reason must identify the source-only supervision need"
+  assert_contains "$out" "1 process-event supervision item(s) active" "block reason must identify the source-only supervision need"
   pass "fm-turnend-guard: non-Claude path blocks a source-only home"
 }
 
@@ -1608,6 +1688,11 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
+test_predicate_idle_secondmate_done_does_not_need_supervision
+test_predicate_remote_reply_without_pending_is_quiet
+test_predicate_remote_reply_with_unhandled_capture_needs_supervision
+test_predicate_remote_reply_with_pending_needs_supervision
+test_predicate_resolved_pending_reply_close_needs_supervision
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home

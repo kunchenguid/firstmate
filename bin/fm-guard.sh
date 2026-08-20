@@ -206,7 +206,7 @@ if [ "$watcher_healthy" = false ]; then
       if [ "$in_flight" -gt 0 ]; then
         printf '●  %s task(s) in flight, but %s.\n' "$in_flight" "$watcher_cause"
       elif [ "$sources" -gt 0 ]; then
-        printf '●  %s process-event source(s) registered, but %s.\n' "$sources" "$watcher_cause"
+        printf '●  %s process-event supervision item(s) active, but %s.\n' "$sources" "$watcher_cause"
       else
         printf '●  X-mode relay polling needs supervision, but %s.\n' "$watcher_cause"
       fi

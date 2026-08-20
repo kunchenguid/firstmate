@@ -1122,7 +1122,7 @@ guard_out=$(FM_ROOT_OVERRIDE="$TMP_ROOT/guard-root" FM_HOME="$HS" FM_GUARD_GRACE
   "$ROOT/bin/fm-guard.sh" 2>&1)
 assert_contains "$guard_out" "WATCHER DOWN - SUPERVISION IS OFF" \
   "the general guard warns when only a process-event source needs supervision"
-assert_contains "$guard_out" "1 process-event source(s) registered" \
+assert_contains "$guard_out" "1 process-event supervision item(s) active" \
   "the general guard identifies the source-only supervision need"
 pass "source-only homes trigger the general supervision guard"
 

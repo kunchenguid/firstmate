@@ -310,6 +310,46 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
   pass "live steal mutex is not reclaimed"
 }
 
+test_lock_reclaims_stale_steal_mutex_without_recursing() {
+  local dir state lockdir dead_lock dead_steal out err newpid nested
+  dir=$(make_case lock-stale-steal-mutex)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  err="$dir/acquire.err"
+  dead_lock=$(dead_pid)
+  dead_steal=$((dead_lock + 1))
+  while kill -0 "$dead_steal" 2>/dev/null; do
+    dead_steal=$((dead_steal + 1))
+  done
+  mkdir "$lockdir" "$lockdir.steal"
+  printf '%s\n' "$dead_lock" > "$lockdir/pid"
+  printf '%s\n' "$dead_steal" > "$lockdir.steal/pid"
+
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then
+      printf "rc=0 pid=%s\n" "$(cat "$2/pid" 2>/dev/null || true)"
+    else
+      printf "rc=1 held=%s pid=%s stealpid=%s\n" \
+        "${FM_LOCK_HELD_PID:-}" \
+        "$(cat "$2/pid" 2>/dev/null || true)" \
+        "$(cat "$2.steal/pid" 2>/dev/null || true)"
+    fi
+  ' _ "$LIB" "$lockdir" 2>"$err") || fail "stale steal mutex acquire command failed"
+
+  case "$out" in
+    rc=0*) ;;
+    *) fail "stale steal mutex blocked stale lock reclamation: $out" ;;
+  esac
+  newpid=${out#*pid=}
+  [ "$newpid" != "$dead_lock" ] || fail "primary stale lock pid was not replaced: $out"
+  [ ! -e "$lockdir.steal" ] && [ ! -L "$lockdir.steal" ] || fail "steal mutex was left behind after acquire"
+  nested=$(find "$state" -maxdepth 1 -name '*.steal.steal*' -print 2>/dev/null)
+  [ -z "$nested" ] || fail "lock acquisition recursed into nested steal paths: $nested"
+  [ ! -s "$err" ] || fail "lock acquisition emitted diagnostics: $(cat "$err")"
+  pass "stale steal mutex is reclaimed without nested steal recursion"
+}
+
 test_lock_does_not_steal_live_lock() {
   local dir state lockdir live out lockpid
   dir=$(make_case lock-live-noop)
@@ -1110,6 +1150,7 @@ test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
+test_lock_reclaims_stale_steal_mutex_without_recursing
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
