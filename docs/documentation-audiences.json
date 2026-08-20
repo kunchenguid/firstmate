@@ -209,6 +209,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/README.md",
+      "audience": "public-product"
+    },
+    {
       "path": "docs/arm-pretool-check.md",
       "audience": "maintainer-architecture"
     },
