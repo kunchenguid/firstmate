@@ -114,7 +114,7 @@ function shouldArm(paths) {
 async function sessionOwnsLock(paths) {
   let lockPid = "";
   try {
-    lockPid = readFileSync(`${paths.state}/.lock`, "utf8").trim();
+    lockPid = readFileSync(`${paths.state}/.lock`, "utf8").split(/\r?\n/, 1)[0]?.trim() ?? "";
   } catch {
     return false;
   }

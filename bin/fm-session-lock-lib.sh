@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
-# Shared session-lock harness identity.
+# Shared per-home session-lock identity.
 #
-# ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
-# bin/fm-lock.sh uses it to acquire and inspect state/.lock;
-# bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
-# lock-owning primary session before it may arm or rewake.
-# This file is sourced by scripts and has no side effects on source.
+# ONE owner of the state/.lock record and the decision whether the current
+# verified-harness session owns it.
+# A current record keeps its numeric pid on line one for compatible readers,
+# then carries `harness=<name>` and, when the harness exposes one to both hooks
+# and ordinary commands, `session=<identity>`.
+# A legacy record containing only one numeric pid remains valid and uses the
+# unchanged ancestry-membership decision.
+#
+# bin/fm-lock.sh owns acquisition and uses the helpers here to inspect, publish,
+# and refresh the record.
+# bin/fm-claude-stop-autoarm.sh uses the same predicate before arming or
+# rewaking.
+# Callers that can reach an identity-matched reparenting case must source
+# fm-wake-lib.sh first so the PID refresh can share fm-lock.sh's acquisition
+# lock and cannot overwrite a concurrent owner.
+# This file has no side effects on source.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
 # deliberately not added to the tables below: Cursor's installed names are
@@ -58,25 +68,46 @@ fm_harness_path_name() {  # <path>
 #   3. a bare interpreter (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
+FM_HARNESS_MATCH_NAME=
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
+  FM_HARNESS_MATCH_NAME=
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
-    case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    case "$base" in
+      *claude*) name=claude ;;
+      *codex*) name=codex ;;
+      *opencode*) name=opencode ;;
+      *grok*) name=grok ;;
+      *kimi*) name=kimi ;;
+      pi-signed) name=pi-signed ;;
+      pi) name=pi ;;
+      *) return 1 ;;
+    esac
+    FM_HARNESS_MATCH_NAME=$name
+    [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
     return 0
   fi
   argv0=${args%% *}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
-    case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    FM_HARNESS_MATCH_NAME=$name
+    [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
-        case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
-        return 0
+        for name in "${FM_HARNESS_NAMES[@]}"; do
+          case "$args" in
+            *"$name"*)
+              FM_HARNESS_MATCH_NAME=$name
+              [ "$name" != claude ] || FM_HARNESS_IS_CLAUDE=1
+              return 0
+              ;;
+          esac
+        done
       fi
       ;;
   esac
@@ -84,7 +115,10 @@ fm_harness_process_matches() {  # <comm> <args>
   # in the command path or argv[0]. Without this a Cursor primary can never
   # locate its own harness in the ancestry, so every session start refuses the
   # fleet lock as read-only and the park can never arm.
-  fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
+  if fm_cursor_process_matches "$comm" "$args" "$argv0"; then
+    FM_HARNESS_MATCH_NAME=cursor
+    return 0
+  fi
   return 1
 }
 
@@ -152,21 +186,202 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
-# True when state dir $1 holds a session lock whose pid is ANY harness ancestor
-# of the current process: this script runs inside the session that owns the
-# home's fleet lock. Membership is the honest test of that question, because the
-# lock owner sits at an unknown depth in a contiguous Claude run - it is the
-# outermost pid when the hook fires inside the session's own nested worker chain,
-# and an inner pid when a harness-named daemon parents the session. A missing
-# lock, a malformed lock, a lock held by a harness outside this ancestry, or an
-# ancestry that cannot be resolved all fail closed.
-fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
-  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
-  case "$lock_pid" in
-    ''|*[!0-9]*) return 1 ;;
+# Print the canonical verified-harness name for pid $1, or return 1.
+fm_harness_pid_name() {
+  local pid=$1 comm args
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  fm_harness_process_matches "$comm" "$args" || return 1
+  [ -n "$FM_HARNESS_MATCH_NAME" ] || return 1
+  printf '%s\n' "$FM_HARNESS_MATCH_NAME"
+}
+
+fm_session_harness_valid() {
+  case "$1" in
+    claude|codex|opencode|grok|kimi|pi|pi-signed|cursor) return 0 ;;
+    *) return 1 ;;
   esac
+}
+
+fm_session_identity_valid() {
+  local identity=$1
+  [ -n "$identity" ] && [ "${#identity}" -le 160 ] || return 1
+  case "$identity" in *[!A-Za-z0-9._:-]*) return 1 ;; esac
+  [ "$identity" != unknown ]
+}
+
+# Parse state/.lock into FM_SESSION_LOCK_PID, FM_SESSION_LOCK_HARNESS, and
+# FM_SESSION_LOCK_IDENTITY.
+# A single numeric line is the legacy format.
+# Current records retain that numeric first line and accept only the two named
+# metadata fields, each at most once.
+FM_SESSION_LOCK_PID=
+FM_SESSION_LOCK_HARNESS=
+FM_SESSION_LOCK_IDENTITY=
+fm_session_lock_read() {  # <state-dir>
+  local state=$1 lock line line_no=0 seen_harness=0 seen_session=0
+  FM_SESSION_LOCK_PID=
+  FM_SESSION_LOCK_HARNESS=
+  FM_SESSION_LOCK_IDENTITY=
+  lock="$state/.lock"
+  [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_no=$((line_no + 1))
+    if [ "$line_no" -eq 1 ]; then
+      case "$line" in ''|*[!0-9]*|1) return 1 ;; esac
+      FM_SESSION_LOCK_PID=$line
+      continue
+    fi
+    case "$line" in
+      harness=*)
+        [ "$seen_harness" -eq 0 ] || return 1
+        FM_SESSION_LOCK_HARNESS=${line#harness=}
+        fm_session_harness_valid "$FM_SESSION_LOCK_HARNESS" || return 1
+        seen_harness=1
+        ;;
+      session=*)
+        [ "$seen_session" -eq 0 ] || return 1
+        FM_SESSION_LOCK_IDENTITY=${line#session=}
+        fm_session_identity_valid "$FM_SESSION_LOCK_IDENTITY" || return 1
+        seen_session=1
+        ;;
+      *) return 1 ;;
+    esac
+  done < "$lock"
+  [ "$line_no" -gt 0 ] || return 1
+  if [ "$line_no" -eq 1 ]; then
+    return 0
+  fi
+  [ "$seen_harness" -eq 1 ] || return 1
+  [ "$seen_session" -eq 0 ] || [ "$seen_harness" -eq 1 ]
+}
+
+fm_session_lock_pid() {  # <state-dir>
+  fm_session_lock_read "$1" || return 1
+  printf '%s\n' "$FM_SESSION_LOCK_PID"
+}
+
+# Print the stable identity an adapter has explicitly bridged to ordinary
+# commands.
+# Claude's SessionStart adapter persists the hook payload's session_id into the
+# vendor-owned CLAUDE_ENV_FILE before fm-lock.sh runs.
+# Other vendor session variables are deliberately not inferred here: an
+# identifier that changes across an in-process reset would turn one owner into a
+# false competitor.
+fm_current_session_identity() {  # <actual-harness>
+  local actual=$1 configured_harness=${FM_SESSION_HARNESS:-} identity=${FM_SESSION_ID:-}
+  [ -n "$configured_harness" ] || [ -n "$identity" ] || return 1
+  [ "$configured_harness" = "$actual" ] || return 1
+  fm_session_identity_valid "$identity" || return 1
+  printf '%s\n' "$identity"
+}
+
+# Parse one JSON string field from a Claude-shaped hook payload without making
+# session startup depend on jq.
+# Hook payload identifiers are UUID-shaped ASCII in current Claude, and the
+# validator below rejects escapes or arbitrary JSON text before use.
+fm_session_identity_from_hook_payload() {  # <payload>
+  local payload=$1 identity
+  identity=$(printf '%s' "$payload" | awk '
+    BEGIN { RS = "\"" }
+    seen == 2 { print; exit }
+    seen == 1 && $0 ~ /^[[:space:]]*:[[:space:]]*$/ { seen = 2; next }
+    seen == 1 { seen = 0 }
+    $0 == "session_id" { seen = 1 }
+  ')
+  fm_session_identity_valid "$identity" || return 1
+  printf '%s\n' "$identity"
+}
+
+# Atomically publish a current record.
+# The numeric first line is intentionally retained for readers outside this
+# library that only need the owner pid.
+fm_session_lock_write() {  # <state-dir> <pid> <harness> [<identity>]
+  local state=$1 pid=$2 harness=$3 identity=${4:-} lock tmp
+  case "$pid" in ''|*[!0-9]*|1) return 1 ;; esac
+  fm_session_harness_valid "$harness" || return 1
+  [ -z "$identity" ] || fm_session_identity_valid "$identity" || return 1
+  lock="$state/.lock"
+  tmp=$(mktemp "$state/.lock-write.XXXXXX" 2>/dev/null) || return 1
+  if ! {
+    printf '%s\n' "$pid"
+    printf 'harness=%s\n' "$harness"
+    [ -z "$identity" ] || printf 'session=%s\n' "$identity"
+  } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$lock" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+# Refresh a matching structured record while sharing fm-lock.sh's acquisition
+# lock.
+# The record is re-read after the claim, so a concurrent takeover can never be
+# overwritten by an identity match observed before that takeover.
+fm_session_lock_refresh_pid() {  # <state> <expected-pid> <harness> <identity> <new-pid>
+  local state=$1 expected_pid=$2 harness=$3 identity=$4 new_pid=$5 claim acquired=0 held_pid
+  command -v fm_lock_try_acquire >/dev/null 2>&1 || return 1
+  claim="$state/.lock.acquire"
+  held_pid=$(cat "$claim/pid" 2>/dev/null || true)
+  if [ "$held_pid" != "${BASHPID:-$$}" ]; then
+    fm_lock_try_acquire "$claim" || return 1
+    acquired=1
+  fi
+  if ! fm_session_lock_read "$state" \
+    || [ "$FM_SESSION_LOCK_PID" != "$expected_pid" ] \
+    || [ "$FM_SESSION_LOCK_HARNESS" != "$harness" ] \
+    || [ "$FM_SESSION_LOCK_IDENTITY" != "$identity" ] \
+    || ! fm_session_lock_write "$state" "$new_pid" "$harness" "$identity"; then
+    [ "$acquired" -eq 0 ] || fm_lock_release "$claim"
+    return 1
+  fi
+  [ "$acquired" -eq 0 ] || fm_lock_release "$claim"
+  return 0
+}
+
+# True when the current verified-harness session owns state dir $1.
+#
+# Current records use stable identity first:
+#   - matching harness and session identity owns the lock regardless of ancestry;
+#   - a matching identity with a changed live pid is a reparented session, so the
+#     pid is refreshed under the acquisition lock before success;
+#   - differing identities with a live recorded owner remain competitors.
+# If either side has no usable identity, the legacy ancestry-membership decision
+# is used byte-for-byte: the recorded pid must appear in the current contiguous
+# harness ancestry.
+# A dead recorded pid is never identity-refreshed and remains the existing stale
+# owner recovery case handled by fm-lock.sh.
+fm_session_lock_owned_by_self() {
+  local state=$1 lock_pid lock_harness lock_identity pids pid current_pid='' current_harness current_identity='' recorded_harness
+  fm_session_lock_read "$state" || return 1
+  lock_pid=$FM_SESSION_LOCK_PID
+  lock_harness=$FM_SESSION_LOCK_HARNESS
+  lock_identity=$FM_SESSION_LOCK_IDENTITY
   pids=$(fm_harness_ancestry_pids) || return 1
+  while IFS= read -r pid; do
+    [ -n "$pid" ] && current_pid=$pid
+  done <<EOF
+$pids
+EOF
+  [ -n "$current_pid" ] || return 1
+  current_harness=$(fm_harness_pid_name "$current_pid") || return 1
+  current_identity=$(fm_current_session_identity "$current_harness" 2>/dev/null || true)
+
+  if [ -n "$lock_identity" ] && [ -n "$current_identity" ]; then
+    # Identity cannot revive a dead record; stale-owner recovery keeps its
+    # existing single acquisition owner in fm-lock.sh.
+    fm_harness_pid_alive "$lock_pid" || return 1
+    recorded_harness=$(fm_harness_pid_name "$lock_pid") || return 1
+    [ "$recorded_harness" = "$lock_harness" ] || return 1
+    if [ "$lock_harness" != "$current_harness" ] || [ "$lock_identity" != "$current_identity" ]; then
+      return 1
+    fi
+    if [ "$lock_pid" != "$current_pid" ]; then
+      fm_session_lock_refresh_pid "$state" "$lock_pid" "$lock_harness" "$lock_identity" "$current_pid" || return 1
+    fi
+    return 0
+  fi
+
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0
   done <<EOF

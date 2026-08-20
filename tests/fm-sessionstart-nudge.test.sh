@@ -472,6 +472,23 @@ test_run_resume_delegates_to_the_nudge() {
   pass "run wrapper: resume delegates to the nudge instead of re-running the digest"
 }
 
+test_run_persists_claude_hook_identity_for_ordinary_commands() {
+  local root="$TMP_ROOT/run-claude-identity" env_file out status=0 ordinary
+  make_run_primary "$root"
+  env_file="$root/session-env.sh"
+  out=$(printf '{"session_id":"12345678-abcd-4abc-8abc-1234567890ab","hook_event_name":"SessionStart","source":"resume"}' |
+    CLAUDE_ENV_FILE="$env_file" run_hook "$root") || status=$?
+  expect_code 0 "$status" "run wrapper Claude identity bridge"
+  assert_contains "$out" "FIRSTMATE_OP" "identity bridge changed resume source routing"
+  [ "$(cat "$env_file" 2>/dev/null || true)" = $'export FM_SESSION_HARNESS=claude\nexport FM_SESSION_ID=12345678-abcd-4abc-8abc-1234567890ab' ] \
+    || fail "SessionStart did not persist the validated Claude identity through CLAUDE_ENV_FILE"
+  # shellcheck disable=SC2016 # The isolated child sources and expands the persisted exports.
+  ordinary=$(env -i PATH="$RUN_PATH" bash -c '. "$1"; printf "%s:%s\n" "$FM_SESSION_HARNESS" "$FM_SESSION_ID"' _ "$env_file")
+  [ "$ordinary" = claude:12345678-abcd-4abc-8abc-1234567890ab ] \
+    || fail "an ordinary command could not recover the SessionStart hook identity: $ordinary"
+  pass "run wrapper: Claude SessionStart identity is reachable from a later ordinary command"
+}
+
 test_run_reads_source_from_the_hook_payload() {
   local root="$TMP_ROOT/run-payload" out status=0
   make_run_primary "$root"
@@ -548,6 +565,7 @@ test_run_compact_without_completion_refreshes_before_finishing_startup
 test_run_clear_without_completion_finishes_startup
 test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge
+test_run_persists_claude_hook_identity_for_ordinary_commands
 test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent

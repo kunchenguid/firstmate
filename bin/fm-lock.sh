@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
-# Writes the harness (agent) process PID found by walking the shell's ancestry,
-# which lives as long as the firstmate session - unlike the transient subshell
-# PID of any one tool call, which is dead moments after it is written.
+# Writes a three-field record whose numeric first line is the verified harness
+# process PID found by walking the shell's ancestry, followed by the harness name
+# and a stable session identity when the harness exposes one to both hooks and
+# ordinary commands.
+# A legacy bare numeric record remains valid and keeps the ancestry-only path.
+# An identity-matched reparented session refreshes the PID under the same
+# acquisition lock used here; a different identity with a live PID keeps the
+# existing competing-session refusal and wording.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -17,23 +22,35 @@ mkdir -p "$STATE" 2>/dev/null || {
   exit 1
 }
 
-# Harness identity (FM_HARNESS_RE, ancestry walk, holder liveness) is owned by
-# the shared session-lock lib so the Claude Stop auto-arm applies the exact
-# same identity contract.
+# The portable claim lock is shared with identity-matched PID refreshes.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# Harness, record, identity, ancestry, refresh, and holder liveness are owned by
+# the shared session-lock lib so every caller applies the exact same contract.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 if [ "${1:-}" = "status" ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
-  old=$(cat "$LOCK" 2>/dev/null) || {
+  if ! fm_session_lock_read "$STATE"; then
     echo "lock: unreadable"
     exit 0
-  }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  fi
+  old=$FM_SESSION_LOCK_PID
+  if fm_session_lock_owned_by_self "$STATE"; then
+    old=$(fm_session_lock_pid "$STATE" 2>/dev/null || printf '%s' "$old")
+    echo "lock: held by this session (live harness pid $old)"
+  elif fm_harness_pid_alive "$old"; then
+    echo "lock: held by live harness pid $old"
+  else
+    echo "lock: stale (pid $old dead or not a harness)"
+  fi
   exit 0
 fi
 
 me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+me_harness=$(fm_harness_pid_name "$me") || { echo "error: cannot identify harness process in ancestry" >&2; exit 1; }
+me_identity=$(fm_current_session_identity "$me_harness" 2>/dev/null || true)
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -42,8 +59,6 @@ rm -f "$probe" 2>/dev/null || {
   echo "error: cannot clean session-lock publication probe; operate read-only until resolved" >&2
   exit 1
 }
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 CLAIM_LOCK="$STATE/.lock.acquire"
 CLAIM_LOCK_HELD=0
 release_claim_lock() {
@@ -56,14 +71,17 @@ trap release_claim_lock EXIT
 trap 'exit 1' HUP INT TERM
 
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
-  old=$(cat "$LOCK" 2>/dev/null || true)
-  if [ "$old" = "$me" ]; then
+  if fm_session_lock_owned_by_self "$STATE"; then
+    me=$(fm_session_lock_pid "$STATE" 2>/dev/null || printf '%s' "$me")
     echo "lock acquired: harness pid $me"
     exit 0
   fi
-  if fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
-    exit 1
+  if fm_session_lock_read "$STATE"; then
+    old=$FM_SESSION_LOCK_PID
+    if fm_harness_pid_alive "$old"; then
+      echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -82,24 +100,30 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is not a regular file; operate read-only until resolved" >&2
     exit 1
   fi
-  old=$(cat "$LOCK" 2>/dev/null) || {
+  if ! fm_session_lock_read "$STATE"; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
-  }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  fi
+  old=$FM_SESSION_LOCK_PID
+  if fm_session_lock_owned_by_self "$STATE"; then
+    me=$(fm_session_lock_pid "$STATE" 2>/dev/null || printf '%s' "$me")
+    release_claim_lock
+    echo "lock acquired: harness pid $me"
+    exit 0
+  fi
+  if fm_harness_pid_alive "$old"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
 fi
-if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
+if ! fm_session_lock_write "$STATE" "$me" "$me_harness" "$me_identity"; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
 fi
-written=$(cat "$LOCK" 2>/dev/null) || {
-  echo "error: cannot verify session lock ownership; operate read-only until resolved" >&2
-  exit 1
-}
-if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
+if ! fm_session_lock_read "$STATE" \
+  || [ "$FM_SESSION_LOCK_PID" != "$me" ] \
+  || [ "$FM_SESSION_LOCK_HARNESS" != "$me_harness" ] \
+  || [ "$FM_SESSION_LOCK_IDENTITY" != "$me_identity" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi

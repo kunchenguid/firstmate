@@ -2,11 +2,14 @@
 # Opt-in credentialed Claude live regression for the Stop-owned auto-arm
 # (bin/fm-claude-stop-autoarm.sh + bin/fm-turnend-guard.sh --claude).
 # Proves, against the real installed Claude Code and the real tracked hook
-# registration: a fresh session with in-flight work, no watcher, and a stale
-# session lock can run fm-session-start.sh first; session start reclaims the
-# dead owner; at least two tokenless auto-arm and rewake cycles then complete
-# with zero model-issued arm commands; and the cooperative guard consumes no
-# forced continuation while the hook's launch is healthy.
+# registration: one stable session identity is available in the SessionStart
+# payload, an ordinary Bash tool, the structured home lock, and fm-lock status
+# while the session runs under Claude's background-host chain; a fresh session
+# with in-flight work, no watcher, and a stale lock then has the tracked
+# SessionStart hook run fm-session-start.sh and reclaim the dead owner; at least
+# two tokenless auto-arm and rewake
+# cycles complete with zero model-issued arm commands; and the cooperative guard
+# consumes no forced continuation while the hook's launch is healthy.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication. No live fleet home, worktree, or session is touched.
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
@@ -32,8 +35,10 @@ HOME_DIR="$LAB/fmhome"
 LIVE_OWNER_HOME="$LAB/live-owner-home"
 TRANSCRIPT="$LAB/claude.jsonl"
 CLAUDE_VERSION=$(claude --version)
+IDENTITY_AGENT_ID=
 
 cleanup() {
+  [ -z "$IDENTITY_AGENT_ID" ] || claude stop "$IDENTITY_AGENT_ID" >/dev/null 2>&1 || true
   rm -rf "$LAB"
 }
 trap cleanup EXIT
@@ -44,6 +49,47 @@ mkdir -p "$LAB"
 git clone -q "$ROOT" "$PROJECT"
 cp -R "$ROOT/bin/." "$PROJECT/bin/"
 cp "$ROOT/.claude/settings.json" "$PROJECT/.claude/settings.json"
+
+# Identity preflight: launch the real Claude session directly into its
+# background-host chain, let the tracked SessionStart adapter persist the hook
+# session_id, and verify an ordinary Bash tool plus fm-lock status recover the
+# same identity while the session is still live.
+# Claude's daemon intentionally does not inherit arbitrary launch-time FM_HOME,
+# so this isolated clone is also the identity preflight's default home.
+mkdir -p "$PROJECT/state" "$PROJECT/config" "$PROJECT/data"
+IDENTITY_LAUNCH=$(
+  cd "$PROJECT" || exit 1
+  CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
+    claude --bg --dangerously-skip-permissions --model fable --effort low \
+      'Use Bash exactly once to run `printf "FM_SESSION_HARNESS=%s\nFM_SESSION_ID=%s\nPPID=%s\n" "$FM_SESSION_HARNESS" "$FM_SESSION_ID" "$PPID" > .claude-id-env; bin/fm-lock.sh status > .claude-id-lock-status`. Then reply exactly IDENTITY_DONE.'
+) || fail "Claude background identity session did not launch"
+IDENTITY_AGENT_ID=$(printf '%s\n' "$IDENTITY_LAUNCH" | sed -n 's/^backgrounded .* \([0-9a-f][0-9a-f]*\)$/\1/p' | head -1)
+[ -n "$IDENTITY_AGENT_ID" ] || fail "Claude background launch did not return an agent id: $IDENTITY_LAUNCH"
+for _ in $(seq 1 960); do
+  [ -s "$PROJECT/.claude-id-env" ] && [ -s "$PROJECT/.claude-id-lock-status" ] && break
+  sleep 0.25
+done
+[ -s "$PROJECT/.claude-id-env" ] || fail "background session never exposed its persisted identity to an ordinary Bash tool"
+IDENTITY_SESSION_ID=$(claude agents --json --all --cwd "$PROJECT" 2>/dev/null \
+  | jq -r --arg id "$IDENTITY_AGENT_ID" '.[] | select(.id == $id or (.sessionId | startswith($id))) | .sessionId' \
+  | head -1)
+[ -n "$IDENTITY_SESSION_ID" ] || fail "background agent $IDENTITY_AGENT_ID had no full session identity"
+[ "$(sed -n '1p' "$PROJECT/.claude-id-env")" = FM_SESSION_HARNESS=claude ] \
+  || fail "ordinary Bash tool did not recover the Claude harness identity"
+[ "$(sed -n '2p' "$PROJECT/.claude-id-env")" = "FM_SESSION_ID=$IDENTITY_SESSION_ID" ] \
+  || fail "ordinary Bash identity did not match the background agent identity"
+[ "$(sed -n '2p' "$PROJECT/state/.lock")" = harness=claude ] \
+  || fail "background session lock omitted the verified harness"
+[ "$(sed -n '3p' "$PROJECT/state/.lock")" = "session=$IDENTITY_SESSION_ID" ] \
+  || fail "background session lock identity did not match the hook and ordinary command"
+grep -q '^lock: held by this session (live harness pid [0-9][0-9]*)$' "$PROJECT/.claude-id-lock-status" \
+  || fail "fm-lock status disagreed with the background session's ownership predicate: $(cat "$PROJECT/.claude-id-lock-status")"
+IDENTITY_TOOL_PARENT=$(sed -n '3s/^PPID=//p' "$PROJECT/.claude-id-env")
+IDENTITY_PARENT_ARGS=$(ps -o args= -p "$IDENTITY_TOOL_PARENT" 2>/dev/null || true)
+case "$IDENTITY_PARENT_ARGS" in *bg-spare*) ;; *) fail "ordinary tool parent $IDENTITY_TOOL_PARENT was not Claude's background spare: $IDENTITY_PARENT_ARGS" ;; esac
+claude stop "$IDENTITY_AGENT_ID" >/dev/null 2>&1 || fail "could not stop the isolated background identity session"
+IDENTITY_AGENT_ID=
+
 # The lab keeps the real tracked .claude/settings.json SessionStart nudge,
 # Stop guard, and asyncRewake auto-arm registration.
 # The only local hook records model-issued Bash calls without acquiring the
@@ -107,7 +153,7 @@ printf 'stale: fixture-rapid drained\n'
 SH
 chmod +x "$PROJECT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-wake-drain.sh"
 
-PROMPT='Run exactly `bin/fm-session-start.sh` with Bash as your first tool call. After reading its complete digest, reply with exactly CYCLE0 and stop. Whenever a Stop hook feedback message wakes you, run exactly `bin/fm-wake-drain.sh` once with Bash, then reply with exactly ACK and stop. Never run bin/fm-watch-arm.sh or any other arm command, and never use any other tool.'
+PROMPT='The tracked SessionStart hook already ran the complete digest before this prompt. Reply with exactly CYCLE0 and stop without using a tool. Whenever a Stop hook feedback message wakes you, run exactly `bin/fm-wake-drain.sh` once with Bash, then reply with exactly ACK and stop. Never run bin/fm-watch-arm.sh or any other arm command, and never use any other tool.'
 
 (
   cd "$PROJECT" || exit 1
@@ -123,8 +169,8 @@ REWAKES=$(grep -c 'Stop hook feedback' "$TRANSCRIPT" 2>/dev/null || true)
 [ "$REWAKES" -ge 2 ] || fail "expected at least 2 exit-2 rewake deliveries, got $REWAKES"
 grep -q 'stale: fixture-rapid-1' "$TRANSCRIPT" || fail "first rapid rewake reason missing from the transcript"
 grep -q 'stale: fixture-rapid-2' "$TRANSCRIPT" || fail "second rapid rewake reason missing from the transcript"
-[ "$(sed -n '1p' "$HOME_DIR/state/tool-calls.log" 2>/dev/null)" = 'bin/fm-session-start.sh' ] \
-  || fail "fresh Claude session did not run session start first: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)"
+[ "$(grep -c '^bin/fm-wake-drain.sh$' "$HOME_DIR/state/tool-calls.log" 2>/dev/null || true)" = 2 ] \
+  || fail "model tools were not exactly the two required wake drains: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)"
 [ "$(cat "$HOME_DIR/state/.lock" 2>/dev/null)" != 9999999 ] \
   || fail "session start did not reclaim the stale dead-owner lock"
 if [ -f "$HOME_DIR/state/tool-calls.log" ]; then
@@ -161,4 +207,4 @@ printf '%s\n' '{"session_id":"live-owner-control"}' \
 [ ! -s "$LAB/live-owner.out" ] && [ ! -s "$LAB/live-owner.err" ] || fail "competing Stop hook produced a rewake while another live session owned the home"
 wait "$LIVE_OWNER_PID"
 
-printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"
+printf 'ok - Claude %s live E2E matched one identity across a background host, ordinary Bash, and fm-lock status; reclaimed a stale lock; completed two tokenless Stop-owned cycles; and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"

@@ -20,6 +20,8 @@ TMP_ROOT=$(fm_test_tmproot fm-session-lock-ancestry)
 fm_git_identity fmtest fmtest@example.invalid
 
 LIB="$ROOT/bin/fm-session-lock-lib.sh"
+WAKE_LIB="$ROOT/bin/fm-wake-lib.sh"
+mkdir -p "$TMP_ROOT/lib-state"
 
 # Claude Code's native installer names the per-session executable by its version,
 # so the harness identity has to survive a basename that says nothing.
@@ -38,11 +40,12 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # liveness questions are decided by the process table alone.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
-  PATH="$fakebin:$PATH" bash -c "
+  FM_STATE_OVERRIDE="$TMP_ROOT/lib-state" PATH="$fakebin:$PATH" bash -c "
+    . \"\$1\"
     . \"\$0\"
     kill() { return 0; }
     $expr
-  " "$LIB"
+  " "$LIB" "$WAKE_LIB"
 }
 
 test_version_named_session_is_identified_on_both_platforms() {
@@ -177,6 +180,112 @@ SH
   lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
     || fail "the contiguous harness run did not recognize its own lock"
   pass "session-lock: ownership stops at the first non-harness gap above the contiguous run"
+}
+
+test_structured_identity_owns_and_refreshes_after_reparenting() {
+  local dir fakebin first
+  dir="$TMP_ROOT/identity-reparent"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  600:comm=) printf '%s\n' claude ;;
+  600:args=) printf '%s\n' claude ;;
+  600:ppid=) printf '%s\n' 1 ;;
+  650:comm=) printf '%s\n' claude ;;
+  650:args=) printf '%s\n' claude ;;
+  650:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' 650 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  printf '650\nharness=claude\nsession=stable-session\n' > "$dir/state/.lock"
+  FM_SESSION_HARNESS=claude FM_SESSION_ID=stable-session \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "matching structured identity did not own with the recorded pid unchanged"
+
+  printf '600\nharness=claude\nsession=stable-session\n' > "$dir/state/.lock"
+  FM_SESSION_HARNESS=claude FM_SESSION_ID=stable-session \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "matching structured identity did not own after reparenting"
+  first=$(sed -n '1p' "$dir/state/.lock")
+  [ "$first" = 650 ] || fail "reparented identity did not refresh pid 600 to 650: $first"
+  [ "$(sed -n '2p' "$dir/state/.lock")" = harness=claude ] \
+    || fail "reparent refresh lost the recorded harness"
+  [ "$(sed -n '3p' "$dir/state/.lock")" = session=stable-session ] \
+    || fail "reparent refresh lost the stable identity"
+  pass "session-lock identity: a matching session owns and atomically refreshes its reparented pid"
+}
+
+test_structured_identity_difference_preserves_competitor_and_missing_side_falls_back() {
+  local dir fakebin
+  dir="$TMP_ROOT/identity-branches"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  600:comm=) printf '%s\n' claude ;;
+  600:args=) printf '%s\n' claude ;;
+  600:ppid=) printf '%s\n' 1 ;;
+  650:comm=) printf '%s\n' claude ;;
+  650:args=) printf '%s\n' claude ;;
+  650:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 650 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  printf '600\nharness=claude\nsession=recorded-session\n' > "$dir/state/.lock"
+  if FM_SESSION_HARNESS=claude FM_SESSION_ID=current-session \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "different live structured identities were treated as one session"
+  fi
+  [ "$(sed -n '1p' "$dir/state/.lock")" = 600 ] \
+    || fail "different identity rewrote the competing owner's pid"
+
+  # Identity missing on the current side: preserve the exact ancestry fallback.
+  printf '650\nharness=claude\nsession=recorded-session\n' > "$dir/state/.lock"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "record-only identity did not fall back to ancestry membership"
+
+  # Identity missing on the recorded side: the same fallback still applies.
+  printf '650\nharness=claude\n' > "$dir/state/.lock"
+  FM_SESSION_HARNESS=claude FM_SESSION_ID=current-session \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "current-only identity did not fall back to ancestry membership"
+
+  # A missing side never widens that fallback to a live harness outside the
+  # current ancestry.
+  printf '600\nharness=claude\nsession=recorded-session\n' > "$dir/state/.lock"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "record-only identity bypassed the unchanged ancestry refusal"
+  fi
+  pass "session-lock identity: differing live sessions refuse and either missing identity uses only ancestry"
 }
 
 test_competing_version_named_session_is_seen_as_live() {
@@ -360,6 +469,8 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_structured_identity_owns_and_refreshes_after_reparenting
+test_structured_identity_difference_preserves_competitor_and_missing_side_falls_back
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

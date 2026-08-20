@@ -125,7 +125,7 @@ submit() {  # <text>
 # --- 1. run-tier session start ----------------------------------------------
 
 wait_for_file "$HOME_DIR/state/.lock" 180 "the fleet session lock"
-LOCK_PID=$(cat "$HOME_DIR/state/.lock" 2>/dev/null)
+LOCK_PID=$(sed -n '1p' "$HOME_DIR/state/.lock" 2>/dev/null)
 PANE_PID=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t primary '#{pane_pid}' 2>/dev/null)
 [ -n "$LOCK_PID" ] && [ "$LOCK_PID" = "$PANE_PID" ] \
   || harness_fail "the session lock must be owned by the Cursor pane process (lock=$LOCK_PID pane=$PANE_PID); Cursor is not resolving in the session-lock ancestry"

@@ -453,14 +453,14 @@ EOF
   [ "$elapsed" -lt 4 ] || fail "lock takeover blocked ${elapsed}s behind deferred network work"
   assert_contains "$out" "operate read-only" \
     "a lease-blocked takeover did not fail closed to read-only: $out"
-  [ "$(cat "$home/state/.lock")" = "$$" ] \
+  [ "$(sed -n '1p' "$home/state/.lock")" = "$$" ] \
     || fail "the lease-blocked takeover replaced the prior owner"
 
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the leased sweep never settled"
   out=$(PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="$next_owner" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-lock.sh" 2>&1) \
     || fail "lock takeover still failed after the sweep released its lease"
-  new_owner=$(cat "$home/state/.lock")
+  new_owner=$(sed -n '1p' "$home/state/.lock")
   assert_contains "$out" "lock acquired: harness pid $new_owner" \
     "the fleet lock did not record the harness owner reported by acquisition"
   [ "$new_owner" != "$$" ] || fail "the prior harness still owned the lock after takeover"

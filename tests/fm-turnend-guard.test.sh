@@ -1380,8 +1380,10 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   [ "$count" = 1 ] || fail "the independent post-recovery failure must start at count 1, got $count"
 
   out=$(run_integrated_autoarm "$dir"); status=$?
-  expect_code 2 "$status" "a later failure after positive recovery must start a new episode"
-  assert_contains "$out" "automatic supervision mechanism is broken" "the new failure episode notice was suppressed"
+  expect_code 2 "$status" "a later failure after positive recovery must continue the new episode"
+  [ -z "$out" ] || fail "the guard-recorded new failure episode repeated an operator notice: $out"
+  [ "$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$dir/state/.claude-autoarm-epoch")" = failed-suppressed ] \
+    || fail "the later auto-arm did not continue the guard-recorded failure episode"
   pass "fm-turnend-guard --claude: integrated fresh failures reach one bounded fail-open, stop continuation, and reset on recovery"
 }
 
@@ -1466,17 +1468,41 @@ test_hook_claude_mode_stale_rewake_epoch_blocks() {
   pass "fm-turnend-guard --claude: stale rewake epoch does not allow a blind stop"
 }
 
-test_hook_claude_mode_budget_without_verified_failure_keeps_blocking() {
-  local dir out status i
+test_hook_claude_mode_structurally_unclaimed_recovery_is_bounded() {
+  local dir out status i count owner owner_after
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget")
   : > "$dir/state/task1.meta"
-  for i in 1 2 3 4; do
+  install_integrated_autoarm "$dir"
+  "$dir/fake-claude" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\nharness=claude\nsession=other-live-session\n' "$owner" > "$dir/state/.lock"
+  # shellcheck disable=SC2016 # FM_HOME expands inside the fake harness child.
+  out=$(printf '{"session_id":"sess-claude-mode","stop_hook_active":false}\n' \
+    | FM_HOME="$dir" "$dir/fake-claude" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
+  owner_after=$(sed -n '1p' "$dir/state/.lock")
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  expect_code 0 "$status" "a Stop auto-arm structurally unable to claim a different live identity"
+  [ -z "$out" ] || fail "structurally inert auto-arm produced output: $out"
+  [ "$owner_after" = "$owner" ] || fail "structurally inert auto-arm replaced the live owner"
+  assert_absent "$dir/state/.claude-autoarm-epoch" "structurally inert auto-arm itself wrote a failure epoch"
+  assert_absent "$dir/state/arm-ran" "structurally inert auto-arm started watcher recovery"
+
+  for i in 1 2 3; do
     out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
-    expect_code 2 "$status" "--claude block $i must exit 2 within the budget"
+    expect_code 2 "$status" "--claude structurally unclaimed block $i must exit 2 within the budget"
+    assert_not_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "structural failure opened before the configured block budget"
+    count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+    [ "$count" = "$i" ] || fail "structural failure block $i recorded count $count"
   done
-  assert_not_contains "$out" 'systemMessage' "budget exhaustion without verified auto-arm failure must not fail open"
-  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "unverified budget exhaustion recorded an attended alarm"
-  pass "fm-turnend-guard --claude: budget exhaustion alone cannot permit a blind stop"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 0 "$status" "the fourth structurally unclaimed Stop must take the attended fail-open"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "structural failure did not end in the loud attended fail-open"
+  assert_contains "$out" 'session ownership' "structural failure alarm omitted ownership diagnosis"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "structural failure did not consume its one-time alarm"
+  [ "$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$dir/state/.claude-autoarm-epoch")" = failed-unclaimed ] \
+    || fail "structural failure did not record its typed epoch"
+  pass "fm-turnend-guard --claude: an inert ownership recovery blocks three times, then fails open loudly"
 }
 
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
@@ -1498,7 +1524,7 @@ test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
   pass "fm-turnend-guard --claude: verified fail-open is loud, bounded, attended, and non-repeating"
 }
 
-test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch() {
+test_hook_claude_mode_partial_failure_records_converge_to_structural_episode() {
   local no_notice notice_only out status
   no_notice=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-no-notice")
   : > "$no_notice/state/task1.meta"
@@ -1506,15 +1532,20 @@ test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch() {
   touch -t 202001010000 "$no_notice/state/.claude-autoarm-epoch"
   seed_claude_budget "$no_notice" 3
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$no_notice" true); status=$?
-  expect_code 2 "$status" "an exhausted failure epoch without the consumed notice must remain blocking"
+  expect_code 0 "$status" "a missing notice after an exhausted block budget must become a structural episode"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "missing-notice repair did not fail open loudly"
+  assert_present "$no_notice/state/.claude-autoarm-failure-notified" "missing-notice repair did not complete the episode"
 
   notice_only=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-no-epoch")
   : > "$notice_only/state/task1.meta"
   : > "$notice_only/state/.claude-autoarm-failure-notified"
   seed_claude_budget "$notice_only" 3
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$notice_only" true); status=$?
-  expect_code 2 "$status" "a consumed notice without an exhausted failure epoch must remain blocking"
-  pass "fm-turnend-guard --claude: fail-open requires both exhausted retries and consumed notice"
+  expect_code 0 "$status" "a missing epoch after an exhausted block budget must become a structural episode"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "missing-epoch repair did not fail open loudly"
+  [ "$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$notice_only/state/.claude-autoarm-epoch")" = failed-unclaimed ] \
+    || fail "missing-epoch repair did not publish the structural outcome"
+  pass "fm-turnend-guard --claude: partial failure records converge to one bounded structural episode"
 }
 
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open() {
@@ -1658,9 +1689,9 @@ test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
-test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
+test_hook_claude_mode_structurally_unclaimed_recovery_is_bounded
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
-test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
+test_hook_claude_mode_partial_failure_records_converge_to_structural_episode
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim

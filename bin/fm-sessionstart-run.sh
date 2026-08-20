@@ -17,6 +17,14 @@
 #             treated as `startup`, because taking the helm redundantly is
 #             cheap and idempotent while not taking it is the whole bug.
 #
+# Claude identity bridge: on a Claude-shaped payload, the wrapper validates
+# `session_id`, appends FM_SESSION_HARNESS and FM_SESSION_ID exports to Claude's
+# vendor-provided CLAUDE_ENV_FILE, and exports the same values into this hook.
+# The lock acquired below can therefore compare the same stable identity from a
+# later Stop hook or from an ordinary Bash tool after process reparenting.
+# If the environment-file write fails, no identity is advertised and the legacy
+# ancestry decision remains in force.
+#
 # Source routing (see docs/sessionstart-nudge.md for the per-harness names):
 #   startup, new            full digest - this process has not taken the helm
 #   clear, compact          `--reemit` digest only when this lock owner recorded
@@ -46,6 +54,10 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# Session identity can refresh a reparented lock, so it shares fm-lock.sh's
+# portable acquisition lock.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-hook-host-lib.sh
@@ -76,12 +88,12 @@ session_start_completed() {
   [ -f "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] || return 1
   [ -f "$COMPLETION_FILE" ] && [ ! -L "$COMPLETION_FILE" ] || return 1
   fm_session_lock_owned_by_self "$STATE" || return 1
-  lock_pid=$(cat "$STATE/.lock" 2>/dev/null) || return 1
+  lock_pid=$(fm_session_lock_pid "$STATE") || return 1
   completion_pid=$(cat "$COMPLETION_FILE" 2>/dev/null) || return 1
-  case "$lock_pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$completion_pid" = "$lock_pid" ]
 }
 
+PAYLOAD=
 if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   # Claude and Codex both deliver a JSON SessionStart payload on stdin whose
   # `source` field carries startup|resume|clear|compact. Parsed without jq so a
@@ -99,6 +111,21 @@ if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   # and repeat every startup sweep.
   if fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
+  fi
+  # Claude's session_id is delivered to SessionStart and Stop hooks but is not
+  # ambient in ordinary Bash tool calls.
+  # CLAUDE_ENV_FILE is the vendor-owned bridge expressly provided by Claude for
+  # SessionStart hooks to persist exports into every later Bash tool call.
+  # Publish only after that append succeeds, so a lock never records an identity
+  # that ordinary commands in the same session cannot recover.
+  if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+    SESSION_ID=$(fm_session_identity_from_hook_payload "$PAYLOAD" 2>/dev/null || true)
+    if [ -n "$SESSION_ID" ] && printf 'export FM_SESSION_HARNESS=claude\nexport FM_SESSION_ID=%s\n' \
+      "$SESSION_ID" >> "$CLAUDE_ENV_FILE" 2>/dev/null; then
+      FM_SESSION_HARNESS=claude
+      FM_SESSION_ID=$SESSION_ID
+      export FM_SESSION_HARNESS FM_SESSION_ID
+    fi
   fi
   SOURCE=$(printf '%s' "$PAYLOAD" | awk '
     BEGIN { RS = "\"" }

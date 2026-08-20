@@ -172,7 +172,7 @@ network_mutation_authorized() {
   [ -n "$expected" ] || return 0
   case "$expected" in *[!0-9]*) return 1 ;; esac
   [ -f "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] || return 1
-  current=$(cat "$STATE/.lock" 2>/dev/null) || return 1
+  current=$(sed -n '1p' "$STATE/.lock" 2>/dev/null) || return 1
   [ "$current" = "$expected" ]
 }
 

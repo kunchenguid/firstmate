@@ -10,11 +10,17 @@
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
-#   - Identity: only when THIS session's harness ancestor holds state/.lock.
-#     When an existing numeric owner fails the shared harness-liveness predicate,
-#     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
+#   - Identity: only when THIS Claude session owns state/.lock.
+#     SessionStart persists Claude's hook `session_id` through CLAUDE_ENV_FILE;
+#     this Stop hook also reads the same payload field directly.
+#     A matching structured identity owns across process reparenting and
+#     refreshes the recorded PID under the session-lock acquisition lock.
+#     A legacy lock or an unavailable identity retains the ancestry walk.
+#     When the recorded owner fails the shared harness-liveness predicate, the
+#     hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
+#     ownership. A different live identity, missing lock, malformed lock, or
+#     unresolved ancestry remains inert, so a competing session never arms or
+#     rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -94,6 +100,17 @@ PAYLOAD=$(cat 2>/dev/null || true)
 # its turn boundary, so stand down on a Cursor-delivered payload.
 fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 
+# The Stop payload is an independent source of the same Claude session identity
+# SessionStart persisted for ordinary commands.
+# A malformed or absent field leaves identity unavailable and therefore keeps
+# the ancestry fallback; it never invents an identity.
+PAYLOAD_SESSION_ID=$(fm_session_identity_from_hook_payload "$PAYLOAD" 2>/dev/null || true)
+if [ -n "$PAYLOAD_SESSION_ID" ]; then
+  FM_SESSION_HARNESS=claude
+  FM_SESSION_ID=$PAYLOAD_SESSION_ID
+  export FM_SESSION_HARNESS FM_SESSION_ID
+fi
+
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
@@ -105,7 +122,7 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # uncertainty rather than stale-owner evidence and remain inert.
 RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
-  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  LOCK_PID=$(fm_session_lock_pid "$STATE" 2>/dev/null || true)
   case "$LOCK_PID" in
     ''|*[!0-9]*) exit 0 ;;
   esac

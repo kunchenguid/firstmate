@@ -129,7 +129,7 @@ function pidAlive(pid: string): boolean {
 function lockOwnership(): LockOwnership {
   let lockPid = "";
   try {
-    lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
+    lockPid = readFileSync(`${state}/.lock`, "utf8").split(/\r?\n/, 1)[0]?.trim() ?? "";
   } catch {
     return "missing";
   }

@@ -204,11 +204,37 @@ test_inert_without_session_lock() {
   pass "auto-arm: inert with no session lock"
 }
 
+test_identity_matched_reparented_session_refreshes_and_arms() {
+  local dir old out status expected refreshed
+  dir=$(make_primary_dir "$TMP_ROOT/reparented-identity")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  old=$!
+  printf '%s\nharness=claude\nsession=reparented-session\n' "$old" > "$dir/state/.lock"
+  out=$(printf '%s\n' '{"session_id":"reparented-session"}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/expected-refreshed-pid"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1); status=$?
+  expected=$(cat "$dir/state/expected-refreshed-pid")
+  refreshed=$(sed -n '1p' "$dir/state/.lock")
+  kill "$old" 2>/dev/null || true
+  wait "$old" 2>/dev/null || true
+  expect_code 2 "$status" "an identity-matched reparented Stop hook must claim and rewake"
+  assert_contains "$out" "firstmate watcher wake" "reparented Stop hook did not translate its actionable close"
+  [ "$refreshed" = "$expected" ] \
+    || fail "reparented Stop hook did not refresh pid $old to its current harness pid $expected: $refreshed"
+  [ -e "$dir/state/arm-ran" ] || fail "reparented Stop hook did not arm watcher supervision"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "reparented Stop hook did not record its claimed rewake"
+  pass "auto-arm: an identity-matched reparented session refreshes its pid, claims the home, and arms"
+}
+
 test_reclaims_stale_session_lock_before_arming() {
   local dir out status expected_owner actual_owner
   dir=$(make_primary_dir "$TMP_ROOT/stale-lock")
   : > "$dir/state/task.meta"
-  printf '9999999\n' > "$dir/state/.lock"
+  printf '9999999\nharness=claude\nsession=stale\n' > "$dir/state/.lock"
   write_arm_fixture "$dir" actionable
   out=$(printf '%s\n' '{"session_id":"stale"}' \
     | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
@@ -217,11 +243,11 @@ test_reclaims_stale_session_lock_before_arming() {
       ' 2>&1); status=$?
   expect_code 2 "$status" "a dead recorded session owner must be reclaimed before the actionable rewake"
   expected_owner=$(cat "$dir/state/expected-owner")
-  actual_owner=$(cat "$dir/state/.lock")
+  actual_owner=$(sed -n '1p' "$dir/state/.lock")
   [ "$actual_owner" = "$expected_owner" ] || fail "stale session lock was not claimed by the current harness: expected $expected_owner, got $actual_owner"
   [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after reclaiming the stale session lock"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "stale-lock recovery must record outcome=rewake"
-  pass "auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh before arming"
+  pass "auto-arm: a matching identity with a demonstrably dead pid keeps stale-owner recovery through fm-lock.sh"
 }
 
 test_inert_when_lock_held_by_other_harness() {
@@ -570,6 +596,50 @@ test_active_in_marked_secondmate_home() {
   pass "auto-arm: active in a marked secondmate home"
 }
 
+test_fm_lock_status_agrees_with_identity_reparent_and_refreshes_pid() {
+  local dir old out status expected refreshed
+  dir=$(make_primary_dir "$TMP_ROOT/lock-status-reparent")
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  old=$!
+  printf '%s\nharness=claude\nsession=same-session\n' "$old" > "$dir/state/.lock"
+  out=$(FM_HOME="$dir" FM_SESSION_HARNESS=claude FM_SESSION_ID=same-session \
+    "$FAKE_CLAUDE" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/expected-refreshed-pid"
+      "$FM_HOME/bin/fm-lock.sh" status
+    ' 2>&1); status=$?
+  expected=$(cat "$dir/state/expected-refreshed-pid")
+  refreshed=$(sed -n '1p' "$dir/state/.lock")
+  kill "$old" 2>/dev/null || true
+  wait "$old" 2>/dev/null || true
+  expect_code 0 "$status" "fm-lock status for an identity-matched reparented session"
+  assert_contains "$out" "lock: held by this session (live harness pid $expected)" \
+    "fm-lock status did not agree with the ownership predicate"
+  [ "$refreshed" = "$expected" ] \
+    || fail "fm-lock status did not refresh reparented pid $old to $expected: $refreshed"
+  pass "fm-lock status: identity-matched reparenting agrees with the predicate and refreshes the pid"
+}
+
+test_fm_lock_refuses_different_live_identity_with_existing_wording() {
+  local dir old out status owner_after record_after
+  dir=$(make_primary_dir "$TMP_ROOT/lock-live-identity-refusal")
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  old=$!
+  printf '%s\nharness=claude\nsession=owner-session\n' "$old" > "$dir/state/.lock"
+  out=$(FM_HOME="$dir" FM_SESSION_HARNESS=claude FM_SESSION_ID=other-session \
+    "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-lock.sh"' 2>&1); status=$?
+  owner_after=$(sed -n '1p' "$dir/state/.lock")
+  record_after=$(sed -n '2,3p' "$dir/state/.lock")
+  kill "$old" 2>/dev/null || true
+  wait "$old" 2>/dev/null || true
+  expect_code 1 "$status" "a different live session must be refused"
+  [ "$out" = "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" ] \
+    || fail "competing-session refusal wording changed: $out"
+  [ "$owner_after" = "$old" ] || fail "different identity replaced live owner $old with $owner_after"
+  [ "$record_after" = $'harness=claude\nsession=owner-session' ] \
+    || fail "different identity mutated the live owner's record: $record_after"
+  pass "fm-lock: a genuinely different live identity is refused with the existing wording"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -579,6 +649,7 @@ test_fm_lock_status_still_works_with_shared_lib() {
 
 test_inert_in_child_worktree
 test_inert_without_session_lock
+test_identity_matched_reparented_session_refreshes_and_arms
 test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
@@ -598,4 +669,6 @@ test_single_flight_admits_exactly_one_owner
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
+test_fm_lock_status_agrees_with_identity_reparent_and_refreshes_pid
+test_fm_lock_refuses_different_live_identity_with_existing_wording
 test_fm_lock_status_still_works_with_shared_lib

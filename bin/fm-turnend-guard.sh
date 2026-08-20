@@ -57,11 +57,13 @@
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
-#   3. only when neither materializes is the auto-arm genuinely absent: re-block
-#      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
-#      (default 3) consecutive blocks per session - safely below Claude Code's
-#      hard 8-consecutive-block override - then allow one loud attended
-#      fail-open only for an already verified failure episode.
+#   3. only when neither materializes is the auto-arm genuinely absent: record
+#      that structurally unclaimed recovery as a verified failure episode, then
+#      re-block with the repair banner at most
+#      FM_CLAUDE_TURNEND_BLOCK_BUDGET (default 3) consecutive times per session -
+#      safely below Claude Code's hard 8-consecutive-block override - before one
+#      loud attended fail-open. This keeps a future ownership failure bounded
+#      even when the auto-arm exits inert before it can write an epoch itself.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -238,6 +240,11 @@ budget_account_current_epoch() {
           COUNT=1
         fi
         ;;
+      failed-unclaimed)
+        # No automatic continuation exists for a structurally unclaimed
+        # recovery, so its first observation is the first blocked Stop.
+        COUNT=1
+        ;;
       *) COUNT=1 ;;
     esac
   fi
@@ -350,9 +357,50 @@ failure_episode_verified() {
   [ -e "$FAILURE_NOTICE" ] || return 1
   outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
-    failed|failed-suppressed) return 0 ;;
+    failed|failed-suppressed|failed-unclaimed) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Record the failure episode the async hook cannot record for itself when it
+# exits inert before claiming the home (for example, because session ownership
+# cannot be established).
+# The auto-arm owner lock serializes this write against a late real claim, and a
+# final health check prevents an unclaimed episode from replacing positive
+# recovery.
+record_structurally_unclaimed_failure() {
+  local seq tmp prior_outcome
+  if failure_episode_verified; then
+    prior_outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+    # A real auto-arm failure already supplies one new epoch per Stop cycle.
+    # A structural failure has no producer other than this guard, so each later
+    # Stop must advance its epoch before budget accounting can advance once.
+    [ "$prior_outcome" = failed-unclaimed ] || return 0
+  fi
+  [ ! -e "$STATE/.afk" ] || return 1
+  fm_lock_try_acquire "$OWNER_LOCK" || return 1
+  if ! fm_lock_set_role "$OWNER_LOCK" structural-failure; then
+    fm_lock_release "$OWNER_LOCK"
+    return 1
+  fi
+  if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || [ -e "$FAILURE_ALARM" ]; then
+    fm_lock_release "$OWNER_LOCK"
+    return 1
+  fi
+  seq=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
+  seq=$((seq + 1))
+  tmp="$STATE/.claude-autoarm-epoch.tmp.${BASHPID:-$$}"
+  if ! : > "$FAILURE_NOTICE" 2>/dev/null \
+    || ! printf 'epoch=%s owner_pid=%s outcome=failed-unclaimed updated_at=%s\n' \
+      "$seq" "${BASHPID:-$$}" "$(date +%s)" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$STATE/.claude-autoarm-epoch" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$OWNER_LOCK"
+    return 1
+  fi
+  fm_lock_release "$OWNER_LOCK"
+  return 0
 }
 
 i=0
@@ -373,8 +421,14 @@ if autoarm_owns_recovery; then
   exit 0
 fi
 
-# The auto-arm genuinely failed to establish: consume the bounded re-block
-# budget before considering the verified one-time attended fail-open.
+# The auto-arm genuinely failed to establish.
+# If it exited before claiming the home, it had no safe opportunity to publish
+# its own failed epoch; create that episode here under the shared owner lock so
+# the block budget can never become an unbounded loop.
+if ! record_structurally_unclaimed_failure; then
+  autoarm_owns_recovery && exit 0
+  block_stop
+fi
 budget_account_current_epoch || block_stop
 terminal_fail_open
 terminal_status=$?
@@ -386,7 +440,7 @@ if [ "$terminal_status" -eq 0 ]; then
   else
     NEED_DESC="X-mode relay polling active"
   fi
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm could not establish recovery, no watcher or automatic continuation exists, and the bounded block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup, including session ownership, before relying on unattended supervision."}\n' "$NEED_DESC"
   exit 0
 fi
 [ "$terminal_status" -eq 2 ] && exit 0

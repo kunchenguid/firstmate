@@ -195,7 +195,7 @@ cmd_start() {  # <locked> <harvest-pid>
   # Captured HERE, at the moment the caller still holds the lock, and carried to
   # the worker: re-reading the lock later would only prove that SOME session
   # holds it, which is exactly the case this guard exists to reject.
-  lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  lock_pid=$(fm_session_lock_pid "$STATE" 2>/dev/null || true)
   if [ "$locked" = 1 ] && ! fm_session_lock_owned_by_self "$STATE"; then
     return 1
   fi
@@ -290,7 +290,7 @@ lock_unchanged() {  # <expected-pid>
   local expected=$1 current
   case "$expected" in ''|*[!0-9]*) return 1 ;; esac
   [ -f "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] || return 1
-  current=$(cat "$STATE/.lock" 2>/dev/null) || return 1
+  current=$(fm_session_lock_pid "$STATE") || return 1
   [ "$current" = "$expected" ]
 }
 
@@ -399,7 +399,7 @@ cmd_run() {  # <locked> <lock-pid> <generation>
     locked=0
   fi
   if [ "$locked" = 1 ]; then
-    [ "$internal" -eq 1 ] || lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+    [ "$internal" -eq 1 ] || lock_pid=$(fm_session_lock_pid "$STATE" 2>/dev/null || true)
     if lock_unchanged "$lock_pid"; then
       sweep_locked=1
       phases=probe,sweeps

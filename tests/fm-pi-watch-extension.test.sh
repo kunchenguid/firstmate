@@ -876,7 +876,7 @@ try {
 }
 
 if (existsSync(process.env.FM_ARM_LOG)) throw new Error("watcher arm ran without lock ownership");
-writeFileSync(lock, `${process.pid}\n`);
+writeFileSync(lock, `${process.pid}\nharness=pi\nsession=session-test\n`);
 const owned = await callArm();
 if (owned.details?.ok !== true || !owned.details.message.includes("started Pi extension arm child")) {
   throw new Error(`owned lock did not arm: ${JSON.stringify(owned.details)}`);
@@ -1338,12 +1338,14 @@ const hooks = await mod.FmPrimaryWatchArm({
 const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
 await hooks.event(event);
-await new Promise((resolve) => setTimeout(resolve, 120));
+// Let the first ownership walk finish before changing the fixture lock; its
+// eight bounded ps hops can exceed 120ms on a loaded macOS host.
+await new Promise((resolve) => setTimeout(resolve, 1200));
 if (existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm ran without owning the session lock");
   process.exit(1);
 }
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\nharness=opencode\nsession=session-test\n`);
 await hooks.event(event);
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));

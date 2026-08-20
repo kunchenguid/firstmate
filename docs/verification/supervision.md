@@ -289,12 +289,58 @@ That inertness result is scoped to the builds it exercised: it did not establish
 
 The secondmate-home scope and manual-repair wake path were measured with Claude Code 2.1.207 on 2026-07-12, when a native background completion re-invoked the idle model with no human input.
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
-Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
+Current session-lock records carry the verified harness and a stable session identity after a numeric PID first line.
+Matching identities own across process reparenting and atomically refresh that PID, while different live identities remain competing sessions.
+When either identity is unavailable, `bin/fm-session-lock-lib.sh` retains the prior whole-contiguous-ancestry decision, so the Stop auto-arm reaches a legacy lock owner wherever that owner sits: the outermost PID of Claude Code's multi-level `bg-spare` hook worker chain, or an inner PID when a harness-named daemon parents the session.
 Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
-`tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
+`tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table, covers every structured identity and fallback branch, and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
 `tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
+
+### Claude session identity under background hosting, 2026-08-20
+
+Claude Code 2.1.237 was inspected first against the live read-only home, then against a disposable background session.
+The live comparison established that the two candidate UUIDs were not aliases for one session.
+The turn-end budget carried `679b5375-7503-44f5-b823-0f798855427b`, while `claude agents --json --all --cwd /Users/tim/repos/firstmate` reported that UUID as an idle background session and reported `08eb4d0b-4357-4740-b094-bb755671453c` separately as a busy foreground session.
+The corresponding JSONL files also carried their own UUID in each record's `sessionId` field.
+
+```text
+$ cat /Users/tim/repos/firstmate/state/.turnend-claude-blocks
+session=679b5375-7503-44f5-b823-0f798855427b
+count=1
+epoch=8
+
+$ claude agents --json --all --cwd /Users/tim/repos/firstmate | jq -c '.[] | select(.sessionId=="08eb4d0b-4357-4740-b094-bb755671453c" or .sessionId=="679b5375-7503-44f5-b823-0f798855427b") | {sessionId,id,status,cwd,name}'
+{"sessionId":"08eb4d0b-4357-4740-b094-bb755671453c","id":null,"status":"busy","cwd":"/Users/tim/repos/firstmate","name":"firstmate-57"}
+{"sessionId":"679b5375-7503-44f5-b823-0f798855427b","id":"679b5375","status":"idle","cwd":"/Users/tim/repos/firstmate","name":"Firstmate request handling"}
+```
+
+The disposable test then launched `claude --bg` with a SessionStart hook that saved its payload and wrote validated `FM_SESSION_HARNESS` and `FM_SESSION_ID` exports to the hook's `CLAUDE_ENV_FILE`.
+The model's only ordinary Bash tool call wrote those exported values and its parent PID to a fixture file.
+The payload UUID, transcript basename, background-agent UUID, and ordinary-command value were identical, and the ordinary command ran below Claude's `bg-spare` process.
+
+```text
+$ claude --version
+2.1.237 (Claude Code)
+
+$ jq -c '{session_id,transcript_path,source,hook_event_name,cwd}' hook-payload.json
+{"session_id":"0a5fd439-11e4-48de-84a5-fb5b7f36a754","transcript_path":"/Users/tim/.claude/projects/-Users-tim--treehouse-firstmate-8bf1b0-1-firstmate--tmp-claude-session-id-evidence/0a5fd439-11e4-48de-84a5-fb5b7f36a754.jsonl","source":"startup","hook_event_name":"SessionStart","cwd":"/Users/tim/.treehouse/firstmate-8bf1b0/1/firstmate/.tmp-claude-session-id-evidence"}
+
+$ cat ordinary-command-env.txt
+FM_SESSION_HARNESS=claude
+FM_SESSION_ID=0a5fd439-11e4-48de-84a5-fb5b7f36a754
+PPID=73776
+
+$ ps -o pid=,ppid=,comm=,args= -p 73706,73776
+73706 71212 claude bg-pty-ho claude bg-pty-host --bg-pty-host ... --bg-spare ...
+73776 73706 claude bg-spare  claude bg-spare --bg-spare ...
+```
+
+This establishes Claude's hook `session_id` as the usable identifier only when SessionStart persists it through `CLAUDE_ENV_FILE`; Claude does not otherwise place it in an ordinary tool environment.
+The transcript basename is the same identity, not a second identity source.
+Because the identifier is available on both required surfaces in the actual background-host chain, the weaker same-installation background-host fallback was not implemented.
+The portable regression is `tests/fm-sessionstart-nudge.test.sh`, and the identity match, PID refresh, legacy fallback, dead-PID recovery, and competing-live-session refusal are covered by `tests/fm-session-lock-ancestry.test.sh` and `tests/fm-claude-stop-autoarm.test.sh`.
 
 The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
 
@@ -426,7 +472,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
-| Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
+| Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | One identity matched across the real background-host chain, an ordinary Bash call, the structured lock, and `fm-lock.sh status`; session start then reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
 | Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |

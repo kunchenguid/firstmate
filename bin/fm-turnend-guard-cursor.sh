@@ -229,8 +229,7 @@ park_still_ours() {
 
 current_session_still_ours() {
   local owner
-  owner=$(cat "$STATE/.lock" 2>/dev/null) || return 1
-  case "$owner" in ''|*[!0-9]*) return 1 ;; esac
+  owner=$(fm_session_lock_pid "$STATE") || return 1
   [ "$owner" = "$OWNER_ID" ] || return 1
   fm_session_lock_owned_by_self "$STATE"
 }
@@ -239,14 +238,14 @@ current_session_still_ours() {
 # leaving its numeric harness pid behind is the one recoverable
 # case, delegated to bin/fm-lock.sh so acquisition keeps its single owner.
 if ! fm_session_lock_owned_by_self "$STATE"; then
-  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  LOCK_PID=$(fm_session_lock_pid "$STATE" 2>/dev/null || true)
   case "$LOCK_PID" in ''|*[!0-9]*) exit 0 ;; esac
   fm_harness_pid_alive "$LOCK_PID" && exit 0
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
 fi
 
-OWNER_ID=$(cat "$STATE/.lock" 2>/dev/null || true)
+OWNER_ID=$(fm_session_lock_pid "$STATE" 2>/dev/null || true)
 case "$OWNER_ID" in ''|*[!0-9]*) exit 0 ;; esac
 
 PARK_SEQ=

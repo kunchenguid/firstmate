@@ -296,10 +296,14 @@ fm_lock_clean_known_files() {
     2>/dev/null || true
 }
 
+# Roles for the Claude auto-arm owner lock:
+#   autoarm            a live Stop hook owns watcher recovery;
+#   terminal-check     the guard owns the final attended-fail-open check;
+#   structural-failure the guard is recording that no auto-arm could claim.
 fm_lock_set_role() {
   local lockdir=$1 role=$2 current pid back
   case "$role" in
-    autoarm|terminal-check) : ;;
+    autoarm|terminal-check|structural-failure) : ;;
     *) return 1 ;;
   esac
   current=${BASHPID:-$$}
