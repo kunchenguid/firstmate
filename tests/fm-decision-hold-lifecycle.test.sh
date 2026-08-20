@@ -986,6 +986,150 @@ EOF
   pass "a channel source with no decision binding closes nothing"
 }
 
+# An any-origin bound source carries answers whose keys are FULL hold identities,
+# so one aggregation surface (the bearings board) can close decisions across
+# origins - including identities longer than the old 64-character adapter cap -
+# while a key with no -decision- separator (a merge or dispatch instruction)
+# feeds nothing, a routed hold stays skipped for the routed close path, and the
+# runner's feed seam carries the whole flow with no runner change.
+test_any_origin_binding_closes_across_origins() {
+  local home alpha beta origin feedback out show long_key long_id overlong_key rc
+  home=$(make_home any-origin-board)
+  alpha=sample-alpha-review
+  beta=sample-instruction-layer-refinement-review
+  for origin in "$alpha" "$beta"; do
+    mkdir -p "$home/data/$origin"
+    tasks_in "$home" add "$origin" "Review $origin" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create origin $origin"
+    write_origin_meta "$home" "$origin"
+    printf 'done: deck ready\n' > "$home/state/$origin.status"
+    printf '# %s\n\nDecisions remain.\n' "$origin" > "$home/data/$origin/report.md"
+  done
+  run_decisions "$home" hold "$alpha" route-choice \
+    --title "Captain call: route-choice" --reason "captain route choice pending" --repo sample >/dev/null \
+    || fail "could not register the alpha hold"
+  run_decisions "$home" hold "$alpha" routed-phase \
+    --title "Captain call: routed-phase" --reason "captain routed phase pending" --repo sample >/dev/null \
+    || fail "could not register the alpha routed hold"
+  long_key=perishable-first-admission-choice
+  long_id="$beta-decision-$long_key"
+  [ "${#long_id}" -ge 81 ] \
+    || fail "fixture regression: the full identity must exceed the old 64-char cap (got ${#long_id})"
+  run_decisions "$home" hold "$beta" "$long_key" \
+    --title "Captain call: $long_key" --reason "captain admission choice pending" --repo sample >/dev/null \
+    || fail "could not register the beta hold"
+  run_decisions "$home" complete "$alpha" route-choice routed-phase >/dev/null \
+    || fail "completion failed for alpha"
+  run_decisions "$home" complete "$beta" "$long_key" >/dev/null \
+    || fail "completion failed for beta"
+  tasks_in "$home" add sample-routed-work "Apply the routed phase" \
+    --kind ship --repo sample --blocked-by "$alpha-decision-routed-phase" >/dev/null \
+    || fail "could not route work behind the alpha routed hold"
+
+  run_decisions "$home" bind board-src --any-origin >/dev/null \
+    || fail "could not record the any-origin binding"
+  [ "$(run_decisions "$home" binding board-src)" = "(any)" ] \
+    || fail "the any-origin binding did not resolve to its marker"
+
+  # The captured board answer: two cross-origin full-identity answers, a merge
+  # instruction with no -decision- separator, a nonexistent identity, an answer
+  # for the routed hold, a 129-char key over the adapter cap, and a non-slug key.
+  overlong_key=$(printf 'x%.0s' {1..129})
+  feedback="$home/board-feedback.txt"
+  cat > "$feedback" <<EOF
+session:
+  file: /bearings-board.html
+  status: feedback
+prompts[7]{uid,prompt,selector,tag,text}:
+  "2","Route: north\\n\\nContext data:\\n{\\n  \\"question\\": \\"$alpha-decision-route-choice\\",\\n  \\"answer\\": \\"north\\"\\n}","form",choice,"Route: north"
+  "3","Admission: perishable-first\\n\\nContext data:\\n{\\n  \\"question\\": \\"$long_id\\",\\n  \\"answer\\": \\"perishable-first\\"\\n}","form",choice,"Admission: perishable-first"
+  "4","Merge order\\n\\nContext data:\\n{\\n  \\"question\\": \\"merge.sample-task\\",\\n  \\"answer\\": \\"merge\\"\\n}","form",choice,"Merge: sample-task"
+  "5","Ghost\\n\\nContext data:\\n{\\n  \\"question\\": \\"$alpha-decision-ghost\\",\\n  \\"answer\\": \\"yes\\"\\n}","form",choice,"Ghost: yes"
+  "6","Routed phase: phase-a\\n\\nContext data:\\n{\\n  \\"question\\": \\"$alpha-decision-routed-phase\\",\\n  \\"answer\\": \\"phase-a\\"\\n}","form",choice,"Routed phase: phase-a"
+  "7","Overlong\\n\\nContext data:\\n{\\n  \\"question\\": \\"$overlong_key\\",\\n  \\"answer\\": \\"yes\\"\\n}","form",choice,"Overlong: yes"
+  "8","Bad shape\\n\\nContext data:\\n{\\n  \\"question\\": \\"bad key\\",\\n  \\"answer\\": \\"yes\\"\\n}","form",choice,"Bad shape: yes"
+EOF
+
+  # The adapter admits a full identity past the old 64-char cap and still
+  # refuses shape violations - both proven through its executable interface.
+  out=$(run_lavish "$home" answers "$feedback") || fail "could not read the captured answers"
+  assert_contains "$out" "$long_id	perishable-first" \
+    "an 81-char full hold identity did not survive the adapter"
+  assert_not_contains "$out" "$overlong_key" "a 129-char question key passed the adapter cap"
+  assert_not_contains "$out" "bad key" "a non-slug question key passed the adapter"
+
+  # Fed through the real runner seam: `binding` prints the marker and the feed
+  # pipes it into the one intake unchanged, exactly as production does.
+  mkdir -p "$home/adapter-root/bin"
+  cat > "$home/adapter-root/bin/fm-procevent-boardchan.sh" <<SH
+#!/usr/bin/env bash
+# Fixture channel: reports keyed captain answers and nothing else.
+case "\${1-}" in
+  answers) exec "$ROOT/bin/fm-procevent-lavish.sh" answers "\${2-}" ;;
+esac
+exit 2
+SH
+  chmod +x "$home/adapter-root/bin/fm-procevent-boardchan.sh"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$home/adapter-root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$ROOT/bin/fm-procevent.sh" register boardchan board-src -- cat "$feedback" >/dev/null \
+    || fail "could not register the board fixture source"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$home/adapter-root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$ROOT/bin/fm-procevent.sh" start board-src >/dev/null 2>&1
+  assert_present "$home/state/procevent-inbox/board-src.1.result" \
+    "the board fixture channel captured no result to feed"
+  assert_absent "$home/state/procevent-inbox/board-src.1.handled" \
+    "feeding a captain answer retired the notification firstmate still needs"
+
+  show=$(tasks_in "$home" show "$alpha-decision-route-choice" --full)
+  assert_contains "$show" "state: done" "the alpha hold stayed open after an any-origin feed"
+  assert_contains "$show" "Resolution mode: answered" "the alpha hold did not record its close path"
+  assert_contains "$show" "Decision key: route-choice" \
+    "the recorded key is not the hold's own short decision key"
+  show=$(tasks_in "$home" show "$long_id" --full)
+  assert_contains "$show" "state: done" "the cross-origin long-identity hold stayed open"
+  assert_contains "$show" "Answer: perishable-first" \
+    "the long-identity hold did not record the captain's actual answer"
+  show=$(tasks_in "$home" show "$alpha-decision-routed-phase" --full)
+  assert_contains "$show" "state: queued" "any-origin closure closed a hold that still blocks routed work"
+  assert_contains "$show" "held: yes" "any-origin closure released a hold that still blocks routed work"
+
+  # Replay through the intake directly: idempotent for closed holds, `skipped:`
+  # diagnostics for everything the feed must leave alone, nonzero because keys
+  # were skipped.
+  set +e
+  out=$(run_lavish "$home" answers "$feedback" \
+    | run_decisions "$home" answers --any-origin \
+        --source "the captured result board-src sequence 1" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an any-origin run that skipped keys reported success"
+  assert_contains "$out" "closed: $alpha-decision-route-choice" \
+    "replaying an identical any-origin capture was not idempotent: $out"
+  assert_contains "$out" "closed: $long_id" \
+    "replaying the long-identity answer was not idempotent: $out"
+  assert_contains "$out" "skipped: merge.sample-task (not a full hold identity)" \
+    "a merge instruction key was not skipped as a non-identity: $out"
+  assert_contains "$out" "skipped: $alpha-decision-ghost" \
+    "a nonexistent identity was not reported skipped: $out"
+  assert_contains "$out" "skipped: $alpha-decision-routed-phase" \
+    "the routed hold was not reported skipped: $out"
+  assert_contains "$out" "origin=(any)" "the summary line did not name the any-origin marker: $out"
+
+  printf 'Captain chose the routed phase.\n' > "$home/routed-phase-decision.txt"
+  run_decisions "$home" resolve "$alpha" routed-phase \
+    --decision-file "$home/routed-phase-decision.txt" --routed-to sample-routed-work >/dev/null \
+    || fail "the routed close path stopped working after any-origin closure"
+  run_decisions "$home" verify "$alpha" >/dev/null \
+    || fail "alpha's answered decisions did not satisfy the completion gate"
+  run_decisions "$home" verify "$beta" >/dev/null \
+    || fail "beta's answered decision did not satisfy the completion gate"
+  pass "an any-origin bound source closes full-identity holds across origins"
+}
+
 # The answer verb is the hold ledger's answer-time closure primitive, so it must
 # carry every guard the unrouted close path already had. Weakening any of them to
 # reach closure would trade the loss this fixes for a worse one.
@@ -1129,5 +1273,6 @@ test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
 test_bound_channel_answers_close_their_holds_at_answer_time
 test_unbound_source_closes_no_hold
+test_any_origin_binding_closes_across_origins
 test_answer_preserves_every_unrouted_close_guard
 test_chat_channel_feeds_the_same_keyed_answer_intake

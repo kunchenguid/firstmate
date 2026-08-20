@@ -27,7 +27,7 @@ When the captain simply answers a hold that has no follow-up work routed behind 
 "A keyed answer closes its matching hold" is one capability with one owner, `bin/fm-decision-hold.sh answers`, and every channel that carries a captain answer feeds it the same `<decision-key>` and answer.
 A channel never maps a key to a hold, records a decision, or closes anything itself, so no channel is special and a new one needs no new closing logic.
 Chat already feeds it: `bin/fm-send.sh --resolve-key` answers a decision in whichever ledger still holds it open, including a decision already transferred to its durable hold.
-A captured-answer source feeds it too once bound with `bin/fm-decision-hold.sh bind <source-id> <origin-id>`; bind before arming the source, and key each structured question by the hold's own decision key.
+A captured-answer source feeds it too once bound with `bin/fm-decision-hold.sh bind <source-id> <origin-id>`, or with `--any-origin` for a source that carries answers across origins, such as the bearings board; bind before arming the source, and key each structured question by the hold's own decision key, or by its full hold identity under an any-origin binding.
 An unbound source and a question slug that is not a decision key both simply feed nothing: the answer is still captured and firstmate is still woken, and closing falls back to the commands above.
 A hold closed outside this owner leaves no durable answer, so the completion gate keeps failing until `bin/fm-decision-hold.sh repair` records the decision the captain actually gave; neither unrouted path may stand in for an answer the captain has not given.
 Resolved findings, recommendations that need no captain choice, and prose that merely sounds decision-like do not create holds.

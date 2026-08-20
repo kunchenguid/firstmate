@@ -12,9 +12,9 @@
 #
 # Exit 75 means the wait window closed with no complete line. SIGTERM exits the
 # same way after cleanup. The remote job worker preempts this read-only poll to
-# unblock any queued command other than another reply long-poll. The
-# bin/fm-remote-job-lib.sh header owns that contract, and a preempted read is
-# indistinguishable from an empty window.
+# unblock any queued command other than another reply long-poll, then publishes
+# that preemption as distinct exit 76. The bin/fm-remote-job-lib.sh header owns
+# that contract.
 set -eu
 
 FM_HOME=${FM_HOME:?FM_HOME is required}

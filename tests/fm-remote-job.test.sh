@@ -369,7 +369,8 @@ PREEMPT_ELAPSED=$(( $(date +%s) - PREEMPT_BEGAN ))
 assert_present "$PREEMPT_SIDE_EFFECT" "the short command behind a long poll did not run"
 [ "$PREEMPT_ELAPSED" -le 10 ] || fail "a queued short command waited a full poll window behind the long poll"
 fm_remote_job_wait "$ACCOUNT_HOME" "$POLL_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
-[ "$FM_REMOTE_JOB_EXIT" -eq 75 ] || fail "a preempted long poll did not publish its elapsed-window result"
+[ "$FM_REMOTE_JOB_EXIT" -eq "$FM_REMOTE_JOB_PREEMPTED_EXIT" ] \
+  || fail "a preempted long poll was not distinguished from an elapsed window"
 [ ! -s "$FM_REMOTE_JOB_STDOUT" ] || fail "a preempted long poll published partial stdout"
 [ ! -s "$FM_REMOTE_JOB_STDERR" ] || fail "a preempted long poll published partial stderr"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the short command could not be reaped"

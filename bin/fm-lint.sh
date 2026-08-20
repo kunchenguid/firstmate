@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-lint.sh - the single owner of firstmate's shell-lint definition.
+# fm-lint.sh - the single owner of firstmate's lint definition.
 #
 # Runs its file set with ShellCheck's default severity, extended analysis,
 # ambient configuration disabled, and one exact ShellCheck version. CI and
@@ -7,6 +7,9 @@
 # version, bounded execution, and diagnostics ordering cannot drift.
 # Tests stop source analysis at imported production modules because every
 # production shell is already a canonical, source-aware root of this same run.
+# The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
+# malformed GitHub workflow, including a self-broken ci.yml, fails locally
+# before merge instead of only failing to run as CI.
 #
 # With no explicit paths, the file set depends on context:
 #   - In CI (GITHUB_ACTIONS=true or CI=true), on the main branch, or when no
@@ -16,10 +19,10 @@
 #   - Otherwise (an ordinary local branch with a real merge-base) it lints
 #     only the canonical-set files changed since that merge-base, including
 #     uncommitted local edits, via plain local `git diff` (no network, no
-#     `gh`). A branch with zero matching changed files exits 0 and prints a
-#     "no changed lint targets" note instead of running ShellCheck.
+#     `gh`). A branch with zero matching changed files skips ShellCheck and
+#     prints a "no changed lint targets" note, then still validates workflows.
 # Explicit paths always bypass this file-set selection and lint exactly the
-# given paths, matching the same config.
+# given paths, matching the same config, without the workflow YAML check.
 #
 # Canonical lint defaults to two bounded workers over two stable logical shards.
 # Each shard writes separate diagnostics, and the parent replays those outputs in
@@ -97,7 +100,14 @@ if [ "${1:-}" = "--required-version" ]; then
 fi
 
 fm_lint_usage() {
-  sed -n '2,39{s/^# \{0,1\}//;p;}' "$SELF"
+  sed -n '2,42{s/^# \{0,1\}//;p;}' "$SELF"
+}
+
+# Default no-args lint also validates GitHub workflows. Explicit paths stay a
+# ShellCheck-only override so callers can target one shell root.
+fm_lint_run_workflows() {
+  [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
+  "$SELF_DIR/fm-lint-workflows.sh"
 }
 
 JOBS=${FM_LINT_JOBS:-2}
@@ -180,7 +190,9 @@ fm_lint_is_canonical_root() {
 }
 
 CHANGED_MODE=0
+EXPLICIT_PATHS=0
 if [ "$#" -gt 0 ]; then
+  EXPLICIT_PATHS=1
   ROOTS=("$@")
 else
   full_lint=1
@@ -238,7 +250,9 @@ fi
 
 if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
   printf 'fm-lint.sh: no changed lint targets\n'
-  exit 0
+  overall_rc=0
+  fm_lint_run_workflows || overall_rc=$?
+  exit "$overall_rc"
 fi
 
 if [ -n "$TELEMETRY" ]; then
@@ -536,6 +550,12 @@ EOF
     printf 'fm-lint.sh: could not write telemetry to %s.\n' "$TELEMETRY" >&2
     [ "$overall_rc" -ne 0 ] || overall_rc=2
   fi
+fi
+
+if [ "$overall_rc" -eq 0 ]; then
+  fm_lint_run_workflows || overall_rc=$?
+else
+  fm_lint_run_workflows || true
 fi
 
 exit "$overall_rc"
