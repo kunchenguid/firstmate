@@ -134,9 +134,21 @@ refuse_secondmate() {
   esac
 }
 
+ensure_dir() {
+  local dir=$1
+  [ ! -L "$dir" ] || return 1
+  if [ ! -e "$dir" ]; then
+    mkdir "$dir" || return 1
+  fi
+  [ -d "$dir" ] && [ ! -L "$dir" ]
+}
+
 ensure_dirs() {
-  mkdir -p "$DELIVERY_DIR" "$FINGERPRINT_DIR" "$DELIVERED_DIR" "$ACCELERATE_DIR" "$PR_CURSOR_DIR" || return 1
-  [ ! -L "$DELIVERY_DIR" ] || return 1
+  ensure_dir "$DELIVERY_DIR" || return 1
+  ensure_dir "$FINGERPRINT_DIR" || return 1
+  ensure_dir "$DELIVERED_DIR" || return 1
+  ensure_dir "$ACCELERATE_DIR" || return 1
+  ensure_dir "$PR_CURSOR_DIR"
 }
 
 scan_marker_age() {

@@ -605,6 +605,35 @@ test_accelerate_marker() {
   pass "accelerate marker speeds eval but scan still discovers without it"
 }
 
+test_accelerate_refuses_symlinked_delivery_state() {
+  local home fixture outside rc
+  home=$(make_world delivery-symlink)
+  fixture="$TMP_ROOT/fix-delivery-symlink"
+  outside="$TMP_ROOT/outside-delivery-symlink"
+  mkdir -p "$outside"
+  ln -s "$outside" "$home/state/pr-delivery"
+
+  set +e
+  run_delivery "$home" "$fixture" accelerate 'https://github.com/acme/alpha/pull/9' >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "accelerate accepted a symlinked delivery state directory"
+  [ ! -e "$outside/accelerate" ] || fail "accelerate created state through a delivery directory symlink"
+  rm "$home/state/pr-delivery"
+  mkdir -p "$home/state/pr-delivery"
+  ln -s "$outside" "$home/state/pr-delivery/accelerate"
+
+  set +e
+  run_delivery "$home" "$fixture" accelerate 'https://github.com/acme/alpha/pull/9' >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "accelerate accepted a symlinked delivery subdirectory"
+  [ ! -e "$outside"/*.marker ] || fail "accelerate created a marker through a delivery subdirectory symlink"
+  pass "accelerate refuses symlinked delivery state directories"
+}
+
 test_blocked_accelerate_marker_is_consumed() {
   local home fixture marker
   home=$(make_world accelblocked)
@@ -708,6 +737,7 @@ test_post_wake_commit_failure_preserves_observation() {
 }
 
 test_discovery_without_secondmate
+test_accelerate_refuses_symlinked_delivery_state
 test_unrecorded_branch_cannot_impersonate_task
 test_review_issue_then_clearance
 test_migration_hold_clears
