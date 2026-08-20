@@ -246,6 +246,15 @@ function parseWindow(value: unknown): QuotaWindowView | null {
   if (!id || !label || !kind) return null;
   if (!validOptionalNumber(value.percentUsed, (number) => number >= 0 && number <= 100)) return null;
   if (!validOptionalNumber(value.percentRemaining, (number) => number >= 0 && number <= 100)) return null;
+  const percentUsed = value.percentUsed === undefined ? null : finiteNumber(value.percentUsed);
+  const parsedPercentRemaining = value.percentRemaining === undefined
+    ? null
+    : finiteNumber(value.percentRemaining);
+  if (
+    percentUsed !== null &&
+    parsedPercentRemaining !== null &&
+    Math.abs(percentUsed + parsedPercentRemaining - 100) > Number.EPSILON * 400
+  ) return null;
   if (!validOptionalTimestamp(value.startsAt) || !validOptionalTimestamp(value.resetsAt)) return null;
   if (!validOptionalNumber(value.windowSeconds, (number) => number > 0)) return null;
   if (!validOptionalNumber(value.spentUsd, (number) => number >= 0)) return null;
@@ -706,7 +715,11 @@ function formatCredits(credits: QuotaCreditsView): string {
   if (credits.unlimited === true) return "credits unlimited";
   if (credits.remaining !== null) {
     const unit = credits.unit && credits.unit !== "credits" ? ` ${credits.unit}` : "";
-    return `credits ${compactNumber(credits.remaining)}${unit}`;
+    const compactRemaining = compactNumber(credits.remaining);
+    const remaining = credits.remaining > 0 && Number(compactRemaining) === 0
+      ? "<0.1"
+      : compactRemaining;
+    return `credits ${remaining}${unit}`;
   }
   return credits.unlimited === false ? "credits unavailable" : "credits unknown";
 }

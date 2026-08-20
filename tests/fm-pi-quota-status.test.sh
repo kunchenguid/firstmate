@@ -206,6 +206,7 @@ out=$(cd "$FIXTURE" && \
   LIB="$FIXTURE/.pi/extensions/lib/fm-pi-quota-status.ts" \
   node --input-type=module 2>&1 <<'JS'
 import fs from "node:fs";
+import { EventEmitter } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
 import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
@@ -362,6 +363,14 @@ for (const expected of [
   assert(full.includes(expected), `complete format omitted ${expected}: ${full}`);
 }
 assert(visibleWidth(full) <= 400, "complete format exceeded its width");
+const tinyCreditReport = report(now);
+tinyCreditReport.providers[1].credits.remaining = 0.04;
+const tinyCreditParsed = parseQuotaAxiJson(JSON.stringify(tinyCreditReport));
+assert(tinyCreditParsed, "small positive credit fixture did not parse structurally");
+const tinyCreditView = selectActiveProviderQuota(tinyCreditParsed, "openai-codex", { nowMs: now });
+const tinyCreditText = formatQuotaStatus(tinyCreditView, 400, now);
+assert(tinyCreditText.includes("credits <0.1"), `small positive credits rounded to zero: ${tinyCreditText}`);
+assert(!tinyCreditText.includes("credits 0"), `positive credits were presented as zero: ${tinyCreditText}`);
 const matchedAccount = selectActiveProviderQuota(parsed, "openai-codex", {
   nowMs: now,
   expectedAccountId: "fixture-codex-account",
@@ -560,6 +569,9 @@ assert(
 );
 const invalidPercentUsed = structuredClone(fullyPopulated);
 invalidPercentUsed.providers[1].windows[0].percentUsed = "invalid";
+const inconsistentPercentComplement = structuredClone(fullyPopulated);
+inconsistentPercentComplement.providers[1].windows[0].percentUsed = 100;
+inconsistentPercentComplement.providers[1].windows[0].percentRemaining = 100;
 const invalidPace = structuredClone(fullyPopulated);
 invalidPace.providers[1].windows[0].pace.reservePercentPoints = "invalid";
 const invalidQuotaSemantics = structuredClone(fullyPopulated);
@@ -607,6 +619,7 @@ for (const [malformedReport, description] of [
   [paddedProviderStatus, "normalized provider status"],
   [missingSourcesTried, "missing state sources"],
   [invalidPercentUsed, "invalid percent used"],
+  [inconsistentPercentComplement, "inconsistent percentage complement"],
   [invalidPace, "invalid pace field"],
   [invalidQuotaSemantics, "invalid quota semantics field"],
   [invalidPaceRelation, "invalid pace status relation"],
@@ -696,9 +709,10 @@ const officialBaseUrls = {
 function fixtureModel(provider, id = "fixture-model", baseUrl = officialBaseUrls[provider] ?? "https://custom.example.invalid") {
   return { provider, id, baseUrl };
 }
-function fixtureAccessToken(accountId) {
+function fixtureAccessToken(accountId, additionalClaims = {}) {
   if (!accountId) return "opaque-fixture-token";
   const payload = Buffer.from(JSON.stringify({
+    ...additionalClaims,
     "https://api.openai.com/auth": { chatgpt_account_id: accountId },
   })).toString("base64url");
   return `eyJhbGciOiJub25lIn0.${payload}.fixture`;
@@ -1057,6 +1071,52 @@ assert(
   "shutdown leaked the credential watcher",
 );
 
+const failedWatcher = new EventEmitter();
+failedWatcher.close = () => {};
+const watcherFailure = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 40,
+  timeoutMs: 500,
+  watchAuthDirectory() {
+    return failedWatcher;
+  },
+}));
+await watcherFailure.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => watcherFailure.widgetText(400).includes("week 94% left"),
+  "watcher-failure fixture did not publish initial account quota",
+);
+const callsBeforeWatcherError = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+failedWatcher.emit("error", new Error("fixture watcher failure"));
+await setStoredOAuth("openai-codex", fixtureAccessToken("replacement-codex-account"));
+await waitFor(
+  () => watcherFailure.widgetText(300).includes("credential monitoring unavailable"),
+  `watcher failure did not expose unavailable monitoring: ${watcherFailure.widgetText(300)}`,
+);
+assert(!watcherFailure.widgetText(400).includes("94%"), "watcher failure retained old-account quota");
+await sleep(120);
+const callsAfterWatcherError = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+assert(callsAfterWatcherError === callsBeforeWatcherError, "failed credential monitoring continued quota refreshes");
+await watcherFailure.emit("session_shutdown", { reason: "quit" });
+await setStoredOAuth("openai-codex", fixtureAccessToken("fixture-codex-account"));
+
+const callsBeforeWatcherSetupFailure = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+const watcherSetupFailure = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 40,
+  timeoutMs: 100,
+  watchAuthDirectory() {
+    throw new Error("fixture watcher setup failure");
+  },
+}));
+await watcherSetupFailure.emit("session_start", { reason: "startup" });
+assert(
+  watcherSetupFailure.widgetText(300).includes("credential monitoring unavailable"),
+  `watcher setup failure was not explicit: ${watcherSetupFailure.widgetText(300)}`,
+);
+await sleep(120);
+const callsAfterWatcherSetupFailure = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+assert(callsAfterWatcherSetupFailure === callsBeforeWatcherSetupFailure, "missing credential monitoring invoked quota-axi");
+await watcherSetupFailure.emit("session_shutdown", { reason: "quit" });
+
 for (const reason of ["reload", "new", "resume", "fork"]) {
   lifecycle.ctx.model = fixtureModel("openai-codex", "codex-fixture");
   await lifecycle.emit("session_start", { reason });
@@ -1266,6 +1326,22 @@ for (const [description, accountId] of [
   assert(!instance.widgetText(400).includes("94%"), `${description} exposed unrelated fresh quota`);
   await instance.emit("session_shutdown", { reason: "quit" });
 }
+await setStoredOAuth("openai-codex", fixtureAccessToken("fixture-codex-account"));
+
+await setStoredOAuth("openai-codex", fixtureAccessToken("replacement-codex-account", {
+  "https://api.openai.com/auth/account_id": "fixture-codex-account",
+}));
+const conflictingCodexClaims = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
+  "openai-codex",
+);
+await conflictingCodexClaims.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => conflictingCodexClaims.widgetText(240).includes("account unverified"),
+  `conflicting Codex account claims were accepted: ${conflictingCodexClaims.widgetText(240)}`,
+);
+assert(!conflictingCodexClaims.widgetText(400).includes("94%"), "legacy Codex claim overrode Pi's active account");
+await conflictingCodexClaims.emit("session_shutdown", { reason: "quit" });
 await setStoredOAuth("openai-codex", fixtureAccessToken("fixture-codex-account"));
 
 async function statusCase(mode, expected, options = {}) {

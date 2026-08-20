@@ -46,6 +46,12 @@ export type QuotaTimerScheduler = {
   clearInterval: (timer: unknown) => void;
 };
 
+type AuthDirectoryWatcher = (
+  path: string,
+  options: { persistent: false },
+  listener: (event: "rename" | "change", filename: string | Buffer | null) => void,
+) => FSWatcher;
+
 export type FirstmateQuotaStatusOptions = {
   command?: string;
   refreshMs?: number;
@@ -57,6 +63,7 @@ export type FirstmateQuotaStatusOptions = {
   width?: () => number;
   timers?: QuotaTimerScheduler;
   authFile?: string;
+  watchAuthDirectory?: AuthDirectoryWatcher;
 };
 
 type ActiveModel = NonNullable<ExtensionContext["model"]>;
@@ -120,6 +127,7 @@ type ActiveSession = {
   process: QuotaProcess | null;
   operationAbort: AbortController | null;
   credentialWatcher: FSWatcher | null;
+  credentialMonitoringAvailable: boolean;
   refreshInFlight: boolean;
   refreshPending: boolean;
   refreshTimer: unknown | null;
@@ -240,16 +248,17 @@ function activeAccountId(provider: string, apiKey: string | undefined): string |
       !Array.isArray(payload["https://api.openai.com/auth"])
     ? payload["https://api.openai.com/auth"] as Record<string, unknown>
     : null;
+  const canonicalAccountId = exactAccountId(auth?.chatgpt_account_id);
+  if (!canonicalAccountId) return null;
   for (const candidate of [
     payload["https://api.openai.com/auth/account_id"],
     payload.account_id,
-    auth?.chatgpt_account_id,
     auth?.account_id,
   ]) {
-    const accountId = exactAccountId(candidate);
-    if (accountId) return accountId;
+    const alternativeAccountId = exactAccountId(candidate);
+    if (alternativeAccountId && alternativeAccountId !== canonicalAccountId) return null;
   }
-  return null;
+  return canonicalAccountId;
 }
 
 function quotaVerification(provider: string, apiKey: string | undefined): QuotaVerification | null {
@@ -364,6 +373,9 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
   const width = options.width;
   const timers = options.timers ?? defaultTimers;
   const authFile = options.authFile ?? defaultAuthFile();
+  const watchAuthDirectory: AuthDirectoryWatcher = options.watchAuthDirectory ?? (
+    (path, watchOptions, listener) => watch(path, watchOptions, listener)
+  );
 
   type BoundedAuthResult =
     | { kind: "ok"; auth: ResolvedOAuthAuth }
@@ -649,9 +661,34 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.expiryTimer = null;
     }
 
+    function credentialMonitoringView(session: ActiveSession): QuotaTarget {
+      const provider = session.model?.provider ?? "no model";
+      return {
+        kind: "unsupported",
+        view: { kind: "unsupported", provider: `${provider} (credential monitoring unavailable)` },
+      };
+    }
+
+    function failCredentialMonitoring(session: ActiveSession): void {
+      session.credentialMonitoringAvailable = false;
+      const watcher = session.credentialWatcher;
+      session.credentialWatcher = null;
+      try {
+        watcher?.close();
+      } catch {
+      }
+      if (active !== session) return;
+      session.generation += 1;
+      session.target = credentialMonitoringView(session);
+      session.report = null;
+      session.lastFailure = null;
+      cancelProcess(session);
+      render(session);
+    }
+
     function watchCredentials(session: ActiveSession): void {
       try {
-        session.credentialWatcher = watch(dirname(authFile), { persistent: false }, (_event, filename) => {
+        const watcher = watchAuthDirectory(dirname(authFile), { persistent: false }, (_event, filename) => {
           if (filename !== null && String(filename) !== basename(authFile)) return;
           if (active !== session) return;
           session.generation += 1;
@@ -662,9 +699,14 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           render(session);
           void refresh(session);
         });
-        session.credentialWatcher.on("error", () => {});
+        session.credentialWatcher = watcher;
+        session.credentialMonitoringAvailable = true;
+        watcher.on("error", () => failCredentialMonitoring(session));
+        watcher.on("close", () => {
+          if (session.credentialWatcher === watcher) failCredentialMonitoring(session);
+        });
       } catch {
-        session.credentialWatcher = null;
+        failCredentialMonitoring(session);
       }
     }
 
@@ -707,6 +749,13 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
 
     async function refresh(session: ActiveSession): Promise<void> {
       if (active !== session) return;
+      if (!session.credentialMonitoringAvailable) {
+        session.target = credentialMonitoringView(session);
+        session.report = null;
+        session.lastFailure = null;
+        render(session);
+        return;
+      }
       if (session.refreshInFlight) {
         session.refreshPending = true;
         return;
@@ -808,8 +857,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.refreshTimer = null;
       clearExpiry(session);
       session.refreshPending = false;
-      session.credentialWatcher?.close();
+      const watcher = session.credentialWatcher;
       session.credentialWatcher = null;
+      session.credentialMonitoringAvailable = false;
+      watcher?.close();
       cancelProcess(session);
       session.ctx.ui.setWidget(WIDGET_KEY, undefined);
       if (active === session) active = null;
@@ -830,6 +881,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         process: null,
         operationAbort: null,
         credentialWatcher: null,
+        credentialMonitoringAvailable: false,
         refreshInFlight: false,
         refreshPending: false,
         refreshTimer: null,
@@ -856,7 +908,9 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       active.ctx = ctx;
       active.model = event.model;
       active.generation += 1;
-      active.target = preflightTarget(ctx, event.model);
+      active.target = active.credentialMonitoringAvailable
+        ? preflightTarget(ctx, event.model)
+        : credentialMonitoringView(active);
       active.lastFailure = null;
       cancelProcess(active);
       render(active);
