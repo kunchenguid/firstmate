@@ -12,10 +12,13 @@
 # broken link, special file, malformed skill directory, unexpected root entry,
 # overlapping managed roots, or ambiguous tree refuses the whole run before any
 # mutation. Skill trees may contain directories and regular files only and must
-# include SKILL.md. A duplicate is verified only when its tree matches the
-# retained copy in structure, bytes, and permission bits. Managed roots are compared by filesystem identity rather than
-# path spelling, so a case-insensitive volume or an aliased path cannot present
-# one directory under two ownership roles.
+# include SKILL.md, and no nested name may carry a control character. A
+# duplicate is verified only when its tree matches the retained copy in
+# structure, bytes, and permission bits, and the canonical copy is established
+# mode-faithfully so that proof holds under any umask. Managed roots are
+# compared by filesystem identity rather than path spelling, so a
+# case-insensitive volume or an aliased path cannot present one directory under
+# two ownership roles.
 #
 # Preflight refusal is total: nothing is mutated. Once --apply begins executing
 # the accepted plan, each step is re-verified against the live filesystem and a
@@ -312,10 +315,15 @@ PLAN="$TMP/plan"
 
 # A verified duplicate must match the retained tree in structure, bytes, and
 # permission bits, otherwise removing it would silently drop the only copy that
-# carries an executable helper script.
+# carries an executable helper script. The listing is line-oriented, so skill
+# trees carrying a control character in any nested name are refused by
+# validate_skill_tree before this proof is trusted.
 tree_mode_listing() {
-  local tree=$1
-  find -P "$tree" \( -type d -o -type f \) -exec stat "$STAT_IDENTITY_FORMAT" "$STAT_MODE_SPEC" {} + 2>/dev/null \
+  local tree=$1 raw
+  raw=$(find -P "$tree" \( -type d -o -type f \) -exec stat "$STAT_IDENTITY_FORMAT" "$STAT_MODE_SPEC" {} +) \
+    || return 1
+  [ -n "$raw" ] || return 1
+  printf '%s\n' "$raw" \
     | awk -v prefix="$tree" '{
         mode = $1
         sub(/^[^ ]* /, "")
@@ -325,17 +333,25 @@ tree_mode_listing() {
     | LC_ALL=C sort
 }
 
+# Fails closed: an unreadable tree, a failing stat, or an empty listing refuses
+# the equality that would otherwise authorize removing the last copy.
 trees_equivalent() {
-  local a=$1 b=$2
+  local a=$1 b=$2 listing_a listing_b
   diff -qr "$a" "$b" >/dev/null 2>&1 || return 1
-  [ "$(tree_mode_listing "$a")" = "$(tree_mode_listing "$b")" ]
+  listing_a=$(tree_mode_listing "$a") || return 1
+  listing_b=$(tree_mode_listing "$b") || return 1
+  [ -n "$listing_a" ] && [ -n "$listing_b" ] || return 1
+  [ "$listing_a" = "$listing_b" ]
 }
 
 validate_skill_tree() {
-  local skill=$1 bad
+  local skill=$1 bad control
   [ -f "$skill/SKILL.md" ] && [ ! -L "$skill/SKILL.md" ] || die "skill lacks a regular SKILL.md: $skill"
   bad=$(find -P "$skill" ! -type d ! -type f -print -quit 2>/dev/null) || die "cannot inspect skill tree: $skill"
   [ -z "$bad" ] || die "skill tree contains a link or special entry: $bad"
+  control=$(LC_ALL=C find -P "$skill" -print0 | LC_ALL=C tr -d '\000' | LC_ALL=C tr -dc '[:cntrl:]' | wc -c) \
+    || die "cannot inspect skill tree names: $skill"
+  [ "$control" -eq 0 ] || die "skill tree contains a control character in a nested name: $skill"
 }
 
 physical_dir() {
@@ -514,7 +530,7 @@ while IFS=$'\t' read -r action first second; do
     copy)
       [ ! -e "$second" ] && [ ! -L "$second" ] || die "destination appeared after preflight: $second"
       mkdir -p "${second%/*}"
-      cp -R "$first" "$second"
+      cp -Rp "$first" "$second"
       ;;
     remove) remove_verified_duplicate "$first" ;;
     unlink-root)

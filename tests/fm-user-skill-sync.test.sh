@@ -287,6 +287,63 @@ test_executable_skill_script_survives_migration() {
   pass "migration preserves executable skill scripts"
 }
 
+entry_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+
+test_non_default_modes_migrate_and_converge() {
+  local home first second
+  home=$(new_home)
+  mkdir -p "$home/.gemini/skills/alpha/scripts"
+  printf '%s\n' body > "$home/.gemini/skills/alpha/SKILL.md"
+  printf '%s\n' 'echo hi' > "$home/.gemini/skills/alpha/scripts/run.sh"
+  chmod 664 "$home/.gemini/skills/alpha/scripts/run.sh"
+  chmod 775 "$home/.gemini/skills/alpha/scripts"
+
+  first=$(umask 022; run_sync "$home" --apply)
+
+  assert_contains "$first" "user skills converged" "migration of non-default modes did not converge"
+  [ "$(entry_mode "$home/.agents/skills/alpha/scripts/run.sh")" = 664 ] \
+    || fail "canonical copy did not preserve the source file mode"
+  [ "$(entry_mode "$home/.agents/skills/alpha/scripts")" = 775 ] \
+    || fail "canonical copy did not preserve the source directory mode"
+  [ ! -e "$home/.gemini/skills/alpha" ] || fail "migrated Gemini source was not removed"
+  second=$(run_sync "$home" --apply)
+  [ "$second" = "user skills already converged; no changes" ] \
+    || fail "rerun after migration did not converge: $second"
+  pass "migration preserves source modes and converges under a default umask"
+}
+
+test_restrictive_umask_migration_converges() {
+  local home first
+  home=$(new_home)
+  make_skill "$home/.opencode/skills" beta body
+
+  first=$(umask 077; run_sync "$home" --apply)
+
+  assert_contains "$first" "user skills converged" "migration under a restrictive umask did not converge"
+  [ -f "$home/.agents/skills/beta/SKILL.md" ] || fail "canonical skill was not established under umask 077"
+  [ ! -e "$home/.opencode/skills/beta" ] || fail "migrated OpenCode source was not removed"
+  pass "migration converges under a restrictive umask"
+}
+
+test_control_character_nested_name_refuses() {
+  local home out nested
+  home=$(new_home)
+  make_skill "$home/.agents/skills" alpha body
+  nested=$(printf 'note\nname.txt')
+  printf '%s\n' text > "$home/.agents/skills/alpha/$nested" 2>/dev/null || {
+    pass "control-character nested names are unsupported by this filesystem (skipped)"
+    return 0
+  }
+
+  out=$(expect_failure "$home" "control-character nested name" --apply)
+
+  assert_contains "$out" "control character" "control-character refusal lacked diagnosis"
+  [ -f "$home/.agents/skills/alpha/SKILL.md" ] || fail "refused run mutated the canonical skill"
+  pass "a control character in a nested skill name refuses before mutation"
+}
+
 test_remote_routes_through_registered_home() {
   local home fakebin argv encoded decoded home_encoded remote_home
   home=$(new_home)
@@ -331,4 +388,7 @@ test_colliding_managed_roots_refuse
 test_aliased_managed_roots_refuse
 test_mode_differing_duplicate_refuses
 test_executable_skill_script_survives_migration
+test_non_default_modes_migrate_and_converge
+test_restrictive_umask_migration_converges
+test_control_character_nested_name_refuses
 test_remote_routes_through_registered_home
