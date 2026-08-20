@@ -22,18 +22,19 @@ Self-review defeats the gate: the whole reason this stage exists is a second, in
 
 ## What to check
 
-1. **Story frontmatter is standard - this is a hard gate.**
-   Verify every `stories/<id>.md` against the contract below.
-   Any missing `id:`, non-unique `id:`, `epic:` that does not match `epic.md`, missing or wrong `pr_base:`, missing `repo:`, or use of `story:`/`phase:`/any other ad-hoc key in place of the required seven is an automatic **FAIL**.
-   This is the failure the whole pipeline exists to prevent, so it is checked first and it is not negotiable.
+1. **Story frontmatter is standard - this is a hard gate, and it is executable.**
+   Run `bin/fm-epic-lint.sh <epic-dir>` on the epic directory; it is the single owner of the epic/story contract and the same check `fm-umbrella-promote.sh` runs at promote time.
+   A non-zero exit is an automatic **FAIL**: copy its numbered problem list into your findings verbatim and stop treating the epic as passable until they are fixed and the lint is green.
+   It enforces, mechanically, exactly the contract in the block below - the seven keys and nothing ad-hoc (`story:`/`phase:` are rejected), lower-kebab unique ids that match their filenames, matching `epic:`, registered `repo:`, valid `pr_base:`, exactly one `gate: true`, `depends:` naming real stories with no cycle, and a resolving plan pointer - so this is the failure the whole pipeline exists to prevent, checked first and not negotiable.
+   `fm-epic-lint.sh --help` documents the full contract; run it, do not re-derive the rules by eye.
 
 2. **The contract is concrete and landable-first.**
    The shared contract (API shape, schema, proto, types package) must be concrete enough to land as its own story before dependent per-repo stories.
    Exactly one story is the `gate: true` contract story, and the stories that consume it `depends:` on it.
    If the contract is still prose, the epic is not ready - **FAIL** and say so.
 
-3. **Dependencies and gates are sound.**
-   Every `depends:` id names a real story in this epic; there is no dependency cycle; the `gate: true` contract story is a dependency of the stories that consume it.
+3. **Dependencies and gates are sound - the judgment beyond the lint.**
+   Check 1's lint already proved, mechanically, that every `depends:` id resolves, there is no cycle, and exactly one story is `gate: true`; here you make the judgment it cannot - that the one gate story is the RIGHT contract story and that the stories consuming it actually `depends:` on it.
    The delivery contract (stories PR into `epic/<slug>` with evidence and review) and the ship gate (full-epic no-mistakes before shipping) are present in `epic.md`.
 
 4. **Each story has a real plan that covers its scope.**
@@ -70,7 +71,7 @@ Write `REVIEW.md` beside `epic.md`, and report back exactly this shape:
 - **Stage:** review
 - **Epic:** `<slug>` - `<title>`
 - **Verdict:** PASS or FAIL
-- **Frontmatter:** all N stories standard, or list every non-standard one with the exact problem
+- **Frontmatter:** `fm-epic-lint.sh` green (all N stories standard), or its numbered problem list copied verbatim
 - **Plans:** every story points at a real plan directory that covers its scope, or name the gaps
 - **Findings:** numbered fix list (empty on a clean PASS) - each item concrete and actionable
 - **next:** on PASS, the captain signs `epic.md`, then /epic-handoff; on FAIL, return to the scaffolder or planner to fix the numbered list, then re-run /epic-review

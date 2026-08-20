@@ -15,9 +15,9 @@
 # epic). This script makes the mechanical promote reliable:
 #
 #   1. LOCATE the designed epic under umbrellas/<id>/plans/<epic-dir>/.
-#   2. VALIDATE before writing anything - epic slug + repos:, and every story's
-#      id: / repo: / pr_base: / matching epic:, and every involved repo registered
-#      in this home's data/projects.md.
+#   2. VALIDATE before writing anything by running bin/fm-epic-lint.sh (the single
+#      owner of the epic/story contract) on the epic dir, so promote and the
+#      epic-review gate enforce ONE identical contract; a failure writes nothing.
 #   3. MOVE the epic dir -> data/plans/<epic-dir>/ (the canonical, durable copy
 #      the dashboard/dispatch read) and leave a BACK-SYMLINK in the umbrella at
 #      umbrellas/<id>/plans/<epic-dir> pointing to it, so the captain keeps
@@ -83,6 +83,12 @@ PLANS_DST="$DATA/plans"
 
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$FM_ROOT/bin/fm-tasks-axi-lib.sh"
+# The epic/story frontmatter parser and the registry check are shared with the
+# lint (bin/fm-epic-lint.sh), which is the single owner of "is this epic valid".
+# shellcheck source=bin/fm-epic-lint-lib.sh
+. "$FM_ROOT/bin/fm-epic-lint-lib.sh"
+
+LINT="$FM_ROOT/bin/fm-epic-lint.sh"
 
 die() { echo "error: $*" >&2; exit 1; }
 say() { echo "$*"; }
@@ -123,47 +129,10 @@ umbrella_id_valid() {
   esac
 }
 
-# frontmatter_get <file> <key>: value of `key:` inside the leading --- ... ---
-# YAML frontmatter, trimmed. Empty (rc 0) when absent so callers test emptiness.
-frontmatter_get() {
-  awk -v key="$2" '
-    NR==1 && $0!="---" { exit }
-    NR==1 { infm=1; next }
-    infm && $0=="---" { exit }
-    infm {
-      line=$0
-      if (sub("^" key "[[:space:]]*:[[:space:]]*", "", line)) {
-        sub(/[[:space:]]+$/, "", line)
-        print line
-        exit
-      }
-    }
-  ' "$1"
-}
-
-# heading_of <file>: first `# ` ATX heading text (the `# ` stripped), or empty.
-heading_of() {
-  awk '/^#[[:space:]]+/ { sub(/^#[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); print; exit }' "$1"
-}
-
-# lower <string>: lowercase, for case-insensitive id comparison.
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-
-# repo_registered <name>: 0 if data/projects.md lists `- <name> ...`. A missing
-# registry means nothing is registered (fail-closed).
-repo_registered() {
-  [ -f "$REG" ] || return 1
-  awk -v n="$1" '$1=="-" && $2==n { found=1; exit } END { exit !found }' "$REG"
-}
-
-# A story id must be a single clean token so it can never smuggle a flag into
-# tasks-axi and always resolves to one backlog key.
-story_id_valid() {
-  case "${1-}" in
-    ''|-*|*[!A-Za-z0-9._-]*) return 1 ;;
-    *) return 0 ;;
-  esac
-}
+# The frontmatter parser, heading reader, lowercase helper, registry check, and
+# story-id validation all live in bin/fm-epic-lint-lib.sh (fm_frontmatter_get,
+# fm_heading_of, fm_lower, fm_repo_registered) and the lint itself, so there is
+# exactly one copy of that logic, shared with the lint.
 
 # read_backlog: parse data/backlog.md into parallel global arrays BL_IDS, BL_TAGS,
 # BL_REPOS, BL_KINDS, BL_TITLES (the derived title, i.e. before any `blocked-by:`
@@ -297,7 +266,7 @@ do_verify() {
   fi
 
   slug=""
-  [ -f "$canon/epic.md" ] && slug="$(frontmatter_get "$canon/epic.md" epic)"
+  [ -f "$canon/epic.md" ] && slug="$(fm_frontmatter_get "$canon/epic.md" epic)"
 
   # (b) umbrella back-symlink resolves to the canonical dir.
   if [ ! -L "$link" ]; then
@@ -321,13 +290,13 @@ do_verify() {
     for sf in "$canon"/stories/*.md; do
       [ -f "$sf" ] || continue
       have_story=1
-      sid="$(frontmatter_get "$sf" id)"
+      sid="$(fm_frontmatter_get "$sf" id)"
       [ -n "$sid" ] || { fails+=("(d) story file $(basename "$sf") has no id:"); continue; }
       story_id_list+=("$sid")
-      exact=-1; civar=""; lc="$(lower "$sid")"
+      exact=-1; civar=""; lc="$(fm_lower "$sid")"
       for ((k = 0; k < ${#BL_IDS[@]}; k++)); do
         if [ "${BL_IDS[$k]}" = "$sid" ]; then exact=$k
-        elif [ "$(lower "${BL_IDS[$k]}")" = "$lc" ]; then civar="${BL_IDS[$k]}"; fi
+        elif [ "$(fm_lower "${BL_IDS[$k]}")" = "$lc" ]; then civar="${BL_IDS[$k]}"; fi
       done
       if [ "$exact" -lt 0 ]; then
         if [ -n "$civar" ]; then
@@ -439,14 +408,22 @@ STORIES_DIR="$EPIC_DIR/stories"
 [ -f "$EPIC_MD" ] || die "no epic.md in $EPIC_DIR"
 [ -d "$STORIES_DIR" ] || die "no stories/ dir in $EPIC_DIR"
 
-# --- validate the epic ------------------------------------------------------
-EPIC_SLUG="$(frontmatter_get "$EPIC_MD" epic)"
-[ -n "$EPIC_SLUG" ] || die "epic.md has no epic: slug ($EPIC_MD)"
-git check-ref-format "refs/heads/epic/$EPIC_SLUG" 2>/dev/null \
-  || die "epic slug \"$EPIC_SLUG\" is not a valid branch name (epic/<slug> must be valid)"
+# --- validate the epic against the single contract owner ---------------------
+# fm-epic-lint.sh is THE check for "is this epic valid" (the seven story keys,
+# lower-kebab unique ids matching filenames, matching epic slug, registered
+# repos, valid pr_base, exactly one gate, acyclic depends, resolving plan
+# pointer). Promote runs it FIRST, before any mutation, so a contract failure
+# writes nothing - the same enforcement the epic-review gate applies at authoring
+# time. FM_PROJECTS_REG pins the lint's registry to the exact one promote uses.
+FM_PROJECTS_REG="$REG" "$LINT" "$EPIC_DIR" >/dev/null \
+  || die "epic \"$EPIC_BASE\" fails the epic/story contract (see the lint problems above); fix the epic before promoting"
 
-EPIC_REPOS_RAW="$(frontmatter_get "$EPIC_MD" repos)"
-[ -n "$EPIC_REPOS_RAW" ] || die "epic.md has no repos: list ($EPIC_MD)"
+# --- parse what the seed/branch steps need (the contract already holds) -------
+# The lint validated the epic; here we only READ the fields promote seeds from,
+# using the shared parser so there is no second copy of frontmatter parsing.
+EPIC_SLUG="$(fm_frontmatter_get "$EPIC_MD" epic)"
+
+EPIC_REPOS_RAW="$(fm_frontmatter_get "$EPIC_MD" repos)"
 # repos: [a, b, c] or repos: a, b - strip brackets, split on comma.
 EPIC_REPOS_RAW="${EPIC_REPOS_RAW#[}"
 EPIC_REPOS_RAW="${EPIC_REPOS_RAW%]}"
@@ -458,17 +435,12 @@ for r in $EPIC_REPOS_RAW; do
   [ -n "$r" ] && epic_repos+=("$r")
 done
 IFS=$IFS_SAVE
-[ "${#epic_repos[@]}" -gt 0 ] || die "epic.md repos: list is empty ($EPIC_MD)"
 
-# --- parse + validate every story -------------------------------------------
 story_ids=()
 story_repos=()
 story_kinds=()
 story_titles=()
 story_files=()
-involved_repos=()   # union of epic repos + story repos, for registration check
-
-for r in "${epic_repos[@]}"; do involved_repos+=("$r"); done
 
 story_count=0
 for sf in "$STORIES_DIR"/*.md; do
@@ -476,25 +448,11 @@ for sf in "$STORIES_DIR"/*.md; do
   story_count=$((story_count + 1))
   base="$(basename "$sf")"
 
-  sid="$(frontmatter_get "$sf" id)"
-  [ -n "$sid" ] || die "story $base has no id:"
-  story_id_valid "$sid" || die "story $base has an invalid id: \"$sid\""
-
-  sepic="$(frontmatter_get "$sf" epic)"
-  [ -n "$sepic" ] || die "story $base ($sid) has no epic:"
-  [ "$sepic" = "$EPIC_SLUG" ] \
-    || die "story $base ($sid) epic: \"$sepic\" does not match epic.md epic: \"$EPIC_SLUG\""
-
-  srepo="$(frontmatter_get "$sf" repo)"
-  [ -n "$srepo" ] || die "story $base ($sid) has no repo:"
-
-  spr="$(frontmatter_get "$sf" pr_base)"
-  [ -n "$spr" ] || die "story $base ($sid) has no pr_base: (required; typically the epic's epic/$EPIC_SLUG or a production branch)"
-
-  skind="$(frontmatter_get "$sf" kind)"
+  sid="$(fm_frontmatter_get "$sf" id)"
+  srepo="$(fm_frontmatter_get "$sf" repo)"
+  skind="$(fm_frontmatter_get "$sf" kind)"
   [ -n "$skind" ] || skind=ship
-
-  shead="$(heading_of "$sf")"
+  shead="$(fm_heading_of "$sf")"
   [ -n "$shead" ] || shead="$sid"
 
   story_ids+=("$sid")
@@ -502,34 +460,7 @@ for sf in "$STORIES_DIR"/*.md; do
   story_kinds+=("$skind")
   story_titles+=("[$EPIC_SLUG] $shead")
   story_files+=("$base")
-
-  # collect repo for registration check (dedup)
-  seen=0
-  for r in "${involved_repos[@]}"; do [ "$r" = "$srepo" ] && { seen=1; break; }; done
-  [ "$seen" -eq 1 ] || involved_repos+=("$srepo")
 done
-[ "$story_count" -gt 0 ] || die "no story files in $STORIES_DIR; design is not done"
-
-# Duplicate story ids inside the epic would collide in the backlog.
-dupe=""
-for i in "${!story_ids[@]}"; do
-  for j in "${!story_ids[@]}"; do
-    [ "$i" -lt "$j" ] || continue
-    [ "${story_ids[$i]}" = "${story_ids[$j]}" ] && dupe="${story_ids[$i]}"
-  done
-done
-[ -z "$dupe" ] || die "two story files share id \"$dupe\"; ids must be unique within the epic"
-
-# --- every involved repo must be registered in THIS home --------------------
-missing_repos=()
-for r in "${involved_repos[@]}"; do
-  repo_registered "$r" || missing_repos+=("$r")
-done
-if [ "${#missing_repos[@]}" -gt 0 ]; then
-  printf 'error: these epic repos are not registered in this home (data/projects.md); register them first so epic branches can be cut:\n' >&2
-  for r in "${missing_repos[@]}"; do printf '  - %s\n' "$r" >&2; done
-  exit 1
-fi
 
 # --- plan the backlog reconcile against the current backlog ------------------
 # Read the existing backlog and classify each story into add / reconcile /
@@ -552,13 +483,13 @@ for ((k = 0; k < ${#BL_IDS[@]}; k++)); do bl_claimed[k]=0; done
 
 for ((i = 0; i < ${#story_ids[@]}; i++)); do
   sid="${story_ids[$i]}"
-  lc_sid="$(lower "$sid")"
+  lc_sid="$(fm_lower "$sid")"
   exact=-1
   ci_idx=()
   for ((k = 0; k < ${#BL_IDS[@]}; k++)); do
     if [ "${BL_IDS[$k]}" = "$sid" ]; then
       exact=$k
-    elif [ "$(lower "${BL_IDS[$k]}")" = "$lc_sid" ]; then
+    elif [ "$(fm_lower "${BL_IDS[$k]}")" = "$lc_sid" ]; then
       ci_idx+=("$k")
     fi
   done

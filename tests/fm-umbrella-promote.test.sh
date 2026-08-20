@@ -22,23 +22,30 @@ run() {  # <home> <args...> -> sets OUT, RC
   RC=$?
 }
 
-# write_story <dir> <id> <epic> <repo> <pr_base> : a story file with a heading.
+# write_story <dir> <id> <epic> <repo> <pr_base> [gate] [depends] : a story file
+# with the full seven-key contract frontmatter and a heading. gate defaults to
+# false and depends to []. An empty <pr_base> omits the key (to test the refusal).
+# ids are lower-kebab and match the filename so the story passes fm-epic-lint.sh.
 write_story() {
-  local dir=$1 id=$2 epic=$3 repo=$4 pr_base=$5
+  local dir=$1 id=$2 epic=$3 repo=$4 pr_base=$5 gate=${6:-false} depends=${7:-'[]'}
   {
     printf -- '---\n'
     printf 'id: %s\n' "$id"
     printf 'epic: %s\n' "$epic"
     printf 'repo: %s\n' "$repo"
     [ -n "$pr_base" ] && printf 'pr_base: %s\n' "$pr_base"
+    printf 'depends: %s\n' "$depends"
+    printf 'kind: ship\n'
+    printf 'gate: %s\n' "$gate"
     printf -- '---\n'
     printf '# Story %s heading\n' "$id"
   } > "$dir/$id.md"
 }
 
 # make_home <name> : a fixture home with one registered repo `svc`, an empty
-# backlog, and an umbrella `u` carrying an epic `things` with stories T-01..T-03.
-# Echoes the home path. The caller may mutate the fixture before running.
+# backlog, and an umbrella `u` carrying an epic `things` with stories
+# svc-01..svc-03 (svc-01 is the one gate story). Echoes the home path. The caller
+# may mutate the fixture before running.
 make_home() {
   local name=$1
   local home="$TMP_ROOT/$name"
@@ -58,10 +65,10 @@ repos: [svc]
 ---
 # Epic things
 EOF
-  local n
-  for n in T-01 T-02 T-03; do
-    write_story "$home/umbrellas/u/plans/ep/stories" "$n" things svc main
-  done
+  local sdir="$home/umbrellas/u/plans/ep/stories"
+  write_story "$sdir" svc-01 things svc main true
+  write_story "$sdir" svc-02 things svc main false
+  write_story "$sdir" svc-03 things svc main false
   printf '%s\n' "$home"
 }
 
@@ -77,7 +84,7 @@ test_promote_moves_and_seeds() {
 
   # Every story seeded with its REAL id and the epic's tag, matching by construction.
   local n
-  for n in T-01 T-02 T-03; do
+  for n in svc-01 svc-02 svc-03; do
     assert_grep "- [ ] $n - [things]" "$home/data/backlog.md" "story $n not seeded with matching id+tag"
   done
   assert_contains "$OUT" "seeded: 3" "seed count wrong"
@@ -161,46 +168,46 @@ test_rerun_is_noop() {
 # --- partial resume: some present, add only the rest -------------------------
 test_partial_resume() {
   local home; home=$(make_home partial)
-  # Simulate a crash after only T-01 was seeded: pre-seed T-01 correctly, and
+  # Simulate a crash after only svc-01 was seeded: pre-seed svc-01 correctly, and
   # pre-move the epic dir + marker so locate reconciles from data/plans.
   mkdir -p "$home/data/plans"
   mv "$home/umbrellas/u/plans/ep" "$home/data/plans/ep"
   printf 'ep\n' > "$home/umbrellas/u/.promoted"
-  # T-01 already correctly seeded before the simulated crash.
-  printf '## In flight\n\n## Queued\n- [ ] T-01 - [things] Story T-01 heading (repo: svc) (kind: ship) (since 2026-08-15)\n## Done\n' > "$home/data/backlog.md"
+  # svc-01 already correctly seeded before the simulated crash.
+  printf '## In flight\n\n## Queued\n- [ ] svc-01 - [things] Story svc-01 heading (repo: svc) (kind: ship) (since 2026-08-15)\n## Done\n' > "$home/data/backlog.md"
 
   run "$home" u
   expect_code 0 "$RC" "partial resume failed"
   assert_contains "$OUT" "seeded: 2" "did not add exactly the missing stories"
   assert_contains "$OUT" "already correct: 1" "did not skip the present story"
-  # T-01 appears exactly once (no duplicate).
-  [ "$(grep -c '\- \[ \] T-01 ' "$home/data/backlog.md")" -eq 1 ] || fail "T-01 duplicated"
+  # svc-01 appears exactly once (no duplicate).
+  [ "$(grep -c '\- \[ \] svc-01 ' "$home/data/backlog.md")" -eq 1 ] || fail "svc-01 duplicated"
   pass "a re-run after a partial seed adds only the missing stories"
 }
 
 # --- R2 fix: a case/kebab-renamed story id is RECONCILED, not orphaned -------
-# The aimica failure: a story file renamed LH-01 -> lh-01 (here t-01 -> T-01)
+# The aimica failure: a story file renamed LH-01 -> lh-01 (here SVC-01 -> svc-01)
 # left a stale lowercase backlog line under a mismatched tag forever. Re-running
 # promote must now converge that line to the canonical id/title/tag in place.
 test_reconciles_case_variant_seed() {
   local home; home=$(make_home casevariant)
-  # A pre-seed of story T-01 under a wrong-case id and short tag (the aimica
+  # A pre-seed of story svc-01 under a wrong-case id and short tag (the aimica
   # LH-01 -> lh-01 failure), carrying a hand-added note line that MUST survive.
-  printf '## In flight\n\n## Queued\n- [ ] t-01 - [th] wrong-case seed (repo: old) (kind: docs) (since 2026-08-10)\n  hand note: keep me\n## Done\n' > "$home/data/backlog.md"
+  printf '## In flight\n\n## Queued\n- [ ] SVC-01 - [th] wrong-case seed (repo: old) (kind: docs) (since 2026-08-10)\n  hand note: keep me\n## Done\n' > "$home/data/backlog.md"
   run "$home" u
   expect_code 0 "$RC" "promote should reconcile a case-variant seed, not refuse"
-  assert_contains "$OUT" "renamed backlog id t-01 -> T-01" "did not report the id rewrite"
+  assert_contains "$OUT" "renamed backlog id SVC-01 -> svc-01" "did not report the id rewrite"
   # Canonical line now present with the real id, tag, title, repo, kind...
-  assert_grep "- [ ] T-01 - [things] Story T-01 heading (repo: svc) (kind: ship)" \
+  assert_grep "- [ ] svc-01 - [things] Story svc-01 heading (repo: svc) (kind: ship)" \
     "$home/data/backlog.md" "case-variant line not converged to canonical"
   # ...the stale lowercase id gone...
-  assert_no_grep "- [ ] t-01" "$home/data/backlog.md" "stale lowercase line survived"
+  assert_no_grep "- [ ] SVC-01" "$home/data/backlog.md" "stale case-variant line survived"
   # ...and the hand-added note preserved.
   assert_grep "hand note: keep me" "$home/data/backlog.md" "hand-added note was clobbered"
-  # T-02, T-03 seeded fresh; T-01 counted as renamed, not duplicated.
+  # svc-02, svc-03 seeded fresh; svc-01 counted as renamed, not duplicated.
   assert_contains "$OUT" "seeded: 2" "did not seed the two new stories"
   assert_contains "$OUT" "renamed: 1" "did not count the rename"
-  [ "$(grep -c 'T-01' "$home/data/backlog.md")" -eq 1 ] || fail "T-01 duplicated"
+  [ "$(grep -c 'svc-01' "$home/data/backlog.md")" -eq 1 ] || fail "svc-01 duplicated"
   pass "a case/kebab-renamed story id is reconciled in place, preserving state and notes"
 }
 
@@ -209,17 +216,17 @@ test_reconciles_drifted_fields() {
   local home; home=$(make_home drift)
   run "$home" u
   expect_code 0 "$RC" "first promote failed"
-  # Simulate a redesign after the first promote: the story T-02 title changed.
-  write_story "$home/data/plans/ep/stories" T-02 things svc main  # regenerate (heading same)
+  # Simulate a redesign after the first promote: the story svc-02 title changed.
+  write_story "$home/data/plans/ep/stories" svc-02 things svc main  # regenerate (heading same)
   # Force a real drift by editing the seeded backlog line to a stale title/repo/kind.
-  perl -i -pe 's/- \[ \] T-02 - \[things\] Story T-02 heading \(repo: svc\) \(kind: ship\)/- [ ] T-02 - [things] STALE title (repo: wrong) (kind: docs)/' \
+  perl -i -pe 's/- \[ \] svc-02 - \[things\] Story svc-02 heading \(repo: svc\) \(kind: ship\)/- [ ] svc-02 - [things] STALE title (repo: wrong) (kind: docs)/' \
     "$home/data/backlog.md"
   assert_grep "STALE title" "$home/data/backlog.md" "fixture drift not applied"
   run "$home" u
   expect_code 0 "$RC" "reconcile re-run failed"
-  assert_contains "$OUT" "refreshed backlog entry T-02" "did not report the field refresh"
+  assert_contains "$OUT" "refreshed backlog entry svc-02" "did not report the field refresh"
   assert_contains "$OUT" "reconciled: 1" "did not count the reconcile"
-  assert_grep "- [ ] T-02 - [things] Story T-02 heading (repo: svc) (kind: ship)" \
+  assert_grep "- [ ] svc-02 - [things] Story svc-02 heading (repo: svc) (kind: ship)" \
     "$home/data/backlog.md" "drifted line not converged to canonical"
   assert_no_grep "STALE title" "$home/data/backlog.md" "stale title survived"
   pass "an already-present story with drifted derived fields is rewritten to match the story"
@@ -237,7 +244,7 @@ test_refuses_orphan_epic_tag() {
   # Wrote nothing: epic still in the umbrella, no new tasks.
   assert_present "$home/umbrellas/u/plans/ep" "refusal still moved the epic dir"
   assert_absent "$home/data/plans/ep" "refusal wrote into data/plans"
-  assert_no_grep "- [ ] T-01" "$home/data/backlog.md" "refusal seeded a second parallel task set"
+  assert_no_grep "- [ ] svc-01" "$home/data/backlog.md" "refusal seeded a second parallel task set"
   pass "a foreign task under this epic's tag is refused, not duplicated, and writes nothing"
 }
 
@@ -245,18 +252,18 @@ test_refuses_orphan_epic_tag() {
 test_refuses_missing_pr_base() {
   local home; home=$(make_home nopr)
   # Strip pr_base from one story.
-  write_story "$home/umbrellas/u/plans/ep/stories" T-02 things svc ""
+  write_story "$home/umbrellas/u/plans/ep/stories" svc-02 things svc ""
   run "$home" u
   expect_code 1 "$RC" "missing pr_base should fail"
-  assert_contains "$OUT" "no pr_base" "did not name the missing pr_base"
+  assert_contains "$OUT" "pr_base" "did not name the missing pr_base"
   assert_absent "$home/data/plans/ep" "wrote to data/plans despite a validation failure"
-  assert_no_grep "- [ ] T-01" "$home/data/backlog.md" "seeded despite a validation failure"
+  assert_no_grep "- [ ] svc-01" "$home/data/backlog.md" "seeded despite a validation failure"
   pass "a story missing pr_base fails with an actionable message and writes nothing"
 }
 
 test_refuses_unregistered_repo() {
   local home; home=$(make_home norepo)
-  write_story "$home/umbrellas/u/plans/ep/stories" T-02 things ghost-repo main
+  write_story "$home/umbrellas/u/plans/ep/stories" svc-02 things ghost-repo main
   run "$home" u
   expect_code 1 "$RC" "unregistered repo should fail"
   assert_contains "$OUT" "not registered" "did not name the registration gap"
@@ -272,11 +279,11 @@ test_manual_backend() {
   run "$home" u
   expect_code 0 "$RC" "manual-backend promote failed"
   assert_contains "$OUT" "backlog backend: manual" "did not report the manual backend"
-  assert_grep "- [ ] T-01 - [things]" "$home/data/backlog.md" "manual seed did not render the line"
+  assert_grep "- [ ] svc-01 - [things]" "$home/data/backlog.md" "manual seed did not render the line"
   # Idempotent under manual too.
   run "$home" u
   assert_contains "$OUT" "seeded: 0" "manual re-run seeded again"
-  [ "$(grep -c '\- \[ \] T-01 ' "$home/data/backlog.md")" -eq 1 ] || fail "manual re-run duplicated T-01"
+  [ "$(grep -c '\- \[ \] svc-01 ' "$home/data/backlog.md")" -eq 1 ] || fail "manual re-run duplicated svc-01"
   pass "the manual backlog backend seeds and stays idempotent"
 }
 
@@ -286,21 +293,21 @@ test_manual_backend_reconciles() {
   printf 'manual\n' > "$home/config/backlog-backend"
   run "$home" u
   expect_code 0 "$RC" "manual-backend promote failed"
-  # Drift T-01's fields (pure reconcile) AND case-rename T-02 -> t-02 (rename
+  # Drift svc-01's fields (pure reconcile) AND case-rename svc-02 -> SVC-02 (rename
   # path) - both go through the manual backend's line-edit helpers.
-  perl -i -pe 's/- \[ \] T-01 - \[things\] Story T-01 heading \(repo: svc\) \(kind: ship\)/- [ ] T-01 - [things] OLD (repo: bad) (kind: docs)/' \
+  perl -i -pe 's/- \[ \] svc-01 - \[things\] Story svc-01 heading \(repo: svc\) \(kind: ship\)/- [ ] svc-01 - [things] OLD (repo: bad) (kind: docs)/' \
     "$home/data/backlog.md"
-  perl -i -pe 's/- \[ \] T-02 /- [ ] t-02 /' "$home/data/backlog.md"
+  perl -i -pe 's/- \[ \] svc-02 /- [ ] SVC-02 /' "$home/data/backlog.md"
   run "$home" u
   expect_code 0 "$RC" "manual reconcile failed"
   assert_contains "$OUT" "reconciled: 1" "manual backend did not reconcile the drift"
-  assert_contains "$OUT" "renamed backlog id t-02 -> T-02" "manual backend did not rewrite the case-variant id"
-  assert_grep "- [ ] T-01 - [things] Story T-01 heading (repo: svc) (kind: ship)" \
+  assert_contains "$OUT" "renamed backlog id SVC-02 -> svc-02" "manual backend did not rewrite the case-variant id"
+  assert_grep "- [ ] svc-01 - [things] Story svc-01 heading (repo: svc) (kind: ship)" \
     "$home/data/backlog.md" "manual reconcile did not converge the line"
-  assert_grep "- [ ] T-02 - [things] Story T-02 heading (repo: svc) (kind: ship)" \
+  assert_grep "- [ ] svc-02 - [things] Story svc-02 heading (repo: svc) (kind: ship)" \
     "$home/data/backlog.md" "manual rename did not converge the renamed line"
   assert_no_grep "OLD (repo: bad)" "$home/data/backlog.md" "manual reconcile left stale fields"
-  assert_no_grep "- [ ] t-02" "$home/data/backlog.md" "manual rename left the stale lowercase id"
+  assert_no_grep "- [ ] SVC-02" "$home/data/backlog.md" "manual rename left the stale case-variant id"
   pass "the manual backend rewrites drifted and case-renamed lines in place"
 }
 
@@ -324,10 +331,10 @@ test_verify_green_then_red() {
 
   # (d) drop a story's backlog entry -> red naming the missing brief.
   run "$home" u >/dev/null 2>&1 || true   # (no-op; keep state)
-  local bl; bl=$(mktemp); grep -v ' T-03 ' "$home/data/backlog.md" | grep -v 'ghost-99' > "$bl"; mv "$bl" "$home/data/backlog.md"
+  local bl; bl=$(mktemp); grep -v ' svc-03 ' "$home/data/backlog.md" | grep -v 'ghost-99' > "$bl"; mv "$bl" "$home/data/backlog.md"
   run "$home" verify u
   expect_code 1 "$RC" "verify should fail when a story has no backlog entry"
-  assert_contains "$OUT" "T-03" "did not name the unqueued story"
+  assert_contains "$OUT" "svc-03" "did not name the unqueued story"
   assert_contains "$OUT" "no backlog entry" "did not classify the missing brief"
 
   # (b) break the back-symlink -> red.
@@ -345,16 +352,16 @@ test_verify_red_then_green_after_reconcile() {
   local home; home=$(make_home verifyrecon)
   run "$home" u
   expect_code 0 "$RC" "first promote failed"
-  # Doctor the backlog: T-02 -> case variant t-02 with a stale title.
-  perl -i -pe 's/- \[ \] T-02 - \[things\] Story T-02 heading \(repo: svc\) \(kind: ship\)/- [ ] t-02 - [things] STALE (repo: svc) (kind: ship)/' \
+  # Doctor the backlog: svc-02 -> case variant SVC-02 with a stale title.
+  perl -i -pe 's/- \[ \] svc-02 - \[things\] Story svc-02 heading \(repo: svc\) \(kind: ship\)/- [ ] SVC-02 - [things] STALE (repo: svc) (kind: ship)/' \
     "$home/data/backlog.md"
   run "$home" verify u
   expect_code 1 "$RC" "verify should be red on the doctored backlog"
-  assert_contains "$OUT" "t-02" "verify did not name the case-variant drift"
+  assert_contains "$OUT" "SVC-02" "verify did not name the case-variant drift"
   # Re-run promote converges it...
   run "$home" u
   expect_code 0 "$RC" "reconcile re-run failed"
-  assert_contains "$OUT" "renamed backlog id t-02 -> T-02" "did not rewrite the drifted id"
+  assert_contains "$OUT" "renamed backlog id SVC-02 -> svc-02" "did not rewrite the drifted id"
   # ...and verify is now green.
   run "$home" verify u
   expect_code 0 "$RC" "verify should be green after reconcile"
@@ -378,7 +385,7 @@ test_marker_written_before_move() {
   run "$home" u
   expect_code 0 "$RC" "reconcile-from-marker re-run failed"
   assert_contains "$OUT" "already promoted to data/plans/ep" "did not reconcile from the marker"
-  assert_grep "- [ ] T-01 - [things]" "$home/data/backlog.md" "did not re-seed from the moved copy"
+  assert_grep "- [ ] svc-01 - [things]" "$home/data/backlog.md" "did not re-seed from the moved copy"
   pass "the .promoted marker is written before the move and drives a clean reconcile re-run"
 }
 
