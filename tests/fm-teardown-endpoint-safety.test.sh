@@ -365,10 +365,59 @@ SH
   pass "fm-teardown: exact tmux cleanup preserves invalid and prefix-matched neighbors while removing only the recorded target"
 }
 
+test_orca_composite_worktree_id_validates() {
+  local dir id rc out
+  dir=$(make_case orca-composite)
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+
+  id=orca-composite-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term_b3fa7d74-8085-472c-9dac-d65b6e5e5dce" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=1fa7dc1c-907a-405d-b332-0eb09b4e7cf6::$dir/worktree"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+    || fail "Orca endpoint with a composite worktree id refused"
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = orca ] \
+    || fail "composite Orca record validated as the wrong backend"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = term_b3fa7d74-8085-472c-9dac-d65b6e5e5dce ] \
+    || fail "composite Orca validation did not select its terminal"
+
+  for value in \
+    "repo::relative/path" \
+    "repo::a::/abs/path" \
+    "::/abs/path" \
+    "repo::" \
+    "repo/id::/abs/path" \
+    "repo/id" \
+    "repo:id" \
+    "$(printf 'repo::/abs/pa\tth')" \
+    "$(printf 'repo::/abs/pa\rth')" \
+    "$(printf 'repo::/abs/pa\ath')"; do
+    id=orca-bad
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+      "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+      "orca_worktree_id=$value"
+    set +e
+    out=$(fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] \
+      || fail "malformed Orca worktree id accepted: $(printf '%q' "$value")"
+    case "$out" in
+      *"preserving task state"*) ;;
+      *) fail "malformed Orca worktree id refusal did not preserve task state: $(printf '%q' "$value")" ;;
+    esac
+  done
+  pass "cleanup identity: composite Orca worktree ids validate while malformed ones refuse"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
+test_orca_composite_worktree_id_validates
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup

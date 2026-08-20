@@ -36,12 +36,13 @@ The normal isolation and unlanded-work refusal rules still apply.
 backend=orca
 window=fm-<id>
 terminal=<orca terminal handle>
-orca_worktree_id=<orca worktree id>
+orca_worktree_id=<orca repo id>::<absolute Orca worktree path>
 worktree=<absolute Orca worktree path>
 ```
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+Orca's own worktree id is the composite `<repo id>::<absolute path>` it returns and accepts back as `id:<value>`, so Firstmate records and replays it verbatim.
 
 ## Current lifecycle and safety
 
