@@ -31,21 +31,29 @@
 #
 # Usage:
 #   fm-umbrella.sh create <umbrella-id> --repos <name>,<name>,...
+#   fm-umbrella.sh link-design <umbrella-id> <epic-dir>
 #   fm-umbrella.sh teardown <umbrella-id> [--force]
 #   fm-umbrella.sh list
 #
-#   create    Allocate one isolated worktree per named project under
-#             umbrellas/<umbrella-id>/repos/<name>, write a DESIGN.md and a cross-repo
-#             AGENTS.md skeleton, and record umbrellas/<umbrella-id>/umbrella.meta.
-#             Transactional: any failure rolls back every worktree and the dir.
-#             Refuses if the umbrella id already exists. Each <name> must resolve
-#             to a git clone at projects/<name>.
-#   teardown  Return every worktree and remove umbrella.meta and the cross-repo
-#             AGENTS.md, KEEPING DESIGN.md as the durable artifact. Refuses unless
-#             DESIGN.md exists and is non-empty; --force skips that gate. Scratch
-#             worktrees are discarded even if dirty, but their `git status` is
-#             printed first so nothing is discarded silently.
-#   list      Print each umbrella id, its repos, and its DESIGN.md state.
+#   create      Allocate one isolated worktree per named project under
+#               umbrellas/<umbrella-id>/repos/<name>, write a DESIGN.md and a cross-repo
+#               AGENTS.md skeleton, and record umbrellas/<umbrella-id>/umbrella.meta.
+#               Transactional: any failure rolls back every worktree and the dir.
+#               Refuses if the umbrella id already exists. Each <name> must resolve
+#               to a git clone at projects/<name>.
+#   link-design Point a scaffolded epic dir at the umbrella-root DESIGN.md (and
+#               decisions.md when present) via a relative symlink, so the epic
+#               dir references the ONE canonical design instead of carrying a copy
+#               that drifts as the captain keeps editing. Idempotent; refuses if a
+#               real (non-symlink) design file already sits in the epic dir, since
+#               that copy is exactly the drift to reconcile by hand first. The epic
+#               dir is umbrellas/<umbrella-id>/plans/<epic-dir>/ (scaffold it first).
+#   teardown    Return every worktree and remove umbrella.meta and the cross-repo
+#               AGENTS.md, KEEPING DESIGN.md as the durable artifact. Refuses unless
+#               DESIGN.md exists and is non-empty; --force skips that gate. Scratch
+#               worktrees are discarded even if dirty, but their `git status` is
+#               printed first so nothing is discarded silently.
+#   list        Print each umbrella id, its repos, and its DESIGN.md state.
 #
 # --repos names are comma-separated with no spaces. The captain enters the lab
 # with `cd umbrellas/<umbrella-id> && <your coding agent>`; AGENTS.md treats direct
@@ -295,6 +303,9 @@ fresh default-branch base.
 Repos: $repos_field
 
 - Design across all repos here; capture the contract in \`DESIGN.md\`.
+- \`DESIGN.md\` is the ONE canonical design; keep editing it here. The scaffolded
+  epic dir must REFERENCE it (a symlink via \`fm-umbrella.sh link-design\`), never
+  carry a copy - a copy drifts the moment the canonical is edited again.
 - Scratch commits in these worktrees are discarded at teardown - they are a
   scratchpad, not the deliverable.
 - The deliverable is \`DESIGN.md\` plus a contract that ships as its own task.
@@ -330,6 +341,83 @@ EOF
   echo "  repos: $repos_field"
   echo "  lab:   umbrellas/$id/  (cd there and drive your coding agent)"
   echo "  design: umbrellas/$id/DESIGN.md"
+}
+
+# Point a scaffolded epic dir at the umbrella-root DESIGN.md (+ decisions.md when
+# present) via a relative symlink, so there is ONE canonical design file and the
+# epic dir can never carry a copy that drifts. Idempotent and fail-closed: an
+# existing correct symlink is a no-op, a stale symlink is re-pointed, and a real
+# (non-symlink) design file in the epic dir is refused so captain content is
+# never discarded silently - that copy is exactly the drift to reconcile by hand.
+cmd_link_design() {
+  local id="" epic=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -*) err "unknown flag: $1"; exit 2 ;;
+      *)
+        if [ -z "$id" ]; then id=$1; shift
+        elif [ -z "$epic" ]; then epic=$1; shift
+        else err "unexpected argument: $1"; exit 2; fi ;;
+    esac
+  done
+
+  if [ -z "$id" ] || [ -z "$epic" ]; then
+    err "usage: fm-umbrella.sh link-design <umbrella-id> <epic-dir>"
+    exit 2
+  fi
+  if ! umbrella_id_valid "$id"; then
+    err "invalid umbrella id: $id"
+    exit 2
+  fi
+  # An epic dir name must be a single clean path segment (same safe class as a
+  # repo name) so it can only ever resolve to a direct child of plans/.
+  if ! repo_name_valid "$epic"; then
+    err "invalid epic dir name: $epic"
+    exit 2
+  fi
+
+  local umbrella_dir="$UMBRELLAS/$id"
+  if [ ! -d "$umbrella_dir" ]; then
+    err "no umbrella at umbrellas/$id"
+    exit 1
+  fi
+  local epic_dir="$umbrella_dir/plans/$epic"
+  if [ ! -d "$epic_dir" ]; then
+    err "no epic dir at umbrellas/$id/plans/$epic; scaffold the epic there first"
+    exit 1
+  fi
+
+  local artifact linked=0
+  for artifact in DESIGN.md decisions.md; do
+    local canonical="$umbrella_dir/$artifact"
+    # Only link what the canonical actually has. DESIGN.md is expected;
+    # decisions.md is optional and linked only when the umbrella carries one.
+    [ -f "$canonical" ] || continue
+    local link="$epic_dir/$artifact"
+    if [ -e "$link" ] && [ ! -L "$link" ]; then
+      err "$link is a real file, not a symlink; a design COPY there drifts from the canonical umbrellas/$id/$artifact. Merge it into the canonical and delete the copy, then re-run."
+      exit 1
+    fi
+    # Relative target: the epic dir lives at umbrellas/<id>/plans/<epic>/, so
+    # ../../ is the umbrella root where the canonical design lives.
+    if ! ln -sfn "../../$artifact" "$link"; then
+      err "cannot create design symlink $link"
+      exit 1
+    fi
+    # Dedup proof: the epic-dir link and the umbrella-root canonical must be the
+    # SAME file (`-ef` follows symlinks and compares inode) - one source, no copy.
+    if [ ! "$link" -ef "$canonical" ]; then
+      err "design symlink $link does not resolve to the canonical $canonical"
+      exit 1
+    fi
+    echo "linked $artifact  (umbrellas/$id/plans/$epic/$artifact -> ../../$artifact)"
+    linked=$((linked + 1))
+  done
+
+  if [ "$linked" -eq 0 ]; then
+    err "no DESIGN.md at umbrellas/$id to link; capture the design first"
+    exit 1
+  fi
 }
 
 cmd_teardown() {
@@ -441,6 +529,7 @@ cmd_list() {
 case "${1:-}" in
   -h|--help|'') usage; exit 0 ;;
   create) shift; cmd_create "$@" ;;
+  link-design) shift; cmd_link_design "$@" ;;
   teardown) shift; cmd_teardown "$@" ;;
   list) shift; cmd_list "$@" ;;
   *) err "unknown command: $1"; usage; exit 2 ;;

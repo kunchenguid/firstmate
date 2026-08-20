@@ -28,6 +28,10 @@ This skill only records a settled design in the standard shape.
 1. **Read the source design.**
    If an umbrella lab produced a `DESIGN.md`, read it in full; otherwise work from the captain's settled design.
    Confirm the contract is concrete enough to split into stories - if it is still prose, the design is not finished and belongs back with the captain, not in a scaffold.
+   Never copy the design doc into the epic dir.
+   The umbrella-root `DESIGN.md` (and any `decisions.md`) stays the ONE canonical design, edited in place; a copy in the epic dir drifts the moment the captain edits the canonical again, and the design agent then refuses to touch a file it does not own.
+   If the epic dir should reference the design, make it a symlink to the canonical, never a copy.
+   In a firstmate fleet the deterministic way is `fm-umbrella.sh link-design <umbrella-id> <epic-dir>`, which points the epic dir at the umbrella-root design by symlink and refuses a drifting copy; see `fm-umbrella.sh --help`.
 
 2. **Pick the epic slug.**
    Choose one short lower-kebab slug (for example `episk`).
