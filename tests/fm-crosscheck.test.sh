@@ -409,8 +409,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ "$mode" = json ] || exit 64
-[ "$provider" = openai-codex ] || exit 65
-[ "$model" = gpt-5.6-sol ] || exit 66
+[ "$provider" = "${FM_TEST_PI_EXPECT_PROVIDER:-openai-codex}" ] || exit 65
+[ "$model" = "${FM_TEST_PI_EXPECT_MODEL:-gpt-5.6-sol}" ] || exit 66
 [ "$thinking" = xhigh ] || exit 67
 [ "$tools" = read,bash,grep,find,ls ] || exit 68
 [ "$context_isolated" = yes ] || {
@@ -1038,6 +1038,31 @@ select_pi_reviewer() {
 EOF
 }
 
+# The primary R6 lane: a dedicated Pi agent dir whose credential is the
+# api-key models.json (azure-glm custom provider), never a codex auth.json.
+write_glm_models_json() {
+  local destination=$1 api_key=${2:-test-glm-key}
+  cat > "$destination" <<EOF
+{"providers":{"azure-glm":{"baseUrl":"https://aif-fm7c799d-eus01.cognitiveservices.azure.com/openai/v1","api":"openai-completions","apiKey":"$api_key","models":[{"id":"FW-GLM-5.2","name":"GLM 5.2 (Azure Foundry Fireworks)","reasoning":true,"input":["text"],"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0},"contextWindow":1000000,"maxTokens":65536}]}}}
+EOF
+}
+
+select_glm_reviewer() {
+  local case_dir=$1
+  sed -i.bak \
+    -e 's/harness=codex/harness=claude/' \
+    -e 's/model=gpt-5.5/model=claude-opus-5/' \
+    "$case_dir/state/task-x1.meta"
+  rm "$case_dir/state/task-x1.meta.bak"
+  rm -f "$case_dir/pi-home/auth.json"
+  write_glm_models_json "$case_dir/pi-home/models.json"
+  cat > "$case_dir/reviewer.json" <<EOF
+{"reviewers":[
+  {"harness":"pi","model":"FW-GLM-5.2","effort":"xhigh","account_home":"$case_dir/pi-home"}
+]}
+EOF
+}
+
 test_reviewer_policy_profiles_and_independence() {
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
     || fail "reviewer policy profiles or independence validation regressed"
@@ -1056,7 +1081,7 @@ root = Path(sys.argv[2]) / "reviewer-policy-profiles"
 root.mkdir()
 homes = {
     name: root / name
-    for name in ("author-home", "codex-home", "claude-home", "pi-home")
+    for name in ("author-home", "codex-home", "glm-home", "pi-home")
 }
 for account_home in homes.values():
     account_home.mkdir()
@@ -1064,9 +1089,9 @@ config_path = root / "reviewer.json"
 os.environ["FM_CROSSCHECK_REVIEWER_CONFIG"] = str(config_path)
 
 profiles = [
+    ("pi", "FW-GLM-5.2", "xhigh", "glm-home"),
     ("codex", "gpt-5.6-sol", "xhigh", "codex-home"),
     ("pi", "gpt-5.6-sol", "xhigh", "pi-home"),
-    ("claude", "claude-opus-5", "xhigh", "claude-home"),
 ]
 
 
@@ -1098,11 +1123,18 @@ validation_author = {
     "model": "validation-author-model",
     "account_home": str(homes["author-home"]),
 }
+expected_family = {
+    "FW-GLM-5.2": "glm-primary",
+    "gpt-5.6-sol": "codex-fallback",
+}
 for harness, model, effort, home_name in profiles:
     candidate = reviewer(harness, model, effort, home_name)
     write_config([candidate])
     selected = module.reviewer_candidates(root, validation_author)[0]
-    assert selected == candidate
+    assert selected == {
+        **candidate,
+        "review_family_mode": expected_family[model],
+    }, selected
     print(f"VALID harness={harness} model={model} effort={effort}")
 
 write_config(
@@ -1117,39 +1149,66 @@ write_config(
 )
 unlisted = expect_refused(validation_author, "must be")
 for accepted in (
-    "claude claude-opus-5 xhigh",
     "codex gpt-5.6-sol xhigh",
+    "pi FW-GLM-5.2 xhigh",
     "pi gpt-5.6-sol xhigh",
 ):
     assert accepted in unlisted, unlisted
+assert "claude" not in unlisted, unlisted
 print(f"REFUSED unlisted-profile: {unlisted}")
+
+# R6 artifact retirement: the interim claude reviewer profile is no longer
+# an accepted profile at all; it is refused by the exact-profile message
+# before any reviewer machinery runs.
+write_config(
+    [
+        {
+            "harness": "claude",
+            "model": "claude-opus-5",
+            "effort": "xhigh",
+            "account_home": str(homes["glm-home"]),
+        }
+    ]
+)
+retired = expect_refused(
+    validation_author,
+    "must be codex gpt-5.6-sol xhigh or pi FW-GLM-5.2 xhigh or pi gpt-5.6-sol xhigh",
+)
+print(f"REFUSED retired claude profile: {retired}")
 
 claude_author = {
     "harness": "claude",
     "model": "claude-opus-5",
     "account_home": str(homes["author-home"]),
 }
-# A claude reviewer profile is valid, but a claude author on the same model
-# still trips the model-separation gate: the claude lane widens provider
-# coverage without weakening reviewer independence.
-write_config([reviewer("claude", "claude-opus-5", "xhigh", "claude-home")])
-claude_same_model = expect_refused(claude_author, "different model")
-print(f"REFUSED same-model claude reviewer: {claude_same_model}")
-
 codex_author = {
     "harness": "codex",
     "model": "gpt-5.6-sol",
     "account_home": str(homes["author-home"]),
 }
-write_config([reviewer("claude", "claude-opus-5", "xhigh", "claude-home")])
-selected = module.reviewer_candidates(root, codex_author)[0]
-assert selected["harness"] == "claude", selected
-print(f"SELECTED claude reviewer for codex author: {selected['model']}")
+# The GLM primary reviewer is model-separate from every author family.
+write_config([reviewer("pi", "FW-GLM-5.2", "xhigh", "glm-home")])
+for author in (codex_author, claude_author):
+    selected = module.reviewer_candidates(root, author)[0]
+    assert selected["model"] == "FW-GLM-5.2", selected
+    assert selected["review_family_mode"] == "glm-primary", selected
+print("SELECTED GLM primary reviewer for codex and claude authors")
+
+# A GLM author (hypothetical same-model roster) still trips the model screen.
+glm_author = {
+    "harness": "pi",
+    "model": "azure-glm/FW-GLM-5.2",
+    "account_home": str(homes["author-home"]),
+}
+write_config([reviewer("pi", "FW-GLM-5.2", "xhigh", "glm-home")])
+glm_same_model = expect_refused(glm_author, "different model")
+print(f"REFUSED same-model GLM reviewer: {glm_same_model}")
 
 write_config([reviewer("pi", "gpt-5.6-sol", "xhigh", "pi-home")])
 selected = module.reviewer_candidates(root, claude_author)[0]
 assert selected["harness"] == "pi", selected
-print(f"SELECTED supported reviewer after Claude author: {selected['harness']}")
+assert selected["review_family_mode"] == "codex-fallback", selected
+print(f"SELECTED fallback reviewer after Claude author: {selected['harness']}")
 
 same_model_author = {
     "harness": "codex",
@@ -1172,10 +1231,12 @@ write_config(
 )
 selected = module.reviewer_candidates(root, claude_author)[0]
 assert selected["account_home"] == str(homes["author-home"].resolve()), selected
-assert set(selected) == {"harness", "model", "effort", "account_home"}, selected
+assert set(selected) == {
+    "harness", "model", "effort", "account_home", "review_family_mode",
+}, selected
 print("SELECTED without author account comparison")
 PY
-  pass "supported profiles enforce the model policy across all three harness lanes and ignore author identity"
+  pass "supported profiles enforce the model policy, record review families, and refuse the retired claude lane"
 }
 
 test_same_model_relaxation_does_not_require_author_identity() {
@@ -1688,9 +1749,9 @@ PY
   pass "missing author identity reaches a normal Crosscheck verdict"
 }
 
-test_claude_reviewer_requires_the_azure_lane() {
+test_claude_reviewer_profile_is_retired() {
   local record case_dir base head rc
-  record=$(make_case claude-reviewer-azure-only)
+  record=$(make_case claude-reviewer-retired)
   IFS=$'\t' read -r case_dir base head <<< "$record"
   cat > "$case_dir/reviewer.json" <<EOF
 {"reviewers":[{"harness":"claude","model":"claude-opus-5","effort":"xhigh","account_home":"$case_dir/reviewer-home"}]}
@@ -1700,11 +1761,326 @@ EOF
     > "$case_dir/out" 2> "$case_dir/err"
   rc=$?
   set -e
-  expect_code 1 "$rc" "local-lane claude reviewer"
-  assert_grep 'Azure compartment lane' \
-    "$case_dir/err" "the local lane did not name the Azure-only claude contract"
+  expect_code 1 "$rc" "retired claude reviewer profile"
+  assert_grep 'CROSSCHECK TOOL-FAILURE: reviewer preflight failed' \
+    "$case_dir/err" "the retired claude profile was not refused at reviewer preflight"
+  assert_grep 'must be codex gpt-5.6-sol xhigh or pi FW-GLM-5.2 xhigh or pi gpt-5.6-sol xhigh' \
+    "$case_dir/err" "the retired claude profile was not refused with the exact profile message"
   assert_absent "$case_dir/fakebin/claude" "Claude reviewer machinery was installed by the fixture"
-  pass "a claude reviewer is profile-valid but executes only through the Azure lane"
+  assert_absent "$case_dir/pi.log" "a reviewer launched despite the retired profile"
+  assert_absent "$case_dir/codex.log" "a reviewer launched despite the retired profile"
+  pass "the retired claude reviewer profile is refused before any reviewer machinery runs"
+}
+
+test_glm_reviewer_executes_bound_policy_profile() {
+  local record case_dir base head output
+  record=$(make_case glm-reviewer)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  select_glm_reviewer "$case_dir"
+  output=$(FM_TEST_PI_BIN=pi PATH="$case_dir/fakebin:$PATH" \
+    FM_TEST_PI_EXPECT_PROVIDER=azure-glm FM_TEST_PI_EXPECT_MODEL=FW-GLM-5.2 \
+    run_case "$case_dir" "$base" "$head" clear run 2> "$case_dir/err") \
+    || fail "GLM reviewer did not complete"
+  assert_contains "$output" 'crosscheck clear' \
+    "GLM reviewer did not earn a clear result"
+  assert_grep '--mode json --provider azure-glm --model FW-GLM-5.2 --thinking xhigh --tools read,bash,grep,find,ls --no-session' \
+    "$case_dir/pi.log" \
+    "GLM reviewer was not invoked on the azure-glm provider with its pinned model, effort, and tools"
+  assert_no_grep 'CROSSCHECK DEGRADED' "$case_dir/err" \
+    "the GLM primary lane announced a degraded fallback"
+  python3 -c '
+import hashlib, json, sys
+value = json.load(open(sys.argv[1]))
+reviewer = value["runs"][-1]["reviewer"]
+assert reviewer["harness"] == "pi"
+assert reviewer["model"] == "FW-GLM-5.2"
+assert reviewer["review_family_mode"] == "glm-primary"
+assert reviewer["account_home"] == sys.argv[2]
+assert reviewer["executing_account_home"] == sys.argv[2]
+assert reviewer["account_selector"] == "PI_CODING_AGENT_DIR"
+assert reviewer["credential_source"] == "pi-azure-glm-models-file"
+binding = hashlib.sha256(
+    b"aif-fm7c799d-eus01/FW-GLM-5.2\n"
+    b"https://aif-fm7c799d-eus01.cognitiveservices.azure.com/openai/v1"
+).hexdigest()
+assert reviewer["credential_identifier"] == "glm-foundry-binding:" + binding
+assert reviewer["execution_proof"]["actual_exit"] == 0
+' "$case_dir/data/task-x1/crosscheck-ledger.json" "$case_dir/pi-home" \
+    || fail "GLM review did not record its bound provider, family mode, and non-secret credential binding"
+  assert_no_grep 'CODEX FALLBACK' "$case_dir/data/task-x1/crosscheck.md" \
+    "a GLM primary review rendered the degraded fallback marker"
+  pass "the GLM reviewer executes on the azure-glm provider with a non-secret Foundry binding"
+}
+
+test_glm_credential_binding_is_key_independent() {
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
+    || fail "GLM credential allowlist or key-independent binding regressed"
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+root = Path(sys.argv[2]) / "glm-credential-binding"
+root.mkdir()
+
+PINNED = "https://aif-fm7c799d-eus01.cognitiveservices.azure.com/openai/v1"
+
+
+def write_home(name, api_key="key-one", base_url=PINNED, api="openai-completions",
+               model_id="FW-GLM-5.2", extra_provider=False, model_extra=None):
+    home = root / name
+    home.mkdir()
+    model = {"id": model_id, "name": "GLM 5.2", "reasoning": True}
+    model.update(model_extra or {})
+    providers = {
+        "azure-glm": {
+            "baseUrl": base_url,
+            "api": api,
+            "apiKey": api_key,
+            "models": [model],
+        }
+    }
+    if extra_provider:
+        providers["another"] = dict(providers["azure-glm"])
+    (home / "models.json").write_text(
+        json.dumps({"providers": providers}), encoding="utf-8"
+    )
+    return home
+
+
+def expect_tool_failure(home, expected):
+    try:
+        module.inspect_pi_glm_credential(home)
+    except module.CrosscheckToolError as exc:
+        assert expected in str(exc), str(exc)
+        return
+    raise AssertionError("unusable GLM credential was accepted: " + expected)
+
+
+# The provider mapping is explicit and refuses unmapped models.
+assert module.pi_provider_for_model("FW-GLM-5.2") == "azure-glm"
+assert module.pi_provider_for_model("gpt-5.6-sol") == "openai-codex"
+try:
+    module.pi_provider_for_model("mystery-model")
+except module.CrosscheckToolError as exc:
+    assert "no Pi provider mapping exists for reviewer model" in str(exc), str(exc)
+else:
+    raise AssertionError("an unmapped Pi model was routed to a guessed provider")
+
+# Two credentials differing ONLY in api key must expose the identical
+# non-secret identifier: the binding is resource+deployment+endpoint and is
+# never derived from the key.
+first_key, second_key = "key-one-material", "key-two-material"
+source_one, identifier_one = module.inspect_pi_glm_credential(
+    write_home("key-one-home", api_key=first_key)
+)
+source_two, identifier_two = module.inspect_pi_glm_credential(
+    write_home("key-two-home", api_key=second_key)
+)
+assert source_one == source_two == "pi-azure-glm-models-file"
+assert identifier_one == identifier_two, (identifier_one, identifier_two)
+import hashlib
+for key in (first_key, second_key):
+    assert key not in identifier_one
+    assert hashlib.sha256(key.encode()).hexdigest() not in identifier_one
+expected = "glm-foundry-binding:" + hashlib.sha256(
+    ("aif-fm7c799d-eus01/FW-GLM-5.2\n" + PINNED).encode()
+).hexdigest()
+assert identifier_one == expected, identifier_one
+
+# The endpoint is an allowlist with an exact refusal.
+wrong = write_home(
+    "wrong-endpoint-home",
+    base_url="https://aif-other.cognitiveservices.azure.com/openai/v1",
+)
+expect_tool_failure(
+    wrong,
+    "GLM reviewer endpoint allowlist refused baseUrl "
+    "'https://aif-other.cognitiveservices.azure.com/openai/v1'; "
+    "the only accepted endpoint is " + PINNED,
+)
+
+# Chat completions only: a Responses-API-shaped configuration is refused.
+expect_tool_failure(
+    write_home("responses-home", api="openai-responses"),
+    "chat completions only",
+)
+
+# pi's provider composer gives MODEL-level baseUrl/api precedence over the
+# provider level (dist/core/provider-composer.js), so a credential keeping
+# the pinned endpoint at provider level while smuggling an override inside
+# the model entry must refuse - this is the exact exploit shape.
+expect_tool_failure(
+    write_home(
+        "model-override-home",
+        model_extra={
+            "baseUrl": "https://evil.example/openai/v1",
+            "api": "openai-responses",
+        },
+    ),
+    "model-level baseUrl/api override",
+)
+# Even an override repeating the pinned values refuses: the provider level
+# must own both fields, and equality today says nothing about tomorrow's
+# rotation of the pin.
+expect_tool_failure(
+    write_home(
+        "model-repeat-home",
+        model_extra={"baseUrl": PINNED, "api": "openai-completions"},
+    ),
+    "model-level baseUrl/api override",
+)
+
+# The credential must declare exactly the azure-glm provider.
+expect_tool_failure(
+    write_home("pooled-home", extra_provider=True),
+    "exactly the azure-glm provider",
+)
+
+# The deployment id must be present.
+expect_tool_failure(
+    write_home("wrong-model-home", model_id="other-model"),
+    "does not declare the FW-GLM-5.2 deployment",
+)
+
+# A missing models.json is refused by name.
+missing = root / "missing-home"
+missing.mkdir()
+expect_tool_failure(missing, "GLM reviewer credential inspection failed at")
+PY
+  pass "the GLM credential pins the endpoint allowlist and binds identity without the api key"
+}
+
+test_codex_fallback_family_is_loud_and_recorded() {
+  local record case_dir base head output
+  # A claude author on the pi-codex fallback: cross-model, so the relaxation
+  # is not needed, but the fallback itself must still be loud and durable.
+  record=$(make_case fallback-loud)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  select_pi_reviewer "$case_dir"
+  output=$(FM_TEST_PI_BIN=pi PATH="$case_dir/fakebin:$PATH" \
+    run_case "$case_dir" "$base" "$head" clear run 2> "$case_dir/err") \
+    || fail "fallback reviewer did not complete"
+  assert_contains "$output" 'crosscheck clear' \
+    "fallback reviewer did not produce a verdict"
+  assert_grep 'CROSSCHECK DEGRADED: codex-family fallback reviewer pi gpt-5.6-sol is standing in for the GLM-5.2 primary lane; crosscheck-same-model relaxation was not required' \
+    "$case_dir/err" \
+    "the codex-family fallback did not announce itself with the exact degraded warning"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+reviewer = value["runs"][-1]["reviewer"]
+assert reviewer["review_family_mode"] == "codex-fallback", reviewer
+assert "model_independence" not in reviewer, reviewer
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "the fallback run did not record its durable codex-fallback marker"
+  assert_grep 'Review family: **CODEX FALLBACK**' \
+    "$case_dir/data/task-x1/crosscheck.md" \
+    "the readable report did not render the degraded fallback marker"
+
+  # A codex-family author under the crosscheck-same-model flip: the warning
+  # must record that the relaxation was required.
+  record=$(make_case fallback-same-model-loud)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  mkdir -p "$case_dir/home/config"
+  printf 'on\n' > "$case_dir/home/config/crosscheck-same-model"
+  sed -i.bak \
+    -e 's/harness=codex/harness=pi/' \
+    -e 's#model=gpt-5.5#model=openai-codex-5/gpt-5.6-sol#' \
+    -e '/^account_home=/d' \
+    "$case_dir/state/task-x1.meta"
+  rm "$case_dir/state/task-x1.meta.bak"
+  output=$(run_case "$case_dir" "$base" "$head" clear run 2> "$case_dir/err") \
+    || fail "same-model fallback reviewer did not complete"
+  assert_contains "$output" 'crosscheck clear' \
+    "same-model fallback reviewer did not produce a verdict"
+  assert_grep 'CROSSCHECK DEGRADED: codex-family fallback reviewer codex gpt-5.6-sol is standing in for the GLM-5.2 primary lane; crosscheck-same-model relaxation was required' \
+    "$case_dir/err" \
+    "the same-model fallback did not name the required relaxation in its warning"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+reviewer = value["runs"][-1]["reviewer"]
+assert reviewer["review_family_mode"] == "codex-fallback", reviewer
+assert reviewer["model_independence"] == "same-model", reviewer
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "the same-model fallback run did not record both degraded markers"
+
+  # A forged ledger cannot claim the wrong family: the marker is bound to the
+  # reviewer model at validation, both directions.
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
+    || fail "validate_ledger did not bind review_family_mode to the reviewer model"
+import copy
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+URL = "https://github.com/ruby-dlee/firstmate/pull/72"
+
+
+def ledger_with(model, family):
+    reviewer = {
+        "harness": "pi",
+        "model": model,
+        "effort": "xhigh",
+        "account_home": "/independent/pi",
+    }
+    if family is not None:
+        reviewer["review_family_mode"] = family
+    return {
+        "schema": module.SCHEMA,
+        "task_id": "task-x1",
+        "pull_request": URL,
+        "findings": [],
+        "runs": [{
+            "at": "2026-08-20T00:00:00Z",
+            "head_sha": "a" * 40,
+            "base_sha": "b" * 40,
+            "base_branch_sha": "b" * 40,
+            "claims_sha256": "c" * 64,
+            "reviewer": reviewer,
+            "state": "tool-failure",
+            "summary": "attempt",
+            "citations": [],
+            "updated_findings": [],
+            "new_findings": [],
+            "active_blockers": [],
+            "suspicions": [],
+        }],
+    }
+
+
+# Honest pairings load; the field also remains optional for older ledgers.
+for model, family in (
+    ("FW-GLM-5.2", "glm-primary"),
+    ("gpt-5.6-sol", "codex-fallback"),
+    ("azure-glm/FW-GLM-5.2", "glm-primary"),
+    ("gpt-5.6-sol", None),
+):
+    module.validate_ledger(ledger_with(model, family), "task-x1", URL)
+
+# Forged pairings refuse, in both directions.
+for model, family in (
+    ("gpt-5.6-sol", "glm-primary"),
+    ("FW-GLM-5.2", "codex-fallback"),
+):
+    try:
+        module.validate_ledger(ledger_with(model, family), "task-x1", URL)
+    except module.CrosscheckError as exc:
+        assert "review_family_mode does not match the reviewer model" in str(exc), str(exc)
+    else:
+        raise AssertionError(f"forged family {family} for {model} validated")
+PY
+  pass "the codex-family fallback is loud, names the relaxation state, and records a model-bound durable marker"
 }
 
 test_same_model_review_is_adversarial_and_durable() {
@@ -1928,8 +2304,11 @@ assert run["state"] == "tool-failure"
 assert run["head_sha"] == sys.argv[2]
 # A failure before launch must record the reviewer identity and nothing else;
 # the author account id carried for the launch check is not reviewer identity.
-assert set(run["reviewer"]) == {"harness", "model", "effort", "account_home"}, \
-    run["reviewer"]
+# The review-family provenance is reviewer identity and stays durable even on
+# a pre-launch failure.
+assert set(run["reviewer"]) == {
+    "harness", "model", "effort", "account_home", "review_family_mode",
+}, run["reviewer"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" "$head" \
     || fail "the exact-head fetch failure was not durably classified as a tool failure"
   pass "an absent remote PR head ref fails closed before review"
@@ -3852,7 +4231,10 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_pi_reviewer_failures_are_tool_failures|\
     test_clear_review_uses_policy_contract|\
     test_missing_author_identity_reaches_normal_verdict|\
-    test_claude_reviewer_requires_the_azure_lane|\
+    test_claude_reviewer_profile_is_retired|\
+    test_glm_reviewer_executes_bound_policy_profile|\
+    test_glm_credential_binding_is_key_independent|\
+    test_codex_fallback_family_is_loud_and_recorded|\
     test_same_model_review_is_adversarial_and_durable|\
     test_empty_runtime_overrides_use_home_defaults|\
     test_empty_environment_fallback_is_generic|\
@@ -3918,7 +4300,7 @@ if [ "${FM_TEST_FOCUSED:-}" = review-safety-findings ]; then
     || fail "Pi launch identity snapshot regressions failed"
   test_same_model_relaxation_does_not_require_author_identity
   test_missing_author_identity_reaches_normal_verdict
-  test_claude_reviewer_requires_the_azure_lane
+  test_claude_reviewer_profile_is_retired
   test_same_model_review_is_adversarial_and_durable
   test_typescript_jest_mutation_proof_can_clear
   test_preexisting_jest_runner_cannot_certify
@@ -3958,7 +4340,10 @@ test_pi_reviewer_executes_bound_policy_profile
 test_pi_reviewer_failures_are_tool_failures
 test_clear_review_uses_policy_contract
 test_missing_author_identity_reaches_normal_verdict
-test_claude_reviewer_requires_the_azure_lane
+test_claude_reviewer_profile_is_retired
+test_glm_reviewer_executes_bound_policy_profile
+test_glm_credential_binding_is_key_independent
+test_codex_fallback_family_is_loud_and_recorded
 test_same_model_review_is_adversarial_and_durable
 test_empty_runtime_overrides_use_home_defaults
 test_empty_environment_fallback_is_generic

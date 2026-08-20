@@ -83,8 +83,22 @@ for marker in (
     assert marker in bridge_source
 guest_source = guest.read_text(encoding="utf-8")
 assert "--disable shell_tool" in guest_source
-assert '--tools ""' in guest_source
 assert "--no-tools" in guest_source
+# R6: the model decides the Pi provider slot inside the guest too, the GLM
+# credential is the models.json shape bound to the exact Foundry endpoint,
+# and the interim claude launch/boot-copy lane is gone entirely.
+assert "azure-glm" in guest_source
+assert "FW-GLM-5.2" in guest_source
+assert "models.json" in guest_source
+assert (
+    "https://aif-fm7c799d-eus01.cognitiveservices.azure.com/openai/v1"
+    in guest_source
+)
+assert "no Pi provider mapping for model" in guest_source
+# The guest refuses model-level baseUrl/api overrides, which pi would give
+# precedence over the pinned provider-level endpoint.
+assert "model-level endpoint override" in guest_source
+assert "claude" not in guest_source.lower()
 assert "AZURE_CLIENT_SECRET" in guest_source
 assert "DOCKER_HOST" in guest_source
 assert "credential manifest identity mismatch" in guest_source
@@ -96,8 +110,14 @@ for forbidden in (
     "az login",
     "fm-crosscheck-tool-client",
     "--dangerously-bypass-approvals-and-sandbox",
+    "runuser",
+    "CLAUDE_CONFIG_DIR",
+    ".credentials.json",
 ):
     assert forbidden not in guest_source
+# R6 artifact 2: the interim claude provider host is retired from the
+# adapter's derivation table.
+assert "api.anthropic.com" not in source
 text = doc.read_text(encoding="utf-8")
 for phrase in (
     "fresh private-controller `crosscheck-tool` runner",
@@ -157,6 +177,264 @@ with tempfile.TemporaryDirectory() as temporary:
         raise AssertionError("unsafe config mode did not fail")
 PY
   pass "Azure selection is explicit, local-default, and unsafe config fails closed"
+}
+
+glm_provider_host_unit() {
+  python3 - "$ADAPTER" "$CORE" <<'PY' || fail "model-aware provider host derivation failed"
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("azure_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+core_spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[2])
+core = importlib.util.module_from_spec(core_spec)
+core_spec.loader.exec_module(core)
+
+# The adapter and the core pin one identical R6 endpoint binding.
+assert module.GLM_REVIEWER_MODEL == core.GLM_REVIEWER_MODEL == "FW-GLM-5.2"
+assert module.GLM_PROVIDER_HOST == core.GLM_PROVIDER_HOST
+assert module.GLM_ALLOWED_BASE_URL == core.GLM_ALLOWED_BASE_URL
+assert module.GLM_REVIEWER_ACCOUNT_IDENTITY == core.GLM_REVIEWER_ACCOUNT_IDENTITY
+assert module.GLM_PROVIDER_HOST == "aif-fm7c799d-eus01.cognitiveservices.azure.com"
+
+# The model decides the host: a GLM review derives the exact Foundry host,
+# refuses a conflicting configured host, and the codex-family fallback keeps
+# its existing derivation. The retired claude harness derives nothing.
+assert module.effective_provider_host({}, "pi", "FW-GLM-5.2") == module.GLM_PROVIDER_HOST
+assert module.effective_provider_host(
+    {"provider_host": module.GLM_PROVIDER_HOST}, "pi", "FW-GLM-5.2"
+) == module.GLM_PROVIDER_HOST
+try:
+    module.effective_provider_host(
+        {"provider_host": "api.example.com"}, "pi", "FW-GLM-5.2"
+    )
+except module.AzureCrosscheckError as exc:
+    assert "bind exactly one provider host" in str(exc), str(exc)
+else:
+    raise AssertionError("a GLM review accepted a foreign provider host")
+assert module.effective_provider_host({}, "pi", "gpt-5.6-sol") == "chatgpt.com"
+assert module.effective_provider_host({}, "codex", "gpt-5.6-sol") == "chatgpt.com"
+assert module.effective_provider_host(
+    {"provider_host": "api.example.com"}, "codex", "gpt-5.6-sol"
+) == "api.example.com"
+assert "claude" not in module.HARNESS_PROVIDER_HOSTS
+try:
+    module.effective_provider_host({}, "claude", "claude-opus-5")
+except module.AzureCrosscheckError as exc:
+    assert "cannot derive a provider host" in str(exc), str(exc)
+else:
+    raise AssertionError("the retired claude harness still derives a provider host")
+
+# The GLM identity record must carry the pinned host through validation.
+import copy
+identity = {
+    "home_binding": "sha256:" + "1" * 64,
+    "task_id": "task-one",
+    "pull_request": "https://github.com/example/repo/pull/1",
+    "head_sha": "a" * 40,
+    "base_sha": "b" * 40,
+    "base_branch_sha": "d" * 40,
+    "claims_sha256": "c" * 64,
+    "deployment_generation": "deploy-1",
+    "model_image_id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg/providers/Microsoft.Compute/images/model",
+    "reviewer_sku": "Standard_D4as_v6",
+    "provider_host": "api.example.com",
+    "provider_port": "443",
+    "reviewer_harness": "pi",
+    "reviewer_model": "FW-GLM-5.2",
+    "reviewer_effort": "xhigh",
+    "reviewer_account_digest": "sha256:" + "2" * 64,
+    "ledger_digest": "sha256:" + "f" * 64,
+}
+identity["review_generation"] = module.digest_bytes(
+    module.canonical_bytes(identity)
+).split(":", 1)[1][:24]
+# Enough well-formed identity to reach the pinned-host check, which raises
+# before the generation recomputation.
+identity.update({
+    "request_digest": "sha256:" + "0" * 64,
+    "credential_archive_digest": "sha256:" + "7" * 64,
+    "credential_digest": "sha256:" + "8" * 64,
+    "evidence_attempts_digest": "sha256:" + "9" * 64,
+})
+reviewer = {
+    "execution_mode": "azure-compartment-v1",
+    "harness": "pi",
+    "model": "FW-GLM-5.2",
+    "effort": "xhigh",
+    "reviewer_account_identity_sha256": "2" * 64,
+    "azure_identity": identity,
+}
+run = {"head_sha": "a" * 40, "base_sha": "b" * 40, "claims_sha256": "c" * 64}
+try:
+    module.validate_azure_reviewer_record(reviewer, run, "run")
+except RuntimeError as exc:
+    assert "GLM provider host is not the pinned R6 Foundry endpoint" in str(exc), str(exc)
+else:
+    raise AssertionError("a GLM ledger record with a foreign provider host validated")
+PY
+  pass "the reviewer model derives the exact Foundry host and the claude host lane is retired"
+}
+
+glm_credential_lane_unit() {
+  python3 - "$ADAPTER" "$CORE" <<'PY' || fail "GLM Azure credential lane contract failed"
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import tarfile
+import tempfile
+
+spec = importlib.util.spec_from_file_location("azure_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+core_spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[2])
+core = importlib.util.module_from_spec(core_spec)
+core_spec.loader.exec_module(core)
+
+PINNED = "https://aif-fm7c799d-eus01.cognitiveservices.azure.com/openai/v1"
+
+
+def models_json(base_url=PINNED, api_key="glm-key-material", model_extra=None):
+    model = {"id": "FW-GLM-5.2", "name": "GLM 5.2"}
+    model.update(model_extra or {})
+    return json.dumps({
+        "providers": {
+            "azure-glm": {
+                "baseUrl": base_url,
+                "api": "openai-completions",
+                "apiKey": api_key,
+                "models": [model],
+            }
+        }
+    })
+
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    home = root / "glm-home"
+    home.mkdir()
+    (home / "models.json").write_text(models_json(), encoding="utf-8")
+    config = {
+        "harness": "pi",
+        "model": "FW-GLM-5.2",
+        "effort": "xhigh",
+        "account_home": str(home),
+    }
+    credential, source, identifier, account_identity = (
+        module.inspect_reviewer_credential(core, config)
+    )
+    assert credential == home.resolve() / "models.json", credential
+    assert source == "pi-azure-glm-models-file", source
+    assert identifier.startswith("glm-foundry-binding:"), identifier
+    assert account_identity == module.GLM_REVIEWER_ACCOUNT_IDENTITY
+
+    # The packaged compartment credential is the models.json under the same
+    # allowlist pin, and its archived identity is the non-secret binding.
+    identity = {"review_generation": "0123456789abcdef01234567"}
+    archive_path = root / "credential.tar.gz"
+    archive_digest, credential_digest = module.create_credential_archive(
+        archive_path, credential, identity, config, account_identity
+    )
+    assert archive_digest.startswith("sha256:")
+    with tarfile.open(archive_path, "r:gz") as archive:
+        names = {member.name for member in archive.getmembers()}
+        assert names == {"manifest.json", "models.json"}, names
+        manifest = json.loads(archive.extractfile("manifest.json").read())
+    assert manifest["credential_name"] == "models.json", manifest
+    assert manifest["model"] == "FW-GLM-5.2", manifest
+
+    # A credential outside the endpoint allowlist never enters the archive.
+    foreign = root / "foreign-home"
+    foreign.mkdir()
+    (foreign / "models.json").write_text(
+        models_json(base_url="https://aif-other.cognitiveservices.azure.com/openai/v1"),
+        encoding="utf-8",
+    )
+    try:
+        module.create_credential_archive(
+            root / "foreign.tar.gz",
+            foreign / "models.json",
+            identity,
+            config,
+            account_identity,
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "pinned R6 Foundry endpoint" in str(exc), str(exc)
+    else:
+        raise AssertionError("a foreign-endpoint GLM credential was archived")
+
+    # pi gives MODEL-level baseUrl/api precedence over the provider level, so
+    # a credential keeping the pinned endpoint at provider level while
+    # smuggling an override inside the model entry must refuse at the archive
+    # gate too - the exact exploit shape from the adversarial review.
+    smuggled = root / "smuggled-home"
+    smuggled.mkdir()
+    (smuggled / "models.json").write_text(
+        models_json(model_extra={
+            "baseUrl": "https://evil.example/openai/v1",
+            "api": "openai-responses",
+        }),
+        encoding="utf-8",
+    )
+    try:
+        module.create_credential_archive(
+            root / "smuggled.tar.gz",
+            smuggled / "models.json",
+            identity,
+            config,
+            account_identity,
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "model-level" in str(exc), str(exc)
+    else:
+        raise AssertionError("a model-level endpoint override was archived")
+    try:
+        module.inspect_reviewer_credential(
+            core, {**config, "account_home": str(smuggled)}
+        )
+    except core.CrosscheckToolError as exc:
+        assert "model-level baseUrl/api override" in str(exc), str(exc)
+    else:
+        raise AssertionError("a model-level endpoint override passed inspection")
+
+    # The retired claude harness has no Azure credential lane at all.
+    claude_home = root / "claude-home"
+    claude_home.mkdir()
+    (claude_home / ".credentials.json").write_text("{}", encoding="utf-8")
+    try:
+        module.inspect_reviewer_credential(
+            core,
+            {
+                "harness": "claude",
+                "model": "claude-opus-5",
+                "effort": "xhigh",
+                "account_home": str(claude_home),
+            },
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "no credential lane for reviewer harness 'claude'" in str(exc), str(exc)
+    else:
+        raise AssertionError("the retired claude credential lane still packages a profile")
+
+    # The GLM preflight accepts the api-key credential without an expiry
+    # reader and still refuses a missing credential loudly.
+    record = module.preflight_reviewer_credential(core, config)
+    assert record["state"] == "usable", record
+    assert record["credential"] == "models.json", record
+    missing = root / "missing-home"
+    missing.mkdir()
+    try:
+        module.preflight_reviewer_credential(
+            core, {**config, "account_home": str(missing)}
+        )
+    except core.CrosscheckToolError as exc:
+        assert "GLM reviewer credential inspection failed" in str(exc), str(exc)
+    else:
+        raise AssertionError("a missing GLM credential passed preflight")
+PY
+  pass "the Azure GLM credential lane packages models.json under the endpoint allowlist and the claude lane is gone"
 }
 
 identity_outcome_unit() {
@@ -978,6 +1256,8 @@ PY
 static_contract
 parameter_contract_unit
 adapter_mode_unit
+glm_provider_host_unit
+glm_credential_lane_unit
 identity_outcome_unit
 account_and_cleanup_identity_unit
 bridge_security_unit

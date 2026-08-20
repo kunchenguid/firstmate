@@ -5,8 +5,8 @@
 > (bounded by `FM_AZURE_CROSSCHECK_QUEUE_WAIT_SECONDS`); lane index selects the
 > reviewer SKU deterministically across four families unless `reviewer_sku` is
 > pinned in config. `python3 bin/fm-crosscheck-azure.py lanes` lists
-> queued/running per lane. Reviewers copy the single claude auth profile in at
-> boot and never sync it back; only the validation cell lane writes fm-auth-home.
+> queued/running per lane. Reviewers copy their credential in at boot and
+> never sync it back; only the validation cell lane writes fm-auth-home.
 
 This document owns the architecture, identity, network, cleanup, and operator contract for policy-grade Azure Crosscheck.
 [`bin/fm-crosscheck-azure.py`](../bin/fm-crosscheck-azure.py) owns the local control adapter, [`docs/azure-crosscheck/compartment.json`](azure-crosscheck/compartment.json) owns the credentialed model VM, and the existing Crosscheck core remains the sole owner of the v2 finding ledger, readable report, and expected-head merge gate.
@@ -24,7 +24,7 @@ One review uses at least three fresh compartments with different immutable resou
 - A second newly created `crosscheck-tool` runner independently replays that accepted helper with no repository network or provider credential.
 
 The model compartment never receives a repository checkout, dynamic repository tool, shell against the repository, Azure CLI, MCP server, extension, skill, container client, or local control authority.
-Its Codex, Claude, and Pi launches explicitly disable their command tools.
+Its Codex and Pi launches explicitly disable their command tools; the interim claude launch lane is retired (R6).
 The static packet is assembled from a fresh exact remote PR checkout, is byte-bounded, and is delimited as untrusted data.
 The tool and verifier repository children never receive the reviewer credential, their trusted controller's storage identity/token, a GitHub credential, author worktree, control home, sibling task data, browser profile, shared temporary state, container socket, SSH agent, or machine-wide validation socket.
 A single VM containing both provider credentials and repository commands is not accepted by this adapter.
@@ -75,8 +75,18 @@ No package or executable is downloaded after the VM begins review.
 
 The reviewer credential is staged as a short-lived exact-object capability.
 It exists only in the model compartment and is removed before result publication.
-Claude Azure review requires a provider-supported Linux file credential.
 The macOS Keychain is never copied.
+
+### GLM-5.2 primary reviewer (R6)
+
+The primary review family is GLM-5.2 on the fleet's own Azure AI Foundry resource through the Fireworks partner lane, driven by Pi as the `FW-GLM-5.2` deployment on the `azure-glm` custom provider.
+For that profile the packaged compartment credential is the api-key `models.json` (not a codex `auth.json`), pinned to exactly `https://aif-fm7c799d-eus01.cognitiveservices.azure.com/openai/v1` - chat completions only; any other baseUrl, including a Responses API surface, refuses before staging.
+pi gives model-level `baseUrl`/`api` fields precedence over the provider level, so the inspection, the archive gate, and the model guest all refuse a model entry carrying either field; the pinned provider level owns both.
+`effective_provider_host` is model-aware: a GLM review derives `aif-fm7c799d-eus01.cognitiveservices.azure.com` as its single egress host and refuses a conflicting configured `provider_host`, while the codex-family fallback keeps its `chatgpt.com` derivation.
+The executing identity is the non-secret Foundry resource/deployment binding (an api key names no upstream account); the api key and anything derived from it never enter identity, ledger, or output.
+The interim claude reviewer lane is retired end to end: no `api.anthropic.com` host derivation, no `.credentials.json` packaging or boot copy, and no claude launch branch in the model guest.
+Honest limit: the currently built fm-ccm model image predates the Pi closure and carries no `pi` binary (verified 2026-08-16, ledger M29), so this Azure-compartment GLM lane is code-complete but not executable until an image rebake and gallery promotion repoint `model_image_id`; the executable GLM lane today is the local Pi reviewer.
+The 25K TPM quota cap (DataZoneStandard capacity 25) bounds review throughput until quota is raised.
 
 The model process has no Azure CLI credential, managed identity, SSH agent, Docker socket, repository checkout, control-home mount, MCP configuration, or shell/read tool.
 It reaches only the provider through the model subnet's fixed egress policy; all source metadata and exact diff content are already in its bounded prompt packet.

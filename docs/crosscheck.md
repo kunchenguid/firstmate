@@ -20,23 +20,28 @@ The file is local and gitignored at `config/crosscheck-reviewer.json`.
 {
   "reviewers": [
     {
+      "harness": "pi",
+      "model": "FW-GLM-5.2",
+      "effort": "xhigh",
+      "account_home": "/absolute/path/to/the/glm/pi/agent/home"
+    },
+    {
       "harness": "codex",
       "model": "gpt-5.6-sol",
       "effort": "xhigh",
       "account_home": "/absolute/path/to/an/independent/codex/home"
-    },
-    {
-      "harness": "pi",
-      "model": "gpt-5.6-sol",
-      "effort": "xhigh",
-      "account_home": "/absolute/path/to/an/independent/pi/home"
     }
   ]
 }
 ```
 
 Crosscheck resolves configured reviewer homes in order and keeps entries that satisfy its reviewer-profile and model policies.
-Claude is never an eligible Crosscheck reviewer; supported reviewer profiles are the configured Codex and Pi policy-grade profiles.
+GLM-5.2 is the sole primary review family (R6, docs/azure-requirements.md): the Pi `FW-GLM-5.2` profile runs on the fleet's own Azure AI Foundry deployment through the `azure-glm` custom provider, whose credential is an api-key `models.json` in a dedicated Pi agent dir - never a codex `auth.json`.
+The GLM endpoint is an allowlist of exactly `https://aif-fm7c799d-eus01.cognitiveservices.azure.com/openai/v1` (chat completions only; any other baseUrl, including a Responses API surface, is refused by name), and the recorded reviewer identity binds the Foundry resource + deployment - never the api key or anything derived from it.
+Because pi's provider composer gives model-level `baseUrl`/`api` fields precedence over the provider level, the allowlist also refuses any model entry carrying either field - the pinned provider level must own both, even when an override repeats the pinned values.
+The pi-codex/codex `gpt-5.6-sol` profiles remain only as the dormant fallback family: a run they serve prints a loud `CROSSCHECK DEGRADED` warning naming whether the `crosscheck-same-model` relaxation was required, and its ledger reviewer record carries `review_family_mode: codex-fallback` (GLM runs record `glm-primary`) with the readable report labeling the run `CODEX FALLBACK`.
+Firstmate authors also run on codex-family models, so the fallback usually needs that recorded same-model degraded state.
+Claude is never an eligible Crosscheck reviewer; the interim claude lane is retired, and a claude profile is refused with the exact-profile message before any reviewer machinery runs.
 Model separation is mandatory by default.
 The optional local `config/crosscheck-same-model` file relaxes only that model screen when it contains exactly `on`; an absent file or exactly `off` preserves the default, and any other value or unsafe file shape is refused.
 This setting is local and gitignored, is read fresh for each reviewer selection, and is not inferred from the reviewer roster or environment.
@@ -51,7 +56,7 @@ The former `config/crosscheck-legacy-author-admissions.json` path existed only t
 Crosscheck then binds the provider's executing credential selector to that exact reviewer path and requires the verdict plus a Bash-created receipt to report the selector and actual private `HOME`.
 That proves which dedicated reviewer home executed the review without comparing it to an author account.
 Every reviewer disables reviewed-repository instruction discovery at launch: Codex sets `project_doc_max_bytes=0`, and Pi uses `--no-context-files`.
-Pi is launched through the resolved installed executable with `openai-codex/gpt-5.6-sol` at `xhigh`, JSON event output, an ephemeral session, and only the read and Bash-capable review tools.
+Pi is launched through the resolved installed executable at `xhigh` with JSON event output, an ephemeral session, and only the read and Bash-capable review tools; the model decides the provider slot through an explicit mapping (`FW-GLM-5.2` on `azure-glm`, `gpt-5.6-sol` on `openai-codex`) that refuses an unmapped model rather than guessing.
 For the installed npm entrypoint, Crosscheck also resolves Pi's sibling Node runtime before launch instead of allowing the reviewer environment's `PATH` to substitute another interpreter.
 That pin recognizes every `env`-based Node shebang, including `#!/usr/bin/env -S node --flag`, and preserves the flags; an `env` shebang naming no interpreter fails closed rather than silently falling back to `PATH`.
 Its event stream must contain at least one completed turn, end with a successful `stop` assistant turn, and complete the agent before Crosscheck accepts that terminal turn's JSON verdict.
@@ -70,7 +75,7 @@ Every candidate passed the configured reviewer-profile and model policy.
 Reviewer credential inspection still proves that the selected reviewer home can execute its configured client, but it makes no claim about the author.
 Model identity compares the model itself, not the recorded string: Pi records `<provider-slot>/<model>`, so `openai-codex-2/gpt-5.6-sol` is the same model as a Codex reviewer's plain `gpt-5.6-sol`.
 That canonical identity is screened out by default and is what marks a selected review as same-model when the explicit relaxation is on.
-The accepted profiles are Codex `gpt-5.6-sol` xhigh and Pi `gpt-5.6-sol` xhigh.
+The accepted profiles are Pi `FW-GLM-5.2` xhigh (the primary family) plus Codex `gpt-5.6-sol` xhigh and Pi `gpt-5.6-sol` xhigh (the loud degraded fallback family).
 Absent reviewer configuration, unavailable reviewer credentials, or model-policy mismatch produces `CROSSCHECK TOOL-FAILURE` and a nonzero exit before reviewer launch.
 
 Crosscheck requires Python 3.11 or newer and refuses to run on anything older.
@@ -239,7 +244,7 @@ PR claims are delimited as untrusted data, and the reviewer is directed to ignor
 Later reviewers receive only a bounded projection of finding IDs, lifecycle state, severity, exact-head clearance, and proof digests.
 Finding prose, reproduction output, test output, and lifecycle notes remain durable in the ledger but are never reinjected into a later reviewer prompt.
 The Codex path pins `gpt-5.6-sol`, xhigh reasoning, noninteractive approval, an independent `CODEX_HOME`, the same account-bound `HOME`, and the exact review checkout.
-The Pi path pins `gpt-5.6-sol`, xhigh reasoning, an independent `PI_CODING_AGENT_DIR`, a disposable private `HOME`, extension and context isolation, and JSON event output.
+The Pi path pins the roster model on its mapped provider (`FW-GLM-5.2` on `azure-glm`, `gpt-5.6-sol` on `openai-codex`), xhigh reasoning, an independent `PI_CODING_AGENT_DIR`, a disposable private `HOME`, extension and context isolation, and JSON event output.
 An unavailable reviewer binary, sandbox, reviewer credential binding, verdict-level execution proof, or exact remote PR head records a `tool-failure` attempt when the live head is already known, and otherwise emits the same tool-failure class without fabricating a ledger run.
 A ledger that cannot be read is the one stop that cannot record itself: appending a run to a file that failed to parse would risk destroying the durable findings it still holds, so the ledger is left exactly as it is and only the readable `crosscheck.md` report is rewritten, naming the parse failure so the cause is on disk rather than only in the exit status of a run nobody kept.
 A reviewer that never reached its provider is also a `tool-failure` rather than an `unreviewed` attempt, and is the case that fails over.
@@ -303,7 +308,7 @@ Most of `tests/fm-crosscheck.test.sh` is hermetic coverage using observed-shape 
 Its `test_installed_sandbox_denies_shared_private_tmp` case is the exception: it invokes the real installed `/usr/bin/sandbox-exec` and verifies the generated proof profile denies shared host temporary state.
 Its `test_pytest_runner_resolves_through_a_uv_aware_ladder` case is the named regression for runner-name resolution: it pins monorepo uv-project discovery, the skipped uv rung outside a project, the unchanged absent-runner refusal, and pytest's retained node-id support.
 Its `test_missing_author_identity_reaches_normal_verdict` case is the named regression for a Pi lane without a captured account identity: the review reaches an ordinary clear verdict without an identity warning or downgrade.
-Its `test_claude_reviewer_is_never_selected` case proves the separate standing rule that Claude is not an accepted reviewer profile and never launches.
+Its `test_claude_reviewer_profile_is_retired` case proves the standing rule that Claude is not an accepted reviewer profile and never launches, and its `test_glm_reviewer_executes_bound_policy_profile`, `test_glm_credential_binding_is_key_independent`, and `test_codex_fallback_family_is_loud_and_recorded` cases pin the GLM primary lane's provider mapping, key-independent endpoint binding, and the loud durable fallback marker.
 Its `test_same_model_relaxation_does_not_require_author_identity` case proves the explicit model-policy relaxation does not revive an author-account precondition.
 `tests/fm-spawn-dispatch-profile.test.sh` separately proves a failed Pi identity capture remains nonfatal and the lane still launches.
 Its `test_typescript_jest_mutation_proof_can_clear` and `test_inadequate_typescript_jest_coverage_stays_blocking` cases prove that package-governed Jest coverage can certify a TypeScript fix while a named Jest test that stays green under mutation keeps the finding blocking.

@@ -99,7 +99,12 @@ reviewer = request["reviewer"]
 identity = request["identity"]
 if "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest() != identity["credential_archive_digest"]:
     raise SystemExit("model guest: credential archive digest mismatch")
-expected_name = "auth.json" if reviewer["harness"] in {"codex", "pi"} else ".credentials.json"
+if reviewer["harness"] == "pi" and reviewer["model"] == "FW-GLM-5.2":
+    expected_name = "models.json"
+elif reviewer["harness"] in {"codex", "pi"}:
+    expected_name = "auth.json"
+else:
+    raise SystemExit("model guest: unsupported reviewer harness")
 with tarfile.open(source, "r:gz") as archive:
     members = archive.getmembers()
     names = {member.name for member in members}
@@ -122,16 +127,35 @@ expected = {
 }
 if manifest != expected or manifest["credential_digest"] != identity["credential_digest"]:
     raise SystemExit("model guest: credential manifest identity mismatch")
-if reviewer["harness"] in {"codex", "pi"}:
-    credential = json.loads(credential_bytes)
-    if reviewer["harness"] == "codex":
-        tokens = credential.get("tokens") if isinstance(credential, dict) else None
-        account = tokens.get("account_id") if isinstance(tokens, dict) else None
-    else:
-        entry = credential.get("openai-codex") if isinstance(credential, dict) else None
-        account = entry.get("accountId") if isinstance(entry, dict) else None
-    if not isinstance(account, str) or "sha256:" + hashlib.sha256(account.encode()).hexdigest() != identity["reviewer_account_digest"]:
-        raise SystemExit("model guest: credential executing account mismatch")
+credential = json.loads(credential_bytes)
+if reviewer["harness"] == "pi" and reviewer["model"] == "FW-GLM-5.2":
+    # R6 GLM lane: the api-key credential must stay inside the pinned
+    # chat-completions endpoint allowlist, and the executing identity is
+    # the non-secret Foundry resource/deployment binding.
+    providers = credential.get("providers") if isinstance(credential, dict) else None
+    entry = (
+        providers.get("azure-glm")
+        if isinstance(providers, dict) and set(providers) == {"azure-glm"}
+        else None
+    )
+    base_url = entry.get("baseUrl") if isinstance(entry, dict) else None
+    if base_url != "https://aif-fm7c799d-eus01.cognitiveservices.azure.com/openai/v1":
+        raise SystemExit("model guest: GLM credential endpoint allowlist mismatch")
+    # pi gives model-level baseUrl/api precedence over the provider level,
+    # so any model entry carrying either field escapes the provider pin.
+    models = entry.get("models") if isinstance(entry, dict) else None
+    for model_entry in (models if isinstance(models, list) else []):
+        if isinstance(model_entry, dict) and ("baseUrl" in model_entry or "api" in model_entry):
+            raise SystemExit("model guest: GLM credential model-level endpoint override")
+    account = "azure-glm:aif-fm7c799d-eus01/FW-GLM-5.2"
+elif reviewer["harness"] == "codex":
+    tokens = credential.get("tokens") if isinstance(credential, dict) else None
+    account = tokens.get("account_id") if isinstance(tokens, dict) else None
+else:
+    entry = credential.get("openai-codex") if isinstance(credential, dict) else None
+    account = entry.get("accountId") if isinstance(entry, dict) else None
+if not isinstance(account, str) or "sha256:" + hashlib.sha256(account.encode()).hexdigest() != identity["reviewer_account_digest"]:
+    raise SystemExit("model guest: credential executing account mismatch")
 path = destination / expected_name
 path.write_bytes(credential_bytes)
 path.chmod(0o600)
@@ -157,46 +181,17 @@ case "$HARNESS" in
       -c "model_reasoning_effort=\"$EFFORT\"" \
       --color never --output-schema "$SCHEMA" --output-last-message "$RESULT" - <"$PROMPT"
     ;;
-  claude)
-    # claude refuses --dangerously-skip-permissions under root, so the
-    # credentialed model process drops to a dedicated unprivileged user;
-    # only the paths that process must touch are handed over.
-    id fmccmodel >/dev/null 2>&1 \
-      || useradd --system --home-dir "$HOME_DIR" --shell /usr/sbin/nologin fmccmodel
-    chown -R fmccmodel:fmccmodel "$ACCOUNT" "$HOME_DIR" "$TMPDIR" "$XDG_CACHE_HOME"
-    # The compartment base stays root-owned, but the unprivileged model
-    # process must traverse it to reach its handed-over leaves (the same
-    # root-only-ancestor traversal failure the validation cells hit live);
-    # execute-only keeps the root-custody files unlistable and unreadable.
-    chmod 0711 "$BASE"
-    set +e
-    runuser -u fmccmodel -- env \
-      HOME="$HOME_DIR" TMPDIR="$TMPDIR" XDG_CACHE_HOME="$XDG_CACHE_HOME" \
-      CLAUDE_CONFIG_DIR="$ACCOUNT" CLAUDE_SECURESTORAGE_CONFIG_DIR="$ACCOUNT" \
-      FM_CROSSCHECK_REVIEW_GENERATION="$REVIEW_GENERATION" PATH="$PATH" \
-      claude -p --safe-mode --model "$MODEL" --effort "$EFFORT" \
-      --dangerously-skip-permissions --tools "" --no-session-persistence \
-      --disable-slash-commands --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
-      --output-format json --json-schema "$(<"$SCHEMA")" \
-      <"$PROMPT" >"$BASE/claude-envelope.json" 2>"$BASE/claude-stderr.log"
-    claude_rc=$?
-    set -e
-    if [ "$claude_rc" -ne 0 ] || ! jq -e '.is_error == false and .subtype == "success" and .terminal_reason == "completed" and (.structured_output|type == "object")' "$BASE/claude-envelope.json" >/dev/null 2>&1; then
-      # A refused review must name its cause in the run-command error stream;
-      # bounded envelope status and stderr slices only, never the credential.
-      {
-        echo "model guest: claude reviewer did not return a completed structured envelope (exit $claude_rc)"
-        tail -c 800 "$BASE/claude-stderr.log" 2>/dev/null
-        jq -c '{is_error, subtype, terminal_reason}' "$BASE/claude-envelope.json" 2>/dev/null
-        jq -r '.result // empty' "$BASE/claude-envelope.json" 2>/dev/null | head -c 600
-      } >&2
-      exit 125
-    fi
-    jq -c '.structured_output' "$BASE/claude-envelope.json" >"$RESULT"
-    ;;
   pi)
     export PI_CODING_AGENT_DIR="$ACCOUNT"
-    pi --mode json --provider openai-codex --model "$MODEL" --thinking "$EFFORT" \
+    # The model decides the provider slot (R6): the GLM deployment runs on
+    # the azure-glm Foundry provider, the gpt fallback family stays on
+    # openai-codex, and an unmapped model refuses rather than guessing.
+    case "$MODEL" in
+      FW-GLM-5.2) PI_PROVIDER=azure-glm ;;
+      gpt-5.6-sol) PI_PROVIDER=openai-codex ;;
+      *) echo "model guest: no Pi provider mapping for model $MODEL" >&2; exit 125 ;;
+    esac
+    pi --mode json --provider "$PI_PROVIDER" --model "$MODEL" --thinking "$EFFORT" \
       --no-tools --no-session --no-extensions --no-skills --no-prompt-templates \
       --no-themes --no-context-files --no-approve "$(<"$PROMPT")" >"$BASE/pi-events.jsonl"
     python3 - "$BASE/pi-events.jsonl" "$RESULT" <<'PY'
