@@ -25,6 +25,13 @@ CHECK="$ROOT/bin/fm-tool-update-check.sh"
 CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
 TMP_ROOT=$(fm_test_tmproot fm-tool-update-check)
 
+# Exported here, at the top level, because git_fixture runs inside a command
+# substitution and an export from that subshell never reaches the cases, which
+# make fixture commits of their own. A host with no git identity configured
+# would otherwise fail those commits and leave the fixture in a shape the case
+# did not ask for.
+fm_git_identity fmtest fmtest@example.invalid
+
 # The incident's tool, under a name that cannot exist on this host.
 TOOL=herdr-fixture
 
@@ -382,7 +389,6 @@ git_fixture() {
   work="$TMP_ROOT/$name"
   git init -q --bare --initial-branch=main "$bare"
   git clone -q "$bare" "$work" 2>/dev/null
-  fm_git_identity
   printf 'one\n' > "$work/f1"
   git -C "$work" add f1
   git -C "$work" commit -qm one
