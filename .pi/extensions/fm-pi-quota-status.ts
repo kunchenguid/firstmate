@@ -69,15 +69,15 @@ function unrefTimer(timer: unknown): void {
   if (typeof unref === "function") unref.call(timer);
 }
 
-function killProcess(child: ChildProcess): void {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  try {
-    if (process.platform !== "win32" && child.pid) {
-      process.kill(-child.pid, "SIGKILL");
+function killProcess(child: ChildProcess, processGroupId: number | null): void {
+  if (processGroupId !== null) {
+    try {
+      process.kill(-processGroupId, "SIGKILL");
       return;
+    } catch {
     }
-  } catch {
   }
+  if (child.exitCode !== null || child.signalCode !== null) return;
   try {
     child.kill("SIGKILL");
   } catch {
@@ -97,6 +97,7 @@ export function runQuotaAxiJson(options: {
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  const processGroupId = process.platform !== "win32" && child.pid ? child.pid : null;
 
   let settled = false;
   let stdoutBytes = 0;
@@ -116,7 +117,7 @@ export function runQuotaAxiJson(options: {
     if (settled) return;
     settled = true;
     clearTimeout(timeout);
-    if (kill) killProcess(child);
+    if (kill) killProcess(child, processGroupId);
     resolveResult(result);
   }
 

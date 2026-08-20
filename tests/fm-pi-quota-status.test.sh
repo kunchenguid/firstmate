@@ -20,6 +20,8 @@ CALLS="$TMP_ROOT/quota.calls"
 STDIN_LOG="$TMP_ROOT/quota.stdin"
 MODE_FILE="$TMP_ROOT/quota.mode"
 PID_LOG="$TMP_ROOT/quota.pids"
+DESCENDANT_PID_LOG="$TMP_ROOT/quota.descendant-pids"
+SURVIVOR_LOG="$TMP_ROOT/quota.survivors"
 mkdir -p "$FIXTURE/.pi/extensions/lib" "$FIXTURE/node_modules/@earendil-works" "$FAKEBIN"
 cp "$ROOT/.pi/extensions/fm-pi-quota-status.ts" "$FIXTURE/.pi/extensions/"
 cp "$ROOT/.pi/extensions/lib/fm-pi-quota-status.ts" "$FIXTURE/.pi/extensions/lib/"
@@ -58,6 +60,16 @@ case "$mode" in
     printf '%s\n' "$$" >> "${FM_QUOTA_TEST_PIDS:?}"
     node -e 'setTimeout(() => process.exit(0), 200)'
     exit 1
+    ;;
+  leader_exit)
+    node -e '
+      const fs = require("node:fs");
+      fs.appendFileSync(process.env.FM_QUOTA_TEST_DESCENDANT_PIDS, `${process.pid}\n`);
+      setTimeout(() => {
+        fs.appendFileSync(process.env.FM_QUOTA_TEST_SURVIVORS, `${process.pid}\n`);
+      }, 1000);
+    ' &
+    exit 0
     ;;
   stale)
     FM_QUOTA_TEST_STALE=1 exec node "${FM_QUOTA_TEST_FIXTURE:?}"
@@ -126,12 +138,16 @@ export FM_QUOTA_TEST_CALLS="$CALLS"
 export FM_QUOTA_TEST_STDIN="$STDIN_LOG"
 export FM_QUOTA_TEST_MODE="$MODE_FILE"
 export FM_QUOTA_TEST_PIDS="$PID_LOG"
+export FM_QUOTA_TEST_DESCENDANT_PIDS="$DESCENDANT_PID_LOG"
+export FM_QUOTA_TEST_SURVIVORS="$SURVIVOR_LOG"
 export FM_QUOTA_TEST_FIXTURE="$TMP_ROOT/quota-fixture.mjs"
 export PATH="$FAKEBIN:$PATH"
 printf '%s\n' success > "$MODE_FILE"
 : > "$CALLS"
 : > "$STDIN_LOG"
 : > "$PID_LOG"
+: > "$DESCENDANT_PID_LOG"
+: > "$SURVIVOR_LOG"
 
 out=$(cd "$FIXTURE" && \
   EXT="$FIXTURE/.pi/extensions/fm-pi-quota-status.ts" \
@@ -566,6 +582,24 @@ const slow = makePi(createFirstmateQuotaStatusExtension({
 await slow.emit("session_start", { reason: "startup" });
 await waitFor(() => slow.widgetText(200).includes("unavailable"), "slow quota process did not time out");
 await slow.emit("session_shutdown", { reason: "quit" });
+
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "leader_exit\n");
+const leaderExit = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 500,
+  width: () => 200,
+}));
+await leaderExit.emit("session_start", { reason: "startup" });
+await waitFor(async () => {
+  return Boolean((await readFile(process.env.FM_QUOTA_TEST_DESCENDANT_PIDS, "utf8")).trim());
+}, "leader-exit fixture did not launch its pipe-holding descendant");
+await waitFor(() => leaderExit.widgetText(200).includes("unavailable"), "leader-exit descendant did not time out");
+await sleep(1100);
+assert(
+  !(await readFile(process.env.FM_QUOTA_TEST_SURVIVORS, "utf8")).trim(),
+  "quota process-group descendant survived after its leader exited",
+);
+await leaderExit.emit("session_shutdown", { reason: "quit" });
 
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "slow\n");
 const pidsBeforeReplacement = (await readFile(process.env.FM_QUOTA_TEST_PIDS, "utf8")).trim().split(/\s+/).filter(Boolean).length;
