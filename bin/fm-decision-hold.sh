@@ -70,8 +70,10 @@
 # and nowhere else. `answers` is its channel-agnostic entry point: it reads
 # `<decision-key>\t<answer>\t<label>` lines on stdin, maps each key to this
 # origin's `<origin-id>-decision-<key>` hold, and closes it through the very same
-# `answer` path above, so every guard applies identically no matter which channel
-# the answer arrived on. With `--any-origin` in place of an origin id, each key
+# `answer` path above, except that the exact reserved answer `__drop__` closes
+# through `decline` with a "dropped by captain" decision record rather than as a
+# substantive choice. Every other guard applies identically no matter which
+# channel the answer arrived on. With `--any-origin` in place of an origin id, each key
 # is instead a FULL hold identity `<origin>-decision-<key>`, split at its first
 # `-decision-`, so one source can carry answers for holds across origins - the
 # aggregation a bearings board needs. An origin id that itself contains
@@ -85,8 +87,9 @@
 #
 # A channel's ONLY job is to turn whatever it received into those keyed lines and
 # pipe them here. It must never map keys to holds, build decision records, decide
-# resolve-versus-decline, or close a hold itself. A future channel needs no change
-# here at all.
+# resolve-versus-decline, or close a hold itself. Emitting `__drop__` is how a
+# channel reports that the captain dropped the decision; this intake, not the
+# channel, chooses `decline`. A future channel needs no change here at all.
 #
 # The decision text is a pure function of (source, key, answer, label), which is
 # what makes a replayed delivery an idempotent no-op rather than a rejected
@@ -691,6 +694,11 @@ BINDING_SCHEMA=fm-decision-binding.v1
 # which is what lets the runner's feed seam carry an any-origin source unchanged.
 BINDING_ANY='(any)'
 
+# Reserved close/drop answer. Exact match after sanitize. The bearings board's
+# Close / drop control emits this value; this intake declines the matching hold
+# with a "dropped by captain" record rather than recording a substantive answer.
+DROP_ANSWER='__drop__'
+
 validate_source_id() {  # <source-id>
   validate_slug source-id "$1"
   [ "${#1}" -le 64 ] || fail "source-id must be at most 64 characters: $1"
@@ -766,6 +774,16 @@ keyed_decision_text() {  # <source> <key> <answer> <label>
   [ -z "$4" ] || printf 'Answer as shown to the captain: %s\n' "$4"
 }
 
+# The durable record for a reserved close/drop answer. Pure function of source,
+# key, and label so a replayed drop is idempotent; it never records `__drop__`
+# as if it were a substantive choice.
+keyed_drop_decision_text() {  # <source> <key> <label>
+  printf 'Captain dropped this decision through %s.\n' "$1"
+  printf 'Decision key: %s\n' "$2"
+  printf 'dropped by captain\n'
+  [ -z "$3" ] || printf 'Answer as shown to the captain: %s\n' "$3"
+}
+
 sanitize_field() {  # <text>
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-512
 }
@@ -824,6 +842,19 @@ command_answers() {
       k_origin=$origin
       k_key=$key
       hold="$origin-decision-$key"
+    fi
+    if [ "$answer" = "$DROP_ANSWER" ]; then
+      keyed_drop_decision_text "$source" "$k_key" "$label" > "$tmp" \
+        || fail "cannot stage the captain decision for $hold"
+      if "$0" decline "$k_origin" "$k_key" --decision-file "$tmp" >/dev/null 2>"$err"; then
+        printf 'closed: %s\n' "$hold"
+        closed=$((closed + 1))
+      else
+        reason=$(tr -d '\n' < "$err" | sed 's/^fm-decision-hold: //')
+        printf 'skipped: %s (%s)\n' "$hold" "$reason"
+        skipped=$((skipped + 1))
+      fi
+      continue
     fi
     keyed_decision_text "$source" "$k_key" "$answer" "$label" > "$tmp" \
       || fail "cannot stage the captain decision for $hold"

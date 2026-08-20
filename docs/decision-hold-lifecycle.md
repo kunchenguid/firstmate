@@ -46,10 +46,11 @@ The live status-log decision ledger has always had answer-time closure through `
 The durable hold ledger did not, so an answer could be captured, believed, and even implemented while its hold stayed open, and the captain could then be asked to re-answer a decision already on disk.
 
 "A keyed answer closes its matching hold" is now one capability with one owner.
-`answers` is its channel-agnostic entry point: it reads a key, answer, and label on each input line and closes the matching hold through the same `answer` path, so every guard applies identically no matter which channel the answer arrived on.
+`answers` is its channel-agnostic entry point: it reads a key, answer, and label on each input line and closes the matching hold through the same `answer` path, except that the exact reserved answer `__drop__` closes through `decline` with a "dropped by captain" decision record rather than as a substantive choice.
 For a single-origin intake the key is the decision key mapped under that bound origin; for the cross-origin intake it is the full hold identity, while keys that do not name a full decision hold feed nothing.
 `--source` is provenance text recorded in the durable decision, never a behavior switch, and the command carries no per-channel branch and no knowledge of chat, review decks, or any transport.
 A channel's only job is to turn whatever it received into those keyed lines and pipe them in; it never maps keys to holds, builds decision records, chooses between the close paths, or closes a hold itself.
+Emitting `__drop__` is how a channel reports that the captain dropped the decision; the intake, not the channel, chooses `decline`.
 The decision text is a pure function of source, key, answer, and label, which is what makes a replayed delivery an idempotent no-op rather than a rejected different decision.
 A key whose hold is absent, already closed, or still blocking routed work is reported as skipped and left for `resolve`, and the command exits nonzero when any key was skipped.
 
@@ -89,6 +90,7 @@ Plural blocker-readiness and mixed-home projection verification date: 2026-07-22
 Unrouted close-path verification date: 2026-08-13.
 Answer-time closure verification date: 2026-08-16.
 Cross-origin answer-time closure verification date: 2026-08-19.
+Reserved close/drop answer verification date: 2026-08-20.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -108,6 +110,7 @@ The capture is left unacknowledged throughout, so the wake firstmate needs in or
 A replayed delivery closes nothing new and is not rejected as a different decision, a source with no binding closes nothing at all, and the `answer` subcommand itself refuses an empty or missing decision file, an absent hold, and a drifted retry.
 A separate regression drives the real `fm-send` over a stubbed transport to prove the chat channel reaches the same intake for a decision already transferred to its hold, which the status ledger alone can no longer close.
 The cross-origin regression drives a bound source through the real runner and adapter interface, closes full-identity holds from different origins, and proves that over-limit, malformed, non-decision, routed-work, absent-hold, and replayed answers all fail or skip without weakening the existing guards.
+A reserved `__drop__` answer through that same published poll shape declines the matching hold with a dropped-by-captain record, leaves Bearings' Captain's Call, and still skips a hold that blocks routed work.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -130,6 +133,16 @@ ok - a channel source with no decision binding closes nothing
 ok - an any-origin bound source closes full-identity holds across origins
 ok - the answer path keeps every guard the unrouted close path already had
 ok - the chat channel feeds the same keyed-answer intake a captured review does
+
+$ bash tests/fm-bearings-board.test.sh
+ok - path prints the stable home-scoped board location
+ok - build refuses malformed payloads before touching the board
+ok - build injects the payload, binds any-origin, then arms the source
+ok - registration can consume answers only after any-origin binding exists
+ok - build establishes the Lavish session before binding and arming
+ok - rebuild refreshes the board in place without double-arming
+ok - build refuses a template without exactly one data slot
+ok - a reserved close/drop answer declines the hold and leaves Captain's Call
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
