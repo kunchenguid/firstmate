@@ -267,6 +267,11 @@ if [ "${FM_FIXTURE_ORPHAN_HERE:-0}" = 1 ]; then
 fi
 printf '%s\n' "$$" > "$FM_HOME/state/session-pid"
 printf '%s\n' "$$" > "$FM_HOME/state/.lock"
+# Model the synchronous Stop guard reaching its published ready boundary before
+# this hook claims the cycle. The hook must acknowledge that same live session
+# before its rewake can become the observable outcome under test.
+printf 'generation=1 status=ready session_pid=%s owner_pid=0\n' "$$" \
+  > "$FM_HOME/state/.claude-rewake-boundary"
 "$FM_HOME/bin/fm-claude-stop-autoarm.sh" </dev/null > "$FM_HOME/state/hook.out" 2>&1
 printf '%s\n' "$?" > "$FM_HOME/state/hook.rc"
 SH

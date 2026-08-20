@@ -11,8 +11,12 @@
 # it in the tool output of whatever it was doing - the one channel every harness
 # has. Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
 # bin/fm-wake-lib.sh): under the Claude Stop auto-arm model the watcher runs only
-# between turns, so mid-turn a fresh beacon with no live watcher is healthy and
-# only a stale beacon (beyond FM_GUARD_GRACE) is a genuine lapse; under the Pi
+# between turns, so mid-turn a fresh beacon with no live watcher is healthy. A
+# verified Claude rewake handling turn may outlive FM_GUARD_GRACE because the
+# actionable watcher intentionally closed to start it; that exception requires
+# a rewake epoch bound to the live lock-owning session and the current guard
+# invocation to descend from that same session. Every other stale beacon remains
+# a genuine lapse. Under the Pi
 # extension model the extension tears the watcher down and respawns it on every
 # actionable wake, so a fresh beacon with a genuinely unheld lock is healthy
 # while that live Pi session provably owns continuity; any held but unhealthy

@@ -31,6 +31,10 @@ This is deliberate Option B ordering: the fleet is protected before the model ha
 
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi and OpenCode do.
 The durable wake queue preserves actionable events during the residual active-turn window, and the bounded turn-end guard enforces recovery at Stop when no watcher or auto-arm claim is present.
+The pull guard treats that residual window as healthy even after the ordinary beacon grace only when `state/.claude-autoarm-epoch` records an actionable `rewake`, the matching `state/.claude-rewake-turn` proof consumed a durable single-use generation that the synchronous guard published after retiring the prior proof, both records bind to the originally verified numeric session owner in `state/.lock`, that owner is still a live verified harness process, the guard invocation descends from that owner, and the detected harness is Claude.
+The epoch deliberately has no wall-clock expiry for this verdict because the watcher closed to start the handling turn and its successor cannot start until that turn ends.
+A missing active-turn proof, a missing or non-`rewake` epoch, a mismatched or dead session owner, a guard call outside the owning session, and every Cursor or persistent-watcher path remain loud once the beacon exceeds `FM_GUARD_GRACE`.
+The turn-end guard keeps its PID-strict check, so the exception cannot permit a blind Stop, and a genuinely dead watcher episode still alarms through the pull guard when the active-turn proof is absent and through the turn-end guard at the boundary.
 For every supported arm path, a successor that observes an accepted down stretch emits `check: rearm-resurface` through the ordinary durable handling path before settling into its live wait.
 That recovery presentation includes all unacknowledged queue rows, the cursor-folded OPEN DECISIONS set, and still-unread informational status lines, so a still-open decision or a buried `note:` answer reappears even when recovery has no queue row of its own.
 The model no longer re-arms after ordinary wakes.
@@ -80,9 +84,10 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
-`tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
+`tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, session-bound epoch publication, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
+`tests/fm-guard-stale-banner.test.sh` reproduces a stale beacon during a long session-bound Claude rewake turn and keeps non-rewake and unowned stale-beacon cases as alarm-preserving counterfactuals.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
-`tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset.
+`tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including prior-proof retirement, both concurrent and delayed active-turn generation handoffs, monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset.
 
 ## Active limits and verification
 

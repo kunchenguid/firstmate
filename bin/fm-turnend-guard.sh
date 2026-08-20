@@ -150,7 +150,44 @@ BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+REWAKE_BOUNDARY_LOCK="$STATE/.claude-rewake-boundary.lock"
+REWAKE_BOUNDARY="$STATE/.claude-rewake-boundary"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+advance_rewake_boundary() {
+  local retire=${1:-0} boundary generation status session_pid owner_pid lock_pid tmp
+  fm_lock_try_acquire "$REWAKE_BOUNDARY_LOCK" || return 1
+  [ "$retire" -eq 0 ] || rm -f "$STATE/.claude-rewake-turn" 2>/dev/null || true
+  boundary=$(cat "$REWAKE_BOUNDARY" 2>/dev/null || true)
+  generation=$(printf '%s\n' "$boundary" | sed -n 's/^generation=\([0-9][0-9]*\) status=.*$/\1/p')
+  status=$(printf '%s\n' "$boundary" | sed -n 's/^generation=[0-9][0-9]* status=\([a-z][a-z]*\) .*$/\1/p')
+  session_pid=$(printf '%s\n' "$boundary" | sed -n 's/^.* session_pid=\([0-9][0-9]*\) .*$/\1/p')
+  owner_pid=$(printf '%s\n' "$boundary" | sed -n 's/^.* owner_pid=\([0-9][0-9]*\)$/\1/p')
+  lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$generation" in ''|*[!0-9]*) generation=0 ;; esac
+  if [ "$status" = pending ] && [ "$session_pid" = "$lock_pid" ]; then
+    status=acked
+  elif [ "$retire" -eq 0 ]; then
+    fm_lock_release "$REWAKE_BOUNDARY_LOCK"
+    return 0
+  elif [ "$status" = ready ] && [ "$session_pid" = "$lock_pid" ]; then
+    :
+  elif [ "$status" = acked ] && [ "$session_pid" = "$lock_pid" ] \
+    && fm_pid_alive "$owner_pid"; then
+    :
+  else
+    generation=$((generation + 1))
+    status=ready
+    session_pid=$lock_pid
+    owner_pid=0
+  fi
+  tmp="$REWAKE_BOUNDARY.tmp.$$"
+  printf 'generation=%s status=%s session_pid=%s owner_pid=%s\n' \
+    "$generation" "$status" "$session_pid" "$owner_pid" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$REWAKE_BOUNDARY" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
+  fm_lock_release "$REWAKE_BOUNDARY_LOCK"
+}
+[ "$CLAUDE_MODE" -eq 0 ] || advance_rewake_boundary 1 || true
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0
@@ -260,6 +297,7 @@ autoarm_owns_recovery() {
   pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   if fm_pid_alive "$pid" && [ "$role" = autoarm ]; then
+    advance_rewake_boundary 0 || true
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi

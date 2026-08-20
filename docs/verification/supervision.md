@@ -387,6 +387,38 @@ Observed output, before and after the model correction, then with the recorded P
 ●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 0s ago).
 ```
 
+The Claude long-active-rewake-turn pull-guard correction was verified on 2026-08-18 with the installed Claude Code 2.1.223, ShellCheck 0.11.0, documentation checks, and deterministic process-backed behavior suites.
+The portable suites are the regression gate because a real model cannot reliably be scripted to perform the same multi-turn tool sequence on demand.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-guard-stale-banner.test.sh tests/fm-turnend-guard.test.sh tests/fm-supervision-instructions.test.sh
+```
+
+Observed output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+fm-doc-audience-check: ok surfaces=68 local_links=253
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=161833
+```
+
+The exact maintainer live-verification sequence is:
+
+1. Launch Claude Code from an isolated firstmate project and isolated `FM_HOME` with `FM_GUARD_GRACE=1`, one in-flight task, the tracked hooks enabled, and no shared fleet state.
+2. Let the Stop-owned watcher produce one actionable close and confirm that the resulting handling turn has no live watcher, a stale `state/.last-watcher-beat`, `state/.claude-autoarm-epoch` with `outcome=rewake` and `session_pid` equal to `state/.lock`, a matching `state/.claude-rewake-turn` proof, and the same generation published in `state/.claude-rewake-boundary`.
+3. From that same handling turn after the one-second grace, run `FM_GUARD_READ_ONLY=1 bin/fm-guard.sh` and confirm it is silent.
+4. Copy the isolated state, replace only the epoch's `session_pid` with a dead or foreign pid, run the same read-only guard outside the owning session, and confirm it prints `WATCHER DOWN - SUPERVISION IS OFF`.
+5. End the real handling turn, confirm its synchronous Stop guard retires the prior `state/.claude-rewake-turn` even if the async auto-arm hook does not execute, confirm its durable generation lets a delayed actionable auto-arm publish the session-owned replacement after the former synchronization window, and confirm the PID-strict turn-end guard still requires a live successor or a current auto-arm claim.
+
+Two runs of `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` on 2026-08-18 did not reach that complete sequence.
+The first run produced one hook-owned arm cycle where the script requested two and reported `expected exactly 2 hook-owned arm cycles, got 1`.
+The second run issued `bin/fm-wake-drain.sh` twice without first issuing the requested `bin/fm-session-start.sh` tool call and reported `fresh Claude session did not run session start first`.
+Those runs establish the model-sequencing limitation rather than a guard verdict because neither attempt reached the requested live probe shape.
+
 The broader relevant regression pass was rerun on 2026-08-02 without live-home or daemon mutation.
 
 ```sh

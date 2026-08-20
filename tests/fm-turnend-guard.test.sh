@@ -1150,6 +1150,16 @@ SH
   chmod +x "$dir/bin/fm-watch-arm.sh"
 }
 
+write_integrated_actionable_arm() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'signal: task.status done: boundary fixture\n'
+exit 0
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
 # The 2026-07-21 incident regression: after a spent forced continuation the old
 # one-shot loop guard ALLOWED a blind stop (stop_hook_active=true) while the
 # watcher was already dead. In --claude mode the guard must re-block instead.
@@ -1162,6 +1172,70 @@ test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy() {
   assert_contains "$out" "TURN WOULD END BLIND" "--claude re-block must carry the blind-turn banner"
   assert_contains "$out" "Stop-owned auto-arm did not claim" "--claude re-block must explain the missing auto-arm claim"
   pass "fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)"
+}
+
+test_hook_claude_mode_retires_prior_rewake_proof() {
+  local dir out status marker
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-retires-rewake")
+  : > "$dir/state/task1.meta"
+  marker="$dir/state/.claude-rewake-turn"
+  printf 'epoch=3 session_pid=999\n' > "$marker"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=10 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "an unhealthy Stop without auto-arm ownership must remain blocked"
+  assert_absent "$marker" "the synchronous Stop guard left the prior turn's rewake proof active"
+  pass "fm-turnend-guard --claude: every Stop retires the prior active-rewake proof"
+}
+
+test_concurrent_stop_boundary_preserves_new_rewake_proof() {
+  local dir auto_pid auto_status guard_out guard_status marker
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-concurrent-rewake")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_integrated_actionable_arm "$dir"
+  marker="$dir/state/.claude-rewake-turn"
+  printf 'epoch=2 session_pid=999\n' > "$marker"
+  run_integrated_autoarm "$dir" > "$dir/auto.out" 2>&1 &
+  auto_pid=$!
+  while ! grep -q ' status=pending ' "$dir/state/.claude-rewake-boundary" 2>/dev/null; do sleep 0.05; done
+  [ "$(cat "$marker")" = 'epoch=2 session_pid=999' ] \
+    || fail "the async hook replaced the ending turn's proof before the synchronous Stop boundary"
+  guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=500 run_hook_claude "$dir" false); guard_status=$?
+  wait "$auto_pid"; auto_status=$?
+  expect_code 0 "$guard_status" "the synchronous guard must accept the claimed auto-arm cycle"
+  [ -z "$guard_out" ] || fail "the concurrent Stop guard produced output: $guard_out"
+  expect_code 2 "$auto_status" "the actionable auto-arm must deliver its rewake"
+  assert_contains "$(cat "$dir/auto.out")" "firstmate watcher wake" \
+    "the concurrent auto-arm fell back without publishing proof"
+  assert_present "$marker" "the synchronous guard deleted the new turn's rewake proof"
+  pass "fm-turnend-guard --claude: concurrent Stop hooks preserve the new rewake proof"
+}
+
+test_guard_first_delayed_boundary_preserves_new_rewake_proof() {
+  local dir auto_status guard_status marker
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-guard-first-rewake")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_integrated_actionable_arm "$dir"
+  marker="$dir/state/.claude-rewake-turn"
+  printf 'epoch=2 session_pid=999\n' > "$marker"
+  # shellcheck disable=SC2016 # Expand these expressions in the fake Claude child shell.
+  FM_HOME="$dir" "$dir/fake-claude" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    printf "%s\n" "{\"stop_hook_active\":false,\"session_id\":\"sess-claude-mode\"}" \
+      | CLAUDECODE=1 "$FM_HOME/bin/fm-turnend-guard.sh" --claude \
+        > "$FM_HOME/guard.out" 2>&1
+    printf "%s\n" "$?" > "$FM_HOME/guard.status"
+    sleep 1.2
+    printf "%s\n" "{\"session_id\":\"sess-claude-mode\",\"stop_hook_active\":false}" \
+      | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/auto.out" 2>&1
+    printf "%s\n" "$?" > "$FM_HOME/auto.status"
+  '
+  guard_status=$(cat "$dir/guard.status")
+  auto_status=$(cat "$dir/auto.status")
+  expect_code 2 "$guard_status" "the guard-first Stop must finish before the delayed auto-arm"
+  expect_code 2 "$auto_status" "the later actionable auto-arm must deliver its rewake"
+  assert_present "$marker" "the guard-first ordering lost the new turn's rewake proof"
+  pass "fm-turnend-guard --claude: delayed auto-arm consumes the durable guard-first generation"
 }
 
 test_hook_claude_mode_reblocks_x_mode_without_tasks() {
@@ -1648,6 +1722,9 @@ test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
+test_hook_claude_mode_retires_prior_rewake_proof
+test_concurrent_stop_boundary_preserves_new_rewake_proof
+test_guard_first_delayed_boundary_preserves_new_rewake_proof
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open

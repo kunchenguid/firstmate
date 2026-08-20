@@ -39,10 +39,16 @@
 #     exit 2 to guarantee the next Stop-owned retry without repeating notice,
 #     until the synchronous guard has consumed its attended fail-open.
 #
-# The epoch ledger state/.claude-autoarm-epoch records the latest claim and
-# outcome so the synchronous Stop guard (bin/fm-turnend-guard.sh --claude) can
+# The epoch ledger state/.claude-autoarm-epoch records the latest claim, outcome,
+# and session-lock owner so the synchronous Stop guard
+# (bin/fm-turnend-guard.sh --claude) can
 # allow a stop whose recovery this hook already owns, instead of forcing a
-# duplicate continuation for the same event epoch. The failure marker
+# duplicate continuation for the same event epoch. The session binding also lets
+# the pull guard recognize a long active rewake turn without extending the
+# beacon's lease for old, foreign, or failed cycles. The companion
+# state/.claude-rewake-turn marker exists only from an actionable close until
+# this session's next Stop, so the prior rewake cannot exempt a later turn. The
+# failure marker
 # state/.claude-autoarm-failure-notified deduplicates the last-resort notice,
 # and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
 # suppresses any later automatic continuation in that unresolved episode.
@@ -64,6 +70,9 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 EPOCH="$STATE/.claude-autoarm-epoch"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+ACTIVE_REWAKE_TURN="$STATE/.claude-rewake-turn"
+REWAKE_BOUNDARY_LOCK="$STATE/.claude-rewake-boundary.lock"
+REWAKE_BOUNDARY="$STATE/.claude-rewake-boundary"
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
 case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
@@ -142,6 +151,15 @@ if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
 fi
 trap 'fm_lock_release "$OWNER_LOCK"' EXIT
 
+EPOCH_SEQUENCE=
+EPOCH_SESSION_PID=
+EPOCH_WRITE_OK=0
+BOUNDARY_GENERATION=
+VERIFIED_SESSION_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+AUTOARM_PID=${BASHPID:-$$}
+case "$VERIFIED_SESSION_PID" in
+  ''|*[!0-9]*) exit 0 ;;
+esac
 write_epoch() {  # <outcome>
   local outcome=$1 seq tmp
   seq=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$EPOCH" 2>/dev/null || true)
@@ -150,13 +168,94 @@ write_epoch() {  # <outcome>
   esac
   seq=$((seq + 1))
   tmp="$EPOCH.tmp.$$"
-  printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
-    "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$EPOCH" 2>/dev/null
+  EPOCH_SEQUENCE=$seq
+  EPOCH_SESSION_PID=$VERIFIED_SESSION_PID
+  EPOCH_WRITE_OK=0
+  if printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s session_pid=%s\n' \
+    "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" "$VERIFIED_SESSION_PID" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$EPOCH" 2>/dev/null; then
+    EPOCH_WRITE_OK=1
+  fi
   rm -f "$tmp" 2>/dev/null || true
 }
 
+publish_active_rewake_turn() {
+  local tmp value current_session_pid boundary i boundary_lock_held
+  [ "$EPOCH_WRITE_OK" -eq 1 ] || return 1
+  for value in "$EPOCH_SEQUENCE" "$EPOCH_SESSION_PID"; do
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  done
+  current_session_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  [ "$current_session_pid" = "$VERIFIED_SESSION_PID" ] || return 1
+  fm_session_lock_owned_by_self "$STATE" || return 1
+  i=0
+  while [ "$i" -lt 20 ]; do
+    boundary=$(cat "$REWAKE_BOUNDARY" 2>/dev/null || true)
+    [ "$boundary" = "generation=$BOUNDARY_GENERATION status=acked session_pid=$EPOCH_SESSION_PID owner_pid=$AUTOARM_PID" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$boundary" = "generation=$BOUNDARY_GENERATION status=acked session_pid=$EPOCH_SESSION_PID owner_pid=$AUTOARM_PID" ] || return 1
+  boundary_lock_held=0
+  i=0
+  while [ "$i" -lt 20 ]; do
+    if fm_lock_try_acquire "$REWAKE_BOUNDARY_LOCK"; then
+      boundary_lock_held=1
+      break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$boundary_lock_held" -eq 1 ] || return 1
+  boundary=$(cat "$REWAKE_BOUNDARY" 2>/dev/null || true)
+  current_session_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  if [ "$boundary" != "generation=$BOUNDARY_GENERATION status=acked session_pid=$EPOCH_SESSION_PID owner_pid=$AUTOARM_PID" ] \
+    || [ "$current_session_pid" != "$VERIFIED_SESSION_PID" ] \
+    || ! fm_session_lock_owned_by_self "$STATE"; then
+    fm_lock_release "$REWAKE_BOUNDARY_LOCK"
+    return 1
+  fi
+  tmp="$ACTIVE_REWAKE_TURN.tmp.$$"
+  if ! printf 'epoch=%s session_pid=%s generation=%s\n' \
+    "$EPOCH_SEQUENCE" "$EPOCH_SESSION_PID" "$BOUNDARY_GENERATION" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$ACTIVE_REWAKE_TURN" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$REWAKE_BOUNDARY_LOCK"
+    return 1
+  fi
+  tmp="$REWAKE_BOUNDARY.tmp.$$"
+  if ! printf 'generation=%s status=published session_pid=%s owner_pid=%s\n' \
+    "$BOUNDARY_GENERATION" "$EPOCH_SESSION_PID" "$AUTOARM_PID" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$REWAKE_BOUNDARY" 2>/dev/null; then
+    rm -f "$ACTIVE_REWAKE_TURN" "$tmp" 2>/dev/null || true
+    fm_lock_release "$REWAKE_BOUNDARY_LOCK"
+    return 1
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  fm_lock_release "$REWAKE_BOUNDARY_LOCK"
+}
+
 write_epoch arming
+if fm_lock_try_acquire "$REWAKE_BOUNDARY_LOCK"; then
+  boundary=$(cat "$REWAKE_BOUNDARY" 2>/dev/null || true)
+  generation=$(printf '%s\n' "$boundary" | sed -n 's/^generation=\([0-9][0-9]*\) status=.*$/\1/p')
+  status=$(printf '%s\n' "$boundary" | sed -n 's/^generation=[0-9][0-9]* status=\([a-z][a-z]*\) .*$/\1/p')
+  boundary_session=$(printf '%s\n' "$boundary" | sed -n 's/^.* session_pid=\([0-9][0-9]*\) .*$/\1/p')
+  case "$generation" in ''|*[!0-9]*) generation=0 ;; esac
+  if [ "$status" = ready ] && [ "$boundary_session" = "$EPOCH_SESSION_PID" ]; then
+    BOUNDARY_GENERATION=$generation
+    status=acked
+  else
+    BOUNDARY_GENERATION=$((generation + 1))
+    status=pending
+  fi
+  printf 'generation=%s status=%s session_pid=%s owner_pid=%s\n' \
+    "$BOUNDARY_GENERATION" "$status" "$EPOCH_SESSION_PID" "$AUTOARM_PID" \
+    > "$REWAKE_BOUNDARY.tmp.$$" 2>/dev/null \
+    && mv -f "$REWAKE_BOUNDARY.tmp.$$" "$REWAKE_BOUNDARY" 2>/dev/null
+  rm -f "$REWAKE_BOUNDARY.tmp.$$" 2>/dev/null || true
+  fm_lock_release "$REWAKE_BOUNDARY_LOCK"
+fi
 
 # X mode cadence: source the generated config so an X instance polls at its
 # 30s cadence (fm-bootstrap.sh x_mode_setup contract).
@@ -238,13 +337,16 @@ fi
 
 if [ "$ACTIONABLE" -eq 1 ]; then
   write_epoch rewake
-  {
-    printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
-    [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
-    printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
-  } >&2
-  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  exit 2
+  if publish_active_rewake_turn; then
+    {
+      printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
+      [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+      printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
+    } >&2
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 2
+  fi
+  ACTIONABLE=0
 fi
 
 # Notify only once for this continuous failure episode; every later invocation

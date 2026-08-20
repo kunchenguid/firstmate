@@ -237,7 +237,10 @@ fm_pi_extension_owns_supervision() {
 #                              stale-beacon - the beacon is stale beyond grace or
 #                                             absent (a genuine supervision lapse)
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
-# because the watcher only runs between turns; only a stale beacon is a lapse.
+# because the watcher only runs between turns. A stale beacon is also expected
+# during a long Claude handling turn when an actionable auto-arm rewake is bound
+# to the live session that owns this guard invocation. Every other stale beacon
+# remains a lapse, including a failed arm and an old epoch from another session.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
 # genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
 # session provably owns continuity (fm_pi_extension_owns_supervision) - that is the
@@ -252,6 +255,53 @@ fm_pi_extension_owns_supervision() {
 FM_WATCHER_VERDICT_OK=false
 # shellcheck disable=SC2034 # Read by callers after the function returns.
 FM_WATCHER_VERDICT_REASON=stale-beacon
+
+# True only while this pull-guard invocation belongs to the live Claude session
+# whose actionable watcher close started the current handling turn. The rewake
+# outcome itself has no wall-clock lease: the watcher is intentionally absent
+# until this turn ends, however long handling takes. Binding the epoch to the
+# numeric session owner and proving that owner is both live and in this process
+# ancestry keeps an old or foreign rewake from suppressing a genuine dead-idle
+# alarm. Cursor shares the autoarm model but owns a different park ledger, so a
+# leftover Claude epoch must never satisfy it.
+fm_claude_rewake_turn_active() {
+  local state=$1 record marker boundary outcome epoch epoch_session_pid marker_epoch marker_session_pid marker_generation boundary_generation boundary_status boundary_session_pid lock_pid harness value
+  harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
+  [ "$harness" = claude ] || return 1
+  if ! type fm_session_lock_owned_by_self >/dev/null 2>&1; then
+    [ -f "$FM_WAKE_LIB_DIR/fm-session-lock-lib.sh" ] || return 1
+    # shellcheck source=bin/fm-session-lock-lib.sh
+    . "$FM_WAKE_LIB_DIR/fm-session-lock-lib.sh"
+  fi
+  [ -f "$state/.claude-autoarm-epoch" ] && [ ! -L "$state/.claude-autoarm-epoch" ] || return 1
+  [ -f "$state/.claude-rewake-turn" ] && [ ! -L "$state/.claude-rewake-turn" ] || return 1
+  record=$(sed -n '1p' "$state/.claude-autoarm-epoch" 2>/dev/null || true)
+  marker=$(sed -n '1p' "$state/.claude-rewake-turn" 2>/dev/null || true)
+  boundary=$(sed -n '1p' "$state/.claude-rewake-boundary" 2>/dev/null || true)
+  epoch=$(printf '%s\n' "$record" | sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p')
+  outcome=$(printf '%s\n' "$record" | sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p')
+  [ "$outcome" = rewake ] || return 1
+  epoch_session_pid=$(printf '%s\n' "$record" | sed -n 's/^.*session_pid=\([0-9][0-9]*\).*$/\1/p')
+  marker_epoch=$(printf '%s\n' "$marker" | sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p')
+  marker_session_pid=$(printf '%s\n' "$marker" | sed -n 's/^.*session_pid=\([0-9][0-9]*\).*$/\1/p')
+  marker_generation=$(printf '%s\n' "$marker" | sed -n 's/^.*generation=\([0-9][0-9]*\).*$/\1/p')
+  boundary_generation=$(printf '%s\n' "$boundary" | sed -n 's/^generation=\([0-9][0-9]*\) .*$/\1/p')
+  boundary_status=$(printf '%s\n' "$boundary" | sed -n 's/^generation=[0-9][0-9]* status=\([a-z][a-z]*\) .*$/\1/p')
+  boundary_session_pid=$(printf '%s\n' "$boundary" | sed -n 's/^.*session_pid=\([0-9][0-9]*\).*$/\1/p')
+  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+  for value in "$epoch" "$epoch_session_pid" "$marker_epoch" "$marker_session_pid" "$marker_generation" "$boundary_generation" "$boundary_session_pid" "$lock_pid"; do
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  done
+  [ "$marker_epoch" = "$epoch" ] || return 1
+  [ "$marker_session_pid" = "$epoch_session_pid" ] || return 1
+  [ "$marker_generation" = "$boundary_generation" ] || return 1
+  [ "$boundary_status" = published ] || return 1
+  [ "$boundary_session_pid" = "$epoch_session_pid" ] || return 1
+  [ "$epoch_session_pid" = "$lock_pid" ] || return 1
+  fm_harness_pid_alive "$lock_pid" || return 1
+  fm_session_lock_owned_by_self "$state"
+}
+
 fm_watcher_supervision_verdict() {
   local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
   local root=${5:-$FM_ROOT}
@@ -266,7 +316,9 @@ fm_watcher_supervision_verdict() {
   esac
   model=$(fm_supervision_model)
   if [ "$model" = autoarm ]; then
-    [ "$fresh" = true ] && FM_WATCHER_VERDICT_OK=true
+    if [ "$fresh" = true ] || fm_claude_rewake_turn_active "$state"; then
+      FM_WATCHER_VERDICT_OK=true
+    fi
     return 0
   fi
   if fm_watcher_healthy "$state" "$watch" "$grace" "$home"; then

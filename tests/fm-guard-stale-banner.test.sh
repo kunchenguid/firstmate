@@ -74,6 +74,35 @@ run_guard_case_autoarm() {
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
+# Run the pull guard from a Claude-shaped process that owns this home's session
+# lock, matching a real mid-turn fleet command. The recorded auto-arm epoch is
+# bound to that same session and deliberately ancient: the actionable watcher
+# closed when it started this handling turn, so neither the epoch nor the last
+# watcher beacon should need a wall-clock lease while the turn remains active.
+run_guard_case_claude_rewake_turn() {
+  local dir=$1 outcome=${2:-rewake} publish_marker=${3:-1} home fake_claude
+  home=$(case_home "$dir")
+  fake_claude="$dir/claude"
+  ln -s /bin/bash "$fake_claude"
+  # shellcheck disable=SC2016 # The fake Claude expands these exported fixture variables.
+  FM_CASE_HOME="$home" FM_CASE_ROOT="$(case_root "$dir")" FM_CASE_OUTCOME="$outcome" \
+    FM_CASE_PUBLISH_MARKER="$publish_marker" \
+    FM_CASE_CODE_ROOT="$ROOT" "$fake_claude" -c '
+      printf "%s\n" "$$" > "$FM_CASE_HOME/state/.lock"
+      printf "epoch=3 owner_pid=999 outcome=%s updated_at=1 session_pid=%s\n" \
+        "$FM_CASE_OUTCOME" "$$" > "$FM_CASE_HOME/state/.claude-autoarm-epoch"
+      if [ "$FM_CASE_PUBLISH_MARKER" = 1 ]; then
+        printf "epoch=3 session_pid=%s generation=7\n" "$$" > "$FM_CASE_HOME/state/.claude-rewake-turn"
+        printf "generation=7 status=published session_pid=%s owner_pid=999\n" "$$" > "$FM_CASE_HOME/state/.claude-rewake-boundary"
+      fi
+      touch -t 202001010000 "$FM_CASE_HOME/state/.claude-autoarm-epoch"
+      FM_ROOT_OVERRIDE="$FM_CASE_ROOT" FM_HOME="$FM_CASE_HOME" \
+        FM_GUARD_GRACE=1 FM_SUPERVISION_MODEL=autoarm CLAUDECODE=1 \
+        "$FM_CASE_CODE_ROOT/bin/fm-guard.sh" 2>&1
+      :
+    '
+}
+
 # The Pi extension model: .pi/extensions/fm-primary-pi-watch.ts tears the watcher
 # down on every actionable wake and spawns the replacement itself, so the lock is
 # legitimately unheld during a hand-off.
@@ -367,6 +396,58 @@ test_autoarm_stale_beacon_alarms_with_correct_reason() {
   assert_contains "$out" "no watcher has a fresh beacon" \
     "auto-arm stale-beacon banner must name the stale-beacon reason"
   pass "fm-guard stale banner: auto-arm stale beacon alarms with the true reason"
+}
+
+test_autoarm_stale_beacon_during_verified_rewake_turn_is_healthy() {
+  local dir home out
+  dir=$(make_guard_case autoarm-stale-active-turn)
+  home=$(case_home "$dir")
+  touch "$home/state/.last-watcher-beat"
+  touch -t 202001010000 "$home/state/.last-watcher-beat"
+  out=$(run_guard_case_claude_rewake_turn "$dir")
+  [ -z "$out" ] \
+    || fail "a stale beacon during its verified Claude rewake turn must stay silent, got: $out"
+  pass "fm-guard stale banner: a verified Claude rewake turn outlives the beacon grace"
+}
+
+test_autoarm_stale_beacon_without_rewake_evidence_still_alarms() {
+  local dir home out
+  dir=$(make_guard_case autoarm-stale-non-rewake)
+  home=$(case_home "$dir")
+  touch "$home/state/.last-watcher-beat"
+  touch -t 202001010000 "$home/state/.last-watcher-beat"
+  out=$(run_guard_case_claude_rewake_turn "$dir" arming)
+  assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "a live primary turn without actionable rewake evidence must not mask a dead watcher"
+  pass "fm-guard stale banner: a non-rewake active turn still alarms on a stale beacon"
+}
+
+test_autoarm_stale_beacon_without_active_turn_proof_still_alarms() {
+  local dir home out
+  dir=$(make_guard_case autoarm-stale-no-active-turn)
+  home=$(case_home "$dir")
+  touch "$home/state/.last-watcher-beat"
+  touch -t 202001010000 "$home/state/.last-watcher-beat"
+  out=$(run_guard_case_claude_rewake_turn "$dir" rewake 0)
+  assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "an old rewake without the current active-turn proof must not mask a dead watcher"
+  pass "fm-guard stale banner: a rewake without active-turn proof still alarms"
+}
+
+test_autoarm_stale_beacon_with_unowned_rewake_still_alarms() {
+  local dir home out
+  dir=$(make_guard_case autoarm-stale-unowned-rewake)
+  home=$(case_home "$dir")
+  touch "$home/state/.last-watcher-beat"
+  touch -t 202001010000 "$home/state/.last-watcher-beat"
+  printf 'epoch=3 owner_pid=999 outcome=rewake updated_at=1 session_pid=999\n' \
+    > "$home/state/.claude-autoarm-epoch"
+  printf 'epoch=3 session_pid=999\n' > "$home/state/.claude-rewake-turn"
+  touch -t 202001010000 "$home/state/.claude-autoarm-epoch"
+  out=$(run_guard_case_autoarm "$dir")
+  assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "an old rewake from no live owning primary must not mask a dead watcher"
+  pass "fm-guard stale banner: an unowned rewake still alarms on a stale beacon"
 }
 
 test_autoarm_stale_episode_is_stable() {
@@ -694,6 +775,10 @@ test_persistent_model_ignores_pi_extension_evidence
 test_extension_live_watcher_is_healthy_without_ownership_evidence
 test_autoarm_fresh_beacon_without_watcher_is_healthy
 test_autoarm_stale_beacon_alarms_with_correct_reason
+test_autoarm_stale_beacon_during_verified_rewake_turn_is_healthy
+test_autoarm_stale_beacon_without_rewake_evidence_still_alarms
+test_autoarm_stale_beacon_without_active_turn_proof_still_alarms
+test_autoarm_stale_beacon_with_unowned_rewake_still_alarms
 test_autoarm_stale_episode_is_stable
 test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
