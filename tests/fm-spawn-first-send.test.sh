@@ -181,6 +181,11 @@ EOF
 run_spawn() {
   local id=$1 from=$2 upto=$3
   shift 3
+  # SPAWN_BACKEND selects an explicit backend for the one case that needs a
+  # non-reference adapter; unset keeps every other case on the fake tmux.
+  local -a spawn_args
+  spawn_args=("$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+  [ -z "${SPAWN_BACKEND:-}" ] || spawn_args+=(--backend "$SPAWN_BACKEND")
   # -u FM_SPAWN_READY_BYPASS: tests/lib.sh exports that bypass for every
   # fixture-based suite, and this is the suite whose whole subject is the gate.
   env -u FM_SPAWN_READY_BYPASS "$@" \
@@ -196,7 +201,65 @@ run_spawn() {
     FM_SPAWN_READY_INTERVAL=0.05 FM_SPAWN_READY_RESEND_EVERY=1 \
     TMPDIR="$CASE_TMP" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+    FM_FAKE_CMUX_STATE="${CMUX_STATE:-}" \
+    "$SPAWN" "${spawn_args[@]}" 2>&1
+}
+
+# install_cmux_fake <fakebin-dir> adds a `cmux` CLI stub keyed on COMMAND SHAPE,
+# not on an ordered response queue, so the number of readiness probes a case
+# provokes cannot desynchronize it.
+#
+# It models exactly the calls a cmux ship spawn makes before the first gate, plus
+# one failure mode: every `send-key` fails. That is what makes the real adapter
+# return status 2 - fm_backend_cmux_send_text_line types the line, fails to
+# submit it with Enter, then fails to clear it with C-c, which is the "input
+# could not be cleared" condition only zellij and cmux define.
+install_cmux_fake() {
+  local fakebin=$1
+  cat > "$fakebin/cmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+STATE="${FM_FAKE_CMUX_STATE:?FM_FAKE_CMUX_STATE unset}"
+case "${1:-}" in
+  version) printf 'cmux 0.64.17 (97) [abcdef1]\n'; exit 0 ;;
+  ping) printf 'PONG\n'; exit 0 ;;
+  new-workspace)
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --name) printf '%s\n' "${2:-}" > "$STATE/title"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    exit 0
+    ;;
+  workspace)
+    if [ "${2:-}" = list ]; then
+      if [ -f "$STATE/title" ]; then
+        printf '{"workspaces":[{"id":"ws-1","title":"%s"}]}\n' "$(cat "$STATE/title")"
+      else
+        printf '{"workspaces":[]}\n'
+      fi
+      exit 0
+    fi
+    exit 0
+    ;;
+  list-panes)
+    printf '{"panes":[{"selected_surface_id":"sf-1","surface_ids":["sf-1"]}]}\n'
+    exit 0
+    ;;
+  send)
+    printf 'literal %s\n' "${!#}" >> "${FM_FAKE_DELIVERED:?}"
+    exit 0
+    ;;
+  send-key)
+    printf 'key %s\n' "${!#}" >> "${FM_FAKE_DELIVERED:?}"
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/cmux"
 }
 
 # delivered_line_count <exact-line>
@@ -452,6 +515,38 @@ test_status_2_is_not_read_as_uncleared_input_on_tmux() {
   pass "status 2 is read as uncleared input only on the adapters that define it"
 }
 
+# The other half of the same contract, on a backend that really does define
+# status 2 as "input could not be cleared". There the typed `touch <marker>` is
+# sitting on the pane's input line with no way to clear it, so retrying would
+# concatenate the next probe onto it: the refusal has to fire on sight and say
+# what the adapter actually reported.
+test_uncleared_probe_input_is_terminal_on_cmux() {
+  local rec id out status
+  id=first-send-cmux-uncleared-p4
+  rec=$(make_case cmux-uncleared "$id")
+  read_case "$rec"
+  install_cmux_fake "$FAKEBIN_DIR"
+  CMUX_STATE="$CASE_TMP/cmux"
+  mkdir -p "$CMUX_STATE"
+
+  out=$(SPAWN_BACKEND=cmux run_spawn "$id" 1 0)
+  status=$?
+  CMUX_STATE=
+  [ "$status" -ne 0 ] || fail "a cmux endpoint whose input could not be cleared still spawned"
+  assert_contains "$out" "probe input could not be cleared" \
+    "the refusal did not report the uncleared input line the cmux adapter signalled"
+  assert_not_contains "$out" "send path is failing" \
+    "an uncleared-input failure fell through to the retryable send-channel path"
+  assert_not_contains "$out" "never confirmed it can read a command line" \
+    "an uncleared-input failure was reported with the pane-shell timeout message"
+  assert_not_contains "$out" "spawned $id" "spawn reported success despite uncleared pane input"
+  # Terminal on sight: exactly one probe was typed, so no second probe could be
+  # concatenated onto the line the adapter could not clear.
+  [ "$(delivered_prefix_count 'literal touch ')" = 1 ] \
+    || fail "the gate typed $(delivered_prefix_count 'literal touch ') probes into a pane whose input it could not clear, instead of refusing on sight"
+  pass "an uncleared-input send failure is terminal on sight on the adapters that define it"
+}
+
 # The bounded retry must count CONSECUTIVE failures. This is the gate's own target
 # scenario: a pane eating every probe's leading bytes while the channel itself is
 # merely intermittent. Two hiccups separated by delivered probes must still be
@@ -549,6 +644,7 @@ test_healthy_shell_pays_one_probe_per_gate
 test_misconfigured_budget_knob_falls_back_to_its_default
 test_broken_send_channel_refuses_on_the_channel_not_the_pane
 test_status_2_is_not_read_as_uncleared_input_on_tmux
+test_uncleared_probe_input_is_terminal_on_cmux
 test_intermittent_send_hiccups_still_refuse_on_the_pane
 test_unusable_tmpdir_falls_back_instead_of_refusing
 test_fixture_bypass_is_explicit

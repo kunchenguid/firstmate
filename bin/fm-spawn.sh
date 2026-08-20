@@ -160,7 +160,13 @@
 #   not interrupt-free end to end, though: the zellij and cmux send_text_line
 #   adapters clear their own failed submit with C-c, and gating both first sends
 #   roughly doubles the number of send_text_line calls that can reach that
-#   pre-existing adapter path.
+#   pre-existing adapter path. Every gate refusal names the window to inspect and
+#   says the created pane survives, because nothing here removes it.
+#   Known residual: on the herdr presentation-projection path both gates run
+#   while this session's presentation-order lock is held, so an unresponsive pane
+#   can add up to two full poll budgets to that hold window. A concurrent herdr
+#   spawn that cannot acquire the lock meanwhile takes the same documented path it
+#   already does, warning once and falling back to the flat layout.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -2330,12 +2336,12 @@ spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
         send_failures=$((send_failures + 1))
         if [ "$send_status" -eq 2 ] && { [ "$BACKEND" = zellij ] || [ "$BACKEND" = cmux ]; }; then
           spawn_ready_cleanup
-          echo "error: shell-readiness probe input could not be cleared on $target for task $ID; refusing to send '$about'" >&2
+          echo "error: shell-readiness probe input could not be cleared on $target for task $ID; refusing to send '$about' - inspect window $T, which survives this refusal and is left for you to clean up" >&2
           return 1
         fi
         if [ "$send_failures" -ge 2 ]; then
           spawn_ready_cleanup
-          echo "error: the send channel for task $ID's endpoint $target failed the shell-readiness probe $send_failures times in a row (last status $send_status), so probes are no longer reaching the pane; refusing to send '$about' - the endpoint's send path is failing, not its shell" >&2
+          echo "error: the send channel for task $ID's endpoint $target failed the shell-readiness probe $send_failures times in a row (last status $send_status), so probes are no longer reaching the pane; refusing to send '$about' - the endpoint's send path is failing, not its shell; inspect window $T, which survives this refusal and is left for you to clean up" >&2
           return 1
         fi
       else
@@ -2350,7 +2356,7 @@ spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
     sleep "$interval"
   done
   spawn_ready_cleanup
-  echo "error: task $ID's pane shell never confirmed it can read a command line ($sends probes over $polls polls at ${interval}s on $target); refusing to send '$about' into a pane that may silently drop its leading bytes" >&2
+  echo "error: task $ID's pane shell never confirmed it can read a command line ($sends probes over $polls polls at ${interval}s on $target); refusing to send '$about' into a pane that may silently drop its leading bytes; inspect window $T, which survives this refusal and is left for you to clean up" >&2
   return 1
 }
 
