@@ -13,13 +13,19 @@ const [harness, worktree, startedAt] = process.argv.slice(2);
 const startedMs = Date.parse(startedAt);
 const emptyUsage = { inputTokens: null, outputTokens: null, cost: null, currency: null };
 
-function emit(inputTokens, outputTokens, wallSeconds) {
+// usageSource explains WHY usage is null so the terminal records unavailable
+// usage explicitly rather than silently omitting it. "recorded" means token
+// totals were read from a verified durable session log; the other values name
+// the specific reason no token count is present.
+function emit(inputTokens, outputTokens, wallSeconds, usageSource) {
   const hasUsage = Number.isFinite(inputTokens) && Number.isFinite(outputTokens);
+  const source = usageSource || (hasUsage ? "recorded" : "session-not-found");
   process.stdout.write(`${JSON.stringify({
     usage: hasUsage
       ? { inputTokens, outputTokens, cost: null, currency: null }
       : emptyUsage,
     wallSeconds: Number.isFinite(wallSeconds) && wallSeconds >= 0 ? wallSeconds : null,
+    usageSource: source,
   })}\n`);
 }
 
@@ -258,15 +264,26 @@ if (!harness || !worktree || !Number.isFinite(startedMs) || !path.isAbsolute(wor
 }
 
 let observation = {};
+let harnessSource = "session-not-found";
 try {
-  if (harness === "codex") observation = codexUsage();
-  else if (harness === "claude") observation = claudeUsage();
-  else if (harness === "pi" || harness === "pi-signed") observation = piUsage();
-  else if (harness === "opencode") observation = await opencodeUsage();
-  // Grok and Kimi have no locally verified durable usage-log surface. Returning
-  // absent data is safer than parsing their rendered TUI or guessing a path.
+  if (harness === "codex") { observation = codexUsage(); }
+  else if (harness === "claude") { observation = claudeUsage(); }
+  else if (harness === "pi" || harness === "pi-signed") { observation = piUsage(); }
+  else if (harness === "opencode") { observation = await opencodeUsage(); }
+  else { harnessSource = "no-verified-source"; }
 } catch {
   observation = {};
+  // A verified source exists for this harness but the read itself failed; keep
+  // the default session-not-found unless the harness has no source at all.
+  if (["grok", "kimi", "cursor-agent"].includes(harness)) harnessSource = "no-verified-source";
 }
 
-emit(observation.inputTokens, observation.outputTokens, observation.wallSeconds);
+const matched = Number.isFinite(observation.inputTokens) && Number.isFinite(observation.outputTokens);
+// A session whose meta line matched this attempt reports its active duration
+// even when the harness never wrote a token total, so wallSeconds is what
+// distinguishes "the session was read and exposed no tokens" from "no session
+// matched at all". Naming them apart keeps the renewal join from reading a
+// harness-capability gap as a teardown-timing one.
+const sessionWithoutTokens = !matched && Number.isFinite(observation.wallSeconds);
+emit(observation.inputTokens, observation.outputTokens, observation.wallSeconds,
+  matched ? "recorded" : (sessionWithoutTokens ? "session-matched-no-tokens" : harnessSource));

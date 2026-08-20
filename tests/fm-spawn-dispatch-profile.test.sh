@@ -210,6 +210,8 @@ test_routing_source_recorded_only_when_declared() {
   status=$?
   expect_code 0 "$status" "spawn with --routing-source fallback should succeed"
   assert_grep "routing_source=fallback" "$HOME_DIR/state/$id.meta" "meta missing routing_source=fallback"
+  jq -es 'map(select(.eventType=="attempt-intake")) | .[0].intake.selection.routingSource=="fallback"' "$HOME_DIR/data/routing-outcomes.jsonl" >/dev/null \
+    || fail "the declared routing source was not written into the intake row's selection"
 
   id=profile-routing-source-z30
   rec=$(make_spawn_case routing-source-absent codex "$id")
@@ -231,6 +233,128 @@ test_routing_source_recorded_only_when_declared() {
   [ ! -s "$LAUNCH_LOG" ] || fail "invalid routing source reached launch submission"
   assert_absent "$HOME_DIR/state/$id.meta" "invalid routing source published task metadata"
   pass "--routing-source records provenance in meta, stays absent when undeclared, and refuses unknown values"
+}
+
+test_spawn_writes_routing_facts_into_intake() {
+  local rec id out status sel long_reason long_family long_provider empty_flag row
+  id=profile-intake-facts-z2a
+  rec=$(make_spawn_case intake-facts codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort high --routing-source profile \
+    --dispatch-provider openai --dispatch-model-family gpt-5 --dispatch-resolved)
+  status=$?
+  expect_code 0 "$status" "spawn with full routing-facts flags should succeed"
+  sel=$(jq -es 'map(select(.eventType=="attempt-intake")) | .[0].intake.selection' "$HOME_DIR/data/routing-outcomes.jsonl")
+  printf '%s' "$sel" | jq -e '.routingSource=="profile" and .dispatchModelFamily=="gpt-5" and .dispatchAttestation.kind=="resolved"' >/dev/null \
+    || fail "the intake selection did not carry routingSource, dispatchModelFamily, and a resolved dispatchAttestation: $sel"
+  jq -es 'map(select(.eventType=="attempt-intake")) | .[0].intake.tuple.provider=="openai"' "$HOME_DIR/data/routing-outcomes.jsonl" >/dev/null \
+    || fail "the intake tuple did not carry the dispatch provider axis"
+
+  # An override attestation carries its reason into the intake row.
+  id=profile-intake-override-z2b
+  rec=$(make_spawn_case intake-override codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort high --routing-source captain \
+    --dispatch-provider openai --dispatch-model-family gpt-5 \
+    --dispatch-override-reason "captain raised the spend limit")
+  status=$?
+  expect_code 0 "$status" "spawn with an override attestation should succeed"
+  sel=$(jq -es 'map(select(.eventType=="attempt-intake")) | .[0].intake.selection' "$HOME_DIR/data/routing-outcomes.jsonl")
+  printf '%s' "$sel" | jq -e '.routingSource=="captain" and .dispatchAttestation.kind=="override" and .dispatchAttestation.reason=="captain raised the spend limit"' >/dev/null \
+    || fail "the intake selection did not carry the override attestation and its reason: $sel"
+
+  # A spawn with no dispatch axes leaves the additive fields absent so the
+  # intake row stays the base five-key selection (backward compatible).
+  id=profile-intake-bare-z2c
+  rec=$(make_spawn_case intake-bare codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "a bare spawn without dispatch axes should succeed"
+  sel=$(jq -es 'map(select(.eventType=="attempt-intake")) | .[0].intake.selection' "$HOME_DIR/data/routing-outcomes.jsonl")
+  printf '%s' "$sel" | jq -e '(has("routingSource")|not) and (has("dispatchAttestation")|not) and (has("dispatchModelFamily")|not)' >/dev/null \
+    || fail "a bare spawn added additive routing-provenance fields it did not have evidence for: $sel"
+  printf '%s' "$sel" | jq -e '.matchedRule==null and (.quota.decision=="unknown") and (.quota.headroom=="unknown") and (.quota.runway=="unknown")' >/dev/null \
+    || fail "a bare spawn changed the base selection facts it should still default: $sel"
+
+  # matched-rule and quota facts are written when firstmate passes them.
+  id=profile-intake-quota-z2d
+  rec=$(make_spawn_case intake-quota codex "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-5 --effort high --routing-source profile \
+    --dispatch-provider openai --dispatch-model-family gpt-5 --dispatch-resolved \
+    --matched-rule rule-3 --quota-decision selected --quota-headroom tight --quota-runway sufficient)
+  status=$?
+  expect_code 0 "$status" "spawn with matched-rule and quota facts should succeed"
+  sel=$(jq -es 'map(select(.eventType=="attempt-intake")) | .[0].intake.selection' "$HOME_DIR/data/routing-outcomes.jsonl")
+  printf '%s' "$sel" | jq -e '.matchedRule=="rule-3" and .quota.decision=="selected" and .quota.headroom=="tight" and .quota.runway=="sufficient"' >/dev/null \
+    || fail "the intake selection did not carry the matched-rule and quota facts: $sel"
+  assert_grep "matched_rule=rule-3" "$HOME_DIR/state/$id.meta" "meta missing matched_rule=rule-3"
+  assert_grep "quota_decision=selected" "$HOME_DIR/state/$id.meta" "meta missing quota_decision=selected"
+  assert_grep "quota_headroom=tight" "$HOME_DIR/state/$id.meta" "meta missing quota_headroom=tight"
+
+  # An invalid matched-rule or quota value is refused before launch.
+  id=profile-intake-bad-rule-z2e
+  rec=$(make_spawn_case intake-bad-rule codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort high --matched-rule vibes)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted an invalid --matched-rule"
+  assert_contains "$out" "--matched-rule must be 'default' or 'rule-<n>'" "invalid matched-rule refusal did not name the contract"
+  id=profile-intake-bad-quota-z2f
+  rec=$(make_spawn_case intake-bad-quota codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort high --quota-decision maybe)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted an invalid --quota-decision"
+  assert_contains "$out" "--quota-decision must be one of" "invalid quota-decision refusal did not name the contract"
+
+  # An empty value is a caller that computed nothing, not a caller that omitted
+  # the flag, and every sibling flag refuses it rather than recording "unknown".
+  for empty_flag in --matched-rule --quota-headroom --quota-runway; do
+    id="profile-intake-empty${empty_flag//--/-}-z2h"
+    rec=$(make_spawn_case "intake-empty${empty_flag//--/-}" codex "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --harness codex --model gpt-5 --effort high "$empty_flag" "")
+    status=$?
+    expect_code 1 "$status" "spawn accepted an empty $empty_flag"
+    assert_contains "$out" "$empty_flag requires a non-empty value" "the empty $empty_flag refusal did not name the contract"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "an empty $empty_flag published task metadata"
+    row=$(jq -c 'select(.eventType=="spawn-failure")' "$HOME_DIR/data/routing-outcomes.jsonl" 2>/dev/null | head -n1)
+    [ -n "$row" ] || fail "an empty $empty_flag left no spawn-failure row while its siblings record one"
+    printf '%s' "$row" | jq -e --arg f "$empty_flag" '.failure.failureKind=="validation" and (.failure.cause|test($f))' >/dev/null \
+      || fail "the empty $empty_flag refusal did not record its exact cause: $row"
+  done
+
+  # The ledger bounds the dispatch axes it stores, and nothing upstream bounds
+  # what a captain types, so an over-long value must be recorded within the cap
+  # rather than wedging a spawn that would otherwise have launched.
+  id=profile-intake-long-axes-z2g
+  rec=$(make_spawn_case intake-long-axes codex "$id")
+  read_case_record "$rec"
+  long_reason=$(printf 'r%.0s' $(seq 1 200))
+  long_family=$(printf 'f%.0s' $(seq 1 120))
+  long_provider=$(printf 'p%.0s' $(seq 1 120))
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-5 --effort high --routing-source captain \
+    --dispatch-provider "$long_provider" --dispatch-model-family "$long_family" \
+    --dispatch-override-reason "$long_reason")
+  status=$?
+  expect_code 0 "$status" "an over-long dispatch axis wedged a spawn that should have launched: $out"
+  sel=$(jq -es 'map(select(.eventType=="attempt-intake")) | .[0].intake' "$HOME_DIR/data/routing-outcomes.jsonl")
+  printf '%s' "$sel" | jq -e '(.selection.dispatchAttestation.reason|length)==160 and (.selection.dispatchModelFamily|length)==96 and (.tuple.provider|length)==96' >/dev/null \
+    || fail "the intake row did not carry the dispatch axes within the caps the ledger enforces: $sel"
+  printf '%s' "$sel" | jq -e '.selection.dispatchAttestation.kind=="override" and (.selection.dispatchAttestation.reason|test("^r+$"))' >/dev/null \
+    || fail "the clamped attestation lost the reason it was recording: $sel"
+  pass "fm-spawn writes routingSource, dispatch axes, and the dispatch attestation into the intake row, and omits them when absent"
 }
 
 test_recorded_default_axes_respawn_as_unset() {
@@ -1796,7 +1920,259 @@ test_cooldown_protects_the_static_crew_harness_path() {
   pass "a durable cooldown suppresses the static crew-harness path with no dispatch profile active"
 }
 
+# A pre-launch refusal must record a spawn-failure event into the routing
+# telemetry ledger so login or credential rot is visible per pool/model/task-type
+# with the exact cause. The capture is best-effort and never changes the spawn's
+# own exit code. RED evidence is structural: the base fm-spawn has no
+# fm_record_spawn_failure helper and its cooldown block only runs
+# `exit "$cooldown_status"`, so no spawn-failure row can be appended; the
+# companion telemetry test proves the base ledger rejects the spawn-failure
+# command outright as "unknown command spawn-failure".
+test_quota_cooldown_refusal_records_spawn_failure() {
+  local rec id out status row ledger
+  id=profile-cooldown-spawn-failure-z45
+  rec=$(make_spawn_case profile-cooldown-spawn-failure claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch_family_cooldown "$HOME_DIR" glm 2026-09-14T00:00:00Z \
+    || fail "could not seed active dispatch cooldown"
+  out=$(FM_QUOTA_COOLDOWN_NOW=2026-08-16T12:05:00Z \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness cursor-agent --model glm-4.5 --effort high \
+    --routing-source profile \
+    --dispatch-provider cursor --dispatch-model-family glm --dispatch-resolved)
+  status=$?
+  expect_code 3 "$status" "cooled spawn should still exit 3 (telemetry never changes the exit code)"
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  row=$(jq -c 'select(.eventType=="spawn-failure")' "$ledger" 2>/dev/null | head -n1)
+  [ -n "$row" ] || fail "no spawn-failure row was recorded for the cooldown refusal"
+  printf '%s' "$row" | jq -e '.failure.failureKind=="quota" and .failure.quotaReader=="available" and .failure.capability=="unknown"' >/dev/null \
+    || fail "spawn-failure row did not classify real quota exhaustion (quota/available/unknown): $row"
+  printf '%s' "$row" | jq -e '(.failure.cause|type=="string" and length>=1)' >/dev/null \
+    || fail "spawn-failure row did not carry the exact cause: $row"
+  printf '%s' "$row" | jq -e '.failure.tuple.harness=="cursor-agent" and .failure.tuple.model=="glm-4.5" and .failure.routingSource=="profile" and .failure.dispatchAttestation.kind=="resolved" and .failure.dispatchModelFamily=="glm"' >/dev/null \
+    || fail "spawn-failure row did not carry the routing axes of the refused spawn: $row"
+  # The refused spawn never produced an attempt-intake row.
+  if jq -es 'any(.eventType=="attempt-intake")' "$ledger" >/dev/null; then
+    fail "a cooled spawn recorded an attempt-intake row (it should stop before any attempt)"
+  fi
+  pass "a quota cooldown refusal records a spawn-failure row with the exact cause"
+}
+
+# A quota-READ credential gap (quota-axi reports kimi_code_cli_credential_expired)
+# must record failureKind=quota-reader with capability=unknown (NOT unsupported)
+# and quotaReader=credential-expired, so the pool is never falsely marked
+# undispatchable by a reader gap. Standalone Kimi dispatch is supported; only
+# its quota-read credential is expired. RED evidence is structural: the base
+# fm-spawn has no fm_classify_cooldown_refusal helper, so a credential-expired
+# cooldown would be recorded as failureKind=quota (falsely conflating a reader
+# gap with quota exhaustion).
+test_quota_reader_gap_records_spawn_failure_separately() {
+  local rec id out status row ledger
+  id=profile-cooldown-reader-gap-z46
+  rec=$(make_spawn_case profile-cooldown-reader-gap claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  FM_HOME="$HOME_DIR" FM_QUOTA_COOLDOWN_NOW=2026-08-16T12:00:00Z \
+    "$COOLDOWN" record --scope model-family --harness kimi \
+    --provider moonshot --model-family kimi \
+    --evidence-kind quota-axi \
+    --evidence "kimi_code_cli_credential_expired" \
+    --expires-at 2026-09-14T00:00:00Z >/dev/null \
+    || fail "could not seed a quota-reader credential-expired cooldown"
+  out=$(FM_QUOTA_COOLDOWN_NOW=2026-08-16T12:05:00Z \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness kimi --model kimi-k2 --effort high \
+    --routing-source profile \
+    --dispatch-provider moonshot --dispatch-model-family kimi --dispatch-resolved)
+  status=$?
+  expect_code 3 "$status" "a quota-reader-gap cooldown should still exit 3 (telemetry never changes the exit code)"
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  row=$(jq -c 'select(.eventType=="spawn-failure")' "$ledger" 2>/dev/null | head -n1)
+  [ -n "$row" ] || fail "no spawn-failure row was recorded for the quota-reader gap"
+  printf '%s' "$row" | jq -e '.failure.failureKind=="quota-reader" and .failure.quotaReader=="credential-expired" and .failure.capability=="unknown"' >/dev/null \
+    || fail "quota-reader gap was not recorded separately from spawn capability: $row"
+  # A quota-read login gap must never mark the pool undispatchable.
+  printf '%s' "$row" | jq -e '.failure.capability!="unsupported"' >/dev/null \
+    || fail "a quota-reader gap falsely marked the pool unsupported (undispatchable): $row"
+  printf '%s' "$row" | jq -e '(.failure.cause|test("kimi_code_cli_credential_expired"))' >/dev/null \
+    || fail "spawn-failure row did not carry the exact credential-expired cause: $row"
+  pass "a quota-reader credential gap records spawn-failure separately from spawn capability"
+}
+
+# A refusal raised while the arguments are still being parsed runs before the
+# task id has been resolved from the positionals, and `set -u` is active the
+# whole time. Such a refusal must still record its spawn-failure row, keep its
+# own exit code, and never leak a shell diagnostic into the message the caller
+# reads.
+test_parse_time_validation_refusal_records_spawn_failure() {
+  local rec id out status row ledger
+  id=profile-parse-refusal-z47
+  rec=$(make_spawn_case profile-parse-refusal claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high \
+    --routing-source profile --dispatch-resolved --quota-decision vibes)
+  status=$?
+  expect_code 1 "$status" "an invalid --quota-decision should still exit 1"
+  assert_contains "$out" "--quota-decision must be one of" "the refusal did not name the rejected value"
+  case "$out" in
+    *"unbound variable"*) fail "a parse-time refusal leaked a shell diagnostic: $out" ;;
+  esac
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  row=$(jq -c 'select(.eventType=="spawn-failure")' "$ledger" 2>/dev/null | head -n1)
+  [ -n "$row" ] || fail "no spawn-failure row was recorded for the parse-time validation refusal"
+  printf '%s' "$row" | jq -e '.failure.failureKind=="validation" and (.failure.cause|test("--quota-decision"))' >/dev/null \
+    || fail "the parse-time refusal did not record its exact cause: $row"
+  # The pool axis is the point of the row: a model and effort with no harness
+  # cannot be attributed to the subscription that refused the spawn.
+  printf '%s' "$row" | jq -e '.failure.tuple.harness=="codex" and .failure.tuple.model=="gpt-5" and .failure.tuple.effort=="high"' >/dev/null \
+    || fail "the parse-time refusal lost the declared harness axis: $row"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused spawn published task metadata"
+  # Every flag guard in this block is a refusal class the read surface must see;
+  # a refusal that exits silently is invisible next to its byte-adjacent sibling.
+  id=profile-parse-refusal-runway-z50
+  rec=$(make_spawn_case profile-parse-refusal-runway claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high \
+    --routing-source profile --dispatch-resolved --quota-runway vibes)
+  status=$?
+  expect_code 1 "$status" "an invalid --quota-runway should still exit 1"
+  assert_contains "$out" "--quota-runway must be one of" "the refusal did not name the rejected value"
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  row=$(jq -c 'select(.eventType=="spawn-failure")' "$ledger" 2>/dev/null | head -n1)
+  [ -n "$row" ] || fail "a --quota-runway refusal left no spawn-failure row while its siblings record one"
+  printf '%s' "$row" | jq -e '.failure.failureKind=="validation" and (.failure.cause|test("--quota-runway")) and .failure.tuple.harness=="codex"' >/dev/null \
+    || fail "the --quota-runway refusal did not record its exact cause and pool: $row"
+  # The axes a parse-time refusal has not validated yet must not take the whole
+  # row down with them: an operator typo on --effort or --task-class is exactly
+  # the refusal the ledger exists to make visible.
+  id=profile-parse-refusal-axes-z51
+  rec=$(make_spawn_case profile-parse-refusal-axes claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort ultra --task-class vibes \
+    --account-profile work --routing-source profile --dispatch-resolved --quota-decision vibes)
+  status=$?
+  expect_code 1 "$status" "an invalid --quota-decision should still exit 1 alongside unvalidated axes"
+  case "$out" in
+    *"spawn-failure telemetry could not be recorded"*) fail "unvalidated axes dropped the refusal row: $out" ;;
+  esac
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  row=$(jq -c 'select(.eventType=="spawn-failure")' "$ledger" 2>/dev/null | head -n1)
+  [ -n "$row" ] || fail "no spawn-failure row survived the unvalidated effort, task-class, and account-profile axes"
+  printf '%s' "$row" | jq -e '.failure.tuple.harness=="codex" and .failure.tuple.model=="gpt-5" and (.failure.cause|test("--quota-decision"))' >/dev/null \
+    || fail "the refusal lost the axes it could vouch for: $row"
+  # An axis fm-spawn cannot vouch for is named as unknown, never invented.
+  printf '%s' "$row" | jq -e '.failure.tuple.effort=="default" and .failure.taskClass=="unresolved" and (.failure.tuple|has("accountProfile")|not)' >/dev/null \
+    || fail "an unvalidated axis was recorded verbatim instead of being named unknown: $row"
+  # The refused axis is itself one the schema constrains, so the row for its own
+  # refusal must not be the one the ledger throws away.
+  id=profile-parse-refusal-routing-z52
+  rec=$(make_spawn_case profile-parse-refusal-routing claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high --routing-source vibes)
+  status=$?
+  expect_code 1 "$status" "an invalid --routing-source should still exit 1"
+  assert_contains "$out" "--routing-source must be one of" "the refusal did not name the rejected value"
+  case "$out" in
+    *"spawn-failure telemetry could not be recorded"*) fail "the --routing-source refusal dropped its own row: $out" ;;
+  esac
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  row=$(jq -c 'select(.eventType=="spawn-failure")' "$ledger" 2>/dev/null | head -n1)
+  [ -n "$row" ] || fail "no spawn-failure row was recorded for the rejected --routing-source"
+  printf '%s' "$row" | jq -e '.failure.failureKind=="validation" and (.failure.cause|test("--routing-source")) and .failure.routingSource==null and .failure.tuple.harness=="codex"' >/dev/null \
+    || fail "the --routing-source refusal did not record its cause with the rejected axis named unknown: $row"
+  pass "a parse-time validation refusal records a spawn-failure row and keeps its exit code"
+}
+
+# --matched-rule feeds the intake schema, which accepts only 'default' or
+# 'rule-<n>'. The parse-time guard must enforce that same shape: a looser guard
+# lets the spawn run to completion before the schema refuses it, records no
+# spawn-failure row for it, and leaves state/<id>.meta - one key=value per line,
+# every reader taking the LAST match - open to a forged line.
+test_matched_rule_guard_matches_the_intake_schema() {
+  local rec id out status row ledger
+  id=profile-matched-rule-z49
+  rec=$(make_spawn_case profile-matched-rule claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high \
+    --routing-source profile --dispatch-resolved --matched-rule rule-3x)
+  status=$?
+  expect_code 1 "$status" "a --matched-rule outside the schema shape should be refused at parse time"
+  assert_contains "$out" "--matched-rule must be" "the refusal did not name the rejected flag"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a rule id the schema rejects still reached harness submission"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused spawn published task metadata"
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  row=$(jq -c 'select(.eventType=="spawn-failure")' "$ledger" 2>/dev/null | head -n1)
+  [ -n "$row" ] || fail "no spawn-failure row was recorded for the rejected --matched-rule"
+  printf '%s' "$row" | jq -e '.failure.failureKind=="validation" and (.failure.cause|test("--matched-rule"))' >/dev/null \
+    || fail "the --matched-rule refusal did not record its exact cause: $row"
+  # A rule id carrying a newline would forge a later meta line; the flag's own
+  # guard must reject it rather than resting on a downstream ordering accident.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high \
+    --routing-source profile --dispatch-resolved --matched-rule "rule-1
+worktree=/tmp/forged")
+  status=$?
+  expect_code 1 "$status" "a multi-line --matched-rule should be refused at parse time"
+  assert_contains "$out" "--matched-rule must be" "the multi-line refusal did not name the rejected flag"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a multi-line rule id published task metadata"
+  # A multi-digit rule id is schema-valid, so the tightened guard must still let
+  # it through to the intake row the schema itself validates.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high \
+    --routing-source profile --dispatch-resolved --matched-rule rule-12)
+  status=$?
+  expect_code 0 "$status" "a schema-valid rule id should still spawn: $out"
+  row=$(jq -es 'map(select(.eventType=="attempt-intake")) | .[0].intake.selection' "$ledger")
+  printf '%s' "$row" | jq -e '.matchedRule=="rule-12"' >/dev/null \
+    || fail "the accepted rule id did not reach the intake selection: $row"
+  pass "--matched-rule is validated at parse time against the shape the intake schema requires"
+}
+
+# The ledger caps a spawn-failure cause at 512 characters, and a cooldown
+# refusal carries the stored provider-refusal quote verbatim - a quote the
+# cooldown owner does not bound. An oversized quote must still be recorded
+# (truncated) rather than dropped, because that is exactly the credential- or
+# quota-rot event the ledger exists to make visible.
+test_oversized_cooldown_evidence_is_recorded_truncated() {
+  local rec id out status row ledger quote
+  id=profile-cooldown-long-evidence-z48
+  rec=$(make_spawn_case profile-cooldown-long-evidence claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  quote="You've hit your usage limit for glm; resets 9/14/2026 $(printf 'x%.0s' $(seq 1 600))"
+  FM_HOME="$HOME_DIR" FM_QUOTA_COOLDOWN_NOW=2026-08-16T12:00:00Z \
+    "$COOLDOWN" record --scope model-family --harness cursor-agent \
+    --provider cursor --model-family glm \
+    --evidence-kind provider-refusal \
+    --evidence "$quote" \
+    --expires-at 2026-09-14T00:00:00Z >/dev/null \
+    || fail "could not seed a cooldown carrying an unbounded evidence quote"
+  out=$(FM_QUOTA_COOLDOWN_NOW=2026-08-16T12:05:00Z \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness cursor-agent --model glm-4.5 --effort high \
+    --routing-source profile \
+    --dispatch-provider cursor --dispatch-model-family glm --dispatch-resolved)
+  status=$?
+  expect_code 3 "$status" "a cooled spawn should still exit 3 with an oversized evidence quote"
+  case "$out" in
+    *"spawn-failure telemetry could not be recorded"*) fail "an oversized cause was dropped instead of truncated: $out" ;;
+  esac
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  row=$(jq -c 'select(.eventType=="spawn-failure")' "$ledger" 2>/dev/null | head -n1)
+  [ -n "$row" ] || fail "an oversized cooldown evidence quote dropped the spawn-failure row entirely"
+  printf '%s' "$row" | jq -e '.failure.failureKind=="quota" and (.failure.cause|length)<=512 and (.failure.cause|test("usage limit"))' >/dev/null \
+    || fail "the oversized cause was not truncated to the recordable cap: $row"
+  pass "an oversized cooldown evidence quote is truncated into the ledger, never dropped"
+}
+
 test_routing_source_recorded_only_when_declared
+test_spawn_writes_routing_facts_into_intake
 test_recorded_default_axes_respawn_as_unset
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
@@ -1819,6 +2195,11 @@ test_no_profile_does_not_require_attestation
 test_active_profile_batch_forwards_resolved_attestation
 test_active_profile_batch_refuses_without_attestation
 test_active_quota_cooldown_suppresses_resolved_spawn
+test_quota_cooldown_refusal_records_spawn_failure
+test_quota_reader_gap_records_spawn_failure_separately
+test_parse_time_validation_refusal_records_spawn_failure
+test_matched_rule_guard_matches_the_intake_schema
+test_oversized_cooldown_evidence_is_recorded_truncated
 test_expired_and_sibling_cooldowns_do_not_suppress_spawn
 test_captain_override_dispatches_cooled_tuple_and_updates_record
 test_missing_axis_refusal_names_the_flags_spawn_accepts

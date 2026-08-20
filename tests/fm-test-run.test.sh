@@ -112,7 +112,8 @@ init_changed_fixture_repo() {
     fm-bearings-snapshot.test.sh \
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
-    fm-backend-orca.test.sh; do
+    fm-backend-orca.test.sh \
+    fm-model-usage.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
@@ -126,6 +127,7 @@ init_changed_fixture_repo() {
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-launch-axis-lib.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/fm-model-usage.mjs"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -175,6 +177,12 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-brief.test.sh" "launch-axis changes select pure contract coverage"
   git -C "$repo" add bin/fm-launch-axis-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm launch-axis-change
+
+  printf '\n' >>"$repo/bin/fm-model-usage.mjs"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-model-usage.test.sh" "usage reader changes select their own contract coverage"
+  git -C "$repo" add bin/fm-model-usage.mjs
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm usage-reader-change
 
   printf '\n' >>"$repo/bin/fm-fixture-shared.sh"
   set +e

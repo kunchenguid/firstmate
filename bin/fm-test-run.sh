@@ -167,7 +167,7 @@ family_for_basename() {
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|fm-macos-scope.test.sh|\
-    fm-model-telemetry.test.sh|fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
+    fm-model-telemetry.test.sh|fm-model-usage.test.sh|fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-ci-water7.test.sh|fm-install-chrome.test.sh|\
     fm-quota-utilization.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\

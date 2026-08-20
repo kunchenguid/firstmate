@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--exploration] [--backend <name>] [--routing-source <captain|profile|fallback>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--backend <name>] [--routing-source <captain|profile|fallback>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--exploration] [--backend <name>] [--routing-source <captain|profile|fallback>] [--matched-rule <default|rule-<n>>] [--quota-decision <selected|stopped|not-applicable|unknown>] [--quota-headroom <sufficient|tight|exhausted|unmeasurable|unknown>] [--quota-runway <sufficient|tight|exhausted|unmeasurable|unknown>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--backend <name>] [--routing-source <captain|profile|fallback>] [--matched-rule <default|rule-<n>>] [--quota-decision <selected|stopped|not-applicable|unknown>] [--quota-headroom <sufficient|tight|exhausted|unmeasurable|unknown>] [--quota-runway <sufficient|tight|exhausted|unmeasurable|unknown>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -141,6 +141,12 @@
 #   to bin/fm-quota-cooldown.sh authorize before any endpoint or task metadata
 #   exists, and relays its refusal status verbatim. That script owns which
 #   candidate is refused, which axes it demands, and how an override is recorded.
+#   --matched-rule, --quota-decision, --quota-headroom, and --quota-runway carry
+#   the routing-decision facts firstmate already has (the rule id and the
+#   quota-axi reading that informed the choice) into the intake row, so the
+#   telemetry join can report per-subscription quota utilization. fm-spawn
+#   writes only what is passed and omits the rest, so a no-profile or legacy
+#   spawn stays byte-identical to before.
 #   A --secondmate spawn is exempt and resolves the SECONDMATE harness
 #   (config/secondmate-harness -> config/crew-harness
 #   -> own), so the secondmate-vs-crewmate split is DURABLE across every respawn
@@ -296,6 +302,105 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
+
+# Record a pre-launch spawn refusal into the routing telemetry ledger so login
+# or credential rot is visible per pool/model/task-type with the exact cause.
+# Best-effort: a telemetry failure never changes the spawn's own exit code or
+# blocks delivery. Called only at refusal points that already decided to exit;
+# the caller still owns the exit code and message.
+fm_record_spawn_failure() {
+  local kind=$1 cause=$2 capability=${3:-unknown} quota_reader=${4:-not-applicable} payload task_id harness
+  local effort_axis task_class account_profile routing_axis
+  [ -n "${FM_HOME:-}" ] || return 0
+  [ -n "${STATE:-}" ] || return 0
+  # Parse-time refusals happen before ID is resolved, so fall back to the first
+  # positional; a batch positional is "<id>=<repo>".
+  task_id=${ID:-}
+  if [ -z "$task_id" ]; then
+    task_id=${POS[0]:-}
+    task_id=${task_id%%=*}
+  fi
+  fm_task_id_creation_valid "$task_id" || return 0
+  [ -n "$kind" ] || [ -n "$cause" ] || return 0
+  # HARNESS is resolved long after the parse-time refusals, so fall back to the
+  # declared --harness. A raw launch command carries spaces and would fail the
+  # ledger's harness whitelist, dropping the whole row, so keep those "unknown".
+  harness=${HARNESS:-}
+  if [ -z "$harness" ]; then
+    case "${HARNESS_ARG:-}" in
+      ''|*[!A-Za-z0-9._:-]*) ;;
+      *) if [ "${#HARNESS_ARG}" -le 96 ]; then harness=$HARNESS_ARG; fi ;;
+    esac
+  fi
+  case "$capability" in supported|unsupported|unknown) ;; *) capability=unknown ;; esac
+  case "$quota_reader" in available|credential-expired|not-applicable|unknown) ;; *) quota_reader=not-applicable ;; esac
+  # A parse-time refusal can fire before --effort, --task-class, --model, and
+  # --account-profile have been validated, and the ledger refuses the whole row
+  # on any one of them. Name the axes we cannot vouch for rather than lose the
+  # refusal the ledger exists to make visible.
+  effort_axis=${EFFORT:-}
+  case "$effort_axis" in ''|low|medium|high|xhigh|max|default) ;; *) effort_axis=default ;; esac
+  task_class=${TASK_CLASS:-unresolved}
+  case "$task_class" in
+    ''|rote-reversible-edit|bounded-implementation-proven-root-fix|unknown-root-diagnosis) ;;
+    adversarial-review-security-review|evidence-heavy-research|long-horizon-repository-work) ;;
+    visual-browser-sensitive-work|documentation-specification-decision-extraction) ;;
+    external-wait-integration-work|unresolved) ;;
+    *) task_class=unresolved ;;
+  esac
+  account_profile=${ACCOUNT_PROFILE:-}
+  if [ "$harness" != claude ] || ! fm_claude_account_profile_name_valid "$account_profile"; then
+    account_profile=
+  fi
+  routing_axis=${ROUTING_SOURCE:-}
+  case "$routing_axis" in ''|captain|profile|fallback) ;; *) routing_axis= ;; esac
+  payload=$(jq -cn \
+    --arg attemptedAt "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    --arg harness "$harness" \
+    --arg provider "${DISPATCH_PROVIDER:-}" \
+    --arg model "${MODEL:-}" \
+    --arg effort "$effort_axis" \
+    --arg modelVersion "${TELEMETRY_MODEL_VERSION:-}" \
+    --arg cliVersion "${TELEMETRY_CLI_VERSION:-}" \
+    --arg accountProfile "$account_profile" \
+    --arg taskClass "$task_class" \
+    --arg kind "${kind:-other}" \
+    --arg cause "${cause:-unknown}" \
+    --arg routingSource "$routing_axis" \
+    --arg modelFamily "${DISPATCH_MODEL_FAMILY:-}" \
+    --argjson dispatchResolved "${DISPATCH_RESOLVED:-0}" \
+    --arg overrideReason "${DISPATCH_OVERRIDE_REASON:-}" \
+    --argjson overrideReasonSet "${DISPATCH_OVERRIDE_REASON_SET:-0}" \
+    --arg capability "$capability" \
+    --arg quotaReader "$quota_reader" \
+    'def tuple: {harness:(if $harness=="" then "unknown" else $harness end),provider:(if $provider=="" then null else $provider[0:96] end),model:(if $model=="" then null else $model[0:160] end),effort:(if $effort=="" then "default" else $effort end),modelVersion:(if $modelVersion=="" then null else $modelVersion[0:160] end),cliVersion:(if $cliVersion=="" then null else $cliVersion[0:160] end)} + (if $accountProfile=="" then {} else {accountProfile:$accountProfile} end);
+     def dispatchAttestation: (if $dispatchResolved==1 then {kind:"resolved"} elif $overrideReasonSet==1 and $overrideReason!="" then {kind:"override",reason:$overrideReason[0:160]} else null end);
+     {attemptedAt:$attemptedAt,tuple:tuple,taskClass:(if $taskClass=="" then "unresolved" else $taskClass end),failureKind:$kind,cause:(if ($cause|length)>512 then (($cause[0:509])+"...") else $cause end),routingSource:(if $routingSource=="" then null else $routingSource end),dispatchAttestation:dispatchAttestation,dispatchModelFamily:(if $modelFamily=="" then null else $modelFamily[0:96] end),capability:$capability,quotaReader:$quotaReader}') || return 0
+  if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$FM_ROOT/bin/fm-model-telemetry.sh" spawn-failure --state "$STATE" --task "$task_id" --payload "$payload" >/dev/null 2>&1; then
+    :
+  else
+    echo "warn: spawn-failure telemetry could not be recorded (kind=$kind); the spawn refusal still stands" >&2
+  fi
+}
+
+# Classify a quota-cooldown refusal so a quota-READ credential gap is recorded
+# as failureKind=quota-reader (pool still dispatchable, just can't read its
+# quota) and never as failureKind=quota (real exhaustion) or failureKind=
+# credential (which would falsely mark the pool undispatchable). The cooldown
+# authorize output carries the stored evidence quote; a credential-expiry
+# marker in that quote is the quota-reader gap signal. capability stays
+# "unknown" because fm-spawn does not read config/model-catalog.json (absent
+# in this home), so it never asserts the pool unsupported on a reader gap.
+fm_classify_cooldown_refusal() {
+  local output=$1
+  if printf '%s' "$output" | grep -Eqi 'credential[_ -]?expir|credential_expired|login required|not authenticated'; then
+    printf 'quota-reader|credential-expired|unknown'
+  else
+    printf 'quota|available|unknown'
+  fi
+}
+
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -321,6 +426,14 @@ DISPATCH_PROVIDER=
 DISPATCH_MODEL_FAMILY=
 DISPATCH_PROVIDER_SET=0
 DISPATCH_MODEL_FAMILY_SET=0
+MATCHED_RULE=
+MATCHED_RULE_SET=0
+QUOTA_DECISION=
+QUOTA_HEADROOM=
+QUOTA_RUNWAY=
+QUOTA_DECISION_SET=0
+QUOTA_HEADROOM_SET=0
+QUOTA_RUNWAY_SET=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -354,6 +467,10 @@ for a in "$@"; do
       dispatch-override-reason) DISPATCH_OVERRIDE_REASON=$a; DISPATCH_OVERRIDE_REASON_SET=1 ;;
       dispatch-provider) DISPATCH_PROVIDER=$a; DISPATCH_PROVIDER_SET=1 ;;
       dispatch-model-family) DISPATCH_MODEL_FAMILY=$a; DISPATCH_MODEL_FAMILY_SET=1 ;;
+      matched-rule) MATCHED_RULE=$a; MATCHED_RULE_SET=1 ;;
+      quota-decision) QUOTA_DECISION=$a; QUOTA_DECISION_SET=1 ;;
+      quota-headroom) QUOTA_HEADROOM=$a; QUOTA_HEADROOM_SET=1 ;;
+      quota-runway) QUOTA_RUNWAY=$a; QUOTA_RUNWAY_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -395,6 +512,14 @@ for a in "$@"; do
     --dispatch-provider=*) DISPATCH_PROVIDER=${a#--dispatch-provider=}; DISPATCH_PROVIDER_SET=1 ;;
     --dispatch-model-family) want_value=dispatch-model-family ;;
     --dispatch-model-family=*) DISPATCH_MODEL_FAMILY=${a#--dispatch-model-family=}; DISPATCH_MODEL_FAMILY_SET=1 ;;
+    --matched-rule) want_value=matched-rule ;;
+    --matched-rule=*) MATCHED_RULE=${a#--matched-rule=}; MATCHED_RULE_SET=1 ;;
+    --quota-decision) want_value=quota-decision ;;
+    --quota-decision=*) QUOTA_DECISION=${a#--quota-decision=}; QUOTA_DECISION_SET=1 ;;
+    --quota-headroom) want_value=quota-headroom ;;
+    --quota-headroom=*) QUOTA_HEADROOM=${a#--quota-headroom=}; QUOTA_HEADROOM_SET=1 ;;
+    --quota-runway) want_value=quota-runway ;;
+    --quota-runway=*) QUOTA_RUNWAY=${a#--quota-runway=}; QUOTA_RUNWAY_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -419,7 +544,7 @@ fi
 [ "$ROUTING_SOURCE_SET" -eq 0 ] || [ -n "$ROUTING_SOURCE" ] || { echo "error: --routing-source requires a non-empty value" >&2; exit 1; }
 case "$ROUTING_SOURCE" in
   ''|captain|profile|fallback) ;;
-  *) echo "error: --routing-source must be one of captain, profile, fallback" >&2; exit 1 ;;
+  *) echo "error: --routing-source must be one of captain, profile, fallback" >&2; fm_record_spawn_failure validation "--routing-source must be one of captain, profile, fallback"; exit 1 ;;
 esac
 [ -z "$TELEMETRY_TASK_ROOT" ] || printf '%s' "$TELEMETRY_TASK_ROOT" | grep -Eq '^mrt_[0-9a-f-]{36}$' || { echo "error: --telemetry-task-root requires an opaque mrt UUID" >&2; exit 1; }
 [ -z "$TELEMETRY_PARENT" ] || printf '%s' "$TELEMETRY_PARENT" | grep -Eq '^mra_[0-9a-f-]{36}$' || { echo "error: --telemetry-parent requires an opaque mra UUID" >&2; exit 1; }
@@ -427,6 +552,27 @@ esac
 [ "$DISPATCH_OVERRIDE_REASON_SET" -eq 0 ] || [ -n "$DISPATCH_OVERRIDE_REASON" ] || { echo "error: --dispatch-override-reason requires a non-empty value" >&2; exit 1; }
 [ "$DISPATCH_PROVIDER_SET" -eq 0 ] || [ -n "$DISPATCH_PROVIDER" ] || { echo "error: --dispatch-provider requires a non-empty value" >&2; exit 1; }
 [ "$DISPATCH_MODEL_FAMILY_SET" -eq 0 ] || [ -n "$DISPATCH_MODEL_FAMILY" ] || { echo "error: --dispatch-model-family requires a non-empty value" >&2; exit 1; }
+[ "$MATCHED_RULE_SET" -eq 0 ] || [ -n "$MATCHED_RULE" ] || { echo "error: --matched-rule requires a non-empty value" >&2; fm_record_spawn_failure validation "--matched-rule requires a non-empty value"; exit 1; }
+if [ -n "$MATCHED_RULE" ] && [[ ! $MATCHED_RULE =~ ^(default|rule-[0-9]+)$ ]]; then
+  echo "error: --matched-rule must be 'default' or 'rule-<n>'" >&2
+  fm_record_spawn_failure validation "--matched-rule must be 'default' or 'rule-<n>'"
+  exit 1
+fi
+[ "$QUOTA_DECISION_SET" -eq 0 ] || [ -n "$QUOTA_DECISION" ] || { echo "error: --quota-decision requires a non-empty value" >&2; fm_record_spawn_failure validation "--quota-decision requires a non-empty value"; exit 1; }
+case "$QUOTA_DECISION" in
+  ''|selected|stopped|not-applicable|unknown) ;;
+  *) echo "error: --quota-decision must be one of selected, stopped, not-applicable, unknown" >&2; fm_record_spawn_failure validation "--quota-decision must be one of selected, stopped, not-applicable, unknown"; exit 1 ;;
+esac
+[ "$QUOTA_HEADROOM_SET" -eq 0 ] || [ -n "$QUOTA_HEADROOM" ] || { echo "error: --quota-headroom requires a non-empty value" >&2; fm_record_spawn_failure validation "--quota-headroom requires a non-empty value"; exit 1; }
+case "$QUOTA_HEADROOM" in
+  ''|sufficient|tight|exhausted|unmeasurable|unknown) ;;
+  *) echo "error: --quota-headroom must be one of sufficient, tight, exhausted, unmeasurable, unknown" >&2; fm_record_spawn_failure validation "--quota-headroom must be one of sufficient, tight, exhausted, unmeasurable, unknown"; exit 1 ;;
+esac
+[ "$QUOTA_RUNWAY_SET" -eq 0 ] || [ -n "$QUOTA_RUNWAY" ] || { echo "error: --quota-runway requires a non-empty value" >&2; fm_record_spawn_failure validation "--quota-runway requires a non-empty value"; exit 1; }
+case "$QUOTA_RUNWAY" in
+  ''|sufficient|tight|exhausted|unmeasurable|unknown) ;;
+  *) echo "error: --quota-runway must be one of sufficient, tight, exhausted, unmeasurable, unknown" >&2; fm_record_spawn_failure validation "--quota-runway must be one of sufficient, tight, exhausted, unmeasurable, unknown"; exit 1 ;;
+esac
 case "$DISPATCH_OVERRIDE_REASON" in
   *$'\n'*) echo "error: --dispatch-override-reason must be a single line - state/<id>.meta is one key=value per line and every reader takes the LAST match, so an embedded newline would forge a later worktree=, backend=, or kind= line" >&2; exit 1 ;;
 esac
@@ -1052,6 +1198,7 @@ idpart=${idpart%%=*}
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+    fm_record_spawn_failure validation "config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)."
     exit 1
   fi
   # Attestation backstop: an explicit harness with no declaration of how it was
@@ -1081,6 +1228,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$ACCOUNT_PROFILE_SET" -eq 0 ] || shared_args+=(--account-profile "$ACCOUNT_PROFILE")
   [ "$DISPATCH_PROVIDER_SET" -eq 0 ] || shared_args+=(--dispatch-provider "$DISPATCH_PROVIDER")
   [ "$DISPATCH_MODEL_FAMILY_SET" -eq 0 ] || shared_args+=(--dispatch-model-family "$DISPATCH_MODEL_FAMILY")
+  [ "$MATCHED_RULE_SET" -eq 0 ] || shared_args+=(--matched-rule "$MATCHED_RULE")
+  [ "$QUOTA_DECISION_SET" -eq 0 ] || shared_args+=(--quota-decision "$QUOTA_DECISION")
+  [ "$QUOTA_HEADROOM_SET" -eq 0 ] || shared_args+=(--quota-headroom "$QUOTA_HEADROOM")
+  [ "$QUOTA_RUNWAY_SET" -eq 0 ] || shared_args+=(--quota-runway "$QUOTA_RUNWAY")
   if [ -n "$TELEMETRY_TASK_ROOT" ] || [ -n "$TELEMETRY_PARENT" ]; then
     echo "error: linked telemetry identifiers are per-attempt and are not supported by batch dispatch" >&2
     exit 1
@@ -1224,6 +1375,7 @@ case "$ARG3" in
     else
       if [ -f "$CONFIG/crew-dispatch.json" ]; then
         echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+        fm_record_spawn_failure validation "config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)."
         exit 1
       fi
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
@@ -1280,6 +1432,10 @@ if [ "$KIND" != secondmate ] && [ -f "$DATA/quota-cooldowns.json" ]; then
   else
     cooldown_status=$?
     [ -z "$cooldown_output" ] || printf '%s\n' "$cooldown_output" >&2
+    IFS='|' read -r cd_kind cd_quota_reader cd_capability <<EOF
+$(fm_classify_cooldown_refusal "${cooldown_output:-}")
+EOF
+    fm_record_spawn_failure "$cd_kind" "${cooldown_output:-quota cooldown authorize refused}" "$cd_capability" "$cd_quota_reader"
     exit "$cooldown_status"
   fi
 fi
@@ -2552,7 +2708,31 @@ TELEMETRY_INTAKE=$(jq -cn \
   --arg taskClass "$TASK_CLASS" --arg exploration "$EXPLORATION" \
   --argjson machine "$TELEMETRY_MACHINE_CONDITION" \
   --arg config "$TELEMETRY_CONFIG_SHA" --arg started "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-  '{attemptClass:"real",source:"firstmate",taskRootId:(if $root=="" then null else $root end),parentAttemptId:(if $parent=="" then null else $parent end),projectRef:$project,taskClass:$taskClass,tuple:({harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:$modelVersion,cliVersion:$cliVersion} + (if $accountProfile=="" then {} else {accountProfile:$accountProfile} end)),selection:{matchedRule:null,configSha256:(if $config=="" then null else $config end),fitReasons:[],candidateAssessments:[{tuple:({harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:$modelVersion,cliVersion:$cliVersion} + (if $accountProfile=="" then {} else {accountProfile:$accountProfile} end)),eligibility:"selected",reasons:[]}],quota:{decision:"unknown",headroom:"unknown",runway:"unknown",observedAt:null}},neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},exploration:{kind:$exploration,machineCondition:$machine},startedAt:$started,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}')
+  --arg provider "$DISPATCH_PROVIDER" --arg modelFamily "$DISPATCH_MODEL_FAMILY" \
+  --arg routingSource "$ROUTING_SOURCE" \
+  --argjson dispatchResolved "$DISPATCH_RESOLVED" \
+  --arg overrideReason "$DISPATCH_OVERRIDE_REASON" \
+  --argjson overrideReasonSet "$DISPATCH_OVERRIDE_REASON_SET" \
+  --arg matchedRule "$MATCHED_RULE" --argjson matchedRuleSet "$MATCHED_RULE_SET" \
+  --arg quotaDecision "$QUOTA_DECISION" --arg quotaHeadroom "$QUOTA_HEADROOM" --arg quotaRunway "$QUOTA_RUNWAY" \
+  'def tuple: {harness:$harness,provider:(if $provider=="" then null else $provider[0:96] end),model:(if $model=="" then null else $model end),effort:$effort,modelVersion:$modelVersion,cliVersion:$cliVersion} + (if $accountProfile=="" then {} else {accountProfile:$accountProfile} end);
+   def dispatchAttestation:
+     (if $dispatchResolved==1 then {kind:"resolved"}
+      elif $overrideReasonSet==1 and $overrideReason!="" then {kind:"override",reason:$overrideReason[0:160]}
+      else null end);
+   def selectionExtras:
+     {}
+     | (if $routingSource=="" then . else . + {routingSource:$routingSource} end)
+     | (if $modelFamily=="" then . else . + {dispatchModelFamily:$modelFamily[0:96]} end)
+     | (if dispatchAttestation==null then . else . + {dispatchAttestation:dispatchAttestation} end);
+   def quotaObj:
+     {decision:(if $quotaDecision=="" then "unknown" else $quotaDecision end),
+      headroom:(if $quotaHeadroom=="" then "unknown" else $quotaHeadroom end),
+      runway:(if $quotaRunway=="" then "unknown" else $quotaRunway end),
+      observedAt:null};
+   {attemptClass:"real",source:"firstmate",taskRootId:(if $root=="" then null else $root end),parentAttemptId:(if $parent=="" then null else $parent end),projectRef:$project,taskClass:$taskClass,tuple:tuple,
+    selection:({matchedRule:(if $matchedRuleSet==1 then $matchedRule else null end),configSha256:(if $config=="" then null else $config end),fitReasons:[],candidateAssessments:[{tuple:tuple,eligibility:"selected",reasons:[]}],quota:quotaObj} + selectionExtras),
+    neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},exploration:{kind:$exploration,machineCondition:$machine},startedAt:$started,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}')
 if ! TELEMETRY_RESULT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     "$FM_ROOT/bin/fm-model-telemetry.sh" intake --state "$STATE" --task "$ID" --payload "$TELEMETRY_INTAKE"); then
   echo "error: model telemetry intake refused; no model launch was submitted" >&2
@@ -2623,6 +2803,10 @@ TELEMETRY_TASK_ROOT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.taskRootId | se
     fi
     [ "$DISPATCH_PROVIDER_SET" -eq 0 ] || echo "dispatch_provider=$DISPATCH_PROVIDER"
     [ "$DISPATCH_MODEL_FAMILY_SET" -eq 0 ] || echo "dispatch_model_family=$DISPATCH_MODEL_FAMILY"
+    [ "$MATCHED_RULE_SET" -eq 0 ] || echo "matched_rule=$MATCHED_RULE"
+    [ "$QUOTA_DECISION_SET" -eq 0 ] || echo "quota_decision=$QUOTA_DECISION"
+    [ "$QUOTA_HEADROOM_SET" -eq 0 ] || echo "quota_headroom=$QUOTA_HEADROOM"
+    [ "$QUOTA_RUNWAY_SET" -eq 0 ] || echo "quota_runway=$QUOTA_RUNWAY"
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0

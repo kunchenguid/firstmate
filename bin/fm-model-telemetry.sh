@@ -10,6 +10,27 @@
 #   fm-model-telemetry.sh candidate-register --candidate <id> --payload <json>
 #   fm-model-telemetry.sh candidate-verdict --comparison <mrc_uuid> --verdict <adopted|discarded> --rollback-evidence <tested|documented>:<id>
 #   fm-model-telemetry.sh sheet [--format json|csv|md]
+#   fm-model-telemetry.sh subscription-sheet [--from <bound>] [--to <bound>] [--format json|csv|md]
+#     A bound is a UTC RFC3339 timestamp or a bare YYYY-MM-DD date; a bare date
+#     on --to covers that whole day. Anything else is refused rather than
+#     silently narrowing the window.
+#     Join intake+terminal over a bounded startedAt window and group by the
+#     subscription axes (harness, provider, accountProfile, dispatchModelFamily,
+#     model) to report attempts, acceptance, cost, tokens, task classes served,
+#     quota utilization, and the usageSource breakdown. Proof that the existing
+#     telemetry join answers a subscription-renewal question without a dashboard.
+#   fm-model-telemetry.sh spawn-failures [--from <bound>] [--to <bound>] [--format json|csv|md]
+#     Group recorded pre-launch spawn refusals over a bounded attemptedAt window
+#     by the same pool axes the failure payload carries (harness, provider,
+#     accountProfile, dispatchModelFamily, model) and report the failureKind,
+#     capability, and quotaReader breakdown plus the most recent exact cause.
+#     This is the read surface that makes login or credential rot visible; the
+#     attempt projections stay attempt-only.
+#   fm-model-telemetry.sh spawn-failure --state <dir> --task <id> --payload <json>
+#     Record a pre-launch spawn refusal (credential, quota, validation, etc.)
+#     with its exact cause so login or credential rot is visible in the join.
+#     Best-effort evidence: the caller wraps it so a telemetry failure never
+#     changes the spawn's own exit code.
 #
 # The ledger is FM_DATA_OVERRIDE/data/routing-outcomes.jsonl when that override
 # is set, otherwise FM_HOME/data/routing-outcomes.jsonl. A pre-existing ledger is
@@ -226,8 +247,18 @@ validate_intake() {
       (.modelVersion==null or (.modelVersion|type=="string" and length<=160)) and
       (.cliVersion==null or (.cliVersion|type=="string" and length<=160)) and
       (if has("accountProfile") then .harness=="claude" and (.accountProfile|accountprofile) else true end);
+    def selection_keys:
+      has("matchedRule") and has("configSha256") and has("fitReasons") and has("candidateAssessments") and has("quota")
+      and all(keys[]; . as $k | (["matchedRule","configSha256","fitReasons","candidateAssessments","quota","routingSource","dispatchAttestation","dispatchModelFamily"] | index($k)) != null);
+    def dispatch_attestation:
+      (.routingSource==null or (.routingSource|oneof(["captain","profile","fallback"]))) and
+      (.dispatchModelFamily==null or (.dispatchModelFamily|type=="string" and length>=1 and length<=96)) and
+      (.dispatchAttestation as $da | ($da==null or
+        ($da|keys_are(["kind"]) and $da.kind=="resolved") or
+        ($da|keys_are(["kind","reason"]) and $da.kind=="override" and
+          ($da.reason|type=="string" and length>=1 and length<=160))));
     def selection:
-      keys_are(["matchedRule","configSha256","fitReasons","candidateAssessments","quota"]) and
+      selection_keys and
       (.matchedRule==null or (.matchedRule|type=="string" and test("^(rule-[0-9]+|default)$"))) and
       (.configSha256==null or (.configSha256|sha)) and
       (.fitReasons|type=="array" and length<=12 and all(.[]; oneof(["captain-override","task-class","required-tool","catalog-support","native-adapter","oracle-strength","tie-break"]))) and
@@ -239,7 +270,8 @@ validate_intake() {
         (.decision|oneof(["selected","stopped","not-applicable","unknown"])) and
         (.headroom|oneof(["sufficient","tight","exhausted","unmeasurable","unknown"])) and
         (.runway|oneof(["sufficient","tight","exhausted","unmeasurable","unknown"])) and
-        (.observedAt==null or (.observedAt|dt)));
+        (.observedAt==null or (.observedAt|dt))) and
+      dispatch_attestation;
     def neutral:
       keys_are(["correlation","capabilityProfile","owner","phase","behavioralResult"]) and
       (.correlation==null or (.correlation|safeid)) and
@@ -302,8 +334,15 @@ validate_terminal() {
     def oneof($a): . as $v | ($a|index($v))!=null;
     def safeid: type=="string" and length>=1 and length<=96 and test("^[A-Za-z0-9._:-]+$");
     def dt: type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$");
-    ((keys_are(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification"])) or
-     (keys_are(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification","gateFacts"]))) and
+    def terminal_keys:
+      (keys|sort)==(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification"]|sort) or
+      (keys|sort)==(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification","gateFacts"]|sort) or
+      (keys|sort)==(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification","usageSource"]|sort) or
+      (keys|sort)==(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification","gateFacts","usageSource"]|sort);
+    def usage_source:
+      (.usageSource==null or (.usageSource|oneof(["recorded","no-verified-source","session-not-found","session-matched-no-tokens","unreadable","worktree-missing"])));
+    (terminal_keys) and
+    usage_source and
     (.classification|oneof(["accepted","rejected","failed","refused","timed-out","quota-stopped","cancelled","incomplete"])) and
     (.refusalQuality|oneof(["compliant","noncompliant","not-applicable","unknown"])) and
     (.endedAt==null or (.endedAt|dt)) and (.wallSeconds==null or (.wallSeconds|type=="number" and .>=0)) and
@@ -337,7 +376,8 @@ validate_terminal_facts() {
     def keys_are($a): (keys|sort)==($a|sort);
     def oneof($a): . as $v | ($a|index($v))!=null;
     def safeid: type=="string" and length>=1 and length<=160;
-    (keys_are(["gate","outcomeLink","usage"]) or keys_are(["gate","outcomeLink","usage","wallSeconds"])) and
+    (keys_are(["gate","outcomeLink","usage"]) or keys_are(["gate","outcomeLink","usage","wallSeconds"]) or
+     keys_are(["gate","outcomeLink","usage","usageSource"]) or keys_are(["gate","outcomeLink","usage","wallSeconds","usageSource"])) and
     (.gate|keys_are(["source","result","stepReruns"]) and
       (.source|oneof(["no-mistakes","delivery","task-terminal","teardown"])) and
       (.result|oneof(["green","failed","cancelled","incomplete"])) and
@@ -348,8 +388,59 @@ validate_terminal_facts() {
     (.usage|keys_are(["inputTokens","outputTokens","cost","currency"]) and
       all([.inputTokens,.outputTokens,.cost][]; .==null or (type=="number" and .>=0)) and
       (.currency==null or (.currency|type=="string" and test("^[A-Z]{3}$")))) and
+    (.usageSource==null or (.usageSource|oneof(["recorded","no-verified-source","session-not-found","session-matched-no-tokens","unreadable","worktree-missing"]))) and
     (.wallSeconds==null or (.wallSeconds|type=="number" and .>=0))
   ' >/dev/null || die "terminal facts payload violates the whitelist"
+}
+
+# A spawn failure is a pre-launch refusal: the spawn never produced a model
+# attempt, so it carries no attemptId. It records the pool/model/task-type
+# that was refused and the exact cause so login or credential rot is visible
+# in the telemetry join without conflating with model-run attempts. Spawn
+# capability and quota-reader availability are recorded SEPARATELY so a
+# quota-read login gap (quotaReader=credential-expired) never falsely marks
+# the pool undispatchable (capability stays "supported"/"unknown", never
+# "unsupported" for a reader gap). failureKind "quota-reader" is distinct
+# from "quota": "quota-reader" is a quota-READ credential gap (pool still
+# dispatchable, just can't read its quota right now); "quota" is real quota
+# exhaustion that quota-axi successfully read. failureKind "catalog" is
+# reserved for a future config/model-catalog.json validation gate; this home
+# does not carry that inherited file, so fm-spawn never emits "catalog"
+# today and the schema does not assume its contents.
+validate_spawn_failure() {
+  printf '%s' "$1" | jq -e '
+    def keys_are($a): (keys|sort)==($a|sort);
+    def oneof($a): . as $v | ($a|index($v))!=null;
+    def safeid: type=="string" and length>=1 and length<=96 and test("^[A-Za-z0-9._:-]+$");
+    def accountprofile: type=="string" and length>=1 and length<=32 and test("^[a-z][a-z0-9-]*$");
+    def dt: type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$");
+    def tuple:
+      (keys_are(["harness","provider","model","effort","modelVersion","cliVersion"]) or
+       keys_are(["harness","provider","model","effort","modelVersion","cliVersion","accountProfile"])) and
+      (.harness|safeid) and (.provider==null or (.provider|type=="string" and length<=96)) and
+      (.model==null or (.model|type=="string" and length<=160)) and
+      (.effort|oneof(["low","medium","high","xhigh","max","default",null])) and
+      (.modelVersion==null or (.modelVersion|type=="string" and length<=160)) and
+      (.cliVersion==null or (.cliVersion|type=="string" and length<=160)) and
+      (if has("accountProfile") then .harness=="claude" and (.accountProfile|accountprofile) else true end);
+    def dispatch_attestation:
+      (.routingSource==null or (.routingSource|oneof(["captain","profile","fallback"]))) and
+      (.dispatchModelFamily==null or (.dispatchModelFamily|type=="string" and length>=1 and length<=96)) and
+      (.dispatchAttestation==null or
+        (.dispatchAttestation as $da | ($da==null or
+          ($da|keys_are(["kind"]) and $da.kind=="resolved") or
+          ($da|keys_are(["kind","reason"]) and $da.kind=="override" and
+            ($da.reason|type=="string" and length>=1 and length<=160)))));
+    keys_are(["attemptedAt","tuple","taskClass","failureKind","cause","routingSource","dispatchAttestation","dispatchModelFamily","capability","quotaReader"]) and
+    (.attemptedAt|dt) and
+    (.tuple|tuple) and
+    (.taskClass|oneof(["rote-reversible-edit","bounded-implementation-proven-root-fix","unknown-root-diagnosis","adversarial-review-security-review","evidence-heavy-research","long-horizon-repository-work","visual-browser-sensitive-work","documentation-specification-decision-extraction","external-wait-integration-work","unresolved"])) and
+    (.failureKind|oneof(["credential","quota","quota-reader","harness-auth","validation","catalog","harness-missing","backend","other"])) and
+    (.cause|type=="string" and length>=1 and length<=512) and
+    (.capability|oneof(["supported","unsupported","unknown"])) and
+    (.quotaReader|oneof(["available","credential-expired","not-applicable","unknown"])) and
+    dispatch_attestation
+  ' >/dev/null || die "spawn failure payload violates the whitelist"
 }
 
 validate_candidate_plan() {
@@ -427,6 +518,8 @@ validate_event() {
      elif $type=="attempt-terminal" then
        (.attemptId|type=="string" and test("^mra_[0-9a-f-]{36}$")) and
        (keys|sort)==(["schemaVersion","eventType","eventId","attemptId","recordedAt","privacy","terminal"]|sort)
+     elif $type=="spawn-failure" then
+       (keys|sort)==(["schemaVersion","eventType","eventId","recordedAt","privacy","failure"]|sort)
      else true end)
   ' >/dev/null 2>&1 || die "generated event violates the envelope whitelist"
 }
@@ -454,6 +547,11 @@ validate_ledger() {
           validate_event "$line" attempt-terminal
           payload=$(printf '%s' "$compact" | jq -cS .terminal)
           validate_terminal "$payload"
+          ;;
+        spawn-failure)
+          validate_event "$line" spawn-failure
+          payload=$(printf '%s' "$compact" | jq -cS .failure)
+          validate_spawn_failure "$payload"
           ;;
         *) die "ledger contains an unknown event type" ;;
       esac
@@ -796,7 +894,7 @@ terminal_command() {
 }
 
 terminal_facts_command() {
-  local task=$1 payload=$2 attempt_arg=${3:-} path attempt facts ended wall terminal status
+  local task=$1 payload=$2 attempt_arg=${3:-} path attempt facts ended wall terminal status usage_source
   require_safe_task_id "$task"
   facts=$(canonical_json "$payload")
   validate_terminal_facts "$facts"
@@ -810,10 +908,11 @@ terminal_facts_command() {
     find_intake "$attempt" >/dev/null || die "terminal facts have no intake row"
     ended=$(now_rfc3339)
     wall=$(printf '%s' "$facts" | jq -c '.wallSeconds // null')
-    terminal=$(jq -cnS --arg ended "$ended" --argjson wall "$wall" --argjson facts "$facts" '
+    usage_source=$(printf '%s' "$facts" | jq -c '.usageSource // null')
+    terminal=$(jq -cnS --arg ended "$ended" --argjson wall "$wall" --argjson usageSource "$usage_source" --argjson facts "$facts" '
       ($facts.gate.result) as $result |
       ($facts.gate.stepReruns) as $reruns |
-      {classification:(if $result=="green" then "accepted" elif $result=="failed" then "failed" elif $result=="cancelled" then "cancelled" else "incomplete" end),
+      ({classification:(if $result=="green" then "accepted" elif $result=="failed" then "failed" elif $result=="cancelled" then "cancelled" else "incomplete" end),
        refusalQuality:(if $result=="incomplete" then "unknown" else "not-applicable" end),
        endedAt:$ended,wallSeconds:$wall,
        firstPassAccepted:(if $result=="green" then (if $reruns==null then null else $reruns==0 end) elif $result=="failed" then false else null end),
@@ -823,7 +922,8 @@ terminal_facts_command() {
        primaryFailureClass:(if $result=="green" then "none" else "unknown" end),
        flags:{tool:false,transport:false,environment:false,externalWait:false,scopeChange:false,quota:false},
        reclassification:{fromTaskClass:null,toTaskClass:null,reasonCodes:["none"],escalated:false},
-       gateFacts:($facts.gate | .source=(if (.source|IN("task-terminal","teardown")) then "delivery" else .source end))}')
+       gateFacts:($facts.gate | .source=(if (.source|IN("task-terminal","teardown")) then "delivery" else .source end))}
+       + (if $usageSource==null then {} else {usageSource:$usageSource} end))')
     validate_terminal "$terminal"
     append_terminal_event "$attempt" "$terminal"
     status=recorded
@@ -831,6 +931,26 @@ terminal_facts_command() {
   rm -f "$path"
   with_lock_end
   jq -cn --arg status "$status" --arg attempt "$attempt" '{status:$status,attemptId:$attempt}'
+}
+
+# A spawn failure is best-effort evidence: it never blocks delivery and carries
+# no receipt or recovery contract, because the spawn never produced a model
+# attempt. The caller (fm-spawn) wraps this command so a telemetry failure
+# cannot change the spawn's own exit code.
+spawn_failure_command() {
+  local task=$1 payload=$2 canonical event status
+  require_safe_task_id "$task"
+  canonical=$(canonical_json "$payload")
+  validate_spawn_failure "$canonical"
+  with_lock_begin
+  validate_ledger_for_write
+  event=$(jq -cnS --arg v "$SCHEMA_VERSION" --arg eid "mre_$(new_uuid)" --arg at "$(now_rfc3339)" --argjson payload "$canonical" \
+    '{schemaVersion:$v,eventType:"spawn-failure",eventId:$eid,recordedAt:$at,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"},failure:$payload}')
+  validate_event "$event" spawn-failure
+  durable_append "$event"
+  status=recorded
+  with_lock_end
+  jq -cn --arg status "$status" '{status:$status}'
 }
 
 candidate_register_command() {
@@ -949,7 +1069,7 @@ usage_command() {
   with_lock_end
   observation=$(NODE_NO_WARNINGS=1 node "$SCRIPT_DIR/fm-model-usage.mjs" "$harness" "$worktree" "$started") ||
     die "session usage collection failed"
-  validate_terminal_facts "$(jq -cn --argjson observation "$observation" '{gate:{source:"delivery",result:"incomplete",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:$observation.usage,wallSeconds:$observation.wallSeconds}')"
+  validate_terminal_facts "$(jq -cn --argjson observation "$observation" '{gate:{source:"delivery",result:"incomplete",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:$observation.usage,wallSeconds:$observation.wallSeconds,usageSource:($observation.usageSource // null)}')"
   printf '%s\n' "$observation"
 }
 
@@ -992,6 +1112,192 @@ sheet_command() {
   esac
 }
 
+# Per-subscription join of intake+terminal over a bounded window. This is the
+# proof that the existing telemetry join answers a subscription-renewal
+# question without a dashboard or parallel data path: it groups attempts by
+# the axes that distinguish accounts (harness, provider, accountProfile,
+# dispatchModelFamily, model) and reports attempts, acceptance, cost, tokens,
+# task classes served, quota utilization, and the usageSource breakdown that
+# names why any usage is absent. The markdown rendering folds that breakdown
+# into recorded/unavailable/absent, where unavailable is every named reason the
+# tokens are missing and absent is a legacy row that never named one; json and
+# csv carry the per-reason counts. --from/--to bound startedAt to a
+# representative window (a UTC RFC3339 timestamp or a bare YYYY-MM-DD date,
+# which on --to covers that whole day); omit both for the whole ledger.
+subscription_sheet_command() {
+  local format=$1 from=$2 to=$3 json
+  validate_ledger
+  json=$(subscription_sheet_json "$from" "$to")
+  case "$format" in
+    json) printf '%s\n' "$json" ;;
+    csv)
+      printf '%s\n' 'subscription,harness,provider,accountProfile,dispatchModelFamily,model,attempts,accepted,rejectedOrFailed,open,cost,currency,inputTokens,outputTokens,taskClasses,quotaSelected,quotaStopped,quotaUnknown,headroomSufficient,headroomTight,headroomExhausted,headroomUnmeasurable,headroomUnknown,usageRecorded,usageNoVerifiedSource,usageSessionNotFound,usageSessionMatchedNoTokens,usageUnreadable,usageWorktreeMissing,usageAbsent'
+      printf '%s' "$json" | jq -r '.[] | [.subscription,.harness,(.provider//""),(.accountProfile//""),(.dispatchModelFamily//""),(.model//""),.attempts,.accepted,.rejectedOrFailed,.open,(.cost//""),(.currency//""),(.inputTokens//""),(.outputTokens//""),(.taskClasses|join(";")),.quotaSelected,.quotaStopped,.quotaUnknown,.headroomSufficient,.headroomTight,.headroomExhausted,.headroomUnmeasurable,.headroomUnknown,.usageRecorded,.usageNoVerifiedSource,.usageSessionNotFound,.usageSessionMatchedNoTokens,.usageUnreadable,.usageWorktreeMissing,.usageAbsent] | @csv'
+      ;;
+    md)
+      printf '%s\n' '| subscription | attempts | accepted | rejected/failed | open | cost | tokens in/out | task classes | quota selected/stopped/unknown | headroom sufficient/tight/exhausted | usage recorded/unavailable/absent |'
+      printf '%s\n' '|---|---|---|---|---|---|---|---|---|---|---|'
+      printf '%s' "$json" | jq -r '.[] | def esc: if .==null then "" else tostring|gsub("\\|";"\\\\|")|gsub("\\n";" ") end; "| \(.subscription|esc) | \(.attempts) | \(.accepted) | \(.rejectedOrFailed) | \(.open) | \((if .cost==null then "absent" else ((.currency // "")+" "+(.cost|tostring)) end)|esc) | \(([.inputTokens,.outputTokens]|map(select(.!=null))|join("/"))|esc) | \(.taskClasses|join(",")) | \(.quotaSelected)/\(.quotaStopped)/\(.quotaUnknown) | \(.headroomSufficient)/\(.headroomTight)/\(.headroomExhausted) | \(.usageRecorded)/\(.usageNoVerifiedSource + .usageSessionNotFound + .usageSessionMatchedNoTokens + .usageUnreadable + .usageWorktreeMissing)/\(.usageAbsent) |"'
+      ;;
+    *) die "subscription-sheet format must be json, csv, or md" ;;
+  esac
+}
+
+# Recorded spawn refusals never became model attempts, so they are deliberately
+# absent from the attempt projections. This is their own read surface: it groups
+# by the pool axes the failure payload already carries and keeps the exact cause
+# so a credential or quota-read gap is visible without grepping the raw ledger.
+spawn_failures_command() {
+  local format=$1 from=$2 to=$3 json
+  validate_ledger
+  json=$(spawn_failures_json "$from" "$to")
+  case "$format" in
+    json) printf '%s\n' "$json" ;;
+    csv)
+      printf '%s\n' 'pool,harness,provider,accountProfile,dispatchModelFamily,model,failures,failureKinds,taskClasses,capability,quotaReader,firstAt,lastAt,lastCause'
+      printf '%s' "$json" | jq -r '.[] | [.pool,.harness,(.provider//""),(.accountProfile//""),(.dispatchModelFamily//""),(.model//""),.failures,([.failureKinds|to_entries[]|"\(.key)=\(.value)"]|join(";")),(.taskClasses|join(";")),(.capability|join(";")),(.quotaReader|join(";")),.firstAt,.lastAt,.lastCause] | @csv'
+      ;;
+    md)
+      printf '%s\n' '| pool | failures | kinds | task classes | capability | quota reader | last at | last cause |'
+      printf '%s\n' '|---|---|---|---|---|---|---|---|'
+      printf '%s' "$json" | jq -r '.[] | def esc: if .==null then "" else tostring|gsub("\\|";"\\\\|")|gsub("\\n";" ") end; "| \(.pool|esc) | \(.failures) | \([.failureKinds|to_entries[]|"\(.key)=\(.value)"]|join(",")|esc) | \(.taskClasses|join(",")|esc) | \(.capability|join(",")|esc) | \(.quotaReader|join(",")|esc) | \(.lastAt|esc) | \(.lastCause|esc) |"'
+      ;;
+    *) die "spawn-failures format must be json, csv, or md" ;;
+  esac
+}
+
+spawn_failures_json() {
+  local from=$1 to=$2
+  [ -e "$LEDGER" ] || { printf '[]\n'; return; }
+  jq -Rcs --arg v "$SCHEMA_VERSION" --arg from "$from" --arg to "$to" "$WINDOW_JQ_DEF"'
+    split("\n") | map(select(length>0)|fromjson)
+    | map(select(.schemaVersion==$v and .eventType=="spawn-failure") | .failure)
+    | map(select(in_window(.attemptedAt)))
+    | group_by(.tuple.harness + "|" + ((.tuple.provider // "_")|tostring) + "|" + ((.tuple.accountProfile // "_")|tostring) + "|" + ((.dispatchModelFamily // "_")|tostring) + "|" + ((.tuple.model // "_")|tostring))
+    | map({
+        pool: (.[0].tuple.harness + "/" + ((.[0].tuple.provider // "?")|tostring) + "/" + ((.[0].tuple.accountProfile // "default")|tostring) + "/" + ((.[0].dispatchModelFamily // "?")|tostring) + "/" + ((.[0].tuple.model // "?")|tostring)),
+        harness: .[0].tuple.harness,
+        provider: .[0].tuple.provider,
+        accountProfile: .[0].tuple.accountProfile,
+        dispatchModelFamily: .[0].dispatchModelFamily,
+        model: .[0].tuple.model,
+        failures: length,
+        failureKinds: ([.[] | .failureKind] | group_by(.) | map({key: .[0], value: length}) | from_entries),
+        taskClasses: ([.[] | .taskClass] | unique),
+        capability: ([.[] | .capability] | unique),
+        quotaReader: ([.[] | .quotaReader] | unique),
+        firstAt: ([.[] | .attemptedAt] | min),
+        lastAt: ([.[] | .attemptedAt] | max),
+        lastCause: (max_by(.attemptedAt) | .cause)
+      })
+  ' "$LEDGER"
+}
+
+# One owner for the bounded-window contract every projection shares: the same
+# predicate over the ledger's own UTC timestamps, where a bare date on --to
+# covers that whole day, so two projections can never report a different window
+# for the same flags.
+WINDOW_JQ_DEF='
+    def in_window($s):
+      ($from=="" or $s>=$from) and
+      ($to=="" or (if ($to|length)==10 then $s[0:10]<=$to else $s<=$to end));
+'
+
+# The window bounds are compared lexically against startedAt, which is only
+# sound for UTC timestamps in the ledger's own shape. Accept a full RFC3339 Z
+# timestamp or a bare calendar date and refuse anything else, so a mistyped or
+# offset-bearing bound can never silently produce a wrong renewal window.
+require_window_bound() {
+  local flag=$1 value=$2
+  [ -n "$value" ] || return 0
+  printf '%s' "$value" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z)?$' \
+    || die "$flag must be a UTC RFC3339 timestamp or a bare YYYY-MM-DD date"
+}
+
+# An inverted window selects nothing, so refuse it instead of reporting an empty
+# renewal sheet. A bare date on --to means the whole of that day, so only then is
+# the lower bound compared by calendar day; two timestamps compare in full.
+require_ordered_window() {
+  local from=$1 to=$2 lower
+  [ -n "$from" ] && [ -n "$to" ] || return 0
+  if [ "${#to}" -eq 10 ]; then lower=${from:0:10}; else lower=$from; fi
+  [ ! "$to" \< "$lower" ] || die "--from must not be later than --to"
+}
+
+# The windowed projections take the same flags under the same rules; parsing
+# them once keeps a correction to one command from leaving the other behind.
+WINDOW_FORMAT=json
+WINDOW_FROM=''
+WINDOW_TO=''
+parse_window_args() {  # <command> [args...]
+  local command=$1 want=''
+  shift
+  WINDOW_FORMAT=json
+  WINDOW_FROM=''
+  WINDOW_TO=''
+  while [ "$#" -gt 0 ]; do
+    if [ -n "$want" ]; then
+      case "$want" in from) WINDOW_FROM=$1 ;; to) WINDOW_TO=$1 ;; format) WINDOW_FORMAT=$1 ;; esac
+      want=
+    else
+      case "$1" in
+        --from) want=from ;; --to) want=to ;; --format) want=format ;;
+        *) die "unknown argument $1" ;;
+      esac
+    fi
+    shift
+  done
+  [ -z "$want" ] || die "--$want requires a value"
+  case "$WINDOW_FORMAT" in json|csv|md) ;; *) die "$command format must be json, csv, or md" ;; esac
+  require_window_bound --from "$WINDOW_FROM"
+  require_window_bound --to "$WINDOW_TO"
+  require_ordered_window "$WINDOW_FROM" "$WINDOW_TO"
+}
+
+subscription_sheet_json() {
+  local from=$1 to=$2
+  [ -e "$LEDGER" ] || { printf '[]\n'; return; }
+  jq -Rcs --arg v "$SCHEMA_VERSION" --arg from "$from" --arg to "$to" "$WINDOW_JQ_DEF"'
+    split("\n") | map(select(length>0)|fromjson) as $rows |
+    ($rows | map(select(.schemaVersion==$v and .eventType=="attempt-intake")) | map(. as $i |
+      ($rows | map(select(.schemaVersion==$v and .eventType=="attempt-terminal" and .attemptId==$i.attemptId)) | first) as $t |
+      {intake:$i.intake, terminal:($t.terminal // null)})) as $attempts |
+    ($attempts | map(select(in_window(.intake.startedAt)))) as $window |
+    ($window | group_by(.intake.tuple.harness + "|" + ((.intake.tuple.provider // "_")|tostring) + "|" + ((.intake.tuple.accountProfile // "_")|tostring) + "|" + ((.intake.selection.dispatchModelFamily // "_")|tostring) + "|" + ((.intake.tuple.model // "_")|tostring)) | map({
+      subscription: (.[0].intake.tuple.harness + "/" + ((.[0].intake.tuple.provider // "?")|tostring) + "/" + ((.[0].intake.tuple.accountProfile // "default")|tostring) + "/" + ((.[0].intake.selection.dispatchModelFamily // "?")|tostring) + "/" + ((.[0].intake.tuple.model // "?")|tostring)),
+      harness: .[0].intake.tuple.harness,
+      provider: .[0].intake.tuple.provider,
+      accountProfile: .[0].intake.tuple.accountProfile,
+      dispatchModelFamily: .[0].intake.selection.dispatchModelFamily,
+      model: .[0].intake.tuple.model,
+      attempts: length,
+      accepted: (map(select(.terminal.classification=="accepted")) | length),
+      rejectedOrFailed: (map(select(.terminal.classification!=null and .terminal.classification!="accepted")) | length),
+      open: (map(select(.terminal==null)) | length),
+      cost: ([.[] | .terminal.usage.cost // empty] | add),
+      currency: ([.[] | .terminal.usage.currency // empty] | first),
+      inputTokens: ([.[] | .terminal.usage.inputTokens // empty] | add),
+      outputTokens: ([.[] | .terminal.usage.outputTokens // empty] | add),
+      taskClasses: ([.[] | .intake.taskClass] | unique),
+      quotaSelected: (map(select(.intake.selection.quota.decision=="selected")) | length),
+      quotaStopped: (map(select(.intake.selection.quota.decision=="stopped")) | length),
+      quotaUnknown: (map(select(.intake.selection.quota.decision=="unknown" or .intake.selection.quota.decision=="not-applicable")) | length),
+      headroomSufficient: (map(select(.intake.selection.quota.headroom=="sufficient")) | length),
+      headroomTight: (map(select(.intake.selection.quota.headroom=="tight")) | length),
+      headroomExhausted: (map(select(.intake.selection.quota.headroom=="exhausted")) | length),
+      headroomUnmeasurable: (map(select(.intake.selection.quota.headroom=="unmeasurable")) | length),
+      headroomUnknown: (map(select(.intake.selection.quota.headroom=="unknown")) | length),
+      usageRecorded: (map(select(.terminal.usageSource=="recorded")) | length),
+      usageNoVerifiedSource: (map(select(.terminal.usageSource=="no-verified-source")) | length),
+      usageSessionNotFound: (map(select(.terminal.usageSource=="session-not-found")) | length),
+      usageSessionMatchedNoTokens: (map(select(.terminal.usageSource=="session-matched-no-tokens")) | length),
+      usageUnreadable: (map(select(.terminal.usageSource=="unreadable")) | length),
+      usageWorktreeMissing: (map(select(.terminal.usageSource=="worktree-missing")) | length),
+      usageAbsent: (map(select(.terminal!=null and (.terminal.usageSource==null))) | length)
+    }))
+  ' "$LEDGER"
+}
+
 COMMAND=${1:-}
 case "$COMMAND" in
   -h|--help|'') usage; [ -n "$COMMAND" ] || exit 2; exit 0 ;;
@@ -999,7 +1305,7 @@ esac
 shift
 
 case "$COMMAND" in
-  intake|terminal|terminal-facts|seal-or-incomplete)
+  intake|terminal|terminal-facts|seal-or-incomplete|spawn-failure)
     # shellcheck source=bin/fm-wake-lib.sh
     . "$SCRIPT_DIR/fm-wake-lib.sh"
     secure_dirs
@@ -1028,6 +1334,7 @@ case "$COMMAND" in
       intake) [ -n "$payload" ] || die "--payload is required"; intake_command "$task" "$payload" ;;
       terminal) [ -n "$payload" ] || die "--payload is required"; terminal_command "$task" "$payload" "$attempt_arg" ;;
       terminal-facts) [ -n "$payload" ] || die "--payload is required"; terminal_facts_command "$task" "$payload" "$attempt_arg" ;;
+      spawn-failure) [ -n "$payload" ] || die "--payload is required"; spawn_failure_command "$task" "$payload" ;;
       seal-or-incomplete)
         [ -z "$payload" ] || die "seal-or-incomplete uses --terminal-payload"
         if [ -n "$terminal_payload" ]; then
@@ -1124,6 +1431,16 @@ case "$COMMAND" in
       format=$2
     fi
     sheet_command "$format"
+    ;;
+  spawn-failures)
+    [ ! -L "$DATA" ] || die "data directory is a symlink"
+    parse_window_args spawn-failures "$@"
+    spawn_failures_command "$WINDOW_FORMAT" "$WINDOW_FROM" "$WINDOW_TO"
+    ;;
+  subscription-sheet)
+    [ ! -L "$DATA" ] || die "data directory is a symlink"
+    parse_window_args subscription-sheet "$@"
+    subscription_sheet_command "$WINDOW_FORMAT" "$WINDOW_FROM" "$WINDOW_TO"
     ;;
   *) die "unknown command $COMMAND" ;;
 esac

@@ -87,6 +87,36 @@ export REAL_LSOF_FOR_TEST
 #   $CASE/origin.git/   - bare upstream repo (so the project clone has origin)
 #   $CASE/project/      - clone of origin; acts as the firstmate project dir
 #   $CASE/wt/           - a worktree of the project (the task worktree)
+# The post-check teardown steps are mocked; refuse logic exits before they run,
+# while the allow cases need them so the script can complete cleanly.
+write_default_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ] && [ "${2:-}" = --force ] && [ -n "${3:-}" ]; then
+  rm -rf -- "$3"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# `treehouse return` fails for a reason that is not a git lock, so teardown
+# aborts after it has already sealed the terminal - the state an operator is
+# told to re-run from.
+add_failing_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  echo "fatal: pool lease is held elsewhere" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
 # Echoes the case dir.
 make_case() {
   local name=$1 case_dir fakebin
@@ -96,13 +126,7 @@ make_case() {
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = return ] && [ "${2:-}" = --force ] && [ -n "${3:-}" ]; then
-  rm -rf -- "$3"
-fi
-exit 0
-SH
+  write_default_treehouse "$case_dir"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = capture-pane ]; then
@@ -3227,6 +3251,172 @@ test_local_only_zero_work_does_not_seal_accepted() {
   pass "a reused-lane zero-work task seals classification=incomplete oracle=not-run gate=delivery/incomplete"
 }
 
+# A sealed terminal takes the agent-authored payload, but the usage source is an
+# observation teardown made, not something the agent can know. The observed
+# source is authoritative on that path too, so a sealed row never records usage
+# as silently absent and never keeps a stale self-reported source.
+test_sealed_terminal_records_the_observed_usage_source() {
+  local case_dir terminal declared sessions row sheet before after contradicting declared_usage digest_tool
+  terminal='{"classification":"failed","refusalQuality":"not-applicable","endedAt":"2026-08-02T00:01:00Z","wallSeconds":60,"firstPassAccepted":false,"correctionCount":1,"interventionCount":0,"evidence":{"tests":"fail","reviewer":"not-run","oracle":"fail","refs":[{"kind":"test","id":"sealed-usage-source"}]},"outcomeLink":{"kind":"none","id":null},"usage":{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null},"primaryFailureClass":"capability","flags":{"tool":false,"transport":false,"environment":false,"externalWait":false,"scopeChange":false,"quota":false},"reclassification":{"fromTaskClass":null,"toTaskClass":null,"reasonCodes":["none"],"escalated":false}}'
+  declared=$(printf '%s' "$terminal" | jq -c '. + {usageSource:"recorded"}')
+
+  # A payload that declares no usage source at all.
+  case_dir=$(make_case telemetry-sealed-usage-source)
+  reuse_lane_after_landed_prior_task "$case_dir"
+  write_meta "$case_dir" local-only ship
+  record_task_base "$case_dir" || fail "could not record the sealed-usage task base"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed sealed-usage telemetry"
+  run_local_merge "$case_dir" >/dev/null 2>&1 || fail "sealed-usage production merge gate failed"
+  sessions="$case_dir/codex-sessions"
+  mkdir -p "$sessions"
+  FM_CODEX_SESSIONS_OVERRIDE="$sessions" FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" --terminal-payload "$terminal" >/dev/null \
+    || fail "sealed-usage teardown failed"
+  row=$(jq -c 'select(.eventType=="attempt-terminal")' "$case_dir/data/routing-outcomes.jsonl" | head -n1)
+  printf '%s' "$row" | jq -e '.terminal.evidence.refs[0].id=="sealed-usage-source"' >/dev/null \
+    || fail "the sealed row did not carry the agent-authored payload: $row"
+  printf '%s' "$row" | jq -e '.terminal.usageSource=="session-not-found"' >/dev/null \
+    || fail "a sealed terminal recorded its usage as silently absent instead of naming the observed source: $row"
+
+  # A payload that declares a usage source teardown did not observe.
+  case_dir=$(make_case telemetry-sealed-usage-source-override)
+  reuse_lane_after_landed_prior_task "$case_dir"
+  write_meta "$case_dir" local-only ship
+  record_task_base "$case_dir" || fail "could not record the override task base"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed override telemetry"
+  run_local_merge "$case_dir" >/dev/null 2>&1 || fail "override production merge gate failed"
+  sessions="$case_dir/codex-sessions"
+  mkdir -p "$sessions"
+  FM_CODEX_SESSIONS_OVERRIDE="$sessions" FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" --terminal-payload "$declared" >/dev/null \
+    || fail "override teardown failed"
+  row=$(jq -c 'select(.eventType=="attempt-terminal")' "$case_dir/data/routing-outcomes.jsonl" | head -n1)
+  printf '%s' "$row" | jq -e '.terminal.usageSource=="session-not-found"' >/dev/null \
+    || fail "a self-reported usage source outranked the source teardown observed: $row"
+
+  # usageSource="recorded" is a positive claim that tokens were read, so the
+  # tokens the observation read must travel with it - a row claiming recorded
+  # usage while carrying none is counted as recorded and contributes nothing.
+  case_dir=$(make_case telemetry-sealed-usage-source-recorded)
+  reuse_lane_after_landed_prior_task "$case_dir"
+  write_meta "$case_dir" local-only ship
+  record_task_base "$case_dir" || fail "could not record the recorded-usage task base"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed recorded-usage telemetry"
+  run_local_merge "$case_dir" >/dev/null 2>&1 || fail "recorded-usage production merge gate failed"
+  sessions="$case_dir/codex-sessions/2026/08/02"
+  mkdir -p "$sessions"
+  cat > "$sessions/rollout-task.jsonl" <<EOF
+{"timestamp":"2026-08-02T00:00:05Z","type":"session_meta","payload":{"id":"task-session","timestamp":"2026-08-02T00:00:05Z","cwd":"$case_dir/wt"}}
+{"timestamp":"2026-08-02T00:00:25Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"output_tokens":40}}}}
+{"timestamp":"2026-08-02T00:02:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3210,"output_tokens":98}}}}
+EOF
+  # Abort teardown after the seal, which is the state the operator re-runs from.
+  add_failing_treehouse "$case_dir"
+  if FM_CODEX_SESSIONS_OVERRIDE="$case_dir/codex-sessions" FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" --terminal-payload "$terminal" >/dev/null 2>"$case_dir/seal.stderr"; then
+    fail "the recorded-usage fixture did not abort after its seal"
+  fi
+  assert_grep "treehouse return failed" "$case_dir/seal.stderr" \
+    "the recorded-usage fixture aborted for the wrong reason: $(cat "$case_dir/seal.stderr")"
+  row=$(jq -c 'select(.eventType=="attempt-terminal")' "$case_dir/data/routing-outcomes.jsonl" | head -n1)
+  printf '%s' "$row" | jq -e '.terminal.usageSource=="recorded"' >/dev/null \
+    || fail "a readable session did not seal as recorded usage: $row"
+  printf '%s' "$row" | jq -e '.terminal.usage.inputTokens==3210 and .terminal.usage.outputTokens==98' >/dev/null \
+    || fail "a sealed terminal claimed recorded usage while discarding the tokens that were read: $row"
+  printf '%s' "$row" | jq -e '.terminal.wallSeconds==120' >/dev/null \
+    || fail "a sealed terminal discarded the active duration the observation measured: $row"
+  # The renewal join must be able to add the tokens it counts as recorded.
+  sheet=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$TELEMETRY" subscription-sheet --format json) \
+    || fail "recorded-usage subscription sheet failed"
+  printf '%s' "$sheet" | jq -e '.[0].usageRecorded==1 and .[0].inputTokens==3210 and .[0].outputTokens==98' >/dev/null \
+    || fail "the subscription sheet counted a recorded usage row that contributed no tokens: $sheet"
+
+  before=$(jq -c 'select(.eventType=="attempt-terminal") | .terminal' "$case_dir/data/routing-outcomes.jsonl")
+
+  # A rerun carrying a DIFFERENT payload is a contradiction against an immutable
+  # terminal, and the ledger must still refuse it rather than discard it.
+  contradicting=$(printf '%s' "$terminal" | jq -c '.classification="accepted" | .evidence.oracle="pass"')
+  if FM_CODEX_SESSIONS_OVERRIDE="$case_dir/codex-sessions" FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" --terminal-payload "$contradicting" >/dev/null 2>"$case_dir/contradict.stderr"; then
+    fail "a rerun carrying a contradicting terminal payload was accepted"
+  fi
+  assert_grep "terminal-conflict" "$case_dir/contradict.stderr" \
+    "the contradicting rerun did not surface the ledger's refusal"
+  after=$(jq -c 'select(.eventType=="attempt-terminal") | .terminal' "$case_dir/data/routing-outcomes.jsonl")
+  [ "$before" = "$after" ] || fail "a refused contradiction still altered the recorded terminal: $after"
+
+  # A terminal is immutable and compared byte-for-byte, so re-running the same
+  # teardown after a later step failed must still seal as a duplicate - the
+  # observation differs on the rerun (the worktree is gone by then) and must not
+  # be restamped onto an already recorded terminal.
+  write_default_treehouse "$case_dir"
+  [ ! -d "$case_dir/wt" ] || rm -rf "$case_dir/wt"
+  FM_CODEX_SESSIONS_OVERRIDE="$case_dir/codex-sessions" FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" --terminal-payload "$terminal" >/dev/null 2>"$case_dir/rerun.stderr" \
+    || fail "re-running the identical teardown was refused: $(cat "$case_dir/rerun.stderr")"
+  assert_grep "already carries the terminal this teardown sealed" "$case_dir/rerun.stderr" \
+    "the rerun did not say the recorded terminal stayed authoritative"
+  [ "$(jq -c 'select(.eventType=="attempt-terminal")' "$case_dir/data/routing-outcomes.jsonl" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "a teardown rerun appended a second terminal row"
+  after=$(jq -c 'select(.eventType=="attempt-terminal") | .terminal' "$case_dir/data/routing-outcomes.jsonl")
+  [ "$before" = "$after" ] || fail "a teardown rerun rewrote the recorded terminal: $after"
+
+  # An observation with no token counts must not erase usage the caller declared:
+  # usageSource names why the observation is absent, it does not overwrite numbers.
+  case_dir=$(make_case telemetry-sealed-usage-declared)
+  reuse_lane_after_landed_prior_task "$case_dir"
+  write_meta "$case_dir" local-only ship
+  record_task_base "$case_dir" || fail "could not record the declared-usage task base"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed declared-usage telemetry"
+  run_local_merge "$case_dir" >/dev/null 2>&1 || fail "declared-usage production merge gate failed"
+  mkdir -p "$case_dir/codex-sessions"
+  declared_usage=$(printf '%s' "$terminal" | jq -c '.usage={inputTokens:4242,outputTokens:77,cost:null,currency:null}')
+  FM_CODEX_SESSIONS_OVERRIDE="$case_dir/codex-sessions" FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" --terminal-payload "$declared_usage" >/dev/null \
+    || fail "declared-usage teardown failed"
+  row=$(jq -c 'select(.eventType=="attempt-terminal")' "$case_dir/data/routing-outcomes.jsonl" | head -n1)
+  printf '%s' "$row" | jq -e '.terminal.usage.inputTokens==4242 and .terminal.usage.outputTokens==77' >/dev/null \
+    || fail "an observation with no token counts erased the usage the caller declared: $row"
+  printf '%s' "$row" | jq -e '.terminal.usageSource=="session-not-found"' >/dev/null \
+    || fail "the absent observation was not named on a row that kept its declared usage: $row"
+
+  # The merge is only safe because the payload can be fingerprinted for the
+  # retry; with no digest available the payload is recorded as authored, so an
+  # identical rerun stays a no-op instead of a contradiction teardown authored.
+  case_dir=$(make_case telemetry-sealed-usage-no-digest)
+  reuse_lane_after_landed_prior_task "$case_dir"
+  write_meta "$case_dir" local-only ship
+  record_task_base "$case_dir" || fail "could not record the no-digest task base"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed no-digest telemetry"
+  run_local_merge "$case_dir" >/dev/null 2>&1 || fail "no-digest production merge gate failed"
+  mkdir -p "$case_dir/codex-sessions"
+  for digest_tool in shasum sha256sum; do
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$case_dir/fakebin/$digest_tool"
+    chmod +x "$case_dir/fakebin/$digest_tool"
+  done
+  add_failing_treehouse "$case_dir"
+  if FM_CODEX_SESSIONS_OVERRIDE="$case_dir/codex-sessions" FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" --terminal-payload "$terminal" >/dev/null 2>"$case_dir/nodigest.stderr"; then
+    fail "the no-digest fixture did not abort after its seal"
+  fi
+  assert_grep "could not be fingerprinted" "$case_dir/nodigest.stderr" \
+    "teardown did not say the payload was recorded as authored: $(cat "$case_dir/nodigest.stderr")"
+  row=$(jq -c 'select(.eventType=="attempt-terminal")' "$case_dir/data/routing-outcomes.jsonl" | head -n1)
+  printf '%s' "$row" | jq -e '(.terminal|has("usageSource")|not) or .terminal.usageSource==null' >/dev/null \
+    || fail "an unrecordable digest still merged the observation into the sealed payload: $row"
+  before=$(jq -c 'select(.eventType=="attempt-terminal") | .terminal' "$case_dir/data/routing-outcomes.jsonl")
+  write_default_treehouse "$case_dir"
+  [ ! -d "$case_dir/wt" ] || rm -rf "$case_dir/wt"
+  FM_CODEX_SESSIONS_OVERRIDE="$case_dir/codex-sessions" FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" --terminal-payload "$terminal" >/dev/null 2>"$case_dir/nodigest-rerun.stderr" \
+    || fail "an unrecordable digest wedged the identical teardown rerun: $(cat "$case_dir/nodigest-rerun.stderr")"
+  [ "$(jq -c 'select(.eventType=="attempt-terminal")' "$case_dir/data/routing-outcomes.jsonl" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the no-digest rerun appended a second terminal row"
+  after=$(jq -c 'select(.eventType=="attempt-terminal") | .terminal' "$case_dir/data/routing-outcomes.jsonl")
+  [ "$before" = "$after" ] || fail "the no-digest rerun rewrote the recorded terminal: $after"
+  pass "a sealed terminal records the usage source teardown observed, not the agent's"
+}
+
 test_local_only_sync_to_advanced_main_does_not_seal_accepted() {
   local case_dir task_base advanced_main
   case_dir=$(make_case telemetry-local-only-sync-only)
@@ -3607,6 +3797,7 @@ test_forced_teardown_still_requires_ledger_repair() {
 
 test_teardown_records_failed_terminal_status_and_forced_cancellation
 test_local_only_zero_work_does_not_seal_accepted
+test_sealed_terminal_records_the_observed_usage_source
 test_local_only_sync_to_advanced_main_does_not_seal_accepted
 test_local_only_missing_task_base_is_diagnosed
 test_local_only_empty_commit_does_not_seal_accepted

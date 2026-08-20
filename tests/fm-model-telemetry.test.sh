@@ -552,6 +552,340 @@ test_account_profile_evidence_is_bound_only_to_claude() {
   pass "account-profile selection evidence is accepted only on Claude tuples"
 }
 
+test_intake_accepts_routing_provenance_additive_fields() {
+  local home payload result row
+  home=$(make_home routing-provenance)
+  # The base five-key selection still validates (backward compatibility).
+  run_intake "$home" base-sel "$(intake_payload)" >/dev/null \
+    || fail "the base five-key selection was refused after the additive extension"
+
+  # Each additive routing-provenance field is accepted independently and in any
+  # subset, because fm-spawn threads only the facts it actually has.
+  payload=$(intake_payload | jq -c '.selection.routingSource="profile"')
+  run_intake "$home" routing-source-only "$payload" >/dev/null \
+    || fail "a selection carrying only routingSource was refused"
+
+  payload=$(intake_payload | jq -c '.selection.dispatchModelFamily="gpt-5"')
+  run_intake "$home" model-family-only "$payload" >/dev/null \
+    || fail "a selection carrying only dispatchModelFamily was refused"
+
+  payload=$(intake_payload | jq -c '.selection.dispatchAttestation={kind:"resolved"}')
+  run_intake "$home" resolved-only "$payload" >/dev/null \
+    || fail "a resolved dispatchAttestation was refused"
+
+  payload=$(intake_payload | jq -c '.selection.dispatchAttestation={kind:"override",reason:"captain raised the spend limit"}')
+  run_intake "$home" override-with-reason "$payload" >/dev/null \
+    || fail "an override dispatchAttestation with a reason was refused"
+
+  payload=$(intake_payload | jq -c '.selection.routingSource="fallback" | .selection.dispatchModelFamily="glm" | .selection.dispatchAttestation={kind:"resolved"}')
+  result=$(run_intake "$home" all-three "$payload") || fail "a selection carrying all three additive fields was refused"
+  row=$(jq -es --arg a "$(printf '%s' "$result" | jq -r .attemptId)" 'map(select(.eventType=="attempt-intake" and .attemptId==$a)) | .[0].intake.selection' "$home/data/routing-outcomes.jsonl")
+  printf '%s' "$row" | jq -e '.routingSource=="fallback" and .dispatchModelFamily=="glm" and .dispatchAttestation.kind=="resolved"' >/dev/null \
+    || fail "the joined intake row did not preserve all three routing-provenance facts"
+
+  # Unknown routingSource, override without a reason, and foreign keys are refused.
+  payload=$(intake_payload | jq -c '.selection.routingSource="vibes"')
+  if run_intake "$home" bad-routing-source "$payload" >/dev/null 2>&1; then
+    fail "an unknown routingSource was accepted"
+  fi
+  payload=$(intake_payload | jq -c '.selection.dispatchAttestation={kind:"override"}')
+  if run_intake "$home" override-no-reason "$payload" >/dev/null 2>&1; then
+    fail "an override dispatchAttestation without a reason was accepted"
+  fi
+  payload=$(intake_payload | jq -c '.selection.foreignField="x"')
+  if run_intake "$home" foreign-key "$payload" >/dev/null 2>&1; then
+    fail "a foreign selection key was accepted"
+  fi
+  pass "intake accepts routing-provenance additive fields in any subset and rejects unknown values and foreign keys"
+}
+
+test_terminal_records_explicit_usage_source() {
+  local home attempt facts row
+  home=$(make_home usage-source)
+  attempt=$(run_intake "$home" usage-attempt "$(intake_payload)") || fail "usage-source intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+
+  # A recorded terminal usage carries usageSource=recorded.
+  facts=$(jq -cn '{gate:{source:"no-mistakes",result:"green",stepReruns:0},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:1200,outputTokens:300,cost:null,currency:null},wallSeconds:60,usageSource:"recorded"}')
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task usage-attempt --attempt "$attempt" --payload "$facts" >/dev/null \
+    || fail "terminal-facts with a recorded usageSource was refused"
+  row=$(jq -es --arg a "$attempt" 'map(select(.eventType=="attempt-terminal" and .attemptId==$a)) | .[0].terminal' "$home/data/routing-outcomes.jsonl")
+  printf '%s' "$row" | jq -e '.usage.inputTokens==1200 and .usageSource=="recorded"' >/dev/null \
+    || fail "the sealed terminal did not carry the recorded usage and usageSource"
+
+  # An unavailable usage is explicitly named rather than silently null.
+  attempt=$(run_intake "$home" no-source-attempt "$(intake_payload)") || fail "no-source intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+  facts=$(jq -cn '{gate:{source:"delivery",result:"incomplete",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:null,usageSource:"no-verified-source"}')
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task no-source-attempt --attempt "$attempt" --payload "$facts" >/dev/null \
+    || fail "terminal-facts with a no-verified-source usageSource was refused"
+  row=$(jq -es --arg a "$attempt" 'map(select(.eventType=="attempt-terminal" and .attemptId==$a)) | .[0].terminal' "$home/data/routing-outcomes.jsonl")
+  printf '%s' "$row" | jq -e '.usage.inputTokens==null and .usageSource=="no-verified-source"' >/dev/null \
+    || fail "the sealed terminal did not explicitly name the unavailable usage source"
+
+  # A session that was read but exposed no token totals is its own reason, so
+  # the join can tell a harness-capability gap from a missing session.
+  attempt=$(run_intake "$home" no-tokens-attempt "$(intake_payload)") || fail "no-tokens intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+  facts=$(jq -cn '{gate:{source:"delivery",result:"incomplete",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:120,usageSource:"session-matched-no-tokens"}')
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task no-tokens-attempt --attempt "$attempt" --payload "$facts" >/dev/null \
+    || fail "terminal-facts with a session-matched-no-tokens usageSource was refused"
+  row=$(jq -es --arg a "$attempt" 'map(select(.eventType=="attempt-terminal" and .attemptId==$a)) | .[0].terminal' "$home/data/routing-outcomes.jsonl")
+  printf '%s' "$row" | jq -e '.usage.inputTokens==null and .wallSeconds==120 and .usageSource=="session-matched-no-tokens"' >/dev/null \
+    || fail "a row measuring a session's duration still claimed no session was found: $row"
+
+  # A terminal without usageSource (legacy callers) still validates.
+  attempt=$(run_intake "$home" legacy-attempt "$(intake_payload)") || fail "legacy intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+  facts=$(jq -cn '{gate:{source:"delivery",result:"incomplete",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:null}')
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task legacy-attempt --attempt "$attempt" --payload "$facts" >/dev/null \
+    || fail "a terminal-facts payload without usageSource was refused"
+  row=$(jq -es --arg a "$attempt" 'map(select(.eventType=="attempt-terminal" and .attemptId==$a)) | .[0].terminal' "$home/data/routing-outcomes.jsonl")
+  printf '%s' "$row" | jq -e 'has("usageSource")|not' >/dev/null \
+    || fail "a terminal without usageSource gained a usageSource field"
+  pass "terminal records explicit usageSource for recorded and unavailable usage and stays absent for legacy callers"
+}
+
+# Proof that the existing telemetry join answers a subscription-renewal
+# question: a representative week is joined into a per-subscription table with
+# attempts, acceptance, cost, tokens, task classes served, quota utilization,
+# and the usageSource breakdown. This is the deliverable; no dashboard is built.
+test_subscription_sheet_joins_a_representative_week() {
+  local home a json n cw cp ct gl ow day md cw_md cw_usage ct_md ct_usage err="$TMP_ROOT/subscription-sheet-err"
+  home=$(make_home subscription-sheet)
+  sub_intake() {
+    local harness=$1 provider=$2 model=$3 account=$4 family=$5 routing=$6 rule=$7 task=$8 started=$9 decision=${10} headroom=${11}
+    jq -cn --arg h "$harness" --arg p "$provider" --arg m "$model" --arg a "$account" --arg f "$family" --arg r "$routing" --arg rule "$rule" --arg t "$task" --arg s "$started" --arg d "$decision" --arg hm "$headroom" \
+    'def tuple: {harness:$h,provider:$p,model:$m,effort:"high",modelVersion:$m,cliVersion:"cli 1.0"} + (if $h=="claude" then {accountProfile:$a} else {} end);
+     {attemptClass:"real",source:"firstmate",taskRootId:null,parentAttemptId:null,projectRef:"project_0123456789abcdef",taskClass:$t,tuple:tuple,selection:{matchedRule:$rule,configSha256:null,fitReasons:["task-class"],candidateAssessments:[{tuple:tuple,eligibility:"selected",reasons:["class-fit"]}],quota:{decision:$d,headroom:$hm,runway:"sufficient",observedAt:null},routingSource:$r,dispatchModelFamily:$f},neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},startedAt:$s,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}'
+  }
+  sub_seal() {
+    local task=$1 attempt=$2 classification=$3 intok=$4 outtok=$5 usageSource=$6 facts
+    facts=$(jq -cn --arg c "$classification" --argjson it "$intok" --argjson ot "$outtok" --arg us "$usageSource" \
+      '{gate:{source:"no-mistakes",result:(if $c=="accepted" then "green" else "failed" end),stepReruns:0},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:$it,outputTokens:$ot,cost:null,currency:null},wallSeconds:60,usageSource:($us|if .=="" then null else . end)}')
+    FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task "$task" --attempt "$attempt" --payload "$facts" >/dev/null
+  }
+
+  # Claude/work: 2 accepted (recorded), 1 failed (recorded).
+  a=$(run_intake "$home" cw1 "$(sub_intake claude anthropic claude-opus work claude profile rule-1 bounded-implementation-proven-root-fix 2026-09-08T10:00:00Z selected sufficient)" | jq -r .attemptId); sub_seal cw1 "$a" accepted 1000 2000 recorded
+  a=$(run_intake "$home" cw2 "$(sub_intake claude anthropic claude-opus work claude profile rule-1 bounded-implementation-proven-root-fix 2026-09-09T10:00:00Z selected sufficient)" | jq -r .attemptId); sub_seal cw2 "$a" accepted 1500 2500 recorded
+  a=$(run_intake "$home" cw3 "$(sub_intake claude anthropic claude-opus work claude profile rule-1 adversarial-review-security-review 2026-09-10T10:00:00Z selected tight)" | jq -r .attemptId); sub_seal cw3 "$a" failed 800 400 recorded
+  # Claude/personal: 1 accepted (recorded), 1 open.
+  a=$(run_intake "$home" cp1 "$(sub_intake claude anthropic claude-opus personal claude profile rule-2 evidence-heavy-research 2026-09-11T10:00:00Z selected sufficient)" | jq -r .attemptId); sub_seal cp1 "$a" accepted 2000 3000 recorded
+  run_intake "$home" cp2 "$(sub_intake claude anthropic claude-opus personal claude profile rule-2 documentation-specification-decision-extraction 2026-09-12T10:00:00Z selected sufficient)" >/dev/null
+  # Codex/team (model gpt-5): 1 accepted (recorded), 1 failed with no-verified-source.
+  a=$(run_intake "$home" ct1 "$(sub_intake codex openai gpt-5 team gpt-5 profile rule-3 bounded-implementation-proven-root-fix 2026-09-09T11:00:00Z selected sufficient)" | jq -r .attemptId); sub_seal ct1 "$a" accepted 500 800 recorded
+  a=$(run_intake "$home" ct2 "$(sub_intake codex openai gpt-5 team gpt-5 profile rule-3 rote-reversible-edit 2026-09-13T11:00:00Z stopped exhausted)" | jq -r .attemptId); sub_seal ct2 "$a" failed null null no-verified-source
+  # Codex/solo (distinct model gpt-5.6-sol): 1 accepted (recorded).
+  a=$(run_intake "$home" cs1 "$(sub_intake codex openai gpt-5.6-sol solo gpt-5 profile rule-4 long-horizon-repository-work 2026-09-10T12:00:00Z selected sufficient)" | jq -r .attemptId); sub_seal cs1 "$a" accepted 600 900 recorded
+  # Cursor GLM exploration candidate: 1 accepted, no-verified-source.
+  a=$(run_intake "$home" gl1 "$(sub_intake cursor-agent cursor glm-4.5 "" glm fallback default bounded-implementation-proven-root-fix 2026-09-12T12:00:00Z selected unmeasurable)" | jq -r .attemptId); sub_seal gl1 "$a" accepted null null no-verified-source
+  # Claude/work again: a session that was read but reported no token totals.
+  a=$(run_intake "$home" cw4 "$(sub_intake claude anthropic claude-opus work claude profile rule-1 rote-reversible-edit 2026-09-09T12:00:00Z selected sufficient)" | jq -r .attemptId); sub_seal cw4 "$a" accepted null null session-matched-no-tokens
+  # Out-of-window attempt that must be excluded by --from.
+  run_intake "$home" old1 "$(sub_intake claude anthropic claude-opus work claude profile rule-1 bounded-implementation-proven-root-fix 2026-08-30T10:00:00Z selected sufficient)" >/dev/null
+
+  json=$(FM_HOME="$home" "$TELEMETRY" subscription-sheet --from 2026-09-08T00:00:00Z --to 2026-09-14T23:59:59Z --format json)
+  n=$(printf '%s' "$json" | jq 'length')
+  [ "$n" = 5 ] || fail "expected 5 subscriptions for the representative week, got $n"
+  cw=$(printf '%s' "$json" | jq -c '.[] | select(.accountProfile=="work" and .harness=="claude")')
+  printf '%s' "$cw" | jq -e '.attempts==4 and .accepted==3 and .rejectedOrFailed==1 and .open==0 and .inputTokens==3300 and .outputTokens==4900 and .usageRecorded==3 and .usageSessionMatchedNoTokens==1 and (.taskClasses|index("bounded-implementation-proven-root-fix")>=0) and (.taskClasses|index("adversarial-review-security-review")>=0) and .quotaSelected==4 and .headroomTight==1' >/dev/null \
+    || fail "claude/work subscription row was wrong: $cw"
+  cp=$(printf '%s' "$json" | jq -c '.[] | select(.accountProfile=="personal" and .harness=="claude")')
+  printf '%s' "$cp" | jq -e '.attempts==2 and .accepted==1 and .open==1' >/dev/null || fail "claude/personal subscription row was wrong: $cp"
+  ct=$(printf '%s' "$json" | jq -c '.[] | select(.harness=="codex" and .model=="gpt-5")')
+  printf '%s' "$ct" | jq -e '.attempts==2 and .accepted==1 and .rejectedOrFailed==1 and .quotaStopped==1 and .headroomExhausted==1 and .usageNoVerifiedSource==1' >/dev/null \
+    || fail "codex/team subscription row was wrong: $ct"
+  # A session read with no token totals gets its own bucket rather than falling
+  # out of the breakdown that is supposed to explain the missing tokens.
+  printf '%s' "$ct" | jq -e '.usageSessionMatchedNoTokens==0' >/dev/null \
+    || fail "codex/team wrongly counted a session-matched-no-tokens row: $ct"
+  printf '%s' "$json" | jq -e '[.[]|.usageSessionMatchedNoTokens]|add==1' >/dev/null \
+    || fail "the usageSource breakdown lost the session-matched-no-tokens row: $json"
+  gl=$(printf '%s' "$json" | jq -c '.[] | select(.harness=="cursor-agent")')
+  printf '%s' "$gl" | jq -e '.attempts==1 and .accepted==1 and .usageNoVerifiedSource==1 and .dispatchModelFamily=="glm" and .headroomUnmeasurable==1' >/dev/null \
+    || fail "cursor/glm subscription row was wrong: $gl"
+  ow=$(printf '%s' "$json" | jq '[.[] | select(.subscription|test("2026-08"))] | length')
+  [ "$ow" = 0 ] || fail "an out-of-window attempt leaked into the representative week"
+  # A bare calendar date bound covers that whole day, so the natural spelling of
+  # the window does not silently drop the attempts recorded on its last day.
+  day=$(FM_HOME="$home" "$TELEMETRY" subscription-sheet --from 2026-09-08 --to 2026-09-13 --format json | jq -c '.[] | select(.harness=="codex" and .model=="gpt-5")')
+  printf '%s' "$day" | jq -e '.attempts==2' >/dev/null \
+    || fail "a bare --to date dropped the attempts recorded on that day: $day"
+  # A bound that is not a UTC RFC3339 timestamp or a bare date is refused rather
+  # than lexically compared into a wrong window.
+  FM_HOME="$home" "$TELEMETRY" subscription-sheet --to 09/14/2026 >"$err" 2>&1 && fail "subscription-sheet accepted a non-RFC3339 --to bound"
+  grep -q "must be a UTC RFC3339 timestamp or a bare YYYY-MM-DD date" "$err" || fail "missing window-bound error for a non-RFC3339 --to: $(cat "$err")"
+  FM_HOME="$home" "$TELEMETRY" subscription-sheet --from 2026-09-08T00:00:00+02:00 >"$err" 2>&1 && fail "subscription-sheet accepted an offset-bearing --from bound"
+  grep -q "must be a UTC RFC3339 timestamp or a bare YYYY-MM-DD date" "$err" || fail "missing window-bound error for an offset-bearing --from: $(cat "$err")"
+  FM_HOME="$home" "$TELEMETRY" subscription-sheet --from 2026-09-14 --to 2026-09-08 >"$err" 2>&1 && fail "subscription-sheet accepted an inverted window"
+  grep -q "must not be later than" "$err" || fail "missing inverted-window error: $(cat "$err")"
+  FM_HOME="$home" "$TELEMETRY" subscription-sheet --from 2026-09-14T12:00:00Z --to 2026-09-14T06:00:00Z >"$err" 2>&1 && fail "subscription-sheet accepted a window inverted within one day"
+  grep -q "must not be later than" "$err" || fail "missing inverted-window error for an intra-day inversion: $(cat "$err")"
+  # A bare --to date still covers the whole day, so a same-day timestamped --from
+  # is a legitimate window rather than an inversion.
+  FM_HOME="$home" "$TELEMETRY" subscription-sheet --from 2026-09-13T00:00:00Z --to 2026-09-13 --format json >/dev/null \
+    || fail "a same-day timestamped --from with a bare --to date was refused as inverted"
+  # The markdown format renders a table, proving the join is presentable without a dashboard.
+  md=$(FM_HOME="$home" "$TELEMETRY" subscription-sheet --from 2026-09-08T00:00:00Z --to 2026-09-14T23:59:59Z --format md)
+  printf '%s\n' "$md" | grep -q '^| subscription |' || fail "subscription-sheet markdown header was missing"
+  # The rendered usage cell must account for every sealed terminal, so a reader
+  # sees the named-absence rows rather than a column that reads zero forever.
+  cw_md=$(printf '%s\n' "$md" | grep '^| claude/anthropic/work/')
+  [ -n "$cw_md" ] || fail "the markdown table lost the claude/work subscription: $md"
+  cw_usage=$(printf '%s\n' "$cw_md" | awk -F'|' '{gsub(/ /,"",$(NF-1)); print $(NF-1)}')
+  [ "$cw_usage" = "3/1/0" ] \
+    || fail "the markdown usage cell hid the named-absence rows (want recorded/unavailable/absent 3/1/0): $cw_md"
+  ct_md=$(printf '%s\n' "$md" | grep -F '| codex/openai/default/gpt-5/gpt-5 |')
+  ct_usage=$(printf '%s\n' "$ct_md" | awk -F'|' '{gsub(/ /,"",$(NF-1)); print $(NF-1)}')
+  [ -n "$ct_md" ] || fail "the markdown table lost the codex/team subscription: $md"
+  [ "$ct_usage" = "1/1/0" ] \
+    || fail "the markdown usage cell did not count the codex/team unavailable row: $ct_md"
+  pass "subscription-sheet joins a representative week into a per-subscription renewal table"
+}
+
+# A spawn failure is a pre-launch refusal: it carries no attemptId and never
+# conflates with a model-run attempt. The ledger must accept every documented
+# failureKind and reject an unknown kind, an empty cause, a non-claude
+# accountProfile, and foreign keys. Spawn capability and quota-reader
+# availability are recorded separately so a quota-read login gap
+# (quotaReader=credential-expired) never falsely marks the pool undispatchable
+# (capability stays "unknown"/"supported", never "unsupported" for a reader
+# gap).
+test_spawn_failure_records_pre_launch_refusals() {
+  local home tuple attempt gap err="$TMP_ROOT/spawn-failure-err"
+  home=$(make_home spawn-failure)
+  tuple='{"harness":"claude","provider":"anthropic","model":"claude-opus","effort":"high","modelVersion":"claude-opus","cliVersion":"claude-cli 1.0"}'
+  for kind in credential quota quota-reader harness-auth validation catalog harness-missing backend other; do
+    FM_HOME="$home" "$TELEMETRY" spawn-failure --state "$home/state" --task "k-$kind" --payload \
+      "$(jq -cn --arg k "$kind" --argjson t "$tuple" '{attemptedAt:"2026-08-18T18:00:00Z",tuple:$t,taskClass:"unresolved",failureKind:$k,cause:"x",routingSource:null,dispatchAttestation:null,dispatchModelFamily:null,capability:"unknown",quotaReader:"not-applicable"}')" \
+      >/dev/null || fail "spawn-failure rejected a valid failureKind: $kind"
+  done
+  # Unknown failureKind is rejected.
+  FM_HOME="$home" "$TELEMETRY" spawn-failure --state "$home/state" --task bad-kind --payload \
+    "$(jq -cn --argjson t "$tuple" '{attemptedAt:"2026-08-18T18:00:00Z",tuple:$t,taskClass:"unresolved",failureKind:"vibes",cause:"x",routingSource:null,dispatchAttestation:null,dispatchModelFamily:null,capability:"unknown",quotaReader:"not-applicable"}')" \
+    >"$err" 2>&1 && fail "spawn-failure accepted an unknown failureKind"
+  grep -q "spawn failure payload violates the whitelist" "$err" || fail "missing whitelist error for unknown kind"
+  # Empty cause is rejected.
+  FM_HOME="$home" "$TELEMETRY" spawn-failure --state "$home/state" --task bad-cause --payload \
+    "$(jq -cn --argjson t "$tuple" '{attemptedAt:"2026-08-18T18:00:00Z",tuple:$t,taskClass:"unresolved",failureKind:"credential",cause:"",routingSource:null,dispatchAttestation:null,dispatchModelFamily:null,capability:"unknown",quotaReader:"not-applicable"}')" \
+    >"$err" 2>&1 && fail "spawn-failure accepted an empty cause"
+  grep -q "spawn failure payload violates the whitelist" "$err" || fail "missing whitelist error for empty cause"
+  # A non-claude accountProfile is rejected (accountProfile is claude-only).
+  FM_HOME="$home" "$TELEMETRY" spawn-failure --state "$home/state" --task bad-acct --payload \
+    "$(jq -cn '{attemptedAt:"2026-08-18T18:00:00Z",tuple:{harness:"codex",provider:"openai",model:"gpt-5",effort:"high",modelVersion:"gpt-5",cliVersion:"codex",accountProfile:"team"},taskClass:"unresolved",failureKind:"credential",cause:"x",routingSource:null,dispatchAttestation:null,dispatchModelFamily:null,capability:"unknown",quotaReader:"not-applicable"}')" \
+    >"$err" 2>&1 && fail "spawn-failure accepted a non-claude accountProfile"
+  grep -q "spawn failure payload violates the whitelist" "$err" || fail "missing whitelist error for non-claude accountProfile"
+  # A foreign key on the failure object is rejected.
+  FM_HOME="$home" "$TELEMETRY" spawn-failure --state "$home/state" --task bad-foreign --payload \
+    "$(jq -cn --argjson t "$tuple" '{attemptedAt:"2026-08-18T18:00:00Z",tuple:$t,taskClass:"unresolved",failureKind:"credential",cause:"x",routingSource:null,dispatchAttestation:null,dispatchModelFamily:null,capability:"unknown",quotaReader:"not-applicable",extraKey:1}')" \
+    >"$err" 2>&1 && fail "spawn-failure accepted a foreign key"
+  grep -q "spawn failure payload violates the whitelist" "$err" || fail "missing whitelist error for foreign key"
+  # A payload missing capability is rejected (capability and quotaReader are required).
+  FM_HOME="$home" "$TELEMETRY" spawn-failure --state "$home/state" --task bad-nocap --payload \
+    "$(jq -cn --argjson t "$tuple" '{attemptedAt:"2026-08-18T18:00:00Z",tuple:$t,taskClass:"unresolved",failureKind:"credential",cause:"x",routingSource:null,dispatchAttestation:null,dispatchModelFamily:null}')" \
+    >"$err" 2>&1 && fail "spawn-failure accepted a payload missing capability"
+  grep -q "spawn failure payload violates the whitelist" "$err" || fail "missing whitelist error for missing capability"
+  # An invalid capability enum is rejected.
+  FM_HOME="$home" "$TELEMETRY" spawn-failure --state "$home/state" --task bad-cap --payload \
+    "$(jq -cn --argjson t "$tuple" '{attemptedAt:"2026-08-18T18:00:00Z",tuple:$t,taskClass:"unresolved",failureKind:"credential",cause:"x",routingSource:null,dispatchAttestation:null,dispatchModelFamily:null,capability:"maybe",quotaReader:"unknown"}')" \
+    >"$err" 2>&1 && fail "spawn-failure accepted an invalid capability enum"
+  grep -q "spawn failure payload violates the whitelist" "$err" || fail "missing whitelist error for invalid capability"
+  # A quota-read login gap is recorded with capability=unknown (NOT unsupported)
+  # and quotaReader=credential-expired, so the pool is never falsely marked
+  # undispatchable by a reader gap.
+  FM_HOME="$home" "$TELEMETRY" spawn-failure --state "$home/state" --task reader-gap --payload \
+    "$(jq -cn '{attemptedAt:"2026-08-18T18:00:00Z",tuple:{harness:"kimi",provider:"moonshot",model:"kimi-k2",effort:"high",modelVersion:"kimi-k2",cliVersion:"kimi-cli"},taskClass:"unresolved",failureKind:"quota-reader",cause:"kimi_code_cli_credential_expired",routingSource:"profile",dispatchAttestation:{kind:"resolved"},dispatchModelFamily:"kimi",capability:"unknown",quotaReader:"credential-expired"}')" \
+    >/dev/null || fail "spawn-failure rejected a quota-reader gap payload"
+  gap=$(jq -c 'select(.failure.failureKind=="quota-reader" and .failure.quotaReader=="credential-expired")' "$home/data/routing-outcomes.jsonl" | head -n1)
+  [ -n "$gap" ] || fail "no quota-reader gap spawn-failure row was recorded"
+  printf '%s' "$gap" | jq -e '.failure.capability=="unknown" and .failure.quotaReader=="credential-expired" and .failure.cause=="kimi_code_cli_credential_expired"' >/dev/null \
+    || fail "quota-reader gap did not separate capability from quota-reader availability: $gap"
+  # The recorded event carries the exact cause and is a spawn-failure, not an attempt.
+  attempt=$(jq -c 'select(.eventType=="spawn-failure")' "$home/data/routing-outcomes.jsonl" | head -n1)
+  [ -n "$attempt" ] || fail "no spawn-failure row was appended to the ledger"
+  printf '%s' "$attempt" | jq -e '.failure.failureKind=="credential" and (.failure.cause|length>=1) and (.attemptId|not)' >/dev/null \
+    || fail "spawn-failure row did not carry the cause or wrongly carried an attemptId"
+  # The ledger still validates with spawn-failure rows present: a subsequent
+  # write runs validate_ledger_for_write over the whole ledger, so it fails
+  # if any prior spawn-failure row were malformed.
+  FM_HOME="$home" "$TELEMETRY" spawn-failure --state "$home/state" --task revalidate --payload \
+    "$(jq -cn --argjson t "$tuple" '{attemptedAt:"2026-08-18T18:00:00Z",tuple:$t,taskClass:"unresolved",failureKind:"other",cause:"revalidate",routingSource:null,dispatchAttestation:null,dispatchModelFamily:null,capability:"unknown",quotaReader:"not-applicable"}')" \
+    >/dev/null || fail "ledger with spawn-failure rows failed to validate on a subsequent write"
+  pass "spawn-failure records pre-launch refusals with the exact cause"
+}
+
+# A recorded spawn refusal never became a model attempt, so the attempt
+# projections stay attempt-only. Its own read surface must group the refusals by
+# the pool axes the failure payload carries and keep the exact cause, so a
+# quota-read credential gap is visible without grepping the raw ledger.
+test_spawn_failures_read_surface_groups_refusals_by_pool() {
+  local home tuple_kimi tuple_codex json kimi codex md err="$TMP_ROOT/spawn-failures-err"
+  home=$(make_home spawn-failures-read)
+  tuple_kimi='{"harness":"kimi","provider":"moonshot","model":"kimi-k2","effort":"high","modelVersion":"kimi-k2","cliVersion":"kimi-cli"}'
+  tuple_codex='{"harness":"codex","provider":"openai","model":"gpt-5","effort":"high","modelVersion":"gpt-5","cliVersion":"codex-cli"}'
+  sf_record() {
+    local task=$1 tuple=$2 at=$3 kind=$4 cause=$5 class=$6 family=$7 cap=$8 reader=$9
+    FM_HOME="$home" "$TELEMETRY" spawn-failure --state "$home/state" --task "$task" --payload \
+      "$(jq -cn --argjson t "$tuple" --arg at "$at" --arg k "$kind" --arg c "$cause" --arg cl "$class" --arg f "$family" --arg cap "$cap" --arg r "$reader" \
+        '{attemptedAt:$at,tuple:$t,taskClass:$cl,failureKind:$k,cause:$c,routingSource:"profile",dispatchAttestation:{kind:"resolved"},dispatchModelFamily:$f,capability:$cap,quotaReader:$r}')" >/dev/null \
+      || fail "spawn-failure was refused while seeding the read surface: $task"
+  }
+  sf_record k1 "$tuple_kimi" 2026-09-10T10:00:00Z quota-reader kimi_code_cli_credential_expired unresolved kimi unknown credential-expired
+  sf_record k2 "$tuple_kimi" 2026-09-13T10:00:00Z quota-reader "kimi_code_cli_credential_expired on retry" rote-reversible-edit kimi unknown credential-expired
+  sf_record k3 "$tuple_kimi" 2026-09-12T10:00:00Z validation "--quota-decision must be one of selected, stopped, not-applicable, unknown" unresolved kimi unknown not-applicable
+  sf_record c1 "$tuple_codex" 2026-09-11T10:00:00Z quota "You have hit your usage limit" bounded-implementation-proven-root-fix gpt-5 unknown available
+
+  json=$(FM_HOME="$home" "$TELEMETRY" spawn-failures --format json)
+  [ "$(printf '%s' "$json" | jq 'length')" = 2 ] || fail "spawn-failures did not group the refusals into one row per pool: $json"
+  kimi=$(printf '%s' "$json" | jq -c '.[] | select(.harness=="kimi")')
+  printf '%s' "$kimi" | jq -e '.failures==3 and .failureKinds["quota-reader"]==2 and .failureKinds.validation==1' >/dev/null \
+    || fail "the kimi pool did not carry its failureKind breakdown: $kimi"
+  # The exact cause of the most recent refusal is what makes credential rot legible.
+  printf '%s' "$kimi" | jq -e '.lastCause=="kimi_code_cli_credential_expired on retry" and .lastAt=="2026-09-13T10:00:00Z" and .firstAt=="2026-09-10T10:00:00Z"' >/dev/null \
+    || fail "the kimi pool did not keep its most recent exact cause: $kimi"
+  # Capability stays separate from quota-reader availability on the read surface too.
+  printf '%s' "$kimi" | jq -e '(.capability|index("unsupported"))==null and (.quotaReader|index("credential-expired"))!=null and (.taskClasses|index("rote-reversible-edit"))!=null' >/dev/null \
+    || fail "the kimi pool conflated spawn capability with quota-reader availability: $kimi"
+  codex=$(printf '%s' "$json" | jq -c '.[] | select(.harness=="codex")')
+  printf '%s' "$codex" | jq -e '.failures==1 and .failureKinds.quota==1 and .quotaReader==["available"] and .dispatchModelFamily=="gpt-5"' >/dev/null \
+    || fail "the codex pool row was wrong: $codex"
+
+  # The window bounds the attemptedAt axis, with the same bare-date whole-day rule.
+  json=$(FM_HOME="$home" "$TELEMETRY" spawn-failures --from 2026-09-11 --to 2026-09-12 --format json)
+  printf '%s' "$json" | jq -e 'length==2 and ([.[]|.failures]|add)==2' >/dev/null \
+    || fail "spawn-failures did not bound the window on attemptedAt: $json"
+  FM_HOME="$home" "$TELEMETRY" spawn-failures --to 09/14/2026 >"$err" 2>&1 && fail "spawn-failures accepted a non-RFC3339 bound"
+  grep -q "must be a UTC RFC3339 timestamp or a bare YYYY-MM-DD date" "$err" || fail "missing window-bound error: $(cat "$err")"
+  FM_HOME="$home" "$TELEMETRY" spawn-failures --from 2026-09-14T12:00:00Z --to 2026-09-14T06:00:00Z >"$err" 2>&1 && fail "spawn-failures accepted an inverted window"
+  grep -q "must not be later than" "$err" || fail "missing inverted-window error: $(cat "$err")"
+  FM_HOME="$home" "$TELEMETRY" spawn-failures --format table >"$err" 2>&1 && fail "spawn-failures accepted an unknown format"
+  grep -q "spawn-failures format must be json, csv, or md" "$err" || fail "missing format error: $(cat "$err")"
+
+  # The renderings are presentable without a dashboard.
+  FM_HOME="$home" "$TELEMETRY" spawn-failures --format csv | grep -q '^pool,harness,provider' || fail "spawn-failures csv header was missing"
+  FM_HOME="$home" "$TELEMETRY" spawn-failures --format md | grep -q '^| pool |' || fail "spawn-failures markdown header was missing"
+  # The cooldown evidence a cause carries is an unbounded provider quote that may
+  # contain a line break; the table must stay one row per pool.
+  sf_record k4 "$tuple_kimi" 2026-09-13T12:00:00Z credential "provider refused the session
+please log in again" unresolved kimi unknown not-applicable
+  md=$(FM_HOME="$home" "$TELEMETRY" spawn-failures --format md)
+  # Header, separator, and exactly one line per pool: a cause that kept its line
+  # break would emit a fragment that is no longer a table row.
+  [ "$(printf '%s\n' "$md" | wc -l | tr -d ' ')" = 4 ] || fail "a multi-line cause split the markdown table: $md"
+  [ "$(printf '%s\n' "$md" | grep -c '^|.*|$')" = 4 ] || fail "a multi-line cause left a fragment outside the table: $md"
+  FM_HOME="$home" "$TELEMETRY" spawn-failures --format md | grep -q 'please log in again' \
+    || fail "the markdown table dropped the multi-line cause instead of folding it onto one row"
+
+  # A spawn refusal never produced an attempt, so the attempt projections must
+  # stay blind to it: the refusals above are the only rows in this ledger.
+  [ "$(FM_HOME="$home" "$TELEMETRY" sheet --format json | jq 'length')" = 0 ] \
+    || fail "a spawn-failure row leaked into the attempt sheet"
+  [ "$(FM_HOME="$home" "$TELEMETRY" subscription-sheet --format json | jq 'length')" = 0 ] \
+    || fail "a spawn-failure row leaked into the subscription sheet"
+  pass "spawn-failures groups recorded refusals per pool with their exact cause"
+}
+
 test_terminals_and_retry_links
 test_crash_recovery_and_terminal_idempotency
 test_relaunch_supersedes_stale_receipt
@@ -565,4 +899,9 @@ test_routing_candidate_guard_rejects_post_outcome_registration_and_missing_plan_
 test_candidate_sample_excludes_non_quality_outcomes_and_binds_frozen_verdict
 test_legacy_lossless_and_read_only_sheets
 test_account_profile_evidence_is_bound_only_to_claude
+test_intake_accepts_routing_provenance_additive_fields
+test_terminal_records_explicit_usage_source
+test_subscription_sheet_joins_a_representative_week
+test_spawn_failure_records_pre_launch_refusals
+test_spawn_failures_read_surface_groups_refusals_by_pool
 printf 'All model telemetry tests passed.\n'

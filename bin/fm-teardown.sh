@@ -70,6 +70,17 @@
 #   delivery-gate result. A matching no-mistakes run always supplies mechanical
 #   quality facts instead, and says on stderr that the payload was not recorded.
 #   Without either quality source, the attempt is sealed incomplete.
+#   The recorded row is the payload plus what teardown observed, not the payload
+#   as authored: on a first-time seal the observed usageSource is merged over it,
+#   together with the observed usage when the harness session actually reported
+#   token counts and the observed active duration when one was measured, so a
+#   sealed row never names a usage source whose numbers were thrown away.
+#   That observation is not reproducible once the worktree is gone, so the seal
+#   fingerprints the payload it recorded into state/<id>.meta as
+#   telemetry_terminal_payload_sha256=. Re-running the same command is then a
+#   no-op against the recorded terminal, while a different payload still reaches
+#   the ledger's terminal-conflict refusal. When no digest can be computed the
+#   payload is recorded as authored, which keeps that retry idempotent.
 #   Sealing a recorded attempt is unconditional: no flag bypasses it, --force
 #   included, so a damaged or pruned ledger blocks cleanup until it is repaired.
 #   The refusal prints the ledger path, the failing line or attempt, and the
@@ -1516,6 +1527,31 @@ scout_delivery_is_accepted() {
     FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null 2>&1
 }
 
+# Digest of one caller-authored terminal payload, canonicalized first so a
+# reformatted but identical payload still matches.
+telemetry_payload_digest() {  # <payload>
+  local canonical
+  canonical=$(printf '%s' "$1" | jq -cS . 2>/dev/null) || return 1
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$canonical" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$canonical" | sha256sum | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+# Whether the ledger already holds a terminal row for this attempt. Asked of the
+# telemetry owner rather than read from the ledger directly, so the projection
+# that answers it stays the owner's.
+telemetry_attempt_is_sealed() {  # <attempt>
+  local attempt=$1 state
+  state=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$FM_ROOT/bin/fm-model-telemetry.sh" sheet --format json 2>/dev/null |
+    jq -r --arg a "$attempt" 'map(select(.attemptId==$a)) | (.[0].state // "open")' 2>/dev/null) || return 1
+  [ "$state" = terminal ]
+}
+
 observe_telemetry_gate_facts() {  # <worktree>
   local wt=$1 out reruns status_line status_verb
   TELEMETRY_GATE_SOURCE=delivery
@@ -2655,19 +2691,26 @@ fi
 # which this ledger refuses on purpose.
 # Cleanup itself never supplies success; a forced cleanup supplies cancellation.
 TELEMETRY_ATTEMPT=$(fm_meta_get "$META" telemetry_attempt)
+TELEMETRY_SEALED_PAYLOAD_DIGEST=$(fm_meta_get "$META" telemetry_terminal_payload_sha256)
+TELEMETRY_RECORD_PAYLOAD_DIGEST=
 if [ -n "$TELEMETRY_ATTEMPT" ]; then
   TELEMETRY_USAGE='{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null}'
   TELEMETRY_WALL_SECONDS=null
+  TELEMETRY_USAGE_SOURCE=null
   if [ -d "$WT" ]; then
     if TELEMETRY_OBSERVATION=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$FM_ROOT/bin/fm-model-telemetry.sh" usage --attempt "$TELEMETRY_ATTEMPT" --worktree "$WT"); then
       TELEMETRY_USAGE=$(printf '%s' "$TELEMETRY_OBSERVATION" | jq -c .usage)
       TELEMETRY_WALL_SECONDS=$(printf '%s' "$TELEMETRY_OBSERVATION" | jq -c .wallSeconds)
+      TELEMETRY_USAGE_SOURCE=$(printf '%s' "$TELEMETRY_OBSERVATION" | jq -c '.usageSource // null')
     else
       echo "teardown: exact-attempt harness session facts were unreadable for $ID; token counts and active duration remain absent" >&2
       TELEMETRY_USAGE='{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null}'
       TELEMETRY_WALL_SECONDS=null
+      TELEMETRY_USAGE_SOURCE='"unreadable"'
     fi
+  else
+    TELEMETRY_USAGE_SOURCE='"worktree-missing"'
   fi
   if [ -n "$TERMINAL_PAYLOAD" ]; then
     printf '%s' "$TERMINAL_PAYLOAD" | jq -e 'type=="object"' >/dev/null 2>&1 || {
@@ -2693,8 +2736,8 @@ if [ -n "$TELEMETRY_ATTEMPT" ]; then
   TELEMETRY_FACTS=$(jq -cn --arg source "$TELEMETRY_GATE_SOURCE" --arg result "$TELEMETRY_GATE_RESULT" \
     --argjson reruns "$TELEMETRY_STEP_RERUNS" --arg kind "$TELEMETRY_OUTCOME_KIND" \
     --argjson outcomeId "$TELEMETRY_OUTCOME_ID" --argjson usage "$TELEMETRY_USAGE" \
-    --argjson wallSeconds "$TELEMETRY_WALL_SECONDS" \
-    '{gate:{source:$source,result:$result,stepReruns:$reruns},outcomeLink:{kind:$kind,id:$outcomeId},usage:$usage,wallSeconds:$wallSeconds}')
+    --argjson wallSeconds "$TELEMETRY_WALL_SECONDS" --argjson usageSource "$TELEMETRY_USAGE_SOURCE" \
+    '{gate:{source:$source,result:$result,stepReruns:$reruns},outcomeLink:{kind:$kind,id:$outcomeId},usage:$usage,wallSeconds:$wallSeconds,usageSource:$usageSource}')
   if [ "$TELEMETRY_GATE_SOURCE" = no-mistakes ] \
     || [ "$TELEMETRY_GATE_RESULT" = green ] \
     || [ -z "$TERMINAL_PAYLOAD" ]; then
@@ -2702,7 +2745,54 @@ if [ -n "$TELEMETRY_ATTEMPT" ]; then
       echo "note: task $ID has an observed terminal result ($TELEMETRY_GATE_RESULT), so its mechanical quality facts were sealed and --terminal-payload was not recorded" >&2
     telemetry_args=(terminal-facts --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT" --payload "$TELEMETRY_FACTS")
   else
-    telemetry_args=(seal-or-incomplete --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT" --terminal-payload "$TERMINAL_PAYLOAD")
+    TERMINAL_PAYLOAD_DIGEST=$(telemetry_payload_digest "$TERMINAL_PAYLOAD") || TERMINAL_PAYLOAD_DIGEST=
+    TELEMETRY_ATTEMPT_SEALED=0
+    if telemetry_attempt_is_sealed "$TELEMETRY_ATTEMPT"; then
+      TELEMETRY_ATTEMPT_SEALED=1
+    fi
+    if [ "$TELEMETRY_ATTEMPT_SEALED" -eq 1 ] \
+      && [ -n "$TERMINAL_PAYLOAD_DIGEST" ] \
+      && [ "$TERMINAL_PAYLOAD_DIGEST" = "$TELEMETRY_SEALED_PAYLOAD_DIGEST" ]; then
+      # This teardown already sealed this exact payload, and the observation it
+      # recorded alongside is not reproducible now that the worktree and its
+      # harness session are gone. Sealing against the recorded outcome keeps the
+      # retry a no-op instead of a refusal teardown itself would have authored.
+      echo "note: task $ID already carries the terminal this teardown sealed from the same --terminal-payload; the recorded terminal is immutable and stays authoritative" >&2
+      telemetry_args=(seal-or-incomplete --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT")
+    else
+      if [ "$TELEMETRY_ATTEMPT_SEALED" -eq 1 ]; then
+        # A different payload against a recorded terminal is a contradiction the
+        # ledger owns and refuses; teardown forwards it unmerged rather than
+        # deciding on its own that the caller meant the recorded outcome.
+        :
+      elif [ -z "$TERMINAL_PAYLOAD_DIGEST" ]; then
+        # Without a digest to recognize this payload by, a merge would make the
+        # rerun of an identical command a contradiction teardown authored. The
+        # caller's payload is forwarded verbatim so the retry stays idempotent.
+        echo "note: task $ID could not be fingerprinted for a seal retry, so --terminal-payload was recorded as authored without the observed usage source" >&2
+      elif [ "$TELEMETRY_USAGE_SOURCE" != null ]; then
+        # The observation owns the usage it names: a sealed terminal never
+        # records usage as silently absent, and usageSource never labels numbers
+        # the observation did not produce. Token counts replace the caller's own
+        # only when the observation actually read some; active duration is a
+        # separate fact, carried only when the observation measured one.
+        TELEMETRY_USAGE_OBSERVED=0
+        if printf '%s' "$TELEMETRY_USAGE" | jq -e '(.inputTokens|type=="number") and (.outputTokens|type=="number")' >/dev/null 2>&1; then
+          TELEMETRY_USAGE_OBSERVED=1
+        fi
+        TERMINAL_PAYLOAD=$(printf '%s' "$TERMINAL_PAYLOAD" |
+          jq -c --argjson usage "$TELEMETRY_USAGE" --argjson wallSeconds "$TELEMETRY_WALL_SECONDS" \
+            --argjson usageSource "$TELEMETRY_USAGE_SOURCE" --argjson observed "$TELEMETRY_USAGE_OBSERVED" \
+            '. + {usageSource:$usageSource}
+               + (if $observed==1 then {usage:$usage} else {} end)
+               + (if $wallSeconds==null then {} else {wallSeconds:$wallSeconds} end)') || {
+          echo "error: --terminal-payload could not carry the observed usage facts" >&2
+          exit 1
+        }
+        TELEMETRY_RECORD_PAYLOAD_DIGEST=$TERMINAL_PAYLOAD_DIGEST
+      fi
+      telemetry_args=(seal-or-incomplete --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT" --terminal-payload "$TERMINAL_PAYLOAD")
+    fi
   fi
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$FM_ROOT/bin/fm-model-telemetry.sh" "${telemetry_args[@]}" >/dev/null; then
@@ -2714,6 +2804,12 @@ if [ -n "$TELEMETRY_ATTEMPT" ]; then
     echo "  2. repair $DATA/routing-outcomes.jsonl from a backup: restore the missing intake row or the malformed line, keep it a regular file with mode 600" >&2
     echo "  3. confirm with 'FM_HOME=$FM_HOME FM_DATA_OVERRIDE=$DATA $FM_ROOT/bin/fm-model-telemetry.sh sheet --format json', then re-run fm-teardown.sh $ID" >&2
     exit 1
+  fi
+  # Remember which caller payload this seal recorded, so a rerun of the same
+  # command is a no-op while a rerun carrying a different one still reaches the
+  # ledger's contradiction refusal.
+  if [ -n "$TELEMETRY_RECORD_PAYLOAD_DIGEST" ] && [ -f "$META" ]; then
+    printf 'telemetry_terminal_payload_sha256=%s\n' "$TELEMETRY_RECORD_PAYLOAD_DIGEST" >> "$META" || true
   fi
 elif [ -n "$TERMINAL_PAYLOAD" ]; then
   echo "error: task $ID has no telemetry attempt for --terminal-payload" >&2
