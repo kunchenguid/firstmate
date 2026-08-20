@@ -41,6 +41,8 @@ Choose that posture when adding or creating the project:
 - `no-mistakes` runs the full validation pipeline before a PR.
 - `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
+  Its canonical copy is either the `projects/<name>` clone itself or a folder elsewhere on this machine, and that is decided by whether the clone has an `origin`: this skill's add and create paths are the single owner of that choice.
+  When the canonical copy is a folder elsewhere, every clone of the project keeps that folder as its `origin` and the landing runs back into it, so never strip or re-point that remote.
 - `no-mistakes-prod-only` is a conditional policy rather than one flat mode: genuinely internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`.
 
 `no-mistakes-prod-only` is the default for a newly added or created remote-backed project when the captain specifies nothing, and a project with no remote defaults to `local-only`.
@@ -58,7 +60,7 @@ Confirm the source URL, local project name, delivery posture, and autonomy postu
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
-A `local-only` project may have no remote and skips no-mistakes initialization.
+A `local-only` project may have no remote and skips no-mistakes initialization, and cloning it from a folder on this machine leaves that folder as its `origin`, which is what a later landing needs.
 
 ## Create a project
 
@@ -68,6 +70,7 @@ Use `gh-axi` for the approved GitHub operation and consult its current help rath
 After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery posture.
 
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
+That clone is then the project's only copy and needs no `origin`; a project whose canonical copy is a folder that already exists is an add, not a create.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
 
 ## Initialize
