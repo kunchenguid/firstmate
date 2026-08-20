@@ -35,7 +35,7 @@
 # commits, and validates the candidate against HEAD.
 #
 # disposition is the supported governance-only pending-to-rejected transition.
-# It updates the class and recorded pull-request disposition atomically in one
+# It updates the class and recorded upstream review disposition atomically in one
 # candidate commit, then validates that actual HEAD. The commit is reported by
 # health as a manifest-governance artifact, never as a carried divergence.
 #
@@ -179,7 +179,8 @@ validate_integrate_inputs() {
     [ -z "$PR_URL$PR_DISPOSITION" ] || die "private divergence must not carry an upstream pull-request record"
     return 0
   fi
-  jq -en --arg url "$PR_URL" '$url | test("^https://github\\.com/[^/]+/[^/]+/(pull|issues)/[0-9]+$")' >/dev/null \
+  jq -en --arg url "$PR_URL" --arg pattern "$(fm_fork_upstream_route_pattern)" \
+    '$url | test($pattern)' >/dev/null \
     || die "non-private divergence requires a full GitHub upstream pull-request or issue URL"
   case "$CLASS:$PR_DISPOSITION" in
     pending:open|rejected-but-retained:rejected) ;;

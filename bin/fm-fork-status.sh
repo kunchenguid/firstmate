@@ -17,8 +17,8 @@
 # Git can no longer recompute after an integration merge, and every one of them
 # is re-proved here before its patch leaves the factual non-upstream count.
 #
-# --refresh fetches origin and upstream and verifies recorded GitHub pull-request
-# and issue dispositions with gh-axi, asking whichever endpoint the recorded URL
+# --refresh fetches origin and upstream and verifies recorded GitHub upstream
+# review dispositions with gh-axi, asking whichever endpoint the recorded URL
 # names. Without it, the report is network-free and uses
 # local refs plus recorded dispositions. gh-axi's current API serializer is
 # parsed as one complete, untruncated scalar envelope rather than compared as
@@ -121,11 +121,11 @@ git -C "$REPO" ls-files --error-unmatch -- "$MANIFEST_REL" >/dev/null 2>&1 \
   || die "manifest is not tracked: $MANIFEST_REL"
 command -v jq >/dev/null 2>&1 || die "jq is required"
 
-if ! jq -e '
+if ! jq -e --arg upstream_route_pattern "$(fm_fork_upstream_route_pattern)" '
   # A divergence names its upstream route in one of exactly two accepted forms:
   # a GitHub pull request, or a GitHub issue stating the problem before any pull
   # request exists. Nothing else counts as a route.
-  def upstream_route_url: type == "string" and test("^https://github\\.com/[^/]+/[^/]+/(pull|issues)/[0-9]+$");
+  def upstream_route_url: type == "string" and test($upstream_route_pattern);
   .schema == "firstmate.fork-divergences.v1" and
   (.upstream_syncs | type == "array" and length <= 20) and
   (.divergences | type == "array") and
@@ -408,21 +408,32 @@ while IFS= read -r line || [ -n "$line" ]; do
   fi
 done < "$CHERRY"
 
-# Optional live PR disposition check. It is evidence only and never updates the
+# Optional live upstream review disposition check. It is evidence only and never updates the
 # tracked manifest behind the operator's back.
 if [ "$REFRESH" -eq 1 ]; then
   while IFS=$'\t' read -r id url recorded; do
     [ -n "$url" ] || continue
     path=${url#https://github.com/}
-    owner=${path%%/*}; path=${path#*/}; repo_name=${path%%/*}; number=${url##*/}
-    case "$url" in
-      */issues/*)
+    IFS=/ read -r -a route_parts <<< "$path"
+    if [ "${#route_parts[@]}" -ne 4 ]; then
+      add_error "manifest unit $id has a malformed upstream review route"
+      continue
+    fi
+    owner=${route_parts[0]}
+    repo_name=${route_parts[1]}
+    resource=${route_parts[2]}
+    number=${route_parts[3]}
+    case "$resource" in
+      issues)
         # A GitHub issue has no merge state; it is open or closed.
         live_output=$(gh-axi api "/repos/$owner/$repo_name/issues/$number" \
           --jq 'if .state == "open" then "open" else "closed" end' 2>/dev/null || true) ;;
-      *)
+      pull)
         live_output=$(gh-axi api "/repos/$owner/$repo_name/pulls/$number" \
           --jq 'if .merged_at != null then "merged" elif .state == "open" then "open" else "closed" end' 2>/dev/null || true) ;;
+      *)
+        add_error "manifest unit $id has unsupported upstream review resource $resource"
+        continue ;;
     esac
     live=$(printf '%s\n' "$live_output" | fm_fork_gh_axi_scalar || true)
     case "$live" in

@@ -790,23 +790,45 @@ test_manifest_class_disposition_pairs_are_enforced() {
 # gh-axi 0.1.29 wraps a selected scalar in an api_response TOON envelope.
 # Refresh parses that current real shape and rejects the old fake-scalar assumption.
 test_refresh_parses_current_gh_axi_scalar_envelope() {
-  local w repo fakebin out
+  local w repo fakebin out log tmp
   w=$(new_world refresh-envelope)
-  add_topic_and_merge "$w" refresh refresh.txt current
+  add_topic_and_merge "$w" repo-issues repo-issues.txt current
+  add_topic_and_merge "$w" owner-issues owner-issues.txt current
+  add_topic_and_merge "$w" genuine-issue genuine-issue.txt current
   repo="$w/admin"
+  tmp="$w/manifest-routes"
+  jq '
+    (.divergences[] | select(.id == "repo-issues") | .upstream_pr.url) = "https://github.com/acme/issues/pull/7" |
+    (.divergences[] | select(.id == "owner-issues") | .upstream_pr.url) = "https://github.com/issues/repo/pull/7" |
+    (.divergences[] | select(.id == "genuine-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/7"
+  ' "$repo/fork-divergences.json" > "$tmp" || fail "could not build refresh route fixtures"
+  mv "$tmp" "$repo/fork-divergences.json"
+  git -C "$repo" add fork-divergences.json
+  git -C "$repo" commit -qm 'Record refresh route fixtures'
+  git -C "$repo" push -q origin main
   fakebin="$w/fakebin"
+  log="$w/gh-api-paths"
   mkdir -p "$fakebin"
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
+: "${FAKE_GH_LOG:?}"
+printf '%s\n' "${2:-}" >> "$FAKE_GH_LOG"
 printf '%s\n' 'api_response:' '  body: open' '  truncated: false'
 SH
   chmod +x "$fakebin/gh-axi"
-  out=$(PATH="$fakebin:$PATH" "$STATUS" --repo "$repo" --refresh 2>&1) \
+  out=$(PATH="$fakebin:$PATH" FAKE_GH_LOG="$log" "$STATUS" --repo "$repo" --refresh 2>&1) \
     || fail "refresh rejected gh-axi's current scalar envelope: $out"
-  assert_not_contains "$out" 'records pull request open but live pull request is api_response' \
+  assert_not_contains "$out" 'records open but its live upstream review is api_response' \
     "refresh compared the serializer envelope as the live disposition"
+  grep -Fxq -- '/repos/acme/issues/pulls/7' "$log" \
+    || fail "a repository named issues routed a pull request through the issue endpoint"
+  grep -Fxq -- '/repos/issues/repo/pulls/7' "$log" \
+    || fail "an owner named issues routed a pull request through the issue endpoint"
+  grep -Fxq -- '/repos/acme/repo/issues/7' "$log" \
+    || fail "a genuine issue route did not use the issue endpoint"
+  [ "$(wc -l < "$log" | tr -d ' ')" -eq 3 ] || fail "refresh queried an unexpected number of API paths"
   assert_contains "$out" 'errors=0' "current gh-axi scalar envelope created a refresh error"
-  pass "fork health refresh parses gh-axi's current untruncated scalar envelope"
+  pass "fork health refresh parses the scalar envelope and routes by resource segment"
 }
 
 # Two canonical topics integrate as separate merge units, and discarding one
@@ -1565,12 +1587,12 @@ SH
 # an absent or malformed route is still refused, and these cases exercise that
 # refusal rather than reading it off the source.
 test_upstream_route_accepts_an_issue_and_still_refuses_a_missing_one() {
-  local w admin candidate before out rc bad
+  local w admin candidate before out rc bad spec id url
   w=$(new_world upstream-route)
   admin="$w/admin"
   git clone -q "$w/fork.git" "$admin"
   configure_fork_clone "$admin" "$w"
-  for id in raised declined; do
+  for id in raised declined owner-hyphen repo-dot repo-underscore repo-hyphen; do
     git -C "$admin" switch -qC "fm/divergence/$id" upstream/main
     printf '%s\n' "$id" > "$admin/$id.txt"
     git -C "$admin" add -- "$id.txt"
@@ -1598,6 +1620,8 @@ test_upstream_route_accepts_an_issue_and_still_refuses_a_missing_one() {
     https://github.com/example/firstmate/issues/abc \
     https://github.com/example/firstmate/issues \
     https://evil.example/example/firstmate/issues/7 \
+    'https://github.com/a b/repo/pull/1' \
+    'https://github.com/acme?x/repo/issues/7' \
     https://github.com/example/firstmate/pull/10/files; do
     set +e
     out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id raised \
@@ -1609,6 +1633,27 @@ test_upstream_route_accepts_an_issue_and_still_refuses_a_missing_one() {
   done
   [ "$(git -C "$candidate" rev-parse HEAD)" = "$before" ] || fail "refused routes moved the candidate"
   [ -z "$(git -C "$candidate" status --porcelain)" ] || fail "refused routes dirtied the candidate"
+
+  # Tight owner and repository segment rules still accept legitimate GitHub
+  # names, including every punctuation form GitHub permits for repositories.
+  for spec in \
+    'owner-hyphen|https://github.com/acme-org/repo/pull/1' \
+    'repo-dot|https://github.com/acme/my.repo/pull/1' \
+    'repo-underscore|https://github.com/acme/my_repo/pull/1' \
+    'repo-hyphen|https://github.com/acme/my-repo/pull/1'; do
+    id=${spec%%|*}
+    url=${spec#*|}
+    candidate=$(new_candidate "$w" "route-$id")
+    out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id "$id" \
+      --summary "Carries $id behavior." --class pending --topic "fm/divergence/$id" \
+      --retire-when "Upstream ships equivalent $id behavior." --path "$id.txt" \
+      --pr-url "$url" --pr-disposition open 2>&1) \
+      || fail "a legitimate upstream route was refused: $url: $out"
+    assert_contains "$out" "errors=0" "a legitimate upstream route failed manifest validation: $url"
+    jq -e --arg url "$url" '.divergences[0].upstream_pr.url == $url' \
+      "$candidate/fork-divergences.json" >/dev/null \
+      || fail "manifest did not retain a legitimate upstream route: $url"
+  done
 
   # An issue is accepted as the upstream route of a pending divergence.
   candidate=$(new_candidate "$w" route-issue)
@@ -1648,8 +1693,8 @@ test_health_uses_git_cherry_equivalence_and_exposes_drift
 test_health_requires_declared_paths_to_cover_the_canonical_patch
 test_health_attributes_pipeline_fixes_and_supports_disposition_transition
 test_manifest_class_disposition_pairs_are_enforced
-test_upstream_route_accepts_an_issue_and_still_refuses_a_missing_one
 test_refresh_parses_current_gh_axi_scalar_envelope
+test_upstream_route_accepts_an_issue_and_still_refuses_a_missing_one
 test_topics_are_independently_revertible_units
 test_topic_integration_conflict_has_receipt_bound_continuation
 test_topic_continue_refuses_unbound_continuation

@@ -64,6 +64,10 @@ bin/fm-brief.sh <task-id> firstmate --mode no-mistakes --start-ref upstream/main
 The exact `upstream/main` start ref also makes the generator place the fork worker contract in the brief that `fm-spawn.sh` delivers as its typed launch input.
 That delivered contract loads `fork-main-integration`, forbids rewriting a published topic or pull-request branch, forbids routine upstream or fork-main merges into the topic, and keeps topic validation on the ordinary official-upstream registration.
 The focused regression for this delivered contract is [`tests/fm-fork-main.test.sh`](../tests/fm-fork-main.test.sh).
+Fork-only work validated through that ordinary registration skips the no-mistakes rebase step and records that the step was skipped, that its comparison base was official upstream rather than fork main, and the branch's actual commit and file delta against fork main.
+The registration correctly measures the branch against official upstream, which does not carry the fork divergences and therefore reports those fork-only commits as unrelated bundled work.
+This skip is safe because the detector is not blind: it is correctly measuring a different base, and refreshing the mirror cannot add the fork divergences to official upstream.
+The recorded comparison lets a later reader distinguish the intentional skip from a clean rebase.
 
 A canonical new topic has one aggregate non-merge patch commit before its first fork integration.
 This constraint matters because `git cherry` compares patches one commit at a time.
@@ -182,7 +186,7 @@ Run the local network-free report with:
 bin/fm-fork-status.sh
 ```
 
-Add `--refresh` to fetch both remotes and compare recorded GitHub pull-request dispositions through `gh-axi`.
+Add `--refresh` to fetch both remotes and compare recorded GitHub upstream review dispositions through `gh-axi`.
 Refresh fails closed when live disposition evidence is incomplete or its response shape is unsupported.
 Add `--json` for schema `firstmate.fork-health.v1`.
 
@@ -212,7 +216,7 @@ Only that independent proof excludes the patch, and the report names every retir
 A record that is stale, contradictory, unproved, or missing leaves its patch counted and reported, never silently excluded.
 PR state, commit messages, branch names, ancestry, and stated intent never retire a patch.
 
-The report is unhealthy when one canonical patch has multiple manifest owners, one canonical topic has several non-equivalent commits, a topic or integration merge is missing, declared paths omit a changed file, a pull-request disposition is stale, a recorded retirement no longer re-proves, any superseded unit remains, or retained canonical patches trend up.
+The report is unhealthy when one canonical patch has multiple manifest owners, one canonical topic has several non-equivalent commits, a topic or integration merge is missing, declared paths omit a changed file, an upstream review disposition is stale, a recorded retirement no longer re-proves, any superseded unit remains, or retained canonical patches trend up.
 A manifest unit whose topic has become equivalent upstream is signaled for retirement review rather than misreported as a raw-patch ownership failure.
 An unrepresented non-upstream commit is likewise a signal until an operator classifies its meaning.
 The signal remains named and counted, so this distinction does not hide the Git fact.
@@ -305,7 +309,7 @@ bin/fm-fork-topic.sh disposition \
   --repo <isolated-worktree>
 ```
 
-The helper changes the class and recorded pull-request disposition together, commits the governance transition, and validates candidate health.
+The helper changes the class and recorded upstream review disposition together, commits the governance transition, and validates candidate health.
 Keep or sharpen its falsifiable retirement condition.
 Do not roll it back merely because upstream declined it, and do not leave it mislabeled.
 
