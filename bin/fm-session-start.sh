@@ -922,22 +922,37 @@ The digest above is complete for this session start. The READ-ONCE CONTRACT
 section near the top of it governs what may still be read from disk.
 EOF
 
-if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
+# The completion proof names the owner that completed a full startup: its lock
+# pid, plus the owner's stable session identity when the record carries one.
+# The identity keeps the proof valid across the PID refresh an identity-matched
+# reparenting performs, and a re-emit re-stamps an existing proof so it keeps
+# naming the live owner after a reset re-identifies it.
+if [ "$READ_ONLY" -eq 0 ] && { [ "$REEMIT" -eq 0 ] || [ -f "$COMPLETION_FILE" ]; }; then
   COMPLETION_RECORDED=0
-  COMPLETION_PID=$(fm_session_lock_pid "$STATE" 2>/dev/null || true)
+  COMPLETION_PID=
+  COMPLETION_IDENTITY=
+  if fm_session_lock_read "$STATE" 2>/dev/null; then
+    COMPLETION_PID=$FM_SESSION_LOCK_PID
+    COMPLETION_IDENTITY=$FM_SESSION_LOCK_IDENTITY
+  fi
   case "$COMPLETION_PID" in
     ''|*[!0-9]*) COMPLETION_PID= ;;
   esac
   COMPLETION_TMP=$(mktemp "$STATE/.session-start-complete.XXXXXX" 2>/dev/null || true)
   if [ -n "$COMPLETION_PID" ] && [ -n "$COMPLETION_TMP" ] \
-    && printf '%s\n' "$COMPLETION_PID" > "$COMPLETION_TMP" 2>/dev/null \
+    && {
+      printf '%s\n' "$COMPLETION_PID"
+      [ -z "$COMPLETION_IDENTITY" ] || printf 'session=%s\n' "$COMPLETION_IDENTITY"
+    } > "$COMPLETION_TMP" 2>/dev/null \
     && mv -f "$COMPLETION_TMP" "$COMPLETION_FILE" 2>/dev/null; then
     COMPLETION_RECORDED=1
   else
     [ -z "$COMPLETION_TMP" ] || rm -f "$COMPLETION_TMP" 2>/dev/null || true
-    printf '\nSESSION_START_COMPLETION: not recorded - the next clear or compact will run a full startup.\n'
+    [ "$REEMIT" -eq 1 ] \
+      || printf '\nSESSION_START_COMPLETION: not recorded - the next clear or compact will run a full startup.\n'
   fi
-  if [ "$SESSION_SOURCE" = startup ] && [ "$COMPLETION_RECORDED" -eq 1 ] && [ -n "$AGENTS_START_HASH" ]; then
+  if [ "$REEMIT" -eq 0 ] && [ "$SESSION_SOURCE" = startup ] \
+    && [ "$COMPLETION_RECORDED" -eq 1 ] && [ -n "$AGENTS_START_HASH" ]; then
     if ! write_agents_baseline "$COMPLETION_PID" "$AGENTS_START_HASH"; then
       printf '\nSESSION_START_AGENTS_BASELINE: not recorded - a later supported rebuild will re-emit AGENTS.md.\n'
     fi

@@ -86,14 +86,24 @@ done
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# True when the session that owns the lock right now is the one that recorded a
+# completed full startup.
+# The recorded pid proves that for an owner whose pid has not moved. An
+# identity-matched reparenting atomically refreshes the lock's pid, so the
+# owner's stable session identity proves the same thing when it has, and either
+# proof alone is enough; a different session matches neither.
 session_start_completed() {
-  local lock_pid completion_pid
+  local lock_pid lock_identity completion_pid completion_identity
   [ -f "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] || return 1
   [ -f "$COMPLETION_FILE" ] && [ ! -L "$COMPLETION_FILE" ] || return 1
   fm_session_lock_owned_by_self "$STATE" || return 1
-  lock_pid=$(fm_session_lock_pid "$STATE") || return 1
-  completion_pid=$(cat "$COMPLETION_FILE" 2>/dev/null) || return 1
-  [ "$completion_pid" = "$lock_pid" ]
+  fm_session_lock_read "$STATE" || return 1
+  lock_pid=$FM_SESSION_LOCK_PID
+  lock_identity=$FM_SESSION_LOCK_IDENTITY
+  completion_pid=$(sed -n '1p' "$COMPLETION_FILE" 2>/dev/null) || return 1
+  [ "$completion_pid" = "$lock_pid" ] && return 0
+  completion_identity=$(sed -n 's/^session=//p' "$COMPLETION_FILE" 2>/dev/null | head -1)
+  [ -n "$lock_identity" ] && [ "$completion_identity" = "$lock_identity" ]
 }
 
 PAYLOAD=

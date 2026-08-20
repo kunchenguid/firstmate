@@ -46,6 +46,15 @@ make_primary() {
   : > "$dir/AGENTS.md"
 }
 
+# A harness-named launcher this suite can run fixtures under: <name> is the exact
+# verified harness command name the session-lock ancestry walk looks for.
+nudge_harness_fixture() {  # <harness-name>
+  local name=$1 dir="$TMP_ROOT/harness-fixtures"
+  mkdir -p "$dir"
+  [ -e "$dir/$name" ] || ln -s /bin/bash "$dir/$name"
+  printf '%s\n' "$dir/$name"
+}
+
 run_nudge() {
   local root=$1
   FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
@@ -124,11 +133,53 @@ test_missing_state_is_silent() {
 }
 
 test_owned_lock_is_silent() {
-  local root="$TMP_ROOT/already-ran"
+  local root="$TMP_ROOT/already-ran" harness out status=0
   make_primary "$root"
-  printf '%s\n' "$$" > "$root/state/.lock"
-  expect_silent_zero "owned lock nudge" run_nudge "$root"
+  harness=$(nudge_harness_fixture codex)
+  # A real session records its OWN harness pid, then runs its hooks below it.
+  # shellcheck disable=SC2016 # the fixture harness expands $$ and $1, not this shell
+  out=$("$harness" -c '
+      printf "%s\n" "$$" > "$1/state/.lock"
+      FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$1" FM_HOME="$1" "$2"
+      exit $?
+    ' _ "$root" "$NUDGE" 2>&1) || status=$?
+  expect_code 0 "$status" "owned lock nudge must exit 0"
+  [ -z "$out" ] || fail "the lock-owning session was nudged to take the helm again: $out"
   pass "fm-sessionstart-nudge: a lock holder in process ancestry is already run"
+}
+
+# A session whose recorded pid is a live harness process it no longer descends
+# from is exactly the reparenting the session-lock identity exists to survive.
+# It owns its home, so it must not be told to take the helm again.
+test_reparented_identity_owner_is_silent() {
+  local root="$TMP_ROOT/reparented-owner" harness old out status=0
+  make_primary "$root"
+  harness=$(nudge_harness_fixture claude)
+  "$harness" -c 'sleep 30; :' &
+  old=$!
+  printf '%s\nharness=claude\nsession=nudge-owner-session\n' "$old" > "$root/state/.lock"
+  cat > "$root/session.sh" <<SH
+#!/usr/bin/env bash
+set -u
+export FM_SESSION_HARNESS=claude
+export FM_SESSION_ID=nudge-owner-session
+export FM_SESSION_PUBLISHER_PID=\$\$
+FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+SH
+  chmod +x "$root/session.sh"
+  # An ordinary shell between this suite's own harness fixture and the claude
+  # fixture keeps the claude session's contiguous run its own.
+  # shellcheck disable=SC2016 # the launcher expands $0/$1 in its own shell
+  out=$(bash -c '"$0" "$1"; exit $?' "$harness" "$root/session.sh" 2>&1) || status=$?
+  kill "$old" 2>/dev/null || true
+  wait "$old" 2>/dev/null || true
+  expect_code 0 "$status" "reparented owner nudge must exit 0"
+  [ -z "$out" ] || fail "a reparented lock owner was nudged to take the helm it already holds: $out"
+  [ "$(sed -n '1p' "$root/state/.lock")" != "$old" ] \
+    || fail "the reparented owner did not refresh the recorded pid: $(cat "$root/state/.lock")"
+  [ "$(sed -n '3p' "$root/state/.lock")" = session=nudge-owner-session ] \
+    || fail "the refreshed record lost the owner identity: $(cat "$root/state/.lock")"
+  pass "fm-sessionstart-nudge: a reparented identity owner is not told to take the helm again"
 }
 
 test_opencode_plugin_delivers_exact_nudge_once() {
@@ -553,6 +604,48 @@ SH
   pass "run wrapper: an in-process clear and compact keep the live owner and republish its identity"
 }
 
+# A reparented owner keeps its home but its recorded pid moves, so the startup
+# completion proof written before the move no longer names the lock's pid. The
+# owner's stable identity still names it, and /clear must re-emit rather than
+# replay the whole digest into a freshly cleared context.
+test_run_clear_reemits_after_a_reparented_pid_refresh() {
+  local root="$TMP_ROOT/run-claude-reparent-reemit" claude_bin
+  make_run_primary "$root"
+  mkdir -p "$TMP_ROOT/claude-fixture"
+  claude_bin="$TMP_ROOT/claude-fixture/claude"
+  [ -e "$claude_bin" ] || ln -s /bin/bash "$claude_bin"
+  cat > "$root/session.sh" <<SH
+#!/usr/bin/env bash
+set -u
+session_open() {  # <source> <session-id> <out-file>
+  printf '{"session_id":"%s","hook_event_name":"SessionStart","source":"%s"}' "\$2" "\$1" \\
+    | env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \\
+        FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" \\
+        CLAUDE_ENV_FILE="$root/session-env.sh" "$RUN" > "\$3" 2>&1
+}
+session_open startup 44444444-4444-4444-8444-444444444444 "$root/out-startup"
+cp "$root/state/.session-start-complete" "$root/completion-after-startup"
+# The pid this owner completed startup under, before the reparenting refresh
+# moved the record onto its current pid.
+printf '9999999\nsession=44444444-4444-4444-8444-444444444444\n' \\
+  > "$root/state/.session-start-complete"
+session_open clear 44444444-4444-4444-8444-444444444444 "$root/out-clear"
+SH
+  chmod +x "$root/session.sh"
+  bash -c '"$0" "$1"; exit $?' "$claude_bin" "$root/session.sh" \
+    || fail "the claude-named session fixture did not complete its session opens"
+
+  [ "$(sed -n '2p' "$root/completion-after-startup")" = session=44444444-4444-4444-8444-444444444444 ] \
+    || fail "startup did not bind its completion proof to the owner identity: $(cat "$root/completion-after-startup")"
+  assert_contains "$(cat "$root/out-clear")" "$REEMIT_BANNER$root" \
+    "a reparented owner's clear replayed the full digest instead of re-emitting"
+  assert_not_contains "$(cat "$root/out-clear")" "READ-ONLY SESSION" \
+    "a reparented owner's clear lost its own home"
+  [ "$(sed -n '1p' "$root/state/.session-start-complete")" != 9999999 ] \
+    || fail "the re-emit did not re-stamp the completion proof onto the live owner"
+  pass "run wrapper: a clear after a reparented pid refresh still re-emits"
+}
+
 test_run_reads_source_from_the_hook_payload() {
   local root="$TMP_ROOT/run-payload" out status=0
   make_run_primary "$root"
@@ -621,6 +714,7 @@ test_unmarked_linked_worktree_is_silent
 test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
+test_reparented_identity_owner_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
@@ -631,6 +725,7 @@ test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge
 test_run_persists_claude_hook_identity_for_ordinary_commands
 test_run_clear_and_compact_keep_and_republish_the_live_owner
+test_run_clear_reemits_after_a_reparented_pid_refresh
 test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent

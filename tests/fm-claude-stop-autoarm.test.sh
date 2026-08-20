@@ -230,6 +230,62 @@ test_identity_matched_reparented_session_refreshes_and_arms() {
   pass "auto-arm: an identity-matched reparented session refreshes its pid, claims the home, and arms"
 }
 
+# Hold the auto-arm owner lock from a separate process under <role>, exactly as
+# bin/fm-turnend-guard.sh does for its own short critical sections. Returns once
+# the lock is really held; the holder releases it after <hold-seconds>.
+hold_owner_lock() {  # <dir> <role> <hold-seconds>
+  local dir=$1 role=$2 seconds=$3 i=0
+  rm -f "$dir/state/owner-lock-held"
+  bash -c '
+      . "$0"
+      fm_lock_try_acquire "$1" || exit 1
+      fm_lock_set_role "$1" "$2" || exit 1
+      : > "$4"
+      sleep "$3"
+      fm_lock_release "$1"
+    ' "$dir/bin/fm-wake-lib.sh" "$dir/state/.claude-autoarm.lock" "$role" "$seconds" \
+      "$dir/state/owner-lock-held" &
+  OWNER_LOCK_HOLDER=$!
+  while [ "$i" -lt 100 ] && [ ! -e "$dir/state/owner-lock-held" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$dir/state/owner-lock-held" ] || fail "the owner-lock holder never took the lock"
+}
+
+test_guard_owned_lock_does_not_starve_a_late_autoarm() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/owner-lock-guard-window")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  # The turn-end guard takes this lock for a bounded critical section. An arm
+  # that reaches its claim inside that window is slow, not superseded, so it
+  # must still arm rather than stand down and look structurally inert.
+  hold_owner_lock "$dir" structural-failure 0.6
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  wait "$OWNER_LOCK_HOLDER" 2>/dev/null || true
+  expect_code 2 "$status" "an arm delayed by a guard-held owner lock must still claim and rewake"
+  [ -e "$dir/state/arm-ran" ] || fail "a guard-held owner lock silenced a healthy auto-arm"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the delayed arm did not record its claimed rewake"
+  pass "auto-arm: a guard-owned owner-lock window delays the claim instead of standing it down"
+}
+
+test_another_live_autoarm_still_stands_the_hook_down() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/owner-lock-competing-arm")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  # A live owner in the autoarm role IS the single-flight owner, so a second
+  # firing must exit 0 immediately and never arm twice.
+  hold_owner_lock "$dir" autoarm 1
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  wait "$OWNER_LOCK_HOLDER" 2>/dev/null || true
+  expect_code 0 "$status" "a second firing must stand down while another arm owns the home"
+  [ ! -e "$dir/state/arm-ran" ] || fail "two firings armed the same watcher cycle"
+  [ -z "$out" ] || fail "a stood-down firing printed output: $out"
+  pass "auto-arm: another live arm owner still stands the second firing down at once"
+}
+
 test_reclaims_stale_session_lock_before_arming() {
   local dir out status expected_owner actual_owner
   dir=$(make_primary_dir "$TMP_ROOT/stale-lock")
@@ -684,6 +740,8 @@ test_inert_in_child_worktree
 test_inert_without_session_lock
 test_identity_matched_reparented_session_refreshes_and_arms
 test_reclaims_stale_session_lock_before_arming
+test_guard_owned_lock_does_not_starve_a_late_autoarm
+test_another_live_autoarm_still_stands_the_hook_down
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates

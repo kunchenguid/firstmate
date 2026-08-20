@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Print the one-line session-start instruction only for a genuine firstmate
 # primary whose current harness session has not already acquired the home lock.
+# Ownership is the shared session-lock predicate's decision, not a local one, so
+# an owner that survived process reparenting is never nudged to take the helm it
+# already holds.
 # Every silence and error path exits 0 because Claude SessionStart exit 2 blocks
 # session initialization.
 set -u
@@ -20,23 +23,20 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
-lock_is_in_ancestry() {
-  local lock_pid pid=$$ _
-  [ -f "$STATE/.lock" ] || return 1
-  IFS= read -r lock_pid < "$STATE/.lock" 2>/dev/null || return 1
-  case "$lock_pid" in
-    ''|*[!0-9]*|1) return 1 ;;
-  esac
-  kill -0 "$lock_pid" 2>/dev/null || return 1
-  for _ in 1 2 3 4 5 6 7 8; do
-    [ "$pid" = "$lock_pid" ] && return 0
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
-  done
-  return 1
-}
+# Ownership of state/.lock has ONE owner, bin/fm-session-lock-lib.sh, so this
+# wrapper asks the same question fm-lock.sh and the Stop auto-arm ask instead of
+# re-deciding it: a session whose pid moved under an identity-matched reparenting
+# still owns its home and must not be told to take the helm again.
+# fm-wake-lib.sh comes first because that reparenting refresh shares fm-lock.sh's
+# acquisition lock. Both are sourced only AFTER the eligibility gates above,
+# because fm-wake-lib.sh materializes the state directory on source and this
+# wrapper must leave a checkout it does not own byte-for-byte untouched.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
-lock_is_in_ancestry && exit 0
+fm_session_lock_owned_by_self "$STATE" 2>/dev/null && exit 0
 nudge=
 fm_operational_input_encode session-start \
   "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions." \
