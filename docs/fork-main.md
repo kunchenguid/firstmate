@@ -189,9 +189,7 @@ bin/fm-fork-status.sh
 
 Add `--refresh` to fetch both remotes and compare recorded GitHub upstream review dispositions through `gh-axi`.
 Refresh fails closed when live disposition evidence is incomplete or its response shape is unsupported.
-For an issue route, refresh maps an open issue to `open`, a `completed` closure to `merged`, and a `not_planned` or `duplicate` closure to `closed`.
-Any other or missing issue closure reason is incomplete evidence and makes refresh unhealthy.
-A stored `rejected` disposition is fresh when the corresponding live result is `closed`.
+For issue routes, [Upstream review after local adoption](#upstream-review-after-local-adoption) owns the complete closure-reason mapping and required operator action.
 These live labels check manifest freshness only; `merged` does not retire a patch without the independent Git proof described below.
 Add `--json` for schema `firstmate.fork-health.v1`.
 
@@ -304,7 +302,20 @@ After the fork pull request lands, `/updatefirstmate` performs only safe fast-fo
 Upstream review is evidence, not the local shipping gate.
 A change enters use only after its topic validation, fork merge candidate validation, green fork CI, captain-approved fork pull request, and safe fleet update.
 
-If upstream rejects a useful running change, whether by closing its pull request unmerged or closing its issue as `not_planned` or `duplicate`, reclassify it from `pending` to `rejected-but-retained` in the next validated fork integration through the supported interface:
+The upstream review outcome controls what may be recorded:
+
+- A pull request closed unmerged is a decline and permits `rejected-but-retained`.
+- An issue closed as `not_planned` is a decline and permits `rejected-but-retained`.
+  It is the only issue closure that does.
+- An issue closed as `duplicate` is not a decline.
+  Review moved to a canonical issue, so repoint the recorded route at that issue and do not reclassify the divergence as rejected.
+  Determining the canonical issue is a person's job because GitHub does not expose it on the issue response.
+- An issue closed as `completed` means upstream acted on it.
+  That result is retirement territory governed by the unit's `retire_when`, not a rejection.
+- A closure whose reason is unavailable settles nothing.
+  Find out what happened before recording any disposition, and do not infer a decline from the absence of a reason.
+
+When a useful running change receives a genuine decline, reclassify it from `pending` to `rejected-but-retained` in the next validated fork integration through the supported interface:
 
 ```sh
 bin/fm-fork-topic.sh disposition \

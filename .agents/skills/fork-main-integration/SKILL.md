@@ -60,8 +60,10 @@ Use a falsifiable statement such as "Upstream ships equivalent endpoint identity
 
 ## Upstream review disposition
 
-A pending divergence whose upstream review ends without acceptance must not remain pending, whether that review was a pull request closed unmerged or an issue closed as not planned or duplicate.
-Choose one of two outcomes in the next validated fork integration:
+Only a genuine upstream decline permits reclassifying a pending divergence to `rejected-but-retained`.
+A duplicate issue closure means review moved, so repoint the recorded route without reclassifying it.
+Follow the full outcome mapping and operator actions in [`docs/fork-main.md`](../../../docs/fork-main.md#upstream-review-after-local-adoption).
+For a genuine decline, choose one of two outcomes in the next validated fork integration:
 
 - Reclassify it to `rejected-but-retained` through `bin/fm-fork-topic.sh disposition` because current evidence still justifies the behavior.
 - Discard it because its retirement condition is true or the evidence no longer supports carrying it.
