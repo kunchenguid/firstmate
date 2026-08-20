@@ -69,7 +69,27 @@ EOF
   write_story "$sdir" svc-01 things svc main true
   write_story "$sdir" svc-02 things svc main false
   write_story "$sdir" svc-03 things svc main false
+  # By default the fixture epic is a FROZEN, SIGNED design so the freshness guards
+  # pass; guard tests re-sign it to a draft / stale state to drive the refusals.
+  sign_home "$home"
   printf '%s\n' "$home"
+}
+
+# sign_home <home> [status] [signed_off]: make the fixture epic a FROZEN, SIGNED
+# design so the freshness guards (design-freeze + stale-sign) pass. Defaults to
+# status: active and signed_off: today (UTC), which matches the just-created
+# files' own mtime day, so the happy path is deterministic regardless of the wall
+# clock. make_home leaves the epic UNSIGNED so the guard tests can drive it.
+sign_home() {
+  local home=$1 status=${2:-active} signed=${3:-} epic="$1/umbrellas/u/plans/ep/epic.md"
+  [ -n "$signed" ] || signed=$(date -u +%Y-%m-%d)
+  # Insert (or replace) status + signed_off just under the `epic:` line.
+  awk -v st="$status" -v so="$signed" '
+    /^status:/ { next }
+    /^signed_off:/ { next }
+    { print }
+    /^epic:/ { print "status: " st; print "signed_off: " so }
+  ' "$epic" > "$epic.tmp" && mv "$epic.tmp" "$epic"
 }
 
 # --- happy path: move + seed, ids/tags derived from frontmatter --------------
@@ -409,6 +429,64 @@ test_locate_errors() {
   pass "unknown id, unsafe id, and ambiguous multi-epic all fail closed"
 }
 
+# --- freshness guard: a draft (unfrozen) epic refuses, writes nothing ---------
+# R1 (promote-before-frozen): promote must not seed a backlog from a design that
+# is still a draft. The contract is sign-THEN-promote.
+test_refuses_draft_status() {
+  local home; home=$(make_home draft)
+  sign_home "$home" draft   # unfreeze: still a draft, keeps signed_off
+  run "$home" u
+  expect_code 1 "$RC" "a draft-status epic should refuse to promote"
+  assert_contains "$OUT" "not \"active\"" "did not report the unfrozen status"
+  assert_contains "$OUT" "SIGN the epic" "did not tell the captain to sign first"
+  assert_absent "$home/data/plans/ep" "draft refusal wrote into data/plans"
+  assert_no_grep "- [ ] svc-01" "$home/data/backlog.md" "draft refusal seeded the backlog"
+  pass "a draft-status epic is refused with a sign-first message and writes nothing"
+}
+
+# --- freshness guard: a stale sign-off refuses, naming the newer file ----------
+# R6 (no stale-sign guard): a design file edited AFTER the sign-off must block the
+# promote until the captain re-signs the current design. mtimes are pinned in UTC
+# so the day-resolution comparison is deterministic regardless of the wall clock.
+test_stale_sign_guard() {
+  local home; home=$(make_home stale)
+  local ep="$home/umbrellas/u/plans/ep"
+  # Freeze + sign at a fixed date, and pin every design file's mtime to that day.
+  sign_home "$home" active 2026-08-18
+  TZ=UTC touch -t 202608180000 "$ep/epic.md" "$ep/stories"/*.md "$home/umbrellas/u/DESIGN.md"
+  # The captain edits ONE story AFTER signing.
+  TZ=UTC touch -t 202608200000 "$ep/stories/svc-02.md"
+  run "$home" u
+  expect_code 1 "$RC" "a design edited after sign-off should refuse"
+  assert_contains "$OUT" "stale" "did not report the stale sign-off"
+  assert_contains "$OUT" "svc-02.md" "did not name the offending story file"
+  assert_absent "$home/data/plans/ep" "stale refusal wrote into data/plans"
+  assert_no_grep "- [ ] svc-01" "$home/data/backlog.md" "stale refusal seeded the backlog"
+
+  # Re-sign the current design: signed_off now covers the edited story.
+  sign_home "$home" active 2026-08-20
+  TZ=UTC touch -t 202608200000 "$ep/epic.md"
+  run "$home" u
+  expect_code 0 "$RC" "promote should pass cleanly after re-signing the current design"
+  assert_grep "- [ ] svc-02 - [things]" "$home/data/backlog.md" "did not seed after re-sign"
+  pass "a design edited after sign-off is refused (naming the file) until re-signed"
+}
+
+# --- freshness guard: --allow-stale-sign downgrades to a loud warning ----------
+test_allow_stale_sign_override() {
+  local home; home=$(make_home allowstale)
+  local ep="$home/umbrellas/u/plans/ep"
+  sign_home "$home" active 2026-08-18
+  TZ=UTC touch -t 202608180000 "$ep/epic.md" "$ep/stories"/*.md "$home/umbrellas/u/DESIGN.md"
+  TZ=UTC touch -t 202608200000 "$ep/stories/svc-02.md"
+  run "$home" --allow-stale-sign u
+  expect_code 0 "$RC" "--allow-stale-sign should proceed"
+  assert_contains "$OUT" "warning" "did not warn loudly about the stale sign-off"
+  assert_contains "$OUT" "svc-02.md" "warning did not name the offending file"
+  assert_grep "- [ ] svc-01 - [things]" "$home/data/backlog.md" "override did not seed the backlog"
+  pass "--allow-stale-sign proceeds with a loud warning naming the stale file"
+}
+
 test_promote_moves_and_seeds
 test_backsymlink_canonical_and_single_count
 test_rerun_heals_missing_backsymlink
@@ -425,5 +503,8 @@ test_verify_green_then_red
 test_verify_red_then_green_after_reconcile
 test_marker_written_before_move
 test_locate_errors
+test_refuses_draft_status
+test_stale_sign_guard
+test_allow_stale_sign_override
 
 echo "# all fm-umbrella-promote tests passed"
