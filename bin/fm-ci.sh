@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # fm-ci.sh - the single command policy for Firstmate's serial Water 7 CI job.
+#
+# When FM_CI_FAST_LANE_BASE is set by the trusted pull-request workflow, run the
+# conservative diff-scoped test selection before the complete serial merge gate.
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -147,6 +150,12 @@ run_invariants() {
   [ -z "$tracked" ] || die "personal fleet paths are tracked:\n$tracked"
 }
 
+run_pr_fast_lane() {
+  local base=${FM_CI_FAST_LANE_BASE:-}
+  [ -n "$base" ] || return 0
+  bin/fm-test-run.sh --changed --base "$base" --fail-on-gate-skip 'herdr not found'
+}
+
 require_water7_host
 require_git_identity
 ensure_tools
@@ -154,6 +163,7 @@ require_macos_properties
 run_invariants
 bin/fm-lint.sh
 bin/fm-test-run.sh --check-coverage
+run_pr_fast_lane
 bin/fm-test-run.sh --lane portable-parallel-1
 bin/fm-test-run.sh --lane portable-parallel-2
 bin/fm-test-run.sh --lane portable-serial

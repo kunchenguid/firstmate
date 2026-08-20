@@ -95,6 +95,8 @@ Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk.
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
 CI owns the complete serial behavior suite, real-Herdr setup, lint, invariants, and the coverage guard in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+For pull requests, that workflow reports a diff-scoped fast lane before the complete suite so iteration gets an early signal without changing the merge gate.
+The fast lane fails closed for an unmapped source path and conservatively selects mapped families, but maintainers must still use the complete suite for dynamic or indirect dependencies the path map cannot prove.
 The dedicated `water-7` runner executes one job at a time and refuses a suite verdict when the shared host's one-minute load is above 12.
 That conservative queue protects fleet workers at the cost of longer CI latency, and it replaces the former hosted macOS Bash 3.2 lane with the repository's Linux suite.
 Hosted macOS Bash 3.2 coverage was dropped to keep CI on the repository-owned `water-7` runner rather than paid hosted capacity, leaving a recorded portability gap: no CI signal on stock macOS Bash 3.2.

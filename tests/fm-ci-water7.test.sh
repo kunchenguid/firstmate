@@ -86,6 +86,9 @@ assert checkout["with"]["fetch-depth"] == 0
 assert checkout["with"]["persist-credentials"] is False
 assert admission["run"] == 'bin/fm-ci-load-guard.sh wait --max-load "$FM_CI_MAX_LOAD" --timeout 900 --poll 15'
 assert command["run"] == "bin/fm-ci.sh"
+assert command["env"] == {
+    "FM_CI_FAST_LANE_BASE": "${{ github.event.pull_request.base.sha }}",
+}
 assert verdict["if"] == "always()"
 assert verdict["run"] == 'bin/fm-ci-load-guard.sh check --max-load "$FM_CI_MAX_LOAD"'
 
@@ -256,6 +259,30 @@ EOF
   pass "the command owner runs lint, coverage, all portable lanes, then real Herdr serially"
 }
 
+test_policy_runs_pr_fast_lane_before_complete_suite() {
+  local tmp repo fakebin calls expected
+  tmp=$(fm_test_tmproot fm-ci-water7-fast-lane)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  make_policy_fixture "$repo" "$fakebin"
+  FM_CI_FAST_LANE_BASE=base-sha run_policy_fixture "$repo" "$fakebin" "$calls" \
+    || fail "Water 7 command policy rejected its valid PR fast-lane fixture"
+  expected=$(cat <<'EOF'
+lint
+test-run --check-coverage
+test-run --changed --base base-sha --fail-on-gate-skip herdr not found
+test-run --lane portable-parallel-1
+test-run --lane portable-parallel-2
+test-run --lane portable-serial
+test-run --family real-herdr-gated --fail-on-gate-skip herdr not found
+EOF
+)
+  [ "$(cat "$calls")" = "$expected" ] \
+    || fail "PR fast lane was not run before the complete serial merge gate: $(cat "$calls")"
+  pass "the PR fast lane reports before the complete serial merge gate"
+}
+
 test_policy_refuses_semantically_unsafe_systemd_limits() {
   local tmp repo fakebin calls out rc
   tmp=$(fm_test_tmproot fm-ci-water7-limits)
@@ -345,6 +372,7 @@ herdr" ] || fail "bounded bootstrap did not use exactly the two tracked installe
 
 test_workflows_are_static_and_water7_only
 test_policy_runs_every_family_serially
+test_policy_runs_pr_fast_lane_before_complete_suite
 test_policy_refuses_semantically_unsafe_systemd_limits
 test_policy_uses_only_bounded_ci_bootstrap
 test_policy_refuses_a_missing_test_dependency
