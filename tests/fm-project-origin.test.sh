@@ -136,4 +136,28 @@ not_local '-/srv/git/app.git'
 not_local ''
 pass "a local repository origin resolves to its path and a remote one never does"
 
+# A caller holding the clone an origin belongs to may anchor a path-shaped
+# spelling before asking, so the library also answers which spellings are paths
+# at all. A colon only makes an origin scp-like when it precedes the first slash.
+path_form() {
+  fm_project_origin_is_path_form "$1" || fail "did not recognize a path-shaped origin: $1"
+}
+not_path_form() {
+  ! fm_project_origin_is_path_form "$1" || fail "read an origin on another host as a path: $1"
+}
+
+path_form '/Users/captain/JobSearch'
+path_form 'file:///Users/captain/JobSearch'
+path_form '../JobSearch'
+path_form '~/JobSearch'
+path_form 'JobSearch'
+path_form './my:folder/JobSearch'
+not_path_form 'https://example.com/owner/app.git'
+not_path_form 'ssh://git@example.com/owner/app.git'
+not_path_form 'git@example.com:owner/app.git'
+not_path_form 'example.com:owner/app.git'
+not_path_form 'ext::sh -c cat'
+not_path_form ''
+pass "path-shaped origin spellings are told apart from origins on another host"
+
 echo "ALL TESTS PASSED"
