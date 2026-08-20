@@ -169,7 +169,27 @@ Acceptance: concurrent crewmates run on distinct pi profiles with no account col
 
 ## R6. Crosscheck reviews outside the author's model family
 
-Status: NOT DONE. Direction decided by the owner 2026-08-19 (see the second amendment above).
+Status: BUILT 2026-08-20; no GLM review has ever completed. The lane below was built and merged
+(#264) and the deployment is live, but the primary reviewer is 0 for 6. Six GLM attempts are
+recorded against PR #220 in the crosscheck ledger on 2026-08-20, and all six ended in
+`tool-failure` with no citations and no execution proof; a seventh attempt, against PR #266, sits
+in the archived ledger beside it and also failed. GLM has produced no verdict at all. The one
+verdict this lane has produced came from the pi-codex fallback reviewer.
+
+The roster was GLM-only when those attempts ran. As of 2026-08-20 it is not: the operator restored
+the pi-codex fallback entries alongside GLM with `config/crosscheck-same-model` on, the sanctioned
+degraded mode while GLM cannot finish a review, so crosscheck can return verdicts again. It returns
+them from the fallback, which means codex-authored work is being reviewed by its own family again
+for the duration, exactly the degradation this requirement exists to remove.
+
+The deployment carries two per-minute limits, not one: 25,000 tokens and 25 requests (`FW-GLM-5.2`,
+DataZoneStandard, capacity 25). The 429 body names neither, reading only that requests to
+`FW-GLM-5.2` in eastus have "exceeded rate limit". Attributing the blocker to the token-per-minute
+limit specifically is therefore inference rather than measurement. Raising either is an owner
+action in the Foundry portal; the Microsoft.Quota API does not cover Cognitive Services.
+
+The Work list below is retained as the record of what was asked for; the state of each item is in
+"What landed" or "Still owed" below.
 
 The requirement is that no author's work is reviewed only by its own model family.
 The roster was instead made eight reviewers all on `openai-codex`, by reading "just use the same
@@ -248,6 +268,98 @@ flip as fallback (the flip sets `config/crosscheck-same-model` on, accepting sam
 of codex-authored work as the recorded degraded mode while it is active); and lane visibility:
 the review evidence and report name the reviewing lane, and a status command answers whether
 GLM is serving or the fallback is active.
+
+What landed, 2026-08-20 (#264, plus #268 for a defect the live runs exposed):
+
+- `Fireworks.EnableDeploy` registered; Foundry resource `aif-fm7c799d-eus01` created in the
+  program's resource group; `FW-GLM-5.2` deployed pay-per-token Data Zone Standard in eastus.
+  The key lives in the fleet's secret custody, never in the repo.
+- Exercised live against the deployment: chat completions answer, and a pi custom provider
+  (`models.json` with a top-level `providers` wrapper, `openai-completions` api, the resource's
+  `/openai/v1` baseUrl, the deployment name as the model id) drives it end to end. A probe of
+  `reasoning_effort` at low, high, xhigh and max was run and each was observed to be accepted and
+  to return reasoning tokens, but no request or response capture was retained, so that one is an
+  unretained observation rather than evidence. Re-run it and keep the artifact if it matters.
+- `allowed_profiles` carries `("pi", "FW-GLM-5.2", "xhigh")`; the model decides the provider;
+  the GLM credential is validated for shape and pinned to one exact endpoint, with any
+  model-level `baseUrl` or `api` override refused (pi's provider composer lets a model-level
+  field outrank the provider-level pin, so a provider-level-only check was bypassable).
+- Reviewer identity binds the Foundry resource and deployment and is provably independent of the
+  key: two configs differing only in `apiKey` produce byte-identical identifiers.
+- The three interim claude artifacts are retired: the `allowed_profiles` entry, the
+  `api.anthropic.com` allowlist entry, and the claude-profile boot copy in the model guest.
+  `validate_ledger` now binds `review_family_mode` to the reviewer model in both directions.
+- Fallback demonstrated end to end on 2026-08-20 against PR #220: the roster flipped to
+  pi-codex with `config/crosscheck-same-model` on, the run printed the exact degraded warning
+  naming the standing-in reviewer and the relaxation, the ledger recorded
+  `review_family_mode: codex-fallback` and `model_independence: same-model`, and the review reached
+  a real clear verdict with citations and an execution proof. The roster was flipped back
+  afterwards; the operator has since restored the fallback entries again, as the status above
+  records. This run is still the only verdict this requirement's lane has produced.
+
+Still owed, and honestly so:
+
+- The live end-to-end GLM review. The six attempts did not all die of the quota, and the record
+  should not be read as if they did. Attempts 0 and 1 (05:54Z) died before reaching the provider
+  at all, on a local harness fault in an operator-authored instrumentation shim whose `/dev/fd`
+  redirect was refused under the reviewer sandbox. Attempts 2, 3 and 4 (05:55Z to 05:59Z) each
+  recorded only `Pi reviewer emitted a turn after agent completion`, the parser defect #268 then
+  fixed (pi continues a retried attempt after `agent_end` via `auto_retry_start`, and the stream
+  parser read that continuation as a turn after completion, masking whatever the provider had
+  actually returned). Because the parser masked it, no retained artifact records what killed those
+  three. Attempt 6 (06:25Z), two minutes after #268 landed, is the only review run anywhere that
+  records an actual 429. The remaining ledger slot, index 5 at 06:08Z, is not a GLM run at all: it
+  is the pi-codex fallback demonstration. What is measured rather than inferred is the traffic
+  shape: in the deployment's metrics the 06:00Z hour shows 35 model requests and 23 client errors.
+  One real GLM review end to end closes this item, and the quota is the leading suspect for what
+  stands in the way, not an established cause.
+- The startup-credit decrement check. Deployment metrics for `aif-fm7c799d-eus01` record 727,136
+  tokens on 2026-08-20: 515,965 in the 04:00Z hour, 135,911 in 05:00Z, 75,260 in 06:00Z. (An
+  earlier draft of this section reported roughly 510K for the day; that was the 04:00Z hour alone.)
+  Cost Management shows no charge against the resource yet. That absence carries no information
+  either way at this range: C3 records that Cost Management actual lags hours, which is why its
+  own bound is a backstop on recorded spend. This needs the portal's cost view.
+- The Azure-compartment GLM lane, which is switched off rather than unbuildable. The serving lane
+  today is the local pi reviewer. The reason recorded here previously, that the `fm-ccm` image
+  carries no `pi` binary and needs a rebake, is stale and is corrected below.
+- A spend signal for the new primary reviewer. The GLM provider entry declares `cost` as zeros for
+  `input`, `output`, `cacheRead` and `cacheWrite` (`tests/fm-crosscheck.test.sh:1046`), so a GLM
+  review prices at zero and the crosscheck ledger records no per-review cost for it. That is the
+  same ledger R10's `daily_budget_usd` waits on, and the reason it does not bind today. It leaves
+  C3's daily bound as the only guard over this lane's spend, and C3's own caveat is that the bound
+  is a backstop on Cost-Management-recorded spend rather than a real-time meter.
+- Three items from the Work list above that neither landed nor were separately tracked. The status
+  command that answers whether GLM is serving or the fallback is active does not exist:
+  `bin/fm-crosscheck.py` exposes `run`, `verify` and `merge` and nothing else. This one is
+  substantive rather than cosmetic, because the stated reason for it was that a silent fallback
+  must be impossible, and the fallback is active right now. Second, that pi tolerates
+  `reasoning_content` in streamed deltas was never verified; the string appears nowhere in the
+  repository outside this document. Third, review guards sized to the model's context window at
+  deploy time: the generic guards pre-exist, and the one size that exists, `MAX_PROMPT_BYTES` in
+  `bin/fm-crosscheck-azure.py`, was set in #130 on 2026-08-13 and was not revisited for a
+  1M-token model.
+
+Correcting the Azure-compartment blocker, 2026-08-20: the current `fm-ccm` image does carry `pi`,
+and the lane is off because it was switched off. `$FM_HOME/config/crosscheck-azure.json` has
+`"enabled": false`, set by an operator on 2026-08-20; that switch, not the image, is why no
+compartment review runs today. The image claim was already stale when it was written: it entered
+`docs/azure-crosscheck.md` in #264 on 2026-08-20, citing a diagnostic boot taken on 2026-08-16
+against an image the config had stopped naming two days earlier. That measurement was correct
+about gallery version `1.0.1786915905`, whose source managed image `img-fm7c799d-ccm-1.0.0` was
+built from the pre-Pi declaration and carries no `pi-tarball-sha256` tag. The config now names
+`1.0.1787092687`, published 2026-08-18T22:38:08Z from managed image
+`img-fm7c799d-ccm-1.0.1787091895`, which does carry both `pi-tarball-sha256` and
+`node-tarball-sha256`, matching the digests tracked in `docs/azure-crosscheck/model-image-closure.json`
+for `pi-coding-agent-0.84.1` and Node v22.23.2. Those tags exist only on an image built from the
+Pi-carrying declaration that #246 added to `docs/azure-crosscheck/model-image.json`, whose build
+asserts that `/usr/local/bin/pi --version` equals the tracked version twice, once before and once
+after the credential purge, so a build that reached distribution could not have omitted `pi`. That
+Image Builder run succeeded between 22:26:20Z and 22:36:46Z on 2026-08-18, after #246 landed on
+main at 20:51:35Z, and `bin/fm-crosscheck-azure-image.sh` builds only from the tracked declaration
+at a HEAD already landed on public main. What remains genuinely unproven is a pi review completing
+on this image, which is what R9 records; the binary's presence and a working lane are separate
+claims. `docs/azure-crosscheck.md`, where the sentence originated, is corrected in the same change,
+as are the claims C1 had built on it.
 
 Acceptance: a codex-authored change and a claude-authored change are each reviewed by a
 GLM-backed reviewer with bound reviewer identity and the same evidence discipline as the codex
@@ -365,29 +477,37 @@ metered, and an out-of-allowlist link refused with a clear message.
 ## C1. Crosscheck completes in 20 to 30 minutes
 
 Status: INSTRUMENTED 2026-08-20; the one measured serving-lane review is FASTER than the band, not
-inside it, and the compartment lane's phase numbers remain unmeasurable until its image is rebaked.
+inside it, and the compartment lane's phase numbers remain unmeasured because that lane is switched
+off.
 
 What was measured, and what is inference.
 
-**The 75 minutes has never been broken down, and for the compartment lane it now cannot be.**
+**The 75 minutes has never been broken down.**
 That figure is the owner's stated premise of 2026-08-18 (see the requirement at the top of this
 document), not a measurement recorded anywhere in this repository; nothing in the repo records its
-provenance. `docs/azure-crosscheck.md` records the compartment lane as non-executable since
-2026-08-16 for want of a `pi` binary in the `fm-ccm` image, so the figure cannot have come from a
-compartment run on or after that date either. Treat the 75 minutes as the target this requirement
-was written against, not as evidence.
+provenance. Treat the 75 minutes as the target this requirement was written against, not as
+evidence.
+An earlier version of this paragraph also argued the figure could not have come from a compartment
+run on or after 2026-08-16, on the grounds that `docs/azure-crosscheck.md` recorded the lane as
+non-executable for want of a `pi` binary. That premise was false and has been corrected in that
+document: the current `fm-ccm` image does carry `pi`, and the lane is off because
+`$FM_HOME/config/crosscheck-azure.json` carries `"enabled": false`. The date argument is therefore
+withdrawn rather than restated; what stands is that no compartment timing is recorded anywhere.
 
 Inference, clearly labeled as such: the compartment lane is the only plausible owner of a duration
 that large, because it is the only lane that creates a model VM, stages a credential archive and
 request into blob storage, boots a Managed Run Command, and collects a digest-bound result. That
-reasoning is from the shape of the code, not from a timing. It is not proof, and this build cannot
-turn it into proof, because the lane it would have to measure cannot execute. Four parallel lanes
+reasoning is from the shape of the code, not from a timing. It is not proof, and this build has not
+turned it into proof, because the lane it would have to measure is switched off rather than run.
+Unlike the earlier reading, that is a reversible condition: switching the lane on and taking one
+compartment review would settle it. Four parallel lanes
 (`FM_AZURE_CROSSCHECK_LANES`, default 4) always bounded concurrency, never one review's clock.
 
 What is fact rather than inference is that the serving lane changed: R6 made GLM-5.2 the sole
 primary reviewer running through the LOCAL pi lane, so today's serving path performs no create,
-boot, stage, or collect at all, and the compartment lane is disabled in the operator home (no
-`config/crosscheck-azure.json`) and code-only until the `fm-ccm` image is rebaked with pi. Whether
+boot, stage, or collect at all, and the compartment lane is disabled in the operator home. It is
+disabled by `"enabled": false` in `$FM_HOME/config/crosscheck-azure.json`, which does exist and
+also names a current `model_image_id`; it is neither absent nor waiting on an image. Whether
 that change is what moved the duration is again inference; none of the three candidate levers this
 requirement listed (warm reviewer VMs, a faster SKU, more lanes) was tried, so none of them was
 ruled out by measurement either.
@@ -421,16 +541,17 @@ by that single run, and the breakdown side is landed and proven hermetically, wi
 crosscheck run recording its own. Both readings are stated because the difference decides whether
 this is DONE, and that call belongs to the owner rather than to this section.
 
-The compartment lane's create, boot, stage, and collect numbers are not merely unmeasured but
-currently unmeasurable, since no compartment review can execute until the image rebake. This
-section does not claim that lane is fixed. If the compartment lane is ever restored to serving,
+The compartment lane's create, boot, stage, and collect numbers are unmeasured, because that lane
+is switched off; they are not unmeasurable, and the earlier claim that they were, pending an image
+rebake, rested on a premise that has since been refuted. This section does not claim that lane is
+fixed. If the compartment lane is ever restored to serving,
 C1 has to be re-measured against it, and the three original candidate levers become live again at
 that point.
 
-Known contradiction to resolve elsewhere: R6's own status line in this document still reads
-NOT DONE while this section relies on R6 having moved the serving lane to the local GLM-5.2
-reviewer, which `bin/fm-crosscheck.py` and `docs/crosscheck.md` both carry. R6 is the stale half;
-it is deliberately not edited here, because a requirement's status is not a C1 side effect.
+The contradiction this section previously flagged is resolved: R6's status line no longer reads
+NOT DONE. Note the correction that came with it, since this section leans on R6's serving lane:
+GLM is the primary reviewer on paper but has never completed a review, so the lane that actually
+served the one measured run, and that serves reviews today, is the pi-codex fallback.
 
 ## C2. Many crewmates, no-mistakes, and crosschecks run in parallel without contention
 
@@ -525,7 +646,7 @@ billable capacity has not run yet.
 5. R4, which needs the runner caller built and one validation cell closed.
 6. R5.
 7. C1, instrumented 2026-08-20; the one measured serving-lane review is faster than the band rather
-   than inside it, and the compartment lane's phases wait on its image rebake.
+   than inside it, and the compartment lane's phases wait on that lane being switched back on.
 8. R9, which is the proof of the rest.
 9. R10, the Slack team exposure, which needs R6's lane and can be pulled forward right after R6
    if the owner wants engineers on it sooner.
