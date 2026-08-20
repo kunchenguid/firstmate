@@ -56,11 +56,12 @@
 # it. A budget that cannot be read as a whole number from 1 to 120 is still
 # refused outright.
 #
-# The report record state/.tool-updates is written only after a complete sweep,
-# and it carries the whole finding set the last report was made from, uncut, so
-# the same pending update is reported once rather than on every poll while a new
-# finding that lands past the one-line cut is still news. A sweep killed part way
-# through leaves no record and is retried, instead of suppressing its finding.
+# The report record state/.tool-updates is written only when a sweep runs to its
+# end, and it carries the whole finding set the last report was made from,
+# uncut, so the same pending update is reported once rather than on every poll
+# while a new finding that lands past the one-line cut is still news. A sweep
+# killed part way through leaves no record and is retried, instead of
+# suppressing its finding.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
