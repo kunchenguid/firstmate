@@ -52,6 +52,15 @@
 #   compartment monitor sets them; every other spawn, including a local
 #   secondmate home requesting its own crewmates, leaves them unset and keeps
 #   the byte-identical parent-less argv.
+#   FM_SPAWN_TASK_HOME names the home the CHILD TASK lives in (state/, data/,
+#   projects/) when it is not the home that owns the elastic-worker controller
+#   document. Only the compartment monitor sets it, always together with the
+#   parent pair. FM_HOME deliberately stays on the primary: it is what names
+#   the ONE money document, and moving it would aim the request at a second
+#   controller and refuse at the lifecycle's home fence. The path is forwarded
+#   as --task-home, which the controller refuses outside a compartment child
+#   request and then authorizes against the home's own .fm-secondmate-home
+#   marker and the primary's data/secondmates.md registry.
 #   With no harness arg, a crewmate/scout spawn resolves the crewmate harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -180,12 +189,53 @@ esac
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-CHECKOUT_STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# TASK_HOME is the home THIS SPAWN's task lives in: its state/, data/ and
+# projects/. FM_HOME stays the home that owns the ONE elastic-worker money
+# document. They are the same directory for every ordinary spawn, and differ
+# only on the secondmate compartment-child lane, where the primary spawns a
+# crewmate ON BEHALF OF a secondmate whose home holds the task authorities.
+# Moving FM_HOME instead would aim the request at a SECOND controller document
+# and refuse at the lifecycle's home fence, which must not be weakened.
+TASK_HOME=$FM_HOME
+if [ -n "${FM_SPAWN_TASK_HOME:-}" ]; then
+  for spawn_task_home_conflict in FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE; do
+    [ -z "${!spawn_task_home_conflict:-}" ] || {
+      echo "error: FM_SPAWN_TASK_HOME cannot be combined with $spawn_task_home_conflict" >&2
+      exit 1
+    }
+  done
+  unset spawn_task_home_conflict
+  case "$FM_SPAWN_TASK_HOME" in
+    /*) : ;;
+    *) echo "error: FM_SPAWN_TASK_HOME must be an absolute path" >&2; exit 1 ;;
+  esac
+  TASK_HOME=$(cd -P "$FM_SPAWN_TASK_HOME" 2>/dev/null && pwd -P) || {
+    echo "error: FM_SPAWN_TASK_HOME is not an existing directory: $FM_SPAWN_TASK_HOME" >&2
+    exit 1
+  }
+  [ -f "$TASK_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$TASK_HOME/$SUB_HOME_MARKER" ] || {
+    echo "error: FM_SPAWN_TASK_HOME is not a seeded secondmate home: $TASK_HOME" >&2
+    exit 1
+  }
+  # Content too, not only shape: without this a typo in the parent id refuses
+  # LATE at the controller, after the lifecycle locks are taken and the
+  # convergence artifacts (including the copied provider credential) are staged.
+  if [ -n "${FM_SPAWN_PARENT_TASK:-}" ] \
+    && [ "$(cat "$TASK_HOME/$SUB_HOME_MARKER" 2>/dev/null || true)" != "$FM_SPAWN_PARENT_TASK" ]; then
+    echo "error: FM_SPAWN_TASK_HOME is not marked for secondmate $FM_SPAWN_PARENT_TASK" >&2
+    exit 1
+  fi
+fi
+STATE="${FM_STATE_OVERRIDE:-$TASK_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$TASK_HOME/data}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$TASK_HOME/projects}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# The controller's own state directory. Derived from $FM_HOME, never from
+# $TASK_HOME: the money document has exactly one home even when the task does
+# not live there.
+PRIMARY_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CHECKOUT_STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
 # shellcheck source=bin/fm-checkout-lock-lib.sh
 . "$SCRIPT_DIR/fm-checkout-lock-lib.sh"
 CHECKOUT_LOCK_ROOT=$(fm_checkout_lock_root "$CHECKOUT_STATE_BASE")
@@ -536,8 +586,11 @@ if [ "$SPAWN_CLOUD" = azure ] \
   echo "notice: cloud placement covers new ship/scout spawns only; this spawn stays on the local backend" >&2
   SPAWN_CLOUD=off
 fi
-if [ "$SPAWN_CLOUD" = azure ] && [ "$STATE" != "$FM_HOME/state" ]; then
-  echo "error: cloud placement requires the home's own state directory ($FM_HOME/state), not an override" >&2
+if [ "$SPAWN_CLOUD" = azure ] && [ "$STATE" != "$TASK_HOME/state" ]; then
+  # The task home's OWN state directory, never an override. TASK_HOME is
+  # FM_HOME everywhere except the compartment-child lane, where FM_SPAWN_TASK_HOME
+  # already refuses to be combined with any state/data/projects override.
+  echo "error: cloud placement requires the task home's own state directory ($TASK_HOME/state), not an override" >&2
   exit 1
 fi
 CLOUD_ACCOUNT_HOME=
@@ -548,6 +601,7 @@ LIFECYCLE_LOCK=
 LIFECYCLE_LOCK_OWNED=0
 SECONDMATE_HOME_LIFECYCLE_LOCK=
 SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK=
+TASK_HOME_LIFECYCLE_LOCK=
 LIFECYCLE_LOCK_INHERITED_PID=
 LIFECYCLE_LOCK_INHERITED_START=
 SPAWN_META_PRESENT=0
@@ -557,10 +611,13 @@ spawn_idpart=${SPAWN_PREFLIGHT_ID%%=*}
 SPAWN_PREFLIGHT_BATCH=0
 
 release_secondmate_home_lifecycle_locks() {
+  [ -z "${TASK_HOME_LIFECYCLE_LOCK:-}" ] \
+    || fm_account_lifecycle_lock_release "$TASK_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true
   [ -z "${SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK:-}" ] \
     || fm_account_lifecycle_lock_release "$SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true
   [ -z "${SECONDMATE_HOME_LIFECYCLE_LOCK:-}" ] \
     || fm_account_lifecycle_lock_release "$SECONDMATE_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true
+  TASK_HOME_LIFECYCLE_LOCK=
   SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK=
   SECONDMATE_HOME_LIFECYCLE_LOCK=
 }
@@ -943,6 +1000,21 @@ if [ "$SPAWN_PREFLIGHT_BATCH" = 0 ]; then
   elif [ -f "$FM_HOME/data/charter.md" ]; then
     echo "error: secondmate home changed while spawn waited for lifecycle ownership" >&2
     exit 1
+  fi
+  if [ "$TASK_HOME" != "$FM_HOME" ]; then
+    # The compartment-child lane writes this spawn's task state into the
+    # SECONDMATE's home, so that home's lifecycle is owned for the same window
+    # as the primary's. A separate lock variable, because the --secondmate
+    # spawn path owns SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK.
+    TASK_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$TASK_HOME") || exit 1
+    fm_checkout_trusted_dir "$TASK_HOME" >/dev/null || {
+      echo "error: task home was removed or redirected while spawn waited for lifecycle ownership" >&2
+      exit 1
+    }
+    [ -f "$TASK_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$TASK_HOME/$SUB_HOME_MARKER" ] || {
+      echo "error: unsafe or absent secondmate home marker at $TASK_HOME/$SUB_HOME_MARKER" >&2
+      exit 1
+    }
   fi
 fi
 
@@ -4295,7 +4367,11 @@ spawn_cloud_lifecycle() {
   FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-worker-lifecycle.sh" "$@"
 }
 spawn_cloud_assignment_generation() {
-  python3 - "$STATE/azure-workers/controller.json" "$ID" "$SPAWN_GENERATION_ID" <<'PY'
+  # The assignment is read from the CONTROLLER's document, which lives under
+  # the primary's home. On the compartment-child lane $STATE is the
+  # secondmate's, and reading it there would silently find no assignment and
+  # report the child as durably queued forever.
+  python3 - "$PRIMARY_STATE/azure-workers/controller.json" "$ID" "$SPAWN_GENERATION_ID" <<'PY'
 import json
 import sys
 
@@ -4442,9 +4518,13 @@ spawn_cloud_claim_execute_dispatch() {
   (set -C; : > "$STATE/$ID.cloud-execute-dispatched") 2>/dev/null
 }
 spawn_cloud_dispatch() {
-  local owner_kind=primary assignment wall role_args parent_args
+  local owner_kind=primary assignment wall role_args parent_args task_home_args
   CLOUD_PLACEMENT_STATE=queued
-  [ ! -f "$FM_HOME/$SUB_HOME_MARKER" ] || owner_kind=secondmate
+  # owner_kind is a property of the home the TASK belongs to, not of the home
+  # that owns the money document. They are the same directory everywhere
+  # except the compartment-child lane, where the request is minted by the
+  # primary on behalf of a secondmate and must still say owner_kind=secondmate.
+  [ ! -f "$TASK_HOME/$SUB_HOME_MARKER" ] || owner_kind=secondmate
   spawn_cloud_persist_convergence_artifacts || {
     echo "error: cloud worker convergence artifacts could not be persisted for $ID" >&2
     return 1
@@ -4470,10 +4550,18 @@ spawn_cloud_dispatch() {
     parent_args=(--parent-task "${FM_SPAWN_PARENT_TASK:-}"
       --parent-task-generation "${FM_SPAWN_PARENT_TASK_GENERATION:-}")
   fi
+  # The task home travels with the request ONLY when it differs from the
+  # controller's home, so every ordinary spawn keeps its exact pre-flag argv.
+  # The controller refuses --task-home outside a complete parent pair with
+  # --role author and --owner-kind secondmate, and then authorizes the
+  # directory against the marker plus the primary's own registry.
+  task_home_args=()
+  [ "$TASK_HOME" = "$FM_HOME" ] || task_home_args=(--task-home "$TASK_HOME")
   spawn_cloud_lifecycle request \
     --task "$ID" --task-generation "$SPAWN_GENERATION_ID" \
     --owner-kind "$owner_kind" ${role_args[@]+"${role_args[@]}"} \
-    ${parent_args[@]+"${parent_args[@]}"} --eligible >&2 || {
+    ${parent_args[@]+"${parent_args[@]}"} \
+    ${task_home_args[@]+"${task_home_args[@]}"} --eligible >&2 || {
     # No durable queue entry exists, so the convergence artifacts have no
     # owner; remove them (including the copied provider credential) with the
     # rolled-back spawn.
@@ -4840,6 +4928,10 @@ CONTINUATION_PROMPT_FILE=
 META_BACKUP=
 discard_existing_artifact_backup
 [ "$LIFECYCLE_LOCK_OWNED" != 1 ] || [ -z "$LIFECYCLE_LOCK" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" || exit 1
+if [ -n "$TASK_HOME_LIFECYCLE_LOCK" ]; then
+  fm_account_lifecycle_lock_release "$TASK_HOME_LIFECYCLE_LOCK" || exit 1
+  TASK_HOME_LIFECYCLE_LOCK=
+fi
 if [ -n "$SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK" ]; then
   fm_account_lifecycle_lock_release "$SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK" || exit 1
   SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK=

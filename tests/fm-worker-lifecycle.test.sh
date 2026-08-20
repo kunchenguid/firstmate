@@ -3759,6 +3759,1058 @@ PY
 }
 
 
+compartment_child_task_home() {
+  # AMENDMENT 2 section 1: FM_HOME does three separable jobs, and the
+  # compartment child is the first case where they differ. --task-home moves
+  # jobs 1 and 2 (where the requesting task's local authorities live, and the
+  # identity stamped into home_binding) to the SECONDMATE's home while job 3
+  # (the identity of the ONE money document) stays on the primary. Every
+  # binding here is a REAL mint through authoritative_request_bindings.
+  local tmp provider fixture envfile
+  # Structural pin: the authorization is decided INSIDE the one exclusive hold
+  # that inserts, and before the bounds it anchors. Outside the lock it would
+  # be a check against a document another process may have moved on by the
+  # time the insert lands, and the queue would admit on stale authority.
+  python3 - "$CONTROLLER" <<'PY' || fail "the task home authorization left the controller lock hold"
+import ast
+import sys
+from pathlib import Path
+
+tree = ast.parse(Path(sys.argv[1]).read_text(encoding="utf-8"))
+command_request = next(
+    node for node in tree.body
+    if isinstance(node, ast.FunctionDef) and node.name == "command_request"
+)
+
+
+def calls(scope, name):
+    return [
+        node for node in ast.walk(scope)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+    ]
+
+
+holds = [
+    node for node in ast.walk(command_request)
+    if isinstance(node, ast.With) and calls(ast.Module(body=[
+        ast.Expr(value=item.context_expr) for item in node.items], type_ignores=[]),
+        "controller_lock")
+]
+assert len(holds) == 1, holds
+hold = holds[0]
+inside = calls(ast.Module(body=hold.body, type_ignores=[]), "authorize_task_home")
+everywhere = calls(command_request, "authorize_task_home")
+assert len(inside) == 1, "authorize_task_home is not called inside the controller lock hold"
+bounds = calls(ast.Module(body=hold.body, type_ignores=[]), "enforce_child_bounds")
+assert len(bounds) == 1, bounds
+assert inside[0].lineno < bounds[0].lineno, \
+    "the task home is authorized after the bounds it anchors"
+# The pre-mint call: nothing may read metadata, resolve caller-named paths, or
+# run git under a directory the primary has not authorized yet.
+mint = calls(command_request, "authoritative_request_bindings")
+assert len(mint) == 1, mint
+assert min(call.lineno for call in everywhere) < mint[0].lineno, \
+    "the bindings are minted from the task home before it is authorized"
+PY
+  fm_test_tmproot_into tmp fm-worker-task-home
+  provider="$tmp/provider.py"
+  fixture="$tmp/provider-state.json"
+  mkdir -p "$tmp/primary/data" "$tmp/primary/state"
+  write_fixture_provider "$provider"
+  envfile="$tmp/env"
+  cat >"$envfile" <<EOF
+FM_HOME=$tmp/primary
+FM_AZURE_SUBSCRIPTION_ID=$SUB
+FM_AZURE_DEPLOYMENT_GENERATION=dep-one
+FM_AZURE_OWNER_TAG=owner
+FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0
+FM_AZURE_NAMING_PREFIX=fmtest
+FM_WORKER_PROVIDER_COMMAND=python3 $provider
+FIXTURE_STATE=$fixture
+FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS=1
+EOF
+  python3 - "$WRAPPER" "$envfile" "$tmp" <<'PY' || fail "the authorized task home contract is not enforced"
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+wrapper, envfile, root = sys.argv[1:]
+root = Path(root)
+env = os.environ.copy()
+for line in Path(envfile).read_text().splitlines():
+    key, value = line.split("=", 1)
+    env[key] = value
+primary = Path(env["FM_HOME"])
+
+git_env = dict(env)
+git_env.update({
+    "GIT_AUTHOR_NAME": "fmtest", "GIT_AUTHOR_EMAIL": "fmtest@example.invalid",
+    "GIT_COMMITTER_NAME": "fmtest", "GIT_COMMITTER_EMAIL": "fmtest@example.invalid",
+})
+
+
+def git(*args, cwd):
+    subprocess.run(["git"] + list(args), cwd=str(cwd), env=git_env, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
+def make_repo(path):
+    path.mkdir(parents=True, exist_ok=True)
+    if (path / ".git").is_dir():
+        return path
+    git("init", "-q", "-b", "main", ".", cwd=path)
+    (path / "README.md").write_text("fixture\n")
+    git("add", "README.md", cwd=path)
+    git("commit", "-q", "-m", "fixture", "--no-gpg-sign", cwd=path)
+    return path
+
+
+def seed_home(path, marker_id):
+    """A seeded secondmate home: marker, AGENTS.md and bin/, as
+    validate_secondmate_home requires of one."""
+    (path / "state").mkdir(parents=True, exist_ok=True)
+    (path / "bin").mkdir(parents=True, exist_ok=True)
+    (path / "AGENTS.md").write_text("fixture home\n")
+    (path / ".fm-secondmate-home").write_text(marker_id + "\n")
+    return path
+
+
+def task_meta(home, task, generation):
+    """The ordinary local authorities authoritative_request_bindings reads."""
+    worktree = make_repo(root / "worktrees" / task)
+    account = root / "accounts" / task
+    account.mkdir(parents=True, exist_ok=True)
+    git_dir = worktree / ".git"
+    identity = "{}:{}".format(os.stat(git_dir).st_dev, os.stat(git_dir).st_ino)
+    (home / "state" / (task + ".meta")).write_text(
+        "generation_id={}\nworktree={}\naccount_home={}\naccount_task={}\n"
+        "worktree_git_dir_identity={}\n".format(
+            generation, worktree, account, task, identity))
+    return worktree, account
+
+
+def registry(*entries):
+    lines = ["# secondmates\n"]
+    for identifier, home in entries:
+        lines.append("- {} - a compartment (home: {}; scope: everything; "
+                     "projects: ; added 2026-08-20)\n".format(identifier, home))
+    (primary / "data" / "secondmates.md").write_text("".join(lines))
+
+
+def run(*args, check=True, extra=None):
+    environment = dict(env)
+    environment.update(extra or {})
+    result = subprocess.run([wrapper] + list(args), env=environment, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and result.returncode != 0:
+        raise AssertionError("{} failed: {}".format(args, result.stderr))
+    return result
+
+
+def binding(number):
+    return format(number, "064x")
+
+
+def controller_state():
+    return json.loads((primary / "state/azure-workers/controller.json").read_text())
+
+
+def parent_children_total():
+    state = controller_state()
+    slot = str(state["queue"]["smc-1@gen-s1"]["slot"])
+    return int(state["workers"][slot].get("children_total", 0))
+
+
+# Three secondmate homes: the registered compartment, a registered but never
+# assigned one, and an impostor that plants the same marker without a
+# registration the primary could only have written itself.
+compartment = seed_home(root / "homes" / "compartment", "smc-1")
+idle = seed_home(root / "homes" / "idle", "smc-2")
+impostor = seed_home(root / "homes" / "impostor", "smc-1")
+stranger = seed_home(root / "homes" / "stranger", "smc-9")
+registry(("smc-1", compartment), ("smc-2", idle))
+
+# Stand the parent compartment up for real, out of the PRIMARY's document.
+run("request", "--task", "smc-1", "--task-generation", "gen-s1",
+    "--home-binding", binding(21), "--account-binding", binding(22),
+    "--worktree-binding", binding(23), "--repository-binding", binding(24),
+    "--repository-generation", "repo-s1", "--owner-kind", "primary",
+    "--role", "secondmate", "--eligible")
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+assert controller_state()["queue"]["smc-1@gen-s1"]["status"] == "assigned"
+assert parent_children_total() == 0
+
+
+def child(task, generation, home, *extra_args, check=True):
+    task_meta(home, task, generation)
+    return run("request", "--task", task, "--task-generation", generation,
+               "--owner-kind", "secondmate", "--eligible",
+               "--task-home", str(home), *extra_args, check=check)
+
+
+# 1. The headline requirement: meta under the --task-home secondmate home,
+#    controller under the primary, child ADMITTED with real minted bindings.
+worktree, account = task_meta(compartment, "child-1", "gen-c1")
+run("request", "--task", "child-1", "--task-generation", "gen-c1",
+    "--owner-kind", "secondmate", "--eligible", "--task-home", str(compartment),
+    "--parent-task", "smc-1", "--parent-task-generation", "gen-s1")
+state = controller_state()
+item = state["queue"]["child-1@gen-c1"]
+assert item["status"] == "queued" and item["owner_kind"] == "secondmate", item
+assert item["role"] == "author" and item["parent_task"] == "smc-1", item
+# home_binding is the SECONDMATE's home; the money document's own home_binding
+# stays the primary's, and verify_state's fence still passes on every command.
+assert item["home_binding"] == hashlib.sha256(
+    str(compartment.resolve()).encode()).hexdigest(), item["home_binding"]
+assert state["home_binding"] == hashlib.sha256(
+    str(primary.resolve()).encode()).hexdigest(), state["home_binding"]
+assert item["home_binding"] != state["home_binding"]
+# The bindings are real mints from the task home's own authorities.
+assert item["account_binding"] == hashlib.sha256(json.dumps(
+    {"account_home": str(account.resolve()), "task": "child-1"},
+    sort_keys=True, separators=(",", ":")).encode()).hexdigest(), item
+assert item["worktree_binding"] == hashlib.sha256(json.dumps(
+    {"git_dir": str((worktree / ".git").resolve()), "worktree": str(worktree.resolve())},
+    sort_keys=True, separators=(",", ":")).encode()).hexdigest(), item
+head = subprocess.check_output(
+    ["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
+assert item["repository_generation"] == head, item
+assert parent_children_total() == 1, "children_total did not increment exactly once"
+
+# 2b. The marker is LOAD BEARING, not decorative: even a home the primary's
+#     own registry names for smc-1 refuses while the directory itself is
+#     marked for someone else. Drop the marker check and this one admits.
+registry(("smc-1", stranger), ("smc-2", idle))
+refused = child("child-2b", "gen-c2b", stranger,
+                "--parent-task", "smc-1", "--parent-task-generation", "gen-s1",
+                check=False)
+assert refused.returncode != 0, refused.stdout
+assert 'is marked for secondmate "smc-9", not the parent compartment smc-1' in refused.stderr, \
+    refused.stderr
+assert "child-2b@gen-c2b" not in controller_state()["queue"], refused.stdout
+assert parent_children_total() == 1
+registry(("smc-1", compartment), ("smc-2", idle))
+
+# 2. A marker naming a DIFFERENT secondmate refuses, mutating nothing.
+before = controller_state()
+refused = child("child-2", "gen-c2", stranger,
+                "--parent-task", "smc-1", "--parent-task-generation", "gen-s1",
+                check=False)
+assert refused.returncode != 0, refused.stdout
+assert 'is marked for secondmate "smc-9", not the parent compartment smc-1' in refused.stderr, \
+    refused.stderr
+after = controller_state()
+assert "child-2@gen-c2" not in after["queue"], "a refused child still mutated the queue"
+assert after["queue"] == before["queue"], "a refused child mutated the queue"
+assert parent_children_total() == 1, "a refused child still spent the lifetime bound"
+
+# 3a. A home the primary never registered for this secondmate refuses, even
+#     though it plants the exact right marker.
+refused = child("child-3", "gen-c3", impostor,
+                "--parent-task", "smc-1", "--parent-task-generation", "gen-s1",
+                check=False)
+assert refused.returncode != 0, refused.stdout
+assert "is not the home the primary registered for secondmate smc-1" in refused.stderr, \
+    refused.stderr
+assert parent_children_total() == 1
+
+# 3b. A secondmate absent from the registry entirely refuses, and does so
+#     BEFORE the bounds, so the registry is the anchor and not a formality.
+refused = child("child-4", "gen-c4", stranger,
+                "--parent-task", "smc-9", "--parent-task-generation", "gen-s9",
+                check=False)
+assert refused.returncode != 0, refused.stdout
+assert "does not validly register secondmate smc-9" in refused.stderr, \
+    refused.stderr
+
+# 3c. No registry at all: nothing is authorized.
+registry_path = primary / "data" / "secondmates.md"
+saved = registry_path.read_text()
+registry_path.unlink()
+refused = child("child-5", "gen-c5", compartment,
+                "--parent-task", "smc-1", "--parent-task-generation", "gen-s1",
+                check=False)
+assert refused.returncode != 0, refused.stdout
+assert "does not validly register secondmate smc-1" in refused.stderr, refused.stderr
+registry_path.write_text(saved)
+
+# 4. A properly marked AND registered home whose secondmate is not an assigned
+#    compartment still hits the UNCHANGED enforce_child_bounds refusal.
+refused = child("child-6", "gen-c6", idle,
+                "--parent-task", "smc-2", "--parent-task-generation", "gen-s2",
+                check=False)
+assert refused.returncode != 0, refused.stdout
+assert "not an assigned secondmate compartment" in refused.stderr, refused.stderr
+
+# 5. --task-home without a complete parent pair refuses with the exact string.
+for extra in ((), ("--parent-task", "smc-1"), ("--parent-task-generation", "gen-s1")):
+    refused = child("child-7", "gen-c7", compartment, *extra, check=False)
+    assert refused.returncode != 0, refused.stdout
+    assert "task home is owned by compartment child requests only" in refused.stderr, \
+        (extra, refused.stderr)
+
+# 6. --task-home with --owner-kind primary refuses, and so does --role
+#    secondmate: a compartment is never requested through a foreign home.
+task_meta(compartment, "child-8", "gen-c8")
+refused = run("request", "--task", "child-8", "--task-generation", "gen-c8",
+              "--owner-kind", "primary", "--eligible", "--task-home", str(compartment),
+              "--parent-task", "smc-1", "--parent-task-generation", "gen-s1", check=False)
+assert refused.returncode != 0, refused.stdout
+assert "task home is owned by compartment child requests only" in refused.stderr, refused.stderr
+refused = run("request", "--task", "child-8", "--task-generation", "gen-c8",
+              "--owner-kind", "secondmate", "--role", "secondmate", "--eligible",
+              "--task-home", str(compartment),
+              "--parent-task", "smc-1", "--parent-task-generation", "gen-s1", check=False)
+assert refused.returncode != 0, refused.stdout
+assert "task home is owned by compartment child requests only" in refused.stderr, refused.stderr
+
+# A symlinked marker is not a marker.
+sneak = root / "homes" / "sneak"
+(sneak / "state").mkdir(parents=True, exist_ok=True)
+os.symlink(str(compartment / ".fm-secondmate-home"), str(sneak / ".fm-secondmate-home"))
+registry(("smc-1", sneak), ("smc-2", idle))
+refused = child("child-9", "gen-c9", sneak,
+                "--parent-task", "smc-1", "--parent-task-generation", "gen-s1",
+                check=False)
+assert refused.returncode != 0, refused.stdout
+assert "carries no ordinary secondmate home marker" in refused.stderr, refused.stderr
+PY
+  pass "a compartment child is admitted from an authorized task home, and every unauthorized home refuses"
+}
+
+local_secondmate_lane_bytes_unchanged() {
+  # The AMENDMENT 1 lane that must not move: a LOCAL secondmate home requesting
+  # its own cloud crewmate, with no parent pair and no --task-home. The emitted
+  # queue item is compared BYTE FOR BYTE against an item this test builds from
+  # first principles - every digest recomputed here, independently of the
+  # controller - so any drift in the parent-less lane's bytes goes red.
+  # Recomputed rather than diffed against main's own binary on purpose: the CI
+  # checkout is shallow, so a golden that needed git history would be a
+  # conditional skip dressed up as coverage.
+  local tmp
+  fm_test_tmproot_into tmp fm-worker-local-secondmate-golden
+  write_fixture_provider "$tmp/provider.py"
+  python3 - "$WRAPPER" "$tmp" "$SUB" <<'PY' || fail "the local-secondmate lane's emitted bytes moved"
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+wrapper, root, subscription = sys.argv[1:]
+root = Path(root)
+home = root / "secondmate-home"
+(home / "state").mkdir(parents=True, exist_ok=True)
+(home / ".fm-secondmate-home").write_text("smc-local\n")
+
+env = os.environ.copy()
+env.update({
+    "FM_HOME": str(home),
+    "FM_AZURE_SUBSCRIPTION_ID": subscription,
+    "FM_AZURE_DEPLOYMENT_GENERATION": "dep-one",
+    "FM_AZURE_OWNER_TAG": "owner",
+    "FM_AZURE_NAMING_PREFIX": "fmtest",
+    "FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS": "0",
+    "FM_WORKER_PROVIDER_COMMAND": "python3 {}".format(root / "provider.py"),
+    "FIXTURE_STATE": str(root / "provider-state.json"),
+    "GIT_AUTHOR_NAME": "fmtest", "GIT_AUTHOR_EMAIL": "fmtest@example.invalid",
+    "GIT_COMMITTER_NAME": "fmtest", "GIT_COMMITTER_EMAIL": "fmtest@example.invalid",
+})
+
+worktree = root / "worktree"
+worktree.mkdir(parents=True, exist_ok=True)
+subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=str(worktree), env=env,
+               check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+(worktree / "README.md").write_text("fixture\n")
+subprocess.run(["git", "add", "README.md"], cwd=str(worktree), env=env, check=True,
+               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+subprocess.run(["git", "commit", "-q", "-m", "fixture", "--no-gpg-sign"],
+               cwd=str(worktree), env=env, check=True,
+               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+account = root / "account"
+account.mkdir(parents=True, exist_ok=True)
+git_dir = worktree / ".git"
+(home / "state" / "local-crew.meta").write_text(
+    "generation_id=gen-local\nworktree={}\naccount_home={}\naccount_task=local-crew\n"
+    "worktree_git_dir_identity={}:{}\n".format(
+        worktree, account, os.stat(git_dir).st_dev, os.stat(git_dir).st_ino))
+
+result = subprocess.run(
+    [wrapper, "request", "--task", "local-crew", "--task-generation", "gen-local",
+     "--owner-kind", "secondmate", "--eligible"],
+    env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+assert result.returncode == 0, result.stderr
+controller = home / "state" / "azure-workers" / "controller.json"
+item = json.loads(controller.read_text())["queue"]["local-crew@gen-local"]
+assert item.pop("enqueued_at", None), "the queue item lost its enqueue timestamp"
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def digest(value):
+    return hashlib.sha256(canonical(value)).hexdigest()
+
+
+head = subprocess.check_output(
+    ["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
+expected = {
+    "schema": "fm.worker-request/v1",
+    "task": "local-crew",
+    "task_generation": "gen-local",
+    # The parent-less lane still stamps the REQUESTING home, which on this lane
+    # IS FM_HOME. --task-home changes where that identity is read from, never
+    # what it is here.
+    "home_binding": hashlib.sha256(str(home.resolve()).encode("utf-8")).hexdigest(),
+    "account_binding": digest({"task": "local-crew", "account_home": str(account.resolve())}),
+    "worktree_binding": digest(
+        {"worktree": str(worktree.resolve()), "git_dir": str(git_dir.resolve())}),
+    "repository_binding": hashlib.sha256(head.encode("ascii")).hexdigest(),
+    "repository_generation": head,
+    "owner_kind": "secondmate",
+    "role": "author",
+    "eligible": True,
+    "discretionary": True,
+    "status": "queued",
+}
+assert canonical(item) == canonical(expected), (canonical(item), canonical(expected))
+assert "parent_task" not in item and "task_home" not in item, item
+PY
+  pass "the parent-less local-secondmate request lane emits its exact pre-change queue item"
+}
+
+verify_state_home_fence_golden() {
+  # The home fence is what makes ONE document one document. A future edit that
+  # drops home_binding from verify_state's tuple, or stops comparing it, must
+  # go red HERE rather than silently letting a foreign home load the money
+  # document. Structural golden plus the live refusal.
+  local tmp
+  fm_test_tmproot_into tmp fm-worker-home-fence-golden
+  python3 - "$CONTROLLER" <<'PY' || fail "verify_state's exact identity fence moved"
+import ast
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+tree = ast.parse(source)
+target = next(
+    node for node in tree.body
+    if isinstance(node, ast.FunctionDef) and node.name == "verify_state"
+)
+loops = [node for node in ast.walk(target) if isinstance(node, ast.For)]
+fence = next(
+    tuple(element.value for element in loop.iter.elts)
+    for loop in loops
+    if isinstance(loop.iter, ast.Tuple)
+    and all(isinstance(element, ast.Constant) for element in loop.iter.elts)
+)
+assert fence == (
+    "schema", "home_binding", "subscription_binding",
+    "deployment_generation", "owner", "prefix",
+), fence
+PY
+  write_fixture_provider "$tmp/provider.py"
+  python3 - "$WRAPPER" "$tmp" "$SUB" <<'PY' || fail "a foreign home no longer refuses the money document"
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+wrapper, root, subscription = sys.argv[1:]
+root = Path(root)
+home = root / "home"
+(home / "state").mkdir(parents=True, exist_ok=True)
+env = os.environ.copy()
+env.update({
+    "FM_HOME": str(home),
+    "FM_AZURE_SUBSCRIPTION_ID": subscription,
+    "FM_AZURE_DEPLOYMENT_GENERATION": "dep-one",
+    "FM_AZURE_OWNER_TAG": "owner",
+    "FM_AZURE_NAMING_PREFIX": "fmtest",
+    "FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS": "0",
+    "FM_WORKER_PROVIDER_COMMAND": "python3 {}".format(root / "provider.py"),
+    "FIXTURE_STATE": str(root / "provider-state.json"),
+    "FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS": "1",
+})
+
+
+def run(*args, check=True):
+    result = subprocess.run([wrapper] + list(args), env=env, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and result.returncode != 0:
+        raise AssertionError("{} failed: {}".format(args, result.stderr))
+    return result
+
+
+run("request", "--task", "task-1", "--task-generation", "gen-1",
+    "--home-binding", format(1, "064x"), "--account-binding", format(2, "064x"),
+    "--worktree-binding", format(3, "064x"), "--repository-binding", format(4, "064x"),
+    "--repository-generation", "repo-1", "--owner-kind", "primary", "--eligible")
+controller = home / "state" / "azure-workers" / "controller.json"
+document = json.loads(controller.read_text())
+assert document["home_binding"] and document["home_binding"] != format(9, "064x")
+document["home_binding"] = format(9, "064x")
+controller.write_text(json.dumps(document, sort_keys=True, separators=(",", ":")))
+refused = run("status", "--json", check=False)
+assert refused.returncode != 0, refused.stdout
+assert "lifecycle state home_binding binding is not exact" in refused.stderr, refused.stderr
+PY
+  pass "verify_state still fences the money document on its exact six-field identity"
+}
+
+compartment_child_reaches_its_ordinary_exit() {
+  # The capability must not admit a child that can never be released. The
+  # child's state/<task>.meta lands ONLY under the task home, so the release
+  # lane has to look for it there: authority-receipt runs the REAL
+  # bin/fm-worker-authority.py against the task home, and the minted receipts
+  # verify through the UNMODIFIED release path. Without this an admitted child
+  # holds a live worker slot with no ordinary exit, and its architectural
+  # "WORKER AUTHORITY REFUSED" would read as a genuine refusal and qualify it
+  # for surrender from the moment it was assigned.
+  local tmp provider fixture envfile
+  fm_test_tmproot_into tmp fm-worker-task-home-release
+  provider="$tmp/provider.py"
+  fixture="$tmp/provider-state.json"
+  mkdir -p "$tmp/primary/data" "$tmp/primary/state" "$tmp/shim" "$tmp/accounts/codex/1"
+  write_fixture_provider "$provider"
+  # The endpoint oracle must prove the task's pane ABSENT through the real
+  # backend helper, so give it a tmux that reports no server.
+  cat > "$tmp/shim/tmux" <<'SH'
+#!/bin/sh
+echo "no server running on /tmp/fm-task-home-release-test" >&2
+exit 1
+SH
+  chmod +x "$tmp/shim/tmux"
+  envfile="$tmp/env"
+  cat >"$envfile" <<EOF
+FM_HOME=$tmp/primary
+FM_AZURE_SUBSCRIPTION_ID=$SUB
+FM_AZURE_DEPLOYMENT_GENERATION=dep-one
+FM_AZURE_OWNER_TAG=owner
+FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0
+FM_AZURE_NAMING_PREFIX=fmtest
+FM_WORKER_PROVIDER_COMMAND=python3 $provider
+FIXTURE_STATE=$fixture
+FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS=1
+FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1
+FM_ACCOUNT_DIRECTORY_ROOT=$tmp/accounts
+PATH=$tmp/shim:$PATH
+EOF
+  python3 - "$WRAPPER" "$envfile" "$tmp" "$ROOT" <<'PY' || fail "an admitted compartment child has no ordinary exit"
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+wrapper, envfile, root, repo = sys.argv[1:]
+root = Path(root)
+env = os.environ.copy()
+for line in Path(envfile).read_text().splitlines():
+    key, value = line.split("=", 1)
+    env[key] = value
+primary = Path(env["FM_HOME"])
+git_env = dict(env)
+git_env.update({
+    "GIT_AUTHOR_NAME": "fmtest", "GIT_AUTHOR_EMAIL": "fmtest@example.invalid",
+    "GIT_COMMITTER_NAME": "fmtest", "GIT_COMMITTER_EMAIL": "fmtest@example.invalid",
+})
+
+
+def git(*args, cwd, check=True):
+    return subprocess.run(["git"] + list(args), cwd=str(cwd), env=git_env, check=check,
+                          text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def run(*args, check=True):
+    result = subprocess.run([wrapper] + list(args), env=env, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and result.returncode != 0:
+        raise AssertionError("{} failed: {}".format(args, result.stderr))
+    return result
+
+
+def binding(number):
+    return format(number, "064x")
+
+
+def controller_state():
+    return json.loads((primary / "state/azure-workers/controller.json").read_text())
+
+
+# A seeded secondmate home, registered by the primary.
+sub = root / "homes" / "compartment"
+(sub / "state").mkdir(parents=True, exist_ok=True)
+(sub / "bin").mkdir(parents=True, exist_ok=True)
+(sub / "AGENTS.md").write_text("fixture home\n")
+(sub / ".fm-secondmate-home").write_text("smc-1\n")
+(primary / "data" / "secondmates.md").write_text(
+    "# secondmates\n\n- smc-1 - a compartment (home: {}; scope: everything; "
+    "projects: ; added 2026-08-20)\n".format(sub))
+
+# An ORIGIN the child's landing evidence can prove reachability against, and a
+# task worktree cloned from it with its work already pushed.
+origin = root / "origin.git"
+seed = root / "seed"
+seed.mkdir(parents=True, exist_ok=True)
+git("init", "-q", "-b", "main", ".", cwd=seed)
+(seed / "README.md").write_text("fixture\n")
+git("add", "README.md", cwd=seed)
+git("commit", "-q", "-m", "fixture", "--no-gpg-sign", cwd=seed)
+subprocess.run(["git", "clone", "-q", "--bare", str(seed), str(origin)], check=True,
+               env=git_env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+worktree = root / "child-worktree"
+subprocess.run(["git", "clone", "-q", str(origin), str(worktree)], check=True,
+               env=git_env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+# The account directory the real account helper validates, and the completion
+# report the report authority requires - both in the SECONDMATE's home.
+account = Path(env["FM_ACCOUNT_DIRECTORY_ROOT"]) / "codex" / "1"
+(sub / "data" / "child-1").mkdir(parents=True, exist_ok=True)
+(sub / "data" / "child-1" / "completion.md").write_text(
+    "# child-1\n\n## Summary\ns\n\n## What changed\nc\n\n## Verification\nv\n\n"
+    "## Visual evidence\ne\n\n## Artifacts\na\n\n## Follow-ups\nf\n")
+git_dir = worktree / ".git"
+head = git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
+(sub / "state" / "child-1.meta").write_text(
+    "generation_id=gen-c1\nworktree={}\naccount_home={}\naccount_task=child-1\n"
+    "kind=ship\nwindow=fmtest:1\nbackend=tmux\n"
+    "worktree_git_dir_identity={}:{}\n".format(
+        worktree, account, os.stat(git_dir).st_dev, os.stat(git_dir).st_ino))
+
+# Parent compartment, assigned.
+run("request", "--task", "smc-1", "--task-generation", "gen-s1",
+    "--home-binding", binding(21), "--account-binding", binding(22),
+    "--worktree-binding", binding(23), "--repository-binding", binding(24),
+    "--repository-generation", "repo-s1", "--owner-kind", "primary",
+    "--role", "secondmate", "--eligible")
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+
+# The child, admitted from its authorized task home with real minted bindings.
+run("request", "--task", "child-1", "--task-generation", "gen-c1",
+    "--owner-kind", "secondmate", "--eligible", "--task-home", str(sub),
+    "--parent-task", "smc-1", "--parent-task-generation", "gen-s1")
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+state = controller_state()
+item = state["queue"]["child-1@gen-c1"]
+assert item["status"] == "assigned", item
+# The PATH is durable, on the queue item AND on the worker record: the release
+# lane sees only the worker.
+assert item["task_home"] == str(sub), item
+worker = state["workers"][str(item["slot"])]
+assert worker["task_home"] == str(sub), worker
+assignment = worker["assignment_generation"]
+
+# The ordinary exit, for real: authority-receipt runs the unmodified authority
+# tool, and it must find the child's metadata under the TASK home.
+receipt_path = root / "child-receipts.json"
+receipts = run("authority-receipt", "--task", "child-1", "--task-generation", "gen-c1",
+               "--assignment-generation", assignment, "--output", str(receipt_path))
+assert "receipts written" in receipts.stdout, receipts.stdout
+minted = json.loads(receipt_path.read_text())
+assert set(minted["authorities"]) == {"endpoint", "report", "landing", "account", "worktree"}, minted
+assert all(entry["verdict"] == "proved" for entry in minted["authorities"].values()), minted
+assert minted["repository_generation"] == head, minted
+
+# And the proof verifies through the UNCHANGED release path.
+proof = json.loads(run(
+    "proof-template", "--task", "child-1", "--task-generation", "gen-c1").stdout)
+proof["authorities"] = minted["authorities"]
+unsigned = dict(proof)
+unsigned.pop("proof_digest", None)
+import hashlib
+proof["proof_digest"] = hashlib.sha256(json.dumps(
+    unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+proof_path = root / "child-proof.json"
+proof_path.write_text(json.dumps(proof, sort_keys=True, separators=(",", ":")))
+run("release", "--task", "child-1", "--task-generation", "gen-c1",
+    "--proof-file", str(proof_path))
+final = controller_state()
+assert final["queue"]["child-1@gen-c1"]["status"] in ("releasing", "complete"), \
+    final["queue"]["child-1@gen-c1"]
+
+# A tampered durable task home cannot redirect the authority lane: the recorded
+# home_binding is the fence. The decoy is a home that would otherwise mint the
+# receipts successfully, so dropping the fence ADMITS a foreign home rather
+# than merely changing which error appears.
+decoy = root / "homes" / "decoy"
+(decoy / "state").mkdir(parents=True, exist_ok=True)
+(decoy / "bin").mkdir(parents=True, exist_ok=True)
+(decoy / "AGENTS.md").write_text("fixture home\n")
+(decoy / ".fm-secondmate-home").write_text("smc-1\n")
+(decoy / "data" / "child-1").mkdir(parents=True, exist_ok=True)
+(decoy / "data" / "child-1" / "completion.md").write_text(
+    (sub / "data" / "child-1" / "completion.md").read_text())
+(decoy / "state" / "child-1.meta").write_text((sub / "state" / "child-1.meta").read_text())
+tampered = json.loads((primary / "state/azure-workers/controller.json").read_text())
+victim = tampered["workers"].get(str(item["slot"]))
+assert victim is not None, "the released worker record vanished before the fence check"
+victim["task_home"] = str(decoy)
+(primary / "state/azure-workers/controller.json").write_text(
+    json.dumps(tampered, sort_keys=True, separators=(",", ":")))
+refused = run("authority-receipt", "--task", "child-1", "--task-generation", "gen-c1",
+              "--assignment-generation", assignment, "--output", str(receipt_path),
+              check=False)
+assert refused.returncode != 0, "a foreign task home minted receipts: {}".format(refused.stdout)
+assert "does not match its recorded home binding" in refused.stderr, refused.stderr
+PY
+  pass "an admitted compartment child mints its five receipts from the task home and releases through the unchanged path"
+}
+
+task_home_registry_is_read_by_the_canonical_reader() {
+  # The money path must be the STRICTEST reader of data/secondmates.md, never
+  # the most permissive. Every shape below is one the repo's own
+  # fm_secondmate_registry_query refuses; each must refuse here too, and the
+  # test proves the canonical reader really rejects each shape rather than
+  # asserting it from memory.
+  local tmp provider fixture envfile
+  fm_test_tmproot_into tmp fm-worker-task-home-registry
+  provider="$tmp/provider.py"
+  fixture="$tmp/provider-state.json"
+  mkdir -p "$tmp/primary/data" "$tmp/primary/state"
+  write_fixture_provider "$provider"
+  envfile="$tmp/env"
+  cat >"$envfile" <<EOF
+FM_HOME=$tmp/primary
+FM_AZURE_SUBSCRIPTION_ID=$SUB
+FM_AZURE_DEPLOYMENT_GENERATION=dep-one
+FM_AZURE_OWNER_TAG=owner
+FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0
+FM_AZURE_NAMING_PREFIX=fmtest
+FM_WORKER_PROVIDER_COMMAND=python3 $provider
+FIXTURE_STATE=$fixture
+FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS=1
+EOF
+  python3 - "$WRAPPER" "$envfile" "$tmp" "$ROOT" <<'PY' || fail "the registry is not read through the canonical reader"
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+wrapper, envfile, root, repo = sys.argv[1:]
+root = Path(root)
+env = os.environ.copy()
+for line in Path(envfile).read_text().splitlines():
+    key, value = line.split("=", 1)
+    env[key] = value
+primary = Path(env["FM_HOME"])
+registry_path = primary / "data" / "secondmates.md"
+git_env = dict(env)
+git_env.update({
+    "GIT_AUTHOR_NAME": "fmtest", "GIT_AUTHOR_EMAIL": "fmtest@example.invalid",
+    "GIT_COMMITTER_NAME": "fmtest", "GIT_COMMITTER_EMAIL": "fmtest@example.invalid",
+})
+
+
+def run(*args, check=True):
+    result = subprocess.run([wrapper] + list(args), env=env, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and result.returncode != 0:
+        raise AssertionError("{} failed: {}".format(args, result.stderr))
+    return result
+
+
+def canonical_reader_accepts(secondmate):
+    """What bin/fm-account-routing-lib.sh itself says about this registry."""
+    script = ('. "$1" || exit 1\n'
+              'fm_secondmate_registry_query "$2" query "$3" home\n')
+    result = subprocess.run(
+        ["bash", "-c", script, "probe",
+         str(Path(repo) / "bin" / "fm-account-routing-lib.sh"),
+         str(registry_path), secondmate],
+        env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return result.returncode == 0
+
+
+def seed_home(path, marker_id):
+    (path / "state").mkdir(parents=True, exist_ok=True)
+    (path / "bin").mkdir(parents=True, exist_ok=True)
+    (path / "AGENTS.md").write_text("fixture home\n")
+    (path / ".fm-secondmate-home").write_text(marker_id + "\n")
+    return path
+
+
+def make_repo(path):
+    path.mkdir(parents=True, exist_ok=True)
+    if (path / ".git").is_dir():
+        return path
+    for argv in (["git", "init", "-q", "-b", "main", "."], ["git", "add", "README.md"],
+                 ["git", "commit", "-q", "-m", "fixture", "--no-gpg-sign"]):
+        if argv[1] == "add":
+            (path / "README.md").write_text("fixture\n")
+        subprocess.run(argv, cwd=str(path), env=git_env, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    return path
+
+
+def task_meta(home, task, generation):
+    worktree = make_repo(root / "worktrees" / task)
+    account = root / "accounts" / task
+    account.mkdir(parents=True, exist_ok=True)
+    git_dir = worktree / ".git"
+    (home / "state" / (task + ".meta")).write_text(
+        "generation_id={}\nworktree={}\naccount_home={}\naccount_task={}\n"
+        "worktree_git_dir_identity={}:{}\n".format(
+            generation, worktree, account, task,
+            os.stat(git_dir).st_dev, os.stat(git_dir).st_ino))
+
+
+def binding(number):
+    return format(number, "064x")
+
+
+sub = seed_home(root / "homes" / "compartment", "smc-1")
+other = seed_home(root / "homes" / "other", "smc-2")
+link_parent = root / "linked"
+link_parent.mkdir(parents=True, exist_ok=True)
+os.symlink(str(root / "homes"), str(link_parent / "homes"))
+
+good = "- smc-1 - a compartment (home: {}; scope: everything; projects: ; added 2026-08-20)\n".format(sub)
+
+
+def write_registry(*lines):
+    registry_path.write_text("# secondmates\n\n" + "".join(lines))
+
+
+# Stand the parent compartment up once, against a VALID registry.
+write_registry(good)
+run("request", "--task", "smc-1", "--task-generation", "gen-s1",
+    "--home-binding", binding(21), "--account-binding", binding(22),
+    "--worktree-binding", binding(23), "--repository-binding", binding(24),
+    "--repository-generation", "repo-s1", "--owner-kind", "primary",
+    "--role", "secondmate", "--eligible")
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+
+
+def child(number, home, check=False, cwd=None):
+    task = "reg-child-{}".format(number)
+    task_meta(sub, task, "gen-r{}".format(number))
+    task_meta(other, task, "gen-r{}".format(number))
+    args = ["request", "--task", task, "--task-generation", "gen-r{}".format(number),
+            "--owner-kind", "secondmate", "--eligible", "--task-home", str(home),
+            "--parent-task", "smc-1", "--parent-task-generation", "gen-s1"]
+    result = subprocess.run([wrapper] + args, env=env, text=True, cwd=cwd,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and result.returncode != 0:
+        raise AssertionError("{} failed: {}".format(args, result.stderr))
+    return result
+
+
+shapes = [
+    ("relative home",
+     ["- smc-1 - a compartment (home: homes/compartment; scope: everything; projects: ; added 2026-08-20)\n"]),
+    ("path through a symlinked component",
+     ["- smc-1 - a compartment (home: {}/homes/compartment; scope: everything; projects: ; added 2026-08-20)\n".format(link_parent)]),
+    ("dot-dot component",
+     ["- smc-1 - a compartment (home: {}/homes/../homes/compartment; scope: everything; projects: ; added 2026-08-20)\n".format(root)]),
+    ("one corrupt trailing line", [good, "- smc-9 - truncated entry (home: /nowhere\n"]),
+    ("trailing spaces", [good.rstrip("\n") + "   \n"]),
+    ("one home under two ids",
+     [good, "- smc-dup - the same home (home: {}; scope: everything; projects: ; added 2026-08-20)\n".format(sub)]),
+]
+# Every shape is exercised even after one fails, so a weakened reader reports
+# ALL the shapes it admits rather than stopping at the first.
+admitted = []
+misrefused = []
+for number, (label, lines) in enumerate(shapes, start=1):
+    write_registry(*lines)
+    assert not canonical_reader_accepts("smc-1"), \
+        "the canonical reader ACCEPTS the {} shape, so this case proves nothing".format(label)
+    # The relative shape runs from the directory it would resolve against, so a
+    # cwd-anchored reader really does admit here instead of missing by luck.
+    result = child(number, sub, cwd=str(root) if label == "relative home" else None)
+    if result.returncode == 0:
+        admitted.append(label)
+    elif "does not validly register secondmate smc-1" not in result.stderr:
+        misrefused.append((label, result.stderr.strip()[-200:]))
+assert not admitted, "shapes the canonical reader refuses were ADMITTED: {}".format(admitted)
+assert not misrefused, misrefused
+
+# A valid registry that simply does not name this secondmate refuses the same way.
+write_registry("- smc-2 - another compartment (home: {}; scope: everything; projects: ; added 2026-08-20)\n".format(other))
+assert canonical_reader_accepts("smc-2")
+refused = child(90, sub)
+assert refused.returncode != 0, refused.stdout
+assert "does not validly register secondmate smc-1" in refused.stderr, refused.stderr
+
+# And the valid registry still ADMITS, so the matrix above is refusing for the
+# shape and not because the lane is simply broken.
+write_registry(good)
+admitted = child(99, sub, check=True)
+assert admitted.returncode == 0, admitted.stderr
+PY
+  pass "the money path refuses every registry shape the repo's own canonical reader refuses"
+}
+
+task_home_marker_matches_the_home_rules() {
+  # The marker link must be as strong as validate_secondmate_home, not merely
+  # marker-shaped: the primary's own home is never a task home, and the marker
+  # comparison strips trailing newlines the way the shell readers' $(cat) does,
+  # never leading whitespace.
+  local tmp provider fixture envfile
+  fm_test_tmproot_into tmp fm-worker-task-home-marker
+  provider="$tmp/provider.py"
+  fixture="$tmp/provider-state.json"
+  mkdir -p "$tmp/primary/data" "$tmp/primary/state" "$tmp/primary/bin"
+  printf 'fixture home\n' > "$tmp/primary/AGENTS.md"
+  write_fixture_provider "$provider"
+  envfile="$tmp/env"
+  cat >"$envfile" <<EOF
+FM_HOME=$tmp/primary
+FM_AZURE_SUBSCRIPTION_ID=$SUB
+FM_AZURE_DEPLOYMENT_GENERATION=dep-one
+FM_AZURE_OWNER_TAG=owner
+FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0
+FM_AZURE_NAMING_PREFIX=fmtest
+FM_WORKER_PROVIDER_COMMAND=python3 $provider
+FIXTURE_STATE=$fixture
+FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS=1
+EOF
+  python3 - "$WRAPPER" "$envfile" "$tmp" <<'PY' || fail "the task home marker rules are weaker than validate_secondmate_home"
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+wrapper, envfile, root = sys.argv[1:]
+root = Path(root)
+env = os.environ.copy()
+for line in Path(envfile).read_text().splitlines():
+    key, value = line.split("=", 1)
+    env[key] = value
+primary = Path(env["FM_HOME"])
+
+
+def run(*args, check=True):
+    result = subprocess.run([wrapper] + list(args), env=env, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and result.returncode != 0:
+        raise AssertionError("{} failed: {}".format(args, result.stderr))
+    return result
+
+
+def binding(number):
+    return format(number, "064x")
+
+
+def seed_home(path, marker_bytes):
+    (path / "state").mkdir(parents=True, exist_ok=True)
+    (path / "bin").mkdir(parents=True, exist_ok=True)
+    (path / "AGENTS.md").write_text("fixture home\n")
+    (path / ".fm-secondmate-home").write_text(marker_bytes)
+    return path
+
+
+git_env = dict(env)
+git_env.update({
+    "GIT_AUTHOR_NAME": "fmtest", "GIT_AUTHOR_EMAIL": "fmtest@example.invalid",
+    "GIT_COMMITTER_NAME": "fmtest", "GIT_COMMITTER_EMAIL": "fmtest@example.invalid",
+})
+
+
+def task_meta(home, task, generation):
+    """A COMPLETE set of local authorities, so that when a home rule is deleted
+    the request is genuinely ADMITTED rather than failing later on a missing
+    metadata file. Every refusal below has to be the rule, not an accident."""
+    worktree = root / "worktrees" / task
+    worktree.mkdir(parents=True, exist_ok=True)
+    if not (worktree / ".git").is_dir():
+        for argv in (["git", "init", "-q", "-b", "main", "."], ["git", "add", "README.md"],
+                     ["git", "commit", "-q", "-m", "fixture", "--no-gpg-sign"]):
+            if argv[1] == "add":
+                (worktree / "README.md").write_text("fixture\n")
+            subprocess.run(argv, cwd=str(worktree), env=git_env, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    account = root / "accounts" / task
+    account.mkdir(parents=True, exist_ok=True)
+    git_dir = worktree / ".git"
+    (home / "state").mkdir(parents=True, exist_ok=True)
+    (home / "state" / (task + ".meta")).write_text(
+        "generation_id={}\nworktree={}\naccount_home={}\naccount_task={}\n"
+        "worktree_git_dir_identity={}:{}\n".format(
+            generation, worktree, account, task,
+            os.stat(git_dir).st_dev, os.stat(git_dir).st_ino))
+
+
+sub = seed_home(root / "homes" / "compartment", "smc-1\n")
+nested = seed_home(primary / "inner-home", "smc-1\n")
+padded = seed_home(root / "homes" / "padded", "  smc-1\n")
+(primary / ".fm-secondmate-home").write_text("smc-1\n")
+
+
+def registry(*entries):
+    (primary / "data" / "secondmates.md").write_text(
+        "# secondmates\n\n" + "".join(
+            "- {} - a compartment (home: {}; scope: everything; projects: ; "
+            "added 2026-08-20)\n".format(identifier, home)
+            for identifier, home in entries))
+
+
+registry(("smc-1", sub))
+run("request", "--task", "smc-1", "--task-generation", "gen-s1",
+    "--home-binding", binding(21), "--account-binding", binding(22),
+    "--worktree-binding", binding(23), "--repository-binding", binding(24),
+    "--repository-generation", "repo-s1", "--owner-kind", "primary",
+    "--role", "secondmate", "--eligible")
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+
+
+def child(number, home):
+    task_meta(home, "mark-{}".format(number), "gen-m{}".format(number))
+    return run("request", "--task", "mark-{}".format(number),
+               "--task-generation", "gen-m{}".format(number),
+               "--owner-kind", "secondmate", "--eligible", "--task-home", str(home),
+               "--parent-task", "smc-1", "--parent-task-generation", "gen-s1", check=False)
+
+
+# The primary's OWN home, marked and registered, is still never a task home.
+registry(("smc-1", primary))
+refused = child(1, primary)
+assert refused.returncode != 0, refused.stdout
+assert "cannot be, contain, or sit inside the active firstmate home" in refused.stderr, refused.stderr
+
+# Nor is a home nested inside it.
+registry(("smc-1", nested))
+refused = child(2, nested)
+assert refused.returncode != 0, refused.stdout
+assert "cannot be, contain, or sit inside the active firstmate home" in refused.stderr, refused.stderr
+
+# Leading whitespace in the marker is not the secondmate id.
+registry(("smc-1", padded))
+refused = child(3, padded)
+assert refused.returncode != 0, refused.stdout
+assert 'is marked for secondmate "  smc-1", not the parent compartment smc-1' in refused.stderr, \
+    refused.stderr
+
+# A relative --task-home never resolves against the caller's cwd.
+registry(("smc-1", sub))
+task_meta(sub, "mark-4", "gen-m4")
+relative = subprocess.run(
+    [wrapper, "request", "--task", "mark-4", "--task-generation", "gen-m4",
+     "--owner-kind", "secondmate", "--eligible", "--task-home", "homes/compartment",
+     "--parent-task", "smc-1", "--parent-task-generation", "gen-s1"],
+    env=env, cwd=str(root), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+assert relative.returncode != 0, relative.stdout
+assert "--task-home must be an absolute path" in relative.stderr, relative.stderr
+
+# A marker carrying control bytes never reaches operator output raw.
+sneaky = seed_home(root / "homes" / "sneaky", "smc-\x07\x1b[31mX\n")
+registry(("smc-1", sneaky))
+refused = child(5, sneaky)
+assert refused.returncode != 0, refused.stdout
+assert "\x1b" not in refused.stderr and "\x07" not in refused.stderr, repr(refused.stderr)
+assert "is marked for secondmate" in refused.stderr, refused.stderr
+PY
+  pass "the task home marker link enforces the same home rules and never echoes raw marker bytes"
+}
+
 compartment_fixture_env() {  # <tmproot-label> -> sets COMPARTMENT_ENVFILE/COMPARTMENT_FIXTURE
   # Shared stand-up for the PR-6 compartment units: fixture provider, envfile.
   local tmp
@@ -5658,6 +6710,12 @@ state_fence_and_revision_cas
 concurrent_mutations_do_not_serialize
 wedged_slot_does_not_stop_the_fleet
 secondmate_role_bounds
+compartment_child_task_home
+local_secondmate_lane_bytes_unchanged
+verify_state_home_fence_golden
+compartment_child_reaches_its_ordinary_exit
+task_home_registry_is_read_by_the_canonical_reader
+task_home_marker_matches_the_home_rules
 surrender_orphan_confirm
 childless_surrender_bytes_unchanged
 secondmate_release_children_positive_control

@@ -24,7 +24,12 @@ ID=${1:?task id}
 GENERATION=${2:?task generation id}
 FM_HOME=${FM_HOME:?FM_HOME is required}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
-CONTROLLER=$STATE/azure-workers/controller.json
+# The controller document is the ONE money authority, and it lives under the
+# home FM_HOME names. $STATE is where THIS TASK's files live, which is the same
+# directory for every ordinary crewmate and the secondmate's own home on the
+# compartment-child lane; deriving the controller from $STATE there would read
+# a document that does not exist and report the crewmate as forever unqueued.
+CONTROLLER=$FM_HOME/state/azure-workers/controller.json
 RESULT=$STATE/$ID.worker-result.json
 EXEC_LOG=$STATE/$ID.worker-execute.log
 ENTRYPOINT=$STATE/$ID.cloud-entrypoint

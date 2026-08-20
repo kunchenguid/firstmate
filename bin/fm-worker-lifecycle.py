@@ -668,6 +668,13 @@ def verify_request(request):
                 "parent_task is owned by secondmate-owned author requests only")
         require_id("parent_task", parent)
         require_id("parent_task_generation", parent_generation)
+    task_home = request.get("task_home")
+    if task_home is not None:
+        if parent is None or role != "author" or request.get("owner_kind") != "secondmate":
+            raise LifecycleError(
+                "task home is owned by compartment child requests only")
+        if not isinstance(task_home, str) or not task_home.startswith("/") or len(task_home) > 4096:
+            raise LifecycleError("worker request task home must be one absolute path")
     if request.get("eligible") is not True:
         raise LifecycleError("worker request must be explicitly eligible")
 
@@ -1486,7 +1493,7 @@ def next_assignment_generation(state):
 def create_worker_record(env, state, slot, item, reservation):
     assignment_generation = next_assignment_generation(state)
     sku, family = SKU_PLAN[slot]
-    return {
+    record = {
         "slot": slot,
         "role": item.get("role", "author"),
         "sku": sku,
@@ -1509,6 +1516,13 @@ def create_worker_record(env, state, slot, item, reservation):
         "last_classification": "retained-for-investigation",
         "last_refusal": None,
     }
+    if item.get("task_home") is not None:
+        # Additive, and ONLY for a compartment child: an ordinary worker record
+        # keeps its exact bytes. ordinary_authority_attempt sees the worker and
+        # not the queue item, so the release lane can only find the child's own
+        # metadata if the path travels here.
+        record["task_home"] = item["task_home"]
+    return record
 
 
 def record_refusal(state, worker, note):
@@ -2351,6 +2365,10 @@ def parser():
     request.add_argument("--role", choices=("author", "secondmate"), default="author")
     request.add_argument("--parent-task", default=None)
     request.add_argument("--parent-task-generation", default=None)
+    request.add_argument(
+        "--task-home", default=None,
+        help="the compartment child's own home, where its task metadata authorities live; "
+             "the money document stays under FM_HOME")
     request.add_argument("--eligible", action="store_true")
     request.add_argument("--required", action="store_true", help="mark non-discretionary recovery/landing work")
 
@@ -2507,10 +2525,20 @@ def parser():
     return top
 
 
-def authoritative_request_bindings(env, task, generation):
+def authoritative_request_bindings(env, task, generation, task_home=None):
     require_id("task", task)
     require_id("task generation", generation)
-    metadata = env["home"] / "state" / (task + ".meta")
+    # FM_HOME does three separable jobs at once: (1) where the REQUESTING
+    # task's local authorities live (this metadata read), (2) the identity
+    # stamped into the request's home_binding, and (3) the identity of the
+    # money document. Jobs 1 and 2 belong to the requester; job 3 belongs to
+    # the controller. The secondmate compartment child is the first case where
+    # they differ, so the origin of the local authorities is a PARAMETER while
+    # FM_HOME stays put - because FM_HOME is what names the one document.
+    # An authorized origin is proven by authorize_task_home under the lock;
+    # nothing here decides authority.
+    origin = task_home or env["home"]
+    metadata = origin / "state" / (task + ".meta")
     if metadata.is_symlink() or not metadata.is_file():
         raise LifecycleError("ordinary task metadata authority is absent")
     values = {}
@@ -2551,12 +2579,160 @@ def authoritative_request_bindings(env, task, generation):
     if recorded_git_identity not in (physical_identity, digest_value({"git_dir": str(git_dir)})):
         raise LifecycleError("ordinary worktree Git-directory identity differs")
     return {
-        "home_binding": env["home_binding"],
+        "home_binding": home_binding(origin),
         "account_binding": digest_value({"task": task, "account_home": str(account_home)}),
         "worktree_binding": digest_value({"worktree": str(worktree), "git_dir": str(git_dir)}),
         "repository_binding": hashlib.sha256(head.encode("ascii")).hexdigest(),
         "repository_generation": head,
     }
+
+
+SECONDMATE_HOME_MARKER = ".fm-secondmate-home"
+# The CANONICAL registry reader, not a second implementation of it. Every shell
+# consumer resolves a secondmate home through
+# bin/fm-account-routing-lib.sh's fm_secondmate_registry_query, which refuses
+# the WHOLE registry on any malformed line and additionally requires an
+# absolute home, no ".." component, an lstat on every path component with a
+# symlink refusal, an existing directory, no duplicate ids and no duplicate
+# homes by device:inode. A regex over the same line shape reproduces the shape
+# and none of that, so a truncated or hand-annotated registry would make every
+# shell consumer refuse wholesale while the money path kept authorizing from
+# it. The money path must be the STRICTEST reader of that document, never the
+# most permissive, so it calls the same reader.
+SECONDMATE_REGISTRY_READER = ROOT / "bin" / "fm-account-routing-lib.sh"
+SECONDMATE_REGISTRY_QUERY = (
+    'set -u\n'
+    '. "$1" || exit 1\n'
+    'fm_secondmate_registry_query "$2" query "$3" home\n'
+)
+
+
+def registered_secondmate_home(env, secondmate):
+    """The home the PRIMARY registered for this secondmate, or a refusal."""
+    registry = env["home"] / "data" / "secondmates.md"
+    try:
+        result = subprocess.run(
+            ["bash", "-c", SECONDMATE_REGISTRY_QUERY, "fm-secondmate-registry",
+             str(SECONDMATE_REGISTRY_READER), str(registry), secondmate],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=PROVIDER_TIMEOUT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LifecycleError(
+            "the primary's secondmate registry could not be read: {}".format(exc))
+    if result.returncode != 0:
+        # One refusal for every way the canonical reader says no: absent,
+        # malformed anywhere, unsafe home path, duplicate id, duplicate home,
+        # or not exactly one entry for this secondmate.
+        raise LifecycleError(
+            "the primary's secondmate registry does not validly register secondmate {}".format(
+                secondmate))
+    home = result.stdout.decode("utf-8", errors="replace").strip()
+    if not home.startswith("/"):
+        raise LifecycleError(
+            "the primary's registered home for secondmate {} is not absolute".format(secondmate))
+    return Path(home)
+
+
+def _within(ancestor, path):
+    return ancestor == path or ancestor in path.parents
+
+
+def safe_marker_text(value):
+    """A bounded, printable rendering of caller-controlled marker bytes."""
+    printable = "".join(
+        character if character.isprintable() and character != '"' else "?"
+        for character in value
+    )
+    return (printable[:64] + "...") if len(printable) > 64 else printable
+
+
+def authorize_task_home(env, parent, task_home, expected_home_binding=None):
+    """Prove the primary authorized this task home for this parent compartment.
+
+    Called INSIDE the controller lock, immediately before enforce_child_bounds,
+    so the authoritative decision and the bounds it anchors are taken under one
+    hold over one document. It is also called BEFORE the bindings are minted,
+    because minting reads metadata, resolves caller-named paths and shells out
+    to git under a directory nothing has authorized yet.
+
+    Nothing here is self-authorizing. The chain has three independent links and
+    every one of them is owned by the primary:
+      1. the marker file inside the task home NAMES a secondmate id, and the
+         directory satisfies the same home-shape rules validate_secondmate_home
+         applies (not the active home, not nested either way with it, not the
+         firstmate repo, and a real firstmate home carrying AGENTS.md and bin/);
+      2. the PRIMARY's own data/secondmates.md, read through the CANONICAL
+         reader, must map that id to exactly this resolved directory - an entry
+         only the primary could have written;
+      3. enforce_child_bounds (unchanged, next) then proves that id is an
+         ASSIGNED role=secondmate entry in this controller's own document.
+    A directory that plants its own marker fails link 2; a registry entry that
+    names a home which does not carry the matching marker fails link 1; a
+    registered, marked home whose secondmate is not a live compartment here
+    fails link 3.
+    """
+    require_id("parent_task", parent)
+    if not task_home.is_absolute():
+        raise LifecycleError("task home must be an absolute path")
+    # The home-shape rules validate_secondmate_home enforces, which a bare
+    # marker check does not: the PRIMARY's own home carries no marker today,
+    # but nothing structural stopped a task home from naming it.
+    if _within(task_home, env["home"]) or _within(env["home"], task_home):
+        raise LifecycleError(
+            "task home cannot be, contain, or sit inside the active firstmate home")
+    if _within(task_home, ROOT) or _within(ROOT, task_home):
+        raise LifecycleError(
+            "task home cannot be, contain, or sit inside the firstmate repository")
+    marker = task_home / SECONDMATE_HOME_MARKER
+    if marker.is_symlink() or not marker.is_file():
+        raise LifecycleError(
+            "task home {} carries no ordinary secondmate home marker".format(task_home))
+    try:
+        # Trailing newlines only, exactly what the shell readers' $(cat ...)
+        # strips. Stripping leading whitespace would admit " smc-1" as smc-1.
+        marked = marker.read_text(encoding="utf-8").rstrip("\n")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise LifecycleError("task home secondmate home marker is unreadable: {}".format(exc))
+    if marked != parent:
+        raise LifecycleError(
+            'task home {} is marked for secondmate "{}", not the parent compartment {}'.format(
+                task_home, safe_marker_text(marked) or "unknown", parent))
+    for required, label in ((task_home / "AGENTS.md", "AGENTS.md"), (task_home / "bin", "bin/")):
+        if not required.exists():
+            raise LifecycleError(
+                "task home {} is not a firstmate home (missing {})".format(task_home, label))
+    registered = registered_secondmate_home(env, parent)
+    if registered.resolve() != task_home:
+        raise LifecycleError(
+            "task home {} is not the home the primary registered for secondmate {} ({})".format(
+                task_home, parent, registered))
+    if expected_home_binding is not None and expected_home_binding != home_binding(task_home):
+        # Belt and braces for the gated asserted-bindings lane, where the
+        # request's own home_binding does not come from this directory.
+        raise LifecycleError(
+            "task home does not match the request's own home binding")
+
+
+def authority_home(env, record):
+    """Where THIS task's ordinary local authorities live.
+
+    FM_HOME names the money document; it does not name where a compartment
+    child's state/<task>.meta lives. Without this the release lane would look
+    for the child's metadata under the primary and find nothing, and an
+    admitted child would hold a live worker slot with no ordinary exit - and
+    worse, the resulting "WORKER AUTHORITY REFUSED" would read as a genuine
+    refusal and qualify every compartment child for surrender from the moment
+    it was assigned.
+    """
+    task_home = record.get("task_home")
+    if task_home is None:
+        return env["home"]
+    if not isinstance(task_home, str) or not task_home.startswith("/"):
+        raise LifecycleError("durable task home is malformed")
+    resolved = Path(task_home).resolve()
+    recorded = record.get("home_binding") or (record.get("bindings") or {}).get("home_binding")
+    if home_binding(resolved) != recorded:
+        raise LifecycleError("durable task home does not match its recorded home binding")
+    return resolved
 
 
 def enforce_child_bounds(env, state, item):
@@ -2598,6 +2774,32 @@ def enforce_child_bounds(env, state, item):
 
 
 def command_request(env, args):
+    # --task-home is the compartment child's ONE new capability: it moves
+    # where the requesting task's local authorities are read from (and the
+    # identity stamped into home_binding), never where the money document
+    # lives. It is refused outside the exact shape that marks a compartment
+    # child, so no other lane can reach a foreign home.
+    task_home = None
+    if getattr(args, "task_home", None) is not None:
+        if (
+            args.parent_task is None
+            or args.parent_task_generation is None
+            or args.role != "author"
+            or args.owner_kind != "secondmate"
+        ):
+            raise LifecycleError("task home is owned by compartment child requests only")
+        if not args.task_home.startswith("/"):
+            # A relative path would resolve against the REQUEST PROCESS'S cwd,
+            # which would make the caller's working directory, not the
+            # registry, the anchor for what gets authorized.
+            raise LifecycleError("--task-home must be an absolute path")
+        task_home = Path(args.task_home).resolve()
+        # Authorize BEFORE minting: the mint reads <task_home>/state/<task>.meta,
+        # resolves and stats caller-named worktree and account paths, and runs
+        # git under them. None of that may happen under a directory the primary
+        # has not authorized. The authoritative decision is still taken again
+        # under the lock, below.
+        authorize_task_home(env, args.parent_task, task_home)
     supplied = (
         args.home_binding, args.account_binding, args.worktree_binding,
         args.repository_binding, args.repository_generation,
@@ -2618,7 +2820,8 @@ def command_request(env, args):
             "repository_generation": require_id("repository generation", args.repository_generation),
         }
     else:
-        bindings = authoritative_request_bindings(env, args.task, args.task_generation)
+        bindings = authoritative_request_bindings(
+            env, args.task, args.task_generation, task_home=task_home)
     item = {
         "schema": REQUEST_SCHEMA,
         "task": args.task,
@@ -2634,6 +2837,11 @@ def command_request(env, args):
     if args.parent_task is not None or args.parent_task_generation is not None:
         item["parent_task"] = args.parent_task
         item["parent_task_generation"] = args.parent_task_generation
+    if task_home is not None:
+        # DURABLE, because the release lane needs the PATH and not only the
+        # digest: authority_home reads it back to tell fm-worker-authority.py
+        # where this task's own state/<task>.meta lives.
+        item["task_home"] = str(task_home)
     verify_request(item)
     key = request_key(item["task"], item["task_generation"])
     with controller_lock(env):
@@ -2644,7 +2852,7 @@ def command_request(env, args):
                 "schema", "task", "task_generation", "home_binding", "account_binding",
                 "worktree_binding", "repository_binding", "repository_generation",
                 "owner_kind", "role", "eligible", "discretionary",
-                "parent_task", "parent_task_generation",
+                "parent_task", "parent_task_generation", "task_home",
             )
             if any(existing.get(field) != item.get(field) for field in identity_fields):
                 raise LifecycleError("task generation already exists with different queue identity")
@@ -2652,6 +2860,10 @@ def command_request(env, args):
             return
         ensure_unique_bindings(state, item)
         if item.get("parent_task") is not None:
+            if task_home is not None:
+                authorize_task_home(
+                    env, item["parent_task"], task_home,
+                    expected_home_binding=item["home_binding"])
             enforce_child_bounds(env, state, item)
         if item.get("role") == "secondmate":
             active_compartments = sum(
@@ -3188,7 +3400,7 @@ def command_authority_receipt(env, args):
         try:
             result = subprocess.run([
                 "python3", str(ROOT / "bin" / "fm-worker-authority.py"),
-                "--home", str(env["home"]), "--task", args.task,
+                "--home", str(authority_home(env, worker)), "--task", args.task,
                 "--task-generation", args.task_generation,
                 "--assignment-generation", args.assignment_generation,
                 "--worker-state", worker_path, "--output", args.output,
@@ -3330,7 +3542,7 @@ def ordinary_authority_attempt(env, args, worker):
     try:
         result = subprocess.run([
             "python3", str(ROOT / "bin" / "fm-worker-authority.py"),
-            "--home", str(env["home"]), "--task", args.task,
+            "--home", str(authority_home(env, worker)), "--task", args.task,
             "--task-generation", args.task_generation,
             "--assignment-generation", worker["assignment_generation"],
             "--worker-state", worker_path, "--output", output_path,

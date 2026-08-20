@@ -186,6 +186,22 @@ def canonical(value):
 
 def tags(action):
     bindings = action["bindings"]
+    if action.get("role") == "secondmate":
+        # A compartment VM carries the compartment tag set; the crewmate tags
+        # below would be a lie in the cloud's own metadata.
+        return {
+            "workload": "firstmate", "firstmate-role": "secondmate-compartment",
+            "deployment-generation": action["deployment_generation"], "cleanup-owner": action["owner"],
+            "worker-slot": str(action["slot"]), "home-binding": bindings["home_binding"],
+            "task-binding": bindings["task"], "task-generation": bindings["task_generation"],
+            "assignment-generation": bindings["assignment_generation"],
+            "account-binding": bindings["account_binding"],
+            "worktree-binding": bindings["worktree_binding"],
+            "repository-binding": bindings["repository_binding"],
+            "repository-generation": bindings["repository_generation"],
+            "agent-capacity": "one-home-scoped-secondmate", "nested-team": "forbidden",
+            "child-launcher": "absent", "browser-profile": "forbidden",
+        }
     return {
         "workload": "firstmate", "firstmate-role": "worker",
         "deployment-generation": action["deployment_generation"], "cleanup-owner": action["owner"],
@@ -915,6 +931,206 @@ test_monitor_keeps_the_outcome_when_the_worktree_moved() {
   pass "the monitor refuses to land onto a worktree that moved off the dispatched generation"
 }
 
+make_child_case() {  # <name> <child-id> <parent-id> -> record
+  # The compartment-child shape: a PRIMARY home that owns the ONE controller
+  # document and the config, and a separate seeded SECONDMATE home that owns
+  # this task's state, data and projects.
+  local name=$1 id=$2 parent=$3 case_dir primary sub project worktree fakebin
+  case_dir="$TMP_ROOT/$name"
+  primary="$case_dir/primary"
+  sub="$case_dir/secondmate-home"
+  project="$case_dir/project"
+  worktree="$case_dir/worktree"
+  mkdir -p "$primary/data" "$primary/state" "$primary/config" \
+    "$sub/data" "$sub/projects" "$sub/state" "$sub/treehouse-pools" \
+    "$case_dir/codex-home" "$case_dir/pi-agent-home"
+  chmod 755 "$case_dir"
+  printf '{"openai-codex":{"accountId":"fixture-account"}}\n' > "$case_dir/pi-agent-home/auth.json"
+  chmod 600 "$case_dir/pi-agent-home/auth.json"
+  printf '%s\n' codex > "$primary/config/crew-harness"
+  printf '%s\n' manual > "$primary/config/backlog-backend"
+  fm_git_init_commit "$project"
+  git -C "$project" worktree add --quiet --detach "$worktree"
+  touch "$sub/state/.last-watcher-beat"
+  mkdir -p "$sub/data/$id"
+  printf 'brief for %s\n' "$id" > "$sub/data/$id/brief.md"
+  printf '# Backlog\n\n## In flight\n- [ ] %s - compartment child test (repo: project)\n\n## Queued\n\n## Done\n' \
+    "$id" > "$sub/data/backlog.md"
+  # The two independent primary-owned links in the authority chain: the marker
+  # inside the home NAMES the secondmate, and the primary's own registry maps
+  # that secondmate to exactly this directory.
+  printf 'fixture home\n' > "$sub/AGENTS.md"
+  mkdir -p "$sub/bin"
+  printf '%s\n' "$parent" > "$sub/.fm-secondmate-home"
+  printf '# secondmates\n\n- %s - the compartment (home: %s; scope: everything; projects: ; added 2026-08-20)\n' \
+    "$parent" "$sub" > "$primary/data/secondmates.md"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  write_fixture_provider "$case_dir/provider.py"
+  : > "$case_dir/launch.log"
+  : > "$case_dir/tmux-calls.log"
+  : > "$case_dir/herdr.log"
+  printf '{"next":1,"workspaces":[],"tabs":[],"agent_status":{}}\n' > "$case_dir/herdr-state.json"
+  printf '%s\n' "$case_dir|$primary|$sub|$project|$worktree|$fakebin"
+}
+
+read_child_case() {
+  IFS='|' read -r CASE_DIR PRIMARY_DIR SUB_DIR PROJECT_DIR WORKTREE_DIR FAKEBIN_DIR <<EOF
+$1
+EOF
+}
+
+run_child_spawn() {  # <case> <primary> <sub> <worktree> <fakebin> [extra env assignments...] -- args
+  # Deliberately sets NO FM_STATE_OVERRIDE/FM_DATA_OVERRIDE/FM_PROJECTS_OVERRIDE:
+  # the split derives them from the task home, and fm-spawn refuses the
+  # combination outright. FM_HOME stays the primary, because FM_HOME is what
+  # names the money document.
+  local case_dir=$1 primary=$2 sub=$3 worktree=$4 fakebin=$5
+  shift 5
+  FM_ROOT_OVERRIDE='' FM_HOME="$primary" \
+    FM_SPAWN_TASK_HOME="$sub" \
+    FM_CONFIG_OVERRIDE="$primary/config" \
+    FM_TREEHOUSE_ROOT="$sub/treehouse-pools" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$case_dir/checkout-refresh-state" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$worktree" TMUX="fake,1,0" \
+    FM_FAKE_TREEHOUSE_WORKTREE="$worktree" \
+    FM_TEST_LAUNCH_LOG="$case_dir/launch.log" \
+    FM_TEST_TMUX_CALLS="$case_dir/tmux-calls.log" \
+    FM_BACKEND_HERDR_TEST_LAB=firstmate-herdr-test-lab-v1 \
+    FM_HERDR_LOG="$case_dir/herdr.log" \
+    FM_FAKE_HERDR_STATE="$case_dir/herdr-state.json" \
+    CODEX_HOME="$case_dir/codex-home" \
+    PI_CODING_AGENT_DIR="$case_dir/pi-agent-home" \
+    FM_SPAWN_CLOUD=azure \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+    FM_AZURE_OWNER_TAG=owner \
+    FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0 \
+    FM_WORKER_PROVIDER_COMMAND="python3 $case_dir/provider.py" \
+    FIXTURE_STATE="$case_dir/provider-state.json" \
+    PATH="$fakebin:$PATH" "$SPAWN" "$@" 2>&1
+}
+
+stand_up_compartment() {  # <case> <primary> <parent-id> <parent-generation>
+  local case_dir=$1 primary=$2 parent=$3 generation=$4
+  FM_HOME="$primary" \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+    FM_AZURE_OWNER_TAG=owner \
+    FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0 \
+    FM_WORKER_PROVIDER_COMMAND="python3 $case_dir/provider.py" \
+    FIXTURE_STATE="$case_dir/provider-state.json" \
+    FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS=1 \
+    "$ROOT/bin/fm-worker-lifecycle.sh" request \
+      --task "$parent" --task-generation "$generation" \
+      --home-binding "$(printf '%064x' 21)" --account-binding "$(printf '%064x' 22)" \
+      --worktree-binding "$(printf '%064x' 23)" --repository-binding "$(printf '%064x' 24)" \
+      --repository-generation repo-parent --owner-kind primary --role secondmate --eligible \
+    || return 1
+  FM_HOME="$primary" \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+    FM_AZURE_OWNER_TAG=owner \
+    FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0 \
+    FM_WORKER_PROVIDER_COMMAND="python3 $case_dir/provider.py" \
+    FIXTURE_STATE="$case_dir/provider-state.json" \
+    FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS=1 \
+    "$ROOT/bin/fm-worker-lifecycle.sh" reconcile --apply --confirm-subscription "$SUB" >/dev/null
+}
+
+test_compartment_child_spawn_splits_the_task_home_from_the_money_document() {
+  # The headline R2/R3 requirement, end to end through the real spawn: a
+  # secondmate running in Azure obtains a crewmate. The child's task lives in
+  # the SECONDMATE's home; the request is admitted into the PRIMARY's one
+  # controller document; no second document is ever created.
+  local record id parent out status meta controller
+  id=child-c1
+  parent=smc-e2e
+  record=$(make_child_case child-lane "$id" "$parent")
+  read_child_case "$record"
+  stand_up_compartment "$CASE_DIR" "$PRIMARY_DIR" "$parent" gen-parent \
+    || fail "the parent compartment could not be stood up in the primary's controller"
+  controller="$PRIMARY_DIR/state/azure-workers/controller.json"
+  assert_grep '"role":"secondmate"' "$controller" "the parent compartment is not a secondmate record"
+  out=$(FM_SPAWN_PARENT_TASK="$parent" FM_SPAWN_PARENT_TASK_GENERATION=gen-parent \
+    run_child_spawn "$CASE_DIR" "$PRIMARY_DIR" "$SUB_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 0 "$status" "a compartment child spawn should succeed: $out"
+  assert_contains "$out" "spawned $id" "the compartment child spawn did not complete: $out"
+  assert_contains "$out" "placement=azure" "the compartment child spawn never reached cloud placement: $out"
+  # The task's own files live in the SECONDMATE's home.
+  meta="$SUB_DIR/state/$id.meta"
+  assert_present "$meta" "the child's task metadata did not land in the secondmate home"
+  assert_absent "$PRIMARY_DIR/state/$id.meta" "the child's task metadata landed in the primary home"
+  assert_grep 'placement=azure' "$meta" "the child spawn did not record placement=azure"
+  # The money document is the primary's, and there is exactly one of them.
+  assert_present "$controller" "the primary's controller document is gone"
+  assert_absent "$SUB_DIR/state/azure-workers/controller.json" \
+    "the compartment child lane created a SECOND controller document under the secondmate home"
+  python3 - "$controller" "$id" "$parent" "$SUB_DIR" "$PRIMARY_DIR" <<'PY' \
+    || fail "the admitted child is not bound to the secondmate home under the primary's document"
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+controller, task, parent, sub, primary = sys.argv[1:]
+state = json.loads(Path(controller).read_text())
+items = [item for item in state["queue"].values() if item.get("task") == task]
+assert len(items) == 1, state["queue"]
+item = items[0]
+assert item["owner_kind"] == "secondmate", item
+assert item["role"] == "author", item
+assert item["parent_task"] == parent and item["parent_task_generation"] == "gen-parent", item
+sub_binding = hashlib.sha256(str(Path(sub).resolve()).encode()).hexdigest()
+primary_binding = hashlib.sha256(str(Path(primary).resolve()).encode()).hexdigest()
+assert item["home_binding"] == sub_binding, (item["home_binding"], sub_binding)
+assert state["home_binding"] == primary_binding, (state["home_binding"], primary_binding)
+parent_item = state["queue"]["{}@{}".format(parent, "gen-parent")]
+worker = state["workers"][str(parent_item["slot"])]
+assert int(worker.get("children_total", 0)) == 1, worker
+PY
+  pass "a compartment child is spawned into the secondmate's home and admitted by the primary's one controller"
+}
+
+test_task_home_refusals_are_exact() {
+  # Every way the split can be asked for wrongly refuses before anything is
+  # written: a relative path, a directory that is not a seeded secondmate home,
+  # and the override combination that would silently re-point the task files.
+  local record id parent out status
+  id=child-c2
+  parent=smc-refuse
+  record=$(make_child_case child-refusals "$id" "$parent")
+  read_child_case "$record"
+  out=$(FM_SPAWN_TASK_HOME=relative/path run_child_spawn \
+    "$CASE_DIR" "$PRIMARY_DIR" "relative/path" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "a relative FM_SPAWN_TASK_HOME should refuse: $out"
+  assert_contains "$out" "FM_SPAWN_TASK_HOME must be an absolute path" "$out"
+  out=$(run_child_spawn "$CASE_DIR" "$PRIMARY_DIR" "$CASE_DIR/nowhere" "$WORKTREE_DIR" \
+    "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "a missing FM_SPAWN_TASK_HOME should refuse: $out"
+  assert_contains "$out" "is not an existing directory" "$out"
+  out=$(run_child_spawn "$CASE_DIR" "$PRIMARY_DIR" "$PROJECT_DIR" "$WORKTREE_DIR" \
+    "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "an unmarked FM_SPAWN_TASK_HOME should refuse: $out"
+  assert_contains "$out" "is not a seeded secondmate home" "$out"
+  out=$(FM_STATE_OVERRIDE="$SUB_DIR/state" run_child_spawn "$CASE_DIR" "$PRIMARY_DIR" "$SUB_DIR" \
+    "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "FM_SPAWN_TASK_HOME with a state override should refuse: $out"
+  assert_contains "$out" "cannot be combined with FM_STATE_OVERRIDE" "$out"
+  assert_absent "$SUB_DIR/state/$id.meta" "a refused task-home spawn still wrote task metadata"
+  assert_absent "$PRIMARY_DIR/state/azure-workers/controller.json" \
+    "a refused task-home spawn still reached the controller"
+  pass "every unsafe task home refuses before the spawn writes anything"
+}
+
 test_cloud_switch_off_keeps_the_local_path_and_metadata_shape
 test_cloud_spawn_places_worker_and_runs_the_entrypoint
 test_monitor_lands_the_outcome_bundle
@@ -932,6 +1148,8 @@ test_cloud_spawn_refuses_unknown_switch_value
 test_cloud_spawn_fails_closed_when_the_lifecycle_refuses_the_request
 test_cloud_switch_refuses_non_pi_harness
 test_cloud_switch_refuses_explicit_backend
+test_compartment_child_spawn_splits_the_task_home_from_the_money_document
+test_task_home_refusals_are_exact
 
 test_cloud_switch_off_and_on_share_the_same_base_metadata
 
