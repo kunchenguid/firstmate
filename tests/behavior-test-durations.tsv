@@ -55,6 +55,7 @@
 4000	tests/fm-credential-expiry.test.sh
 10055	tests/fm-crew-state.test.sh
 5000	tests/fm-crosscheck-azure.test.sh
+20000	tests/fm-crosscheck-slack.test.sh
 94232	tests/fm-crosscheck.test.sh
 13991	tests/fm-daemon.test.sh
 340	tests/fm-decision-pretool-check.test.sh

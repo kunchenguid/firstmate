@@ -47,6 +47,7 @@ fm-composer-lib.test.sh	hermetic
 fm-credential-expiry.test.sh	hermetic
 fm-crew-state.test.sh	hermetic
 fm-crosscheck-azure.test.sh	hermetic
+fm-crosscheck-slack.test.sh	hermetic
 fm-crosscheck.test.sh	hermetic
 fm-daemon.test.sh	hermetic
 fm-decision-pretool-check.test.sh	hermetic
