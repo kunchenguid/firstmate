@@ -844,6 +844,7 @@ fm_backend_herdr_presentation_lock_namespace_fault() {
 # so a refusal stays one statement at every site. Keeping the shape here keeps
 # the two-fault vocabulary in the adapter that owns it, so no caller can drift
 # into naming an unreachable session when the truth is an unusable namespace.
+# shellcheck disable=SC2120 # The retryable tail is optional by contract: the one refusal site that has no retryable wording deliberately calls this with no argument.
 fm_backend_herdr_presentation_lock_refusal_suffix() {  # [retryable-tail]
   local fault
   if fault=$(fm_backend_herdr_presentation_lock_namespace_fault); then
@@ -2834,7 +2835,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
   verdict=$(fm_composer_classify_screen "$caps" "$cap")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || [ -z "$identity" ]; then
-      identity=probe-absent
+      identity="probe-absent"
     fi
     verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown

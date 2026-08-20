@@ -2580,6 +2580,7 @@ make_herdr_uid_stat_bin() {  # <dir> <path-glob> <uid|mode:octal> [...] -> echoe
       *) uid_rules+=("$rule") ;;
     esac
   done
+  # shellcheck disable=SC2016 # Deliberate: $#/$2/$3 must reach the generated shim verbatim and expand when it runs, not here.
   {
     printf '%s\n' '#!/usr/bin/env bash' 'set -u' 'if [ "$#" -eq 3 ]; then' '  case "$2" in'
     printf '%s\n' "    '%u')" '      case "$3" in'
@@ -2783,6 +2784,7 @@ SH
     rmdir "/tmp/firstmate-herdr-presentation-$spoof" 2>/dev/null || true
     [ ! -e "/tmp/firstmate-herdr-presentation-$spoof" ] \
       || fail "the inherited id namespace name unexpectedly exists for $spoof"
+    # shellcheck disable=SC2016 # Deliberate: $0 is the "$ROOT" argument the child bash expands, and `env` hides the `bash -c` shape ShellCheck otherwise recognizes.
     path=$(env "EUID=$spoof" "UID=$spoof" PATH="$dir/idbin:$fb:$PATH" \
       FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT" 2>&1)
@@ -2795,6 +2797,7 @@ SH
     esac
     [ ! -e "/tmp/firstmate-herdr-presentation-$spoof" ] \
       || fail "an inherited account id ($spoof) named a namespace of its own"
+    # shellcheck disable=SC2016 # Deliberate: $0 is the "$ROOT" argument the child bash expands, and `env` hides the `bash -c` shape ShellCheck otherwise recognizes.
     fault=$(env "EUID=$spoof" "UID=$spoof" PATH="$dir/idbin:$fb:$PATH" \
       FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace_fault' "$ROOT" 2>&1)

@@ -1520,6 +1520,7 @@ write_teardown_uid_stat_shim() {  # <case-dir> <path-glob> <uid|mode:octal> [...
       *) uid_rules+=("$rule") ;;
     esac
   done
+  # shellcheck disable=SC2016 # Deliberate: $#/$2/$3 must reach the generated shim verbatim and expand when it runs, not here.
   {
     printf '%s\n' '#!/usr/bin/env bash' 'set -u' 'if [ "$#" -eq 3 ]; then' '  case "$2" in'
     printf '%s\n' "    '%u')" '      case "$3" in'
