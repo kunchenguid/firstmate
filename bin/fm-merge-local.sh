@@ -19,16 +19,21 @@
 # never forces, stashes, or discards: it runs only when origin names a git work
 # tree on this machine, only while that folder sits on the same default branch,
 # only as a fast-forward, and only when nothing uncommitted, untracked, or
-# gitignored there touches a path the fast-forward would change. Ignored paths
-# count because git's own fast-forward overwrites them without a word, and a
-# folder ignoring a path the clone commits is exactly how personal material would
-# be lost. Anything else refuses with the concrete reason. An origin spelled
-# relative to the clone or with a leading tilde names that same folder, so it is
-# anchored against the clone first, the way seeding anchors the origin it seeds
-# from; a path-shaped origin that cannot be anchored refuses rather than being
-# reported as somewhere else. An origin that is absent, a bare repository, or a
-# URL on another host is not a folder anyone reads, so the landing simply reports
-# that it ended at the clone.
+# gitignored that is really present there sits on a path the fast-forward would
+# change. Ignored paths count because git's own fast-forward overwrites them
+# without a word, and a folder ignoring a path the clone commits is exactly how
+# personal material would be lost; they count only when the path is actually
+# there, because git reports a wholly-ignored directory as one entry and a
+# landing that merely adds a file beside someone's scratch work destroys nothing.
+# Anything else refuses with the concrete reason. An origin spelled relative to
+# the clone or with a leading tilde names that same folder, so it is anchored
+# against the clone first, the way seeding anchors the origin it seeds from; the
+# carry then succeeds with an advisory to re-point that origin, because git
+# resolves a relative origin against each linked worktree's own directory and no
+# worker can be spawned from a clone spelled that way. A path-shaped origin that
+# cannot be anchored refuses rather than being reported as somewhere else. An
+# origin that is absent, a bare repository, or a URL on another host is not a
+# folder anyone reads, so the landing simply reports that it ended at the clone.
 # Both stages are idempotent, so a repeat run converges instead of refusing.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
@@ -104,12 +109,16 @@ fi
 # what the origin is, so the landing and bin/fm-home-seed.sh agree about the same
 # value; the shared validator still only ever sees an absolute path.
 ORIGIN_SPELLING=$ORIGIN_URL
+ORIGIN_ANCHORED=
 if fm_project_origin_is_path_form "$ORIGIN_URL"; then
   case $ORIGIN_URL in
     file://* | /?*) ;;
-    '~') ORIGIN_SPELLING=${HOME:-} ;;
-    '~/'*) ORIGIN_SPELLING=${HOME:+${HOME%/}/${ORIGIN_URL#'~/'}} ;;
-    *) ORIGIN_SPELLING=$( (cd "$PROJ_ABS" && cd -- "$ORIGIN_URL" && pwd -P) 2>/dev/null ) || ORIGIN_SPELLING= ;;
+    '~') ORIGIN_SPELLING=${HOME:-}; ORIGIN_ANCHORED=1 ;;
+    '~/'*) ORIGIN_SPELLING=${HOME:+${HOME%/}/${ORIGIN_URL#'~/'}}; ORIGIN_ANCHORED=1 ;;
+    *)
+      ORIGIN_SPELLING=$( (cd "$PROJ_ABS" && cd -- "$ORIGIN_URL" && pwd -P) 2>/dev/null ) || ORIGIN_SPELLING=
+      ORIGIN_ANCHORED=1
+      ;;
   esac
   if [ -z "$ORIGIN_SPELLING" ]; then
     echo "REFUSED: origin $ORIGIN_URL is spelled as a path but names no folder relative to $PROJ, so the landing cannot reach the project's own folder." >&2
@@ -150,6 +159,15 @@ if [ -z "$origin_top" ] || [ -z "$origin_real" ] || [ "$origin_top" != "$origin_
 fi
 ORIGIN_PATH=$origin_real
 
+# git resolves a relative origin against each linked worktree's own directory
+# rather than the clone's toplevel, so a clone spelled that way can receive this
+# carry but can never have a worker spawned in it. The landing is the one place
+# that follows the spelling, so it is the one place that says what it costs.
+advise_origin_spelling() {
+  [ -n "$ORIGIN_ANCHORED" ] || return 0
+  echo "note: $PROJ names its origin as $ORIGIN_URL; re-point it at $ORIGIN_PATH so workers can still be spawned from that clone"
+}
+
 origin_branch=$(git -C "$ORIGIN_PATH" symbolic-ref --short HEAD 2>/dev/null || echo "")
 if [ "$origin_branch" != "$DEFAULT" ]; then
   echo "REFUSED: $ORIGIN_PATH is on '${origin_branch:-a detached HEAD}', not '$DEFAULT'; refusing to change what it has checked out." >&2
@@ -175,6 +193,7 @@ current=$(git -C "$ORIGIN_PATH" rev-parse --verify --quiet "refs/heads/$DEFAULT^
 }
 if [ "$current" = "$target" ]; then
   echo "already current: $ORIGIN_PATH is on $DEFAULT at $(git -C "$ORIGIN_PATH" rev-parse --short HEAD)"
+  advise_origin_spelling
   exit 0
 fi
 if ! git -C "$ORIGIN_PATH" merge-base --is-ancestor "$current" "$target"; then
@@ -190,16 +209,60 @@ CHANGED=()
 while IFS= read -r -d '' changed_path; do
   CHANGED+=("$changed_path")
 done < <(git -C "$ORIGIN_PATH" diff --name-only --no-renames -z "$current" "$target")
-# Ignored paths are asked about too: git's fast-forward overwrites an ignored
-# file in silence, and the folder ignores what its owner keeps to himself.
+# Ignored paths are asked about too, because git's fast-forward overwrites an
+# ignored file in silence and the folder ignores what its owner keeps to himself.
+# They are asked about only where the path is really present: git reports a
+# wholly-ignored directory as a single entry, so asking about the rest would
+# refuse a landing that only adds a file next to somebody's scratch work.
+PRESENT=()
+for changed_path in "${CHANGED[@]+"${CHANGED[@]}"}"; do
+  if [ -e "$ORIGIN_PATH/$changed_path" ] || [ -L "$ORIGIN_PATH/$changed_path" ]; then
+    PRESENT+=("$changed_path")
+  fi
+done
 if [ "${#CHANGED[@]}" -gt 0 ]; then
-  collisions=$(GIT_LITERAL_PATHSPECS=1 git -C "$ORIGIN_PATH" status --porcelain --untracked-files=all --ignored=matching -- "${CHANGED[@]}") || {
-    echo "REFUSED: could not read whether $ORIGIN_PATH has uncommitted work on the paths this landing would change." >&2
+  collisions=$(GIT_LITERAL_PATHSPECS=1 git -C "$ORIGIN_PATH" status --porcelain --untracked-files=all -- "${CHANGED[@]}") || {
+    echo "REFUSED: could not read whether $ORIGIN_PATH has work of its own on the paths this landing would change." >&2
     echo "The change is safe in $PROJ on $DEFAULT; nothing in $ORIGIN_PATH was changed." >&2
     exit 1
   }
+  if [ "${#PRESENT[@]}" -gt 0 ]; then
+    ignored_raw=$(GIT_LITERAL_PATHSPECS=1 git -C "$ORIGIN_PATH" status --porcelain --untracked-files=all --ignored=matching -- "${PRESENT[@]}") || {
+      echo "REFUSED: could not read whether $ORIGIN_PATH ignores any of the paths this landing would change." >&2
+      echo "The change is safe in $PROJ on $DEFAULT; nothing in $ORIGIN_PATH was changed." >&2
+      exit 1
+    }
+    ignored_hits=()
+    while IFS= read -r entry; do
+      case $entry in
+        '!! '*) ;;
+        *) continue ;;
+      esac
+      spec=${entry#'!! '}
+      case $spec in
+        */)
+          # A collapsed directory entry names the folder, not the file inside it,
+          # so name the present paths it covers instead. A spelling that covers
+          # none of them is kept as git reported it rather than dropped.
+          hits_before=${#ignored_hits[@]}
+          for changed_path in "${PRESENT[@]}"; do
+            case $changed_path in
+              "$spec"*) ignored_hits+=("!! $changed_path") ;;
+            esac
+          done
+          [ "${#ignored_hits[@]}" -gt "$hits_before" ] || ignored_hits+=("$entry")
+          ;;
+        *) ignored_hits+=("$entry") ;;
+      esac
+    done <<EOF
+$ignored_raw
+EOF
+    if [ "${#ignored_hits[@]}" -gt 0 ]; then
+      collisions=${collisions:+$collisions$'\n'}$(printf '%s\n' "${ignored_hits[@]}")
+    fi
+  fi
   if [ -n "$collisions" ]; then
-    echo "REFUSED: $ORIGIN_PATH has uncommitted work on paths this landing would change:" >&2
+    echo "REFUSED: $ORIGIN_PATH has work of its own on paths this landing would change (!! marks a path it ignores):" >&2
     printf '%s\n' "$collisions" >&2
     echo "The change is safe in $PROJ on $DEFAULT; commit, move, or revert those paths yourself, then retry." >&2
     exit 1
@@ -220,3 +283,4 @@ if [ "$landed" != "$target" ]; then
   exit 1
 fi
 echo "carried $DEFAULT into $ORIGIN_PATH ($(git -C "$ORIGIN_PATH" rev-parse --short "$current") -> $(git -C "$ORIGIN_PATH" rev-parse --short "$target"))"
+advise_origin_spelling
