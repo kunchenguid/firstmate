@@ -83,7 +83,20 @@ reclaim_stale_dispatch() {
   local mtime now wall
   [ -f "$DISPATCH_MARKER" ] || return 0
   [ ! -s "$RESULT" ] || return 0
-  mtime=$(stat -f %m "$DISPATCH_MARKER" 2>/dev/null || stat -c %Y "$DISPATCH_MARKER" 2>/dev/null) || return 0
+  # Portable epoch mtime, branched on uname like bin/fm-lock-lib.sh. A
+  # BSD-first `stat -f %m "$f" || stat -c %Y "$f"` chain is broken on GNU:
+  # there -f selects a filesystem-format mode that takes no format operand, so
+  # %m is read as a SECOND FILE operand. GNU stat prints the filesystem block
+  # for %m's stat, errors on the real file, and the `||` does fire - but the
+  # first command's output is already inside the captured substitution, so the
+  # variable holds filesystem text plus the fallback's epoch and the numeric
+  # guard below reads it as "not a number" and returns, disabling the reclaim
+  # staleness check entirely on exactly the platform the workers run.
+  if [ "$(uname)" = Darwin ]; then
+    mtime=$(stat -f %m "$DISPATCH_MARKER" 2>/dev/null) || return 0
+  else
+    mtime=$(stat -c %Y "$DISPATCH_MARKER" 2>/dev/null) || return 0
+  fi
   case "$mtime" in ''|*[!0-9]*) return 0 ;; esac
   now=$(date +%s)
   wall=$(persisted_wall_seconds)

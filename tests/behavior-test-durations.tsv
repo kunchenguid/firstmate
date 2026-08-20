@@ -82,7 +82,7 @@
 261383	tests/fm-report-stack-a.test.sh
 243164	tests/fm-report-stack-b.test.sh
 495	tests/fm-review-diff.test.sh
-46000	tests/fm-secondmate-cloud-monitor.test.sh
+81531	tests/fm-secondmate-cloud-monitor.test.sh
 26463	tests/fm-secondmate-harness.test.sh
 37513	tests/fm-secondmate-lifecycle-e2e.test.sh
 6623	tests/fm-secondmate-liveness.test.sh

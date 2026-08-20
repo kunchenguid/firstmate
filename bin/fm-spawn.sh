@@ -45,6 +45,13 @@
 #   the local path. Secondmate and account-recovery spawns always stay local,
 #   and --backend, raw launch commands, or a non-pi harness cannot be combined
 #   with cloud placement.
+#   FM_SPAWN_PARENT_TASK / FM_SPAWN_PARENT_TASK_GENERATION mark a cloud spawn as
+#   a SECONDMATE COMPARTMENT CHILD: both are forwarded to the lifecycle request
+#   as --parent-task/--parent-task-generation, where the controller's fan-out,
+#   lifetime, parent-liveness and depth bounds apply to them. Only the
+#   compartment monitor sets them; every other spawn, including a local
+#   secondmate home requesting its own crewmates, leaves them unset and keeps
+#   the byte-identical parent-less argv.
 #   With no harness arg, a crewmate/scout spawn resolves the crewmate harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -4410,6 +4417,17 @@ spawn_cloud_persist_convergence_artifacts() {
           case "${!var}" in ''|*[!0-9]*) continue ;; esac
           printf 'export %s=%q\n' "$var" "${!var}"
         done
+        # The compartment's child-relay policy knobs. The monitor pane runs in
+        # the Herdr server's closed environment, so an operator knob that is
+        # not persisted here is unreachable in production no matter what the
+        # docs say. Bare names only (a project directory name), never a path
+        # and never a secret.
+        if [ -n "${FM_SECONDMATE_CHILD_PROJECT:-}" ]; then
+          case "$FM_SECONDMATE_CHILD_PROJECT" in
+            *[!A-Za-z0-9._-]*) : ;;
+            *) printf 'export FM_SECONDMATE_CHILD_PROJECT=%q\n' "$FM_SECONDMATE_CHILD_PROJECT" ;;
+          esac
+        fi
       fi
       for var in $SPAWN_CLOUD_ENV_ALLOWLIST; do
         [ -n "${!var+x}" ] || continue
@@ -4424,7 +4442,7 @@ spawn_cloud_claim_execute_dispatch() {
   (set -C; : > "$STATE/$ID.cloud-execute-dispatched") 2>/dev/null
 }
 spawn_cloud_dispatch() {
-  local owner_kind=primary assignment wall role_args
+  local owner_kind=primary assignment wall role_args parent_args
   CLOUD_PLACEMENT_STATE=queued
   [ ! -f "$FM_HOME/$SUB_HOME_MARKER" ] || owner_kind=secondmate
   spawn_cloud_persist_convergence_artifacts || {
@@ -4438,9 +4456,24 @@ spawn_cloud_dispatch() {
   # owner_kind=primary), so a secondmate home requesting a compartment is
   # refused there, loudly. Crewmate requests keep their exact pre-flag argv.
   [ "$KIND" != secondmate ] || role_args=(--role secondmate)
+  # Compartment-child passthrough (R2/R3 B.5 step 3, AMENDMENT 1). The
+  # secondmate compartment's monitor is the only caller that sets these, and
+  # it always sets BOTH: the pair is what marks a request as a compartment
+  # child, so a child cannot dodge the controller's fan-out, lifetime,
+  # parent-liveness and depth bounds. Absent (every other spawn, including a
+  # LOCAL secondmate home requesting its own crewmates) the argv is unchanged
+  # and the documented parent-less lane stays byte-identical. A half-set pair
+  # is forwarded as-is so verify_request refuses it loudly rather than being
+  # quietly dropped here.
+  parent_args=()
+  if [ -n "${FM_SPAWN_PARENT_TASK:-}" ] || [ -n "${FM_SPAWN_PARENT_TASK_GENERATION:-}" ]; then
+    parent_args=(--parent-task "${FM_SPAWN_PARENT_TASK:-}"
+      --parent-task-generation "${FM_SPAWN_PARENT_TASK_GENERATION:-}")
+  fi
   spawn_cloud_lifecycle request \
     --task "$ID" --task-generation "$SPAWN_GENERATION_ID" \
-    --owner-kind "$owner_kind" ${role_args[@]+"${role_args[@]}"} --eligible >&2 || {
+    --owner-kind "$owner_kind" ${role_args[@]+"${role_args[@]}"} \
+    ${parent_args[@]+"${parent_args[@]}"} --eligible >&2 || {
     # No durable queue entry exists, so the convergence artifacts have no
     # owner; remove them (including the copied provider credential) with the
     # rolled-back spawn.

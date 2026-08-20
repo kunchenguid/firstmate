@@ -26,6 +26,16 @@
 #     operator investigates. Verified replies render into this pane;
 #     verified leg-summary bundle declarations land into the local home
 #     worktree by fast-forward only, else the bundle is kept and reported.
+#   - CHILD RELAY: verified child-spawn and attach requests land under
+#     state/<id>.cloud-childreq/ and are validated, spent, or refused by
+#     bin/fm-secondmate-cloud-monitor.py child-relay (design B.5 steps 2-5).
+#     An invalid request never reaches command_request; its refusal names the
+#     exact failed check and is DELIVERED into this compartment's own inbox,
+#     so a resend is a loud duplicate rather than a hopeful retry. A valid one
+#     spawns through the ordinary lane as the secondmate, carrying the parent
+#     pair, so the controller's bounds apply; an admission refusal round-trips
+#     the same way. Child terminal status and requested delta bundles come
+#     back through the inbox too.
 #   - LEG LIFECYCLE: when a leg's execute returns, the verified leg summary
 #     decides: reason=wall renews (next manifest-free leg, O_EXCL-guarded,
 #     refused past FM_SECONDMATE_TTL_HOURS from first dispatch);
@@ -66,15 +76,18 @@ WORKTREE_FILE=$STATE/$ID.cloud-worktree
 INBOX=$STATE/$ID.cloud-inbox
 RELAYED=$INBOX/.relayed
 MAILBOX=$STATE/$ID.cloud-mailbox
+CHILDREQ=$STATE/$ID.cloud-childreq
 CHAIN_BREAK=$MAILBOX/.chain-break
 STATE_FILE=$STATE/$ID.cloud-secondmate-state.json
 STATUS_FILE=$STATE/$ID.cloud-secondmate-status
 FIRST_DISPATCH=$STATE/$ID.cloud-secondmate-first-dispatch
 CURSOR_FILE=$STATE/$ID.cloud-collect-cursor
 HELPER=$SCRIPT_DIR/fm-secondmate-cloud-monitor.py
-# The lifecycle seam exists for the hermetic tests (a fixture CLI capturing
-# argv and returning canned JSON); operation always uses the sibling wrapper.
+# The lifecycle and spawn seams exist for the hermetic tests (fixture CLIs
+# capturing argv and returning canned JSON); operation always uses the sibling
+# wrappers.
 LIFECYCLE=${FM_SECONDMATE_LIFECYCLE_BIN:-$SCRIPT_DIR/fm-worker-lifecycle.sh}
+SPAWN=${FM_SECONDMATE_SPAWN_BIN:-$SCRIPT_DIR/fm-spawn.sh}
 
 INTERVAL=${FM_SECONDMATE_MONITOR_INTERVAL_SECONDS:-15}
 case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=15 ;; esac
@@ -185,10 +198,12 @@ reclaim_stale_leg() {  # <n> <current-assignment>
   result=$(leg_result "$n")
   [ -f "$marker" ] || return 0
   [ ! -s "$result" ] || return 0
-  # Portable epoch mtime, branched on uname like bin/fm-lock-lib.sh: GNU
-  # stat accepts `-f %m` without failing (it means something else), so the
-  # BSD-first fallback chain silently yields a non-numeric value on Linux
-  # and the staleness guard below would bail forever.
+  # Portable epoch mtime, branched on uname like bin/fm-lock-lib.sh. A
+  # BSD-first `stat -f %m || stat -c %Y` chain is broken on GNU: -f selects a
+  # filesystem-format mode taking no format operand, so %m becomes a second
+  # file operand, the filesystem block is printed into the captured
+  # substitution before the fallback runs, and the numeric guard below reads
+  # the mixture as "not a number" and bails forever.
   if [ "$(uname)" = Darwin ]; then
     mtime=$(stat -f %m "$marker" 2>/dev/null) || return 0
   else
@@ -349,9 +364,38 @@ process_mailbox() {
   worktree=$(cat "$WORKTREE_FILE" 2>/dev/null) || worktree=
   python3 "$HELPER" process-mailbox \
     --task "$ID" --mailbox "$MAILBOX" --state-file "$STATE_FILE" \
-    --worktree "$worktree"
+    --worktree "$worktree" --childreq "$CHILDREQ"
   # Exit 3 (chain break) already rendered its loud refusal; the sticky
   # marker freezes relay in both directions from the next loop check.
+  return 0
+}
+
+child_relay() {  # <assignment>
+  # Design B.5 steps 2-5. Only requests the chain verifier already accepted
+  # reach here (process_mailbox lands them and acts on none), and only this
+  # pass validates them, spends anything, or answers. Refusals and
+  # announcements are written as ordinary inbox envelopes, so the relay below
+  # carries them to the compartment on this same iteration.
+  local assignment=$1 worktree
+  [ -d "$CHILDREQ" ] || return 0
+  worktree=$(cat "$WORKTREE_FILE" 2>/dev/null) || worktree=
+  if [ -z "$worktree" ]; then
+    echo "warning: secondmate $ID: no recorded secondmate home; child requests cannot be relayed"
+    return 0
+  fi
+  (
+    # The persisted environment carries the allowlisted FM_AZURE_* identity
+    # the child's own request needs; sourced in this subshell only.
+    # shellcheck source=/dev/null
+    . "$CLOUD_ENV" 2>/dev/null || true
+    python3 "$HELPER" child-relay \
+      --task "$ID" --task-generation "$GENERATION" \
+      --assignment-generation "$assignment" \
+      --childreq "$CHILDREQ" --inbox "$INBOX" \
+      --spawn-home "$FM_HOME" --home "$worktree" \
+      --controller "$CONTROLLER" \
+      --spawn-bin "$SPAWN" --lifecycle-bin "$LIFECYCLE"
+  ) || echo "warning: secondmate $ID: the child relay pass refused (see above)"
   return 0
 }
 
@@ -442,9 +486,14 @@ while :; do
   if [ -f "$CHAIN_BREAK" ]; then
     echo "secondmate $ID: OUTBOX CHAIN BREAK recorded at $CHAIN_BREAK; relay frozen in both directions until an operator investigates (files retained)"
   elif [ "$status" = assigned ] && [ -n "$assignment" ]; then
-    relay_inbox "$assignment"
     collect_mailbox "$assignment"
     process_mailbox
+    # The child relay runs BEFORE the outbound relay so a refusal, an
+    # acceptance, an attach announcement or a child's terminal status written
+    # this iteration reaches the compartment on this iteration - a delivered
+    # refusal the agent waits a whole interval for reads like a lost message.
+    child_relay "$assignment"
+    relay_inbox "$assignment"
     if ! leg_lifecycle "$assignment" "$slot" "$repo_generation"; then
       render_leg_log
       exit 0
