@@ -2105,6 +2105,48 @@ def proof_template(state, task, generation):
     return proof
 
 
+def compartment_projection(state):
+    """Bounded status of every live secondmate compartment, from controller.json
+    fields ONLY: role/slot/status from the queue entry, children_total and the
+    assignment timestamps from the worker record, and the active-children count
+    from the same queue scan the child bounds use. Leg progress and the exact
+    TTL clock are the compartment monitor's local state and are deliberately
+    NOT invented here; ttl_anchor is the durable assignment anchor (assigned_at,
+    else created_at), the controller's honest approximation of when compartment
+    compute began. session_legs is projected only when a worker record actually
+    carries it (additive, per design B.2)."""
+    compartments = []
+    for key, item in sorted(state["queue"].items()):
+        if item.get("role") != "secondmate" or item.get("status") == "complete":
+            continue
+        worker = None
+        slot = item.get("slot")
+        if slot is not None:
+            candidate = state["workers"].get(str(slot))
+            if candidate is not None and candidate.get("queue_key") == key:
+                worker = candidate
+        children_active = sum(
+            1 for entry in state["queue"].values()
+            if entry.get("parent_task") == item.get("task")
+            and entry.get("parent_task_generation") == item.get("task_generation")
+            and entry.get("status") != "complete"
+        )
+        entry = {
+            "task": item.get("task"),
+            "task_generation": item.get("task_generation"),
+            "status": item.get("status"),
+            "slot": int(slot) if slot is not None else None,
+            "assignment_generation": (worker or {}).get("assignment_generation"),
+            "children_active": children_active,
+            "children_total": int((worker or {}).get("children_total", 0) or 0),
+            "ttl_anchor": (worker or {}).get("assigned_at") or (worker or {}).get("created_at"),
+        }
+        if worker is not None and "session_legs" in worker:
+            entry["session_legs"] = worker["session_legs"]
+        compartments.append(entry)
+    return compartments
+
+
 def status_projection(env, state, inventory=None):
     if inventory is None:
         metrics = state.get("last_metrics") or {}
@@ -2216,6 +2258,7 @@ def status_projection(env, state, inventory=None):
         "regional_observed_plus_reserved_vcpus": regional_committed,
         "family_observed_plus_reserved_vcpus": family_committed,
         "shared_headroom_vcpus": SHARED_HEADROOM_VCPUS,
+        "compartments": compartment_projection(state),
         "idle_cooldown_seconds": env["cooldown_seconds"],
         "warm_idle_target": env["warm_idle"],
         "retained_disks": retained_disks,
@@ -2257,6 +2300,16 @@ def print_status(status, json_output):
     print("specialized-queue: queued={} reserved={}".format(
         status["specialized_queued_reservations"], status["specialized_reserved_reservations"],
     ))
+    for compartment in status.get("compartments") or []:
+        line = (
+            "compartment: task={}@{} status={} slot={} children={}/{} ttl-anchor={}".format(
+                compartment["task"], compartment["task_generation"], compartment["status"],
+                compartment["slot"], compartment["children_active"],
+                compartment["children_total"], compartment["ttl_anchor"],
+            ))
+        if "session_legs" in compartment:
+            line += " legs={}".format(compartment["session_legs"])
+        print(line)
     if status["pending_mutations"]:
         print("pending-mutations: {}".format(json.dumps(
             status["pending_mutations"], sort_keys=True, separators=(",", ":"))))
@@ -2320,6 +2373,10 @@ def parser():
     surrender_parser.add_argument(
         "--confirm-discard-unlanded", action="store_true",
         help="acknowledge that recorded execute outcomes never proven landed are discarded",
+    )
+    surrender_parser.add_argument(
+        "--confirm-orphan-children", action="store_true",
+        help="acknowledge that live compartment children are durably reparented to the primary",
     )
     surrender_parser.add_argument("--confirm-subscription", required=True)
     abandon_parser = sub.add_parser(
@@ -2431,6 +2488,16 @@ def parser():
         "--after", default=None,
         help="resume after this local outbox name (the cursor a previous summary reported)",
     )
+
+    chain_tip = sub.add_parser(
+        "compartment-chain-tip",
+        help="record one compartment's verified outbox chain tip on its controller-owned worker record",
+    )
+    chain_tip.add_argument("--task", required=True)
+    chain_tip.add_argument("--task-generation", required=True)
+    chain_tip.add_argument("--assignment-generation", required=True)
+    chain_tip.add_argument("--sequence", type=int, required=True)
+    chain_tip.add_argument("--chain-digest", required=True)
 
     status = sub.add_parser("status", help="show bounded local lifecycle and cost evidence")
     status.add_argument("--live", action="store_true")
@@ -3301,8 +3368,11 @@ def command_surrender(env, args):
     Surrender is the durable, refusal-first replacement for that hand edit. It
     is not a shortcut around release: it first runs the ordinary authority
     itself and refuses when that succeeds, refuses live compute (the VM must be
-    deallocated or stopped), refuses to replace an ordinary release proof, and
-    demands an operator reason plus the same double confirmation as withdraw.
+    deallocated or stopped), refuses to replace an ordinary release proof,
+    refuses to orphan live compartment children unless the operator passes
+    --confirm-orphan-children (which durably stamps reparented_to: primary on
+    every live child under the same lock hold), and demands an operator reason
+    plus the same double confirmation as withdraw.
     The minted bundle keeps the fm.worker-release/v2 shape the downstream
     deallocate/delete-compute/reset machinery already fences on, but every
     authority verdict is "surrendered" - release_receipt() rejects that verdict,
@@ -3371,6 +3441,23 @@ def command_surrender(env, args):
                 "is unproven; inspect the task disk, then pass --confirm-discard-unlanded "
                 "to discard it deliberately".format(", ".join(produced))
             )
+        # The children-quiesced gate, mirroring command_release's, with the one
+        # sanctioned bypass (design B.7 graft 4, closing AMENDMENT 1's
+        # temporary hole): orphaning live children demands its own explicit
+        # confirmation, and taking it stamps a durable reparented_to note on
+        # every live child in the SAME lock hold that records the surrender,
+        # so the reparenting and the surrender are one atomic durable fact.
+        live_children = [
+            entry for entry in state["queue"].values()
+            if entry.get("parent_task") == args.task
+            and entry.get("parent_task_generation") == args.task_generation
+            and entry.get("status") != "complete"
+        ]
+        if live_children and not args.confirm_orphan_children:
+            raise LifecycleError(
+                "surrender refuses: {} active children name parent {}; pass "
+                "--confirm-orphan-children to reparent them to the primary deliberately".format(
+                    len(live_children), args.task))
         refusal = ordinary_authority_attempt(env, args, worker)
         if refusal is None:
             raise LifecycleError(
@@ -3395,6 +3482,13 @@ def command_surrender(env, args):
             "last_execution_digest": worker.get("last_execution_digest"),
             "discarded_unlanded_executions": produced,
         }
+        if live_children:
+            # Scoped deliberately: an ordinary childless surrender must mint
+            # BYTE-IDENTICAL receipts to before this change, and every receipt's
+            # evidence_digest is taken over this block, so an unconditional
+            # "orphaned_children": 0 would move all five digests on a lane that
+            # never orphaned anything.
+            surrender["orphaned_children"] = len(live_children)
         proof = {
             "schema": RELEASE_SCHEMA,
             "home_binding": worker["bindings"]["home_binding"],
@@ -3427,6 +3521,11 @@ def command_surrender(env, args):
         worker["released_at"] = surrendered_at
         worker["phase"] = "release-proved"
         item["status"] = "releasing"
+        for entry in live_children:
+            # Durable, under this same lock hold: the child queue entries now
+            # name the primary as their driver. The parent fields stay for
+            # lineage; the note is what the captain reads.
+            entry["reparented_to"] = "primary"
         save_state(env, state)
     write_surrender_output(args.output, proof)
     print("FM-SURRENDERED {} {}".format(args.task, args.task_generation))
@@ -3709,6 +3808,78 @@ def command_message_collect(env, args):
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 
 
+def command_compartment_chain_tip(env, args):
+    """Record one compartment's verified outbox chain tip on its WORKER RECORD.
+
+    This exists because a hash chain proves nothing without a trustworthy
+    anchor. The compartment outbox is anchored at one end by a public genesis
+    constant and at the other by its verified tip; when the authority read that
+    tip out of state/<task>.cloud-secondmate-state.json, it was reading the
+    same attacker-writable file, in the same directory as the mailbox, that it
+    was trying to check. An attacker could recompute SHA-256 exactly as the
+    monitor does and write a matching tip, so a wholly fabricated chain
+    verified. The monitor's own tip check is sound because the monitor is the
+    live writer comparing against its own prior state; for the authority, which
+    by its own endpoint receipt runs only after the monitor is dead and the
+    file is unowned, that check was vacuous.
+
+    So the tip belongs where blocker 1's role fix put evidence provenance: the
+    controller document, fenced, lock-guarded, written only through this CLI.
+
+    Deliberately NOT part of the message lane. PR 3's invariant is that
+    message-put/message-collect touch no lifecycle state, and a static test
+    pins that neither rewrites controller.json; recording the tip inside
+    message-collect would trade one hole for another. This is its own command:
+    claim-exempt (it touches no compute, no money, and no provider), but it is
+    a lifecycle write, not a data-plane transfer.
+
+    Monotonic by construction: the sequence may only advance, and a replay of
+    the same sequence must carry the same digest. A lower sequence, or the same
+    sequence with a different digest, is a fork or a rewind and refuses.
+    """
+    require_id("task", args.task)
+    require_id("task generation", args.task_generation)
+    sequence = args.sequence
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+        raise LifecycleError("compartment chain tip sequence must be a positive integer")
+    chain_digest = require_binding("compartment chain tip digest", args.chain_digest)
+    with controller_lock(env):
+        state = load_state(env)
+        key = request_key(args.task, args.task_generation)
+        item = state["queue"].get(key)
+        if item is None or item.get("status") != "assigned":
+            raise LifecycleError(
+                "compartment chain tip requires one exact assigned task generation")
+        if item.get("role") != "secondmate":
+            raise LifecycleError("compartment chain tip is owned by secondmate compartments only")
+        worker = state["workers"].get(str(item.get("slot")))
+        if worker is None or worker.get("queue_key") != key:
+            raise LifecycleError("compartment chain tip task has no exact durable worker owner")
+        if worker.get("assignment_generation") != args.assignment_generation:
+            raise LifecycleError("compartment chain tip assignment generation is not exact")
+        if worker.get("release_proof") is not None:
+            raise LifecycleError("released work cannot record a compartment chain tip")
+        current = worker.get("verified_chain_tip")
+        if isinstance(current, dict):
+            held = current.get("sequence")
+            if isinstance(held, int) and not isinstance(held, bool):
+                if sequence < held:
+                    raise LifecycleError(
+                        "compartment chain tip refuses to rewind from sequence {} to {}".format(
+                            held, sequence))
+                if sequence == held and current.get("chain_digest") != chain_digest:
+                    raise LifecycleError(
+                        "compartment chain tip sequence {} already recorded a different digest".format(
+                            sequence))
+        worker["verified_chain_tip"] = {
+            "sequence": sequence,
+            "chain_digest": chain_digest,
+            "recorded_at": iso_utc(),
+        }
+        save_state(env, state)
+    print("recorded compartment chain tip {} for {}".format(sequence, args.task))
+
+
 def command_status(env, args):
     inventory = None
     if args.live:
@@ -3784,6 +3955,8 @@ def main(argv=None):
         command_message_put(env, args)
     elif args.command == "message-collect":
         command_message_collect(env, args)
+    elif args.command == "compartment-chain-tip":
+        command_compartment_chain_tip(env, args)
     elif args.command == "status":
         command_status(env, args)
     else:

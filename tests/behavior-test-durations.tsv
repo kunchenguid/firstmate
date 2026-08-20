@@ -115,6 +115,7 @@
 180000	tests/fm-watch-pause-absorb.test.sh
 95645	tests/fm-watch-triage.test.sh
 20435	tests/fm-watcher-lock.test.sh
+3000	tests/fm-worker-authority-secondmate.test.sh
 12000	tests/fm-worker-lifecycle.test.sh
 1000	tests/fm-worker-outcome-transport.test.sh
 1000	tests/fm-worker-supervisor.test.sh
