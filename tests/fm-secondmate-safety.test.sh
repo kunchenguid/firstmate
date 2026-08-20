@@ -536,6 +536,120 @@ test_home_seed_no_projects_end_to_end() {
   pass "home seeding scaffolds, registers, and spawns a project-less home end to end"
 }
 
+test_home_seed_and_spawn_consume_one_charter_generation() {
+  local home sub cpbin fakebin ready release snapshot_done seed_pid spawn_pid
+  local seed_wait spawn_wait seed_rc spawn_rc parent_brief generation_b launch_snapshot log
+  home="$TMP_ROOT/charter-generation-home"
+  sub="$TMP_ROOT/charter-generation-subhome"
+  cpbin="$TMP_ROOT/charter-generation-cpbin"
+  ready="$TMP_ROOT/charter-generation-copy-ready"
+  release="$TMP_ROOT/charter-generation-copy-release"
+  snapshot_done="$TMP_ROOT/charter-generation-spawn-snapshot"
+  mkdir -p "$home/data" "$home/state" "$home/projects" "$cpbin"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='generation A charter' \
+    FM_SECONDMATE_SCOPE='generation A scope' \
+    "$ROOT/bin/fm-home-seed.sh" generation "$sub" --no-projects >/dev/null \
+    || fail "initial generation seed failed"
+  sub=$(cd "$sub" && pwd -P)
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='generation B charter' \
+    FM_SECONDMATE_SCOPE='generation B scope' \
+    "$ROOT/bin/fm-brief.sh" generation --secondmate --no-projects --replace >/dev/null \
+    || fail "generation B charter replacement failed"
+  parent_brief="$home/data/generation/brief.md"
+  generation_b="$TMP_ROOT/charter-generation-b.md"
+  cp -p "$parent_brief" "$generation_b"
+
+  cat > "$cpbin/cp" <<'SH'
+#!/usr/bin/env bash
+set -eu
+src=${@: -2:1}
+dest=${@: -1}
+case "$dest" in
+  "$FM_TEST_CHILD_DATA"/*)
+    if grep -F 'generation B charter' "$src" >/dev/null 2>&1; then
+      bytes=$(LC_ALL=C wc -c < "$src" | tr -d ' ')
+      first=$((bytes / 2))
+      head -c "$first" "$src" > "$dest"
+      : > "$FM_TEST_COPY_READY"
+      attempt=0
+      while [ ! -e "$FM_TEST_COPY_RELEASE" ] && [ "$attempt" -lt 500 ]; do
+        /bin/sleep 0.01
+        attempt=$((attempt + 1))
+      done
+      tail -c "+$((first + 1))" "$src" >> "$dest"
+      exit 0
+    fi
+    ;;
+esac
+if [ "$src" = "$FM_TEST_CHILD_CHARTER" ]; then
+  "$FM_REAL_CP" "$@"
+  : > "$FM_TEST_SNAPSHOT_DONE"
+  exit 0
+fi
+exec "$FM_REAL_CP" "$@"
+SH
+  chmod +x "$cpbin/cp"
+
+  PATH="$cpbin:$PATH" FM_REAL_CP="$(command -v cp)" \
+    FM_TEST_CHILD_DATA="$sub/data" FM_TEST_CHILD_CHARTER="$sub/data/charter.md" \
+    FM_TEST_COPY_READY="$ready" FM_TEST_COPY_RELEASE="$release" \
+    FM_TEST_SNAPSHOT_DONE="$snapshot_done" FM_HOME="$home" \
+    "$ROOT/bin/fm-home-seed.sh" generation "$sub" --no-projects \
+    > "$TMP_ROOT/charter-generation-seed.out" 2>&1 &
+  seed_pid=$!
+  seed_wait=0
+  while [ ! -e "$ready" ] && kill -0 "$seed_pid" 2>/dev/null; do
+    seed_wait=$((seed_wait + 1))
+    [ "$seed_wait" -lt 500 ] || break
+    /bin/sleep 0.01
+  done
+  [ -e "$ready" ] || {
+    touch "$release"
+    wait "$seed_pid" 2>/dev/null || true
+    fail "re-seed never reached charter publication"$'\n'"$(cat "$TMP_ROOT/charter-generation-seed.out")"
+  }
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='generation C charter' \
+    FM_SECONDMATE_SCOPE='generation C scope' \
+    "$ROOT/bin/fm-brief.sh" generation --secondmate --no-projects --replace >/dev/null \
+    || fail "concurrent generation C charter replacement failed"
+
+  fakebin=$(make_fake_tmux "$TMP_ROOT/charter-generation-tmux")
+  log="$TMP_ROOT/charter-generation-tmux/tmux.log"
+  PATH="$cpbin:$fakebin:$PATH" FM_REAL_CP="$(command -v cp)" \
+    FM_TEST_CHILD_DATA="$sub/data" FM_TEST_CHILD_CHARTER="$sub/data/charter.md" \
+    FM_TEST_COPY_READY="$ready" FM_TEST_COPY_RELEASE="$release" \
+    FM_TEST_SNAPSHOT_DONE="$snapshot_done" FM_HOME="$home" \
+    FM_SKIP_SECONDMATE_INHERIT=1 FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/charter-generation-tmux/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" generation "$sub" codex --secondmate \
+    > "$TMP_ROOT/charter-generation-spawn.out" 2>&1 &
+  spawn_pid=$!
+  spawn_wait=0
+  while [ ! -e "$snapshot_done" ] && kill -0 "$spawn_pid" 2>/dev/null; do
+    spawn_wait=$((spawn_wait + 1))
+    [ "$spawn_wait" -lt 100 ] || break
+    /bin/sleep 0.01
+  done
+  touch "$release"
+  wait "$seed_pid"; seed_rc=$?
+  wait "$spawn_pid"; spawn_rc=$?
+  expect_code 0 "$seed_rc" "concurrent re-seed should succeed"$'\n'"$(cat "$TMP_ROOT/charter-generation-seed.out")"
+  expect_code 0 "$spawn_rc" "concurrent secondmate spawn should succeed"$'\n'"$(cat "$TMP_ROOT/charter-generation-spawn.out")"
+
+  launch_snapshot="$home/state/generation.launch-brief.md"
+  cmp -s "$generation_b" "$sub/data/charter.md" \
+    || fail "re-seed published a charter other than its snapshotted generation"
+  cmp -s "$generation_b" "$launch_snapshot" \
+    || fail "spawn consumed a partial or different charter generation"
+  assert_grep 'generation B charter' "$home/data/secondmates.md" \
+    "registry publication reread a different parent charter generation"
+  assert_no_grep 'generation C charter' "$home/data/secondmates.md" \
+    "registry publication mixed in the concurrent replacement generation"
+  pass "home seed and spawn consume one atomic charter generation"
+}
+
 test_secondmate_spawn_resolves_punctuated_registry_projects() {
   local home sub sub_abs fakebin log meta projects
   home="$TMP_ROOT/punctuated-spawn-home"
@@ -2953,6 +3067,12 @@ EOF
   pass "fm-backlog-handoff refuses Done items under whitespace section headings and unsafe homes"
 }
 
+if [ "${FM_TEST_BRIEF_PUBLICATION_ONLY:-0}" = 1 ]; then
+  test_home_seed_and_spawn_consume_one_charter_generation
+  echo "ALL TESTS PASSED"
+  exit 0
+fi
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
@@ -2971,6 +3091,7 @@ test_home_seed_refuses_missing_filled_charter
 test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_no_projects_end_to_end
+test_home_seed_and_spawn_consume_one_charter_generation
 test_secondmate_spawn_resolves_punctuated_registry_projects
 test_secondmate_spawn_refuses_ambiguous_and_mismatched_registry_bindings
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home

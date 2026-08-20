@@ -18,6 +18,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+BRIEF="$ROOT/bin/fm-brief.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
@@ -156,86 +157,60 @@ EOF
 # contract line, so an appended block carrying a different mode would otherwise
 # launch unnoticed.
 test_spawn_refuses_an_appended_scaffold_signature() {
-  local rec home proj fakebin brief out status
+  local rec home proj fakebin brief generated_a generated_b out status
   rec=$(make_home duplicated)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
-  mkdir -p "$home/data/delivery-duplicated-d1"
+  generated_a="$TMP_ROOT/duplicated/generated-a"
+  generated_b="$TMP_ROOT/duplicated/generated-b"
+  mkdir -p "$home/data/delivery-duplicated-d1" "$generated_a" "$generated_b"
   brief="$home/data/delivery-duplicated-d1/brief.md"
-  cat > "$brief" <<'EOF'
-You are a crewmate.
-
-# Task
-Original task.
-
-# Setup
-Original setup.
-
-# Rules
-Original rules.
-
-# Project memory
-Original memory contract.
-
-# Definition of done
-Delivery contract: mode=no-mistakes
-
-# Setup
-Re-scaffolded setup.
-
-# Rules
-Re-scaffolded rules.
-
-# Project memory
-Re-scaffolded memory contract.
-
-# Definition of done
-Delivery contract: mode=direct-PR
-EOF
+  FM_HOME="$generated_a" "$BRIEF" delivery-duplicated-d1 proj --mode no-mistakes >/dev/null
+  FM_HOME="$generated_b" "$BRIEF" delivery-duplicated-d1 proj --mode direct-PR >/dev/null
+  cat "$generated_a/data/delivery-duplicated-d1/brief.md" \
+    "$generated_b/data/delivery-duplicated-d1/brief.md" > "$brief"
 
   out=$(run_spawn "$home" "$fakebin" delivery-duplicated-d1 "$proj" claude --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a brief with duplicated sections should exit non-zero"
-  assert_contains "$out" "repeats these sections" "the refusal did not say what is wrong with the brief"
-  assert_contains "$out" "# Setup" "the refusal did not list the repeated setup section"
-  assert_contains "$out" "# Rules" "the refusal did not list the repeated rules section"
-  assert_contains "$out" "# Project memory" "the refusal did not list the repeated project-memory section"
-  assert_contains "$out" "# Definition of done" "the refusal did not list the repeated section"
+  assert_contains "$out" "multiple generated scaffold markers" \
+    "the refusal did not identify the duplicated generated scaffold"
   assert_contains "$out" "--replace" "the refusal did not name the supported regeneration path"
   assert_absent "$home/state/delivery-duplicated-d1.meta" "a duplicated-brief spawn wrote task metadata"
   pass "fm-spawn: an appended scaffold signature is refused"
 }
 
 test_spawn_accepts_legitimate_repeated_task_headings() {
-  local rec home proj fakebin brief marker suffix out
+  local rec home proj fakebin brief marker suffix out status
   rec=$(make_home legitimate-headings)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
-  mkdir -p "$home/data/delivery-task-heading-d2"
+  FM_HOME="$home" "$BRIEF" delivery-task-heading-d2 proj --mode no-mistakes >/dev/null
   brief="$home/data/delivery-task-heading-d2/brief.md"
-  cat > "$brief" <<'EOF'
-You are a crewmate.
-
-# Task
-Explain a setup procedure.
-
-# Setup
-This heading belongs to the task body.
-
-# Setup
-This heading belongs to the scaffold.
-
-# Rules
-Scaffold rules.
-
-# Definition of done
-Delivery contract: mode=no-mistakes
-EOF
+  awk '
+    $0 == "{TASK}" {
+      print "Explain setup and rule concepts."
+      print ""
+      print "# Setup"
+      print "This heading belongs to the task body."
+      print ""
+      print "# Rules"
+      print "This heading also belongs to the task body."
+      next
+    }
+    { print }
+  ' "$brief" > "$brief.next"
+  mv "$brief.next" "$brief"
+  printf '#!/bin/sh\nprintf "task headings reached endpoint launch\\n" >&2\nexit 1\n' > "$fakebin/tmux"
   out=$(run_spawn "$home" "$fakebin" delivery-task-heading-d2 "$proj" claude --mode no-mistakes --yolo off)
-  assert_not_contains "$out" "repeats these sections" \
-    "one task-body heading matching a scaffold heading was falsely refused"
+  status=$?
+  expect_code 1 "$status" "the hermetic endpoint fixture should stop the launch"
+  assert_contains "$out" "task headings reached endpoint launch" \
+    "task-body Setup and Rules headings did not reach endpoint launch"
+  assert_not_contains "$out" "multiple generated scaffold markers" \
+    "task-body Setup and Rules headings were falsely refused"
 
   for marker in '```' '~~~'; do
     case "$marker" in '```') suffix=backticks ;; *) suffix=tildes ;; esac
@@ -248,14 +223,14 @@ EOF
       printf '\n# Definition of done\nDelivery contract: mode=no-mistakes\n'
     } > "$brief"
     out=$(run_spawn "$home" "$fakebin" "delivery-fenced-$suffix-d3" "$proj" claude --mode no-mistakes --yolo off)
-    assert_not_contains "$out" "repeats these sections" \
+    assert_not_contains "$out" "multiple generated scaffold markers" \
       "$marker fenced scaffold-looking headings were falsely refused"
   done
   pass "fm-spawn: legitimate task headings clear the scaffold-signature guard"
 }
 
 test_secondmate_duplicate_guidance_names_the_charter_publisher() {
-  local rec home proj fakebin route sm brief out status
+  local rec home proj fakebin route sm brief generated_a generated_b out status
   rec=$(make_home secondmate-duplicate-guidance)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
@@ -273,19 +248,17 @@ EOF
         > "$sm/.fm-secondmate-parent"
     fi
     brief="$sm/data/charter.md"
-    cat > "$brief" <<'EOF'
-# Charter
-Original charter.
-
-# Operating model
-Original operating model.
-
-# Charter
-Appended charter.
-
-# Operating model
-Appended operating model.
-EOF
+    generated_a="$TMP_ROOT/secondmate-duplicate-guidance-$route-generated-a"
+    generated_b="$TMP_ROOT/secondmate-duplicate-guidance-$route-generated-b"
+    mkdir -p "$generated_a" "$generated_b"
+    FM_HOME="$generated_a" FM_SECONDMATE_CHARTER='Original charter.' \
+      FM_SECONDMATE_SCOPE='Original scope.' \
+      "$BRIEF" "delivery-charter-$route" --secondmate --no-projects >/dev/null
+    FM_HOME="$generated_b" FM_SECONDMATE_CHARTER='Appended charter.' \
+      FM_SECONDMATE_SCOPE='Appended scope.' \
+      "$BRIEF" "delivery-charter-$route" --secondmate --no-projects >/dev/null
+    cat "$generated_a/data/delivery-charter-$route/brief.md" \
+      "$generated_b/data/delivery-charter-$route/brief.md" > "$brief"
 
     out=$(FM_SKIP_SECONDMATE_INHERIT=1 run_spawn "$home" "$fakebin" \
       "delivery-charter-$route" "$sm" claude --secondmate)

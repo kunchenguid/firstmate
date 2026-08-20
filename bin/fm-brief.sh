@@ -218,7 +218,7 @@ BRIEF="$DATA/$ID/brief.md"
 # governs, so the worker follows whichever copy it read last. --replace is the
 # supported path, and it archives the superseded brief instead of destroying the
 # filled-in task text that made hand-editing look safer than regenerating.
-mkdir -p "$DATA/$ID"
+mkdir -p "$DATA/$ID" "$STATE"
 STAGE_DIR=$(mktemp -d "$DATA/$ID/.brief-stage.XXXXXX")
 STAGED="$STAGE_DIR/brief.md"
 ARCHIVE_STAGED=
@@ -280,6 +280,7 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+printf '%s\n\n' "$FM_BRIEF_SCAFFOLD_MARKER" > "$STAGED"
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
@@ -291,7 +292,7 @@ else
   PROJECT_CLONES_BODY=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
   PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
 fi
-cat > "$STAGED" <<EOF
+cat >> "$STAGED" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
 
 # Charter
@@ -423,7 +424,7 @@ EOF
 WAIT_SECTION=${WAIT_SECTION%$'\n'}
 
 if [ "$KIND" = scout ]; then
-cat > "$STAGED" <<EOF
+cat >> "$STAGED" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
@@ -528,7 +529,7 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
-cat > "$STAGED" <<EOF
+cat >> "$STAGED" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task

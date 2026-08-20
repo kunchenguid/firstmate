@@ -49,6 +49,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-brief-lib.sh
+. "$SCRIPT_DIR/fm-brief-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -526,10 +528,13 @@ SEED_PARENT_REG_EXISTED=0
 SEED_PARENT_BRIEF=
 SEED_PARENT_BRIEF_CREATED=0
 SEED_PARENT_BRIEF_DIR_CREATED=0
+SEED_PARENT_BRIEF_SNAPSHOT=
 SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
+SEED_CHARTER_PUBLISHED=0
 SEED_MARKER_EXISTED=0
 SEED_PARENT_MARKER_EXISTED=0
+SEED_ID=
 
 restore_seed_file() {
   local existed=$1 backup=$2 path=$3
@@ -539,6 +544,21 @@ restore_seed_file() {
   else
     rm -f "$path" 2>/dev/null || true
   fi
+}
+
+restore_seed_charter() {
+  local replacement='' rc
+  [ "$SEED_CHARTER_PUBLISHED" = 1 ] || return 0
+  if [ "$SEED_CHARTER_EXISTED" = 1 ]; then
+    replacement="$SEED_BACKUP_DIR/charter.md"
+  fi
+  if fm_brief_restore_if_matches_locked "$SEED_HOME/state" "$SEED_ID" \
+      "$SEED_PARENT_BRIEF_SNAPSHOT" "$replacement" "$SEED_HOME/data/charter.md"; then
+    return 0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 2 ] || return "$rc"
 }
 
 seed_rollback_target() {
@@ -628,8 +648,10 @@ seed_rollback() {
   [ "${SEED_ROLLBACK_ACTIVE:-0}" = 1 ] || return 0
   [ "${SEED_COMMITTED:-0}" = 0 ] || return 0
 
-  if [ -n "${SEED_PARENT_BRIEF:-}" ] && [ "$SEED_PARENT_BRIEF_CREATED" = 1 ]; then
-    rm -f "$SEED_PARENT_BRIEF" 2>/dev/null || true
+  if [ -n "${SEED_PARENT_BRIEF:-}" ] && [ "$SEED_PARENT_BRIEF_CREATED" = 1 ] \
+     && [ -f "$SEED_PARENT_BRIEF_SNAPSHOT" ]; then
+    fm_brief_restore_if_matches_locked "$STATE" "$SEED_ID" \
+      "$SEED_PARENT_BRIEF_SNAPSHOT" "" "$SEED_PARENT_BRIEF" 2>/dev/null || true
   fi
   if [ -n "${SEED_PARENT_BRIEF:-}" ] && [ "$SEED_PARENT_BRIEF_DIR_CREATED" = 1 ]; then
     rmdir "$(dirname "$SEED_PARENT_BRIEF")" 2>/dev/null || true
@@ -650,7 +672,7 @@ seed_rollback() {
       if [ -n "${SEED_BACKUP_DIR:-}" ] && [ "${SEED_HOME_BACKED_UP:-0}" = 1 ]; then
         restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
         restore_seed_file "$SEED_PARENT_MARKER_EXISTED" "$SEED_BACKUP_DIR/parent-marker" "$SEED_HOME/$SUB_HOME_PARENT_MARKER"
-        restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
+        restore_seed_charter || true
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
       fi
     fi
@@ -846,10 +868,13 @@ seed_home() {
   : > "$SEED_CREATED_PROJECTS_FILE"
   SEED_PARENT_REG_EXISTED=0
   SEED_PARENT_BRIEF="$DATA/$id/brief.md"
+  SEED_ID=$id
   SEED_PARENT_BRIEF_CREATED=0
   SEED_PARENT_BRIEF_DIR_CREATED=0
+  SEED_PARENT_BRIEF_SNAPSHOT=
   SEED_SUB_REG_EXISTED=0
   SEED_CHARTER_EXISTED=0
+  SEED_CHARTER_PUBLISHED=0
   SEED_MARKER_EXISTED=0
   if [ -f "$REG" ]; then
     SEED_PARENT_REG_EXISTED=1
@@ -877,9 +902,6 @@ seed_home() {
   validate_existing_parent_binding "$home" || return 1
   if [ "$no_projects" -eq 1 ]; then
     refuse_populated_projectless_home "$home" || return 1
-    if [ -f "$SEED_PARENT_BRIEF" ]; then
-      refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF" || return 1
-    fi
   fi
   mkdir -p "$DATA" "$home/data" "$home/state" "$home/config" "$home/projects"
   if [ -f "$home/data/projects.md" ]; then
@@ -888,7 +910,8 @@ seed_home() {
   fi
   if [ -f "$home/data/charter.md" ]; then
     SEED_CHARTER_EXISTED=1
-    cp "$home/data/charter.md" "$SEED_BACKUP_DIR/charter.md"
+    fm_brief_copy_locked "$home/state" "$id" "$home/data/charter.md" \
+      "$SEED_BACKUP_DIR/charter.md" || return 1
   fi
   if [ -f "$home/$SUB_HOME_MARKER" ]; then
     SEED_MARKER_EXISTED=1
@@ -913,16 +936,22 @@ seed_home() {
     fi
     SEED_PARENT_BRIEF_CREATED=1
   fi
-  if grep -F '{TASK}' "$SEED_PARENT_BRIEF" >/dev/null 2>&1; then
+  SEED_PARENT_BRIEF_SNAPSHOT="$SEED_BACKUP_DIR/parent-brief.snapshot.md"
+  fm_brief_copy_locked "$STATE" "$id" "$SEED_PARENT_BRIEF" \
+    "$SEED_PARENT_BRIEF_SNAPSHOT" || return 1
+  if [ "$no_projects" -eq 1 ]; then
+    refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF_SNAPSHOT" || return 1
+  fi
+  if grep -F '{TASK}' "$SEED_PARENT_BRIEF_SNAPSHOT" >/dev/null 2>&1; then
     echo "error: secondmate charter brief at $SEED_PARENT_BRIEF still contains {TASK}; fill it before seeding" >&2
     return 1
   fi
-  charter_summary=$(registry_summary_for_brief "$SEED_PARENT_BRIEF")
+  charter_summary=$(registry_summary_for_brief "$SEED_PARENT_BRIEF_SNAPSHOT")
   [ -n "$charter_summary" ] || {
     echo "error: secondmate charter brief at $SEED_PARENT_BRIEF has an empty Charter section; fill it before seeding" >&2
     return 1
   }
-  charter_scope=$(registry_scope_for_brief "$SEED_PARENT_BRIEF")
+  charter_scope=$(registry_scope_for_brief "$SEED_PARENT_BRIEF_SNAPSHOT")
   [ -n "$charter_scope" ] || {
     echo "error: secondmate charter brief at $SEED_PARENT_BRIEF has an empty Routing scope section; fill it before seeding" >&2
     return 1
@@ -943,7 +972,9 @@ seed_home() {
     fi
   done
 
-  cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
+  fm_brief_copy_locked "$home/state" "$id" "$SEED_PARENT_BRIEF_SNAPSHOT" \
+    "$home/data/charter.md" || return 1
+  SEED_CHARTER_PUBLISHED=1
 
   projects_csv=$(join_projects "$@")
   # Durable record of this home's route to its parent, written once here next
@@ -959,7 +990,7 @@ seed_home() {
   mv -f -- "$home/$SUB_HOME_PARENT_MARKER.tmp.$$" "$home/$SUB_HOME_PARENT_MARKER"
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER.tmp.$$"
   mv -f -- "$home/$SUB_HOME_MARKER.tmp.$$" "$home/$SUB_HOME_MARKER"
-  write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
+  write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF_SNAPSHOT"
   validate_registry
   SEED_COMMITTED=1
   seed_registry_lock_release

@@ -14,10 +14,10 @@
 #   scaffolded before that line existed warns once and launches on the flag. When
 #   the explicit mode carries less rigor than the project's standing posture, a
 #   loud one-line deviation notice is printed and the spawn continues.
-#   Every spawn also refuses an appended-scaffold signature: at least two distinct
-#   top-level "# " sections repeated outside fenced code blocks. A single repeat
-#   may be legitimate task Markdown. Regenerate a duplicated scaffold with
-#   bin/fm-brief.sh --replace instead.
+#   Every spawn also refuses more than one generated-scaffold marker. Task Markdown
+#   may legitimately repeat scaffold heading names, so headings are not treated as
+#   generation identity. Regenerate a duplicated scaffold with bin/fm-brief.sh
+#   --replace instead.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
@@ -1657,7 +1657,27 @@ fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 BRIEF_SOURCE=$BRIEF
 BRIEF_SNAPSHOT="$STATE/$ID.launch-brief.md"
-fm_brief_snapshot "$BRIEF_SOURCE" "$BRIEF_SNAPSHOT" || exit 1
+BRIEF_INPUT=$BRIEF_SOURCE
+if [ -n "${FM_CONTROL_RELAUNCH_BRIEF_SNAPSHOT:-}" ]; then
+  [ "$RELAUNCH" -eq 1 ] && [ "$SPAWN_CONTROL_PARENT" -eq 1 ] || {
+    echo "error: a control-plane relaunch instructions snapshot is accepted only from the owning fm-control process" >&2
+    exit 1
+  }
+  [ "$FM_CONTROL_RELAUNCH_BRIEF_SNAPSHOT" = "$STATE/$ID.control-relaunch.brief-next" ] \
+    && [ -f "$FM_CONTROL_RELAUNCH_BRIEF_SNAPSHOT" ] \
+    && [ ! -L "$FM_CONTROL_RELAUNCH_BRIEF_SNAPSHOT" ] || {
+      echo "error: control-plane relaunch instructions snapshot is unavailable or unsafe" >&2
+      exit 1
+    }
+  BRIEF_INPUT=$FM_CONTROL_RELAUNCH_BRIEF_SNAPSHOT
+  fm_brief_snapshot "$BRIEF_INPUT" "$BRIEF_SNAPSHOT" || exit 1
+else
+  BRIEF_LOCK_STATE=$STATE
+  if [ "$KIND" = secondmate ] && [ "$BRIEF_SOURCE" = "$PROJ_ABS/data/charter.md" ]; then
+    BRIEF_LOCK_STATE="$PROJ_ABS/state"
+  fi
+  fm_brief_copy_locked "$BRIEF_LOCK_STATE" "$ID" "$BRIEF_INPUT" "$BRIEF_SNAPSHOT" || exit 1
+fi
 BRIEF=$BRIEF_SNAPSHOT
 
 duplicate_brief_recovery_guidance() {
@@ -1680,58 +1700,12 @@ duplicate_brief_recovery_guidance() {
   echo "regenerate the parent charter with bin/fm-brief.sh --replace, then republish $PROJ_ABS/data/charter.md with its route's bin/fm-home-seed.sh or bin/fm-remote-home-seed.sh instead of appending a second copy" >&2
 }
 
-# This guard is deliberately signature-based rather than refusing any repeated
-# heading. The duplication arose because bin/fm-brief.sh refused the re-scaffold,
-# so the regenerated brief was hand-appended around that refusal. A false refusal
-# here would push firstmate back into hand-editing and recreate the exact defect
-# this guard exists to prevent, making false refusal a correctness problem rather
-# than an inconvenience. An appended scaffold repeats several sections whose
-# competing rules have no precedence marker, while one repeated heading may be
-# legitimate task-body Markdown. Fenced code examples are not brief structure.
-# The mode check below reads only the FIRST delivery contract line, so a second
-# scaffold carrying a different mode would otherwise launch unnoticed.
-DUP_SECTIONS=$(awk '
-  function trim_fence_indent(text, i) {
-    for (i = 0; i < 3 && substr(text, 1, 1) == " "; i++) text = substr(text, 2)
-    return text
-  }
-  function fence_marker_run(text, marker, i) {
-    marker = substr(text, 1, 1)
-    if (marker != "`" && marker != "~") return 0
-    for (i = 1; substr(text, i, 1) == marker; i++) {}
-    return i - 1
-  }
-  {
-    candidate = trim_fence_indent($0)
-    run = fence_marker_run(candidate)
-    marker = substr(candidate, 1, 1)
-    if (fence_marker == "") {
-      if (run >= 3) {
-        fence_marker = marker
-        fence_length = run
-        next
-      }
-      if ($0 ~ /^# /) sections[$0]++
-      next
-    }
-    if (marker == fence_marker && run >= fence_length &&
-        substr(candidate, run + 1) ~ /^[[:space:]]*$/) {
-      fence_marker = ""
-      fence_length = 0
-    }
-  }
-  END {
-    for (section in sections) {
-      if (sections[section] > 1) repeated[++count] = section
-    }
-    if (count >= 2) {
-      for (i = 1; i <= count; i++) print repeated[i]
-    }
-  }
-' "$BRIEF" | sort | sed 's/^/  /')
-if [ -n "$DUP_SECTIONS" ]; then
-  echo "error: $BRIEF_SOURCE repeats these sections, so which copy governs is undefined:" >&2
-  echo "$DUP_SECTIONS" >&2
+# Each generated scaffold carries one fixed marker. Appending another generated
+# scaffold therefore has an unambiguous signature that cannot drift with section
+# names, while arbitrary task headings remain valid Markdown.
+SCAFFOLD_MARKER_COUNT=$(grep -Fxc "$FM_BRIEF_SCAFFOLD_MARKER" "$BRIEF" 2>/dev/null || true)
+if [ "$SCAFFOLD_MARKER_COUNT" -gt 1 ]; then
+  echo "error: $BRIEF_SOURCE contains multiple generated scaffold markers, so which copy governs is undefined" >&2
   duplicate_brief_recovery_guidance
   exit 1
 fi

@@ -1098,11 +1098,10 @@ test_replace_applies_to_every_scaffold_kind() {
   pass "fm-brief.sh: --replace works for ship, scout and secondmate scaffolds"
 }
 
-# Every generated brief must carry each top-level section exactly once. This is
-# the shape bin/fm-spawn.sh refuses on, so the scaffold and the guard cannot
-# drift into disagreement.
-test_generated_briefs_carry_each_section_once() {
-  local home kind id brief dupes
+# Every generated brief carries exactly one stable generation marker, while
+# retaining unique top-level scaffold sections for readable instructions.
+test_generated_briefs_carry_one_marker_and_each_section_once() {
+  local home kind id brief dupes markers
   home="$TMP_ROOT/section-uniqueness-home"
   mkdir -p "$home/data"
   for kind in no-mistakes direct-PR local-only scout secondmate herdr; do
@@ -1115,11 +1114,14 @@ test_generated_briefs_carry_each_section_once() {
     esac
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$kind: brief was not scaffolded"
+    markers=$(grep -Fc '<!-- firstmate:generated-brief-scaffold:v1 -->' "$brief" || true)
+    [ "$markers" -eq 1 ] \
+      || fail "$kind: generated brief carries $markers scaffold markers instead of exactly one"
     dupes=$(grep '^# ' "$brief" | sort | uniq -d)
     [ -z "$dupes" ] \
-      || fail "$kind: brief repeats top-level sections, which bin/fm-spawn.sh refuses: $dupes"
+      || fail "$kind: generated scaffold repeats top-level sections: $dupes"
   done
-  pass "fm-brief.sh: every generated brief carries each top-level section exactly once"
+  pass "fm-brief.sh: every generated brief carries one marker and unique top-level sections"
 }
 
 test_scout_and_secondmate_load_decision_hold_policy() {
@@ -1193,6 +1195,6 @@ test_replace_rejects_non_regular_live_briefs
 test_replace_does_not_follow_a_swapped_destination
 test_replace_does_not_move_into_a_swapped_directory
 test_replace_applies_to_every_scaffold_kind
-test_generated_briefs_carry_each_section_once
+test_generated_briefs_carry_one_marker_and_each_section_once
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold

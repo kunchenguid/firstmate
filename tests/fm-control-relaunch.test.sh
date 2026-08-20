@@ -72,6 +72,15 @@ case "${1:-}" in
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
         /exit|/quit)
+          if [ -n "${FM_FAKE_EXIT_ENTERED:-}" ]; then
+            : > "$FM_FAKE_EXIT_ENTERED"
+            attempt=0
+            while [ ! -e "$FM_FAKE_EXIT_RELEASE" ] && [ "$attempt" -lt 500 ]; do
+              /bin/sleep 0.01
+              attempt=$((attempt + 1))
+            done
+          fi
+          [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_BEFORE_STOP:-}" ] || exit 1
           printf 'zsh' > "$D/command"
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
@@ -171,6 +180,9 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_FAKE_EXIT_ENTERED="${FM_FAKE_EXIT_ENTERED:-}" \
+    FM_FAKE_EXIT_RELEASE="${FM_FAKE_EXIT_RELEASE:-}" \
+    FM_FAKE_EXIT_TRANSPORT_FAIL_BEFORE_STOP="${FM_FAKE_EXIT_TRANSPORT_FAIL_BEFORE_STOP:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -391,6 +403,78 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
   assert_grep "reproduced the crash in parser.go" "$dir/home/state/rl2.control-relaunch.note" \
     "the note should also be preserved beside the transaction record"
   pass "fm-control relaunch: the progress note lands in the instructions the replacement reads"
+}
+
+test_relaunch_launches_the_progress_note_generation() {
+  local dir entered release control_pid wait_count=0 rc launch_snapshot live_brief
+  dir=$(new_case note-generation rl35)
+  add_ship_task "$dir" rl35 claude
+  entered="$dir/exit-entered"
+  release="$dir/exit-release"
+  FM_FAKE_EXIT_ENTERED="$entered" FM_FAKE_EXIT_RELEASE="$release" \
+    run_control "$dir" rl35 relaunch --note "generation-specific progress" \
+    > "$dir/control.out" 2>&1 &
+  control_pid=$!
+  while [ ! -e "$entered" ] && kill -0 "$control_pid" 2>/dev/null; do
+    wait_count=$((wait_count + 1))
+    [ "$wait_count" -lt 500 ] || break
+    /bin/sleep 0.01
+  done
+  [ -e "$entered" ] || {
+    touch "$release"
+    wait "$control_pid" 2>/dev/null || true
+    fail "relaunch did not reach its blocked exit after publishing the note"
+  }
+
+  FM_HOME="$dir/home" "$ROOT/bin/fm-brief.sh" rl35 proj --mode no-mistakes --replace >/dev/null \
+    || fail "concurrent instructions replacement failed"
+  touch "$release"
+  wait "$control_pid"; rc=$?
+  expect_code 0 "$rc" "relaunch should succeed across a concurrent instructions replacement"$'\n'"$(cat "$dir/control.out")"
+
+  launch_snapshot="$dir/home/state/rl35.launch-brief.md"
+  live_brief="$dir/home/data/rl35/brief.md"
+  assert_grep 'generation-specific progress' "$launch_snapshot" \
+    "replacement agent did not receive the progress-note generation"
+  assert_no_grep 'generation-specific progress' "$live_brief" \
+    "relaunch overwrote the concurrently published live instructions"
+  pass "fm-control relaunch launches its stable progress-note generation"
+}
+
+test_relaunch_rollback_preserves_superseding_instructions() {
+  local dir entered release control_pid wait_count=0 rc live_brief
+  dir=$(new_case note-rollback-generation rl36)
+  add_ship_task "$dir" rl36 claude
+  entered="$dir/exit-entered"
+  release="$dir/exit-release"
+  FM_FAKE_EXIT_ENTERED="$entered" FM_FAKE_EXIT_RELEASE="$release" \
+    FM_FAKE_EXIT_TRANSPORT_FAIL_BEFORE_STOP=1 \
+    run_control "$dir" rl36 relaunch --note "rollback-specific progress" \
+    > "$dir/control.out" 2>&1 &
+  control_pid=$!
+  while [ ! -e "$entered" ] && kill -0 "$control_pid" 2>/dev/null; do
+    wait_count=$((wait_count + 1))
+    [ "$wait_count" -lt 500 ] || break
+    /bin/sleep 0.01
+  done
+  [ -e "$entered" ] || {
+    touch "$release"
+    wait "$control_pid" 2>/dev/null || true
+    fail "failing relaunch did not reach its blocked exit after publishing the note"
+  }
+
+  FM_HOME="$dir/home" "$ROOT/bin/fm-brief.sh" rl36 proj --mode no-mistakes --replace >/dev/null \
+    || fail "superseding instructions replacement failed"
+  touch "$release"
+  if wait "$control_pid"; then rc=0; else rc=$?; fi
+  expect_code 1 "$rc" "transport-refused relaunch should fail"$'\n'"$(cat "$dir/control.out")"
+
+  live_brief="$dir/home/data/rl36/brief.md"
+  assert_grep '<!-- firstmate:generated-brief-scaffold:v1 -->' "$live_brief" \
+    "rollback clobbered the superseding generated instructions"
+  assert_no_grep 'Do the thing.' "$live_brief" \
+    "rollback restored stale instructions over a newer publication"
+  pass "fm-control relaunch rollback preserves superseding instructions"
 }
 
 test_relaunch_requires_a_note_for_a_ship_task() {
@@ -1312,11 +1396,21 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
 }
 
+if [ "${FM_TEST_BRIEF_PUBLICATION_ONLY:-0}" = 1 ]; then
+  test_relaunch_appends_the_progress_note_to_the_instructions
+  test_relaunch_launches_the_progress_note_generation
+  test_relaunch_rollback_preserves_superseding_instructions
+  echo "ALL TESTS PASSED"
+  exit 0
+fi
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
+test_relaunch_launches_the_progress_note_generation
+test_relaunch_rollback_preserves_superseding_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes

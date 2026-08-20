@@ -49,6 +49,7 @@ CREATED_HOME=0
 CREATED_BACKLOG=0
 EXISTING_HOME=0
 PUBLISHED=0
+CHARTER_PUBLISHED=0
 PROVISION_LOCK=
 PROVISION_LOCK_HELD=0
 CREATED_PROJECTS="$TMP/created-projects"
@@ -61,6 +62,21 @@ release_provision_lock() {
 }
 restore_owned_file() { # <relative-path>
   local rel=$1 dest="$FM_HOME/$1" backup="$TMP/before/$1"
+  if [ "$rel" = data/charter.md ]; then
+    local replacement='' rc
+    [ "$CHARTER_PUBLISHED" -eq 1 ] || return 0
+    if [ -f "$backup.present" ]; then
+      replacement=$backup
+    fi
+    if fm_brief_restore_if_matches_locked "$FM_HOME/state" "$ID" \
+        "$TMP/charter" "$replacement" "$dest"; then
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 2 ] || return "$rc"
+    return 0
+  fi
   if [ -f "$backup.present" ]; then
     mkdir -p "$(dirname "$dest")" || return 1
     cp -p -- "$backup" "$dest.tmp.rollback.$$" || return 1
@@ -141,6 +157,8 @@ fi
 FM_STATE_OVERRIDE="$PROVISION_LOCK_STATE"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-brief-lib.sh
+. "$SCRIPT_DIR/fm-brief-lib.sh"
 PROVISION_LOCK="$STATE/.remote-home-provision-$HOME_LOCK_KEY.lock"
 fm_lock_acquire_wait "$PROVISION_LOCK"
 PROVISION_LOCK_HELD=1
@@ -239,9 +257,10 @@ EOF
   printf '%s\n' "$REGISTRY_LINE" >> "$PROJECT_REG"
 done < <(grep '^project=' "$TMP/manifest")
 
-cp "$TMP/charter" "$FM_HOME/data/charter.md.tmp.$$"
-chmod 600 "$FM_HOME/data/charter.md.tmp.$$"
-mv -f -- "$FM_HOME/data/charter.md.tmp.$$" "$FM_HOME/data/charter.md"
+chmod 600 "$TMP/charter"
+fm_brief_copy_locked "$FM_HOME/state" "$ID" "$TMP/charter" "$FM_HOME/data/charter.md" \
+  || die "cannot publish the remote charter"
+CHARTER_PUBLISHED=1
 cp "$PROJECT_REG" "$FM_HOME/data/projects.md.tmp.$$"
 mv -f -- "$FM_HOME/data/projects.md.tmp.$$" "$FM_HOME/data/projects.md"
 {

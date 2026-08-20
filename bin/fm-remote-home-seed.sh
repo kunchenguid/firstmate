@@ -39,6 +39,8 @@ MAX_MANIFEST_BYTES=1048576
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-brief-lib.sh
+. "$SCRIPT_DIR/fm-brief-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-project-origin-lib.sh
@@ -80,6 +82,7 @@ case "$REMOTE_HOME/" in "$REMOTE_ROOT/"*) die "remote home must not be inside th
 case "$REMOTE_ROOT/" in "$REMOTE_HOME/"*) die "remote code root must not be inside the remote home" ;; esac
 
 NO_PROJECTS=0
+PROJECT_COUNT=0
 PROJECT_NAMES=()
 PROJECT_ORIGINS=()
 for arg in "$@"; do
@@ -96,12 +99,13 @@ for arg in "$@"; do
     esac
     PROJECT_NAMES+=("$name")
     PROJECT_ORIGINS+=("$origin")
+    PROJECT_COUNT=$((PROJECT_COUNT + 1))
   fi
 done
 if [ "$NO_PROJECTS" -eq 1 ]; then
-  [ "${#PROJECT_NAMES[@]}" -eq 0 ] || die "--no-projects cannot be combined with project names"
+  [ "$PROJECT_COUNT" -eq 0 ] || die "--no-projects cannot be combined with project names"
 else
-  [ "${#PROJECT_NAMES[@]}" -gt 0 ] || die "at least one project or --no-projects is required"
+  [ "$PROJECT_COUNT" -gt 0 ] || die "at least one project or --no-projects is required"
 fi
 
 mkdir -p "$STATE" || die "cannot create parent state directory"
@@ -134,15 +138,21 @@ if [ ! -f "$BRIEF" ]; then
   fi
   BRIEF_CREATED=1
 fi
-if grep -F '{TASK}' "$BRIEF" >/dev/null 2>&1; then
-  [ "$BRIEF_CREATED" -eq 0 ] || rm -f -- "$BRIEF"
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-home-seed.XXXXXX") || die "cannot create seed staging directory"
+BRIEF_SNAPSHOT="$TMP/brief.snapshot.md"
+fm_brief_copy_locked "$STATE" "$ID" "$BRIEF" "$BRIEF_SNAPSHOT" \
+  || die "cannot snapshot the parent charter"
+if grep -F '{TASK}' "$BRIEF_SNAPSHOT" >/dev/null 2>&1; then
+  if [ "$BRIEF_CREATED" -eq 1 ]; then
+    fm_brief_restore_if_matches_locked "$STATE" "$ID" "$BRIEF_SNAPSHOT" "" "$BRIEF" \
+      2>/dev/null || true
+  fi
   die "secondmate charter still contains {TASK}: $BRIEF"
 fi
-SUMMARY=$(registry_summary_for_brief "$BRIEF")
-SCOPE=$(registry_scope_for_brief "$BRIEF")
+SUMMARY=$(registry_summary_for_brief "$BRIEF_SNAPSHOT")
+SCOPE=$(registry_scope_for_brief "$BRIEF_SNAPSHOT")
 [ -n "$SUMMARY" ] && [ -n "$SCOPE" ] || die "charter summary and routing scope must be nonempty"
 
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-home-seed.XXXXXX") || die "cannot create seed staging directory"
 REG_EXISTED=0
 [ -f "$REG" ] && { cp "$REG" "$TMP/registry.before"; REG_EXISTED=1; }
 
@@ -152,42 +162,44 @@ PARENT_STATUS="$STATE/$ID.status"
 REMOTE_STATUS="$REMOTE_HOME/state/parent-replies.status"
 while IFS= read -r line || [ -n "$line" ]; do
   printf '%s\n' "${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}"
-done < "$BRIEF" > "$TMP/charter.remote"
+done < "$BRIEF_SNAPSHOT" > "$TMP/charter.remote"
 
 PROJECTS_CSV=
 : > "$TMP/project.records"
 PROJECT_INDEX=0
-for project in "${PROJECT_NAMES[@]}"; do
-  ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
-  PROJECT_INDEX=$((PROJECT_INDEX + 1))
-  MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")
-  read -r MODE _ <<EOF
+if [ "$PROJECT_COUNT" -gt 0 ]; then
+  for project in "${PROJECT_NAMES[@]}"; do
+    ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
+    PROJECT_INDEX=$((PROJECT_INDEX + 1))
+    MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")
+    read -r MODE _ <<EOF
 $MODE_LINE
 EOF
-  case "$MODE" in
-    no-mistakes|direct-PR) ;;
-    local-only) die "project $project is local-only and cannot be provisioned remotely" ;;
-    *) die "project $project has unsupported delivery mode: $MODE" ;;
-  esac
-  # An origin named on the command line is authoritative. Reading one from a
-  # clone this home happens to have is only a convenience for the already-cloned
-  # case; it is never a reason to create one.
-  if [ -z "$ORIGIN" ] && [ -d "$PROJECTS/$project/.git" ]; then
-    ORIGIN=$(git -C "$PROJECTS/$project" remote get-url origin 2>/dev/null || true)
-  fi
-  [ -n "$ORIGIN" ] \
-    || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"
-  fm_project_origin_safe "$ORIGIN" \
-    || die "project $project origin is not an accepted clone URL: $ORIGIN"
-  REGISTRY_LINE=$(awk -v p="$project" '$1 == "-" && $2 == p { print; exit }' "$DATA/projects.md" 2>/dev/null || true)
-  [ -n "$REGISTRY_LINE" ] || die "project $project has no registry record"
-  NAME_B64=$(printf '%s' "$project" | encode)
-  ORIGIN_B64=$(printf '%s' "$ORIGIN" | encode)
-  PROJECT_REG_B64=$(printf '%s' "$REGISTRY_LINE" | encode)
-  MODE_B64=$(printf '%s' "$MODE" | encode)
-  printf 'project=%s|%s|%s|%s\n' "$NAME_B64" "$ORIGIN_B64" "$PROJECT_REG_B64" "$MODE_B64" >> "$TMP/project.records"
-  PROJECTS_CSV="${PROJECTS_CSV}${PROJECTS_CSV:+, }$project"
-done
+    case "$MODE" in
+      no-mistakes|direct-PR) ;;
+      local-only) die "project $project is local-only and cannot be provisioned remotely" ;;
+      *) die "project $project has unsupported delivery mode: $MODE" ;;
+    esac
+    # An origin named on the command line is authoritative. Reading one from a
+    # clone this home happens to have is only a convenience for the already-cloned
+    # case; it is never a reason to create one.
+    if [ -z "$ORIGIN" ] && [ -d "$PROJECTS/$project/.git" ]; then
+      ORIGIN=$(git -C "$PROJECTS/$project" remote get-url origin 2>/dev/null || true)
+    fi
+    [ -n "$ORIGIN" ] \
+      || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"
+    fm_project_origin_safe "$ORIGIN" \
+      || die "project $project origin is not an accepted clone URL: $ORIGIN"
+    REGISTRY_LINE=$(awk -v p="$project" '$1 == "-" && $2 == p { print; exit }' "$DATA/projects.md" 2>/dev/null || true)
+    [ -n "$REGISTRY_LINE" ] || die "project $project has no registry record"
+    NAME_B64=$(printf '%s' "$project" | encode)
+    ORIGIN_B64=$(printf '%s' "$ORIGIN" | encode)
+    PROJECT_REG_B64=$(printf '%s' "$REGISTRY_LINE" | encode)
+    MODE_B64=$(printf '%s' "$MODE" | encode)
+    printf 'project=%s|%s|%s|%s\n' "$NAME_B64" "$ORIGIN_B64" "$PROJECT_REG_B64" "$MODE_B64" >> "$TMP/project.records"
+    PROJECTS_CSV="${PROJECTS_CSV}${PROJECTS_CSV:+, }$project"
+  done
+fi
 
 {
   printf 'schema=fm-remote-home-provision.v1\n'
@@ -200,7 +212,7 @@ done
   # back; the parent's real filesystem path is never sent, since it names
   # nothing on the remote filesystem.
   printf 'parent_host_b64=%s\n' "$(printf '%s' "$HOST" | encode)"
-  printf 'project_count=%s\n' "${#PROJECT_NAMES[@]}"
+  printf 'project_count=%s\n' "$PROJECT_COUNT"
   cat "$TMP/project.records"
 } > "$TMP/manifest"
 MANIFEST_BYTES=$(LC_ALL=C wc -c < "$TMP/manifest" | tr -d ' ')
@@ -220,7 +232,10 @@ fi
 
 restore_registry_and_brief() {
   if [ "$REG_EXISTED" -eq 1 ]; then cp "$TMP/registry.before" "$REG"; else rm -f -- "$REG"; fi
-  [ "$BRIEF_CREATED" -eq 0 ] || rm -f -- "$BRIEF"
+  if [ "$BRIEF_CREATED" -eq 1 ]; then
+    fm_brief_restore_if_matches_locked "$STATE" "$ID" "$BRIEF_SNAPSHOT" "" "$BRIEF" \
+      2>/dev/null || true
+  fi
 }
 
 # Preflight and, where it can, repair the remote runtime before anything is

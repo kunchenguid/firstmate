@@ -134,6 +134,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-brief-lib.sh
+. "$SCRIPT_DIR/fm-brief-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -160,6 +162,10 @@ control_cleanup() {
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
     fm_lock_release "$CONTROL_LOCK" || true
+  fi
+  if [ "${RELAUNCH_BRIEF_LOCK_HELD:-0}" = 1 ]; then
+    RELAUNCH_BRIEF_LOCK_HELD=0
+    fm_lock_release "$RELAUNCH_BRIEF_LOCK" || true
   fi
   return "$status"
 }
@@ -494,11 +500,16 @@ do_exit() {
 JOURNAL="$STATE/$ID.control-relaunch"
 META_PRIOR="$JOURNAL.meta-prior"
 BRIEF_PRIOR="$JOURNAL.brief-prior"
+BRIEF_NEXT="$JOURNAL.brief-next"
 NOTE_FILE="$JOURNAL.note"
 RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
 RELAUNCH_TX=
 RELAUNCH_BRIEF=
+RELAUNCH_BRIEF_LOCK=
+RELAUNCH_BRIEF_LOCK_HELD=0
+RELAUNCH_BRIEF_ROLLBACK=
+RELAUNCH_BRIEF_NEXT_READY=0
 PRIOR_HARNESS=$HARNESS
 PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
 CONFIG_HARNESS=
@@ -539,6 +550,33 @@ journal_write() {  # <phase> [extra-line]...
   return 1
 }
 
+relaunch_brief_lock_release() {
+  [ "$RELAUNCH_BRIEF_LOCK_HELD" = 1 ] || return 0
+  RELAUNCH_BRIEF_LOCK_HELD=0
+  fm_lock_release "$RELAUNCH_BRIEF_LOCK"
+}
+
+restore_relaunch_brief() {
+  local rc
+  RELAUNCH_BRIEF_ROLLBACK=unchanged
+  [ "$RELAUNCH_BRIEF_NEXT_READY" = 1 ] \
+    && [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ] && [ -f "$BRIEF_NEXT" ] \
+    || return 0
+  if fm_brief_restore_if_matches_locked "$STATE" "$ID" "$BRIEF_NEXT" \
+      "$BRIEF_PRIOR" "$RELAUNCH_BRIEF"; then
+    RELAUNCH_BRIEF_ROLLBACK=instructions-restored
+    return 0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 2 ]; then
+    RELAUNCH_BRIEF_ROLLBACK=superseding-instructions-preserved
+    return 0
+  fi
+  RELAUNCH_BRIEF_ROLLBACK=instructions-restore-failed
+  return "$rc"
+}
+
 relaunch_rollback() {
   local state
   [ "$RELAUNCH_ACTIVE" = 1 ] || return 0
@@ -548,21 +586,25 @@ relaunch_rollback() {
     checkpoint|noted)
       # The old agent was never touched. Restore the instructions byte-exact so
       # a refused relaunch leaves nothing behind.
-      if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
-        cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
+      restore_relaunch_brief || true
+      journal_write "failed:$RELAUNCH_PHASE" "rollback=$RELAUNCH_BRIEF_ROLLBACK" || true
+      if [ "$RELAUNCH_BRIEF_ROLLBACK" = superseding-instructions-preserved ]; then
+        echo "error: relaunch of $ID was refused before its agent was touched; a newer instructions publication was preserved" >&2
+      else
+        echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
       fi
-      journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored" || true
-      echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
       ;;
     stopping)
       state=$(agent_state 2>/dev/null || printf unknown)
       case "$state" in
         alive)
-          if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
-            cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
+          restore_relaunch_brief || true
+          journal_write "failed:$RELAUNCH_PHASE" "rollback=$RELAUNCH_BRIEF_ROLLBACK-agent-alive" || true
+          if [ "$RELAUNCH_BRIEF_ROLLBACK" = superseding-instructions-preserved ]; then
+            echo "error: relaunch of $ID failed while stopping the old agent, which is still running; a newer instructions publication was preserved" >&2
+          else
+            echo "error: relaunch of $ID failed while stopping the old agent, which is still running; its original instructions were restored" >&2
           fi
-          journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored-agent-alive" || true
-          echo "error: relaunch of $ID failed while stopping the old agent, which is still running; its original instructions were restored" >&2
           ;;
         dead)
           journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-agent-dead" || true
@@ -749,8 +791,19 @@ record_note() {
   printf '%s\n' "$NOTE" > "$NOTE_FILE"
   case "$KIND" in
     ship|scout)
-      cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" \
-        || die "could not preserve task $ID's instructions before recording the progress note"
+      RELAUNCH_BRIEF_LOCK=$(fm_brief_publication_lock_path "$STATE" "$ID") \
+        || die "could not resolve task $ID's instructions publication lock"
+      fm_lock_acquire_wait "$RELAUNCH_BRIEF_LOCK" \
+        || die "could not lock task $ID's instructions before recording the progress note"
+      RELAUNCH_BRIEF_LOCK_HELD=1
+      if ! fm_brief_snapshot "$RELAUNCH_BRIEF" "$BRIEF_PRIOR"; then
+        relaunch_brief_lock_release || true
+        die "could not preserve task $ID's instructions before recording the progress note"
+      fi
+      if ! fm_brief_snapshot "$BRIEF_PRIOR" "$BRIEF_NEXT"; then
+        relaunch_brief_lock_release || true
+        die "could not stage task $ID's progress-note instructions"
+      fi
       {
         echo
         echo "## Progress note ($stamp)"
@@ -759,14 +812,23 @@ record_note() {
         echo "uncommitted change are exactly as the previous worker left them."
         echo
         printf '%s\n' "$NOTE"
-      } >> "$RELAUNCH_BRIEF" \
-        || die "could not append the progress note to task $ID's instructions"
+      } >> "$BRIEF_NEXT" || {
+        relaunch_brief_lock_release || true
+        die "could not append the progress note to task $ID's staged instructions"
+      }
+      if ! fm_brief_copy_atomic "$BRIEF_NEXT" "$RELAUNCH_BRIEF"; then
+        relaunch_brief_lock_release || true
+        die "could not publish the progress note to task $ID's instructions"
+      fi
+      RELAUNCH_BRIEF_NEXT_READY=1
+      relaunch_brief_lock_release \
+        || die "could not unlock task $ID's instructions after recording the progress note"
       ;;
   esac
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line spawn_status
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -814,8 +876,24 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
-      "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
+  spawn_status=0
+  if [ "$RELAUNCH_BRIEF_NEXT_READY" = 1 ]; then
+    if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+        FM_CONTROL_RELAUNCH_BRIEF_SNAPSHOT="$BRIEF_NEXT" \
+        "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
+      :
+    else
+      spawn_status=$?
+    fi
+  else
+    if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+        "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
+      :
+    else
+      spawn_status=$?
+    fi
+  fi
+  if [ "$spawn_status" -eq 0 ]; then
     RELAUNCH_META_PUBLISHED=1
   else
     [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \

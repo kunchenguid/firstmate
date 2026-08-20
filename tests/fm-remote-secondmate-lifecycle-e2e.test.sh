@@ -357,7 +357,8 @@ FM_SECONDMATE_CHARTER='Failing seed charter.' FM_SECONDMATE_SCOPE='failed seed' 
 seed_fail_pid=$!
 seed_wait=0
 while [ ! -f "$TMP_ROOT/seed.entered" ]; do
-  kill -0 "$seed_fail_pid" 2>/dev/null || fail "failing seed exited before remote provisioning"
+  kill -0 "$seed_fail_pid" 2>/dev/null \
+    || fail "failing seed exited before remote provisioning"$'\n'"$(cat "$TMP_ROOT/seed-fail.out")"
   seed_wait=$((seed_wait + 1))
   [ "$seed_wait" -le 250 ] || fail "failing seed never reached remote provisioning"
   sleep 0.02
@@ -377,6 +378,80 @@ assert_no_grep '- seed-fail ' "$TMP_ROOT/seed-parent/data/secondmates.md" "faile
 assert_grep '- seed-keep ' "$TMP_ROOT/seed-parent/data/secondmates.md" "failed seed rollback removed a competing successful route"
 assert_present "$TMP_ROOT/seed-keep-home/.fm-secondmate-home" "serialized seed lost its published remote home"
 pass "remote seed rollback preserves serialized competing routes"
+
+seed_generation_cpbin="$TMP_ROOT/seed-generation-cpbin"
+seed_generation_ready="$TMP_ROOT/seed-generation-ready"
+seed_generation_release="$TMP_ROOT/seed-generation-release"
+seed_generation_home="$TMP_ROOT/seed-generation-home"
+seed_generation_real_cp=$(command -v cp)
+mkdir -p "$seed_generation_cpbin"
+FM_HOME="$TMP_ROOT/seed-parent" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  FM_SECONDMATE_CHARTER='remote generation B charter' \
+  FM_SECONDMATE_SCOPE='remote generation B scope' \
+  "$ROOT/bin/fm-brief.sh" seed-generation --secondmate --no-projects >/dev/null \
+  || fail "remote generation B charter scaffold failed"
+cat > "$seed_generation_cpbin/cp" <<'SH'
+#!/usr/bin/env bash
+set -eu
+src=${@: -2:1}
+dest=${@: -1}
+if [ "$src" = "$FM_TEST_SEED_REGISTRY" ]; then
+  case "$dest" in
+    */registry.before)
+      "$FM_REAL_CP" "$@"
+      : > "$FM_TEST_SEED_READY"
+      attempt=0
+      while [ ! -e "$FM_TEST_SEED_RELEASE" ] && [ "$attempt" -lt 500 ]; do
+        /bin/sleep 0.01
+        attempt=$((attempt + 1))
+      done
+      exit 0
+      ;;
+  esac
+fi
+exec "$FM_REAL_CP" "$@"
+SH
+chmod +x "$seed_generation_cpbin/cp"
+PATH="$seed_generation_cpbin:$PATH" FM_REAL_CP="$seed_generation_real_cp" \
+  FM_TEST_SEED_REGISTRY="$TMP_ROOT/seed-parent/data/secondmates.md" \
+  FM_TEST_SEED_READY="$seed_generation_ready" \
+  FM_TEST_SEED_RELEASE="$seed_generation_release" \
+  seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-generation remote-mac \
+  "$REMOTE_ROOT" "$seed_generation_home" --no-projects \
+  > "$TMP_ROOT/seed-generation.out" 2>&1 &
+seed_generation_pid=$!
+seed_generation_wait=0
+while [ ! -e "$seed_generation_ready" ] && kill -0 "$seed_generation_pid" 2>/dev/null; do
+  seed_generation_wait=$((seed_generation_wait + 1))
+  [ "$seed_generation_wait" -lt 500 ] || break
+  /bin/sleep 0.01
+done
+[ -e "$seed_generation_ready" ] || {
+  touch "$seed_generation_release"
+  wait "$seed_generation_pid" 2>/dev/null || true
+  fail "remote seed never reached its post-snapshot registry backup"
+}
+FM_HOME="$TMP_ROOT/seed-parent" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  FM_SECONDMATE_CHARTER='remote generation C charter' \
+  FM_SECONDMATE_SCOPE='remote generation C scope' \
+  "$ROOT/bin/fm-brief.sh" seed-generation --secondmate --no-projects --replace >/dev/null \
+  || fail "concurrent remote generation C replacement failed"
+touch "$seed_generation_release"
+wait "$seed_generation_pid" \
+  || fail "remote generation seed failed"$'\n'"$(cat "$TMP_ROOT/seed-generation.out")"
+assert_grep 'remote generation B charter' "$seed_generation_home/data/charter.md" \
+  "remote seed transported a different charter generation than it validated"
+assert_no_grep 'remote generation C charter' "$seed_generation_home/data/charter.md" \
+  "remote seed reread the mutable parent charter while building its manifest"
+assert_grep '- seed-generation - remote generation B charter' \
+  "$TMP_ROOT/seed-parent/data/secondmates.md" \
+  "remote route registry disagrees with the transported charter generation"
+pass "remote seed consumes one parent charter generation"
+
+if [ "${FM_TEST_BRIEF_PUBLICATION_ONLY:-0}" = 1 ]; then
+  echo "ALL TESTS PASSED"
+  exit 0
+fi
 
 : > "$DOCTOR_LOG"
 if FM_SECONDMATE_CHARTER='Unknown readiness charter.' FM_SECONDMATE_SCOPE='unknown readiness' \
