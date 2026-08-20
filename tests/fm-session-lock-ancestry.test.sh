@@ -40,6 +40,26 @@ NAMED_CODEX="$FAKEBIN/codex"
 ln -s /bin/bash "$FAKEBIN/node"
 NAMED_NODE="$FAKEBIN/node"
 
+# The two ways a REAL Claude Code session's reported command name differs from
+# the bare harness name. Both are the reporter's doing rather than the program's,
+# and both were unidentifiable until the library normalized them, so both are
+# built as real executables here: the name under test is then produced by the
+# kernel and by ps, not by a fixture that was told what to print.
+#
+# Claude Code's installed executable is a single-file Bun build literally named
+# claude.exe, and its background pty worker renames its own task to
+# `claude bg-pty-host`, which the 15-character task-name limit cuts mid-word.
+ln -s /bin/bash "$FAKEBIN/claude.exe"
+SUFFIXED_CLAUDE="$FAKEBIN/claude.exe"
+ln -s /bin/bash "$FAKEBIN/claude bg-pty-host"
+WORKER_CLAUDE="$FAKEBIN/claude bg-pty-host"
+
+# Near misses that differ from a harness name only in ways that normalization
+# must NOT undo, so a widened rule fails here rather than in a real fleet.
+ln -s /bin/bash "$FAKEBIN/claudette"
+ln -s /bin/bash "$FAKEBIN/claude-code"
+ln -s /bin/bash "$FAKEBIN/python3"
+
 # --- unit layer: identity behind a deterministic process table ---------------
 
 # Run one library expression with <fakebin> shadowing ps. kill is stubbed so
@@ -350,6 +370,18 @@ case "$pid:$field:${FM_TEST_EXEC_SHAPE:-nativepath}" in
   780:args=:binentry) printf '%s\n' '/usr/local/bin/claude' ;;
   780:comm=:codexname) printf '%s\n' codex ;;
   780:args=:codexname) printf '%s\n' 'codex' ;;
+  780:comm=:suffixed) printf '%s\n' claude.exe ;;
+  780:args=:suffixed) printf '%s\n' '/home/u/.nvm/versions/node/v24.16.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --resume' ;;
+  780:comm=:worker) printf '%s\n' 'claude bg-pty-h' ;;
+  780:args=:worker) printf '%s\n' '/home/u/.nvm/versions/node/v24.16.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe bg-pty-host' ;;
+  780:comm=:npmpath) printf '%s\n' node ;;
+  780:args=:npmpath) printf '%s\n' 'node /home/u/.nvm/versions/node/v24.16.0/lib/node_modules/@anthropic-ai/claude-code/bin/cli.js' ;;
+  780:comm=:nearmiss) printf '%s\n' claude-code ;;
+  780:args=:nearmiss) printf '%s\n' '/opt/vendor/claude-code --serve' ;;
+  780:comm=:lookalike) printf '%s\n' claudette ;;
+  780:args=:lookalike) printf '%s\n' '/opt/claudette/bin/claudette' ;;
+  780:comm=:pylike) printf '%s\n' python3 ;;
+  780:args=:pylike) printf '%s\n' 'python3 /srv/app.py --config /etc/claude/x.toml' ;;
   780:comm=:mainthread) printf '%s\n' MainThread ;;
   780:args=:mainthread) printf '%s\n' 'node /home/u/.nvm/versions/node/v24.16.0/bin/codex' ;;
   780:comm=:*) printf '%s\n' node ;;
@@ -375,6 +407,29 @@ SH
   kind=$(FM_TEST_EXEC_SHAPE=codexname lib_eval "$fakebin" 'fm_harness_pid_kind 780' | tr -d '[:space:]')
   [ "$kind" = codex ] || fail "a codex-named executable typed as '$kind' rather than codex"
 
+  # The command name a real install reports, with the path deliberately unable to
+  # carry the verdict: the npm layout's own directory is `claude-code`, which is
+  # no harness component, so `suffixed` and `worker` can only be typed by the
+  # command name itself. `npmpath` is the same argv with the harness named
+  # nowhere else, and it must stay untyped - that is both the divergence proof
+  # for the two cases above and the node-hosted limit the library states.
+  for shape in suffixed worker; do
+    kind=$(FM_TEST_EXEC_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_kind 780' | tr -d '[:space:]')
+    [ "$kind" = claude ] || fail "$shape: the command name a real Claude Code install reports typed as '${kind:-nothing}' rather than claude, so its own session start refuses its home and degrades to read-only while it is the only session alive"
+  done
+  if kind=$(FM_TEST_EXEC_SHAPE=npmpath lib_eval "$fakebin" 'fm_harness_pid_kind 780'); then
+    fail "the npm install path alone typed as '$kind', so the two cases above prove nothing about the command name"
+  fi
+
+  # Normalization strips two reporting artifacts before the SAME exact-equality
+  # test; it must never become a prefix rule. Each name below shares a prefix
+  # with a verified harness and is not one.
+  for shape in nearmiss lookalike pylike; do
+    if kind=$(FM_TEST_EXEC_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_kind 780'); then
+      fail "$shape: a name that merely starts like a harness typed as '$kind', so an unrelated process could be accepted as a session's own harness"
+    fi
+  done
+
   # A harness named nowhere but in an argument list stays identified, and still
   # gets no accept path. That is the fail-closed direction and it is deliberate:
   # the alternative accepts a different harness that merely inherited the marker.
@@ -393,6 +448,84 @@ SH
     fi
   done
   pass "session-lock: cohort acceptance is typed from executable identity and never from an argument list"
+}
+
+# Start a real background process under executable <1> and print its pid once the
+# real ps can see it. The trailing no-op is what stops bash from exec'ing the
+# sleep into its own pid, which would replace the command name this is all about.
+start_named_process() {  # <path>
+  local bin=$1 pid comm i=0
+  "$bin" -c 'while :; do sleep 0.2; done; :' >/dev/null 2>&1 &
+  pid=$!
+  COHORT_PIDS+=("$pid")
+  while [ "$i" -lt 200 ]; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '\n')
+    [ -n "$comm" ] && { printf '%s\n' "$pid"; return 0; }
+    sleep 0.05
+    i=$((i + 1))
+  done
+  fail "the fixture process for $bin never became visible to ps"
+}
+
+# The reporter produces the name here, not a fixture. Every case above hands the
+# library a command name a fake ps was told to print, and that is precisely the
+# blind spot that let a real install shape go unidentified: a stub can only report
+# a name someone already thought of, so every fixture in this suite named its
+# executable exactly `claude` and none of them could see a suffixed or truncated
+# name at all. These processes are real, their names come from real executables,
+# and the name under test is read back through the same ps the library calls.
+#
+# Each case drives the two signals apart on purpose: the verdict is asked of the
+# observed command name with NO argument list at all, so the command name is the
+# only thing that can carry it, and the divergence between that name and the bare
+# harness name is asserted first so the case cannot pass vacuously if a platform
+# stops producing the artifact.
+test_real_reported_command_names_are_typed_for_acceptance() {
+  local pid comm base kind name
+  for name in "$SUFFIXED_CLAUDE" "$WORKER_CLAUDE"; do
+    pid=$(start_named_process "$name")
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '\n')
+    base=${comm##*/}
+    [ -n "$base" ] || fail "ps reported no command name at all for the fixture process from $name"
+    [ "$base" != claude ] || fail \
+      "$name was reported as the bare name 'claude', so this platform no longer reproduces the reporting artifact and the case would pass without testing it"
+    kind=$(lib_probe "fm_harness_exec_kind '$base' ''" | tr -d '[:space:]') || kind=
+    [ "$kind" = claude ] || fail \
+      "a real process reporting command name '$comm' typed as '${kind:-nothing}' rather than claude. This is the shape Claude Code actually runs as, so its own session start would refuse its home and degrade to read-only while it is the only session alive."
+    kind=$(lib_probe "fm_harness_pid_kind $pid" | tr -d '[:space:]') || kind=
+    [ "$kind" = claude ] || fail \
+      "the live-pid reading disagreed with the command-name reading for '$comm': it typed as '${kind:-nothing}'"
+    kill "$pid" 2>/dev/null || true
+  done
+
+  # The truncation is a property of the reporter, so pin that it really happened
+  # rather than trusting the length arithmetic: a name the reporter shortened must
+  # still be more than the bare harness name.
+  pid=$(start_named_process "$WORKER_CLAUDE")
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '\n')
+  case "${comm##*/}" in
+    'claude '*) : ;;
+    *) fail "the worker fixture reported '$comm', which is not the multi-word command name this case exists to cover" ;;
+  esac
+  kill "$pid" 2>/dev/null || true
+
+  # Real processes whose names differ from a harness only in ways normalization
+  # must not undo. A widened rule fails here rather than in a real fleet.
+  for name in claudette claude-code node python3; do
+    pid=$(start_named_process "$FAKEBIN/$name")
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '\n')
+    base=${comm##*/}
+    [ "$base" = "$name" ] || fail \
+      "the negative control for $name reported command name '$comm', so it is no longer the name this case means to refuse"
+    if kind=$(lib_probe "fm_harness_exec_kind '$base' ''"); then
+      fail "a real process named '$name' typed as '$kind', so an unrelated process could be accepted as a session's own harness and take over its home"
+    fi
+    if kind=$(lib_probe "fm_harness_pid_kind $pid"); then
+      fail "a real process named '$name' typed as '$kind' through its live pid, so an unrelated process could be accepted as a session's own harness"
+    fi
+    kill "$pid" 2>/dev/null || true
+  done
+  pass "session-lock: the command names a real install reports are typed for acceptance, and near misses still are not"
 }
 
 test_harness_beyond_a_gap_never_owns_the_lock() {
@@ -1442,6 +1575,7 @@ test_ordinary_paths_are_never_harness_processes
 test_node_main_thread_identity_comes_only_from_the_script_path
 test_bare_interpreter_identity_stops_at_the_first_flag
 test_acceptance_typing_comes_only_from_executable_identity
+test_real_reported_command_names_are_typed_for_acceptance
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home

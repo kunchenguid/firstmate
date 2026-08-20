@@ -73,12 +73,16 @@ fm_harness_path_name() {  # <path>
 # Print the exact harness name when path $1's BASENAME is exactly a verified
 # harness name, or return 1.
 #
-# The strictest of this file's path rules, and used by the `MainThread` branch
-# below and nowhere else. That branch has exactly one token of evidence, so it
+# The strictest of this file's rules, and the single owner of the exact-equality
+# test. Two callers reach it, and they hand it different things. The `MainThread`
+# branch below passes a SCRIPT PATH from argv, its only token of evidence, so it
 # takes the strictest reading of it; the sibling interpreter branch reads the same
 # token positions under the same stop-at-the-first-flag rule but by whole path
 # component, because the only shape it identifies at all is a node-hosted bin
-# entry that is NOT named after the harness.
+# entry that is NOT named after the harness. fm_harness_comm_name below passes a
+# REPORTED COMMAND NAME, and normalizes the reporter's own artifacts out of it
+# first; that normalization is stated there and deliberately does not reach the
+# script-path caller, which sees neither of those artifacts.
 #
 # Exact equality is deliberate, and under `MainThread` it is the ONLY evidence
 # there is: the command path is literally `MainThread` and argv[0] is the
@@ -99,6 +103,38 @@ fm_harness_basename_name() {  # <path>
     fi
   done
   return 1
+}
+
+# Print the exact harness name that COMMAND NAME $1 reports, or return 1.
+#
+# The same exact-equality test as fm_harness_basename_name, applied to a command
+# name after two reporting artifacts are undone. Both are properties of how the
+# name reaches us rather than of the program, so leaving them in place refuses a
+# harness its own home while it is the only session alive:
+#
+#   1. A command name is not always one word, and it is truncated to 15
+#      characters. Linux reports the kernel task name, which node and Bun
+#      harnesses rename to label a worker role, so Claude Code's background pty
+#      worker `claude bg-pty-host` arrives as `claude bg-pty-h` - one executable
+#      word, one role label, and a cut that lands mid-word. The executable is the
+#      FIRST word, so only that word is compared and the cut cannot reach it: no
+#      verified harness name is longer than 15 characters.
+#   2. Claude Code's installed executable is literally named `claude.exe` on
+#      every platform, because it is a single-file Bun build, so a process that
+#      execs it reports that name verbatim. `.exe` is the only executable suffix
+#      any verified harness carries.
+#
+# Neither step loosens the comparison itself, which is still exact equality
+# against FM_HARNESS_NAMES, and that is what keeps this from becoming a prefix
+# rule: `claude-code` has neither a space nor a suffix, so it is still not a
+# harness, and neither are `claudette` or `claude_code`. Path components are
+# untouched here, so `pi` keeps the basename anchoring that stops an interior
+# `/home/pi` component from naming a harness.
+fm_harness_comm_name() {  # <comm>
+  local base=${1##*/}
+  base=${base%% *}
+  base=${base%.exe}
+  fm_harness_basename_name "$base"
 }
 
 # Print the exact harness name carried by an ARGV token $1, or return 1.
@@ -306,14 +342,8 @@ fm_harness_process_matches() {  # <comm> <args>
 # name has to be the thing the acceptance turns on, and it has to come from what
 # the process IS rather than from a path it was handed on its command line.
 fm_harness_exec_kind() {  # <comm> <args>
-  local comm=$1 args=$2 base name
-  base=${comm##*/}
-  for name in "${FM_HARNESS_NAMES[@]}"; do
-    if [ "$base" = "$name" ]; then
-      printf '%s' "$name"
-      return 0
-    fi
-  done
+  local comm=$1 args=$2
+  fm_harness_comm_name "$comm" && return 0
   fm_harness_path_name "$comm" && return 0
   fm_harness_path_name "${args%% *}"
 }
@@ -532,16 +562,22 @@ fm_session_tty_of_pid() {  # <pid>
 # merely inherited the marker, but it is a real limit and not a closed one.
 #
 # One recognition limit sits underneath all of that and is stated rather than
-# fixed here: an npm layout whose package directory is `claude-code` rather than
-# `claude` is identified by no rule in this file at all, so such a session cannot
-# resolve a harness ancestry, fm_session_lock_owned_by_self returns false, and the
-# session start degrades to read-only against its own home - the exact
-# false-refusal lockout this mechanism exists to remove. Fixing it here would mean
-# inventing the command name, argv[0] and bin shape of an install nobody has
-# observed, which is the same guess this file refuses for a marker row. The
-# opt-in guard in docs/verification/runtime-backends.md reports the command name
-# and argv it actually observes for every installed harness, so a real npm install
-# produces the evidence a later fix needs.
+# fixed here, and it is narrower than it first looks. The npm layout whose
+# package directory is `claude-code` was observed rather than imagined: the
+# install in use reports its own executable, `claude.exe` under
+# .../node_modules/@anthropic-ai/claude-code/bin/, and fm_harness_comm_name types
+# that by name, so for that shape the package directory never has to be read at
+# all. What stays unidentified is the node-hosted variant of the same layout,
+# where the command name is the interpreter or `MainThread` and `claude-code` is
+# the only place the harness is named: no rule here matches a path component that
+# is not exactly a harness name, so such a session resolves no harness ancestry,
+# fm_session_lock_owned_by_self returns false, and its session start degrades to
+# read-only against its own home - the exact false-refusal lockout this mechanism
+# exists to remove. Closing it means observing the command name and argv a real
+# node-hosted install reports rather than inventing them, which is the same
+# verification this file demands for a marker row. The opt-in guard in
+# docs/verification/runtime-backends.md records exactly that for every installed
+# harness, so a real one produces the evidence a later fix needs.
 #
 # Why leaving it that way is safe rather than merely incomplete: a row is
 # consulted only when the asking session and the holder are both the harness that

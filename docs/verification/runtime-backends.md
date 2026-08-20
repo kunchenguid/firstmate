@@ -178,8 +178,9 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that 
 `bin/fm-session-lock-lib.sh` decides which harness process holds a home's session lock and whether the current process is that same session.
 Its verdict comes from vendor-emitted process names, argv, kernel process state, and the environment a harness hands to the processes it starts, so the per-harness result below is refreshed by a real-harness run rather than transcribed from a previous release.
 
-The installed adapters were exercised on 2026-08-18 with tmux 3.6 on Linux 6.18.33.2-microsoft-standard-WSL2 x86_64.
+The installed adapters were exercised on 2026-08-20 with tmux 3.6 on Linux 6.18.33.2-microsoft-standard-WSL2 x86_64.
 Each harness ran as a child of a pane shell, which is the shape a captain's own session has and the shape the suspended-holder incident was observed in.
+Each was also launched a second time as its own INSTALLED executable, because the PATH entry is a symlink named exactly after the harness and a launch through it can only ever observe the name already expected.
 
 ```sh
 FM_SESSION_LOCK_IDENTITY_LIVE=1 bin/fm-test-run.sh tests/fm-session-lock-identity-live-e2e.test.sh
@@ -188,18 +189,46 @@ FM_SESSION_LOCK_IDENTITY_LIVE=1 bin/fm-test-run.sh tests/fm-session-lock-identit
 Observed output:
 
 ```text
-# claude 2.1.234 (Claude Code): comm='claude', no descendant of a bare launch carried a launch marker
-ok - session-lock identity: claude 2.1.234 (Claude Code) is identified, refuses an unrelated session, and releases while suspended
-# codex codex-cli 0.139.0: comm='MainThread', no descendant of a bare launch carried a launch marker
+# claude 2.1.237 (Claude Code): installed executable claude.exe reports comm='claude.exe' acceptance-kind='claude'
+# claude 2.1.237 (Claude Code): comm='claude' argv='/home/u/.nvm/versions/node/v24.16.0/bin/claude' acceptance-kind='claude'
+# claude 2.1.237 (Claude Code): no descendant of a bare launch carried a launch marker verified for claude
+ok - session-lock identity: claude 2.1.237 (Claude Code) is identified, refuses an unrelated session, and releases while suspended
+# codex codex-cli 0.139.0: executable identity names no harness, so the launch-marker accept path stays closed for it and its session-lock verdict is decided by process ancestry alone
+# codex codex-cli 0.139.0: the installed executable codex.js is an interpreter script, so its own name never reaches a reported command name and only the launcher name is typed
+# codex codex-cli 0.139.0: comm='MainThread' argv='node /home/u/.nvm/versions/node/v24.16.0/bin/codex' acceptance-kind='none'
+# codex codex-cli 0.139.0: no descendant of a bare launch carried a launch marker verified for codex
 ok - session-lock identity: codex codex-cli 0.139.0 is identified, refuses an unrelated session, and releases while suspended
+# skip: opencode is not installed on this machine, so its session-lock identity is unverified here
+# skip: pi is not installed on this machine, so its session-lock identity is unverified here
+# skip: pi-signed is not installed on this machine, so its session-lock identity is unverified here
+# skip: grok is not installed on this machine, so its session-lock identity is unverified here
+# skip: kimi is not installed on this machine, so its session-lock identity is unverified here
+# skip: cursor is not installed on this machine, so its session-lock identity is unverified here
+# reporter control 'claude.exe': comm='claude.exe' acceptance-kind='claude' (expected claude)
+# reporter control 'claude bg-pty-host': comm='claude bg-pty-h' acceptance-kind='claude' (expected claude)
+# reporter control 'claudette': comm='claudette' acceptance-kind='none' (expected none)
+# reporter control 'claude-code': comm='claude-code' acceptance-kind='none' (expected none)
+# reporter control 'node': comm='node' acceptance-kind='none' (expected none)
+# reporter control 'python3': comm='python3' acceptance-kind='none' (expected none)
+ok - session-lock identity: this machine's reported command names are typed after the reporter's own artifacts, and near misses still are not
+# unchecked: the cross-harness kind distinctness that scopes launch markers needs two harnesses that name themselves by executable identity, and only 1 did here (kinds observed: claude:claude)
 # unverified on this machine (not installed): opencode pi pi-signed grok kimi cursor
 # checked 2 installed harness(es)
 ```
 
-| Harness | Version | `ps -o comm=` | Identified | Refuses an unrelated session | Releases while suspended |
-| --- | --- | --- | --- | --- | --- |
-| claude | 2.1.234 (Claude Code) | `claude` | yes | yes | yes |
-| codex | codex-cli 0.139.0 | `MainThread` | yes | yes | yes |
+| Harness | Version | `ps -o comm=` | Installed executable | Acceptance kind | Identified | Refuses an unrelated session | Releases while suspended |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| claude | 2.1.237 (Claude Code) | `claude` | `claude.exe`, reports `claude.exe` | `claude` from either | yes | yes | yes |
+| codex | codex-cli 0.139.0 | `MainThread` | `codex.js`, an interpreter script | none | yes | yes | yes |
+
+Claude Code is the harness whose reported command name is not the bare harness name, in two ways that are the reporter's doing rather than the program's, and both were unidentified until the name was normalized before the exact-equality test.
+Its installed executable is a single-file native build named `claude.exe`, so a process that execs it directly reports that name verbatim; and it renames its own background pty worker task to `claude bg-pty-host`, which the 15-character kernel task-name limit cuts to `claude bg-pty-h`.
+Normalization takes the first space-delimited word and strips the platform executable suffix, then compares exactly as before, so `claude.exe` and `claude bg-pty-h` both name `claude` while `claudette`, `claude-code`, `node`, and `python3` still name nothing.
+Those six reporter controls are run against real processes carrying those exact names, because whether an artifact appears at all depends on the platform: procps reports the kernel task name and truncates it, while BSD `ps` reports argv[0] and does not.
+The acceptance cases assert the divergence before the verdict, so a machine that stopped producing an artifact fails rather than passing without testing anything.
+
+`codex.js` is reported rather than failed because an interpreter script's own name never reaches a reported command name: the kernel runs the interpreter named in its `#!` line, so the process is called after the launcher or the interpreter instead.
+Only a native executable's own name can reach `ps`, which is why the check is a hard failure for one and an observation for the other.
 
 Codex is the harness whose reported name depends on its install method.
 The macOS table above records `codex` for a native 0.146.0 install, while an npm install under nvm runs it as a node script and node renames its own main thread, so `ps -o comm=` reports `MainThread` and no interpreter name at all.
@@ -214,13 +243,15 @@ It previously matched a verified harness name anywhere in the whole argument str
 None of the three is identified now.
 The real install this rule does protect is the npm codex layout, `node /usr/lib/node_modules/@openai/codex/bin/codex.js`, whose package directory is exactly `codex`, which is why the rule reads path components rather than a basename.
 It does not protect Claude Code's or OpenCode's npm layouts, and that is a limit rather than a claim: `node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js` is not identified, because the components are `@anthropic-ai` and `claude-code` and neither is exactly `claude`, and `node /usr/lib/node_modules/opencode-ai/bin/opencode.mjs` is not identified either.
+The Claude Code half of that has since been narrowed by observation: the npm install actually in use does not run as a node script at all, because it ships its own single-file native executable and is identified by that executable's name, so its `claude-code` package directory never has to be read.
+What the limit still covers is a node-hosted launch out of that layout, where the interpreter is the command name and the package directory is the only place the harness is named.
 An install recognised by no rule in this file cannot resolve a harness ancestry, so `fm_session_lock_owned_by_self` returns false and that session start degrades to read-only against its own home, which is the false-refusal lockout this work exists to remove.
-Teaching this file that layout would mean inventing the command name, argv[0] and bin shape of an install nobody here has observed, which is the same guess the file refuses for a launch-marker row, so the guard above is what closes it: it records the command name and argv it actually observes for every installed harness, and a real npm install run through it produces the evidence a later fix needs.
+Closing it means observing the command name and argv a real node-hosted install reports rather than inventing them, which is the same guess the file refuses for a launch-marker row, so the guard above is what closes it: it records the command name and argv it actually observes for every installed harness, and a real one run through it produces the evidence a later fix needs.
 Stopping at the first flag gives up the inferred `node --experimental-foo /path/to/claude/cli.js` shape, exactly as the `MainThread` branch gives up its own flag-prefixed shape and for the same reason.
 Two further limits of this rule are stated rather than implied closed: it reads every token before that flag rather than the script token alone, so `node /srv/app/server.js /opt/claude/agent.json` is Claude here and is nothing under the `MainThread` branch on identical argv; and `pi` and `pi-signed` are read as a token's own basename rather than as an interior component, because `/home/pi` is the Raspberry Pi OS default home and `node /home/pi/app.js` would otherwise be a verified Pi harness.
 
 Everything above decides IDENTIFICATION, which is what the ancestry walk and the liveness predicate need in order to interpret a recorded pid at all.
-It does not decide the launch-marker acceptance below, which is typed from executable identity alone: the reported command name's own basename, or a whole path component of that command name or of argv[0], and never an argument list.
+It does not decide the launch-marker acceptance below, which is typed from executable identity alone: the reported command name's own basename once the reporter's own artifacts are normalized out of it, or a whole path component of that command name or of argv[0], and never an argument list.
 A launch marker proves a launch relationship rather than identity, so a codex session the captain started from inside a Claude session carries a truthful `CLAUDE_PID` naming that Claude holder, and the evidence for that pair is otherwise identical to the rehosted Claude session the marker path exists to accept.
 The consequence is that a harness named nowhere but in its argument list - a node-hosted launch, or the npm `MainThread` shape recorded above - is identified here and still gets no accept path, which `FM_SESSION_LAUNCH_MARKERS` in `bin/fm-session-lock-lib.sh` owns alongside the reason that fail-closed direction is the right one.
 
@@ -250,8 +281,7 @@ That is the behavior they had before this record existed rather than a regressio
 Adding a row is a verification task: observe the variable in a real child of a real session of that harness, then refresh this table with that harness in the row.
 The guard above reports the marker it actually observed per harness, scoped the same way, and reports `no descendant of a bare launch carried a launch marker verified for <harness>` when a prompt-free launch started no child to read or the harness has no row.
 It also records the harness kind each installed release reports and refuses a pass where two installed harnesses report the same kind, because that scoping is only as good as telling the two apart.
-The recorded run above predates that check and the wording changes that came with it, so the acceptance kind each release reports is unobserved here, the guard's per-harness command-name and argv observation line is absent from it, its note lines predate the `verified for <harness>` wording they now carry, and it records no cross-harness kind distinctness line at all.
-Re-running the guard is what observes all three, so a difference confined to those lines is an unrefreshed record rather than identity drift.
+Only claude named itself by executable identity in the run above, so that distinctness had nothing to compare and the guard says so rather than reporting it as checked.
 
 Suspension is confirmed over several samples, and this run also recorded a kernel behavior worth keeping: on this WSL2 build `SIGSTOP` does not stop a pty **session leader** at all, while it stops an ordinary child normally.
 

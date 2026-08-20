@@ -142,17 +142,75 @@ descendant_marker() {  # <pid> <harness>
   return 1
 }
 
+# Launch <2> (plus the optional extra arguments in <3>) in its own real pty
+# window named <1>, reporting the pid of the process running inside it in
+# PROBE_PID and whether the library came to see that process as a harness before
+# it exited in PROBE_IDENTIFIED, so a caller can tell "never started" from "not
+# identified".
+#
+# <4> is how long to keep asking, and it is a correctness setting rather than a
+# speed one. A harness that is running but unidentifiable is drift, and proving
+# that needs the whole window; a control that is SUPPOSED to be unidentifiable
+# would spend that window every time and report nothing new, so it asks only
+# until the process is visible to ps. Pass `visible` for a control.
+#
+# Both results are globals rather than stdout deliberately: a command
+# substitution would run this in a subshell, which loses PROBE_IDENTIFIED and,
+# worse, loses the LAUNCHED_PIDS entry that guarantees cleanup reaches every
+# process this guard started.
+#
+# Each launch runs as a CHILD of the pane's shell, not as the pane process
+# itself. That is the shape a captain's own session has - a harness started from
+# a shell in a pane - and it is the shape the suspended-holder incident was
+# observed in. The trailing no-op is what stops bash from exec'ing the target
+# into the shell's own pid and making it the session leader.
+PROBE_IDENTIFIED=0
+PROBE_PID=
+launch_identity_probe() {  # <window> <binary> [<extra-args>] [identified|visible]
+  local window=$1 target=$2 extra=${3-} until_what=${4:-identified} pane_pid pid='' tracked=''
+  PROBE_IDENTIFIED=0
+  PROBE_PID=
+  # shellcheck disable=SC2086,SC2016  # an empty value must add no argument; the inner shell's $0/$@ are deliberately unexpanded here
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -t identity: -n "$window" -c "$LAB/wt" -- \
+    "${CLEARED[@]}" bash -c '"$0" "$@"; :' "$target" $extra \
+    || fail "could not launch a pty window for the '$window' identity probe of $target"
+  for _ in $(seq 1 300); do
+    pane_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "identity:$window" '#{pane_pid}' 2>/dev/null | tr -d '[:space:]')
+    case "$pane_pid" in
+      ''|*[!0-9]*) sleep 0.2; continue ;;
+    esac
+    pid=$(ps -eo pid= -o ppid= 2>/dev/null | awk -v r="$pane_pid" '$2 == r { print $1; exit }')
+    case "$pid" in
+      ''|*[!0-9]*) sleep 0.2; continue ;;
+    esac
+    if [ "$pid" != "$tracked" ]; then
+      LAUNCHED_PIDS="$LAUNCHED_PIDS $pid"
+      tracked=$pid
+    fi
+    if probe "fm_harness_pid_alive $pid"; then
+      PROBE_IDENTIFIED=1
+      break
+    fi
+    [ "$until_what" = visible ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  PROBE_PID=$pid
+  [ -n "$pid" ] || return 1
+  return 0
+}
+
 CHECKED=0
 SKIPPED=
 UNEXERCISED=
 MARKERS=
 KINDS=
 TYPED=0
+INSTALL_NAMES_CHECKED=0
 
 # Every primary-capable adapter this repo has verified. muse is crewmate-only and
 # never holds a home's session lock, so it is deliberately out of scope here.
 for harness in claude codex opencode pi pi-signed grok kimi cursor; do
-  pane_pid=
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its session-lock identity is unverified here"
@@ -167,39 +225,9 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor; do
   # same flag fm-spawn passes for the same reason.
   launch_args=""
   [ "$harness" = cursor ] && launch_args="--trust"
-  # The harness runs as a CHILD of the pane's shell, not as the pane process
-  # itself. That is the shape a captain's own session has - a harness started
-  # from a shell in a pane - and it is the shape the suspended-holder incident
-  # was observed in. The trailing no-op is what stops bash from exec'ing the
-  # harness into the shell's own pid and making it the session leader.
-  # shellcheck disable=SC2086,SC2016  # an empty value must add no argument; the inner shell's $0/$@ are deliberately unexpanded here
-  "$REAL_TMUX" -L "$SOCKET" new-window -d -t identity: -n "$harness" -c "$LAB/wt" -- \
-    "${CLEARED[@]}" bash -c '"$0" "$@"; :' "$bin_path" $launch_args \
-    || fail "$harness ($version): could not launch a window for the identity probe"
-
-  pid=
-  tracked=
-  identified=0
-  for _ in $(seq 1 300); do
-    pane_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "identity:$harness" '#{pane_pid}' 2>/dev/null | tr -d '[:space:]')
-    case "$pane_pid" in
-      ''|*[!0-9]*) sleep 0.2; continue ;;
-    esac
-    pid=$(ps -eo pid= -o ppid= 2>/dev/null | awk -v r="$pane_pid" '$2 == r { print $1; exit }')
-    case "$pid" in
-      ''|*[!0-9]*) sleep 0.2; continue ;;
-    esac
-    if [ "$pid" != "$tracked" ]; then
-      LAUNCHED_PIDS="$LAUNCHED_PIDS $pid"
-      tracked=$pid
-    fi
-    if probe "fm_harness_pid_alive $pid"; then
-      identified=1
-      break
-    fi
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 0.2
-  done
+  launch_identity_probe "$harness" "$bin_path" "$launch_args" || true
+  pid=$PROBE_PID
+  identified=$PROBE_IDENTIFIED
 
   # A harness that never stayed running was not exercised. That is a fact about
   # this machine, not evidence about identity, so report it instead of turning
@@ -279,6 +307,48 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor; do
     TYPED=$((TYPED + 1))
   fi
 
+  # What the harness is called on PATH is almost never what it is called on
+  # disk: the PATH entry is a symlink named exactly after the harness, so a
+  # launch through it can only ever observe the name this guard already expected.
+  # That blind spot is not hypothetical. Claude Code's installed executable is a
+  # single-file native build named claude.exe, and while the reported name was
+  # compared without normalizing it, every process that exec'd that binary
+  # directly - which is what Claude's own background workers do - was identified
+  # as a harness and yielded no kind at all, so the session's own start refused
+  # its home and degraded to read-only while it was the only session alive. The
+  # only way to see that is to launch what is actually installed.
+  #
+  # A resolved target that is an interpreter SCRIPT is reported rather than
+  # failed, because its own name never reaches a reported command name: the
+  # kernel runs the interpreter named in its `#!` line, so the process is called
+  # after the launcher or the interpreter instead. codex ships exactly that shape.
+  real_path=$(readlink -f "$bin_path" 2>/dev/null) || real_path=$bin_path
+  [ -n "$real_path" ] || real_path=$bin_path
+  if [ "$real_path" = "$bin_path" ]; then
+    note "$harness $version: the launched path is the installed executable, so its own name was already the name under test"
+  elif [ "$(head -c 2 "$real_path" 2>/dev/null)" = '#!' ]; then
+    note "$harness $version: the installed executable ${real_path##*/} is an interpreter script, so its own name never reaches a reported command name and only the launcher name is typed"
+  else
+    launch_identity_probe "$harness-installed" "$real_path" "$launch_args" || true
+    real_pid=$PROBE_PID
+    if [ -z "$real_pid" ] || ! kill -0 "$real_pid" 2>/dev/null; then
+      note "unexercised: $harness $version did not stay running when launched as its installed executable ${real_path##*/}, so that name is unverified"
+    else
+      real_comm=$(ps -o comm= -p "$real_pid" 2>/dev/null | tr -d '\n')
+      real_args=$(ps -o args= -p "$real_pid" 2>/dev/null | cut -c1-120 | tr -d '\n')
+      real_kind=$(probe "fm_harness_pid_kind $real_pid" 2>/dev/null | tr -d '[:space:]')
+      [ -n "$real_kind" ] || fail \
+        "SESSION-LOCK IDENTITY DRIFT: $harness $version run as its own installed executable ${real_path##*/} reports command name '$real_comm' and is typed as no harness at all, while the same release launched through PATH types as '${kind:-nothing}'. Every process that execs that binary directly is then identified as a harness with no kind, the cohort refuses, and this harness's own session start degrades to read-only against its own home while it is the only session alive. Observed argv '$real_args'."
+      if [ -n "$kind" ] && [ "$real_kind" != "$kind" ]; then
+        fail "SESSION-LOCK IDENTITY DRIFT: $harness $version types as '$kind' when launched through PATH but as '$real_kind' when launched as its installed executable ${real_path##*/}, so one release answers to two harness names and either could believe a launch marker the other exported. Observed command name '$real_comm'; observed argv '$real_args'."
+      fi
+      note "$harness $version: installed executable ${real_path##*/} reports comm='$real_comm' acceptance-kind='$real_kind'"
+      INSTALL_NAMES_CHECKED=$((INSTALL_NAMES_CHECKED + 1))
+      kill "$real_pid" 2>/dev/null || true
+    fi
+    "$REAL_TMUX" -L "$SOCKET" kill-window -t "identity:$harness-installed" >/dev/null 2>&1 || true
+  fi
+
   # The raw observation, recorded for every installed harness rather than only on
   # failure, because a shape this file's rules do not yet identify is exactly the
   # evidence a later fix needs and inference is not allowed to stand in for it.
@@ -295,6 +365,57 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor; do
   CHECKED=$((CHECKED + 1))
 done
 
+# The reporter itself, on this machine. Everything above depends on what ps and
+# the kernel here do to a command name, and that differs by platform: procps
+# reports the kernel task name and cuts it at 15 characters, while BSD ps reports
+# argv[0] and does not. So the two artifacts the library normalizes are produced
+# locally, from real executables carrying those exact names, and the names are
+# read back through the same ps the library calls.
+#
+# The near misses matter as much as the acceptances. Normalization strips two
+# artifacts before an unchanged exact-equality test, and this is where a widening
+# into a prefix rule would show up on the real platform rather than in a fleet.
+REPORTER_LAB="$LAB/reporter"
+mkdir -p "$REPORTER_LAB"
+REPORTER_CHECKED=0
+# The two acceptance names are the artifacts a real Claude Code install produces;
+# the four after them differ from a verified harness name only in ways
+# normalization must not undo.
+REPORTER_NAMES=('claude.exe' 'claude bg-pty-host' claudette claude-code node python3)
+for reporter_name in "${REPORTER_NAMES[@]}"; do
+  ln -sf /bin/bash "$REPORTER_LAB/$reporter_name"
+  case "$reporter_name" in
+    'claude.exe'|'claude bg-pty-host') reporter_want=claude ;;
+    *) reporter_want= ;;
+  esac
+  launch_identity_probe "reporter-$REPORTER_CHECKED" "$REPORTER_LAB/$reporter_name" '' visible || true
+  reporter_pid=$PROBE_PID
+  if [ -z "$reporter_pid" ] || ! kill -0 "$reporter_pid" 2>/dev/null; then
+    fail "the reporter control named '$reporter_name' never stayed running, so this machine's command-name reporting is unverified"
+  fi
+  reporter_comm=$(ps -o comm= -p "$reporter_pid" 2>/dev/null | tr -d '\n')
+  reporter_base=${reporter_comm##*/}
+  reporter_kind=$(probe "fm_harness_exec_kind '$reporter_base' ''" 2>/dev/null | tr -d '[:space:]')
+  if [ -n "$reporter_want" ]; then
+    # Divergence first: a control that stopped carrying the artifact would pass
+    # without testing anything, which is the failure this whole guard removes.
+    [ "$reporter_base" != "$reporter_want" ] || fail \
+      "the reporter control '$reporter_name' was reported as the bare name '$reporter_base', so this machine no longer reproduces the artifact and the check below would pass vacuously"
+    [ "$reporter_kind" = "$reporter_want" ] || fail \
+      "SESSION-LOCK IDENTITY DRIFT: a real process reporting command name '$reporter_comm' is typed as '${reporter_kind:-nothing}' rather than $reporter_want on this machine. That is a command name Claude Code actually runs under, so its own session start would refuse its home and degrade to read-only while it is the only session alive."
+  else
+    [ -z "$reporter_kind" ] || fail \
+      "SESSION-LOCK SAFETY FAILURE: a real process named '$reporter_name' is typed as '$reporter_kind' on this machine, so an unrelated process could be accepted as a session's own harness and take over its home."
+  fi
+  note "reporter control '$reporter_name': comm='$reporter_comm' acceptance-kind='${reporter_kind:-none}' (expected ${reporter_want:-none})"
+  kill "$reporter_pid" 2>/dev/null || true
+  "$REAL_TMUX" -L "$SOCKET" kill-window -t "identity:reporter-$REPORTER_CHECKED" >/dev/null 2>&1 || true
+  REPORTER_CHECKED=$((REPORTER_CHECKED + 1))
+done
+[ "$REPORTER_CHECKED" -eq "${#REPORTER_NAMES[@]}" ] || fail \
+  "only $REPORTER_CHECKED of the ${#REPORTER_NAMES[@]} command-name reporter controls ran, so this machine's reporting is only partly verified"
+pass "session-lock identity: this machine's reported command names are typed after the reporter's own artifacts, and near misses still are not"
+
 [ "$CHECKED" -gt 0 ] || fail \
   "no verified harness was exercised here, so this run proved nothing; install at least one harness that stays running in a bare pty launch before trusting a pass"
 
@@ -306,6 +427,9 @@ else
   note "unchecked: the cross-harness kind distinctness that scopes launch markers needs two harnesses that name themselves by executable identity, and only $TYPED did here (kinds observed:$KINDS)"
 fi
 
+if [ "$INSTALL_NAMES_CHECKED" -eq 0 ]; then
+  note "unchecked: no installed harness here resolved to a native executable under a different name, so the installed-executable name check had nothing to exercise"
+fi
 [ -z "$SKIPPED" ] || note "unverified on this machine (not installed):$SKIPPED"
 [ -z "$UNEXERCISED" ] || note "unverified on this machine (did not stay running):$UNEXERCISED"
 [ -z "$MARKERS" ] || note "observed launch markers:$MARKERS"
