@@ -34,7 +34,7 @@ ok - a control character in a nested skill name refuses before mutation
 ok - odd CODEX_HOME separator spelling still links correctly and converges
 ok - an unreadable managed root refuses instead of claiming convergence
 ok - a permission-bit-only difference is diagnosed as such
-ok - an interrupted apply stops with a nonzero status instead of claiming success
+ok - an interrupted apply stops at the signal instead of finishing the plan
 ok - an unresolvable CODEX_HOME reports exactly one cause
 ok - remote invocation binds the registered host and forwards explicit apply
 ```

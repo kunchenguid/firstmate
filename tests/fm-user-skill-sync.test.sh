@@ -423,35 +423,42 @@ test_mode_only_difference_names_permission_bits() {
   pass "a permission-bit-only difference is diagnosed as such"
 }
 
+# The apply loop is paused deterministically by shadowing `cp` with a stub that
+# blocks after the canonical copy is planned, so the signal is always delivered
+# mid-plan rather than racing the run to completion. Bash defers the trap until
+# the foreground child returns, so the stub is released after signalling.
 test_interrupt_stops_apply() {
-  local home out pid rc i waited
+  local home out pid rc fakebin waited
   home=$(new_home)
-  i=0
-  while [ "$i" -lt 60 ]; do
-    make_skill "$home/.gemini/skills" "skill$i" body
-    i=$((i + 1))
-  done
+  make_skill "$home/.gemini/skills" alpha body
   out="$home/apply.out"
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/cp" <<'SH'
+#!/usr/bin/env bash
+: > "${COPY_STARTED:?}"
+waited=0
+while [ ! -e "${COPY_RELEASE:?}" ] && [ "$waited" -lt 600 ]; do
+  sleep 0.1
+  waited=$((waited + 1))
+done
+exec /bin/cp "$@"
+SH
+  chmod +x "$fakebin/cp"
 
-  HOME="$home" CODEX_HOME="$home/.codex" "$SCRIPT" --apply > "$out" 2>&1 &
+  PATH="$fakebin:$PATH" COPY_STARTED="$home/copy.started" COPY_RELEASE="$home/copy.release" \
+    HOME="$home" CODEX_HOME="$home/.codex" "$SCRIPT" --apply > "$out" 2>&1 &
   pid=$!
+
   waited=0
-  while [ "$waited" -lt 400 ]; do
-    grep -q '^APPLY$' "$out" 2>/dev/null && break
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 0.05
+  while [ ! -e "$home/copy.started" ]; do
+    kill -0 "$pid" 2>/dev/null || fail "apply exited before reaching the canonical copy"
+    [ "$waited" -lt 600 ] || fail "apply never reached the canonical copy"
+    sleep 0.1
     waited=$((waited + 1))
   done
 
-  if ! kill -0 "$pid" 2>/dev/null; then
-    set +e
-    wait "$pid"
-    set -e
-    pass "interrupted apply exits nonzero (skipped: run finished before the signal landed)"
-    return 0
-  fi
-
-  kill -TERM "$pid" 2>/dev/null || true
+  kill -TERM "$pid" || fail "apply was no longer running when the signal was sent"
+  : > "$home/copy.release"
   set +e
   wait "$pid"
   rc=$?
@@ -460,7 +467,10 @@ test_interrupt_stops_apply() {
   [ "$rc" -eq 143 ] || fail "interrupted apply exited $rc instead of 143"
   assert_contains "$(cat "$out")" "interrupted by SIGTERM" "interrupted apply lacked an interruption diagnosis"
   assert_not_contains "$(cat "$out")" "user skills converged" "interrupted apply still claimed convergence"
-  pass "an interrupted apply stops with a nonzero status instead of claiming success"
+  [ -f "$home/.agents/skills/alpha/SKILL.md" ] || fail "the copy that was in flight did not complete"
+  [ -d "$home/.gemini/skills/alpha" ] || fail "the interrupted apply kept executing later plan steps"
+  [ ! -e "$home/.claude/skills/alpha" ] || fail "the interrupted apply kept linking after the signal"
+  pass "an interrupted apply stops at the signal instead of finishing the plan"
 }
 
 test_unresolvable_codex_home_reports_one_cause() {
