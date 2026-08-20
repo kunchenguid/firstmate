@@ -3003,6 +3003,28 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
   printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null
 }
 
+# fm_backend_herdr_agent_status_raw_strict: like agent_status_raw but
+# distinguishes "CLI ran (got parseable JSON)" from "CLI failed to run
+# (no output, socket error, timeout)".
+# Returns 0 and echoes the status (or empty if no agent) when the CLI
+# produced parseable JSON.
+# Returns 1 when the CLI produced no parseable output at all - the read
+# genuinely failed and the caller must not treat it as "no agent".
+fm_backend_herdr_agent_status_raw_strict() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out status
+  # Capture output regardless of exit code: herdr exits 1 for both
+  # "agent_not_found" (legitimate) and "server unreachable" (failure).
+  out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null) || true
+  # If we got no output at all, the CLI failed to produce anything.
+  [ -n "$out" ] || return 1
+  # Try to parse a status from the JSON.
+  status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null) || true
+  # If we got parseable JSON (even with an error code like agent_not_found),
+  # the CLI ran. An empty status means no agent is registered.
+  printf '%s' "$status"
+  return 0
+}
+
 # fm_backend_herdr_busy_state: semantic busy state from herdr's native
 # agent-state detection (agent.get), the "first backend where fm_session_busy_state
 # gets real semantics" per the design report. See

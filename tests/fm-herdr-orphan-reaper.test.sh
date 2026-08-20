@@ -99,6 +99,10 @@ case "${1:-}:${2:-}:${3:-}" in
     ;;
   agent:get:*)
     pane_id=$3
+    # A fail marker forces a CLI error with NO output (simulates socket/server failure).
+    if [ -f "$STATE/agent-fail-$pane_id" ]; then
+      exit 1
+    fi
     if [ -f "$STATE/agent-$pane_id.json" ]; then
       cat "$STATE/agent-$pane_id.json"
     else
@@ -134,6 +138,15 @@ SH
 #!/usr/bin/env bash
 if [ "$1" = "-p" ] && [ "$2" = "99999" ]; then
   echo "Fri Jan  1 00:00:00 2000"
+  exit 0
+fi
+if [ "$1" = "-o" ] && [ "$2" = "comm=" ] && [ "$3" = "-p" ]; then
+  if [ "$4" = "99999" ]; then exit 1; fi
+  echo "claude"
+  exit 0
+fi
+if [ "$1" = "-o" ] && [ "$2" = "args=" ] && [ "$3" = "-p" ]; then
+  echo "claude"
   exit 0
 fi
 exec /bin/ps "$@"
@@ -240,6 +253,11 @@ seed_process_info() {
 JSON
 }
 
+seed_agent_fail() {
+  local pane_id=$1
+  touch "$HERDR_STATE/agent-fail-$pane_id"
+}
+
 SAVE_PATH="$PATH"
 
 # --- Test 1: refuses to close a pane claimed by meta -------------------------
@@ -315,23 +333,22 @@ assert_not_contains "$out" "ORPHAN wA:p1" "other-home: secondmate must not see p
 assert_not_contains "$out" "REAPER: ORPHAN" "other-home: secondmate should find no orphans"
 pass "another home's panes are invisible (home-scoped)"
 
-# --- Test 5: identifies a genuine orphan (unclaimed, no live agent) ----------
+# --- Test 5: done agent is live (done is not gone) --------------------------
 PATH="$SAVE_PATH"
-setup_test "orphan"
+setup_test "done-is-live"
 seed_workspace "wA" "firstmate"
-seed_tab "wA" "wA:t1" "fm-dead-task"
+seed_tab "wA" "wA:t1" "fm-done-task"
 seed_pane "wA:p1" "wA:t1" "wA"
 seed_agent "wA:p1" "done"
 seed_process_info "wA:p1" 99999
 
 out=$("$ROOT/bin/fm-herdr-orphan-reaper.sh" --report 2>&1)
 rc=$?
-[ "$rc" -eq 0 ] || fail "orphan detection: expected exit 0, got $rc"
-assert_contains "$out" "ORPHAN wA:p1" "orphan detection: should detect the orphan"
-assert_contains "$out" "fm-dead-task" "orphan detection: should show tab label"
-assert_contains "$out" "report mode" "orphan detection: should mention report mode"
-assert_not_contains "$out" "CLOSED" "orphan detection: should not close in report mode"
-pass "identifies a genuine orphan (unclaimed, done agent)"
+[ "$rc" -eq 0 ] || fail "done agent: expected exit 0, got $rc"
+assert_contains "$out" "SKIP wA:p1" "done agent: should report SKIP"
+assert_contains "$out" "live agent (status: done)" "done agent: should mention done status"
+assert_not_contains "$out" "REAPER: ORPHAN" "done agent: should not report any orphans"
+pass "done agent is live (done is not gone; task owns pane until cleanup)"
 
 # --- Test 6: non-fm- tabs are ignored (captain's own terminals) --------------
 PATH="$SAVE_PATH"
@@ -348,21 +365,25 @@ rc=$?
 [ -z "$out" ] || fail "captain tab: expected silent exit (no fm- tabs), got: $out"
 pass "non-fm- tabs are ignored (captain's own terminals, silent)"
 
-# --- Test 7: --close actually closes orphans ---------------------------------
+# --- Test 7: --close actually closes orphans (with lock and no agent) --------
 PATH="$SAVE_PATH"
 setup_test "close"
 seed_workspace "wA" "firstmate"
 seed_tab "wA" "wA:t1" "fm-dead-task"
 seed_pane "wA:p1" "wA:t1" "wA"
-seed_agent "wA:p1" "idle"
+# No agent seeded - a pane with no registered agent is the genuine orphan case.
 seed_process_info "wA:p1" 99999
+# Seed a session lock (--close requires it).
+printf '%s\n' "$$" > "$TDIR/home/state/.lock"
+# Seed at least one meta so the self-check does not trip.
+seed_meta "other-active-task" "wA:pOther"
 
 out=$("$ROOT/bin/fm-herdr-orphan-reaper.sh" --close 2>&1)
 rc=$?
 [ "$rc" -eq 0 ] || fail "close mode: expected exit 0, got $rc"
 assert_contains "$out" "ORPHAN wA:p1" "close mode: should detect the orphan"
 assert_contains "$out" "CLOSED wA:p1" "close mode: should report closure"
-pass "--close actually closes orphans"
+pass "--close actually closes orphans (lock held, no agent)"
 
 # --- Test 8: non-herdr backend exits cleanly ---------------------------------
 PATH="$SAVE_PATH"
@@ -375,7 +396,7 @@ rc=$?
 [ -z "$out" ] || fail "non-herdr: expected silent exit, got: $out"
 pass "non-herdr backend exits cleanly (silent)"
 
-# --- Test 9: mixed panes - claimed, orphan, captain, live-agent --------------
+# --- Test 9: mixed panes - claimed, orphan, captain, live-agent, done --------
 PATH="$SAVE_PATH"
 setup_test "mixed"
 seed_workspace "wA" "firstmate"
@@ -384,9 +405,9 @@ seed_tab "wA" "wA:t1" "fm-claimed-task"
 seed_pane "wA:p1" "wA:t1" "wA"
 seed_meta "claimed-task" "wA:p1"
 
+# No agent = genuine orphan (deregistered)
 seed_tab "wA" "wA:t2" "fm-orphan-task"
 seed_pane "wA:p2" "wA:t2" "wA"
-seed_agent "wA:p2" "done"
 seed_process_info "wA:p2" 99999
 
 seed_tab "wA" "wA:t3" "my-shell"
@@ -396,15 +417,21 @@ seed_tab "wA" "wA:t4" "fm-live-task"
 seed_pane "wA:p4" "wA:t4" "wA"
 seed_agent "wA:p4" "working"
 
+# Done agent = still live (done is not gone)
+seed_tab "wA" "wA:t5" "fm-done-task"
+seed_pane "wA:p5" "wA:t5" "wA"
+seed_agent "wA:p5" "done"
+
 out=$("$ROOT/bin/fm-herdr-orphan-reaper.sh" --report 2>&1)
 rc=$?
 [ "$rc" -eq 0 ] || fail "mixed: expected exit 0, got $rc"
 assert_contains "$out" "SKIP wA:p1" "mixed: should skip claimed pane"
-assert_contains "$out" "ORPHAN wA:p2" "mixed: should detect orphan pane"
+assert_contains "$out" "ORPHAN wA:p2" "mixed: should detect orphan pane (no agent)"
 assert_not_contains "$out" "wA:p3" "mixed: captain's tab should be invisible"
-assert_contains "$out" "SKIP wA:p4" "mixed: should skip live agent pane"
+assert_contains "$out" "SKIP wA:p4" "mixed: should skip live agent pane (working)"
+assert_contains "$out" "SKIP wA:p5" "mixed: should skip done agent pane (done is live)"
 assert_contains "$out" "1 orphaned pane" "mixed: should count exactly 1 orphan"
-pass "mixed panes: correctly classifies claimed, orphan, captain, and live-agent"
+pass "mixed panes: correctly classifies claimed, orphan, captain, working, and done"
 
 # --- Test 10: pane with no agent at all (deregistered) is orphan -------------
 PATH="$SAVE_PATH"
@@ -426,7 +453,7 @@ setup_test "self-owned"
 seed_workspace "wA" "2ndmate-lucie"
 seed_tab "wA" "wA:t1" "fm-lucie"
 seed_pane "wA:p1" "wA:t1" "wA"
-seed_agent "wA:p1" "done"  # ordinarily an orphan
+seed_agent "wA:p1" "done"  # would also refuse as live agent; supervisor check fires first
 
 printf 'lucie\n' > "$TDIR/home/.fm-secondmate-home"
 
@@ -444,10 +471,12 @@ setup_test "young-pane"
 seed_workspace "wA" "firstmate"
 seed_tab "wA" "wA:t1" "fm-new-task"
 seed_pane "wA:p1" "wA:t1" "wA"
-seed_agent "wA:p1" "done"  # ordinarily an orphan
+# No agent seeded - the pane must reach the age check to test the refusal.
 
-# Mock process_info so shell_pid points to the current process ($$), which was just created
-seed_process_info "wA:p1" "$$"
+# Launch a fresh process so its lstart is within the last second.
+sleep 300 &
+YOUNG_PID=$!
+seed_process_info "wA:p1" "$YOUNG_PID"
 
 out=$("$ROOT/bin/fm-herdr-orphan-reaper.sh" --report 2>&1)
 rc=$?
@@ -455,6 +484,7 @@ rc=$?
 assert_contains "$out" "SKIP wA:p1" "young pane: should report SKIP"
 assert_contains "$out" "pane is too young" "young pane: should mention pane is too young"
 assert_not_contains "$out" "REAPER: ORPHAN" "young pane: should not report any orphans"
+kill "$YOUNG_PID" 2>/dev/null || true; wait "$YOUNG_PID" 2>/dev/null || true
 pass "refuses to close a pane that is too young (startup race immunity)"
 
 # --- Test 13: refuses to close a pane whose age cannot be determined --------
@@ -463,7 +493,7 @@ setup_test "undeterminable-age"
 seed_workspace "wA" "firstmate"
 seed_tab "wA" "wA:t1" "fm-undeterminable"
 seed_pane "wA:p1" "wA:t1" "wA"
-seed_agent "wA:p1" "done"  # ordinarily an orphan
+# No agent seeded - the pane must reach the age check to test the refusal.
 
 # The default mock returns process_info without a shell_pid, simulating failure to determine age.
 # No seed_process_info call is needed here.
@@ -476,4 +506,90 @@ assert_contains "$out" "pane is too young (unknowns < 15s)" "undeterminable age:
 assert_not_contains "$out" "REAPER: ORPHAN" "undeterminable age: should not report any orphans"
 pass "refuses to close a pane whose age cannot be determined (fail closed)"
 
+# --- Test 14: unreadable agent status refuses (not orphan) -------------------
+# Change (2): a CLI failure reading agent status is not evidence of absence.
+# The reaper must refuse, not treat the pane as agent-free and close it.
+PATH="$SAVE_PATH"
+setup_test "unreadable-status"
+seed_workspace "wA" "firstmate"
+seed_tab "wA" "wA:t1" "fm-mystery-task"
+seed_pane "wA:p1" "wA:t1" "wA"
+seed_agent_fail "wA:p1"
+seed_process_info "wA:p1" 99999
+# Seed a lock and a meta so the other gates do not interfere.
+printf '%s\n' "$$" > "$TDIR/home/state/.lock"
+seed_meta "other-task" "wA:pOther"
+
+out=$("$ROOT/bin/fm-herdr-orphan-reaper.sh" --close 2>&1)
+rc=$?
+[ "$rc" -eq 0 ] || fail "unreadable status: expected exit 0, got $rc"
+assert_contains "$out" "SKIP wA:p1" "unreadable status: should report SKIP"
+assert_contains "$out" "agent status unreadable" "unreadable status: should mention unreadable"
+assert_not_contains "$out" "REAPER: ORPHAN" "unreadable status: should not report any orphans"
+# The critical assertion: no close call was issued.
+[ ! -f "$HERDR_STATE/closed-panes.log" ] || fail "unreadable status: close call was issued (closed-panes.log exists)"
+pass "unreadable agent status refuses (CLI failure is not evidence of absence)"
+
+# --- Test 15: --close refuses without session lock ---------------------------
+# Change (3): the destructive sweep must be gated on the session lock.
+PATH="$SAVE_PATH"
+setup_test "no-lock"
+seed_workspace "wA" "firstmate"
+seed_tab "wA" "wA:t1" "fm-orphan-no-lock"
+seed_pane "wA:p1" "wA:t1" "wA"
+seed_process_info "wA:p1" 99999
+# No lock file - deliberately omitted.
+# Seed a meta so the self-check does not interfere.
+seed_meta "some-task" "wA:pOther"
+
+out=$("$ROOT/bin/fm-herdr-orphan-reaper.sh" --close 2>&1)
+rc=$?
+[ "$rc" -eq 0 ] || fail "no-lock close: expected exit 0, got $rc"
+assert_contains "$out" "refusing --close without session lock" "no-lock: should mention refusing without lock"
+# The critical assertion: no close call was issued.
+[ ! -f "$HERDR_STATE/closed-panes.log" ] || fail "no-lock: close call was issued (closed-panes.log exists)"
+pass "--close refuses without session lock (gated on lock)"
+
+# --- Test 16: self-check refuses when fm-* panes but no meta -----------------
+# Change (4): workspace has fm-* panes but state/ has no task records.
+# The reaper resolved the wrong home or is reading an empty state directory.
+PATH="$SAVE_PATH"
+setup_test "wrong-home"
+seed_workspace "wA" "firstmate"
+seed_tab "wA" "wA:t1" "fm-someones-task"
+seed_pane "wA:p1" "wA:t1" "wA"
+seed_process_info "wA:p1" 99999
+# Seed a lock (so the lock gate passes).
+printf '%s\n' "$$" > "$TDIR/home/state/.lock"
+# Deliberately NO meta files - state/ has no task records at all.
+
+out=$("$ROOT/bin/fm-herdr-orphan-reaper.sh" --close 2>&1)
+rc=$?
+[ "$rc" -eq 0 ] || fail "wrong-home: expected exit 0, got $rc"
+assert_contains "$out" "refusing --close" "wrong-home: should refuse"
+assert_contains "$out" "no task records" "wrong-home: should mention no task records"
+# The critical assertion: no close call was issued.
+[ ! -f "$HERDR_STATE/closed-panes.log" ] || fail "wrong-home: close call was issued (closed-panes.log exists)"
+pass "self-check refuses when fm-* panes exist but state/ has no task records"
+
+
+# --- Test 17: --close refuses with a STALE session lock ----------------------
+PATH="$SAVE_PATH"
+setup_test "stale-lock"
+seed_workspace "wA" "firstmate"
+seed_tab "wA" "wA:t1" "fm-orphan-stale-lock"
+seed_pane "wA:p1" "wA:t1" "wA"
+seed_process_info "wA:p1" 99999
+# Seed a STALE lock file. 99999 is our mocked dead PID.
+printf '99999\n' > "$TDIR/home/state/.lock"
+# Seed a meta so the self-check does not interfere.
+seed_meta "some-task" "wA:pOther"
+
+out=$("$ROOT/bin/fm-herdr-orphan-reaper.sh" --close 2>&1)
+rc=$?
+[ "$rc" -eq 0 ] || fail "stale-lock close: expected exit 0, got $rc"
+assert_contains "$out" "refusing --close" "stale-lock: should mention refusing"
+# The critical assertion: no close call was issued.
+[ ! -f "$HERDR_STATE/closed-panes.log" ] || fail "stale-lock: close call was issued (closed-panes.log exists)"
+pass "--close refuses with a STALE session lock"
 echo "all tests passed"
