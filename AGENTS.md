@@ -317,6 +317,7 @@ Fleet supervision is an always-loaded operational contract; `docs/architecture.m
 
 Whenever work is under way, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
 Relay may require that same live cycle with no fleet work.
+A registered process-to-event source requires that same live cycle by its presence alone, with no fleet work.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 For every actionable wake, follow the ordinary-wake continuation in the emitted protocol; use its repair action only when the live cycle is missing or failed.
 No turn ends blind while work is under way, including turns described as holding or waiting.
