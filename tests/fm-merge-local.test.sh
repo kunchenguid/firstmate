@@ -480,6 +480,7 @@ $(make_landing tilde)
 EOF
   ready_branch "$home" "$clone" task-p Cover.tex "the cover letter"
   base=$(dirname "$origin")
+  # shellcheck disable=SC2088 # The tilde is a literal prefix in a value written to git config, not a path this test writes, so it must stay unexpanded.
   git -C "$clone" remote set-url origin '~/JobSearch'
 
   out=$(HOME="$base" run_merge "$home" task-p) \
