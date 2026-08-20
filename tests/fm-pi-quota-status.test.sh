@@ -22,7 +22,9 @@ MODE_FILE="$TMP_ROOT/quota.mode"
 PID_LOG="$TMP_ROOT/quota.pids"
 DESCENDANT_PID_LOG="$TMP_ROOT/quota.descendant-pids"
 SURVIVOR_LOG="$TMP_ROOT/quota.survivors"
-mkdir -p "$FIXTURE/.pi/extensions/lib" "$FIXTURE/node_modules/@earendil-works" "$FAKEBIN"
+PI_CONFIG="$TMP_ROOT/pi-config"
+AUTH_FILE="$PI_CONFIG/auth.json"
+mkdir -p "$FIXTURE/.pi/extensions/lib" "$FIXTURE/node_modules/@earendil-works" "$FAKEBIN" "$PI_CONFIG"
 cp "$ROOT/.pi/extensions/fm-pi-quota-status.ts" "$FIXTURE/.pi/extensions/"
 cp "$ROOT/.pi/extensions/lib/fm-pi-quota-status.ts" "$FIXTURE/.pi/extensions/lib/"
 ln -s "$PI_PACKAGE_DIR" "$FIXTURE/node_modules/@earendil-works/pi-coding-agent"
@@ -189,7 +191,9 @@ export FM_QUOTA_TEST_PIDS="$PID_LOG"
 export FM_QUOTA_TEST_DESCENDANT_PIDS="$DESCENDANT_PID_LOG"
 export FM_QUOTA_TEST_SURVIVORS="$SURVIVOR_LOG"
 export FM_QUOTA_TEST_FIXTURE="$TMP_ROOT/quota-fixture.mjs"
+export PI_CODING_AGENT_DIR="$PI_CONFIG"
 export PATH="$FAKEBIN:$PATH"
+printf '%s\n' '{}' > "$AUTH_FILE"
 printf '%s\n' success > "$MODE_FILE"
 : > "$CALLS"
 : > "$STDIN_LOG"
@@ -320,6 +324,14 @@ for (const field of ["label", "source"]) {
     `schema-5 full output missing ${field} was accepted as fresh`,
   );
 }
+const missingFullSources = structuredClone(schema5Full);
+delete missingFullSources.providers[1].state.sourcesTried;
+const missingFullSourcesParsed = parseQuotaAxiJson(JSON.stringify(missingFullSources), { projection: "full" });
+assert(missingFullSourcesParsed, "schema-5 full fixture missing sourcesTried did not parse structurally");
+assert(
+  selectActiveProviderQuota(missingFullSourcesParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "schema-5 full output missing sourcesTried was accepted as fresh",
+);
 assert(quotaProviderForPiProvider("openai-codex") === "codex", "openai-codex provider mapping failed");
 assert(quotaProviderForPiProvider("anthropic") === "claude", "anthropic provider mapping failed");
 assert(quotaProviderForPiProvider("github-copilot") === "copilot", "GitHub Copilot provider mapping failed");
@@ -427,6 +439,16 @@ assert(visibleWidth(narrow) <= 72, "narrow format exceeded its width");
 const veryNarrow = formatQuotaStatus(codex, 24, now);
 assert(veryNarrow.includes("narrow"), `very narrow format lost its explicit degradation: ${veryNarrow}`);
 assert(visibleWidth(veryNarrow) <= 24, "very narrow format exceeded its width");
+for (const [reason, expected] of [
+  ["missing", "quota-axi missing"],
+  ["failed", "quota-axi failed"],
+  ["timeout", "quota-axi timed out"],
+  ["overflow", "quota-axi output too large"],
+  ["cancelled", "quota refresh cancelled"],
+]) {
+  const failureText = formatQuotaStatus({ kind: "failure", provider: "codex", reason }, 200, now);
+  assert(failureText.includes(expected), `${reason} failure was not explicit: ${failureText}`);
+}
 
 const claude = selectActiveProviderQuota(parsed, "anthropic", { nowMs: now });
 assert(claude.kind === "fresh", "active Claude provider was not selected");
@@ -576,6 +598,26 @@ function fixtureAccessToken(accountId) {
   })).toString("base64url");
   return `eyJhbGciOiJub25lIn0.${payload}.fixture`;
 }
+async function setStoredOAuth(provider, access) {
+  let credentials = {};
+  try {
+    credentials = JSON.parse(await readFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, "utf8"));
+  } catch {
+  }
+  credentials[provider] = {
+    type: "oauth",
+    access,
+    refresh: `fixture-refresh-${provider}`,
+    expires: Date.now() + 24 * 60 * 60 * 1000,
+  };
+  await writeFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, `${JSON.stringify(credentials)}\n`);
+}
+for (const provider of Object.keys(officialBaseUrls)) {
+  await setStoredOAuth(
+    provider,
+    provider === "openai-codex" ? fixtureAccessToken("fixture-codex-account") : `fixture-${provider}-access`,
+  );
+}
 function makePi(factory, provider = "openai-codex", mode = "tui", providerOptions = {}) {
   const handlers = new Map();
   const statuses = new Map([["aaa-unrelated", "UNRELATED_STATUS"]]);
@@ -598,25 +640,30 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
       ? {}
       : {
           getProvider() {
-            return { auth: { oauth: { isSubscription: providerOptions.subscription !== false } } };
+            return {
+              auth: {
+                oauth: {
+                  isSubscription: providerOptions.subscription !== false,
+                  async toAuth(credential) {
+                    if (providerOptions.authNever) return new Promise(() => {});
+                    if (providerOptions.authDelayMs) await sleep(providerOptions.authDelayMs);
+                    if (providerOptions.authError || providerOptions.authUnavailable) {
+                      throw new Error("fixture auth failure");
+                    }
+                    return {
+                      apiKey: credential.access,
+                      ...(providerOptions.authBaseUrl ? { baseUrl: providerOptions.authBaseUrl } : {}),
+                    };
+                  },
+                },
+              },
+            };
           },
           isUsingOAuth() {
             return providerOptions.authType !== "api_key";
           },
           async getProviderAuth() {
-            if (providerOptions.authDelayMs) await sleep(providerOptions.authDelayMs);
-            if (providerOptions.authError) throw new Error("fixture auth failure");
-            if (providerOptions.authUnavailable) return undefined;
-            const accountId = Object.hasOwn(providerOptions, "accountId")
-              ? providerOptions.accountId
-              : "fixture-codex-account";
-            return {
-              auth: {
-                apiKey: fixtureAccessToken(accountId),
-                ...(providerOptions.authBaseUrl ? { baseUrl: providerOptions.authBaseUrl } : {}),
-              },
-              source: providerOptions.authType === "api_key" ? "fixture API key" : "OAuth",
-            };
+            throw new Error("quota extension used the refreshing auth resolver");
           },
         },
     ui: {
@@ -739,6 +786,65 @@ await waitFor(
   "custom-endpoint model did not resolve to unavailable",
 );
 await resolvingTransition.emit("session_shutdown", { reason: "quit" });
+
+const authTimeout = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 40 }),
+  "openai-codex",
+  "tui",
+  { authDelayMs: 200 },
+);
+await authTimeout.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => authTimeout.widgetText(240).includes("auth timed out"),
+  `stalled auth resolution did not time out explicitly: ${authTimeout.widgetText(240)}`,
+);
+await authTimeout.emit("session_shutdown", { reason: "quit" });
+
+const stalledAuthOptions = { authNever: true };
+const stalledAuth = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 5_000 }),
+  "openai-codex",
+  "tui",
+  stalledAuthOptions,
+);
+await stalledAuth.emit("session_start", { reason: "startup" });
+assert(stalledAuth.widgetText(240).includes("refreshing"), "stalled auth did not retain a bounded pending view");
+await stalledAuth.emit("session_shutdown", { reason: "reload" });
+stalledAuthOptions.authNever = false;
+await stalledAuth.emit("session_start", { reason: "reload" });
+await waitFor(
+  () => stalledAuth.widgetText(400).includes("week 94% left"),
+  "shutdown did not cancel stalled auth before replacement startup",
+);
+await stalledAuth.emit("session_shutdown", { reason: "quit" });
+
+await setStoredOAuth("openai-codex", fixtureAccessToken("fixture-codex-account"));
+const credentialChange = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 500,
+}));
+await credentialChange.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => credentialChange.widgetText(400).includes("week 94% left"),
+  "credential-change fixture did not publish initial account quota",
+);
+await setStoredOAuth("openai-codex", fixtureAccessToken("replacement-codex-account"));
+assert(
+  !credentialChange.widgetText(400).includes("94%"),
+  "credential change remained fresh at the render boundary",
+);
+await waitFor(
+  () => credentialChange.widgetText(240).includes("account unverified"),
+  `credential change was not re-correlated: ${credentialChange.widgetText(240)}`,
+);
+await credentialChange.emit("session_shutdown", { reason: "quit" });
+const writesAfterCredentialShutdown = credentialChange.widgetWriteCount;
+await setStoredOAuth("openai-codex", fixtureAccessToken("fixture-codex-account"));
+await sleep(100);
+assert(
+  credentialChange.widgetWriteCount === writesAfterCredentialShutdown,
+  "shutdown leaked the credential watcher",
+);
 
 for (const reason of ["reload", "new", "resume", "fork"]) {
   lifecycle.ctx.model = fixtureModel("kimi-coding", "kimi-fixture");
@@ -925,11 +1031,10 @@ for (const [description, accountId] of [
   ["missing active account identity", null],
   ["different active account", "other-codex-account"],
 ]) {
+  await setStoredOAuth("openai-codex", fixtureAccessToken(accountId));
   const instance = makePi(
     createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
     "openai-codex",
-    "tui",
-    { accountId },
   );
   await instance.emit("session_start", { reason: "startup" });
   await waitFor(
@@ -939,6 +1044,7 @@ for (const [description, accountId] of [
   assert(!instance.widgetText(400).includes("94%"), `${description} exposed unrelated fresh quota`);
   await instance.emit("session_shutdown", { reason: "quit" });
 }
+await setStoredOAuth("openai-codex", fixtureAccessToken("fixture-codex-account"));
 
 async function statusCase(mode, expected, options = {}) {
   await writeFile(process.env.FM_QUOTA_TEST_MODE, `${mode}\n`);
@@ -959,10 +1065,14 @@ async function statusCase(mode, expected, options = {}) {
 }
 
 await statusCase("malformed", "malformed data");
-await statusCase("fail", "unavailable");
+await statusCase("fail", "quota-axi failed");
 await statusCase("stale", "stale");
-await statusCase("overflow", "unavailable", { maxOutputBytes: 128 });
-await statusCase("success", "unavailable", { command: "quota-axi-definitely-missing" });
+await statusCase("overflow", "quota-axi output too large", { maxOutputBytes: 128 });
+await statusCase("success", "quota-axi missing", { command: "quota-axi-definitely-missing" });
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "slow\n");
+const cancelledProcess = runQuotaAxiJson({ timeoutMs: 5_000, maxOutputBytes: 1024 * 1024 });
+cancelledProcess.cancel();
+assert((await cancelledProcess.promise).kind === "cancelled", "quota process cancellation lost its reason");
 
 const pidsBeforeUnsupportedRace = (await readFile(process.env.FM_QUOTA_TEST_PIDS, "utf8")).trim().split(/\s+/).filter(Boolean).length;
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "delayed_fail\n");
@@ -996,7 +1106,7 @@ const slow = makePi(createFirstmateQuotaStatusExtension({
   width: () => 200,
 }));
 await slow.emit("session_start", { reason: "startup" });
-await waitFor(() => slow.widgetText(200).includes("unavailable"), "slow quota process did not time out");
+await waitFor(() => slow.widgetText(200).includes("quota-axi timed out"), "slow quota process did not time out explicitly");
 await slow.emit("session_shutdown", { reason: "quit" });
 
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "leader_exit\n");
@@ -1009,7 +1119,7 @@ await leaderExit.emit("session_start", { reason: "startup" });
 await waitFor(async () => {
   return Boolean((await readFile(process.env.FM_QUOTA_TEST_DESCENDANT_PIDS, "utf8")).trim());
 }, "leader-exit fixture did not launch its pipe-holding descendant");
-await waitFor(() => leaderExit.widgetText(200).includes("unavailable"), "leader-exit descendant did not time out");
+await waitFor(() => leaderExit.widgetText(200).includes("quota-axi timed out"), "leader-exit descendant did not time out explicitly");
 await sleep(1100);
 assert(
   !(await readFile(process.env.FM_QUOTA_TEST_SURVIVORS, "utf8")).trim(),

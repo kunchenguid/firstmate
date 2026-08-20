@@ -1,4 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { readFileSync, watch, type FSWatcher } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_QUOTA_FRESHNESS_MS,
@@ -7,6 +10,7 @@ import {
   quotaProviderForPiProvider,
   selectActiveProviderQuota,
   type ParsedQuotaAxiReport,
+  type QuotaFailureReason,
   type QuotaView,
 } from "./lib/fm-pi-quota-status.ts";
 
@@ -24,7 +28,7 @@ const OFFICIAL_PROVIDER_BASE_URLS: Readonly<Record<string, string>> = {
 
 type QuotaProcessResult =
   | { kind: "ok"; stdout: string }
-  | { kind: "missing" | "failed" | "timeout" | "overflow" | "cancelled" };
+  | { kind: QuotaFailureReason };
 
 type QuotaProcess = {
   promise: Promise<QuotaProcessResult>;
@@ -48,6 +52,7 @@ export type FirstmateQuotaStatusOptions = {
   now?: () => number;
   width?: () => number;
   timers?: QuotaTimerScheduler;
+  authFile?: string;
 };
 
 type ActiveModel = NonNullable<ExtensionContext["model"]>;
@@ -56,18 +61,38 @@ type QuotaVerification =
   | { kind: "account"; accountId: string | null }
   | { kind: "source"; source: string };
 
+type StoredOAuthCredential = {
+  type: "oauth";
+  access: string;
+  refresh: string;
+  expires: number;
+  [key: string]: unknown;
+};
+
+type ResolvedOAuthAuth = {
+  apiKey?: string;
+  baseUrl?: string;
+};
+
 type QuotaTarget =
   | { kind: "resolving"; piProvider: string }
-  | { kind: "supported"; piProvider: string; verification: QuotaVerification }
+  | {
+      kind: "supported";
+      piProvider: string;
+      verification: QuotaVerification;
+      credentialRevision: string;
+    }
   | { kind: "unsupported"; view: Extract<QuotaView, { kind: "unsupported" }> };
 
 type CompatibleModelRegistry = {
   getProvider?: (provider: string) => {
-    auth?: { oauth?: { isSubscription?: boolean } };
+    auth?: {
+      oauth?: {
+        isSubscription?: boolean;
+        toAuth?: (credential: StoredOAuthCredential) => Promise<ResolvedOAuthAuth>;
+      };
+    };
   } | undefined;
-  getProviderAuth?: (provider: string) => Promise<{
-    auth: { apiKey?: string; baseUrl?: string };
-  } | undefined>;
   isUsingOAuth?: (model: ActiveModel) => boolean;
 };
 
@@ -78,6 +103,9 @@ type ActiveSession = {
   target: QuotaTarget;
   report: ParsedQuotaAxiReport | null;
   process: QuotaProcess | null;
+  operationAbort: AbortController | null;
+  credentialRevision: string;
+  credentialWatcher: FSWatcher | null;
   refreshInFlight: boolean;
   refreshPending: boolean;
   refreshTimer: unknown | null;
@@ -99,6 +127,49 @@ function unrefTimer(timer: unknown): void {
   if (typeof timer !== "object" || timer === null || !("unref" in timer)) return;
   const unref = (timer as { unref?: unknown }).unref;
   if (typeof unref === "function") unref.call(timer);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function defaultAuthFile(): string {
+  const configured = process.env.PI_CODING_AGENT_DIR;
+  let agentDir = configured && configured.trim() ? configured : join(homedir(), ".pi", "agent");
+  if (agentDir === "~") agentDir = homedir();
+  else if (agentDir.startsWith("~/")) agentDir = join(homedir(), agentDir.slice(2));
+  return join(agentDir, "auth.json");
+}
+
+function storedCredential(authFile: string, provider: string): unknown {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(authFile, "utf8"));
+    return isRecord(parsed) ? parsed[provider] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function storedOAuthCredential(value: unknown): StoredOAuthCredential | null {
+  if (!isRecord(value)) return null;
+  if (
+    value.type !== "oauth" ||
+    typeof value.access !== "string" ||
+    value.access.length === 0 ||
+    typeof value.refresh !== "string" ||
+    value.refresh.length === 0 ||
+    typeof value.expires !== "number" ||
+    !Number.isFinite(value.expires)
+  ) return null;
+  return value as StoredOAuthCredential;
+}
+
+function credentialRevision(value: unknown): string {
+  try {
+    return value === undefined ? "missing" : JSON.stringify(value);
+  } catch {
+    return "malformed";
+  }
 }
 
 function canonicalBaseUrl(value: string): string | null {
@@ -260,9 +331,8 @@ export function runQuotaAxiJson(options: {
   };
 }
 
-function processFailureView(kind: Exclude<QuotaProcessResult["kind"], "ok">, provider: string): QuotaView {
-  if (kind === "cancelled") return { kind: "unavailable", provider, label: null };
-  return { kind: "unavailable", provider, label: null };
+function processFailureView(reason: QuotaFailureReason, provider: string): QuotaView {
+  return { kind: "failure", provider, reason };
 }
 
 export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatusOptions = {}) {
@@ -274,6 +344,50 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
   const now = options.now ?? Date.now;
   const width = options.width;
   const timers = options.timers ?? defaultTimers;
+  const authFile = options.authFile ?? defaultAuthFile();
+
+  type BoundedAuthResult =
+    | { kind: "ok"; auth: ResolvedOAuthAuth }
+    | { kind: "failed" | "timeout" | "cancelled" };
+
+  function resolveOAuthAuth(
+    oauth: { toAuth?: (credential: StoredOAuthCredential) => Promise<ResolvedOAuthAuth> },
+    credential: StoredOAuthCredential,
+    signal: AbortSignal,
+  ): Promise<BoundedAuthResult> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer: unknown | null = null;
+      const finish = (result: BoundedAuthResult) => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) timers.clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      };
+      const onAbort = () => finish({ kind: "cancelled" });
+      if (signal.aborted) {
+        finish({ kind: "cancelled" });
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      timer = timers.setTimeout(() => finish({ kind: "timeout" }), timeoutMs);
+      unrefTimer(timer);
+      Promise.resolve()
+        .then(() => oauth.toAuth?.(credential))
+        .then((auth) => {
+          if (
+            !isRecord(auth) ||
+            (auth.apiKey !== undefined && typeof auth.apiKey !== "string") ||
+            (auth.baseUrl !== undefined && typeof auth.baseUrl !== "string")
+          ) {
+            finish({ kind: "failed" });
+            return;
+          }
+          finish({ kind: "ok", auth });
+        }, () => finish({ kind: "failed" }));
+    });
+  }
 
   return function firstmateQuotaStatus(pi: ExtensionAPI): void {
     let active: ActiveSession | null = null;
@@ -297,7 +411,6 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       const registry = ctx.modelRegistry as unknown as CompatibleModelRegistry;
       if (
         typeof registry.getProvider !== "function" ||
-        typeof registry.getProviderAuth !== "function" ||
         typeof registry.isUsingOAuth !== "function"
       ) {
         return {
@@ -315,42 +428,61 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       return { kind: "resolving", piProvider: model.provider };
     }
 
-    async function resolveTarget(ctx: ExtensionContext, model: ActiveModel | undefined): Promise<QuotaTarget> {
+    async function resolveTarget(
+      ctx: ExtensionContext,
+      model: ActiveModel | undefined,
+      signal: AbortSignal,
+    ): Promise<QuotaTarget> {
       const preflight = preflightTarget(ctx, model);
       if (preflight.kind !== "resolving") return preflight;
       if (!model) return { kind: "unsupported", view: { kind: "unsupported", provider: "no model" } };
 
       const registry = ctx.modelRegistry as unknown as CompatibleModelRegistry;
-      if (typeof registry.getProviderAuth !== "function") {
+      const provider = registry.getProvider?.call(ctx.modelRegistry, model.provider);
+      const oauth = provider?.auth?.oauth;
+      if (!oauth || typeof oauth.toAuth !== "function") {
         return {
           kind: "unsupported",
           view: { kind: "unsupported", provider: `${model.provider} (auth inspection unavailable)` },
         };
       }
-      let auth;
-      try {
-        auth = await registry.getProviderAuth.call(ctx.modelRegistry, model.provider);
-      } catch {
+
+      const rawCredential = storedCredential(authFile, model.provider);
+      const credential = storedOAuthCredential(rawCredential);
+      if (!credential) {
         return {
           kind: "unsupported",
           view: { kind: "unsupported", provider: `${model.provider} (auth unavailable)` },
         };
       }
-      if (!auth) {
+      if (credential.expires <= now()) {
         return {
           kind: "unsupported",
-          view: { kind: "unsupported", provider: `${model.provider} (auth unavailable)` },
+          view: { kind: "unsupported", provider: `${model.provider} (auth expired)` },
         };
       }
 
-      const effectiveBaseUrl = auth.auth.baseUrl ?? model.baseUrl;
+      const authResult = await resolveOAuthAuth(oauth, credential, signal);
+      if (authResult.kind !== "ok") {
+        const reason = authResult.kind === "timeout"
+          ? "auth timed out"
+          : authResult.kind === "cancelled"
+            ? "auth cancelled"
+            : "auth unavailable";
+        return {
+          kind: "unsupported",
+          view: { kind: "unsupported", provider: `${model.provider} (${reason})` },
+        };
+      }
+
+      const effectiveBaseUrl = authResult.auth.baseUrl ?? model.baseUrl;
       if (!isOfficialProviderBaseUrl(model.provider, effectiveBaseUrl)) {
         return {
           kind: "unsupported",
           view: { kind: "unsupported", provider: `${model.provider} (custom endpoint)` },
         };
       }
-      const verification = quotaVerification(model.provider, auth.auth.apiKey);
+      const verification = quotaVerification(model.provider, authResult.auth.apiKey);
       if (!verification) {
         return {
           kind: "unsupported",
@@ -360,12 +492,20 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           },
         };
       }
-      return { kind: "supported", piProvider: model.provider, verification };
+      return {
+        kind: "supported",
+        piProvider: model.provider,
+        verification,
+        credentialRevision: credentialRevision(rawCredential),
+      };
     }
 
     function currentView(session: ActiveSession, nowMs = now()): QuotaView {
       if (session.target.kind === "unsupported") return session.target.view;
       if (session.target.kind === "resolving") {
+        return { kind: "refreshing", provider: session.target.piProvider };
+      }
+      if (activeCredentialRevision(session.model) !== session.target.credentialRevision) {
         return { kind: "refreshing", provider: session.target.piProvider };
       }
       if (!session.report) return { kind: "refreshing", provider: session.target.piProvider };
@@ -381,6 +521,33 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     function clearExpiry(session: ActiveSession): void {
       if (session.expiryTimer !== null) timers.clearTimeout(session.expiryTimer);
       session.expiryTimer = null;
+    }
+
+    function activeCredentialRevision(model: ActiveModel | undefined): string {
+      return model
+        ? credentialRevision(storedCredential(authFile, model.provider))
+        : "no-model";
+    }
+
+    function watchCredentials(session: ActiveSession): void {
+      try {
+        session.credentialWatcher = watch(dirname(authFile), { persistent: false }, (_event, filename) => {
+          if (filename !== null && String(filename) !== basename(authFile)) return;
+          if (active !== session) return;
+          const revision = activeCredentialRevision(session.model);
+          if (revision === session.credentialRevision) return;
+          session.credentialRevision = revision;
+          session.generation += 1;
+          session.target = preflightTarget(session.ctx, session.model);
+          session.report = null;
+          cancelProcess(session);
+          render(session);
+          void refresh(session);
+        });
+        session.credentialWatcher.on("error", () => {});
+      } catch {
+        session.credentialWatcher = null;
+      }
     }
 
     function render(session: ActiveSession, override?: QuotaView): void {
@@ -414,6 +581,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     }
 
     function cancelProcess(session: ActiveSession): void {
+      session.operationAbort?.abort();
+      session.operationAbort = null;
       if (session.process) session.process.cancel();
       session.process = null;
     }
@@ -427,14 +596,17 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
 
       session.refreshInFlight = true;
       const generation = session.generation;
+      const operationAbort = new AbortController();
+      session.operationAbort = operationAbort;
       try {
-        const target = await resolveTarget(session.ctx, session.model);
+        const target = await resolveTarget(session.ctx, session.model, operationAbort.signal);
         if (active !== session || session.generation !== generation) return;
         session.target = target;
         if (target.kind === "unsupported") {
           render(session);
           return;
         }
+        session.credentialRevision = target.credentialRevision;
 
         const piProvider = target.piProvider;
         if (!session.report || currentView(session).kind !== "fresh") {
@@ -462,7 +634,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           session.process !== running
         ) return;
 
-        const completedTarget = await resolveTarget(session.ctx, session.model);
+        const completedTarget = await resolveTarget(session.ctx, session.model, operationAbort.signal);
         if (
           active !== session ||
           session.generation !== generation ||
@@ -472,6 +644,13 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         session.target = completedTarget;
         if (completedTarget.kind === "unsupported") {
           render(session);
+          return;
+        }
+        session.credentialRevision = completedTarget.credentialRevision;
+        if (completedTarget.credentialRevision !== target.credentialRevision) {
+          session.report = null;
+          session.refreshPending = true;
+          render(session, { kind: "refreshing", provider: completedTarget.piProvider });
           return;
         }
 
@@ -495,6 +674,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           }
         }
       } finally {
+        if (session.operationAbort === operationAbort) session.operationAbort = null;
         session.refreshInFlight = false;
         if (session.refreshPending && active === session) {
           session.refreshPending = false;
@@ -508,6 +688,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.refreshTimer = null;
       clearExpiry(session);
       session.refreshPending = false;
+      session.credentialWatcher?.close();
+      session.credentialWatcher = null;
       cancelProcess(session);
       session.ctx.ui.setWidget(WIDGET_KEY, undefined);
       if (active === session) active = null;
@@ -525,12 +707,16 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         target: preflightTarget(ctx, model),
         report: null,
         process: null,
+        operationAbort: null,
+        credentialRevision: activeCredentialRevision(model),
+        credentialWatcher: null,
         refreshInFlight: false,
         refreshPending: false,
         refreshTimer: null,
         expiryTimer: null,
       };
       active = session;
+      watchCredentials(session);
       session.refreshTimer = timers.setInterval(() => {
         void refresh(session);
       }, refreshMs);
@@ -551,6 +737,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       active.model = event.model;
       active.generation += 1;
       active.target = preflightTarget(ctx, event.model);
+      active.credentialRevision = activeCredentialRevision(event.model);
       cancelProcess(active);
       render(active);
       void refresh(active);

@@ -30,11 +30,14 @@ export type FreshQuotaView = {
   freshUntilMs: number;
 };
 
+export type QuotaFailureReason = "missing" | "failed" | "timeout" | "overflow" | "cancelled";
+
 export type QuotaView =
   | FreshQuotaView
   | { kind: "refreshing"; provider: string }
   | { kind: "unsupported"; provider: string }
   | { kind: "unavailable"; provider: string; label: string | null }
+  | { kind: "failure"; provider: string; reason: QuotaFailureReason }
   | { kind: "unverified"; provider: string }
   | { kind: "stale"; provider: string; label: string | null }
   | { kind: "malformed"; provider: string };
@@ -279,7 +282,7 @@ export function selectActiveProviderQuota(
   if (
     typeof rawProvider.state.stale !== "boolean" ||
     !status ||
-    (report.schemaVersion === 3 && !Array.isArray(sourcesTried)) ||
+    ((report.schemaVersion === 3 || fullProjection) && !Array.isArray(sourcesTried)) ||
     (sourcesTried !== undefined && (
       !Array.isArray(sourcesTried) ||
       sourcesTried.some((entry) => exactText(entry) === null)
@@ -414,6 +417,16 @@ export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.n
   if (view.kind === "unavailable") {
     const label = view.label ? ` ${view.label}` : "";
     return truncateToWidth(`Quota${label}: unavailable`, safeWidth, "…");
+  }
+  if (view.kind === "failure") {
+    const reason = {
+      missing: "quota-axi missing",
+      failed: "quota-axi failed",
+      timeout: "quota-axi timed out",
+      overflow: "quota-axi output too large",
+      cancelled: "quota refresh cancelled",
+    }[view.reason];
+    return truncateToWidth(`Quota: unavailable (${reason})`, safeWidth, "…");
   }
   if (view.kind === "unverified") {
     return truncateToWidth("Quota: unavailable (account unverified)", safeWidth, "…");
