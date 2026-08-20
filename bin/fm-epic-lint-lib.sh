@@ -93,3 +93,11 @@ fm_repo_registered() {
   [ -f "$1" ] || return 1
   awk -v n="$2" '$1=="-" && $2==n { found=1; exit } END { exit !found }' "$1"
 }
+
+# fm_registered_repos <registry-file>: print every registered project name (the
+# `- <name> ...` lines), one per line, in file order. Empty when the registry is
+# absent. Used to scan a story body for a repo other than its own `repo:` frontmatter.
+fm_registered_repos() {
+  [ -f "$1" ] || return 0
+  awk '$1=="-" && $2!="" { print $2 }' "$1"
+}

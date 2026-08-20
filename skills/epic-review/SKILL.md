@@ -25,8 +25,10 @@ Self-review defeats the gate: the whole reason this stage exists is a second, in
 1. **Story frontmatter is standard - this is a hard gate, and it is executable.**
    Run `bin/fm-epic-lint.sh <epic-dir>` on the epic directory; it is the single owner of the epic/story contract and the same check `fm-umbrella-promote.sh` runs at promote time.
    A non-zero exit is an automatic **FAIL**: copy its numbered problem list into your findings verbatim and stop treating the epic as passable until they are fixed and the lint is green.
-   It enforces, mechanically, exactly the contract in the block below - the seven required keys plus an optional `delivery:` mode and nothing else ad-hoc (`story:`/`phase:` are rejected), lower-kebab unique ids that match their filenames, matching `epic:`, registered `repo:`, valid `pr_base:`, exactly one `gate: true`, `depends:` naming real stories with no cycle, a resolving plan pointer, and a known `delivery:` value when that optional key is present - so this is the failure the whole pipeline exists to prevent, checked first and not negotiable.
+   It enforces, mechanically, exactly the contract in the block below - the seven required keys plus an optional `delivery:` mode and nothing else ad-hoc (`story:`/`phase:` are rejected), lower-kebab unique ids that match their filenames, matching `epic:`, registered `repo:`, valid `pr_base:`, exactly one `gate: true`, `depends:` naming real stories with no cycle, a resolving plan pointer, a known `delivery:` value when that optional key is present, and no story body that assigns work to a second repo (one story = one repo) - so this is the failure the whole pipeline exists to prevent, checked first and not negotiable.
    `fm-epic-lint.sh --help` documents the full contract; run it, do not re-derive the rules by eye.
+   Any multi-repo story is a FAIL-to-split: it can never dispatch as a single unit (a worker gets ONE worktree), so it must be split into per-repo stories linked by `depends:` before handoff - see the one-story-one-repo note below.
+   The lint FAILS when a body assigns work to a second repo and only WARNS on a bare cross-repo mention; treat a warning as your cue to judge whether the story is actually a bundled cross-repo unit hiding behind prose, and if it is, FAIL it to split even though the lint let it pass.
 
 2. **The contract is concrete and landable-first.**
    The shared contract (API shape, schema, proto, types package) must be concrete enough to land as its own story before dependent per-repo stories.
@@ -68,6 +70,12 @@ The optional `delivery:` records the story's intended delivery mode when it is k
 Omit it and firstmate resolves the mode at dispatch from the repo's registered posture, exactly as before.
 `fm-epic-lint` validates a present value against those three modes and warns (never fails) when a `no-mistakes-prod-only` repo's story is marked `direct-PR`, since that mode fits only an internal-only surface.
 The mode stays overridable by an explicit captain instruction at dispatch - it is never a hard lock.
+
+**One story = one repo = one dispatchable unit.**
+A crewmate spawns in ONE worktree, so a story whose body assigns work to a second repo cannot dispatch - it has to be split before it ever reaches a worker.
+`fm-epic-lint` scans each story body against the home's registered repos: it WARNS on a bare mention of a repo other than the story's own `repo:` (the author may reference a dependency benignly) and FAILS when that mention shares a line with a deliverable verb (touch, change, modify, update, add, wire, implement, build, ship, patch, create), because that body is assigning work to a second repo.
+Split a genuinely cross-repo unit into per-repo stories linked by `depends:` - the producer story lands the shared contract, the consumer story `depends:` on it - never one story that names two repos in prose.
+`FM_EPIC_LINT_MULTIREPO` tunes the strictness (`off` disables the scan, `warn` never fails, `strict` fails on any mention); the default layering above is what the review gate and promote-validate run.
 
 ## Output
 
