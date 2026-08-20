@@ -1310,6 +1310,95 @@ EOF
   esac
 }
 
+# --- Submit confirmation window ---------------------------------------------
+#
+# THE ONE owner of how long a submit core waits for its confirming evidence,
+# shared by every backend that confirms a submit (the retry core below, the
+# tmux core in bin/fm-tmux-lib.sh, and herdr's native-agent-state core in
+# bin/backends/herdr.sh).
+#
+# Why the window cannot be a constant. Every submit core waits for evidence
+# that the harness ACCEPTED our Enter: a turn starting, or our text leaving
+# the composer. Neither can appear until the harness has finished accepting a
+# submission, and that acceptance latency is a function of how long the
+# submitted line is, not a fixed cost. Measured live on agy 1.1.15 through
+# herdr 0.8.2, steering a mid-turn worker (docs/verification/runtime-backends.md
+# "Submit acceptance latency"): ~0.1s at 8 and 79 characters, 1.2-1.6s at 307,
+# and 3.3-7.4s at 615. claude on the same backend accepted every one of those
+# lines inside a tenth of a second, which is why a constant window looked
+# correct for years and then reported a landed steer as unsubmitted the moment
+# a real firstmate decision message (a few hundred characters) went to agy.
+#
+# Waiting longer never weakens the check. The verdict still requires the same
+# positive evidence, a composer that never clears still reports `pending`, and
+# every core returns the instant its evidence appears - so a harness that
+# accepts in 90ms pays nothing for a window sized to a slow one.
+#
+# FM_SUBMIT_CONFIRM_PER_CHAR: seconds of window per typed character. 0.015 is
+#   ~25% above the worst per-character rate measured above (7.44s / 615).
+# FM_SUBMIT_CONFIRM_MAX: hard cap, so an unusually long line cannot stall a
+#   caller indefinitely. 10s covers the worst measured acceptance with headroom.
+# FM_SUBMIT_CONFIRM_INTERVAL: spacing between samples inside the window. A
+#   window is SAMPLED, never slept through, so evidence landing early is seen
+#   early; a budget shorter than one interval collapses to a single sample at
+#   the end, which is exactly the pre-existing single-read behavior.
+FM_SUBMIT_CONFIRM_PER_CHAR=${FM_SUBMIT_CONFIRM_PER_CHAR:-0.015}
+FM_SUBMIT_CONFIRM_MAX=${FM_SUBMIT_CONFIRM_MAX:-10}
+FM_SUBMIT_CONFIRM_INTERVAL=${FM_SUBMIT_CONFIRM_INTERVAL:-0.25}
+
+# fm_submit_confirm_budget: the confirmation window for one Enter attempt.
+# Without <typed-chars> it returns the caller's own budget unchanged, so a
+# caller that has no line length (a bare --key Enter, a retry after the first
+# attempt already waited out the acceptance latency) keeps its previous timing
+# exactly.
+fm_submit_confirm_budget() {  # <caller-budget-seconds> [typed-chars] -> seconds
+  awk -v b="${1:-0}" -v n="${2:-0}" -v per="$FM_SUBMIT_CONFIRM_PER_CHAR" -v max="$FM_SUBMIT_CONFIRM_MAX" 'BEGIN {
+    b += 0
+    n += 0
+    per += 0
+    max += 0
+    if (b < 0) b = 0
+    if (n > 0 && per > 0) {
+      want = n * per
+      if (max > 0 && want > max) want = max
+      if (want > b) b = want
+    }
+    printf "%.4f", b
+  }' 2>/dev/null || printf '%s' "${1:-0}"
+}
+
+# fm_submit_confirm_polls: how many samples fit in <budget> at the configured
+# interval, never fewer than one.
+fm_submit_confirm_polls() {  # <budget-seconds> -> integer
+  awk -v b="${1:-0}" -v iv="$FM_SUBMIT_CONFIRM_INTERVAL" 'BEGIN {
+    b += 0
+    iv += 0
+    if (iv <= 0 || iv > b) { print 1; exit }
+    n = int(b / iv)
+    if (n < 1) n = 1
+    print n
+  }' 2>/dev/null || printf '1'
+}
+
+# fm_submit_confirm_wait: sample <state-fn> across <budget>, returning the
+# FIRST verdict that is not proven-or-unproven pending. A still-pending window
+# returns its last pending verdict, so the caller's retry and refusal logic is
+# unchanged - this only decides WHEN the caller is entitled to give up.
+fm_submit_confirm_wait() {  # <state-fn> <target> <budget> [expected-label] -> verdict
+  local state_fn=$1 target=$2 budget=$3 expected_label=${4:-} polls interval i state=unknown
+  polls=$(fm_submit_confirm_polls "$budget")
+  interval=$(awk -v b="$budget" -v n="$polls" 'BEGIN { n += 0; if (n < 1) n = 1; v = (b + 0) / n; if (v < 0) v = 0; printf "%.4f", v }' 2>/dev/null) || interval=$budget
+  for ((i = 0; i < polls; i++)); do
+    sleep "$interval"
+    state=$("$state_fn" "$target" "$expected_label")
+    case "$state" in
+      pending|pending-unproven) ;;
+      *) printf '%s' "$state"; return 0 ;;
+    esac
+  done
+  printf '%s' "$state"
+}
+
 # fm_composer_submit_retry_core: the ONE verify-and-retry-Enter submit loop
 # for the cursor-less backends (cmux, orca, zellij), parameterised by the
 # adapter's send-key and composer-state functions. The caller has already
@@ -1323,12 +1412,17 @@ EOF
 # and idle-baseline turn-started conversions its busy primitive enables), and
 # herdr confirms through native agent-state; both consume the same shared
 # verdict, so no shape knowledge lives in any of the three loops.
-fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label]
-  local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} i=0 state
+# <typed-chars> sizes the FIRST attempt's window to the submitted line (see
+# the submit confirmation window above). Only the first attempt pays it: once
+# that window has elapsed the harness has accepted everything we typed, so
+# every later Enter is judged on the caller's own budget as before.
+fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label] [typed-chars]
+  local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} typed_chars=${7:-} i=0 state budget
+  budget=$(fm_submit_confirm_budget "$sleep_s" "$typed_chars")
   while :; do
     "$send_key_fn" "$target" Enter "$expected_label" || true
-    sleep "$sleep_s"
-    state=$("$state_fn" "$target" "$expected_label")
+    state=$(fm_submit_confirm_wait "$state_fn" "$target" "$budget" "$expected_label")
+    budget=$sleep_s
     case "$state" in
       pending|pending-unproven) ;;
       *) printf '%s' "$state"; return 0 ;;

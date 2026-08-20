@@ -203,6 +203,57 @@ Kimi was not installed on the verification machine; its bordered shape is pinned
 This guard is the refresh command after an upgrade to any matrix-covered harness; rerun it and update the versions above rather than trusting this table across releases.
 Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
 
+## Submit acceptance latency
+
+The submit confirmation window (`bin/fm-composer-lib.sh`, "Submit confirmation window") is sized from how long a real harness takes to ACCEPT a submitted line, so this table is the empirical basis for that policy and must be refreshed after a harness upgrade.
+The measured quantity is the interval between the confirming Enter and the harness clearing the submitted text out of its composer, sampled every 0.15s.
+It is a terminal-UI fact rather than a model fact, so it is measurable without spending model quota.
+
+Measured on macOS arm64 through Herdr 0.8.2 protocol 21, against a worker mid-turn, in an isolated `bin/fm-herdr-lab.sh` session.
+
+| Submitted line | agy 1.1.12-1.1.15 (2026-08-19) | agy 1.1.16 (2026-08-20) |
+| --- | --- | --- |
+| 8 characters | 0.10-0.31s | 0.09-0.15s |
+| 79 characters | 0.09-0.13s | 0.13-0.18s |
+| 307 characters | 1.22-1.58s | 0.74-1.36s |
+| 615 characters | 3.26-7.44s | 1.63-2.54s |
+
+Acceptance latency scales with the submitted line's length on agy, and 1.1.16 lowered the magnitude without removing the scaling.
+claude 2.1.228 accepted every one of those lengths inside a tenth of a second on the same backend, which is why a constant confirmation window looked correct for years: it only expires on a harness whose acceptance is slow, and only for a line long enough to make it so.
+
+The end-to-end consequence, measured with the real `bin/fm-send.sh` against a live agy 1.1.16 pane, three sends per cell, with acceptance read from the pane transcript rather than from a model reply:
+
+| Steer length | Constant window (`FM_SUBMIT_CONFIRM_PER_CHAR=0`) | Line-sized window (shipped) |
+| --- | --- | --- |
+| 314 characters | 3/3 confirmed | 3/3 confirmed |
+| 614 characters | 3/3 confirmed | 3/3 confirmed |
+| 1215 characters | 0/3 confirmed - three `verdict=pending` reports on steers the harness had accepted | 3/3 confirmed |
+
+claude was unaffected at every length under both windows.
+
+The refresh command is the live guard, which drives the real submit core against every installed harness with a realistic multi-hundred-character steer into a mid-turn worker:
+
+```sh
+FM_SUBMIT_LATENCY_LIVE=1 tests/fm-submit-latency-live-e2e.test.sh
+```
+
+Observed output on 2026-08-20:
+
+```text
+ok - agy (1.1.16): a 582-character mid-turn steer confirmed submitted in 2s
+ok - claude (2.1.228 (Claude Code)): a 582-character mid-turn steer confirmed submitted in 1s
+# harness absent, not verified here: codex
+# harness absent, not verified here: opencode
+# harness absent, not verified here: pi
+# harness absent, not verified here: grok
+# harness absent, not verified here: kimi
+# harness absent, not verified here: muse
+ok - live submit-acceptance-latency guard: 2 installed harness(es) confirmed a realistic-length steer
+```
+
+Only agy and claude were installed on the verification machine.
+The portable half of the guarantee - that a late-clearing composer confirms, that one which never clears still refuses, and that an unreadable one is still a loud refusal - is pinned without any harness by `tests/fm-submit-confirm-window.test.sh`.
+
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
 ## Herdr

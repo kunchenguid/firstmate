@@ -239,12 +239,18 @@ fm_pane_is_busy() {  # <target> [harness]
 # fm_tmux_submit_enter_core caller, or a pane already busy before typing) an
 # `unknown` verdict is preserved untouched: busy conversion without the
 # transition evidence could mark an undelivered message delivered.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle]
-  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} i=0 j state
+# <typed-chars> sizes the FIRST Enter attempt's confirmation window to the
+# submitted line, because a harness cannot clear its composer before it has
+# accepted the whole line and that acceptance latency scales with the line's
+# length (bin/fm-composer-lib.sh: "Submit confirmation window"). Omitting it
+# keeps the previous constant timing exactly.
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle] [typed-chars]
+  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} typed_chars=${5:-} i=0 j state budget
+  budget=$(fm_submit_confirm_budget "$sleep_s" "$typed_chars")
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
-    sleep "$sleep_s"
-    state=$(fm_tmux_composer_state "$target")
+    state=$(fm_submit_confirm_wait fm_tmux_composer_state "$target" "$budget")
+    budget=$sleep_s
     case "$state" in
       pending|pending-unproven) ;;
       unknown)
@@ -292,5 +298,5 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   [ "$baseline_state" = idle ] && baseline_idle=1
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle" "${#text}"
 }

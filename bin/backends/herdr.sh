@@ -2794,7 +2794,8 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 #   - Slow transition: fm_backend_herdr_wait_for_working samples repeatedly
 #     across herdr's per-attempt confirmation budget (not once at the end), so a
 #     transition landing partway through a window is still caught before this
-#     loop gives up and sends a needless extra Enter.
+#     loop gives up and sends a needless extra Enter. The composer branch below
+#     samples its own window the same way, for the same reason.
 #   - Instant round-trip (a turn starts AND returns to idle between two
 #     polls): unavoidable in the absolute, but bounded by how tightly polls
 #     are packed into the budget; real claude/codex measured first-working
@@ -2824,19 +2825,38 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # path still never reads pane content, and a pane already mid-turn before we
 # typed keeps reporting `pending` rather than borrowing someone else's turn as
 # proof of our own delivery.
+# Window width (2026-08-20 incident): both branches above waited a CONSTANT
+# per-attempt budget, but neither a started turn nor an emptied composer can
+# appear before the harness has accepted the whole typed line, and that
+# acceptance latency scales with the line's length - measured on agy at ~0.1s
+# for a short steer and seconds for a few-hundred-character one, while claude
+# accepted every length inside a tenth of a second. A realistic firstmate
+# decision message to agy therefore finished landing AFTER the budget expired
+# and was reported unsubmitted, which pushed firstmate into recovery against a
+# healthy worker. The first Enter attempt now waits a window sized to that
+# line (bin/fm-composer-lib.sh: "Submit confirmation window"), and both
+# branches sample across it rather than reading once at the end. Nothing about
+# the verdict loosened: the same positive evidence is still required, and a
+# composer that never clears still reports `pending`. Only the first attempt
+# pays the widened window - once it has elapsed the harness has accepted
+# everything we typed, so later retries keep the caller's own budget.
 # Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
 # submit vocabulary. Empty means confirmed submitted for every backend; how
 # each backend confirms it is an internal decision, and herdr's is no longer
 # literally "the composer read empty".
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local raw_status footer_baseline=''
+  local raw_status footer_baseline='' budget
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   baseline=$(fm_backend_herdr_classify_submit_agent_status "$raw_status")
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
+  # The FIRST attempt waits out this line's acceptance latency on BOTH
+  # confirmation paths, because neither a started turn nor an emptied composer
+  # can appear before the harness has accepted the whole line.
+  budget=$(fm_backend_herdr_submit_confirm_budget "$sleep_s" "${#text}")
   # Typing never starts a turn, so a footer read taken after the literal send
   # and before the first Enter is still a pre-submission baseline.
   [ "$baseline" = idle ] || footer_baseline=$(fm_backend_herdr_rendered_busy_state "$target")
@@ -2844,16 +2864,16 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     fm_backend_herdr_send_key "$target" Enter || true
     if [ "$baseline" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-        "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
+        "$budget" "$(fm_backend_herdr_submit_polls "$budget")")
     else
-      sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target")
+      verdict=$(fm_submit_confirm_wait fm_backend_herdr_composer_state "$target" "$budget")
       if [ "$verdict" = pending ] && [ "$raw_status" != working ] \
         && [ "$footer_baseline" = idle ] \
         && [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then
         verdict=busy
       fi
     fi
+    budget=$confirm_sleep
     case "$verdict" in
       busy) printf 'empty'; return 0 ;;
       empty) printf 'empty'; return 0 ;;
@@ -3079,15 +3099,38 @@ fm_backend_herdr_busy_state() {  # <target>
 FM_BACKEND_HERDR_SUBMIT_POLLS=${FM_BACKEND_HERDR_SUBMIT_POLLS:-6}
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=${FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP:-0.6}
 
-fm_backend_herdr_submit_confirm_budget() {  # <caller-budget-seconds>
-  awk -v b="${1:-0}" -v m="$FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP" 'BEGIN {
+# fm_backend_herdr_submit_confirm_budget: this adapter's own floor applied on
+# top of the shared line-length window (bin/fm-composer-lib.sh: "Submit
+# confirmation window"), which is the single owner of how a submitted line's
+# length maps to a confirmation budget.
+fm_backend_herdr_submit_confirm_budget() {  # <caller-budget-seconds> [typed-chars]
+  local floored
+  floored=$(awk -v b="${1:-0}" -v m="$FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP" 'BEGIN {
     b += 0
     m += 0
     if (b < 0) b = 0
     if (m < 0) m = 0
     if (m > b) b = m
     printf "%.4f", b
-  }' 2>/dev/null || printf '%s' "${1:-0}"
+  }' 2>/dev/null) || floored=${1:-0}
+  fm_submit_confirm_budget "$floored" "${2:-}"
+}
+
+# fm_backend_herdr_submit_polls: samples to spread across <budget>. The
+# explicit FM_BACKEND_HERDR_SUBMIT_POLLS knob wins whenever it asks for MORE
+# samples (tests pin exact call counts with it); a budget widened for a long
+# line is otherwise sampled at the shared interval so evidence landing early
+# in a long window is still seen early.
+fm_backend_herdr_submit_polls() {  # <budget-seconds> -> integer
+  local derived
+  derived=$(fm_submit_confirm_polls "$1")
+  awk -v a="$FM_BACKEND_HERDR_SUBMIT_POLLS" -v b="$derived" 'BEGIN {
+    a += 0
+    b += 0
+    if (a < 1) a = 1
+    if (b < 1) b = 1
+    print (a > b) ? a : b
+  }' 2>/dev/null || printf '%s' "$FM_BACKEND_HERDR_SUBMIT_POLLS"
 }
 
 fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <polls>

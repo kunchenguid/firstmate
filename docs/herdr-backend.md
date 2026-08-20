@@ -213,8 +213,12 @@ Slash and dollar-prefixed input uses the shared harness-aware settle before the 
 Text is typed once; only Enter is retried.
 
 On an idle or done native baseline, submit confirmation waits for `working` or `blocked` across a bounded polling window.
-On an already active or unreadable baseline, it falls back to conservative composer clearance.
+On an already active or unreadable baseline, it falls back to conservative composer clearance, which is now sampled across that same window rather than read once.
 A fully unreadable target stops retrying and reports unknown.
+
+The window's width is sized to the submitted line rather than being a constant, because neither a started turn nor a cleared composer can appear before the harness has accepted the whole line, and that acceptance latency scales with the line's length on some harnesses.
+`bin/fm-composer-lib.sh` ("Submit confirmation window") owns that policy for every backend, and `docs/verification/runtime-backends.md` ("Submit acceptance latency") holds the measurements it is derived from.
+Only the first Enter attempt pays the widened window; once it has elapsed the harness has accepted everything that was typed, so later retries use the caller's own budget as before.
 
 Some harnesses never present a legibly idle native baseline at all, so the composer fallback is their only path.
 Herdr reports a Cursor pane `blocked` in every state, and Cursor's mid-turn composer renders its placeholder beside a right-aligned busy token, which is composer content and therefore `pending` on a composer that holds no user text.
