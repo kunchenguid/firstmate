@@ -25,6 +25,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GROUPS_FILE="$CONFIG/signal-groups"
 SEND_TIMEOUT=${FM_SIGNAL_COMMAND_TIMEOUT:-30}
 SOURCE_ID=signal-account
+SIGNAL_STATE_DIR="$STATE/signal"
+PRIVATE_TEMP_DIR="$SIGNAL_STATE_DIR/tmp"
 
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
@@ -63,8 +65,20 @@ usage() { sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 positive_int() { case "${1-}" in ''|*[!0-9]*) return 1 ;; 0) return 1 ;; *) return 0 ;; esac }
 
 private_tempfile() {
-  local target=$1 template=$2 file
-  file=$(mktemp "$template") || return 1
+  local target=$1 prefix=$2 file
+  if [ -e "$SIGNAL_STATE_DIR" ] || [ -L "$SIGNAL_STATE_DIR" ]; then
+    [ -d "$SIGNAL_STATE_DIR" ] && [ ! -L "$SIGNAL_STATE_DIR" ] || return 1
+  else
+    (umask 077; mkdir -p "$SIGNAL_STATE_DIR") || return 1
+  fi
+  chmod 700 "$SIGNAL_STATE_DIR" || return 1
+  if [ -e "$PRIVATE_TEMP_DIR" ] || [ -L "$PRIVATE_TEMP_DIR" ]; then
+    [ -d "$PRIVATE_TEMP_DIR" ] && [ ! -L "$PRIVATE_TEMP_DIR" ] || return 1
+  else
+    (umask 077; mkdir -p "$PRIVATE_TEMP_DIR") || return 1
+  fi
+  chmod 700 "$PRIVATE_TEMP_DIR" || return 1
+  file=$(umask 077; mktemp "$PRIVATE_TEMP_DIR/$prefix.XXXXXX") || return 1
   PRIVATE_TEMPFILES+=("$file")
   chmod 600 "$file" || return 1
   printf -v "$target" '%s' "$file"
@@ -179,7 +193,7 @@ account_number() {
   local target=$1 output discovered
   positive_int "$SEND_TIMEOUT" || die "FM_SIGNAL_COMMAND_TIMEOUT must be a positive integer"
   require_signal_account_access
-  private_tempfile output "${TMPDIR:-/tmp}/fm-signal-accounts.XXXXXX" || die "cannot create private account result"
+  private_tempfile output fm-signal-accounts || die "cannot create private account result"
   if ! fm_run_timed "$SEND_TIMEOUT" signal-cli listAccounts >"$output" 2>/dev/null; then
     rm -f "$output"
     die "Signal account discovery failed or timed out"
@@ -336,14 +350,14 @@ cmd_send_locked() {
   label=$(display_label "$selector") || exit 1
   cmd_retire_locked "$selector" >/dev/null || die "could not retire Signal receive source"
   account_number account || exit 1
-  private_tempfile raw "${TMPDIR:-/tmp}/fm-signal-raw.XXXXXX" || die "cannot create private Signal message"
+  private_tempfile raw fm-signal-raw || die "cannot create private Signal message"
   if [ "$message" = - ]; then
     cat >"$raw" || { rm -f "$raw"; die "cannot read Signal message"; }
   else
     cp "$message" "$raw" || { rm -f "$raw"; die "cannot stage Signal message"; }
   fi
   [ -s "$raw" ] || { rm -f "$raw"; die "Signal message is empty"; }
-  private_tempfile prefixed "${TMPDIR:-/tmp}/fm-signal-message.XXXXXX" || { rm -f "$raw"; die "cannot create private Signal message"; }
+  private_tempfile prefixed fm-signal-message || { rm -f "$raw"; die "cannot create private Signal message"; }
   SIGNAL_DISPLAY_LABEL="$label" FM_SIGNAL_RAW="$raw" python3 -c '
 import os
 import sys
@@ -378,7 +392,7 @@ cmd_send() {
   local selector=${1-} message=${2:--} lock send_rc=0 staged='' ownership_status
   validate_selector "$selector"
   if [ "$message" = - ]; then
-    private_tempfile staged "${TMPDIR:-/tmp}/fm-signal-input.XXXXXX" || die "cannot create private Signal message"
+    private_tempfile staged fm-signal-input || die "cannot create private Signal message"
     cat >"$staged" || { rm -f "$staged"; die "cannot read Signal message"; }
     message=$staged
   fi

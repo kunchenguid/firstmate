@@ -14,6 +14,18 @@ SIGNAL_TMP="$SIGNAL_ROOT/private-tmp"
 INTERRUPT_ROOT="$SIGNAL_ROOT/interruption-cli"
 mkdir -p "$FAKEBIN" "$SIGNAL_TMP" "$INTERRUPT_ROOT"
 export FM_PROCEVENT_CLAIM_ROOT="$SIGNAL_ROOT/claims"
+export FM_REAL_PYTHON3
+FM_REAL_PYTHON3=$(command -v python3)
+
+cat > "$FAKEBIN/python3" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_SIGNAL_RAW:-}" ]; then
+  sleep "${FM_FAKE_SIGNAL_PREFIX_DELAY:-0}"
+fi
+exec "$FM_REAL_PYTHON3" "$@"
+SH
+chmod +x "$FAKEBIN/python3"
 
 cat > "$FAKEBIN/signal-cli" <<'SH'
 #!/usr/bin/env bash
@@ -112,17 +124,36 @@ cleanup_sources() {
 trap cleanup_sources EXIT
 
 wait_for_private_temp() {
-  local pattern=$1
+  local home=$1 pattern=$2 dir="$1/state/signal/tmp" file
   for _ in $(seq 1 100); do
-    find "$SIGNAL_TMP" -type f -name "$pattern" -print -quit | grep -q . && return 0
+    file=$(find "$dir" -type f -name "$pattern" -print -quit 2>/dev/null)
+    if [ -n "$file" ]; then
+      [ "$(file_mode "$home/state/signal")" = 700 ] || fail "Signal state directory is not mode 0700"
+      [ "$(file_mode "$dir")" = 700 ] || fail "Signal temporary directory is not mode 0700"
+      [ "$(file_mode "$file")" = 600 ] || fail "Signal temporary file is not mode 0600"
+      [ -z "$(find "$SIGNAL_TMP" -type f -name 'fm-signal-*' -print -quit)" ] \
+        || fail "Signal operation staged sensitive bytes outside its effective home"
+      return 0
+    fi
     sleep 0.02
   done
   return 1
 }
 
 assert_no_private_temps() {
-  [ -z "$(find "$SIGNAL_TMP" -type f -name 'fm-signal-*' -print -quit)" ] \
+  local home=$1
+  [ -z "$(find "$home/state/signal/tmp" -type f -name 'fm-signal-*' -print -quit 2>/dev/null)" ] \
     || fail "interrupted Signal operation retained a private temporary"
+  [ -z "$(find "$SIGNAL_TMP" -type f -name 'fm-signal-*' -print -quit)" ] \
+    || fail "interrupted Signal operation staged sensitive bytes outside its effective home"
+}
+
+file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
 }
 
 assert_runner_owned_receive() {
@@ -149,12 +180,12 @@ FM_HOME="$HINT" FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$HINT/config" \
 interrupted_pid=$!
 exec 9> "$INTERRUPT_FIFO"
 printf 'partial fixture' >&9
-wait_for_private_temp 'fm-signal-input.*' || fail "stdin staging interruption fixture never created its private temporary"
+wait_for_private_temp "$HINT" 'fm-signal-input.*' || fail "stdin staging interruption fixture never created its private temporary"
 kill -TERM "$interrupted_pid" 2>/dev/null || true
 exec 9>&-
 wait "$interrupted_pid" 2>/dev/null || true
 rm -f "$INTERRUPT_FIFO"
-assert_no_private_temps
+assert_no_private_temps "$HINT"
 
 printf 'interruption fixture\n' > "$SIGNAL_ROOT/interruption-message"
 perl -e 'setpgrp(0, 0) or exit 125; exec @ARGV; exit 125' \
@@ -164,10 +195,23 @@ perl -e 'setpgrp(0, 0) or exit 125; exec @ARGV; exit 125' \
     send team "$SIGNAL_ROOT/interruption-message" \
     > "$SIGNAL_ROOT/interrupted-account.out" 2> "$SIGNAL_ROOT/interrupted-account.err" &
 interrupted_pid=$!
-wait_for_private_temp 'fm-signal-accounts.*' || fail "account interruption fixture never created its private temporary"
+wait_for_private_temp "$HINT" 'fm-signal-accounts.*' || fail "account interruption fixture never created its private temporary"
 kill -TERM -"$interrupted_pid" 2>/dev/null || true
 wait "$interrupted_pid" 2>/dev/null || true
-assert_no_private_temps
+assert_no_private_temps "$HINT"
+
+perl -e 'setpgrp(0, 0) or exit 125; exec @ARGV; exit 125' \
+  env FM_HOME="$HINT" FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$HINT/config" \
+    PATH="$FAKEBIN:$PATH" TMPDIR="$SIGNAL_TMP" FM_FAKE_SIGNAL_ROOT="$INTERRUPT_ROOT" \
+    FM_FAKE_SIGNAL_PREFIX_DELAY=30 "$ROOT/bin/fm-procevent-signal.sh" \
+    send team "$SIGNAL_ROOT/interruption-message" \
+    > "$SIGNAL_ROOT/interrupted-prefix.out" 2> "$SIGNAL_ROOT/interrupted-prefix.err" &
+interrupted_pid=$!
+wait_for_private_temp "$HINT" 'fm-signal-raw.*' || fail "raw message interruption fixture never created its private temporary"
+wait_for_private_temp "$HINT" 'fm-signal-message.*' || fail "prefixed message interruption fixture never created its private temporary"
+kill -TERM -"$interrupted_pid" 2>/dev/null || true
+wait "$interrupted_pid" 2>/dev/null || true
+assert_no_private_temps "$HINT"
 
 perl -e 'setpgrp(0, 0) or exit 125; exec @ARGV; exit 125' \
   env FM_HOME="$HINT" FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$HINT/config" \
@@ -176,11 +220,11 @@ perl -e 'setpgrp(0, 0) or exit 125; exec @ARGV; exit 125' \
     send team "$SIGNAL_ROOT/interruption-message" \
     > "$SIGNAL_ROOT/interrupted-send.out" 2> "$SIGNAL_ROOT/interrupted-send.err" &
 interrupted_pid=$!
-wait_for_private_temp 'fm-signal-message.*' || fail "send interruption fixture never created its private temporary"
+wait_for_private_temp "$HINT" 'fm-signal-message.*' || fail "send interruption fixture never created its private temporary"
 kill -TERM -"$interrupted_pid" 2>/dev/null || true
 wait "$interrupted_pid" 2>/dev/null || true
-assert_no_private_temps
-pass "interruptions remove partial stdin, account, and outbound private temporaries"
+assert_no_private_temps "$HINT"
+pass "Signal temporaries stay home-local, private, and clean across interruptions"
 
 signal "$H" arm team >/dev/null
 reconcile "$H" >/dev/null
