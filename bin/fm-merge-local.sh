@@ -27,12 +27,18 @@
 # wholly-ignored directory as one entry and a landing that merely adds a file
 # beside someone's scratch work destroys nothing.
 # Anything else refuses with the concrete reason. An origin spelled relative to
-# the clone or with a leading tilde names that same folder, so it is anchored
-# against the clone first, the way seeding anchors the origin it seeds from; the
-# carry then succeeds with an advisory to re-point that origin, because git
-# resolves a relative origin against each linked worktree's own directory and no
-# worker can be spawned from a clone spelled that way. A path-shaped origin that
-# cannot be anchored refuses rather than being reported as somewhere else. An
+# the clone names that same folder, so it is anchored against the clone first, the
+# way seeding anchors the origin it seeds from, and both owners then hold one
+# value. An origin spelled with a leading tilde is anchored against $HOME for this
+# carry alone: seeding does not expand a tilde and git never expands one in a
+# local-path remote, so a clone spelled that way cannot fetch from its own origin.
+# Either spelling therefore carries with an advisory to re-point that origin,
+# because a clone spelled either way can receive a landing but can never have a
+# worker spawned in it. An anchored path is then judged as what it is, a path on
+# this machine: absolute, no control character, no ".." segment, and a space or
+# any other ordinary path character welcome. A path-shaped origin that cannot be
+# anchored, or that is anchored and still unusable, refuses naming the fault
+# rather than being reported as somewhere else. An
 # origin that is absent, a bare repository, or a URL on another host is not a
 # folder anyone reads, so the landing simply reports that it ended at the clone.
 # Both stages are idempotent, so a repeat run converges instead of refusing.
@@ -99,43 +105,49 @@ echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
 # Stage two: carry the landed default branch into the folder this clone calls
 # origin. Everything below either completes that carry or refuses it out loud;
 # nothing here is allowed to reach for a fallback.
-PROJ_ABS=$(cd "$PROJ" && pwd -P)
+PROJ_ABS=$(CDPATH='' cd -- "$PROJ" && pwd -P)
 ORIGIN_URL=$(git -C "$PROJ" remote get-url origin 2>/dev/null || true)
 if [ -z "$ORIGIN_URL" ]; then
   echo "landing ended in $PROJ: it has no origin, so this clone is the project's only copy"
   exit 0
 fi
-# A clone may name its origin the way a person types a path, relative to the clone
-# or with a leading tilde. Anchor those against the clone itself before asking
-# what the origin is, so the landing and bin/fm-home-seed.sh agree about the same
-# value; the shared validator still only ever sees an absolute path.
-ORIGIN_SPELLING=$ORIGIN_URL
-ORIGIN_ANCHORED=
-if fm_project_origin_is_path_form "$ORIGIN_URL"; then
-  # shellcheck disable=SC2088 # The tilde is a literal prefix in a value read from git config, not a path this script writes, so these branches match and expand it rather than let the shell do it.
-  case $ORIGIN_URL in
-    file://* | /?*) ;;
-    '~') ORIGIN_SPELLING=${HOME:-}; ORIGIN_ANCHORED=1 ;;
-    '~/'*) ORIGIN_SPELLING=${HOME:+${HOME%/}/${ORIGIN_URL#'~/'}}; ORIGIN_ANCHORED=1 ;;
-    *)
-      ORIGIN_SPELLING=$( (cd "$PROJ_ABS" && cd -- "$ORIGIN_URL" && pwd -P) 2>/dev/null ) || ORIGIN_SPELLING=
-      ORIGIN_ANCHORED=1
-      ;;
-  esac
-  if [ -z "$ORIGIN_SPELLING" ]; then
-    echo "REFUSED: origin $ORIGIN_URL is spelled as a path but names no folder relative to $PROJ, so the landing cannot reach the project's own folder." >&2
-    echo "The change is safe in $PROJ on $DEFAULT; re-point that origin at the folder's absolute path, then retry." >&2
-    exit 1
-  fi
-fi
-if ! ORIGIN_PATH=$(fm_project_origin_local_path "$ORIGIN_SPELLING"); then
-  if fm_project_origin_is_path_form "$ORIGIN_URL"; then
-    echo "REFUSED: origin $ORIGIN_URL is spelled as a path this landing may not follow, so it cannot reach the project's own folder." >&2
-    echo "The change is safe in $PROJ on $DEFAULT; re-point that origin at the folder's absolute path, then retry." >&2
-    exit 1
-  fi
+if ! fm_project_origin_is_path_form "$ORIGIN_URL"; then
   echo "landing ended in $PROJ: origin $ORIGIN_URL is not a folder on this machine"
   exit 0
+fi
+# A clone may name its origin the way a person types a path, relative to the clone
+# or with a leading tilde. A relative spelling is anchored against the clone
+# itself, exactly as normalize_origin_url in bin/fm-home-seed.sh anchors the origin
+# it seeds from, so both owners hold the same value. A tilde is anchored against
+# $HOME for this carry alone: normalize_origin_url does not expand one and git
+# never expands one in a local-path remote, so a clone spelled that way cannot
+# fetch from its own origin at all, which is exactly what the advisory below tells
+# the operator to fix. Either way what follows sees a path already anchored on this
+# machine, so it is judged as a local path rather than as a value bound elsewhere.
+ORIGIN_SPELLING=$ORIGIN_URL
+ORIGIN_ANCHORED=
+# shellcheck disable=SC2088 # The tilde is a literal prefix in a value read from git config, not a path this script writes, so these branches match and expand it rather than let the shell do it.
+case $ORIGIN_URL in
+  file://* | /?*) ;;
+  '~') ORIGIN_SPELLING=${HOME:-}; ORIGIN_ANCHORED=1 ;;
+  '~/'*) ORIGIN_SPELLING=${HOME:+${HOME%/}/${ORIGIN_URL#'~/'}}; ORIGIN_ANCHORED=1 ;;
+  *)
+    ORIGIN_SPELLING=$( (CDPATH='' cd -- "$PROJ_ABS" && CDPATH='' cd -- "$ORIGIN_URL" && pwd -P) 2>/dev/null ) || ORIGIN_SPELLING=
+    ORIGIN_ANCHORED=1
+    ;;
+esac
+if [ -z "$ORIGIN_SPELLING" ]; then
+  echo "REFUSED: origin $ORIGIN_URL is spelled as a path but names no folder relative to $PROJ, so the landing cannot reach the project's own folder." >&2
+  echo "The change is safe in $PROJ on $DEFAULT; re-point that origin at the folder's absolute path, then retry." >&2
+  exit 1
+fi
+if ! ORIGIN_PATH=$(fm_project_origin_anchored_local_path "$ORIGIN_SPELLING"); then
+  origin_fault=$(fm_project_origin_anchored_local_fault "$ORIGIN_SPELLING")
+  origin_named="origin $ORIGIN_URL"
+  [ "$ORIGIN_SPELLING" = "$ORIGIN_URL" ] || origin_named="origin $ORIGIN_URL, which names $ORIGIN_SPELLING,"
+  echo "REFUSED: $origin_named is not a folder this landing can follow because $origin_fault." >&2
+  echo "The change is safe in $PROJ on $DEFAULT; give that origin a plain absolute path to the folder, then retry." >&2
+  exit 1
 fi
 if [ ! -d "$ORIGIN_PATH" ]; then
   echo "REFUSED: origin $ORIGIN_PATH is missing, so the landing cannot reach the project's own folder." >&2
