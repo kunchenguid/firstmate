@@ -53,7 +53,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
 | `fm-remote-agent-lib.sh` | Own native remote-agent metadata, normalized task state, private artifacts, and report safety |
 | `fm-remote-agent-aime.sh` | Select AIME's established lifecycle while publishing new `executor=remote-agent` records |
-| `fm-remote-agent-ida.sh` | Probe, dispatch, adopt, reconcile, cancel, and retire an SG iDA remote-agent task |
+| `fm-remote-agent-ida.sh` | Probe, dispatch, adopt, reconcile, cancel, abandon, and retire an SG iDA remote-agent task |
 | `fm-ida-remote-lib.sh`   | Own iDA configuration, normalized observations, and provider-state validation |
 | `fm-bytedcli-mcp-call.sh` | Pass approved private iDA MCP tool arguments through stdin and emit normalized tool JSON |
 | `fm-cloud-research-aime.sh` | Probe, dispatch, adopt, reconcile, interrupt, retire, or explicitly sandbox-verify an AIME research task |

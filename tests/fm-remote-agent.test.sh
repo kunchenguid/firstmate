@@ -247,6 +247,67 @@ test_pre_submission_unavailable_recovers_without_duplicate() {
   pass "pre-submission provider unavailability preserves the safe checkpoint and recovers with one create"
 }
 
+test_artifact_store_idempotency() {
+  local home id=ida-store sha provider rc=0
+  home=$(new_home store)
+  mkdir -p "$home/data/$id"
+  printf 'PRIVATE_PROMPT_alpha\n' >"$home/data/$id/instructions.txt"; chmod 0600 "$home/data/$id/instructions.txt"
+  sha=$(sha256sum "$home/data/$id/instructions.txt" | awk '{print $1}')
+  provider=$(jq -cn --arg marker "firstmate:$id:${sha:0:16}" '{region:"sg",identity:"user",session_marker:$marker,session_id:null,task_id:null,agent_id:null,agent_name:null,model:null,provider_status:null}')
+  FM_HOME="$home" bash -c '
+    set -u
+    . "$1/bin/fm-remote-agent-lib.sh"
+    STATE="$2/state"; DATA="$2/data"; id=$3
+    fm_remote_state_initialize "$id" ida research "$2/data/$id/instructions.txt" "$4" 0.128.0 "$5" || exit 10
+    printf "same-bytes\n" >"$2/a.json"; printf "same-bytes\n" >"$2/b.json"; printf "other-bytes\n" >"$2/c.json"
+    first=$(fm_remote_artifact_store "$id" observation "$2/a.json") || exit 11
+    again=$(fm_remote_artifact_store "$id" observation "$2/b.json") || exit 12
+    [ "$first" = "$again" ] || exit 13
+    fm_remote_artifact_store "$id" observation "$2/c.json" >/dev/null 2>&1 && exit 14
+    exit 0
+  ' _ "$ROOT" "$home" "$id" "$sha" "$provider"; rc=$?
+  [ "$rc" -eq 0 ] || fail "remote artifact store idempotency drifted (rc=$rc)"
+  assert_grep 'same-bytes' "$home/state/remote-tasks/$id/artifacts/1-observation.json" "idempotent re-store lost the identical artifact"
+  pass "remote artifact store re-verifies identical content and refuses different content at the same revision"
+}
+
+test_abandon_after_authoritative_zero_match() {
+  local home fakebin id=ida-abandon dup=ida-abandon-dup marker sha creates
+  home=$(new_home abandon); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"
+  new_task "$home" "$id"; : >"$home/sessions.tsv"; : >"$home/bytedcli.log"
+  FM_IDA_FAKE_MODE=timeout-zero dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail "abandon fixture dispatch failed"
+  wait_phase "$home" "$id" ambiguous || fail "timeout-zero submission did not wedge ambiguous"
+  run_ida "$home" "$fakebin" adopt "$id" >"$home/adopt.out" 2>"$home/adopt.err" && fail "adoption escaped a zero-match ambiguous task"
+  assert_grep 'remains ambiguous' "$home/adopt.err" "ambiguous adoption refusal drifted"
+  run_ida "$home" "$fakebin" abandon "$id" >"$home/abandon.out" 2>"$home/abandon.err" && fail "abandonment lacked an authority gate"
+  assert_grep 'requires --authorize-abandon' "$home/abandon.err" "abandonment gate missing"
+  FM_IDA_FAKE_MODE=timeout-zero run_ida "$home" "$fakebin" abandon "$id" --authorize-abandon >/dev/null || fail "authorized abandonment failed"
+  [ "$(phase_of "$home" "$id")" = terminal-failure ] || fail "abandonment did not fail-terminal the durable record"
+  assert_grep 'abandoned' "$home/data/$id/report.md" "abandonment report missing"
+  assert_grep 'zero-match' "$home/data/$id/report.md" "abandonment report lost its proof boundary"
+  assert_grep 'abandoned' "$home/state/$id.status" "abandonment did not route through durable task status"
+  creates=$(grep -F -c 'tool:ida_deep_research_create' "$home/bytedcli.log" || true)
+  [ "$creates" -eq 1 ] || fail "abandonment path issued another create"
+  FM_HOME="$home" "$RETIRE" "$id" >/dev/null 2>&1 && fail "abandoned retirement bypassed the decision gate"
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
+  FM_HOME="$home" "$RETIRE" "$id" >/dev/null || fail "decision-complete abandoned retirement failed"
+  assert_absent "$home/state/$id.meta" "retirement retained abandoned iDA metadata"
+  assert_present "$home/data/$id/report.md" "retirement removed the abandoned durable report"
+
+  new_task "$home" "$dup"; : >"$home/sessions.tsv"
+  sha=$(sha256sum "$home/data/$dup/instructions.txt" | awk '{print $1}'); marker="firstmate:$dup:${sha:0:16}"
+  FM_IDA_FAKE_MODE=timeout-zero dispatch_ida "$home" "$fakebin" "$dup" >/dev/null || fail "duplicate-marker abandon fixture dispatch failed"
+  wait_phase "$home" "$dup" ambiguous || fail "duplicate-marker fixture did not wedge ambiguous"
+  printf '%s\t%s\tcompleted\n' "$SESSION_ID" "$marker" >"$home/sessions.tsv"
+  printf '%s\t%s\tcompleted\n' "$((SESSION_ID + 1))" "$marker" >>"$home/sessions.tsv"
+  FM_IDA_FAKE_MODE=success run_ida "$home" "$fakebin" abandon "$dup" --authorize-abandon >"$home/dup.out" 2>"$home/dup.err" \
+    && fail "abandonment ignored a non-zero-match session list"
+  assert_grep 'zero-match' "$home/dup.err" "abandonment proof refusal drifted"
+  [ "$(phase_of "$home" "$dup")" = ambiguous ] || fail "refused abandonment mutated the durable record"
+  run_ida "$home" "$fakebin" interrupt-wait "$dup" >/dev/null || true
+  pass "iDA abandonment fail-terminals only after authoritative zero-match proof and never recreates"
+}
+
 test_cancellation_and_retirement_authority() {
   local home fakebin id=ida-cancel rc=0
   home=$(new_home cancel); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
@@ -339,6 +400,8 @@ SH
 test_dispatch_success_and_redaction
 test_provider_states_and_zero_result
 test_timeout_reconciliation_and_no_duplicate
+test_artifact_store_idempotency
+test_abandon_after_authoritative_zero_match
 test_pre_submission_unavailable_recovers_without_duplicate
 test_cancellation_and_retirement_authority
 test_aime_compatibility_and_local_unchanged

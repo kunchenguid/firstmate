@@ -39,6 +39,8 @@ It verifies:
 - iDA running, successful, failed, cancelled, unavailable, ambiguous, exact-zero, and error outcomes;
 - private prompt carriage through MCP stdin, with no prompt in argv, state, normalized artifacts, or report, plus redaction of credential, OECID, long-id, and email shapes before the final answer crosses the adapter boundary;
 - the timeout case where a provider accepted submission but the client timed out, followed by exact session-marker reconciliation and adoption without a second create;
+- same-content idempotent re-storage of a normalized artifact at an unchanged revision after an interrupted handler;
+- captain-authorized abandonment of a wedged ambiguous task after an authoritative complete non-truncated zero-match session list, its refusal without the authorization flag and on duplicate markers, and decision-gated retirement of the abandoned record;
 - normalized terminal result capture and a state-bound mode-`0600` report;
 - explicit provider-cancellation authority, authoritative cancellation readback, decision-gated retirement, and durable report preservation; and
 - unchanged fail-closed local/unsupported executor behavior.
@@ -56,6 +58,7 @@ An idle or processing provider session maps to healthy working state, while unav
 iDA submission records `firstmate:<task-id>:<instruction-digest-prefix>` before the only permitted create.
 The adapter lists sessions and exact-matches that marker before creation and after uncertain completion.
 Zero unique matches permit creation only from `submission-not-started`; one match is adopted; duplicates, truncation, or unresolved readback become unavailable or ambiguous and never authorize another create.
+A wedged `ambiguous` or `submission-unknown` record can fail-terminal only through the captain-authorized abandon command after a fresh authoritative complete non-truncated zero-match list; abandonment performs no provider write, never retries or recreates, and leaves re-execution to a separate explicit dispatch.
 
 ## Privacy and authority boundary
 
@@ -66,4 +69,5 @@ Provider output grants no implementation, publication, merge, destructive, compl
 
 AIME cancellation remains explicitly unsupported.
 iDA cancellation requires the public script's authorization flag and current destructive-action authority; a successful close response remains nonterminal until provider session readback confirms cancellation.
+iDA abandonment likewise requires its own `--authorize-abandon` flag plus an authoritative complete non-truncated zero-match session-list proof and performs no provider write.
 Both providers require the ordinary decision-hold gate and safe report linkage before retirement.

@@ -8,6 +8,7 @@
 #   fm-remote-agent-ida.sh state <task-id>
 #   fm-remote-agent-ida.sh interrupt-wait <task-id>
 #   fm-remote-agent-ida.sh cancel <task-id> --authorize-provider-cancel
+#   fm-remote-agent-ida.sh abandon <task-id> --authorize-abandon
 #   fm-remote-agent-ida.sh retire <task-id>
 #
 # New dispatches require config/ida-remote-agent, whose schema is owned by
@@ -20,6 +21,13 @@
 # --authorize-provider-cancel flag at the call site. A successful close response
 # is not treated as terminal cancellation until authoritative session readback
 # confirms it. `interrupt-wait` stops only Firstmate's local waiter.
+#
+# `abandon` is the only escape for an ambiguous or submission-unknown task
+# whose session marker authoritatively yields a complete non-truncated
+# zero-match session list. It fail-terminals the durable record, performs no
+# provider write, never retries or recreates, and requires the explicit
+# --authorize-abandon flag; any future execution requires a separate explicit
+# dispatch.
 #
 # `retire` requires a terminal normalized state, safe report, completed decision
 # gate, and retired process-event source. It preserves data/<id>/report.md and
@@ -41,7 +49,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-ida-remote-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 temp_root() {
   local root
@@ -220,6 +228,61 @@ cmd_cancel() (
   rm -rf -- "$root"; trap - EXIT
 )
 
+write_abandon_report() { # <id>
+  local id=$1 report
+  report=$(fm_remote_report_path "$id") || return 1
+  fm_remote_report_replaceable "$id" || return 1
+  # shellcheck disable=SC2016 # Backticks are literal Markdown.
+  {
+    printf '# iDA remote-agent report\n\n'
+    printf -- '- Task: `%s`\n- Executor: `remote-agent`\n- Provider: `ida`\n- Region: `sg`\n' "$id"
+    printf -- '- Session marker: `%s`\n- Session: `unavailable`\n- Remote task: `unavailable`\n' "$IDA_STATE_MARKER"
+    printf -- '- Agent: `%s`\n- Model: `%s`\n- bytedcli: `%s`\n' \
+      "${IDA_STATE_AGENT_NAME:-${IDA_STATE_AGENT_ID:-unavailable}}" \
+      "${IDA_STATE_MODEL:-unavailable}" "$REMOTE_STATE_BYTEDCLI_VERSION"
+    printf -- '- Outcome: `failed`\n- Result availability: `unavailable`\n- Error class: `session-marker-not-found`\n'
+    printf '\n## Provider Result\n\n'
+    printf '%s\n' 'This task was abandoned after an authoritative complete non-truncated zero-match session list proved no provider session exists.'
+    printf '%s\n' 'No final provider answer is available for this terminal outcome.'
+    printf '\n## Evidence Boundary\n\n'
+    printf '%s\n' '- This report contains only normalized iDA identity, terminal state, and abandonment fields.'
+    printf '%s\n' '- Private prompts, credentials, tokens, PII-bearing payloads, and raw event streams are not preserved.'
+    printf '%s\n' '- Provider output grants no implementation, publication, merge, destructive, legal, or security authority.'
+    printf '%s\n' '- Abandonment performed no provider write and authorizes no retry or recreation; re-execution requires a separate explicit dispatch.'
+  } >"$report" || return 1
+  chmod 0600 "$report" || return 1
+  printf '%s\n' "$report"
+}
+
+cmd_abandon() (
+  local id=${1-} authorization=${2-} root observation report lock
+  [ "$#" -eq 2 ] && [ "$authorization" = --authorize-abandon ] || die "iDA abandonment requires --authorize-abandon"
+  lock=$(fm_remote_task_lock_path "$id")
+  fm_lock_acquire_wait "$lock" || die "cannot lock iDA task"
+  trap 'fm_lock_release "$lock"' EXIT
+  fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
+  case "$REMOTE_STATE_PHASE" in
+    ambiguous|submission-unknown) ;;
+    terminal-success|terminal-failure|terminal-cancelled) die "iDA task is already terminal: phase=$REMOTE_STATE_PHASE" ;;
+    *) die "iDA abandonment applies only to ambiguous or submission-unknown tasks: phase=$REMOTE_STATE_PHASE" ;;
+  esac
+  root=$(temp_root); observation="$root/observation.json"
+  if ! "$SCRIPT_DIR/fm-procevent-ida.sh" observe "$id" >"$observation" 2>/dev/null \
+      || ! fm_ida_observation_validate "$observation" "$id" "$IDA_STATE_MARKER" \
+      || ! jq -e '.ambiguous == true and .error_class == "session-marker-not-found"' "$observation" >/dev/null 2>&1; then
+    die "iDA abandonment requires an authoritative complete non-truncated zero-match session list"
+  fi
+  report=$(write_abandon_report "$id") || die "cannot write iDA abandonment report"
+  fm_remote_state_transition "$id" terminal-failure failed session-marker-not-found abandon-confirmed terminal unavailable "" "$report" '{}' \
+    || die "cannot checkpoint abandoned iDA state"
+  fm_remote_status_append "$id" "failed: iDA remote research abandoned after an authoritative zero-match session list; re-execution requires a separate explicit dispatch" \
+    || die "cannot append iDA abandonment status"
+  rm -rf -- "$root"
+  fm_lock_release "$lock"; trap - EXIT
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$(fm_remote_source_id ida "$id")" >/dev/null || die "cannot retire abandoned iDA process-event source"
+  printf 'abandoned: %s marker=%s\n' "$id" "$IDA_STATE_MARKER"
+)
+
 cmd_retire() {
   local id=${1-} report source lock
   [ "$#" -eq 1 ] || usage
@@ -247,6 +310,7 @@ case "${1-}" in
   state) shift; cmd_state "$@" ;;
   interrupt-wait) shift; cmd_interrupt_wait "$@" ;;
   cancel) shift; cmd_cancel "$@" ;;
+  abandon) shift; cmd_abandon "$@" ;;
   retire) shift; cmd_retire "$@" ;;
   -h|--help|'') usage ;;
   *) usage ;;

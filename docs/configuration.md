@@ -44,7 +44,6 @@ Malformed content, unsafe ownership, unsafe permissions, another file type, a sy
 [`docs/feishu-channel.md`](feishu-channel.md) is the single operator owner for app setup, activation, local controls, supported limits, transport operation, safety, health, and recovery.
 [`bin/fm-feishu-state.mjs`](../bin/fm-feishu-state.mjs) owns the exact private child schemas and mutation mechanics.
 
-## AIME cloud research worker (config/aime-cloud-worker)
 ## Remote research agents
 
 Firstmate supports exactly two native remote research providers: AIME and iDA.
@@ -158,6 +157,7 @@ iDA document mode does not imply AIME's Feishu creation contract; the durable re
 
 `interrupt-wait` stops only local waiting and may leave the provider session running.
 Provider cancellation uses official `chat completion close`, requires current destructive-action authority plus `--authorize-provider-cancel`, and does not become terminal until session readback confirms a cancelled/closed state.
+An ambiguous or submission-unknown task whose marker yields an authoritative complete non-truncated zero-match session list can leave its permanent blocked state only through the explicit `abandon` command with `--authorize-abandon`; abandonment fail-terminals the durable record, performs no provider write, never retries or recreates, and any future execution requires a separate explicit dispatch.
 Retirement requires normalized terminal state, a safe bound report, retired process-event supervision, and the ordinary decision-hold completion gate.
 Disabling the config blocks new submission but does not erase, cancel, or make an existing record unreadable.
 Current behavioral evidence is in [`verification/remote-agents.md`](verification/remote-agents.md).

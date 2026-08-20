@@ -297,7 +297,7 @@ fm_remote_state_transition() {
 }
 
 fm_remote_artifact_store() {
-  local id=$1 kind=$2 source=$3 dir revision dest tmp
+  local id=$1 kind=$2 source=$3 dir revision dest tmp source_sha dest_sha
   case "$kind" in observation|submission|session|result|cancel|reconcile|error) ;; *) return 1 ;; esac
   fm_remote_state_load "$id" || return 1
   revision=$(jq -r '.revision' "$REMOTE_STATE_FILE")
@@ -305,6 +305,13 @@ fm_remote_artifact_store() {
   (umask 077; mkdir -p "$dir") || return 1
   chmod 0700 "$dir" 2>/dev/null || true
   dest="$dir/${revision}-${kind}.json"
+  if [ -f "$dest" ] && [ ! -L "$dest" ]; then
+    source_sha=$(fm_remote_sha256_file "$source") || return 1
+    dest_sha=$(fm_remote_sha256_file "$dest") || return 1
+    [ "$source_sha" = "$dest_sha" ] || return 1
+    printf '%s\n' "$dest"
+    return 0
+  fi
   [ ! -e "$dest" ] && [ ! -L "$dest" ] || return 1
   tmp=$(umask 077; mktemp "$dir/.artifact.XXXXXX") || return 1
   cp "$source" "$tmp" || { rm -f -- "$tmp"; return 1; }

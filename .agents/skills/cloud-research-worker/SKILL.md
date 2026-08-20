@@ -101,6 +101,10 @@ The adapter lists sessions and exact-matches that marker before the only allowed
 A unique match is adopted; multiple matches, a truncated list, or unresolved identity becomes `ambiguous`.
 No ambiguous or `submission-unknown` state authorizes another create.
 
+An `ambiguous` or `submission-unknown` record that stays wedged has exactly one captain-authorized escape: `bin/fm-remote-agent-ida.sh abandon <id> --authorize-abandon`.
+Abandonment re-verifies an authoritative complete non-truncated zero-match session list, fail-terminals the durable record with a bound report, performs no provider write, and never retries or recreates; any future execution requires a separate explicit dispatch of a new task.
+Multiple matches, truncation, provider unavailability, or any non-zero match refuse abandonment and keep the honest blocker or adoption path.
+
 `bin/fm-procevent-ida.sh` owns marker reconciliation, first submission, provider observation, normalized artifact capture, result/report generation, acknowledgement, and re-arming.
 An idle or provider-running session is healthy and remains supervised.
 Provider readback failure is `unavailable`, an unrecognized state is `ambiguous`, and terminal reports preserve `available`, exact `zero`, `unavailable`, and `error` as distinct result states.
