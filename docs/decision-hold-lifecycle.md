@@ -102,7 +102,7 @@ A hold closed by a direct `tasks-axi done` reproduces the shape that fails `veri
 An unanswered decision still blocks completion and teardown, and neither `decline` nor `repair` can close a hold that is still actively held or supply an answer with a missing or empty decision file.
 `repair` also refuses a closed captain-kind task that was never held for the captain.
 
-Seven further regressions cover decisions that backlog retention has archived out of the active backlog.
+Nine further regressions cover decisions that backlog retention has archived out of the active backlog, together with the identity checks that run on the same path.
 An answered decision keeps satisfying the gate after retention files it, an identical close retry stays idempotent against the archived record, and a different answer is still rejected.
 An archived decision closed with no recorded captain answer still refuses `verify`, teardown, and `repair`, so presence in the archive is never accepted as proof that the captain answered.
 The archived and live answerless-close refusals stay distinguishable: only the live one points at `repair`, because only a live row can still have the missing answer written onto it.
