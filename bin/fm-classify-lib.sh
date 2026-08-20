@@ -140,8 +140,8 @@ status_is_paused() {  # <status-line>
 # 0 if a status line declares either an external-wait pause or a verified
 # captain-held transfer.
 # Both declarations can intentionally leave an exited crew's endpoint idle, so
-# the watcher applies its bounded pause cadence when agent death confirms that
-# no live decision gate is being silenced.
+# this predicate only reports the declaration; bin/fm-watch.sh's
+# pause_state_class owns whether a given pane earns the bounded pause cadence.
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1 verb
   status_is_paused "$line" && return 0

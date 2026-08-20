@@ -1141,10 +1141,12 @@ test_nonterminal_stale_clears_livecheck_stamp() {
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
 # bounded pause handling.
-# A still-live agent at an external-decision gate is the disconfirming case: it
-# must surface once, while the unchanged hash must not append the same wake on
-# every watcher re-arm.
-test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
+# The disconfirming case is that same recovery step with its evidence withdrawn:
+# a declaration sitting in the log that the authoritative verdict cannot confirm,
+# while the agent is not confidently dead either. Such a pane must surface once -
+# the bounded cadence is never granted on a stale log line alone - while the
+# unchanged hash must not append the same wake on every watcher re-arm.
+test_exited_declared_pause_is_bounded_but_unconfirmed_declaration_surfaces() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -1208,27 +1210,28 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
     || fail "captain-held dead-agent pane surfaced as a stopped crew"
 
-  dir=$(make_case alive-decision-gate); state="$dir/state"; fakebin="$dir/fakebin"
+  dir=$(make_case unconfirmed-declaration); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
   window="test:fm-gate"
-  printf 'idle external-decision gate\n' > "$capture_file"
+  printf 'idle after an unreadable verdict\n' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
-  printf 'paused: waiting at an active external-decision gate\n' > "$statusf"
+  printf 'paused: waiting at an external-decision gate\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "idle external-decision gate")
+  pane_hash=$(hash_text "idle after an unreadable verdict")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
 
-  # First sight must surface promptly so a live external-decision gate is not
-  # hidden behind the pause cadence.
+  # The declaration is in the log, but the authoritative verdict does not carry
+  # it and the agent is not confidently dead, so nothing confirms the wait.
+  # First sight must surface promptly rather than damp on the log line alone.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: unknown · source: none · verdict unreadable' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "live external-decision gate did not surface immediately"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the immediate external-decision surface"
+  wait_for_exit "$pid" 100 || fail "an unconfirmed declaration on a live pane did not surface immediately"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the immediate unconfirmed-declaration surface"
 
   # Re-arm with the stale timer already beyond the wedge threshold. This is the
   # exact unchanged-hash fallback after the immediate surface: it must retain
@@ -1236,22 +1239,117 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   # a second possible-wedge wake.
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: unknown · source: none · verdict unreadable' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
     reap "$pid"
-    fail "live external-decision gate escalated on the wedge timer after its immediate surface: $(cat "$out")"
+    fail "an unconfirmed declaration escalated on the wedge timer after its immediate surface: $(cat "$out")"
   fi
-  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live external-decision gate lost its pause cadence marker"; }
-  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "live external-decision gate retained the wedge timer"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "the surfaced pane lost its pause cadence marker"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "the surfaced pane retained the wedge timer"; }
   reap "$pid"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
   bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
-  [ "$wakes" -eq 0 ] || fail "acknowledged external-decision surface replayed $wakes wakes"
-  [ "$bare" -eq 0 ] || fail "acknowledged external-decision bare stale remained queued"
-  pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
+  [ "$wakes" -eq 0 ] || fail "the acknowledged unconfirmed-declaration surface replayed $wakes wakes"
+  [ "$bare" -eq 0 ] || fail "the acknowledged unconfirmed-declaration bare stale remained queued"
+  pass "exited declared-pause and captain-held panes use bounded pause cadence while a declaration nothing confirms still surfaces once"
+}
+
+# --- a LIVE crew's refreshed declared pause over a churning pane -------------
+# The reported fleet shape: a worker sitting in a long training run refreshes its
+# `paused:` declaration every ten minutes while the run keeps printing progress,
+# so every watcher round meets a NEW stale hash - and the pane was re-escalated
+# every few minutes regardless, with the paused flag set, no wedge timer, no
+# escalation counter, and nothing in the triage log.
+#
+# That marker signature identifies the emitting path exactly: the non-terminal
+# FIRST-SIGHT branch, whose classification fell out as `none` for a live agent
+# even though the crew's authoritative state was the declared pause, and reached
+# surface_nonterminal_stale - which wakes with a bare `stale: <window>`, re-arms
+# the pause markers on the way out, and writes no triage line. Every re-arm met
+# the next hash as another first sight, so "surfaces once" became "surfaces
+# forever" on any pane that prints.
+#
+# Phase A drives exactly that: four rounds, a fresh hash each round, the
+# declaration refreshed midway, and nothing else changed. Phase B flips the one
+# condition the absorb depends on - the declaration's own age - so the pass
+# cannot come from blanket silencing: past FM_PAUSE_RESURFACE_SECS the same pane
+# must still surface, as the bounded recheck rather than a bare stale or a wedge.
+test_live_declared_pause_absorbed_across_changing_hashes() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid round wakes back
+  dir=$(make_case live-declared-pause-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/trainer.status"
+  window="test:fm-trainer"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/trainer.meta"
+  printf 'working: training started\npaused: long training run in flight, refreshed every ten minutes\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-trainer_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  round=1
+  while [ "$round" -le 4 ]; do
+    # The training run prints, so each round meets a hash it has never classified.
+    printf 'epoch %d/500 loss 0.4%d\n' "$round" "$round" > "$capture_file"
+    pane_hash=$(hash_text "$(cat "$capture_file")")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    if [ "$round" -eq 3 ]; then
+      # The worker refreshes its declaration; re-prime .seen-* so the signal scan
+      # does not pre-empt the stale path this fixture is about.
+      printf 'paused: long training run in flight, refreshed every ten minutes\n' >> "$statusf"
+      sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-trainer_status"
+    fi
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+      FM_FAKE_CREW_STATE='state: paused · source: status-log · long training run in flight' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=1800 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    wait_poll_cycle "$state" "$pid" \
+      || { reap "$pid"; fail "round $round re-escalated a refreshed declared pause on a new hash: $(cat "$out")"; }
+    reap "$pid"
+    # Firstmate acknowledges the round the way a real re-arm does, so the next
+    # watcher starts on clean recovery state and actually reaches its stale scan
+    # instead of exiting on the generic post-downtime resurface.
+    ack_stopped_cycle "$state" || fail "could not acknowledge round $round"
+    round=$((round + 1))
+  done
+  [ ! -s "$out" ] || fail "a refreshed declared pause printed a wake reason: $(cat "$out")"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null)
+  [ "${wakes:-0}" -eq 0 ] || fail "a refreshed declared pause enqueued $wakes stale wakes across four fresh hashes"
+  [ -e "$state/.paused-$key" ] || fail "the declared-pause cadence did not take a live worker's pane"
+  [ ! -e "$state/.stale-since-$key" ] || fail "an absorbed declared pause started the wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "an absorbed declared pause opened an escalation chain"
+  grep -F "absorbed stale (paused, awaiting external" "$state/.watch-triage.log" >/dev/null \
+    || fail "the absorb left no triage record: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+
+  # Phase B: the one flipped condition. The declaration is no longer refreshed,
+  # so it ages past the re-surface window and the same pane must surface again.
+  back=$(( $(date +%s) - 2000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-trainer_status"
+  printf 'epoch 5/500 loss 0.45\n' > "$capture_file"
+  pane_hash=$(hash_text "$(cat "$capture_file")")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · long training run in flight' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=1800 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an unrefreshed declared pause never re-surfaced"; }
+  grep -F "awaiting external" "$out" >/dev/null \
+    || fail "the unrefreshed re-surface was not the bounded recheck: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "an unrefreshed declared pause was mislabeled a possible wedge"
+  [ "$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")" -eq 0 ] \
+    || fail "the unrefreshed re-surface queued a bare stopped-crew stale"
+  pass "a live worker's refreshed declared pause is absorbed across changing hashes, and re-surfaces once it stops being refreshed"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -2652,7 +2750,8 @@ test_busy_declared_pause_damps_a_running_wedge_escalation_chain
 test_declared_pause_recheck_demands_inspection_once_unrefreshed
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
-test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_exited_declared_pause_is_bounded_but_unconfirmed_declaration_surfaces
+test_live_declared_pause_absorbed_across_changing_hashes
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
