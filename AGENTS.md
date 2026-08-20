@@ -405,7 +405,7 @@ Handle actionable wakes as follows:
    `pr-delivery` obligations are handled by loading the `pr-delivery` skill.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
-When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
+When a non-`pr-delivery` wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
 When Relay-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, use its promised-final reconciliation when a typed public commitment exists, otherwise post the final completion follow-up so the link clears even if earlier follow-ups were spent.
 
 A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.

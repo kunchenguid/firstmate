@@ -1,10 +1,6 @@
 ---
 name: pr-delivery
-description: >-
-  Agent-only procedure for handling check: pr-delivery wakes from the bounded
-  main-home PR delivery loop. Use on every check: pr-delivery wake to enumerate
-  merge-eligible PRs, merge under configured authority
-  via fm-pr-merge.sh, fleet-sync after merge, and follow the normal teardown path.
+description: Agent-only procedure for handling check: pr-delivery wakes from the bounded main-home PR delivery loop. Use on every check: pr-delivery wake to enumerate merge-eligible PRs, merge under configured authority via fm-pr-merge.sh, then defer post-merge orchestration to its owning flow.
 user-invocable: false
 metadata:
   internal: true
@@ -34,8 +30,8 @@ Do not invent a parallel PR poll or merge path.
 4. Merge only through `bin/fm-pr-merge.sh <task-id> <full-pr-url> --expected-head <payload-head>`.
    If the expected-head guard refuses, leave the PR unmerged and let the delivery scan classify the new head.
    Never call `gh` or `gh-axi pr merge` directly around that helper.
-5. After a successful merge, refresh the project clone through the guarded fleet-sync path (`bin/fm-fleet-sync.sh`).
-6. Continue normal ship supervision: validation state, PR ready reporting, teardown only after landing is confirmed.
+5. After a successful merge, stop this delivery handling turn.
+   Project and secondmate fleet sync, validation and ready reporting, and teardown remain outside this delivery loop.
 
 ## Holds this scan respects
 
