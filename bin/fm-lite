@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+# fm-lite - isolated worktrees, task briefs, and a multi-repo registry without Firstmate runtime services.
+#
+# First Mate Lite has exactly three command families:
+#
+#   fm-lite project <name> [<path-or-url>]
+#       Register an existing clone or clone a URL into the Lite data directory.
+#       With no path or URL, print the registered clone path.
+#
+#   fm-lite new <project> <task>
+#       Create feature/<task> from the registered clone's HEAD in an isolated
+#       native Git worktree, scaffold .firstmate/tasks/<task>/, and print the
+#       worktree path.
+#
+#   fm-lite clean <project> <task>
+#       Remove the task worktree and local feature branch only when the
+#       worktree is clean and the branch is contained in the registered
+#       clone's current HEAD.
+#
+# State lives under ${XDG_DATA_HOME:-$HOME/.local/share}/firstmate-lite.
+# The command does not read FM_HOME or call any Firstmate runtime script.
+# Project and task names must start with an ASCII letter or digit and then use
+# only ASCII letters, digits, dots, underscores, or hyphens.
+set -eu
+
+PROGRAM=${0##*/}
+
+usage() {
+  sed -n '2,/^set -eu$/s/^# \{0,1\}//p' "$0"
+}
+
+die() {
+  printf '%s: %s\n' "$PROGRAM" "$*" >&2
+  exit 1
+}
+
+require_git() {
+  command -v git >/dev/null 2>&1 || die "git is required"
+}
+
+validate_name() {
+  value=$1
+  label=$2
+  case "$value" in
+    [A-Za-z0-9]* ) ;;
+    * ) die "$label '$value' must start with an ASCII letter or digit" ;;
+  esac
+  case "$value" in
+    *[!A-Za-z0-9._-]* )
+      die "$label '$value' may contain only ASCII letters, digits, dots, underscores, and hyphens"
+      ;;
+  esac
+}
+
+data_root() {
+  if [ -n "${XDG_DATA_HOME:-}" ]; then
+    case "$XDG_DATA_HOME" in
+      /* ) printf '%s/firstmate-lite\n' "${XDG_DATA_HOME%/}" ;;
+      * ) die "XDG_DATA_HOME must be an absolute path" ;;
+    esac
+    return
+  fi
+  [ -n "${HOME:-}" ] || die "HOME is required when XDG_DATA_HOME is unset"
+  case "$HOME" in
+    /* ) printf '%s/.local/share/firstmate-lite\n' "${HOME%/}" ;;
+    * ) die "HOME must be an absolute path" ;;
+  esac
+}
+
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P)
+}
+
+registry_path() {
+  printf '%s/projects.tsv\n' "$DATA_ROOT"
+}
+
+project_lookup() {
+  lookup_name=$1
+  registry=$(registry_path)
+  [ -f "$registry" ] || return 1
+  awk -F '\t' -v wanted="$lookup_name" '
+    $1 == wanted {
+      print substr($0, length($1) + 2)
+      found = 1
+      exit
+    }
+    END { if (!found) exit 1 }
+  ' "$registry"
+}
+
+require_project() {
+  required_name=$1
+  project_path=$(project_lookup "$required_name") \
+    || die "project '$required_name' is not registered; run: $PROGRAM project $required_name <path-or-url>"
+  [ -d "$project_path" ] \
+    || die "registered clone for project '$required_name' is missing: $project_path"
+  git -C "$project_path" rev-parse --git-dir >/dev/null 2>&1 \
+    || die "registered path is no longer a Git repository: $project_path"
+  canonical_dir "$project_path" \
+    || die "cannot resolve registered clone for project '$required_name': $project_path"
+}
+
+command_project() {
+  [ "$#" -eq 1 ] || [ "$#" -eq 2 ] \
+    || die "usage: $PROGRAM project <name> [<path-or-url>]"
+  name=$1
+  validate_name "$name" "project name"
+
+  existing=$(project_lookup "$name" 2>/dev/null || true)
+  if [ -n "$existing" ]; then
+    [ "$#" -eq 1 ] \
+      || die "project '$name' is already registered as $existing"
+    [ -d "$existing" ] \
+      || die "registered clone for project '$name' is missing: $existing"
+    canonical_dir "$existing" \
+      || die "cannot resolve registered clone for project '$name': $existing"
+    return
+  fi
+
+  [ "$#" -eq 2 ] || die "project '$name' is not registered; provide a clone path or URL"
+  source=$2
+  mkdir -p "$DATA_ROOT"
+
+  if [ -d "$source" ]; then
+    repo=$(canonical_dir "$source") \
+      || die "cannot resolve repository path: $source"
+    git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 \
+      || die "not a Git repository: $source"
+  else
+    clone_parent="$DATA_ROOT/projects"
+    clone_target="$clone_parent/$name"
+    [ ! -e "$clone_target" ] \
+      || die "managed clone path already exists without a registry entry: $clone_target"
+    mkdir -p "$clone_parent"
+    git clone -- "$source" "$clone_target" \
+      || die "could not clone '$source'"
+    repo=$(canonical_dir "$clone_target") \
+      || die "could not resolve cloned repository: $clone_target"
+  fi
+
+  case "$repo" in
+    *$'\t'* | *$'\n'* ) die "repository path may not contain tabs or newlines" ;;
+  esac
+  printf '%s\t%s\n' "$name" "$repo" >> "$(registry_path)"
+  printf 'Registered project %s at %s\n' "$name" "$repo" >&2
+  printf '%s\n' "$repo"
+}
+
+write_context() {
+  context_dir=$1
+  task=$2
+  branch=$3
+  mkdir -p "$context_dir"
+
+  cat > "$context_dir/brief.md" <<EOF
+# Task brief: $task
+
+## Task description
+
+Describe the user problem and the intended change.
+
+## Acceptance criteria
+
+- [ ] Add observable, testable outcomes before implementation starts.
+
+## Constraints
+
+- Record scope limits, compatibility requirements, and actions that require a team decision.
+- Keep this brief, \`decisions.md\`, and \`verification.md\` with the implementation on \`$branch\`.
+
+## Delivery definition
+
+- The implementation and task context are committed on \`$branch\`.
+- The acceptance criteria pass and the evidence is recorded in \`verification.md\`.
+- The branch is ready for an MR or PR under the repository's normal review process.
+EOF
+
+  cat > "$context_dir/decisions.md" <<EOF
+# Decisions: $task
+
+Record decisions that affect the implementation or future maintenance.
+
+| Decision | Rationale | Date |
+| --- | --- | --- |
+| _None yet_ |  |  |
+EOF
+
+  cat > "$context_dir/verification.md" <<EOF
+# Verification: $task
+
+## Commands run
+
+- _Not run yet._
+
+## Results
+
+- _Record pass, failure, and any unverified edge here._
+EOF
+}
+
+command_new() {
+  [ "$#" -eq 2 ] || die "usage: $PROGRAM new <project> <task>"
+  name=$1
+  task=$2
+  validate_name "$name" "project name"
+  validate_name "$task" "task name"
+  repo=$(require_project "$name")
+  branch="feature/$task"
+  worktree_parent="$DATA_ROOT/worktrees/$name"
+  worktree="$worktree_parent/$task"
+
+  git -C "$repo" show-ref --verify --quiet "refs/heads/$branch" \
+    && die "branch '$branch' already exists in project '$name'"
+  [ ! -e "$worktree" ] \
+    || die "task worktree path already exists: $worktree"
+  git -C "$repo" cat-file -e 'HEAD^{commit}' 2>/dev/null \
+    || die "registered clone has no commit at HEAD: $repo"
+
+  mkdir -p "$worktree_parent"
+  if ! git -C "$repo" worktree add -b "$branch" "$worktree" HEAD >&2; then
+    die "could not create worktree for '$name/$task'"
+  fi
+
+  context_dir="$worktree/.firstmate/tasks/$task"
+  if ! write_context "$context_dir" "$task" "$branch"; then
+    printf '%s: context scaffold failed; preserving worktree for recovery: %s\n' \
+      "$PROGRAM" "$worktree" >&2
+    exit 1
+  fi
+
+  printf 'Created %s on %s\n' "$worktree" "$branch" >&2
+  printf 'Brief: %s/brief.md\n' "$context_dir" >&2
+  printf '%s\n' "$worktree"
+}
+
+command_clean() {
+  [ "$#" -eq 2 ] || die "usage: $PROGRAM clean <project> <task>"
+  name=$1
+  task=$2
+  validate_name "$name" "project name"
+  validate_name "$task" "task name"
+  repo=$(require_project "$name")
+  branch="feature/$task"
+  worktree="$DATA_ROOT/worktrees/$name/$task"
+
+  [ -d "$worktree" ] || die "task worktree does not exist: $worktree"
+  actual_top=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null) \
+    || die "task path is not a Git worktree: $worktree"
+  actual_top=$(canonical_dir "$actual_top") \
+    || die "cannot resolve task worktree: $worktree"
+  expected_top=$(canonical_dir "$worktree") \
+    || die "cannot resolve expected task worktree: $worktree"
+  [ "$actual_top" = "$expected_top" ] \
+    || die "task path resolves to an unexpected worktree: $actual_top"
+  actual_branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null) \
+    || die "task worktree is not on a branch: $worktree"
+  [ "$actual_branch" = "$branch" ] \
+    || die "task worktree is on '$actual_branch', expected '$branch'"
+  [ -z "$(git -C "$worktree" status --porcelain --untracked-files=all --ignored=matching)" ] \
+    || die "task worktree has uncommitted, untracked, or ignored files; preserve them before cleanup: $worktree"
+  git -C "$repo" merge-base --is-ancestor "refs/heads/$branch" HEAD \
+    || die "branch '$branch' is not contained in the registered clone's HEAD; merge it and update $repo before cleanup"
+
+  git -C "$repo" worktree remove "$worktree" \
+    || die "Git refused to remove task worktree: $worktree"
+  git -C "$repo" branch -d "$branch" \
+    || die "worktree was removed, but Git refused to delete the merged branch '$branch'"
+  printf 'Cleaned project %s task %s\n' "$name" "$task" >&2
+}
+
+require_git
+DATA_ROOT=$(data_root)
+
+case "${1:-}" in
+  project)
+    shift
+    command_project "$@"
+    ;;
+  new)
+    shift
+    command_new "$@"
+    ;;
+  clean)
+    shift
+    command_clean "$@"
+    ;;
+  -h | --help | help)
+    usage
+    ;;
+  '')
+    usage >&2
+    exit 2
+    ;;
+  *)
+    die "unknown command '$1'; expected project, new, or clean"
+    ;;
+esac

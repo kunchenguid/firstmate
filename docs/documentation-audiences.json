@@ -31,7 +31,8 @@
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
-    "docs/remote-secondmates.md"
+    "docs/remote-secondmates.md",
+    "docs/firstmate-lite.md"
   ],
   "requiredOwnerPointers": [
     {
@@ -261,6 +262,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/firstmate-lite.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
       "audience": "operator-example"
     },
@@ -378,6 +383,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/firstmate-lite.md",
       "audience": "maintainer-verification"
     },
     {

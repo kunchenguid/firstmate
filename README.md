@@ -54,6 +54,21 @@ Launching a supported harness inside it instantiates your first mate - and makes
 
 Full detail on every feature lives in [docs/architecture.md](docs/architecture.md).
 
+## First Mate Lite
+
+First Mate Lite is the standalone path for teammates who want isolated task worktrees, task briefs, and one multi-repo registry without running the Firstmate agent distro.
+It is one Bash command backed only by Git, uses XDG data storage, and has no `FM_HOME`, watcher, fleet, supervision, or worker-agent dependency.
+
+Install it after cloning this repository:
+
+```sh
+./bin/fm-lite-install.sh
+```
+
+The workflow stays deliberately small: register a repository with `fm-lite project`, create a worktree and brief with `fm-lite new`, then safely retire merged work with `fm-lite clean`.
+Every task creates `.firstmate/tasks/<task>/` on its feature branch, and that directory is intentionally committed and merged with the code so the team retains the brief, decisions, and verification history instead of losing them in private chat or local files.
+See the copyable [First Mate Lite guide](docs/firstmate-lite.md) for the complete three-step flow.
+
 ## Quick Start
 
 ### Requirements
@@ -199,6 +214,7 @@ Firstmate's skills live in two separate places with different audiences:
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
+- [docs/firstmate-lite.md](docs/firstmate-lite.md) - install and use standalone First Mate Lite without any full Firstmate runtime services.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, the files you set, and harness support.
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.

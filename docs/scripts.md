@@ -7,6 +7,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 
 | Script                   | Purpose                                                                              |
 | ------------------------ | ------------------------------------------------------------------------------------ |
+| `fm-lite`                | Manage standalone Lite project registration, task worktrees and context, and safe cleanup |
+| `fm-lite-install.sh`     | Install the self-contained First Mate Lite command                                   |
 | `fm-session-start.sh`    | Compose lock, bootstrap, and wake drain into the single ordered session-start digest |
 | `fm-sessionstart-nudge.sh` | Print the native session-start hook nudge when the primary has not already run the digest |
 | `fm-sessionstart-run.sh` | Route a native session-open hook to the full digest, a context re-emit, or the nudge |
