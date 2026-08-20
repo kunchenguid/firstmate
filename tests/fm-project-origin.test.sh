@@ -107,9 +107,9 @@ refuses 'file:///srv/git/../../etc/app.git'
 refuses '/srv/git/..'
 pass "executable transports, option-shaped values, and unusable spellings are refused"
 
-# The landing for a local-only project has to know whether its origin is a folder
-# it can pull into, so the same validator answers that separately. A local answer
-# is a real path, and anything on another host must not read as one.
+# A transported origin may still name a path on the receiving machine, so the
+# validator answers that separately. A local answer is a real path, and anything
+# on another host must not read as one.
 local_path_is() {  # <url> <expected-path>
   local actual
   actual=$(fm_project_origin_local_path "$1") \
@@ -160,5 +160,45 @@ not_path_form 'example.com:owner/app.git'
 not_path_form 'ext::sh -c cat'
 not_path_form ''
 pass "path-shaped origin spellings are told apart from origins on another host"
+
+# Once a caller has anchored a spelling against its own clone it holds a path on
+# THIS machine, which is a different question from what may be handed to another
+# host: a folder named "Job Search" is ordinary here, so the landing must follow it
+# rather than refuse every landing that project will ever have. The transport rules
+# above are untouched by that, which is why this is a separate answer.
+anchored_path_is() {  # <origin> <expected-path>
+  local actual
+  actual=$(fm_project_origin_anchored_local_path "$1") \
+    || fail "refused a folder this machine can follow: $1"
+  [ "$actual" = "$2" ] || fail "resolved $1 to $actual, expected $2"
+  [ -z "$(fm_project_origin_anchored_local_fault "$1")" ] \
+    || fail "named a fault in a folder it followed anyway: $1"
+}
+anchored_fault_is() {  # <origin> <substring of the reason>
+  local reason
+  ! fm_project_origin_anchored_local_path "$1" >/dev/null \
+    || fail "followed an anchored origin that is not a usable local path: $1"
+  reason=$(fm_project_origin_anchored_local_fault "$1")
+  case $reason in
+    *"$2"*) ;;
+    *) fail "refused $1 without saying what is wrong with it: ${reason:-<nothing>}" ;;
+  esac
+}
+
+anchored_path_is '/Users/captain/Job Search' '/Users/captain/Job Search'
+anchored_path_is '/Users/captain/JobSearch' '/Users/captain/JobSearch'
+anchored_path_is 'file:///Users/captain/Job Search' '/Users/captain/Job Search'
+anchored_path_is "/Users/captain/Bewerbungen (2026)" "/Users/captain/Bewerbungen (2026)"
+anchored_fault_is 'JobSearch' 'absolute'
+anchored_fault_is '../JobSearch' 'absolute'
+# shellcheck disable=SC2088 # The tilde is a literal prefix in a value read from git config, so an unanchored one is refused rather than expanded here.
+anchored_fault_is '~/JobSearch' 'absolute'
+anchored_fault_is 'https://example.com/owner/app.git' 'absolute'
+anchored_fault_is 'file://relative.git' 'absolute'
+anchored_fault_is '' 'absolute'
+anchored_fault_is '/Users/captain/JobSearch/../../etc' '".." segment'
+anchored_fault_is 'file:///Users/captain/JobSearch/..' '".." segment'
+anchored_fault_is "$(printf '/Users/captain/Job\nSearch')" 'control character'
+pass "an origin already anchored on this machine is judged as a local path, spaces and all"
 
 echo "ALL TESTS PASSED"

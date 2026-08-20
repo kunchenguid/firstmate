@@ -34,16 +34,17 @@ commit_file() {  # <repo> <path> <content> <message>
 
 # The captain's own folder (a git repo with no remote at all, outside projects/),
 # a home whose clone of it is the project, and a task meta pointing at that clone.
-# Echoes "<home>|<origin-folder>|<clone>".
-make_landing() {  # <name>
-  local name=$1 base home origin clone
+# Echoes "<home>|<origin-folder>|<clone>". The folder may be named, because a
+# folder name is the captain's to choose and an ordinary one may hold a space.
+make_landing() {  # <name> [origin-folder-name]
+  local name=$1 folder=${2:-JobSearch} base home origin clone
   mkdir -p "$TMP_ROOT/$name"
   # Canonical paths throughout: the landing resolves the origin folder with
   # `pwd -P`, so a symlinked temp root would otherwise make every reported path
   # disagree with the fixture's own.
   base=$(cd "$TMP_ROOT/$name" && pwd -P)
   home="$base/home"
-  origin="$base/JobSearch"
+  origin="$base/$folder"
   clone="$home/projects/JobSearch"
   mkdir -p "$home/data" "$home/state" "$home/projects" "$origin"
   git_q "$origin" init -q -b main
@@ -515,6 +516,64 @@ EOF
   pass "a path-shaped origin that resolves to nothing refuses instead of reporting"
 }
 
+test_landing_reaches_an_origin_folder_whose_path_holds_a_space() {
+  local home origin clone out
+  IFS='|' read -r home origin clone <<EOF
+$(make_landing spaced 'Job Search')
+EOF
+  ready_branch "$home" "$clone" task-r Cover.tex "the cover letter"
+  # A folder whose path holds a space is completely ordinary on this machine, and
+  # the clone seeded from it is an ordinary working sibling, so the landing has to
+  # follow the very origin that seeding left behind rather than refuse it forever.
+  case $origin in
+    *' '*) ;;
+    *) fail "the fixture built no space into $origin" ;;
+  esac
+  [ "$(git -C "$clone" remote get-url origin)" = "$origin" ] \
+    || fail "the clone does not name the spaced folder as its origin"
+  git -C "$clone" fetch --quiet origin || fail "the clone cannot even fetch from its spaced origin"
+  printf '%s\n' "cv edited by hand" > "$origin/CV.tex"
+
+  out=$(run_merge "$home" task-r) || fail "landing refused an origin folder whose path holds a space: $out"
+  [ -f "$origin/Cover.tex" ] || fail "the landed file never reached the spaced origin folder"
+  [ "$(head_of "$origin")" = "$(head_of "$clone")" ] \
+    || fail "the spaced origin folder is not at the landed commit"
+  case "$out" in
+    *"carried main into $origin"*) ;;
+    *) fail "landing did not report carrying the branch into the spaced folder: $out" ;;
+  esac
+  [ "$(cat "$origin/CV.tex")" = "cv edited by hand" ] || fail "the landing overwrote an uncommitted edit"
+  pass "an origin folder whose path holds a space is landed into like any other"
+}
+
+test_landing_refuses_an_anchored_origin_it_may_not_follow() {
+  local home origin clone out before_head
+  IFS='|' read -r home origin clone <<EOF
+$(make_landing traversal)
+EOF
+  ready_branch "$home" "$clone" task-s Cover.tex "the cover letter"
+  # Judging an anchored origin as a local path must not become a blanket accept: a
+  # spelling that walks through ".." is refused even though it reaches the folder.
+  git -C "$clone" remote set-url origin "$origin/../$(basename "$origin")"
+  before_head=$(head_of "$origin")
+
+  if out=$(run_merge "$home" task-s); then
+    fail "landing followed an origin spelled through a \"..\" segment: $out"
+  fi
+  case "$out" in
+    *REFUSED*'".." segment'*) ;;
+    *) fail "refusal did not say what is wrong with the origin spelling: $out" ;;
+  esac
+  # A refusal must never prescribe what the origin already does.
+  case "$out" in
+    *"re-point that origin at the folder's absolute path"*)
+      fail "refusal advised an action this already-absolute origin satisfies: $out" ;;
+  esac
+  [ "$(head_of "$origin")" = "$before_head" ] || fail "the refused landing still moved the origin folder"
+  [ ! -f "$origin/Cover.tex" ] || fail "the refused landing still carried the change"
+  pass "an anchored origin that is not a plain absolute path refuses naming the fault"
+}
+
 test_landing_reaches_the_origin_folder
 test_landing_is_idempotent
 test_landing_refuses_uncommitted_work_on_a_path_it_would_change
@@ -535,3 +594,5 @@ test_landing_refuses_an_ignored_file_blocking_a_directory_it_needs
 test_landing_follows_an_origin_spelled_relative_to_the_clone
 test_landing_follows_an_origin_spelled_with_a_tilde
 test_landing_refuses_a_path_shaped_origin_it_cannot_anchor
+test_landing_reaches_an_origin_folder_whose_path_holds_a_space
+test_landing_refuses_an_anchored_origin_it_may_not_follow
