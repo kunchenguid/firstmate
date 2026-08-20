@@ -817,6 +817,20 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
 }
 
+# Wait until the watcher completes a poll for <key>, evidenced by its recorded pane
+# hash advancing past <before>. A churning pane rewrites that hash every poll, so this
+# returns as soon as one poll is done instead of burning a fixed liveness budget, and
+# it proves a poll actually happened rather than only that the process is still alive.
+wait_poll_after() {  # <state> <key> <before-hash> [<ticks>]
+  local state=$1 key=$2 before=$3 limit=${4:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ "$(cat "$state/.hash-$key" 2>/dev/null || true)" != "$before" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # Count queued stale wakes for <window>. An absorbed cycle never creates the queue
 # file at all, so an absent queue counts as zero rather than an awk error.
 queued_stale_wakes() {  # <state> <window>
@@ -1800,7 +1814,7 @@ test_scheduled_pause_recheck_does_not_throttle_later_death() {
 # The pause is FRESH under a high re-surface threshold, so the bounded cadence can
 # never wake here; every wake counted below is the immediate surface.
 test_declared_pause_changing_hash_live_to_dead() {
-  local dir state fakebin out statusf window key pid round wakes
+  local dir state fakebin out statusf window key pid round wakes before
   dir=$(make_case declared-pause-changing-hash); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; statusf="$state/held.status"
   window="test:fm-held"
@@ -1837,6 +1851,7 @@ TMUX
   # the worker is still present to end the wait it declared.
   round=1
   while [ "$round" -le 3 ]; do
+    before=$(cat "$state/.hash-$key" 2>/dev/null || true)
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TICK_FILE="$dir/tick" \
       FM_FAKE_TMUX_CURRENT_COMMAND=grok \
       FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release' \
@@ -1844,7 +1859,11 @@ TMUX
       FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
-    if ! wait_live "$pid" 30; then
+    if ! wait_poll_after "$state" "$key" "$before"; then
+      reap "$pid"
+      fail "live churning declared pause never completed a poll on round $round: $(cat "$out")"
+    fi
+    if ! is_live_non_zombie "$pid"; then
       reap "$pid"
       fail "live churning declared pause surfaced instead of absorbing on round $round: $(cat "$out")"
     fi
@@ -1876,6 +1895,7 @@ TMUX
   # whole classification exists to avoid.
   round=1
   while [ "$round" -le 3 ]; do
+    before=$(cat "$state/.hash-$key" 2>/dev/null || true)
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TICK_FILE="$dir/tick" \
       FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
       FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
@@ -1883,6 +1903,9 @@ TMUX
       FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
+    # A dead, already-surfaced pause absorbs cheaply and deliberately writes no new
+    # artifact, so there is nothing to observe completing; a bounded liveness wait is
+    # the honest instrument here rather than a poll-completion proof.
     if wait_live "$pid" 30; then reap "$pid"; else wait "$pid" || fail "dead churning repeat round $round failed"; fi
     wakes=$(queued_stale_wakes "$state" "$window")
     [ "$wakes" -eq 0 ] \
