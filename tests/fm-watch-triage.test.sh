@@ -111,6 +111,33 @@ record_pi_busy() {  # <state-dir> <id>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
+# A capture fixture whose final footer changes on every capture while the pane
+# body remains frozen, mirroring quota countdown output from an idle harness.
+install_ticking_footer_tmux() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows)
+    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
+    ;;
+  capture-pane)
+    n=$(cat "${FM_FAKE_TMUX_TICK_COUNT:?}" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$FM_FAKE_TMUX_TICK_COUNT"
+    cat "${FM_FAKE_TMUX_CAPTURE:?}"
+    printf '\n────────────────────────────────────────\n'
+    printf '$0.00%02d (sub) 0.%d%%/272k (auto)\n' "$n" "$n"
+    printf 'ChatGPT used: 7d %d%% ↻6h%dm\n' "$n" "$n"
+    printf '%s\n' "$n" >> "${FM_FAKE_TMUX_RAW_LOG:?}"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+}
+
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
 test_signal_reason_is_actionable_classifier() {
@@ -454,6 +481,124 @@ test_terminal_stale_surfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the terminal stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "terminal stale was not queued"
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
+}
+
+# --- stale pane footer drift: normalize, dedupe, and re-surface new status ---
+
+test_terminal_stale_footer_drift_surfaces_once_and_new_status_surfaces() {
+  local dir state fakebin out drain_out capture_file tick_file raw_log window statusf sig pid first_ticks second_ticks
+  dir=$(make_case terminal-footer-drift); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  tick_file="$dir/ticks"; raw_log="$dir/raw-ticks"; window="test:fm-footer-done"
+  printf 'finished, awaiting merge decision\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/footer-done.meta"
+  statusf="$state/footer-done.status"
+  printf 'done: ready in branch fm/first\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-footer-done_status"
+  install_ticking_footer_tmux "$fakebin"
+
+  # The first terminal stale surfaces only after the normalized pane has stayed
+  # stable across several distinct raw footer captures.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_TICK_COUNT="$tick_file" FM_FAKE_TMUX_RAW_LOG="$raw_log" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 80 || fail "terminal pane with a changing footer did not surface its first stale wake"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "first changing-footer terminal stale did not print a stale wake"
+  first_ticks=$(cat "$tick_file")
+  [ "$first_ticks" -ge 3 ] || fail "terminal stale did not observe several changing footer captures"
+  [ "$(sort -u "$raw_log" | wc -l | tr -d ' ')" -ge 3 ] || fail "terminal footer fixture did not change between captures"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after changing-footer terminal stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "first changing-footer terminal stale was not queued"
+
+  # A re-armed watcher keeps observing a differently rendered footer but neither
+  # wakes nor queues the already-surfaced terminal status.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_TICK_COUNT="$tick_file" FM_FAKE_TMUX_RAW_LOG="$raw_log" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || { reap "$pid"; fail "unchanged terminal status re-surfaced as its footer ticked: $(cat "$out")"; }
+  second_ticks=$(cat "$tick_file")
+  [ "$second_ticks" -gt "$first_ticks" ] || { reap "$pid"; fail "re-armed watcher did not recapture the changing footer"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "unchanged terminal status queued another stale wake"; }
+  reap "$pid"
+
+  # Prime the status signal so this assertion exercises stale observation itself,
+  # not the independent status-signal path.
+  printf 'done: ready in branch fm/second\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-footer-done_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_TICK_COUNT="$tick_file" FM_FAKE_TMUX_RAW_LOG="$raw_log" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a new terminal status on an unchanged pane did not surface immediately"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "new terminal status did not print a stale wake"
+  pass "a ticking terminal footer is normalized, its status surfaces once, and a new status re-surfaces"
+}
+
+test_frozen_nonterminal_ticking_footer_escalates_within_bounded_polls() {
+  local dir state fakebin out capture_file tick_file raw_log window statusf sig pid ticks
+  dir=$(make_case nonterminal-footer-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; tick_file="$dir/ticks"; raw_log="$dir/raw-ticks"
+  window="test:fm-footer-wedge"
+  printf 'frozen worker output\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/footer-wedge.meta"
+  statusf="$state/footer-wedge.status"
+  printf 'working: validation is running\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-footer-wedge_status"
+  install_ticking_footer_tmux "$fakebin"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # The footer changes on every poll, but the frozen body must still become stale,
+  # start its wedge timer, and escalate within this bounded polling window.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_TICK_COUNT="$tick_file" FM_FAKE_TMUX_RAW_LOG="$raw_log" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 80 || fail "frozen non-terminal pane did not wedge-escalate while its footer changed every poll"
+  ticks=$(cat "$tick_file")
+  [ "$ticks" -ge 4 ] || fail "wedge escalation did not observe multiple changing-footer polls"
+  [ "$ticks" -le 20 ] || fail "wedge escalation exceeded its bounded changing-footer poll window ($ticks polls)"
+  [ "$(sort -u "$raw_log" | wc -l | tr -d ' ')" -eq "$ticks" ] || fail "footer fixture was not different on every poll"
+  grep -F "stale: $window" "$out" >/dev/null || fail "changing-footer wedge escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "changing-footer wedge escalation did not flag a possible wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "a frozen non-terminal pane wedge-escalates on schedule despite a footer that changes every poll"
+}
+
+test_substantive_percentage_above_three_row_footer_resets_wedge_timer() {
+  local dir state fakebin out capture_file tick_file raw_log window statusf sig pid key progress
+  dir=$(make_case substantive-percentage-progress); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; tick_file="$dir/ticks"; raw_log="$dir/raw-ticks"
+  window="test:fm-substantive-progress"; key="test_fm-substantive-progress"
+  printf 'Downloaded 10%%\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/substantive-progress.meta"
+  statusf="$state/substantive-progress.status"
+  printf 'working: download is running\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-substantive-progress_status"
+  install_ticking_footer_tmux "$fakebin"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · downloading (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_TICK_COUNT="$tick_file" FM_FAKE_TMUX_RAW_LOG="$raw_log" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=2 \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  progress=20
+  while [ "$progress" -le 70 ]; do
+    sleep 0.6
+    kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "substantive percentage progress was normalized as footer drift: $(cat "$out")"; }
+    printf 'Downloaded %d%%\n' "$progress" > "$capture_file"
+    progress=$((progress + 10))
+  done
+  wait_live "$pid" 10 || { reap "$pid"; fail "substantive percentage progress did not keep the wedge timer reset: $(cat "$out")"; }
+  [ -s "$state/.hash-$key" ] || { reap "$pid"; fail "progress fixture was not observed by stale hashing"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "substantive percentage progress above a three-row footer resets the wedge timer"
 }
 
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
@@ -865,7 +1010,7 @@ test_secondmate_unpause_clears_pause_tracking() {
   pass "a resumed secondmate clears pause and stale tracking before stale exemption"
 }
 
-test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
+test_nonterminal_stale_pause_transitions_reclassify_unchanged_content() {
   local dir state fakebin out capture_file window key pane_hash sig pid i
   dir=$(make_case nonterminal-stale-pause-transition); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-transition"
@@ -892,10 +1037,10 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
     sleep 0.1
     i=$((i + 1))
   done
-  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "a stale hash that entered pause was wedge-escalated: $(cat "$out")"; }
-  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "unchanged stale hash did not enter paused mode"; }
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "normalized stale content that entered pause was wedge-escalated: $(cat "$out")"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "unchanged normalized stale content did not enter paused mode"; }
   [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "pause transition retained its wedge timer"; }
-  wait_live "$pid" 30 || { reap "$pid"; fail "a stale hash that entered pause was wedge-escalated: $(cat "$out")"; }
+  wait_live "$pid" 30 || { reap "$pid"; fail "normalized stale content that entered pause was wedge-escalated: $(cat "$out")"; }
   reap "$pid"
 
   printf 'working: upstream landed, resuming\n' > "$state/transition.status"
@@ -912,13 +1057,13 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
     sleep 0.1
     i=$((i + 1))
   done
-  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "a stale hash that left pause did not resume wedge tracking: $(cat "$out")"; }
-  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "unchanged stale hash retained paused mode after resume"; }
-  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "unchanged stale hash did not restart wedge tracking after resume"; }
-  wait_live "$pid" 30 || { reap "$pid"; fail "a stale hash that left pause did not resume wedge tracking: $(cat "$out")"; }
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "normalized stale content that left pause did not resume wedge tracking: $(cat "$out")"; }
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "unchanged normalized stale content retained paused mode after resume"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "unchanged normalized stale content did not restart wedge tracking after resume"; }
+  wait_live "$pid" 30 || { reap "$pid"; fail "normalized stale content that left pause did not resume wedge tracking: $(cat "$out")"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
-  pass "unchanged stale hashes reclassify when a crew enters or leaves pause"
+  pass "unchanged normalized stale content reclassifies when a crew enters or leaves pause"
 }
 
 test_nonterminal_paused_rechecks_authoritative_state() {
@@ -1018,7 +1163,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
   # The crew's pipeline is actively running: a static pane is normal (waiting on CI).
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
-  # Priming round: first sighting of this stale hash classifies and absorbs it
+  # Priming round: first sighting of this normalized stale content classifies and absorbs it
   # (establishing .stale-$key and starting the wedge timer) without going
   # through wedge_timer_check at all - mirrors the existing wedge tests' Phase A.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1125,9 +1270,9 @@ test_busy_pane_below_turn_age_bound_is_absorbed() {
   pass "a busy worker below the turn-age bound remains working with no escalation"
 }
 
-test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
+test_busy_pane_stable_content_escalates_past_turn_age_bound() {
   local dir state fakebin out capture_file window key pane_hash sig pid
-  dir=$(make_case busy-stable-hash-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
+  dir=$(make_case busy-stable-content-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-stable"
   printf 'Working...' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-stable.meta"
@@ -1141,16 +1286,16 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   # No completed turn ever recorded for this task: age the spawn record itself.
   touch -t 200001010000 "$state/busy-stable.meta"
 
-  # Phase A: past the bound, the stable-hash busy pane is absorbed but starts
+  # Phase A: past the bound, the stable-content busy pane is absorbed but starts
   # the wedge timer (mirrors the existing provably-working-stale Phase A/B).
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "a stable-hash busy pane past the turn-age bound escalated before the wedge threshold: $(cat "$out")"
+    reap "$pid"; fail "a stable-content busy pane past the turn-age bound escalated before the wedge threshold: $(cat "$out")"
   fi
-  [ -s "$state/.stale-since-$key" ] || fail "a stable-hash busy pane past the turn-age bound did not start a wedge timer"
+  [ -s "$state/.stale-since-$key" ] || fail "a stable-content busy pane past the turn-age bound did not start a wedge timer"
   reap "$pid"
 
   # Phase B: backdate the wedge timer past the threshold; the next poll escalates.
@@ -1160,18 +1305,18 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
     FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "a stable-hash busy pane did not wedge-escalate past the turn-age bound"
+  wait_for_exit "$pid" 40 || fail "a stable-content busy pane did not wedge-escalate past the turn-age bound"
   grep -F "stale: $window" "$out" >/dev/null || fail "busy turn-age escalation did not print the stale wake"
   grep -F "possible wedge" "$out" >/dev/null || fail "busy turn-age escalation did not flag a possible wedge"
-  pass "a busy worker with a stable pane hash still escalates once its completed-turn age reaches the bound"
+  pass "a busy worker with stable pane content still escalates once its completed-turn age reaches the bound"
 }
 
-# Regression fixture for the incident's actual masking condition: Pi's rendered
-# elapsed-time footer changes every poll, so the pane hash never repeats and the
-# watcher always takes the "new hash" branch, never the stable-hash one above.
-test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
+# Regression fixture for the incident's masking condition: a rendered elapsed-time
+# footer changes every poll while the worker is frozen. The normalized stale
+# content must remain stable, so the busy turn-age path retains its wedge timer.
+test_busy_pane_ticking_footer_escalates_past_turn_age_bound() {
   local dir state fakebin out capture_file window key pid
-  dir=$(make_case busy-changing-hash-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
+  dir=$(make_case busy-ticking-footer-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-ticking"
   printf 'Working... (3600.1s)' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-ticking.meta"
@@ -1180,23 +1325,21 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
   sig=$(seen_sig "$state/busy-ticking.status"); printf '%s' "$sig" > "$state/.seen-busy-ticking_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   touch -t 200001010000 "$state/busy-ticking.meta"
-  # No pre-seeded .hash-<key>: with a real ticking elapsed footer, every poll
-  # lands here (h != prev) - the reproduction's actual masking condition.
+  # No pre-seeded .hash-<key>: the raw footer ticks, but its normalized content
+  # is intentionally stable before the busy turn-age path begins.
 
-  # Phase A: first sight past the bound absorbs and starts the wedge timer,
-  # without ever needing the "genuinely stale" hash-match path.
+  # Phase A: first sight past the bound absorbs and starts the wedge timer.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "a changing-hash busy pane past the turn-age bound escalated before the wedge threshold: $(cat "$out")"
+    reap "$pid"; fail "a ticking-footer busy pane past the turn-age bound escalated before the wedge threshold: $(cat "$out")"
   fi
-  [ -s "$state/.stale-since-$key" ] || fail "a changing-hash busy pane past the turn-age bound did not start a wedge timer"
+  [ -s "$state/.stale-since-$key" ] || fail "a ticking-footer busy pane past the turn-age bound did not start a wedge timer"
   reap "$pid"
 
-  # Phase B: another tick (still a fresh, never-before-seen hash) plus a
-  # backdated wedge timer escalates exactly as the stable-hash case does.
+  # Phase B: another raw footer tick plus a backdated wedge timer escalates.
   printf 'Working... (3601.2s)' > "$capture_file"
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
@@ -1204,10 +1347,10 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
     FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "a changing-hash busy pane did not wedge-escalate past the turn-age bound"
-  grep -F "stale: $window" "$out" >/dev/null || fail "busy turn-age escalation (changing hash) did not print the stale wake"
-  grep -F "possible wedge" "$out" >/dev/null || fail "busy turn-age escalation (changing hash) did not flag a possible wedge"
-  pass "a busy worker whose pane hash changes every poll still escalates once its completed-turn age reaches the bound"
+  wait_for_exit "$pid" 40 || fail "a ticking-footer busy pane did not wedge-escalate past the turn-age bound"
+  grep -F "stale: $window" "$out" >/dev/null || fail "busy turn-age escalation (ticking footer) did not print the stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "busy turn-age escalation (ticking footer) did not flag a possible wedge"
+  pass "a busy worker whose footer changes every poll still escalates once its completed-turn age reaches the bound"
 }
 
 test_busy_pane_turn_end_touch_resets_age() {
@@ -1854,13 +1997,16 @@ test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_terminal_stale_footer_drift_surfaces_once_and_new_status_surfaces
+test_frozen_nonterminal_ticking_footer_escalates_within_bounded_polls
+test_substantive_percentage_above_three_row_footer_resets_wedge_timer
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
-test_busy_pane_stable_hash_escalates_past_turn_age_bound
-test_busy_pane_changing_hash_escalates_past_turn_age_bound
+test_busy_pane_stable_content_escalates_past_turn_age_bound
+test_busy_pane_ticking_footer_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
@@ -1870,7 +2016,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
-test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
+test_nonterminal_stale_pause_transitions_reclassify_unchanged_content
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer

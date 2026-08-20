@@ -116,6 +116,18 @@ mark_surfaced() {  # <status-file>
   printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
 }
 
+# status_was_surfaced: 0 only when this exact current captain-relevant status
+# line already has a durable surfaced marker.
+# The marker owner is mark_surfaced above, so signal, stale, and heartbeat paths
+# all dedupe a terminal situation on the same status fact rather than pane bytes.
+status_was_surfaced() {  # <status-file>
+  local f=$1 task last
+  task=$(basename "$f"); task="${task%.status}"
+  last=$(last_status_line "$f")
+  [ -n "$last" ] && status_is_captain_relevant "$last" \
+    && [ "$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)" = "$last" ]
+}
+
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
   local backend=$1 session=$2 record=$3 pane_id to window task reason

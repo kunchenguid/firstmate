@@ -182,8 +182,57 @@ _event_cap_fails=0
 # digest/injection layer would never see the wake.
 afk_present() { [ -e "$STATE/.afk" ]; }
 
+# normalize_pane_for_stale_hash removes only volatile quantity fields from a
+# structurally delimited footer before stale detection hashes a capture.
+# A unique blank-prefixed horizontal rule with one to three nonblank rows below
+# it identifies the footer boundary; short or ambiguous captures keep their raw
+# hash rather than guessing which rows are substantive agent output.
+# A new footer field outside these generic duration, percentage, or cost forms
+# deliberately remains hash-visible, preserving today's surface-on-change safety
+# until the live drift guard names the harness and field for review.
+normalize_pane_for_stale_hash() {
+  awk '
+    { rows[NR] = $0 }
+    $0 ~ /[^[:space:]]/ { nonblank[++count] = NR }
+    function is_rule(row, compact) {
+      compact = row
+      gsub(/[[:space:]]/, "", compact)
+      return length(compact) >= 8 && compact ~ /^[-_=─━═]+$/
+    }
+    END {
+      first = NR + 1
+      if (count >= 4) {
+        for (j = 2; j < count; j++) {
+          candidate = nonblank[j]
+          below = count - j
+          if (below <= 3 && candidate > 1 && rows[candidate - 1] !~ /[^[:space:]]/ && is_rule(rows[candidate])) {
+            if (boundary) {
+              boundary = 0
+              ambiguous = 1
+              break
+            }
+            boundary = candidate
+          }
+        }
+        if (!ambiguous && boundary) first = boundary
+      }
+      for (i = 1; i <= NR; i++) {
+        row = rows[i]
+        if (i >= first) {
+          gsub(/\$[0-9]+([.][0-9]+)?/, "$<cost>", row)
+          gsub(/[0-9]+([.][0-9]+)?%/, "<percent>", row)
+          gsub(/([0-9]+([.][0-9]+)?[smhdw])+/, "<duration>", row)
+        }
+        printf "%s%s", row, (i < NR ? ORS : "")
+      }
+    }
+  '
+}
+
 hash_pane() {
-  if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
+  normalize_pane_for_stale_hash | {
+    if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
+  }
 }
 
 # window_is_busy: 0 (busy) iff the task's harness is PROVABLY working, through
@@ -261,25 +310,26 @@ recorded_windows() {
 }
 
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
-# (default 3): a pane that keeps re-wedging on the SAME stale hash - each
-# escalation gets absorbed again as "still validating" one poll later, since the
-# hash never changes - can otherwise repeat forever with no signal that this is
+# (default 3): a pane that keeps re-wedging with the SAME normalized stale
+# content - each escalation gets absorbed again as "still validating" one poll
+# later, since meaningful pane content never changes - can otherwise repeat
+# forever with no signal that this is
 # no longer a one-off. At the threshold, wedge_timer_check appends a
 # "demand-deep-inspection" marker to the wake payload so the wake reason itself
 # (not just repetition the supervisor has to notice on its own) forces a closer
 # look instead of another routine supervision resume. Reset wherever a window's
-# pane/hash state resets to genuinely active (see the two rm-on-reset call sites
+# normalized pane state resets to genuinely active (see the two rm-on-reset call sites
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
-# Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
-# absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
-# watcher restart between recording the hash and recording the timer), or
+# Repeat-poll wedge-timer bookkeeping for already-classified normalized stale
+# content absorbed as provably-working - repairs a missing/corrupt timer
+# (self-heals a watcher restart between recording the hash and recording the timer), or
 # escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
 # state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
+# both places normalized stale content can be absorbed this way: the plain
+# non-terminal path, and the stale_is_terminal-overridden path (a
+# captain-relevant status-log line that an active run/busy pane outranked).
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -328,7 +378,8 @@ busy_turn_over_age() {  # <task>
 # clock, a token counter) cannot keep resetting the cadence the way a hash-tied
 # timer would. A .paused-resurfaced-<key> throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
-# every poll. Advances the stale suppressor to <hash> and flags the key paused.
+# every poll. Advances the stale suppressor to the normalized content hash and
+# flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
@@ -948,10 +999,10 @@ EOF
     fi
   fi
 
-  # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
-  # signature means the crewmate finished, is waiting, or is wedged. Each distinct
-  # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
-  # remembers the hash already classified).
+  # Layer 1 backbone: pane staleness. Two consecutive captures with identical
+  # normalized content and no busy signature mean the crewmate finished, is
+  # waiting, or is wedged. Each normalized stale situation is surfaced, absorbed,
+  # or timed toward escalation once (.stale-* remembers it after classification).
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
@@ -993,7 +1044,7 @@ EOF
             *)      clear_pause_tracking "$w" ;;
           esac
         elif afk_present; then
-          # Daemon owns triage: one-shot per distinct stale hash, as before.
+          # Daemon owns triage: one-shot per distinct normalized stale content.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             fm_wake_append stale "$w" "stale: $w" || exit 1
             printf '%s' "$h" > "$sf"
@@ -1011,35 +1062,45 @@ EOF
           # poll. Root cause of the 2026-07 herdr false-surface incidents: a
           # validating crew was surfaced as stale every few minutes despite an
           # actively-running pipeline, purely because of this stale leftover
-          # line. On a NEW hash, give an active run/busy pane (the same
-          # authoritative source fm-crew-state.sh itself already prioritizes
-          # over the log) a chance to override before trusting the log.
+          # line. On newly normalized stale content, give an active run/busy pane
+          # (the same authoritative source fm-crew-state.sh itself already
+          # prioritizes over the log) a chance to override before trusting the log.
+          statusf="$STATE/$(window_to_task "$w" "$STATE").status"
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            elif status_was_surfaced "$statusf"; then
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              triage_log "absorbed stale (terminal status already surfaced): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
+              mark_surfaced "$statusf"
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then
-            # This exact hash was already overridden as provably-working (a
-            # wedge timer is running for it) - keep treating it that way
-            # without re-reading the crew state every poll, and without
-            # letting the still-captain-relevant log line re-surface it.
+            # This exact normalized stale content was already overridden as
+            # provably-working (a wedge timer is running for it) - keep treating
+            # it that way without re-reading the crew state every poll.
             wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
+          elif ! status_was_surfaced "$statusf"; then
+            # The pane stayed idle but the terminal status changed since its
+            # prior surface, so its new fact must wake immediately.
+            fm_wake_append stale "$w" "stale: $w" || exit 1
+            mark_surfaced "$statusf"
+            wake "stale: $w"
           fi
-          # else: already surfaced as genuinely terminal on a prior poll of
-          # this same hash - nothing left to do (matches the original,
-          # unmodified terminal-status behavior).
+          # else: this terminal status was already surfaced and no active-run
+          # wedge timer owns it, so keep observing without re-surfacing it.
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
-          # Decided once per distinct stale hash (the costly state reads run only
-          # on first sight, never every poll) via pause_state_class, which returns:
+          # Decided once per distinct normalized stale content (the costly state
+          # reads run only on first sight, never every poll) via pause_state_class,
+          # which returns:
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
           #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
