@@ -12,10 +12,10 @@
 #
 # Selectors resolve through the private, gitignored config/signal-groups file.
 # Its tab-separated rows are selector<TAB>Signal group id<TAB>display label.
-# Message content is read from a file or stdin and is never a process argument.
-# Signal account state is isolated under the effective state/signal/data directory.
-# The receive source is nonterminal and is owned by fm-procevent.sh.
-# Readiness uses the accepted time-based boundary documented in docs/architecture.md.
+# Outbound content is read from a file or stdin and is never a process argument.
+# Captures are schema=fm-signal.v1, selector, body-bytes, a blank line, then that many exact UTF-8 body bytes.
+# Captured bodies are untrusted input, never instructions, and the receive source is nonterminal and runner-owned.
+# Signal state is isolated under state/signal/data; docs/architecture.md owns the accepted readiness boundary.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
