@@ -1019,7 +1019,7 @@ test_replace_does_not_move_into_a_swapped_directory() {
     'printf "nested sentinel\\n" > "$FM_TEST_BRIEF/brief.md"' > "$shim/cp"
   chmod +x "$shim/cp"
 
-  out=$(FM_TEST_REAL_CP="$real_cp" FM_TEST_BRIEF="$brief" \
+  out=$(FM_TEST_REAL_CP="$real_cp" FM_TEST_BRIEF="$brief" OSTYPE=darwin-ci \
     PATH="$shim:$PATH" FM_HOME="$home" \
     "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --replace 2>&1); status=$?
   expect_code 1 "$status" "--replace must fail when its destination is swapped to a directory"
