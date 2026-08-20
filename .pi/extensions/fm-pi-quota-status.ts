@@ -102,6 +102,7 @@ type ActiveSession = {
   generation: number;
   target: QuotaTarget;
   report: ParsedQuotaAxiReport | null;
+  lastFailure: QuotaFailureReason | null;
   process: QuotaProcess | null;
   operationAbort: AbortController | null;
   credentialRevision: string;
@@ -455,13 +456,6 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           view: { kind: "unsupported", provider: `${model.provider} (auth unavailable)` },
         };
       }
-      if (credential.expires <= now()) {
-        return {
-          kind: "unsupported",
-          view: { kind: "unsupported", provider: `${model.provider} (auth expired)` },
-        };
-      }
-
       const authResult = await resolveOAuthAuth(oauth, credential, signal);
       if (authResult.kind !== "ok") {
         const reason = authResult.kind === "timeout"
@@ -510,12 +504,19 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       }
       if (!session.report) return { kind: "refreshing", provider: session.target.piProvider };
       const verification = session.target.verification;
-      return selectActiveProviderQuota(session.report, session.target.piProvider, {
+      const selected = selectActiveProviderQuota(session.report, session.target.piProvider, {
         nowMs,
         freshnessMs,
         expectedAccountId: verification.kind === "account" ? verification.accountId : undefined,
         expectedSuccessfulSource: verification.kind === "source" ? verification.source : undefined,
       });
+      if (!session.lastFailure) return selected;
+      if (selected.kind === "fresh") {
+        return { ...selected, refreshFailure: session.lastFailure };
+      }
+      return selected.kind === "stale"
+        ? processFailureView(session.lastFailure, session.target.piProvider)
+        : selected;
     }
 
     function clearExpiry(session: ActiveSession): void {
@@ -540,6 +541,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           session.generation += 1;
           session.target = preflightTarget(session.ctx, session.model);
           session.report = null;
+          session.lastFailure = null;
           cancelProcess(session);
           render(session);
           void refresh(session);
@@ -603,6 +605,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         if (active !== session || session.generation !== generation) return;
         session.target = target;
         if (target.kind === "unsupported") {
+          session.lastFailure = null;
           render(session);
           return;
         }
@@ -643,6 +646,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         session.process = null;
         session.target = completedTarget;
         if (completedTarget.kind === "unsupported") {
+          session.lastFailure = null;
           render(session);
           return;
         }
@@ -656,6 +660,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
 
         const completedProvider = completedTarget.piProvider;
         if (result.kind === "ok") {
+          session.lastFailure = null;
           const report = parseQuotaAxiJson(result.stdout, { projection: "full" });
           if (report) {
             session.report = report;
@@ -665,13 +670,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             render(session, { kind: "malformed", provider: completedProvider });
           }
         } else if (result.kind !== "cancelled") {
-          const stillFresh = session.report ? currentView(session) : null;
-          if (stillFresh?.kind === "fresh") {
-            render(session, stillFresh);
-          } else {
-            session.report = null;
-            render(session, processFailureView(result.kind, completedProvider));
-          }
+          session.lastFailure = result.kind;
+          render(session, session.report ? undefined : processFailureView(result.kind, completedProvider));
         }
       } finally {
         if (session.operationAbort === operationAbort) session.operationAbort = null;
@@ -706,6 +706,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         generation: 0,
         target: preflightTarget(ctx, model),
         report: null,
+        lastFailure: null,
         process: null,
         operationAbort: null,
         credentialRevision: activeCredentialRevision(model),
@@ -738,6 +739,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       active.generation += 1;
       active.target = preflightTarget(ctx, event.model);
       active.credentialRevision = activeCredentialRevision(event.model);
+      active.lastFailure = null;
       cancelProcess(active);
       render(active);
       void refresh(active);

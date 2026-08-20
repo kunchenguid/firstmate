@@ -28,6 +28,7 @@ export type FreshQuotaView = {
   credits: QuotaCreditsView | null;
   generatedAtMs: number;
   freshUntilMs: number;
+  refreshFailure?: QuotaFailureReason | null;
 };
 
 export type QuotaFailureReason = "missing" | "failed" | "timeout" | "overflow" | "cancelled";
@@ -106,8 +107,27 @@ const QUOTA_WINDOW_KINDS = ["session", "weekly", "monthly", "model", "credits", 
 const QUOTA_CREDIT_UNITS = ["usd", "credits"] as const;
 const QUOTA_PROVIDER_SOURCES = ["oauth", "cli-rpc", "api", "web", "cache", "unavailable"] as const;
 const QUOTA_PROVIDER_STATUSES = ["fresh", "stale", "unavailable", "auth_required", "rate_limited", "error"] as const;
+const QUOTA_AUTH_STATUSES = ["usable", "expired_refreshable", "unusable"] as const;
+const QUOTA_STATE_REASONS = ["keychain_access_required", "credentials_expired"] as const;
 const QUOTA_IDENTITY_STATUSES = ["verified", "unverified"] as const;
 const QUOTA_ATTEMPT_STATUSES = ["success", "failed", "skipped"] as const;
+const QUOTA_PACE_STATUSES = ["ahead", "on_pace", "behind", "unknown"] as const;
+const QUOTA_PACE_REASONS = [
+  "stale",
+  "missing_usage",
+  "missing_cycle",
+  "invalid_cycle",
+  "future_cycle_start",
+  "expired_reset",
+  "unsupported_period",
+] as const;
+const QUOTA_PROJECTION_CONFIDENCES = ["early", "established"] as const;
+const QUOTA_CYCLE_BASES = ["starts_at_resets_at", "window_seconds"] as const;
+const QUOTA_SEMANTICS_STATUSES = ["known", "partial", "unknown"] as const;
+const QUOTA_AVAILABILITY_STATUSES = ["known", "unknown"] as const;
+const QUOTA_EFFECTIVE_PACE_STATUSES = ["ahead", "on_pace", "behind", "mixed", "unknown"] as const;
+const QUOTA_RUNWAY_STATUSES = ["exhausted_now", "projected_exhaustion", "through_reset", "unknown"] as const;
+const QUOTA_SELECTION_STATUSES = ["known", "unknown"] as const;
 
 export function quotaProviderForPiProvider(piProvider: string): string | null {
   return PI_PROVIDER_TO_QUOTA_PROVIDER[piProvider] ?? null;
@@ -123,7 +143,14 @@ export function parseQuotaAxiJson(
   } catch {
     return null;
   }
-  if (!isRecord(value) || !Array.isArray(value.providers)) return null;
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.providers) ||
+    (value.help !== undefined && (
+      !Array.isArray(value.help) ||
+      value.help.some((entry) => typeof entry !== "string")
+    ))
+  ) return null;
   const generatedAtMs = parseTimestamp(value.generatedAt);
   const schemaVersion = finiteNumber(value.schemaVersion);
   if (
@@ -146,24 +173,63 @@ function malformed(provider: string): QuotaView {
   return { kind: "malformed", provider };
 }
 
+function validOptionalNumber(
+  value: unknown,
+  predicate: (number: number) => boolean = () => true,
+): boolean {
+  if (value === undefined) return true;
+  const parsed = finiteNumber(value);
+  return parsed !== null && predicate(parsed);
+}
+
+function validOptionalTimestamp(value: unknown): boolean {
+  return value === undefined || parseTimestamp(value) !== null;
+}
+
+function validTextArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((entry) => exactText(entry) !== null);
+}
+
+function validOptionalTextArray(value: unknown): boolean {
+  return value === undefined || validTextArray(value);
+}
+
+function validPace(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value) || !exactEnum(value.status, QUOTA_PACE_STATUSES)) return false;
+  if (value.reason !== undefined && !exactEnum(value.reason, QUOTA_PACE_REASONS)) return false;
+  if (!validOptionalNumber(value.timeRemainingPercent)) return false;
+  if (!validOptionalNumber(value.elapsedPercent)) return false;
+  if (!validOptionalNumber(value.reservePercentPoints)) return false;
+  if (!validOptionalNumber(value.burnMultiple, (number) => number >= 0)) return false;
+  if (!validOptionalTimestamp(value.projectedExhaustedAt)) return false;
+  if (
+    value.projectionConfidence !== undefined &&
+    !exactEnum(value.projectionConfidence, QUOTA_PROJECTION_CONFIDENCES)
+  ) return false;
+  if (value.projectionBasis !== undefined && value.projectionBasis !== "cycle_average") return false;
+  if (value.cycleBasis !== undefined && !exactEnum(value.cycleBasis, QUOTA_CYCLE_BASES)) return false;
+  return validOptionalNumber(value.cycleSeconds, (number) => number > 0);
+}
+
 function parseWindow(value: unknown): QuotaWindowView | null {
   if (!isRecord(value)) return null;
-  const id = cleanText(value.id);
+  const id = exactText(value.id);
   const label = cleanText(value.label);
   const kind = exactEnum(value.kind, QUOTA_WINDOW_KINDS);
   if (!id || !label || !kind) return null;
+  if (!validOptionalNumber(value.percentUsed, (number) => number >= 0 && number <= 100)) return null;
+  if (!validOptionalNumber(value.percentRemaining, (number) => number >= 0 && number <= 100)) return null;
+  if (!validOptionalTimestamp(value.startsAt) || !validOptionalTimestamp(value.resetsAt)) return null;
+  if (!validOptionalNumber(value.windowSeconds, (number) => number > 0)) return null;
+  if (!validOptionalNumber(value.spentUsd, (number) => number >= 0)) return null;
+  if (!validOptionalNumber(value.limitUsd, (number) => number >= 0)) return null;
+  if (!validPace(value.pace)) return null;
 
-  let percentRemaining: number | null = null;
-  if (value.percentRemaining !== undefined) {
-    percentRemaining = finiteNumber(value.percentRemaining);
-    if (percentRemaining === null || percentRemaining < 0 || percentRemaining > 100) return null;
-  }
-
-  let resetsAtMs: number | null = null;
-  if (value.resetsAt !== undefined) {
-    resetsAtMs = parseTimestamp(value.resetsAt);
-    if (resetsAtMs === null) return null;
-  }
+  const percentRemaining = value.percentRemaining === undefined
+    ? null
+    : finiteNumber(value.percentRemaining);
+  const resetsAtMs = value.resetsAt === undefined ? null : parseTimestamp(value.resetsAt);
   const resetText = value.resetText === undefined ? null : cleanText(value.resetText);
   if (value.resetText !== undefined && resetText === null) return null;
 
@@ -231,6 +297,92 @@ function parseAttempts(value: unknown): ParsedAttempt[] | null | undefined {
   return attempts;
 }
 
+function validEffectivePace(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value) || !exactEnum(value.status, QUOTA_EFFECTIVE_PACE_STATUSES)) return false;
+  if (!validOptionalTextArray(value.aheadWindowIds)) return false;
+  if (!validOptionalTextArray(value.behindWindowIds)) return false;
+  if (!validOptionalTextArray(value.onPaceWindowIds)) return false;
+  if (!validOptionalTextArray(value.unknownWindowIds)) return false;
+  if (!validOptionalNumber(value.worstReservePercentPoints)) return false;
+  return value.worstReserveWindowId === undefined || exactText(value.worstReserveWindowId) !== null;
+}
+
+function validRunway(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value) || !exactEnum(value.status, QUOTA_RUNWAY_STATUSES)) return false;
+  if (!validOptionalNumber(value.usableRunwaySeconds, (number) => number >= 0)) return false;
+  if (!validOptionalTimestamp(value.projectedExhaustedAt)) return false;
+  if (value.limitingWindowId !== undefined && exactText(value.limitingWindowId) === null) return false;
+  if (
+    value.projectionConfidence !== undefined &&
+    !exactEnum(value.projectionConfidence, QUOTA_PROJECTION_CONFIDENCES)
+  ) return false;
+  if (value.projectionBasis !== undefined && value.projectionBasis !== "cycle_average") return false;
+  return validOptionalTextArray(value.unmeasurableWindowIds);
+}
+
+function validSelection(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value) || !exactEnum(value.status, QUOTA_SELECTION_STATUSES)) return false;
+  if (!validOptionalNumber(value.spendPriority, (number) => number >= -100 && number <= 100)) return false;
+  return validOptionalTextArray(value.unmeasurableWindowIds);
+}
+
+function validEffectiveAvailability(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (exactText(value.scope) === null || !exactEnum(value.status, QUOTA_AVAILABILITY_STATUSES)) return false;
+  if (!validOptionalNumber(value.effectivePercentRemaining, (number) => number >= 0 && number <= 100)) return false;
+  if (!validTextArray(value.boundedBy) || !validOptionalTextArray(value.limitingWindowIds)) return false;
+  return validEffectivePace(value.pace) && validRunway(value.runway) && validSelection(value.selection);
+}
+
+function validQuotaSemantics(value: unknown, requireDescription: boolean): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value) || !exactEnum(value.status, QUOTA_SEMANTICS_STATUSES)) return false;
+  if (requireDescription && typeof value.description !== "string") return false;
+  if (value.description !== undefined && typeof value.description !== "string") return false;
+  if (
+    !Array.isArray(value.effectiveAvailability) ||
+    !value.effectiveAvailability.every(validEffectiveAvailability)
+  ) return false;
+  return validOptionalTextArray(value.unresolvedWindowIds);
+}
+
+function validProviderState(value: unknown, requireSourcesTried: boolean): boolean {
+  if (!isRecord(value)) return false;
+  if (!exactEnum(value.status, QUOTA_PROVIDER_STATUSES) || typeof value.stale !== "boolean") return false;
+  if (!validOptionalTimestamp(value.refreshedAt)) return false;
+  for (const field of ["error", "retryAfter", "remedyCommand"] as const) {
+    if (value[field] !== undefined && typeof value[field] !== "string") return false;
+  }
+  if (value.authStatus !== undefined && !exactEnum(value.authStatus, QUOTA_AUTH_STATUSES)) return false;
+  if (value.reason !== undefined && !exactEnum(value.reason, QUOTA_STATE_REASONS)) return false;
+  if (!validOptionalTextArray(value.untrustedWindowIds)) return false;
+  if (requireSourcesTried && !validTextArray(value.sourcesTried)) return false;
+  return validOptionalTextArray(value.sourcesTried);
+}
+
+function validProviderFields(
+  value: Record<string, unknown>,
+  schemaVersion: number,
+  projection: QuotaAxiProjection,
+): boolean {
+  const requireFullFields = schemaVersion === 3 || projection === "full";
+  if (value.label !== undefined && cleanText(value.label) === null) return false;
+  if (value.source !== undefined && !exactEnum(value.source, QUOTA_PROVIDER_SOURCES)) return false;
+  if (requireFullFields && (cleanText(value.label) === null || !exactEnum(value.source, QUOTA_PROVIDER_SOURCES))) {
+    return false;
+  }
+  if (value.plan !== undefined && cleanText(value.plan, 48) === null) return false;
+  if (!validProviderState(value.state, requireFullFields)) return false;
+  if (!Array.isArray(value.windows) || !value.windows.every((window) => parseWindow(window) !== null)) return false;
+  if (!validQuotaSemantics(value.quotaSemantics, requireFullFields)) return false;
+  if (parseCredits(value.credits) === null) return false;
+  if (parseAccount(value.account) === null || parseAttempts(value.attempts) === null) return false;
+  return true;
+}
+
 export function selectActiveProviderQuota(
   report: ParsedQuotaAxiReport,
   piProvider: string,
@@ -265,6 +417,7 @@ export function selectActiveProviderQuota(
   }
 
   const fullProjection = report.projection === "full";
+  if (!validProviderFields(rawProvider, report.schemaVersion, report.projection)) return malformed(provider);
   const label = rawProvider.label === undefined && report.schemaVersion === 5 && !fullProjection
     ? QUOTA_PROVIDER_LABELS[provider] ?? null
     : cleanText(rawProvider.label);
@@ -390,18 +543,43 @@ function formatCredits(credits: QuotaCreditsView): string {
   return credits.unlimited === false ? "credits unavailable" : "credits unknown";
 }
 
-function fitExplicitNarrow(label: string, windows: number, width: number): string {
-  const count = `${windows} window${windows === 1 ? "" : "s"}`;
-  const candidates = [
-    `Quota ${label}: narrow - ${count}; widen for details`,
-    `Quota: narrow - ${count}; widen`,
-    `Quota: narrow (${windows}w)`,
-    "Quota: narrow",
-  ];
+const FAILURE_TEXT: Readonly<Record<QuotaFailureReason, { long: string; compact: string }>> = {
+  missing: { long: "quota-axi missing", compact: "missing" },
+  failed: { long: "quota-axi failed", compact: "failed" },
+  timeout: { long: "quota-axi timed out", compact: "timeout" },
+  overflow: { long: "quota-axi output too large", compact: "overflow" },
+  cancelled: { long: "quota refresh cancelled", compact: "cancelled" },
+};
+
+function firstFitting(candidates: string[], width: number): string {
   for (const candidate of candidates) {
     if (visibleWidth(candidate) <= width) return candidate;
   }
-  return truncateToWidth("Quota: narrow", Math.max(0, width), "…");
+  return truncateToWidth(candidates[candidates.length - 1] ?? "", Math.max(0, width), "…");
+}
+
+function fitExplicitNarrow(
+  label: string,
+  windows: number,
+  width: number,
+  refreshFailure?: QuotaFailureReason | null,
+): string {
+  const count = `${windows} window${windows === 1 ? "" : "s"}`;
+  const failure = refreshFailure ? FAILURE_TEXT[refreshFailure].compact : null;
+  const candidates = failure
+    ? [
+        `Quota ${label}: narrow - ${count} cached; refresh ${failure}`,
+        `Quota: narrow - ${count} cached; ${failure}`,
+        `Quota: narrow (${windows}w; ${failure})`,
+        `Quota: narrow; ${failure}`,
+      ]
+    : [
+        `Quota ${label}: narrow - ${count}; widen for details`,
+        `Quota: narrow - ${count}; widen`,
+        `Quota: narrow (${windows}w)`,
+        "Quota: narrow",
+      ];
+  return firstFitting(candidates, width);
 }
 
 export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.now()): string {
@@ -419,14 +597,11 @@ export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.n
     return truncateToWidth(`Quota${label}: unavailable`, safeWidth, "…");
   }
   if (view.kind === "failure") {
-    const reason = {
-      missing: "quota-axi missing",
-      failed: "quota-axi failed",
-      timeout: "quota-axi timed out",
-      overflow: "quota-axi output too large",
-      cancelled: "quota refresh cancelled",
-    }[view.reason];
-    return truncateToWidth(`Quota: unavailable (${reason})`, safeWidth, "…");
+    const reason = FAILURE_TEXT[view.reason];
+    return firstFitting([
+      `Quota: unavailable (${reason.long})`,
+      `Quota: ${reason.compact}`,
+    ], safeWidth);
   }
   if (view.kind === "unverified") {
     return truncateToWidth("Quota: unavailable (account unverified)", safeWidth, "…");
@@ -448,7 +623,10 @@ export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.n
   });
   const fullParts = [heading, ...(windowParts.length > 0 ? windowParts : ["no quota windows"])];
   if (view.credits) fullParts.push(formatCredits(view.credits));
+  if (view.refreshFailure) {
+    fullParts.push(`refresh unavailable (${FAILURE_TEXT[view.refreshFailure].long})`);
+  }
   const full = fullParts.join(" | ");
   if (visibleWidth(full) <= safeWidth) return full;
-  return fitExplicitNarrow(view.label, view.windows.length, safeWidth);
+  return fitExplicitNarrow(view.label, view.windows.length, safeWidth, view.refreshFailure);
 }

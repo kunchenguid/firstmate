@@ -439,15 +439,17 @@ assert(visibleWidth(narrow) <= 72, "narrow format exceeded its width");
 const veryNarrow = formatQuotaStatus(codex, 24, now);
 assert(veryNarrow.includes("narrow"), `very narrow format lost its explicit degradation: ${veryNarrow}`);
 assert(visibleWidth(veryNarrow) <= 24, "very narrow format exceeded its width");
-for (const [reason, expected] of [
-  ["missing", "quota-axi missing"],
-  ["failed", "quota-axi failed"],
-  ["timeout", "quota-axi timed out"],
-  ["overflow", "quota-axi output too large"],
-  ["cancelled", "quota refresh cancelled"],
+for (const [reason, expected, compact] of [
+  ["missing", "quota-axi missing", "Quota: missing"],
+  ["failed", "quota-axi failed", "Quota: failed"],
+  ["timeout", "quota-axi timed out", "Quota: timeout"],
+  ["overflow", "quota-axi output too large", "Quota: overflow"],
+  ["cancelled", "quota refresh cancelled", "Quota: cancelled"],
 ]) {
   const failureText = formatQuotaStatus({ kind: "failure", provider: "codex", reason }, 200, now);
   assert(failureText.includes(expected), `${reason} failure was not explicit: ${failureText}`);
+  const compactFailureText = formatQuotaStatus({ kind: "failure", provider: "codex", reason }, 24, now);
+  assert(compactFailureText === compact, `${reason} failure lost its narrow identity: ${compactFailureText}`);
 }
 
 const claude = selectActiveProviderQuota(parsed, "anthropic", { nowMs: now });
@@ -502,6 +504,67 @@ const paddedProviderStatus = report(now);
 paddedProviderStatus.providers[1].state.status = " fresh ";
 const missingSourcesTried = report(now);
 delete missingSourcesTried.providers[1].state.sourcesTried;
+const fullyPopulated = report(now);
+const populatedProvider = fullyPopulated.providers[1];
+populatedProvider.state.authStatus = "usable";
+populatedProvider.state.untrustedWindowIds = [];
+Object.assign(populatedProvider.windows[0], {
+  percentUsed: 6,
+  startsAt: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+  windowSeconds: 7 * 24 * 60 * 60,
+  spentUsd: 0,
+  limitUsd: 1,
+  pace: {
+    status: "behind",
+    timeRemainingPercent: 85,
+    elapsedPercent: 15,
+    reservePercentPoints: 9,
+    burnMultiple: 0.4,
+    projectedExhaustedAt: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    projectionConfidence: "established",
+    projectionBasis: "cycle_average",
+    cycleBasis: "window_seconds",
+    cycleSeconds: 7 * 24 * 60 * 60,
+  },
+});
+populatedProvider.quotaSemantics = {
+  status: "known",
+  description: "Fixture quota semantics",
+  effectiveAvailability: [{
+    scope: "all_models",
+    status: "known",
+    effectivePercentRemaining: 94,
+    boundedBy: ["weekly"],
+    limitingWindowIds: ["weekly"],
+    pace: {
+      status: "behind",
+      behindWindowIds: ["weekly"],
+      worstReservePercentPoints: 9,
+      worstReserveWindowId: "weekly",
+    },
+    runway: {
+      status: "through_reset",
+      projectionConfidence: "established",
+      projectionBasis: "cycle_average",
+    },
+    selection: { status: "known", spendPriority: 1 },
+  }],
+  unresolvedWindowIds: [],
+};
+const fullyPopulatedParsed = parseQuotaAxiJson(JSON.stringify(fullyPopulated));
+assert(fullyPopulatedParsed, "fully-populated quota fixture did not parse structurally");
+assert(
+  selectActiveProviderQuota(fullyPopulatedParsed, "openai-codex", { nowMs: now }).kind === "fresh",
+  "valid known quota fields were rejected",
+);
+const invalidPercentUsed = structuredClone(fullyPopulated);
+invalidPercentUsed.providers[1].windows[0].percentUsed = "invalid";
+const invalidPace = structuredClone(fullyPopulated);
+invalidPace.providers[1].windows[0].pace.reservePercentPoints = "invalid";
+const invalidQuotaSemantics = structuredClone(fullyPopulated);
+invalidQuotaSemantics.providers[1].quotaSemantics.effectiveAvailability[0].selection.spendPriority = "invalid";
+const invalidAuthStatus = structuredClone(fullyPopulated);
+invalidAuthStatus.providers[1].state.authStatus = "invalid";
 for (const [malformedReport, description] of [
   [missingWindows, "missing windows"],
   [missingWindowKind, "missing window kind"],
@@ -515,6 +578,10 @@ for (const [malformedReport, description] of [
   [unknownProviderStatus, "unknown provider status"],
   [paddedProviderStatus, "normalized provider status"],
   [missingSourcesTried, "missing state sources"],
+  [invalidPercentUsed, "invalid percent used"],
+  [invalidPace, "invalid pace field"],
+  [invalidQuotaSemantics, "invalid quota semantics field"],
+  [invalidAuthStatus, "invalid auth status"],
 ]) {
   const structurallyParsed = parseQuotaAxiJson(JSON.stringify(malformedReport));
   assert(structurallyParsed, `${description} fixture should remain structurally parseable`);
@@ -598,7 +665,7 @@ function fixtureAccessToken(accountId) {
   })).toString("base64url");
   return `eyJhbGciOiJub25lIn0.${payload}.fixture`;
 }
-async function setStoredOAuth(provider, access) {
+async function setStoredOAuth(provider, access, expires = Date.now() + 24 * 60 * 60 * 1000) {
   let credentials = {};
   try {
     credentials = JSON.parse(await readFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, "utf8"));
@@ -608,7 +675,7 @@ async function setStoredOAuth(provider, access) {
     type: "oauth",
     access,
     refresh: `fixture-refresh-${provider}`,
-    expires: Date.now() + 24 * 60 * 60 * 1000,
+    expires,
   };
   await writeFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, `${JSON.stringify(credentials)}\n`);
 }
@@ -897,6 +964,11 @@ class FakeClock {
 const fakeStart = Date.now();
 const fakeClock = new FakeClock(fakeStart);
 process.env.FM_QUOTA_TEST_NOW_MS = String(fakeStart);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  fakeStart + 4 * 60 * 1000,
+);
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
 const expiring = makePi(createFirstmateQuotaStatusExtension({
   refreshMs: 5 * 60 * 1000,
@@ -915,18 +987,24 @@ assert(expiring.widgetText(400).includes("week 94% left"), "restored clock did n
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "fail\n");
 const writesBeforeFailedRefresh = expiring.widgetWriteCount;
 fakeClock.advance(5 * 60 * 1000);
-await waitFor(() => expiring.widgetWriteCount > writesBeforeFailedRefresh, "failed refresh did not republish the still-fresh report");
+await waitFor(
+  () => expiring.widgetText(400).includes("quota-axi failed"),
+  `failed refresh did not expose its outcome beside cached quota: ${expiring.widgetText(400)}`,
+);
+assert(expiring.widgetWriteCount > writesBeforeFailedRefresh, "failed refresh did not republish the still-fresh report");
+assert(!expiring.widgetText(400).includes("auth expired"), "soft OAuth expiry was classified as unsupported");
 assert(expiring.widgetText(400).includes("week 94% left"), "failed refresh discarded quota before its freshness deadline");
 const writesBeforeDelayedExpiry = expiring.widgetWriteCount;
 fakeClock.jump(60 * 1000);
 assert(expiring.widgetWriteCount === writesBeforeDelayedExpiry, "fake clock unexpectedly ran the delayed expiry callback");
-assert(expiring.widgetText(400).includes("stale"), "rendering presented quota past its freshness deadline");
+assert(expiring.widgetText(400).includes("quota-axi failed"), "expired cached quota hid the latest refresh failure");
 assert(!expiring.widgetText(400).includes("94%"), "rendering presented expired quota values as fresh");
 fakeClock.advance(0);
-assert(expiring.widgetWriteCount > writesBeforeDelayedExpiry, "expiry callback did not republish the stale view");
+assert(expiring.widgetWriteCount > writesBeforeDelayedExpiry, "expiry callback did not republish the failed refresh view");
 await expiring.emit("session_shutdown", { reason: "quit" });
 assert(fakeClock.tasks.size === 0, "shutdown leaked a fake-clock refresh or expiry timer");
 delete process.env.FM_QUOTA_TEST_NOW_MS;
+await setStoredOAuth("openai-codex", fixtureAccessToken("fixture-codex-account"));
 
 const nonTui = makePi(createFirstmateQuotaStatusExtension({ refreshMs: 40, timeoutMs: 80 }), "openai-codex", "print");
 await nonTui.emit("session_start", { reason: "startup" });
