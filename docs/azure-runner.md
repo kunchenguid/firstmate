@@ -281,6 +281,29 @@ export FM_AZURE_RUNNER_REMOTE_CLASSES='test=behavior-heavy,lint=validation-stand
 no-mistakes axi run --intent '<captain goal and implementation context>'
 ```
 
+The three `FM_AZURE_RUNNER_TASK` / `FM_AZURE_RUNNER_GENERATION` /
+`FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION` exports above are an operator override,
+not a requirement of the no-mistakes path: `bin/fm-azure-runner-dispatch.sh` is
+the caller that derives the per-run bindings from the ambient no-mistakes run
+when they are not exported.
+The task and generation come from the run's own identity - the
+`$FM_HOME/state/<task>.meta` whose `worktree=` records the command's Git
+top-level, or, inside a no-mistakes gate worktree
+(`<nm-home>/worktrees/<repo-id>/<run-id>`), the run id as `nm-<run-id>` with
+the exact snapshot HEAD as the generation.
+The subscription confirmation is always passed through from the operator
+environment's `FM_AZURE_SUBSCRIPTION_ID` and never synthesized.
+In the ambient lane, `FM_AZURE_RUNNER_REMOTE_CLASSES` is therefore the spend
+switch, full stop: selecting a class remote is the single operator gesture
+that authorizes billable dispatch, and the auto-derived subscription
+confirmation is no longer a second one.
+Explicit values are honored only as a task/generation pair; half a hand-set
+identity refuses.
+A binding that cannot be derived fails closed with an exact error naming what
+is missing, and the selected command then runs nowhere - there is no silent
+local fallback, and `FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES` remains the only
+explicit local opt-out.
+
 The lint payload preserves the tracked shell owner and locked Agent Fleet command unchanged inside the dispatched argv.
 For a validation-owned feature branch, the caller passes its exact current `refs/heads/<branch>` identity plus the one-ref private snapshot bundle.
 The runner binds and privately stages that unpushed commit, while a changed local bundle/head/tree or public default base refuses before compute creation.

@@ -86,30 +86,38 @@ creates it, the crewmate completes a task, and both release cleanly.
 
 ## R4. no-mistakes runs on Azure
 
-Status: PARTIAL, and neither lane functions today.
+Status: PARTIAL. Both lanes are code-complete pending their live acceptance runs.
 
 Two lanes exist.
 The validation-cell lane (`docs/azure-validation.md`) has never closed a cell; there is no
 `azure-validation` state under `$FM_HOME/state`.
 A stranding strand was fixed: a passed run carrying a short receipt set is now demoted to failed
 so the cell collects and retains legibly.
-That buys legibility, not closing, and the root cause (an in-cell bridge producing no receipts) is
-untouched, so a demoted cell still cannot `close`.
+The root cause behind "an in-cell bridge producing no receipts" is now found and fixed: the
+bridge emits receipts in the one attempt whose test step executes, no-mistakes does not
+re-execute an already-green test step when a resumed attempt (reattach or respond) continues the
+same run, and the guest wiped the shard exchange's receipts at the start of EVERY attempt - so
+every multi-attempt run assembled its final result with zero receipts, demoted, and could never
+`close`. The wipe is now scoped to run boundaries (start mode only); the controller's collect
+gate stays the binding authority (receipt head must be the published head or a verified ancestor
+with its tree bound), proven hermetically through the real bridge, guest emission, collect
+identity gate, and close gate in `tests/fm-azure-validation.test.sh`.
 The one stranded work disk that sat on the subscription was deleted by the owner's direction on
-2026-08-19 after no cell record could be found anywhere for the sanctioned close, so the lane's
-inability to close now has no live residue, only the unfixed root cause.
-The runner-offload lane (`FM_AZURE_RUNNER_REMOTE_CLASSES`) has no caller: nothing in the
-repository sets `FM_AZURE_RUNNER_TASK`, `FM_AZURE_RUNNER_GENERATION`, or
-`FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION`, and the placeholders in `docs/azure-runner.md` are an
-operator recipe rather than a caller.
-Selecting the `test` class therefore routes every non-Herdr test to Azure and keeps only the
-Herdr lifecycle scripts local; with no caller supplying the bindings the dispatch fails, so those
-non-Herdr tests run nowhere and the step exits 1.
-There is no automatic fallback to the host, and `FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES` is the
-explicit operator opt-out that restores the full local run.
+2026-08-19 after no cell record could be found anywhere for the sanctioned close, so the lane
+has no live residue.
+The runner-offload lane (`FM_AZURE_RUNNER_REMOTE_CLASSES`) now has its caller:
+`bin/fm-azure-runner-dispatch.sh` derives `FM_AZURE_RUNNER_TASK` and
+`FM_AZURE_RUNNER_GENERATION` from the ambient no-mistakes run (the task-worktree
+`$FM_HOME/state/<task>.meta` authority, or the gate worktree's own run id and snapshot HEAD)
+and passes `FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION` through from the operator environment's
+`FM_AZURE_SUBSCRIPTION_ID`, never inventing it. Any underivable binding fails closed with an
+exact error naming what is missing and the command runs nowhere; the `docs/azure-runner.md`
+exports remain an operator override, and `FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES` remains the
+only explicit local opt-out.
 
-Work: build the caller that derives the per-run bindings from the ambient no-mistakes run, then
-drive one validation cell from dispatch to close.
+Work remaining: the two live acceptance runs, operator-driven after merge - one no-mistakes run
+offloading a selected test class to Azure end to end, and one validation cell driven from
+dispatch through `close`.
 
 Acceptance: a no-mistakes run offloads a test class to Azure and returns a real verdict; and,
 separately, one validation cell reaches `close` with its worktree disk released.

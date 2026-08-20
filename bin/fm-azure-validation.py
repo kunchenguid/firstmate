@@ -1965,6 +1965,14 @@ def verify_result_identity(state, result):
         rounds = set()
         receipt_heads = set()
         receipt_trees = set()
+        # Receipts must be this cell's own shard round, not merely a
+        # well-formed set at an ancestor head. The controller recorded every
+        # shard it dispatched for this run in shard_runs (keyed by the shard
+        # request digest, carrying the round, shard index, head, command, and
+        # invocation it actually created), so an alien round smuggled onto the
+        # durable disk cannot correspond and is refused here rather than
+        # trusted on disk structure alone.
+        dispatched = state.get("shard_runs") or {}
         for item in shard_receipts:
             if not isinstance(item, dict):
                 raise ValidationError("behavior shard receipt is malformed")
@@ -1980,6 +1988,16 @@ def verify_result_identity(state, result):
                 or not item.get("vm_instance_id")
             ):
                 raise ValidationError("behavior shard receipt identity is incomplete or stale")
+            record = dispatched.get(str(item.get("request_digest")))
+            if (
+                not isinstance(record, dict)
+                or record.get("round") != item.get("round")
+                or record.get("shard") != item.get("shard")
+                or record.get("head") != item.get("head")
+                or record.get("command_digest") != item.get("command_digest")
+                or record.get("invocation") != item.get("invocation")
+            ):
+                raise ValidationError("behavior shard receipts do not correspond to this cell's own dispatched shard round")
             receipt_heads.add(item["head"])
             receipt_trees.add(item["tree"])
             artifact = item.get("artifact")

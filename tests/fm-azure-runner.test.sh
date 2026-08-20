@@ -724,6 +724,255 @@ PY2
   pass "runner-local strict and commissioning defenses keep the budget-alert proof, itemized bound, and ledger concurrency"
 }
 
+# One ULID whose 26 characters all sit in the Crockford alphabet the gate
+# worktree probe accepts (no I/L/O/U).
+NM_RUN_FIXTURE=01BX5ZZKBKACTAV9WEVGEMMVRZ
+
+make_dispatch_fixture() {  # <root>: real dispatch + step code, capturing runner
+  local root=$1
+  mkdir -p "$root/bin" "$root/tests"
+  cp "$ROOT/bin/fm-azure-runner-dispatch.sh" "$root/bin/fm-azure-runner-dispatch.sh"
+  cp "$ROOT/bin/fm-no-mistakes-test-command.sh" "$root/bin/fm-no-mistakes-test-command.sh"
+  cp "$ROOT/bin/fm-azure-runner-command.sh" "$root/bin/fm-azure-runner-command.sh"
+  cat >"$root/bin/fm-azure-runner.sh" <<SH
+#!/bin/sh
+printf '%s\n' "\$@" >"$root/captured"
+exit 0
+SH
+  cat >"$root/tests/run.sh" <<SH
+#!/bin/sh
+printf '%s\n' "\$@" >>"$root/local-runs"
+exit 0
+SH
+  printf 'fm-fixture-herdr.test.sh\therdr-lab\n' >"$root/tests/test-capabilities.tsv"
+  chmod +x "$root/bin/"* "$root/tests/run.sh"
+}
+
+make_ambient_worktree() {  # <path>: a committed git worktree
+  mkdir -p "$1"
+  git -C "$1" init -q -b fm/ambient
+  git -C "$1" config user.name fixture
+  git -C "$1" config user.email fixture@example.invalid
+  printf 'ambient\n' >"$1/README.md"
+  git -C "$1" add README.md
+  git -C "$1" commit -qm ambient
+}
+
+dispatch_ambient_binding_contract() {
+  local tmp fixture home taskwt gatewt gate_head dispatch out rc
+  fm_test_tmproot_into tmp fm-azure-runner-ambient-bindings
+  fixture="$tmp/fixture"
+  make_dispatch_fixture "$fixture"
+  dispatch="$fixture/bin/fm-azure-runner-dispatch.sh"
+  home="$tmp/home"
+  mkdir -p "$home/state"
+  make_ambient_worktree "$tmp/taskwt"
+  taskwt=$(cd "$tmp/taskwt" && pwd -P)
+  mkdir -p "$taskwt/sub"
+  fm_write_meta "$home/state/task-fixture.meta" \
+    "worktree=$taskwt" \
+    "generation_id=spawn:fixture123" \
+    "kind=ship" "mode=no-mistakes"
+
+  # 1. Ambient task-worktree derivation, exact bindings, from a subdirectory.
+  rm -f "$fixture/captured"
+  (cd "$taskwt/sub" && env FM_HOME="$home" FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_RUNNER_REMOTE_CLASSES='lint=validation-standard' \
+    "$dispatch" lint -- sh -c 'exit 0') || fail "ambient task-worktree dispatch failed"
+  [ -f "$fixture/captured" ] || fail "the fixture runner captured no invocation"
+  python3 - "$fixture/captured" "$SUB" <<'PY' || fail "task-worktree bindings were not derived exactly"
+import sys
+argv=open(sys.argv[1]).read().splitlines()
+def value(flag): return argv[argv.index(flag)+1]
+assert argv[0]=="run" and "--confirm-run" in argv
+assert value("--confirm-subscription")==sys.argv[2]
+assert value("--task")=="task-fixture"
+assert value("--generation")=="spawn:fixture123"
+assert value("--resource-class")=="validation-standard"
+assert argv[argv.index("--")+1:]==["sh","-c","exit 0"]
+PY
+
+  # 2. Gate-worktree derivation: the no-mistakes run's own identity.
+  gatewt="$tmp/nm-home/worktrees/19543ae8611e/$NM_RUN_FIXTURE"
+  make_ambient_worktree "$gatewt"
+  gate_head=$(git -C "$gatewt" rev-parse HEAD)
+  rm -f "$fixture/captured"
+  (cd "$gatewt" && env FM_HOME="$home" FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_RUNNER_REMOTE_CLASSES='lint=validation-standard' \
+    "$dispatch" lint -- sh -c 'exit 0') || fail "gate-worktree dispatch failed"
+  python3 - "$fixture/captured" "nm-$NM_RUN_FIXTURE" "$gate_head" <<'PY' || fail "gate-worktree bindings were not derived exactly"
+import sys
+argv=open(sys.argv[1]).read().splitlines()
+def value(flag): return argv[argv.index(flag)+1]
+assert value("--task")==sys.argv[2]
+assert value("--generation")==sys.argv[3]
+PY
+
+  # 3. No ambient identity fails CLOSED: loud, exact, and the command runs
+  # NOWHERE - no runner dispatch and no silent local execution.
+  make_ambient_worktree "$tmp/unrecorded"
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  rc=0
+  out=$(cd "$tmp/unrecorded" && env FM_HOME="$home" FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_RUNNER_REMOTE_CLASSES='lint=validation-standard' \
+    "$dispatch" lint -- sh -c "touch '$tmp/ran-locally'" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an underivable task identity did not refuse"
+  assert_contains "$out" "cannot derive FM_AZURE_RUNNER_TASK" "the refusal did not name the missing binding"
+  assert_contains "$out" "$home/state" "the refusal did not name the searched state directory"
+  [ ! -e "$fixture/captured" ] || fail "an underivable identity still dispatched to Azure"
+  [ ! -e "$tmp/ran-locally" ] || fail "an underivable identity fell back to silent local execution"
+
+  # 4. An ambiguous worktree refuses rather than guessing.
+  fm_write_meta "$home/state/task-second.meta" \
+    "worktree=$taskwt" "generation_id=spawn:second456"
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  rc=0
+  out=$(cd "$taskwt" && env FM_HOME="$home" FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_RUNNER_REMOTE_CLASSES='lint=validation-standard' \
+    "$dispatch" lint -- sh -c "touch '$tmp/ran-locally'" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an ambiguous worktree recording did not refuse"
+  assert_contains "$out" "more than one task metadata" "the ambiguity refusal was not explicit"
+  assert_contains "$out" "task-fixture" "the ambiguity refusal did not name the first candidate"
+  assert_contains "$out" "task-second" "the ambiguity refusal did not name the second candidate"
+  [ ! -e "$fixture/captured" ] && [ ! -e "$tmp/ran-locally" ] || fail "an ambiguous identity still executed"
+  rm -f "$home/state/task-second.meta"
+
+  # 5. A matched task whose metadata lacks generation_id refuses by name.
+  make_ambient_worktree "$tmp/nogen"
+  fm_write_meta "$home/state/task-nogen.meta" "worktree=$(cd "$tmp/nogen" && pwd -P)"
+  rc=0
+  out=$(cd "$tmp/nogen" && env FM_HOME="$home" FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_RUNNER_REMOTE_CLASSES='lint=validation-standard' \
+    "$dispatch" lint -- sh -c 'exit 0' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a metadata record without generation_id did not refuse"
+  assert_contains "$out" "records no generation_id" "the generation refusal was not explicit"
+
+  # 6. The subscription confirmation is pass-through only, never invented.
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  rc=0
+  out=$(cd "$taskwt" && env FM_HOME="$home" \
+    FM_AZURE_RUNNER_REMOTE_CLASSES='lint=validation-standard' \
+    "$dispatch" lint -- sh -c "touch '$tmp/ran-locally'" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an absent operator subscription did not refuse"
+  assert_contains "$out" "FM_AZURE_SUBSCRIPTION_ID is not set" "the subscription refusal did not name its source"
+  [ ! -e "$fixture/captured" ] && [ ! -e "$tmp/ran-locally" ] || fail "a missing subscription confirm still executed"
+
+  # 7. Explicit operator bindings pass through verbatim, without any git or
+  # metadata requirement.
+  rm -f "$fixture/captured"
+  (cd "$tmp" && env FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_RUNNER_REMOTE_CLASSES='lint=validation-standard' \
+    FM_AZURE_RUNNER_TASK=operator-task FM_AZURE_RUNNER_GENERATION=operator-gen \
+    FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION="$SUB" \
+    "$dispatch" lint -- sh -c 'exit 0') || fail "explicit operator bindings failed to dispatch"
+  python3 - "$fixture/captured" <<'PY' || fail "explicit operator bindings were not passed through verbatim"
+import sys
+argv=open(sys.argv[1]).read().splitlines()
+def value(flag): return argv[argv.index(flag)+1]
+assert value("--task")=="operator-task" and value("--generation")=="operator-gen"
+PY
+
+  # 8. Half an explicit identity refuses instead of silently mixing sources.
+  rc=0
+  out=$(cd "$taskwt" && env FM_HOME="$home" FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_RUNNER_REMOTE_CLASSES='lint=validation-standard' \
+    FM_AZURE_RUNNER_TASK=operator-task \
+    "$dispatch" lint -- sh -c 'exit 0' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a half-explicit identity was accepted"
+  assert_contains "$out" "export both or neither" "the half-explicit refusal was not explicit"
+  rc=0
+  out=$(cd "$taskwt" && env FM_HOME="$home" FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_RUNNER_REMOTE_CLASSES='lint=validation-standard' \
+    FM_AZURE_RUNNER_GENERATION=operator-gen \
+    "$dispatch" lint -- sh -c 'exit 0' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a generation-only explicit identity was accepted"
+  assert_contains "$out" "export both or neither" "the generation-only refusal was not explicit"
+
+  # 8b. A directory under worktrees/ whose name is not a ULID run id is not a
+  # gate worktree and refuses rather than minting a fake run identity.
+  make_ambient_worktree "$tmp/nm-home/worktrees/19543ae8611e/not-a-run-id"
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  rc=0
+  out=$(cd "$tmp/nm-home/worktrees/19543ae8611e/not-a-run-id" && env FM_HOME="$home" \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" FM_AZURE_RUNNER_REMOTE_CLASSES='lint=validation-standard' \
+    "$dispatch" lint -- sh -c "touch '$tmp/ran-locally'" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a non-ULID worktrees directory minted a run identity"
+  assert_contains "$out" "not a no-mistakes gate worktree" "the non-ULID refusal was not explicit"
+  [ ! -e "$fixture/captured" ] && [ ! -e "$tmp/ran-locally" ] || fail "a non-ULID worktrees directory still executed"
+
+  # 9. A class that is not remote-selected stays local and needs no identity.
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  (cd "$tmp/unrecorded" && "$dispatch" lint -- sh -c "touch '$tmp/ran-locally'") \
+    || fail "unselected class failed to execute locally"
+  [ -e "$tmp/ran-locally" ] || fail "unselected class did not run locally"
+  [ ! -e "$fixture/captured" ] || fail "unselected class reached the runner"
+
+  # 10. Explicit local recovery still wins over the remote selection.
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  (cd "$tmp/unrecorded" && env FM_AZURE_RUNNER_REMOTE_CLASSES='lint=validation-standard' \
+    FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES=lint \
+    "$dispatch" lint -- sh -c "touch '$tmp/ran-locally'" 2>/dev/null) \
+    || fail "local recovery class failed to execute locally"
+  [ -e "$tmp/ran-locally" ] || fail "local recovery did not run locally"
+  [ ! -e "$fixture/captured" ] || fail "local recovery reached the runner"
+
+  pass "the dispatch caller derives task/generation from the ambient run, passes the operator subscription through, and fails closed with exact refusals"
+}
+
+no_mistakes_test_step_offload_contract() {
+  local tmp fixture gatewt gate_head fakebin rc out
+  fm_test_tmproot_into tmp fm-azure-runner-test-step-offload
+  fixture="$tmp/fixture"
+  make_dispatch_fixture "$fixture"
+  gatewt="$tmp/nm-home/worktrees/19543ae8611e/$NM_RUN_FIXTURE"
+  make_ambient_worktree "$gatewt"
+  gate_head=$(git -C "$gatewt" rev-parse HEAD)
+  fakebin="$tmp/fakebin"
+  mkdir -p "$fakebin"
+  cat >"$fakebin/tmux" <<'SH'
+#!/bin/sh
+[ "${1:-}" = -V ] && echo "tmux 3.4"
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+
+  # The REAL no-mistakes test step machinery: the remote-selected test class
+  # dispatches the non-Herdr suite through the REAL caller with bindings
+  # derived from the ambient gate worktree, while the local Herdr shard runs.
+  rm -f "$fixture/captured" "$fixture/local-runs"
+  (cd "$gatewt" && env PATH="$fakebin:$PATH" FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_RUNNER_REMOTE_CLASSES='test=behavior-heavy' \
+    "$fixture/bin/fm-no-mistakes-test-command.sh") \
+    || fail "the remote-selected test step failed with derivable bindings"
+  [ -f "$fixture/captured" ] || fail "the test step never reached the fixture runner"
+  python3 - "$fixture/captured" "nm-$NM_RUN_FIXTURE" "$gate_head" "$SUB" <<'PY' || fail "the test step did not derive the ambient run bindings"
+import sys
+argv=open(sys.argv[1]).read().splitlines()
+def value(flag): return argv[argv.index(flag)+1]
+assert value("--task")==sys.argv[2]
+assert value("--generation")==sys.argv[3]
+assert value("--confirm-subscription")==sys.argv[4]
+assert value("--resource-class")=="behavior-heavy"
+assert any("tests/run.sh --skip-herdr" in item for item in argv), "the Azure shard lost the non-Herdr suite"
+PY
+  grep -q "fm-fixture-herdr.test.sh" "$fixture/local-runs" \
+    || fail "the local Herdr shard did not run its declared inventory"
+
+  # An underivable subscription fails the step closed: exit 1, exact refusal,
+  # no host fallback for the non-Herdr suite.
+  rm -f "$fixture/captured" "$fixture/local-runs"
+  rc=0
+  out=$(cd "$gatewt" && env PATH="$fakebin:$PATH" \
+    FM_AZURE_RUNNER_REMOTE_CLASSES='test=behavior-heavy' \
+    "$fixture/bin/fm-no-mistakes-test-command.sh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the test step passed while its Azure shard could not dispatch"
+  assert_contains "$out" "cannot derive FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION" "the step did not surface the exact refusal"
+  [ ! -e "$fixture/captured" ] || fail "a refused derivation still reached the runner"
+  grep -q -- "--skip-herdr" "$fixture/local-runs" 2>/dev/null \
+    && fail "a refused Azure dispatch fell back to running the non-Herdr suite locally"
+
+  pass "the real test step offloads the non-Herdr suite with derived ambient bindings and fails closed without host fallback"
+}
 
 static_private_controller_contract
 environment_mode_defaults
@@ -740,5 +989,7 @@ retail_rate_unit
 quota_snapshot_unit
 shared_allocator_bridge_unit
 commissioning_admission_unit
+dispatch_ambient_binding_contract
+no_mistakes_test_step_offload_contract
 
 echo "# fm-azure-runner.test.sh: all assertions passed"

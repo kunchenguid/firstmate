@@ -551,12 +551,26 @@ for executable in "$NM_BIN" "$PROVIDER_BIN" "$GH_BIN" "$GH_AXI_BIN"; do
   [ -x "$executable" ] || { echo "validation guest: exact runtime executable is absent" >&2; exit 125; }
 done
 PROVIDER=$(jq -r '.credentials.provider' "$REQUEST")
-# A receipt set proves something about the attempt that produced it. The shard
-# exchange is on the durable worktree mount and survives a reattach, so a stale
-# receipts.json would let this attempt inherit the previous one's proof - which
-# the controller accepts, because it allows a receipt head that is merely an
-# ancestor of the published head. Every attempt starts from no receipts.
-rm -f "$SHARD_EXCHANGE/receipts.json" || :
+# Receipts are run-scoped, not attempt-scoped. The bridge writes them in the
+# one attempt whose test step actually executes, and a resumed attempt
+# (reattach after a teardown, respond after a gate) continues the exact same
+# no-mistakes run - identity re-proved above - without re-executing an
+# already-green test step, so the round's receipts on the durable shard
+# exchange are that resumed attempt's only proof that sharding happened.
+# Wiping them per attempt (the first cut of the receipt demotion) made every
+# multi-attempt run assemble its final result with zero receipts, demote to
+# failed, and lose the ability to close. Binding stays with the controller:
+# collect accepts a receipt head only as the published head or a verified
+# ancestor of it, with the receipt tree bound to that head, so a carried
+# receipt can never vouch for history the run did not publish. Only a start
+# boot - a fresh run - begins from no receipts, so a retained disk can never
+# leak a previous run's proof into a new one. Belt-and-suspenders only: the
+# filesystem gate above already refuses a start boot on a disk that carries a
+# filesystem, and a fresh mkfs cannot carry receipts, so this wipe is not
+# load-bearing today.
+if [ "$MODE" = start ]; then
+  rm -f "$SHARD_EXCHANGE/receipts.json" || :
+fi
 ENV_FILE=$STATE/cell.env
 {
   printf 'HOME=%s\n' "$HOME_DIR"

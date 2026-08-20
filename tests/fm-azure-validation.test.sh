@@ -602,6 +602,9 @@ state={
 receipts=[]
 for i in range(1,9):
  receipts.append({"round":"round-aaaaaaaaaaaa","kind":"behavior","shard":i,"shard_count":8,"head":head,"tree":tree,"request_digest":"sha256:"+format(i,"064x"),"command_digest":"sha256:"+format(i+8,"064x"),"invocation":"azr-"+format(i,"012x"),"boot_id":f"boot-{i}","vm_instance_id":f"vm-{i}","artifact":{"path":f"results/executed-{i}.tsv","digest":"sha256:"+format(i+16,"064x"),"bytes":100+i}})
+# The controller's own dispatch ledger: receipts must correspond to the shard
+# round this cell actually created, not merely be well-formed.
+state["shard_runs"]={item["request_digest"]:{"round":item["round"],"shard":item["shard"],"head":item["head"],"command_digest":item["command_digest"],"invocation":item["invocation"]} for item in receipts}
 result={
  "schema":"fm.azure-validation-result/v1","request_digest":state["request_digest"],"cell":state["cell"],"home_binding":state["request"]["home_binding"],"task":"task","task_generation":"gen","validation_generation":"val","fence":state["request"]["fence"],"branch":"fm/task","submitted_head":head,"current_head":head,"current_tree":tree,"remote_head":head,"worktree_disk_id":"/work","run_id":"01HZX7YQ7EJQH8C9G3N4M5P6R7","vm_resource_id":"/vm","vm_instance_id":"vm-instance","boot_id":state["expected_boot_id"],"outcome":"checks-passed","checks_green":True,"pr_url":"https://github.com/o/r/pull/1","behavior_shards":receipts
 }
@@ -624,6 +627,8 @@ reject("wrong VM",lambda r:r.__setitem__("vm_instance_id","peer-vm"))
 reject("wrong boot",lambda r:r.__setitem__("boot_id","peer-boot"))
 reject("stale shard head",lambda r:r["behavior_shards"][0].__setitem__("head","c"*40))
 reject("stale shard tree",lambda r:r["behavior_shards"][0].__setitem__("tree","c"*40))
+reject("alien shard round",lambda r:[item.__setitem__("round","round-ffffffffffff") for item in r["behavior_shards"]])
+reject("undispatched receipt digest",lambda r:r["behavior_shards"][0].__setitem__("request_digest","sha256:"+"e"*64))
 reject("duplicate shard index",lambda r:r["behavior_shards"][7].__setitem__("shard",1))
 reject("wrong artifact digest",lambda r:r["behavior_shards"][0]["artifact"].__setitem__("digest","bad"))
 reject("cross-repo PR",lambda r:r.__setitem__("pr_url","https://github.com/peer/repo/pull/1"))
@@ -971,12 +976,246 @@ DRIVER
   emit passed '[]' >/dev/null 2>&1
   assert_result '"outcome":"passed"' "a zero-shard request was demoted"
 
-  # Every attempt starts from no receipts, so a reattach cannot inherit the
-  # previous attempt's proof about a tree it did not test.
+  # Receipts are cleared at run boundaries only; the run-scope contract below
+  # owns the behavioral proof for both directions.
   grep -q 'rm -f ..SHARD_EXCHANGE/receipts.json' "$GUEST" \
-    || fail "the guest does not clear a stale receipt set before an attempt"
+    || fail "the guest does not clear a stale receipt set at a run boundary"
 
   pass "a passed cell result without its complete shard receipt set is demoted in the emitted result, not refused after the spend"
+}
+
+receipt_run_scope_contract() {
+  local work block
+  work=$(fm_test_tmproot fm-azure-validation-receipt-scope)
+
+  # Drive the guest's real receipt-wipe text. no-mistakes does not re-execute
+  # an already-green test step when a resumed attempt continues the same run,
+  # so the round's receipts on the durable shard exchange are the final
+  # attempt's only proof that sharding happened; a per-attempt wipe therefore
+  # demotes every multi-attempt run and the cell can never close. Only a
+  # start boot (a fresh run) begins from no receipts.
+  block=$work/wipe.sh
+  awk '/^# Receipts are run-scoped/{f=1} f{print; if($0=="fi") exit}' "$GUEST" >"$block"
+  [ -s "$block" ] || fail "the guest receipt-wipe region was not found"
+  # shellcheck disable=SC2016  # The pattern is literal guest text, not an expansion.
+  grep -q 'rm -f "$SHARD_EXCHANGE/receipts.json"' "$block" \
+    || fail "the extracted region does not clear receipts"
+
+  run_wipe() {  # <mode>
+    mkdir -p "$work/exchange"
+    printf '[]\n' >"$work/exchange/receipts.json"
+    # shellcheck disable=SC2016  # The inner shell reads its own environment.
+    env MODE="$1" SHARD_EXCHANGE="$work/exchange" \
+      bash -c 'set -euo pipefail; MODE=$MODE; SHARD_EXCHANGE=$SHARD_EXCHANGE; . "$1"' wipe "$block"
+  }
+
+  run_wipe start || fail "the wipe region failed under start mode"
+  [ ! -e "$work/exchange/receipts.json" ] \
+    || fail "a start boot (fresh run) inherited a previous run's receipts"
+
+  for mode in reattach respond; do
+    run_wipe "$mode" || fail "the wipe region failed under $mode mode"
+    [ -e "$work/exchange/receipts.json" ] \
+      || fail "a resumed $mode attempt destroyed the run's own shard receipts"
+  done
+
+  pass "shard receipts survive resumed attempts of the same run and never cross a run boundary"
+}
+
+receipt_chain_close_contract() {
+  local tmp work exchange head tree block
+  fm_test_tmproot_into tmp fm-azure-validation-receipt-chain
+  work=$tmp/work
+  exchange=$work/exchange
+  mkdir -p "$work" "$exchange" "$tmp/home"
+  make_repo "$tmp/project"
+  head=$(git -C "$tmp/project/repo" rev-parse HEAD)
+  tree=$(git -C "$tmp/project/repo" rev-parse 'HEAD^{tree}')
+  # A later pipeline commit (documentation) publishes a head whose receipts
+  # legitimately prove an exact ancestor - the multi-attempt shape R4 fixes.
+  git -C "$tmp/project/repo" commit -q --allow-empty -m docs
+  git -C "$tmp/project/repo" push -q origin fm/fixture
+  published_head=$(git -C "$tmp/project/repo" rev-parse HEAD)
+  published_tree=$(git -C "$tmp/project/repo" rev-parse 'HEAD^{tree}')
+
+  # 1. The REAL in-cell bridge emits the receipt set from a completed shard
+  # round: verify_behavior against the repository's own trusted plan.
+  (cd "$ROOT" && python3 - "$BRIDGE" "$work" "$exchange" "$head" "$tree" <<'PY') \
+    || fail "the real bridge did not emit the receipts close requires"
+import hashlib,importlib.util,json,pathlib,sys
+spec=importlib.util.spec_from_file_location("bridge",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+work=pathlib.Path(sys.argv[2]); exchange=pathlib.Path(sys.argv[3])
+head,tree=sys.argv[4],sys.argv[5]
+count=8
+plan=m.trusted_behavior_plan(pathlib.Path.cwd(),count)
+environment={"cell":"azv-aaaaaaaaaaaa","exchange":exchange}
+round_dir=work/"round"; round_dir.mkdir()
+results={}
+for shard in range(1,count+1):
+    directory=round_dir/"response-{}".format(shard); directory.mkdir()
+    manifest="".join("{}\t{}\t0\t1\n".format(shard,path) for path in plan[shard])
+    source=directory/"executed.tsv"; source.write_text(manifest)
+    digest="sha256:"+hashlib.sha256(source.read_bytes()).hexdigest()
+    results[shard]={"directory":directory,"result":{
+        "round":"round-aaaaaaaaaaaa","kind":"behavior","shard":shard,"shard_count":count,
+        "head":head,"tree":tree,
+        "request_digest":"sha256:"+format(shard,"064x"),
+        "command_digest":"sha256:"+format(shard+8,"064x"),
+        "invocation":"azr-"+format(shard,"012x"),
+        "vm_instance_id":"vm-{}".format(shard),"boot_id":"boot-{}".format(shard),
+        "artifact":{"path":"results/executed-{}.tsv".format(shard),"digest":digest,"bytes":source.stat().st_size},
+        "duration_seconds":10,"cost_usd":0.01,
+    }}
+m.verify_behavior(environment,round_dir,results,count)
+receipts=json.loads((exchange/"receipts.json").read_text())
+assert isinstance(receipts,list) and len(receipts)==count, "bridge emitted an incomplete receipt set"
+for item in receipts:
+    for key in ("round","kind","shard","shard_count","head","tree","request_digest","command_digest","invocation","vm_instance_id","boot_id","artifact"):
+        assert key in item, "receipt lacks "+key
+PY
+
+  # 2. The REAL guest result assembly carries that receipt set into the
+  # emitted result without demotion.
+  block=$work/emit.sh
+  awk '/^SHARD_RECEIPTS=\$SHARD_EXCHANGE/,/^RESULT_ARCHIVE=/' "$GUEST" \
+    | grep -v '^install -d\|^cp \|^RESULT_ARCHIVE=' >"$block"
+  [ -s "$block" ] || fail "the guest result-emission region was not found"
+  # shellcheck disable=SC2016  # The pattern is literal guest text, not an expansion.
+  sed -i.bak 's#\$(cat /proc/sys/kernel/random/boot_id)#44444444-4444-4444-8444-444444444444#' "$block" && rm -f "$block.bak"
+  mkdir -p "$work/state" "$work/evidence/attempt-2"
+  python3 - "$work/request.json" "$head" <<'PY'
+import json,sys
+request={
+  "limits":{"behavior_shards":8},
+  "protocol":{"result_schema":"fm.azure-validation-result/v1"},
+  "request_digest":"sha256:"+"1"*64,"cell":"azv-aaaaaaaaaaaa",
+  "home_binding":"sha256:"+"2"*64,"task":"task","task_generation":"gen",
+  "validation_generation":"val","fence":"sha256:"+"3"*64,
+  "repository":{"branch":"fm/fixture","head":sys.argv[2],"slug":"o/r"},
+}
+open(sys.argv[1],"w").write(json.dumps(request)+"\n")
+PY
+  printf '{"worktree_disk_id":"/work","run_id":"01HZX7YQ7EJQH8C9G3N4M5P6R7"}\n' >"$work/identity.json"
+  cat >"$work/drive.sh" <<'DRIVER'
+set -euo pipefail
+SHARD_EXCHANGE=$FM_TEST_WORK/exchange
+REQUEST=$FM_TEST_WORK/request.json
+IDENTITY=$FM_TEST_WORK/identity.json
+STATE=$FM_TEST_WORK/state
+EVIDENCE=$FM_TEST_WORK/evidence
+ATTEMPT=2
+CELL=azv-aaaaaaaaaaaa
+OUTCOME=checks-passed
+CURRENT_HEAD=$FM_TEST_HEAD
+CURRENT_TREE=$FM_TEST_TREE
+REMOTE_HEAD=$FM_TEST_HEAD
+RUN_ID=01HZX7YQ7EJQH8C9G3N4M5P6R7
+VM_RESOURCE_ID=/vm
+VM_INSTANCE_ID=vm-instance
+START_EPOCH=1 END_EPOCH=2 START_LOAD=0 END_LOAD=0
+START_MEM_AVAILABLE_KIB=1 END_MEM_AVAILABLE_KIB=1
+PR=https://github.com/o/r/pull/7
+CHECKS_GREEN=true
+. "$FM_TEST_BLOCK"
+DRIVER
+  env FM_TEST_BLOCK="$block" FM_TEST_WORK="$work" FM_TEST_HEAD="$head" FM_TEST_TREE="$tree" \
+    bash "$work/drive.sh" >/dev/null 2>&1 || fail "guest result assembly failed on a complete receipt set"
+  python3 - "$work/state/result-a2.json" <<'PY' || fail "the emitted result lost the run's receipt set"
+import json,sys
+result=json.load(open(sys.argv[1]))
+assert result["outcome"]=="checks-passed", "a resumed attempt carrying the round's receipts was demoted: "+result["outcome"]
+assert result["checks_green"] is True
+assert len(result["behavior_shards"])==8, "the emitted result dropped receipts"
+PY
+
+  # 3+4. The REAL controller receipt gate accepts exactly that emitted result
+  # bound to this cell's own dispatched shard round, accepts the receipts as
+  # proof of an exact ancestor of the published head, refuses an alien round
+  # at that same valid ancestor head, refuses an empty set, and the REAL
+  # close gate closes the cell on the ancestor-proved result while a demoted
+  # (failed) result still cannot close.
+  python3 - "$HOST" "$work/state/result-a2.json" "$tmp/home" "$tmp/project/repo" \
+    "$published_head" "$published_tree" <<'PY' \
+    || fail "collect/close did not accept the receipts the bridge produced"
+import copy,importlib.util,json,pathlib,sys,types
+spec=importlib.util.spec_from_file_location("validation",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+result=json.load(open(sys.argv[2]))
+home=pathlib.Path(sys.argv[3]); repo=sys.argv[4]
+published_head,published_tree=sys.argv[5],sys.argv[6]
+state={
+  "schema":m.SCHEMA,"cell":"azv-aaaaaaaaaaaa","phase":"collected","attempt":2,
+  "request_digest":result["request_digest"],
+  "repository_root":repo,
+  "started_at":"2026-08-20T00:00:00Z",
+  "request":{
+    "home_binding":result["home_binding"],"task":"task","task_generation":"gen",
+    "validation_generation":"val","fence":result["fence"],
+    "repository":{"slug":"o/r","branch":"fm/fixture","head":result["submitted_head"]},
+    "limits":{"behavior_shards":8},
+  },
+  "resources":{"worktree_disk_id":"/work","vm_id":"/vm","vm_instance_id":"vm-instance"},
+  "expected_boot_id":"44444444-4444-4444-8444-444444444444",
+  # The controller's own dispatch ledger for this cell's shard round, exactly
+  # as drive() records it when it serves the bridge's requests.
+  "shard_runs":{item["request_digest"]:{
+      "round":item["round"],"shard":item["shard"],"head":item["head"],
+      "command_digest":item["command_digest"],"invocation":item["invocation"],
+  } for item in result["behavior_shards"]},
+  "result":result,
+}
+# The controller's own receipt gate accepts the exact emitted result.
+m.verify_result_identity(state,result)
+# The multi-attempt shape: a later pipeline commit published a descendant
+# head, and the round's receipts legitimately prove the exact ancestor.
+ancestor=copy.deepcopy(result)
+ancestor["current_head"]=published_head; ancestor["current_tree"]=published_tree
+ancestor["remote_head"]=published_head
+m.verify_result_identity(state,ancestor)
+# An alien round at that same valid ancestor head does not correspond to
+# this cell's own dispatched shard round and is refused.
+alien=copy.deepcopy(ancestor)
+for item in alien["behavior_shards"]:
+    item["round"]="round-ffffffffffff"
+try:
+    m.verify_result_identity(state,alien)
+except m.ValidationError as exc:
+    assert "own dispatched shard round" in str(exc), str(exc)
+else:
+    raise AssertionError("an alien shard round at a valid ancestor head was accepted")
+# An empty receipt set on the same otherwise-successful result is refused.
+empty=copy.deepcopy(result); empty["behavior_shards"]=[]
+try:
+    m.verify_result_identity(state,empty)
+except m.ValidationError as exc:
+    assert "receipt set" in str(exc)
+else:
+    raise AssertionError("a successful result with no receipts was accepted")
+# The REAL close path on the ancestor-proved result: compute/storage teardown
+# is faked, every gate is real, and the remote-branch proof runs real git.
+env={"home":home,"state_dir":home/"state"/"azure-validation","subscription":"sub"}
+m.ensure_dirs(env)
+state["result"]=ancestor
+(env["state_dir"]/"azv-aaaaaaaaaaaa.json").write_text(json.dumps(state))
+m.cleanup_compute=lambda _env,_state:None
+m.delete_resource=lambda *_args,**_kwargs:None
+m.delete_cell_storage_scope=lambda _env,_state:None
+args=types.SimpleNamespace(cell="azv-aaaaaaaaaaaa",confirm_close=True,confirm_subscription="sub",confirm_head=published_head)
+m.close(env,args)
+closed=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
+assert closed["phase"]=="closed", "close did not reach the closed phase: "+closed["phase"]
+# A demoted cell still cannot close: the failed outcome retains storage.
+failed=copy.deepcopy(state); failed["phase"]="collected"
+failed["result"]=copy.deepcopy(ancestor); failed["result"]["outcome"]="failed"; failed["result"]["checks_green"]=False
+(env["state_dir"]/"azv-aaaaaaaaaaaa.json").write_text(json.dumps(failed))
+try:
+    m.close(env,args)
+except m.ValidationError as exc:
+    assert "retains durable storage" in str(exc)
+else:
+    raise AssertionError("a demoted failed result was closed")
+PY
+
+  pass "the real bridge emits the receipt set, the guest carries it, and the real collect and close gates accept it end to end, bound to this cell's own shard round"
 }
 
 static_contract
@@ -994,3 +1233,5 @@ cleanup_recovery_contract
 multi_lane_queue_contract
 operator_documentation_contract
 shard_receipt_demotion_contract
+receipt_run_scope_contract
+receipt_chain_close_contract
