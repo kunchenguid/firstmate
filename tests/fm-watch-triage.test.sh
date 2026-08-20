@@ -744,6 +744,68 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# --- a DECLARED pause is trusted on its own terms, whatever liveness reports ------
+# Regression for an inverted suppression: pause_state_class consulted the backend's
+# agent-liveness verdict and returned `none` for any agent that was not confidently
+# `dead`, so a healthy worker parked on a current, accurate `paused:` line was
+# surfaced on sight - its idle pane being exactly what the declaration predicted.
+# The suppression fired hardest where it knew least, because `unknown` (an unreadable
+# read, an ambiguous foreground process, or an unverified backend) is also "not dead".
+#
+# Liveness is no longer consulted here, so every verdict absorbs: the declaration is
+# the worker's own evidence and the bounded PAUSE_RESURFACE_SECS recheck remains the
+# backstop against a wait that has quietly rotted.
+#
+# Asserted on the classification's observable effects rather than on wake wording: the
+# pause is FRESH under a high re-surface threshold, so the bounded cadence cannot wake
+# here, and any queued stale wake means the declaration was rejected.
+declared_pause_absorbs_case() {  # <case-name> <pane-command>
+  local name=$1 command=$2
+  local dir state fakebin out statusf window key pane pane_hash pid
+  dir=$(make_case "declared-pause-$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; statusf="$state/held.status"
+  window="test:fm-held"
+  pane='idle, holding for the upstream tool release'
+  printf '%s\n' "$pane" > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "declared pause with a $name agent surfaced instead of absorbing: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] \
+    || { reap "$pid"; fail "declared pause with a $name agent queued a stale wake instead of absorbing"; }
+  [ -e "$state/.paused-$key" ] \
+    || { reap "$pid"; fail "declared pause with a $name agent did not take the bounded pause cadence"; }
+  [ ! -e "$state/.stale-since-$key" ] \
+    || { reap "$pid"; fail "declared pause with a $name agent started the wedge timer"; }
+  reap "$pid"
+}
+
+test_declared_pause_absorbs_whatever_liveness_reports() {
+  # grok, zsh, node and an empty command are read through the real tmux liveness
+  # classifier, which resolves them to alive, dead, ambiguous and unreadable. All four
+  # must absorb, so no verdict - least of all an inconclusive one - can suppress a
+  # declared wait.
+  declared_pause_absorbs_case live grok
+  declared_pause_absorbs_case dead zsh
+  declared_pause_absorbs_case ambiguous node
+  declared_pause_absorbs_case unreadable ''
+  pass "a declared pause is absorbed whatever the backend reports about agent liveness"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -897,15 +959,24 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
 
-  # First sight must surface promptly so a live external-decision gate is not
-  # hidden behind the pause cadence.
+  # A live worker parked on a declared wait is absorbed on the bounded cadence. This
+  # case previously required the opposite - an immediate surface on first sight - which
+  # was the inverted suppression itself written down as an expectation: liveness was
+  # used to silence the declaration rather than to judge it. A worker that is still
+  # running is the one best placed to end its own declared wait, so it is left alone.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "live external-decision gate did not surface immediately"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the immediate external-decision surface"
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "live declared pause surfaced instead of absorbing on the bounded cadence: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] \
+    || { reap "$pid"; fail "live declared pause queued a stale wake instead of absorbing"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the live declared-pause absorb"
 
   # Re-arm with the stale timer already beyond the wedge threshold. This is the
   # exact unchanged-hash fallback after the immediate surface: it must retain
@@ -2119,6 +2190,7 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_nonterminal_stale_not_working_surfaced
+test_declared_pause_absorbs_whatever_liveness_reports
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode

@@ -399,8 +399,12 @@ clear_pause_tracking() {  # <window>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# A declared wait is trusted on its own terms; agent liveness never SUPPRESSES it,
+# because an inconclusive read would otherwise silence the declaration exactly where
+# it has learned least. Liveness is still read for the one thing it can settle: a
+# confidently dead ordinary crew recovers paused classification after fm-crew-state
+# has fallen back to stopped or unknown, so an exited crew keeps its bounded recheck
+# instead of surfacing as a bare stopped crew.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -414,14 +418,6 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
     printf 'paused'
     return
   fi
@@ -433,11 +429,6 @@ pause_state_class() {  # <window> <task>
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
-      return
-    fi
   fi
   [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
   case "$class" in
