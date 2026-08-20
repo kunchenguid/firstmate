@@ -54,6 +54,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-project-origin-lib.sh
+. "$SCRIPT_DIR/fm-project-origin-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -357,24 +359,21 @@ validate_project_destination() {
   printf '%s\n' "$abs_dst"
 }
 
+# Which origins name a filesystem path is bin/fm-project-origin-lib.sh's to say,
+# so ask it rather than deciding again here. A file: URL already names an absolute
+# path, so it is the one path-shaped spelling with nothing to anchor.
 normalize_origin_url() {
-  local repo=$1 url=$2 prefix
+  local repo=$1 url=$2
   case "$url" in
-    file://*|*://*)
+    file://*)
       printf '%s\n' "$url"
       return
       ;;
-    *:*)
-      prefix=${url%%:*}
-      case "$prefix" in
-        */*) ;;
-        *)
-          printf '%s\n' "$url"
-          return
-          ;;
-      esac
-      ;;
   esac
+  if ! fm_project_origin_is_path_form "$url"; then
+    printf '%s\n' "$url"
+    return
+  fi
   ( cd "$repo" && canonical_path_for_check "$url" )
 }
 
