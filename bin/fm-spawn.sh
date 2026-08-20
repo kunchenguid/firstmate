@@ -14,8 +14,8 @@
 #   scaffolded before that line existed warns once and launches on the flag. When
 #   the explicit mode carries less rigor than the project's standing posture, a
 #   loud one-line deviation notice is printed and the spawn continues.
-#   Every spawn also refuses more than one generated-scaffold marker, or more than
-#   one complete ordered legacy scaffold signature outside fenced code. Task
+#   Every spawn also refuses more than one generated-scaffold marker or complete
+#   ordered legacy scaffold signature found outside fenced code. Task
 #   Markdown may legitimately repeat individual scaffold heading names. Regenerate
 #   a duplicated scaffold with bin/fm-brief.sh --replace instead.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
@@ -1700,8 +1700,8 @@ duplicate_brief_recovery_guidance() {
   echo "regenerate the parent charter with bin/fm-brief.sh --replace, then republish $PROJ_ABS/data/charter.md with its route's bin/fm-home-seed.sh or bin/fm-remote-home-seed.sh instead of appending a second copy" >&2
 }
 
-legacy_scaffold_signature_count() {
-  awk -v kind="$KIND" '
+scaffold_detection_counts() {
+  awk -v kind="$KIND" -v scaffold_marker="$FM_BRIEF_SCAFFOLD_MARKER" '
     function trim_fence_indent(text, i) {
       for (i = 0; i < 3 && substr(text, 1, 1) == " "; i++) text = substr(text, 2)
       return text
@@ -1730,6 +1730,7 @@ legacy_scaffold_signature_count() {
         }
         next
       }
+      if ($0 == scaffold_marker) markers++
       if ($0 !~ /^# /) next
       if (kind == "secondmate") {
         if ($0 == "# Charter") {
@@ -1763,20 +1764,21 @@ legacy_scaffold_signature_count() {
         step = 0
       }
     }
-    END { print signatures + 0 }
+    END { print markers + 0, signatures + 0 }
   ' "$1"
 }
 
 # Each generated scaffold carries one fixed marker. Appending another generated
 # scaffold therefore has an unambiguous signature that cannot drift with section
 # names, while arbitrary task headings remain valid Markdown.
-SCAFFOLD_MARKER_COUNT=$(grep -Fxc "$FM_BRIEF_SCAFFOLD_MARKER" "$BRIEF" 2>/dev/null || true)
+SCAFFOLD_DETECTION_COUNTS=$(scaffold_detection_counts "$BRIEF") || exit 1
+SCAFFOLD_MARKER_COUNT=${SCAFFOLD_DETECTION_COUNTS%% *}
+LEGACY_SCAFFOLD_COUNT=${SCAFFOLD_DETECTION_COUNTS#* }
 if [ "$SCAFFOLD_MARKER_COUNT" -gt 1 ]; then
   echo "error: $BRIEF_SOURCE contains multiple generated scaffold markers, so which copy governs is undefined" >&2
   duplicate_brief_recovery_guidance
   exit 1
 fi
-LEGACY_SCAFFOLD_COUNT=$(legacy_scaffold_signature_count "$BRIEF") || exit 1
 if [ "$LEGACY_SCAFFOLD_COUNT" -gt 1 ]; then
   echo "error: $BRIEF_SOURCE contains multiple generated scaffold signatures, so which copy governs is undefined" >&2
   duplicate_brief_recovery_guidance

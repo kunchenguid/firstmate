@@ -239,7 +239,7 @@ EOF
 }
 
 test_spawn_accepts_legitimate_repeated_task_headings() {
-  local rec home proj fakebin brief marker suffix out status
+  local rec home proj fakebin brief marker suffix id out status
   rec=$(make_home legitimate-headings)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
@@ -273,19 +273,32 @@ EOF
 
   for marker in '```' '~~~'; do
     case "$marker" in '```') suffix=backticks ;; *) suffix=tildes ;; esac
-    mkdir -p "$home/data/delivery-fenced-$suffix-d3"
-    brief="$home/data/delivery-fenced-$suffix-d3/brief.md"
-    {
-      printf 'You are a crewmate.\n\n# Task\n'
-      printf '%smarkdown\n# Setup\nExample setup.\n# Rules\nExample rules.\n%s\n' "$marker" "$marker"
-      printf '\n# Setup\nScaffold setup.\n\n# Rules\nScaffold rules.\n'
-      printf '\n# Definition of done\nDelivery contract: mode=no-mistakes\n'
-    } > "$brief"
-    out=$(run_spawn "$home" "$fakebin" "delivery-fenced-$suffix-d3" "$proj" claude --mode no-mistakes --yolo off)
+    id="delivery-fenced-$suffix-d3"
+    FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null
+    brief="$home/data/$id/brief.md"
+    awk -v fence="$marker" '
+      $0 == "{TASK}" {
+        print "Show scaffold examples."
+        print ""
+        print fence "markdown"
+        print "# Setup"
+        print "Example setup."
+        print "# Rules"
+        print "Example rules."
+        print "<!-- firstmate:generated-brief-scaffold:v1 -->"
+        print fence
+        next
+      }
+      { print }
+    ' "$brief" > "$brief.next"
+    mv "$brief.next" "$brief"
+    out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+    status=$?
+    expect_code 1 "$status" "the hermetic endpoint fixture should stop the $suffix launch"
     assert_contains "$out" "task headings reached endpoint launch" \
-      "$marker fenced headings did not reach endpoint launch"
+      "$marker fenced scaffold example did not reach endpoint launch"
     assert_not_contains "$out" "multiple generated scaffold markers" \
-      "$marker fenced scaffold-looking headings were falsely refused"
+      "$marker fenced generated marker was falsely refused"
     assert_not_contains "$out" "multiple generated scaffold signatures" \
       "$marker fenced headings matched a legacy scaffold signature"
   done
