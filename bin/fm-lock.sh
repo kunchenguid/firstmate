@@ -9,6 +9,9 @@
 # acquisition lock used here; any other case falls back to the ancestry test, so
 # a live PID outside this session's ancestry keeps the existing competing-session
 # refusal and wording.
+# When ancestry proves ownership but the record's identity no longer names this
+# session - an in-process /clear or /compact re-identification - this script is
+# the ONLY writer that republishes the record, under that same acquisition lock.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -30,6 +33,17 @@ mkdir -p "$STATE" 2>/dev/null || {
 # the shared session-lock lib so every caller applies the exact same contract.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+
+# True when the current record already names this session's harness and identity,
+# so no republish is owed. A record with no identity, or a session with none, is
+# the legacy ancestry contract and is deliberately left byte-for-byte alone.
+record_needs_republish() {
+  [ -n "$me_identity" ] || return 1
+  fm_session_lock_read "$STATE" || return 1
+  [ -n "$FM_SESSION_LOCK_IDENTITY" ] || return 1
+  [ "$FM_SESSION_LOCK_HARNESS" = "$me_harness" ] || return 1
+  [ "$FM_SESSION_LOCK_IDENTITY" != "$me_identity" ]
+}
 
 if [ "${1:-}" = "status" ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
@@ -72,12 +86,15 @@ trap release_claim_lock EXIT
 trap 'exit 1' HUP INT TERM
 
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
+  # An owed republish takes the claim lock below rather than writing here, so
+  # every structured-record write stays under the single acquisition owner.
   if fm_session_lock_owned_by_self "$STATE"; then
-    me=$(fm_session_lock_pid "$STATE" 2>/dev/null || printf '%s' "$me")
-    echo "lock acquired: harness pid $me"
-    exit 0
-  fi
-  if fm_session_lock_read "$STATE"; then
+    if ! record_needs_republish; then
+      me=$(fm_session_lock_pid "$STATE" 2>/dev/null || printf '%s' "$me")
+      echo "lock acquired: harness pid $me"
+      exit 0
+    fi
+  elif fm_session_lock_read "$STATE"; then
     old=$FM_SESSION_LOCK_PID
     if fm_harness_pid_alive "$old"; then
       echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
@@ -107,6 +124,14 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   fi
   old=$FM_SESSION_LOCK_PID
   if fm_session_lock_owned_by_self "$STATE"; then
+    # Ownership is confirmed and the claim lock is held, so this is where a
+    # record whose identity no longer names its live owner - an in-process
+    # /clear or /compact re-identification - is republished, and the only place
+    # any such write happens.
+    if record_needs_republish && ! fm_session_lock_write "$STATE" "$me" "$me_harness" "$me_identity"; then
+      echo "error: cannot republish session lock identity; operate read-only until resolved" >&2
+      exit 1
+    fi
     me=$(fm_session_lock_pid "$STATE" 2>/dev/null || printf '%s' "$me")
     release_claim_lock
     echo "lock acquired: harness pid $me"

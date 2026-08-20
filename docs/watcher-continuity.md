@@ -15,9 +15,11 @@ The hook fires on every Stop, and an eligible primary with supervision need admi
 The session lock keeps its numeric PID on line one, followed by the verified harness name and a stable session identity when one is available.
 Claude's SessionStart adapter validates the hook payload's `session_id` and persists it through Claude's `CLAUDE_ENV_FILE`, so the same identity is reachable from both later hooks and ordinary Bash tool calls after background hosting or process reparenting.
 A matching identity remains the owner when its process ancestry changes and atomically refreshes the recorded PID under the lock-acquisition lease.
-A different identity falls back to the same contiguous-ancestry test, so a live session that Claude re-identified in place through its own `/clear` or `/compact` SessionStart still owns its lock and re-publishes the current identity, while a genuinely competing live session outside that ancestry keeps the hook inert.
+A different identity falls back to the same contiguous-ancestry test, so a live session that Claude re-identified in place through its own `/clear` or `/compact` SessionStart still owns its lock, while a genuinely competing live session outside that ancestry keeps the hook inert.
+That fallback never writes: only `bin/fm-lock.sh` republishes the re-identified record, under the acquisition lock after it has confirmed ownership.
 A legacy bare numeric lock, or a current record for which either side lacks identity, keeps the prior contiguous-ancestry test unchanged.
-A bridged identity is exported into ordinary commands, so a nested session of the same harness inherits it; a session hosted by another live session of that harness beyond its own contiguous run therefore never uses the inherited identity and is judged by ancestry alone.
+A bridged identity is exported into ordinary commands, so a nested session of the same harness inherits it; SessionStart therefore publishes the pid that published the identity, and an identity with no such provenance, or one whose publisher hosts this process from outside its own harness run, is refused and judged by ancestry alone.
+A nested session that ran its own SessionStart bridge published its own provenance and keeps full identity ownership.
 A recorded owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while an absent or malformed lock remains inert.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.

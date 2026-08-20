@@ -261,27 +261,32 @@ fm_session_lock_pid() {  # <state-dir>
   printf '%s\n' "$FM_SESSION_LOCK_PID"
 }
 
-# Print the pid of a live <harness> session that HOSTS this process from outside
-# its own contiguous harness run, or return 1.
+# True when <publisher-pid> - the harness process that published the ambient
+# session identity - HOSTS this process from outside its own contiguous harness
+# run.
 #
-# The bridged identity below is exported into the owning session's ordinary
-# command environment, so every process it launches inherits it - including a
-# nested session of the same harness whose own bridge never ran. That nested
-# session would otherwise present its host's identity and take the host's lock
-# away from it. The gap this walk crosses is exactly that boundary: the nested
-# session's own run ends at the host's tool shell, and the host's harness
-# processes sit above it.
-fm_outer_harness_host_pid() {  # <harness>
-  local harness=$1 pid=$$ comm args in_run=0 run_done=0
+# The bridged identity is exported into the publishing session's ordinary command
+# environment, so every process it launches inherits it, including a nested
+# session of the same harness whose own SessionStart bridge never ran. Such a
+# session presents its host's identity AND its host's publisher pid, and that pid
+# is reachable only by leaving this process's own contiguous run - which is
+# exactly what this walk detects. A nested session that DID run its own bridge
+# publishes its own session pid, finds it inside its own run, and keeps full
+# identity ownership.
+# The walk never stops at an unrelated harness in between: only the recorded
+# publisher pid decides, so an intervening process of another harness cannot hide
+# a same-harness host.
+fm_session_identity_publisher_is_foreign_host() {  # <publisher-pid>
+  local publisher=$1 pid=$$ comm args in_run=0 run_done=0
+  case "$publisher" in ''|*[!0-9]*) return 1 ;; esac
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
+    if [ "$pid" = "$publisher" ]; then
+      [ "$run_done" -eq 1 ] || return 1
+      return 0
+    fi
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
     if fm_harness_process_matches "$comm" "$args"; then
-      if [ "$run_done" -eq 1 ]; then
-        [ "$FM_HARNESS_MATCH_NAME" = "$harness" ] || return 1
-        printf '%s\n' "$pid"
-        return 0
-      fi
       in_run=1
       # Only Claude reports a multi-level contiguous run; every other harness
       # ends its own run at the first match, exactly as the ancestry walk does.
@@ -298,19 +303,23 @@ fm_outer_harness_host_pid() {  # <harness>
 # Print the stable identity an adapter has explicitly bridged to ordinary
 # commands.
 # Claude's SessionStart adapter persists the hook payload's session_id into the
-# vendor-owned CLAUDE_ENV_FILE before fm-lock.sh runs.
+# vendor-owned CLAUDE_ENV_FILE before fm-lock.sh runs, together with the pid of
+# the harness process that published it.
 # Other vendor session variables are deliberately not inferred here: an
 # identifier that changes across an in-process reset would turn one owner into a
 # false competitor.
-# An identity merely INHERITED from a hosting session of the same harness is not
-# this session's identity, so it is refused here and the caller falls back to the
-# ancestry decision, which can never reach across that gap.
+# Provenance is REQUIRED, not advisory: an identity with no publisher pid, or one
+# whose publisher hosts this process from outside its own harness run, is an
+# inherited value rather than this session's own, so it is refused and the caller
+# falls back to the ancestry decision, which can never reach across that gap.
 fm_current_session_identity() {  # <actual-harness>
   local actual=$1 configured_harness=${FM_SESSION_HARNESS:-} identity=${FM_SESSION_ID:-}
+  local publisher=${FM_SESSION_PUBLISHER_PID:-}
   [ -n "$configured_harness" ] || [ -n "$identity" ] || return 1
   [ "$configured_harness" = "$actual" ] || return 1
   fm_session_identity_valid "$identity" || return 1
-  fm_outer_harness_host_pid "$actual" >/dev/null 2>&1 && return 1
+  case "$publisher" in ''|*[!0-9]*|1) return 1 ;; esac
+  fm_session_identity_publisher_is_foreign_host "$publisher" && return 1
   printf '%s\n' "$identity"
 }
 
@@ -356,10 +365,8 @@ fm_session_lock_write() {  # <state-dir> <pid> <harness> [<identity>]
 # lock.
 # The record is re-read after the claim, so a concurrent takeover can never be
 # overwritten by an identity match observed before that takeover.
-# <new-identity> defaults to the expected one; it differs only when the owner has
-# been re-identified in place by an in-process reset.
-fm_session_lock_refresh_pid() {  # <state> <expected-pid> <harness> <identity> <new-pid> [<new-identity>]
-  local state=$1 expected_pid=$2 harness=$3 identity=$4 new_pid=$5 new_identity=${6:-$4} claim acquired=0 held_pid
+fm_session_lock_refresh_pid() {  # <state> <expected-pid> <harness> <identity> <new-pid>
+  local state=$1 expected_pid=$2 harness=$3 identity=$4 new_pid=$5 claim acquired=0 held_pid
   command -v fm_lock_try_acquire >/dev/null 2>&1 || return 1
   claim="$state/.lock.acquire"
   held_pid=$(cat "$claim/pid" 2>/dev/null || true)
@@ -371,7 +378,7 @@ fm_session_lock_refresh_pid() {  # <state> <expected-pid> <harness> <identity> <
     || [ "$FM_SESSION_LOCK_PID" != "$expected_pid" ] \
     || [ "$FM_SESSION_LOCK_HARNESS" != "$harness" ] \
     || [ "$FM_SESSION_LOCK_IDENTITY" != "$identity" ] \
-    || ! fm_session_lock_write "$state" "$new_pid" "$harness" "$new_identity"; then
+    || ! fm_session_lock_write "$state" "$new_pid" "$harness" "$identity"; then
     [ "$acquired" -eq 0 ] || fm_lock_release "$claim"
     return 1
   fi
@@ -392,8 +399,11 @@ fm_session_lock_refresh_pid() {  # <state> <expected-pid> <harness> <identity> <
 # SessionStart, which re-publishes a session_id that is not proven stable across
 # the reset - from turning the one live owner into its own competitor, while a
 # genuinely competing live session is still refused because its pid is not in
-# this ancestry. Ownership won that way re-publishes the current identity so the
-# record keeps naming the session that actually holds it.
+# this ancestry.
+# That fallback is READ-ONLY here. Run membership is a weaker proof than an
+# identity match, so it never rewrites the record: republishing a re-identified
+# owner belongs to the single acquisition owner, bin/fm-lock.sh, under the
+# acquisition lock and after its own authoritative ownership confirmation.
 # A dead recorded pid is never identity-refreshed and remains the existing stale
 # owner recovery case handled by fm-lock.sh.
 fm_session_lock_owned_by_self() {
@@ -427,16 +437,7 @@ EOF
   fi
 
   while IFS= read -r pid; do
-    [ "$pid" = "$lock_pid" ] || continue
-    # Ancestry membership proves the record names this very process run, so a
-    # changed identity here is the same owner re-identified in place rather than
-    # a competitor. Republishing keeps the record usable for a later reparenting.
-    if [ -n "$lock_identity" ] && [ -n "$current_identity" ] \
-      && [ "$lock_harness" = "$current_harness" ] && [ "$lock_identity" != "$current_identity" ]; then
-      fm_session_lock_refresh_pid "$state" "$lock_pid" "$lock_harness" "$lock_identity" \
-        "$current_pid" "$current_identity" || true
-    fi
-    return 0
+    [ "$pid" = "$lock_pid" ] && return 0
   done <<EOF
 $pids
 EOF

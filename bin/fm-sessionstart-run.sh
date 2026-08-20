@@ -18,12 +18,15 @@
 #             cheap and idempotent while not taking it is the whole bug.
 #
 # Claude identity bridge: on a Claude-shaped payload, the wrapper validates
-# `session_id`, appends FM_SESSION_HARNESS and FM_SESSION_ID exports to Claude's
-# vendor-provided CLAUDE_ENV_FILE, and exports the same values into this hook.
+# `session_id`, appends FM_SESSION_HARNESS, FM_SESSION_ID, and the publishing
+# session's FM_SESSION_PUBLISHER_PID to Claude's vendor-provided CLAUDE_ENV_FILE,
+# and exports the same values into this hook.
 # The lock acquired below can therefore compare the same stable identity from a
-# later Stop hook or from an ordinary Bash tool after process reparenting.
-# If the environment-file write fails, no identity is advertised and the legacy
-# ancestry decision remains in force.
+# later Stop hook or from an ordinary Bash tool after process reparenting, while
+# the publisher pid keeps a nested session that inherited those exports from
+# presenting this session's identity as its own.
+# If the harness process cannot be resolved or the environment-file write fails,
+# no identity is advertised and the legacy ancestry decision remains in force.
 #
 # Source routing (see docs/sessionstart-nudge.md for the per-harness names):
 #   startup, new            full digest - this process has not taken the helm
@@ -120,11 +123,20 @@ if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   # that ordinary commands in the same session cannot recover.
   if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
     SESSION_ID=$(fm_session_identity_from_hook_payload "$PAYLOAD" 2>/dev/null || true)
-    if [ -n "$SESSION_ID" ] && printf 'export FM_SESSION_HARNESS=claude\nexport FM_SESSION_ID=%s\n' \
-      "$SESSION_ID" >> "$CLAUDE_ENV_FILE" 2>/dev/null; then
+    # The publishing session's own pid travels with the identity. Ordinary
+    # commands inherit both, so a nested session whose own bridge never ran is
+    # detectable by that provenance instead of presenting this session's
+    # identity as its own. A nested session that DOES run this bridge overwrites
+    # both values with its own and keeps full identity ownership.
+    SESSION_PUBLISHER_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
+    case "$SESSION_PUBLISHER_PID" in ''|*[!0-9]*|1) SESSION_PUBLISHER_PID= ;; esac
+    if [ -n "$SESSION_ID" ] && [ -n "$SESSION_PUBLISHER_PID" ] \
+      && printf 'export FM_SESSION_HARNESS=claude\nexport FM_SESSION_ID=%s\nexport FM_SESSION_PUBLISHER_PID=%s\n' \
+        "$SESSION_ID" "$SESSION_PUBLISHER_PID" >> "$CLAUDE_ENV_FILE" 2>/dev/null; then
       FM_SESSION_HARNESS=claude
       FM_SESSION_ID=$SESSION_ID
-      export FM_SESSION_HARNESS FM_SESSION_ID
+      FM_SESSION_PUBLISHER_PID=$SESSION_PUBLISHER_PID
+      export FM_SESSION_HARNESS FM_SESSION_ID FM_SESSION_PUBLISHER_PID
     fi
   fi
   SOURCE=$(printf '%s' "$PAYLOAD" | awk '

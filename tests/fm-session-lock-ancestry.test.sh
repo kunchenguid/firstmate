@@ -213,12 +213,12 @@ SH
   chmod +x "$fakebin/ps"
 
   printf '650\nharness=claude\nsession=stable-session\n' > "$dir/state/.lock"
-  FM_SESSION_HARNESS=claude FM_SESSION_ID=stable-session \
+  FM_SESSION_HARNESS=claude FM_SESSION_ID=stable-session FM_SESSION_PUBLISHER_PID=650 \
     lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
     || fail "matching structured identity did not own with the recorded pid unchanged"
 
   printf '600\nharness=claude\nsession=stable-session\n' > "$dir/state/.lock"
-  FM_SESSION_HARNESS=claude FM_SESSION_ID=stable-session \
+  FM_SESSION_HARNESS=claude FM_SESSION_ID=stable-session FM_SESSION_PUBLISHER_PID=650 \
     lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
     || fail "matching structured identity did not own after reparenting"
   first=$(sed -n '1p' "$dir/state/.lock")
@@ -261,12 +261,23 @@ SH
   chmod +x "$fakebin/ps"
 
   printf '600\nharness=claude\nsession=recorded-session\n' > "$dir/state/.lock"
-  if FM_SESSION_HARNESS=claude FM_SESSION_ID=current-session \
+  if FM_SESSION_HARNESS=claude FM_SESSION_ID=current-session FM_SESSION_PUBLISHER_PID=650 \
     lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
     fail "different live structured identities were treated as one session"
   fi
   [ "$(sed -n '1p' "$dir/state/.lock")" = 600 ] \
     || fail "different identity rewrote the competing owner's pid"
+
+  # An identity with no publisher provenance cannot be proven to be this
+  # session's own, so it fails closed to ancestry rather than being trusted.
+  if FM_SESSION_HARNESS=claude FM_SESSION_ID=recorded-session \
+    lib_eval "$fakebin" 'fm_current_session_identity claude'; then
+    fail "an identity with no publisher provenance was published as this session's"
+  fi
+  if FM_SESSION_HARNESS=claude FM_SESSION_ID=recorded-session \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "an identity with no publisher provenance owned a lock outside this ancestry"
+  fi
 
   # Identity missing on the current side: preserve the exact ancestry fallback.
   printf '650\nharness=claude\nsession=recorded-session\n' > "$dir/state/.lock"
@@ -275,7 +286,7 @@ SH
 
   # Identity missing on the recorded side: the same fallback still applies.
   printf '650\nharness=claude\n' > "$dir/state/.lock"
-  FM_SESSION_HARNESS=claude FM_SESSION_ID=current-session \
+  FM_SESSION_HARNESS=claude FM_SESSION_ID=current-session FM_SESSION_PUBLISHER_PID=650 \
     lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
     || fail "current-only identity did not fall back to ancestry membership"
 
@@ -288,8 +299,8 @@ SH
   pass "session-lock identity: differing live sessions refuse and either missing identity uses only ancestry"
 }
 
-test_in_process_reidentification_keeps_its_owner() {
-  local dir fakebin
+test_in_process_reidentification_keeps_its_owner_without_writing() {
+  local dir fakebin before
   dir="$TMP_ROOT/identity-reset"
   fakebin=$(fm_fakebin "$dir")
   mkdir -p "$dir/state"
@@ -317,18 +328,26 @@ SH
 
   # Claude routes /clear and /compact through their own SessionStart, which
   # re-publishes an identity for the SAME live process. That owner must keep its
-  # own lock rather than become its own competitor.
+  # own lock rather than become its own competitor - and the predicate itself,
+  # which fm-lock status, the Stop auto-arm, the Cursor guard, and the startup
+  # sweep all call, must not rewrite the record on that weaker proof.
   printf '650\nharness=claude\nsession=before-reset\n' > "$dir/state/.lock"
-  FM_SESSION_HARNESS=claude FM_SESSION_ID=after-reset \
+  before=$(cat "$dir/state/.lock")
+  FM_SESSION_HARNESS=claude FM_SESSION_ID=after-reset FM_SESSION_PUBLISHER_PID=650 \
     lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
     || fail "an in-process re-identification locked the live owner out of its own lock"
-  [ "$(sed -n '1p' "$dir/state/.lock")" = 650 ] \
-    || fail "the re-identified owner lost its recorded pid"
-  [ "$(sed -n '3p' "$dir/state/.lock")" = session=after-reset ] \
-    || fail "the re-identified owner did not republish its current identity"
+  [ "$(cat "$dir/state/.lock")" = "$before" ] \
+    || fail "the ancestry fallback rewrote the record from run membership alone"
+  pass "session-lock identity: an in-process re-identification keeps its own lock without rewriting it"
+}
 
-  # The republished record must carry the re-identified owner through a later
-  # reparenting, which is the whole point of recording an identity.
+# The nested cases share one process table: a session that owns the lock (800)
+# runs an ordinary command (880) that launches a second session of the same
+# harness (900). SHAPE=harness-gap puts a DIFFERENT verified harness in that gap,
+# which must not hide the host.
+nested_session_fakebin() {  # <dir>
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -340,75 +359,83 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-case "$pid:$field" in
-  650:comm=) printf '%s\n' claude ;;
-  650:args=) printf '%s\n' claude ;;
-  650:ppid=) printf '%s\n' 1 ;;
-  660:comm=) printf '%s\n' claude ;;
-  660:args=) printf '%s\n' claude ;;
-  660:ppid=) printf '%s\n' 1 ;;
-  *:comm=) printf '%s\n' bash ;;
-  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
-  *:ppid=) printf '%s\n' 660 ;;
+case "$pid:$field:${FM_TEST_NESTED_SHAPE:-plain}" in
+  800:comm=:*) printf '%s\n' claude ;;
+  800:args=:*) printf '%s\n' claude ;;
+  800:ppid=:*) printf '%s\n' 1 ;;
+  880:comm=:plain) printf '%s\n' bash ;;
+  880:args=:plain) printf '%s\n' 'bash -c claude' ;;
+  880:comm=:harness-gap) printf '%s\n' codex ;;
+  880:args=:harness-gap) printf '%s\n' codex ;;
+  880:ppid=:*) printf '%s\n' 800 ;;
+  900:comm=:*) printf '%s\n' claude ;;
+  900:args=:*) printf '%s\n' claude ;;
+  900:ppid=:*) printf '%s\n' 880 ;;
+  910:comm=:*) printf '%s\n' claude ;;
+  910:args=:*) printf '%s\n' claude ;;
+  910:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=:*) printf '%s\n' 900 ;;
 esac
 SH
   chmod +x "$fakebin/ps"
-  FM_SESSION_HARNESS=claude FM_SESSION_ID=after-reset \
-    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
-    || fail "the republished identity did not survive a later reparenting"
-  [ "$(sed -n '1p' "$dir/state/.lock")" = 660 ] \
-    || fail "the republished identity did not refresh the reparented pid"
-  pass "session-lock identity: an in-process re-identification keeps and republishes its own lock"
+  printf '%s\n' "$fakebin"
 }
 
 test_inherited_identity_never_takes_the_hosting_sessions_lock() {
-  local dir fakebin
-  dir="$TMP_ROOT/identity-nested"
-  fakebin=$(fm_fakebin "$dir")
+  local dir fakebin shape
+  dir="$TMP_ROOT/identity-nested-inherited"
+  fakebin=$(nested_session_fakebin "$dir")
   mkdir -p "$dir/state"
-  # A nested session of the same harness, launched from an ordinary command of
-  # the session that owns the lock: its own contiguous run ends at the host's
-  # tool shell (880), and the live owner (800) sits above that gap.
-  cat > "$fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-set -u
-field= pid=
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -o) field=$2; shift 2 ;;
-    -p) pid=$2; shift 2 ;;
-    *) shift ;;
-  esac
-done
-case "$pid:$field" in
-  800:comm=) printf '%s\n' claude ;;
-  800:args=) printf '%s\n' claude ;;
-  800:ppid=) printf '%s\n' 1 ;;
-  880:comm=) printf '%s\n' bash ;;
-  880:args=) printf '%s\n' 'bash -c claude -p' ;;
-  880:ppid=) printf '%s\n' 800 ;;
-  900:comm=) printf '%s\n' claude ;;
-  900:args=) printf '%s\n' claude ;;
-  900:ppid=) printf '%s\n' 880 ;;
-  *:comm=) printf '%s\n' bash ;;
-  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
-  *:ppid=) printf '%s\n' 900 ;;
-esac
-SH
-  chmod +x "$fakebin/ps"
 
+  # The nested session's own SessionStart bridge never ran, so it presents the
+  # host's exported identity AND the host's publisher pid.
+  for shape in plain harness-gap; do
+    printf '800\nharness=claude\nsession=host-session\n' > "$dir/state/.lock"
+    if FM_TEST_NESTED_SHAPE="$shape" FM_SESSION_HARNESS=claude FM_SESSION_ID=host-session \
+      FM_SESSION_PUBLISHER_PID=800 \
+      lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+      fail "$shape: a nested session took the lock using the identity it inherited from its host"
+    fi
+    [ "$(sed -n '1p' "$dir/state/.lock")" = 800 ] \
+      || fail "$shape: a nested session refreshed the hosting session's recorded pid to itself"
+    if FM_TEST_NESTED_SHAPE="$shape" FM_SESSION_HARNESS=claude FM_SESSION_ID=host-session \
+      FM_SESSION_PUBLISHER_PID=800 \
+      lib_eval "$fakebin" 'fm_current_session_identity claude'; then
+      fail "$shape: an identity published by a hosting session was presented as this session's"
+    fi
+  done
+  pass "session-lock identity: an identity inherited from a hosting session never owns its lock"
+}
+
+test_nested_session_with_its_own_bridge_keeps_full_identity() {
+  local dir fakebin
+  dir="$TMP_ROOT/identity-nested-own-bridge"
+  fakebin=$(nested_session_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # This nested session DID run its own SessionStart bridge, so it published its
+  # own identity and its own publisher pid. Being hosted must not cost it the
+  # reparenting fix: its own reparented record still refreshes to its live pid.
+  printf '910\nharness=claude\nsession=nested-session\n' > "$dir/state/.lock"
+  FM_SESSION_HARNESS=claude FM_SESSION_ID=nested-session FM_SESSION_PUBLISHER_PID=900 \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a nested session with its own bridge lost identity ownership of its own lock"
+  [ "$(sed -n '1p' "$dir/state/.lock")" = 900 ] \
+    || fail "a nested session with its own bridge did not refresh its reparented pid"
+  [ "$(sed -n '3p' "$dir/state/.lock")" = session=nested-session ] \
+    || fail "the reparent refresh lost the nested session's own identity"
+
+  # It is still a competitor for a lock a different live session owns.
   printf '800\nharness=claude\nsession=host-session\n' > "$dir/state/.lock"
-  if FM_SESSION_HARNESS=claude FM_SESSION_ID=host-session \
+  if FM_SESSION_HARNESS=claude FM_SESSION_ID=nested-session FM_SESSION_PUBLISHER_PID=900 \
     lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
-    fail "a nested session took the lock using the identity it inherited from its host"
+    fail "a nested session with its own identity took a live host session's lock"
   fi
   [ "$(sed -n '1p' "$dir/state/.lock")" = 800 ] \
-    || fail "a nested session refreshed the hosting session's recorded pid to itself"
-  if FM_SESSION_HARNESS=claude FM_SESSION_ID=host-session \
-    lib_eval "$fakebin" 'fm_current_session_identity claude'; then
-    fail "an identity inherited from a hosting session of the same harness was published as this session's"
-  fi
-  pass "session-lock identity: an inherited identity never takes the hosting session's lock"
+    || fail "a competing nested session rewrote the live host's recorded pid"
+  pass "session-lock identity: a nested session that ran its own bridge keeps identity and still cannot compete"
 }
 
 test_competing_version_named_session_is_seen_as_live() {
@@ -594,8 +621,9 @@ test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_structured_identity_owns_and_refreshes_after_reparenting
 test_structured_identity_difference_preserves_competitor_and_missing_side_falls_back
-test_in_process_reidentification_keeps_its_owner
+test_in_process_reidentification_keeps_its_owner_without_writing
 test_inherited_identity_never_takes_the_hosting_sessions_lock
+test_nested_session_with_its_own_bridge_keeps_full_identity
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

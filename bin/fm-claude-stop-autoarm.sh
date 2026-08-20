@@ -11,8 +11,11 @@
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
 #   - Identity: only when THIS Claude session owns state/.lock.
-#     SessionStart persists Claude's hook `session_id` through CLAUDE_ENV_FILE;
-#     this Stop hook also reads the same payload field directly.
+#     SessionStart persists Claude's hook `session_id` through CLAUDE_ENV_FILE
+#     together with the pid that published it; this Stop hook also reads the
+#     same payload field directly and stamps its own harness ancestry as that
+#     provenance, so an identity inherited from a hosting session is never
+#     mistaken for this session's own.
 #     A matching structured identity owns across process reparenting and
 #     refreshes the recorded PID under the session-lock acquisition lock.
 #     A legacy lock, an unavailable identity, or a changed identity retains the
@@ -102,14 +105,22 @@ PAYLOAD=$(cat 2>/dev/null || true)
 fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 
 # The Stop payload is an independent source of the same Claude session identity
-# SessionStart persisted for ordinary commands.
-# A malformed or absent field leaves identity unavailable and therefore keeps
-# the ancestry fallback; it never invents an identity.
+# SessionStart persisted for ordinary commands, and this hook's own harness
+# ancestry is its provenance, so a first-party identity never depends on values
+# inherited from a hosting session.
+# A malformed or absent field, or an unresolvable harness ancestry, leaves
+# identity unavailable and therefore keeps the ancestry fallback; it never
+# invents an identity and never reuses an inherited one.
 PAYLOAD_SESSION_ID=$(fm_session_identity_from_hook_payload "$PAYLOAD" 2>/dev/null || true)
-if [ -n "$PAYLOAD_SESSION_ID" ]; then
+PAYLOAD_PUBLISHER_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
+case "$PAYLOAD_PUBLISHER_PID" in ''|*[!0-9]*|1) PAYLOAD_PUBLISHER_PID= ;; esac
+if [ -n "$PAYLOAD_SESSION_ID" ] && [ -n "$PAYLOAD_PUBLISHER_PID" ]; then
   FM_SESSION_HARNESS=claude
   FM_SESSION_ID=$PAYLOAD_SESSION_ID
-  export FM_SESSION_HARNESS FM_SESSION_ID
+  FM_SESSION_PUBLISHER_PID=$PAYLOAD_PUBLISHER_PID
+  export FM_SESSION_HARNESS FM_SESSION_ID FM_SESSION_PUBLISHER_PID
+elif [ -n "$PAYLOAD_SESSION_ID" ]; then
+  unset FM_SESSION_ID FM_SESSION_PUBLISHER_PID
 fi
 
 # --- scope: genuine primary checkout only -----------------------------------

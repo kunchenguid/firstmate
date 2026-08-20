@@ -473,20 +473,84 @@ test_run_resume_delegates_to_the_nudge() {
 }
 
 test_run_persists_claude_hook_identity_for_ordinary_commands() {
-  local root="$TMP_ROOT/run-claude-identity" env_file out status=0 ordinary
+  local root="$TMP_ROOT/run-claude-identity" env_file out status=0 ordinary publisher
   make_run_primary "$root"
   env_file="$root/session-env.sh"
   out=$(printf '{"session_id":"12345678-abcd-4abc-8abc-1234567890ab","hook_event_name":"SessionStart","source":"resume"}' |
     CLAUDE_ENV_FILE="$env_file" run_hook "$root") || status=$?
   expect_code 0 "$status" "run wrapper Claude identity bridge"
   assert_contains "$out" "FIRSTMATE_OP" "identity bridge changed resume source routing"
-  [ "$(cat "$env_file" 2>/dev/null || true)" = $'export FM_SESSION_HARNESS=claude\nexport FM_SESSION_ID=12345678-abcd-4abc-8abc-1234567890ab' ] \
+  [ "$(sed -n '1,2p' "$env_file" 2>/dev/null || true)" = $'export FM_SESSION_HARNESS=claude\nexport FM_SESSION_ID=12345678-abcd-4abc-8abc-1234567890ab' ] \
     || fail "SessionStart did not persist the validated Claude identity through CLAUDE_ENV_FILE"
   # shellcheck disable=SC2016 # The isolated child sources and expands the persisted exports.
-  ordinary=$(env -i PATH="$RUN_PATH" bash -c '. "$1"; printf "%s:%s\n" "$FM_SESSION_HARNESS" "$FM_SESSION_ID"' _ "$env_file")
-  [ "$ordinary" = claude:12345678-abcd-4abc-8abc-1234567890ab ] \
+  ordinary=$(env -i PATH="$RUN_PATH" bash -c '. "$1"; printf "%s:%s:%s\n" "$FM_SESSION_HARNESS" "$FM_SESSION_ID" "$FM_SESSION_PUBLISHER_PID"' _ "$env_file")
+  [ "${ordinary%:*}" = claude:12345678-abcd-4abc-8abc-1234567890ab ] \
     || fail "an ordinary command could not recover the SessionStart hook identity: $ordinary"
+  publisher=${ordinary##*:}
+  case "$publisher" in ''|*[!0-9]*) fail "the identity bridge published no numeric session provenance: $ordinary" ;; esac
+  # Provenance must name the live harness process that published it, so an
+  # identity inherited by a nested session is distinguishable from its own.
+  kill -0 "$publisher" 2>/dev/null \
+    || fail "the published session provenance $publisher is not a live process"
   pass "run wrapper: Claude SessionStart identity is reachable from a later ordinary command"
+}
+
+# One long-lived claude-named process, with an ordinary shell between it and this
+# suite's own codex fixture so its contiguous harness run is its own. Claude's
+# real lifecycle is exactly this: startup, then /clear and /compact SessionStart
+# sources fired by the SAME process, each publishing a fresh session_id.
+test_run_clear_and_compact_keep_and_republish_the_live_owner() {
+  local root="$TMP_ROOT/run-claude-reset" claude_bin fixture_pid
+  make_run_primary "$root"
+  mkdir -p "$TMP_ROOT/claude-fixture"
+  claude_bin="$TMP_ROOT/claude-fixture/claude"
+  [ -e "$claude_bin" ] || ln -s /bin/bash "$claude_bin"
+  cat > "$root/session.sh" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "\$\$" > "$root/state/fixture-pid"
+session_open() {  # <source> <session-id> <out-file>
+  printf '{"session_id":"%s","hook_event_name":"SessionStart","source":"%s"}' "\$2" "\$1" \\
+    | env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \\
+        FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" \\
+        CLAUDE_ENV_FILE="$root/session-env.sh" "$RUN" > "\$3" 2>&1
+  cp "$root/state/.lock" "$root/lock-after-\$1"
+}
+session_open startup 11111111-1111-4111-8111-111111111111 "$root/out-startup"
+session_open clear 22222222-2222-4222-8222-222222222222 "$root/out-clear"
+session_open compact 33333333-3333-4333-8333-333333333333 "$root/out-compact"
+SH
+  chmod +x "$root/session.sh"
+  bash -c '"$0" "$1"; exit $?' "$claude_bin" "$root/session.sh" \
+    || fail "the claude-named session fixture did not complete its three session opens"
+
+  fixture_pid=$(cat "$root/state/fixture-pid")
+  assert_contains "$(cat "$root/out-startup")" "lock acquired: harness pid $fixture_pid" \
+    "the claude fixture did not take its own home lock at startup"
+  [ "$(sed -n '3p' "$root/lock-after-startup")" = session=11111111-1111-4111-8111-111111111111 ] \
+    || fail "startup did not record the bridged session identity: $(cat "$root/lock-after-startup")"
+
+  # /clear re-identifies the SAME process. It must stay the owner - never its own
+  # competitor - and the record must be republished under the new identity so a
+  # later reparenting still resolves.
+  assert_contains "$(cat "$root/out-clear")" "$REEMIT_BANNER$root" "clear was not routed to a re-emit"
+  assert_not_contains "$(cat "$root/out-clear")" "READ-ONLY SESSION" \
+    "an in-process clear locked the live owner out of its own home"
+  assert_not_contains "$(cat "$root/out-clear")" "another live firstmate session holds the lock" \
+    "an in-process clear treated the live owner as a competing session"
+  [ "$(sed -n '1p' "$root/lock-after-clear")" = "$fixture_pid" ] \
+    || fail "clear moved the lock off its live owner: $(cat "$root/lock-after-clear")"
+  [ "$(sed -n '3p' "$root/lock-after-clear")" = session=22222222-2222-4222-8222-222222222222 ] \
+    || fail "clear did not republish the re-identified owner: $(cat "$root/lock-after-clear")"
+
+  assert_contains "$(cat "$root/out-compact")" "$REEMIT_BANNER$root" "compact was not routed to a re-emit"
+  assert_not_contains "$(cat "$root/out-compact")" "READ-ONLY SESSION" \
+    "an in-process compact locked the live owner out of its own home"
+  [ "$(sed -n '3p' "$root/lock-after-compact")" = session=33333333-3333-4333-8333-333333333333 ] \
+    || fail "compact did not republish the re-identified owner: $(cat "$root/lock-after-compact")"
+  [ "$(sed -n '2p' "$root/lock-after-compact")" = harness=claude ] \
+    || fail "the republished record lost the verified harness: $(cat "$root/lock-after-compact")"
+  pass "run wrapper: an in-process clear and compact keep the live owner and republish its identity"
 }
 
 test_run_reads_source_from_the_hook_payload() {
@@ -566,6 +630,7 @@ test_run_clear_without_completion_finishes_startup
 test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge
 test_run_persists_claude_hook_identity_for_ordinary_commands
+test_run_clear_and_compact_keep_and_republish_the_live_owner
 test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
