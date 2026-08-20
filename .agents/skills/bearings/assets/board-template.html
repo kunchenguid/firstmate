@@ -435,6 +435,7 @@ __FM_BEARINGS_BOARD_DATA__
     return n;
   }
   function badge(tone, text) { return el("span", "fm-badge fm-badge--" + tone, text); }
+  function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
   var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
   document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
@@ -544,8 +545,8 @@ __FM_BEARINGS_BOARD_DATA__
       /* picked option, optionally annotated; a bare note is itself the answer */
       var answer = value ? (note ? value + " - " + note : value) : note;
       if (!answer) return;
-      if (answer.length > 512) {
-        answerLimit.textContent = "Answer is too long to queue (512 characters maximum).";
+      if (utf8ByteLength(answer) > 512) {
+        answerLimit.textContent = "Answer is too long to queue (512 bytes maximum).";
         answerLimit.classList.add("is-visible");
         return;
       }
@@ -655,9 +656,9 @@ __FM_BEARINGS_BOARD_DATA__
       pick.type = "checkbox"; pick.className = "bb-pick"; pick.value = t.id;
       pick.setAttribute("aria-label", "Pick " + t.id + " for dispatch");
       pick.addEventListener("change", function () {
-        if (pick.checked && pickedIds().join(",").length > 512) {
+        if (pick.checked && utf8ByteLength(pickedIds().join(",")) > 512) {
           pick.checked = false;
-          refreshBar("Selection limit reached (512 characters maximum). ");
+          refreshBar("Selection limit reached (512 bytes maximum). ");
           return;
         }
         refreshBar();
@@ -689,8 +690,8 @@ __FM_BEARINGS_BOARD_DATA__
       var ids = pickedIds();
       var dispatchAnswer = ids.join(",");
       if (!ids.length) return;
-      if (dispatchAnswer.length > 512) {
-        refreshBar("Selection is too long to queue (512 characters maximum). ");
+      if (utf8ByteLength(dispatchAnswer) > 512) {
+        refreshBar("Selection is too long to queue (512 bytes maximum). ");
         return;
       }
       if (window.lavish && window.lavish.queuePrompt) {
