@@ -18,6 +18,13 @@
 #   2. VALIDATE before writing anything by running bin/fm-epic-lint.sh (the single
 #      owner of the epic/story contract) on the epic dir, so promote and the
 #      epic-review gate enforce ONE identical contract; a failure writes nothing.
+#      Then enforce two FRESHNESS guards (incident R1/R6): the design must be
+#      FROZEN (epic.md status: active) and the sign-off must be CURRENT (signed_off
+#      no older than the newest of epic.md, every story, and DESIGN.md, compared at
+#      day resolution). A draft status or a stale sign-off is refused, naming the
+#      offending file, so a backlog is never seeded from a design that is still
+#      moving; --allow-stale-sign downgrades the stale-sign refusal to a loud
+#      warning. Both guards write nothing on refusal.
 #   3. MOVE the epic dir -> data/plans/<epic-dir>/ (the canonical, durable copy
 #      the dashboard/dispatch read) and leave a BACK-SYMLINK in the umbrella at
 #      umbrellas/<id>/plans/<epic-dir> pointing to it, so the captain keeps
@@ -56,7 +63,7 @@
 # bin/fm-epic-branch.sh and bin/fm-epic-ship.sh.
 #
 # Usage:
-#   fm-umbrella-promote.sh [promote] <umbrella-id>
+#   fm-umbrella-promote.sh [promote] [--allow-stale-sign] <umbrella-id>
 #   fm-umbrella-promote.sh verify <umbrella-id>
 #   fm-umbrella-promote.sh -h | --help
 #
@@ -93,24 +100,54 @@ LINT="$FM_ROOT/bin/fm-epic-lint.sh"
 die() { echo "error: $*" >&2; exit 1; }
 say() { echo "$*"; }
 
+# fm_epic_scalar <file> <key>: a frontmatter scalar reduced to its first token,
+# with any inline `# comment` and surrounding whitespace stripped. epic.md's
+# `status:` is one word and `signed_off:` is a bare YYYY-MM-DD date sometimes
+# trailed by a captain note (`signed_off: 2026-08-18   # ...`). fm_frontmatter_get
+# keeps that trailing note, so the freshness guards read scalars through here.
+fm_epic_scalar() {
+  local v
+  v="$(fm_frontmatter_get "$1" "$2")"
+  v="${v%%#*}"                                    # drop an inline `# comment`
+  v="${v#"${v%%[![:space:]]*}"}"                  # ltrim
+  v="${v%"${v##*[![:space:]]}"}"                  # rtrim
+  printf '%s' "${v%%[[:space:]]*}"                # first whitespace-delimited token
+}
+
+# fm_file_mtime_day <file>: the file's modification time as a UTC calendar date
+# (YYYY-MM-DD), or empty (rc 1) if unreadable. Portable across BSD (macOS) and
+# GNU, the same stat/date idiom as bin/fm-backlog-receive.sh and
+# bin/fm-public-followup.sh. Day resolution matches signed_off, which is a date.
+fm_file_mtime_day() {
+  local epoch
+  epoch="$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null)" || return 1
+  [ -n "$epoch" ] || return 1
+  date -u -r "$epoch" +%Y-%m-%d 2>/dev/null || date -u -d "@$epoch" +%Y-%m-%d 2>/dev/null
+}
+
 usage() {  # <exit-code> (default 2); code 0 prints to stdout for --help
   local code=${1:-2} out=/dev/stderr
   [ "$code" -eq 0 ] && out=/dev/stdout
   cat > "$out" <<'EOF'
 usage:
-  fm-umbrella-promote.sh [promote] <umbrella-id>   promote a designed umbrella epic
+  fm-umbrella-promote.sh [promote] [--allow-stale-sign] <umbrella-id>
+                                                    promote a designed umbrella epic
   fm-umbrella-promote.sh verify <umbrella-id>       assert the promoted end-state
   fm-umbrella-promote.sh -h | --help
 
 Run WITH FM_HOME set to the home that owns the umbrella. `promote` (the default)
 moves the designed epic under umbrellas/<id>/plans/<epic-dir>/ into data/plans/,
 seeds its stories into the backlog (ids + [<epic>] tags derived from the story
-frontmatter, so they match by construction), then STOPS at the sign-off gate and
-prints the remaining sign/branch/dispatch/teardown steps. Idempotent and
-fail-closed: validation and the full reconcile plan run before any write, a
-re-run CONVERGES the backlog to the canonical epic (adds missing stories,
-rewrites drifted title/repo/kind, rewrites a case/kebab-renamed id), and only
-unresolvable drift is refused. Never signs, branches, or dispatches.
+frontmatter, so they match by construction), then STOPS at the branch/dispatch
+gate. The contract is sign-THEN-promote: promote REFUSES an epic that is not
+frozen (epic.md status must be `active`) or whose signed_off is older than the
+newest of epic.md, any story, or DESIGN.md, naming the offending file; re-sign
+the current design (or pass --allow-stale-sign to downgrade the stale-sign
+refusal to a warning) and re-run. Idempotent and fail-closed: validation, the
+freshness guards, and the full reconcile plan all run before any write, a re-run
+CONVERGES the backlog to the canonical epic (adds missing stories, rewrites
+drifted title/repo/kind, rewrites a case/kebab-renamed id), and only unresolvable
+drift is refused. Never signs, branches, or dispatches.
 
 `verify` mutates nothing and exits non-zero (naming every failure) unless the
 epic is canonical at data/plans, the umbrella back-symlink resolves to it, the
@@ -338,9 +375,11 @@ case "${1-}" in
 esac
 
 UMBRELLA_ID=""
+ALLOW_STALE_SIGN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help|help) usage 0 ;;
+    --allow-stale-sign) ALLOW_STALE_SIGN=1 ;;
     -*) die "unknown option: $1" ;;
     *) if [ -z "$UMBRELLA_ID" ]; then UMBRELLA_ID=$1; else usage; fi ;;
   esac
@@ -417,6 +456,50 @@ STORIES_DIR="$EPIC_DIR/stories"
 # time. FM_PROJECTS_REG pins the lint's registry to the exact one promote uses.
 FM_PROJECTS_REG="$REG" "$LINT" "$EPIC_DIR" >/dev/null \
   || die "epic \"$EPIC_BASE\" fails the epic/story contract (see the lint problems above); fix the epic before promoting"
+
+# --- freshness guards: refuse a promote from an unfrozen or stale-signed design
+# The handoff contract is sign-THEN-promote: the captain freezes the design by
+# signing epic.md (status: active + a signed_off date), and only then is a backlog
+# seeded from it. These two guards, run before any mutation (write nothing on
+# refusal), close the incident's root causes R1 (promote-before-frozen) and R6
+# (no stale-sign guard): the 08-18 promote ran while the design still had two days
+# of redesign ahead, and signed_off stayed stale through all of it with nothing to
+# catch it. "signed = active + signed_off" is the same definition bin/fm-epic-status.sh
+# reports. Fail-closed and idempotent: a re-run after a re-sign passes cleanly.
+
+# Design-freeze guard: a draft (or any non-active) status is not a frozen design.
+EPIC_STATUS="$(fm_epic_scalar "$EPIC_MD" status)"
+[ "$EPIC_STATUS" = active ] \
+  || die "epic \"$EPIC_BASE\" has status \"${EPIC_STATUS:-unset}\", not \"active\": the design is not frozen. Review the design and SIGN the epic (set status: active and a signed_off date in $EPIC_MD) before promoting; promote will not seed a backlog from an unsigned draft."
+
+# Stale-sign guard: the sign-off must be at least as new as the newest design
+# file (epic.md, every story, DESIGN.md). Compared at DAY resolution because
+# signed_off is a UTC date and writing it touches epic.md the same day it is
+# signed, so a same-day edit is treated as covered (only a LATER day is stale).
+EPIC_SIGNED_OFF="$(fm_epic_scalar "$EPIC_MD" signed_off)"
+[ -n "$EPIC_SIGNED_OFF" ] \
+  || die "epic \"$EPIC_BASE\" is status active but has no signed_off date: sign the frozen design (add a signed_off date to $EPIC_MD) before promoting."
+
+newest_day=""
+newest_file=""
+for f in "$EPIC_MD" "$STORIES_DIR"/*.md "$UMBRELLA_DIR/DESIGN.md"; do
+  [ -f "$f" ] || continue
+  fday="$(fm_file_mtime_day "$f")" || die "cannot read the modification time of $f"
+  if [ -z "$newest_day" ] || [[ "$fday" > "$newest_day" ]]; then
+    newest_day="$fday"
+    newest_file="$f"
+  fi
+done
+
+if [ -n "$newest_day" ] && [[ "$newest_day" > "$EPIC_SIGNED_OFF" ]]; then
+  stale_rel="${newest_file#"$FM_HOME"/}"
+  stale_msg="epic \"$EPIC_BASE\" sign-off is stale: $stale_rel was modified $newest_day, AFTER signed_off: $EPIC_SIGNED_OFF. The signed design no longer matches the files - re-sign the current design (update signed_off in $EPIC_MD) before promoting."
+  if [ "$ALLOW_STALE_SIGN" -eq 1 ]; then
+    echo "warning: $stale_msg  (proceeding anyway: --allow-stale-sign)" >&2
+  else
+    die "$stale_msg  (override with --allow-stale-sign to promote from the stale sign-off anyway.)"
+  fi
+fi
 
 # --- parse what the seed/branch steps need (the contract already holds) -------
 # The lint validated the epic; here we only READ the fields promote seeds from,
@@ -671,8 +754,7 @@ if [ "$seed_manual" -eq 1 ]; then
 fi
 say ""
 say "STOP - the remaining steps are human/firstmate-owned (this script never signs, branches, or dispatches):"
-say "  1. Review umbrellas/$UMBRELLA_ID/DESIGN.md, then SIGN the epic:"
-say "     set epic.md status pending -> active and add 'signed_off: $(date -u +%Y-%m-%d)' in data/plans/$EPIC_BASE/epic.md"
+say "  1. Design is signed and frozen (status: active, signed_off: $EPIC_SIGNED_OFF). If you revise it, re-sign (update signed_off in data/plans/$EPIC_BASE/epic.md) before re-running promote."
 say "  2. Cut one epic branch per involved repo:"
 for r in "${epic_repos[@]}"; do
   say "     bin/fm-epic-branch.sh create $EPIC_SLUG $r"
