@@ -938,6 +938,24 @@ assert(
   selectActiveProviderQuota(schema3ProjectedParsed, "openai-codex", { nowMs: now }).kind === "fresh",
   "valid schema-3 projected-exhaustion runway was rejected",
 );
+const falseThroughResetRunway = structuredClone(schema3Projected);
+falseThroughResetRunway.providers[1].quotaSemantics.effectiveAvailability[0].runway = {
+  status: "through_reset",
+  projectionConfidence: "established",
+  projectionBasis: "cycle_average",
+};
+const falseThroughResetParsed = parseQuotaAxiJson(JSON.stringify(falseThroughResetRunway));
+assert(
+  selectActiveProviderQuota(falseThroughResetParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "through-reset runway ignored an earlier bounding-window exhaustion",
+);
+const wrongProjectedRunway = structuredClone(schema3Projected);
+wrongProjectedRunway.providers[1].quotaSemantics.effectiveAvailability[0].runway.usableRunwaySeconds += 1;
+const wrongProjectedRunwayParsed = parseQuotaAxiJson(JSON.stringify(wrongProjectedRunway));
+assert(
+  selectActiveProviderQuota(wrongProjectedRunwayParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "projected runway scalar detached from its bounding window was accepted",
+);
 const schema3ProjectedWithoutBasis = structuredClone(schema3Projected);
 delete schema3ProjectedWithoutBasis.providers[1].quotaSemantics.effectiveAvailability[0].runway.projectionBasis;
 const schema3ProjectedWithoutBasisParsed = parseQuotaAxiJson(JSON.stringify(schema3ProjectedWithoutBasis));
@@ -980,6 +998,13 @@ const invalidQuotaSemantics = structuredClone(schema5Populated);
 invalidQuotaSemantics.providers[1].quotaSemantics.effectiveAvailability[0].selection.spendPriority = "invalid";
 const invalidPaceRelation = structuredClone(fullyPopulated);
 invalidPaceRelation.providers[1].windows[0].pace.reason = "stale";
+const wrongEffectivePaceSummary = structuredClone(fullyPopulated);
+wrongEffectivePaceSummary.providers[1].quotaSemantics.effectiveAvailability[0].pace = {
+  status: "ahead",
+  aheadWindowIds: ["weekly"],
+  worstReservePercentPoints: 8.2857,
+  worstReserveWindowId: "weekly",
+};
 const invalidRunwayRelation = structuredClone(fullyPopulated);
 invalidRunwayRelation.providers[1].quotaSemantics.effectiveAvailability[0].runway.status = "unknown";
 const falseExhaustedRunway = structuredClone(fullyPopulated);
@@ -1081,6 +1106,7 @@ for (const [malformedReport, description] of [
   [inconsistentKnownPace, "known pace detached from its window"],
   [invalidQuotaSemantics, "invalid quota semantics field"],
   [invalidPaceRelation, "invalid pace status relation"],
+  [wrongEffectivePaceSummary, "effective pace detached from its bounding windows"],
   [invalidRunwayRelation, "invalid runway status relation"],
   [falseExhaustedRunway, "exhausted runway with remaining quota"],
   [invalidSelectionRelation, "invalid selection status relation"],
@@ -1107,6 +1133,21 @@ for (const [malformedReport, description] of [
     `${description} was accepted as fresh`,
   );
 }
+const unknownPaceReport = report(now);
+unknownPaceReport.providers[1].windows[0].pace = { status: "unknown", reason: "missing_cycle" };
+const unknownPaceParsed = parseQuotaAxiJson(JSON.stringify(unknownPaceReport));
+assert(
+  selectActiveProviderQuota(unknownPaceParsed, "openai-codex", { nowMs: now }).kind === "fresh",
+  "valid producer-derived unknown pace reason was rejected",
+);
+const wrongUnknownPaceReason = structuredClone(unknownPaceReport);
+wrongUnknownPaceReason.providers[1].windows[0].pace.reason = "stale";
+const wrongUnknownPaceParsed = parseQuotaAxiJson(JSON.stringify(wrongUnknownPaceReason));
+assert(
+  selectActiveProviderQuota(wrongUnknownPaceParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "unknown pace reason detached from its window was accepted",
+);
+
 const staleMixedPace = structuredClone(fullyPopulated);
 staleMixedPace.providers[1].source = "cache";
 staleMixedPace.providers[1].state.status = "stale";
@@ -1562,6 +1603,41 @@ await waitFor(
 );
 await liveComposition.emit("session_shutdown", { reason: "quit" });
 
+const delayedAuthWatcher = new EventEmitter();
+delayedAuthWatcher.close = () => {};
+let notifyDelayedAuthChange;
+const delayedAuthOptions = { authType: "api_key" };
+const delayedAuthSync = makePi(
+  createFirstmateQuotaStatusExtension({
+    refreshMs: 60_000,
+    timeoutMs: 500,
+    watchAuthDirectory(_path, _options, listener) {
+      notifyDelayedAuthChange = listener;
+      return delayedAuthWatcher;
+    },
+  }),
+  "openai-codex",
+  "tui",
+  delayedAuthOptions,
+);
+await delayedAuthSync.emit("session_start", { reason: "startup" });
+assert(
+  delayedAuthSync.widgetText(240).includes("non-subscription auth"),
+  "pre-login auth mode was not explicit",
+);
+notifyDelayedAuthChange("change", "auth.json");
+await sleep(50);
+assert(
+  delayedAuthSync.widgetText(240).includes("non-subscription auth"),
+  "credential watcher did not resolve against the initial runtime auth mode",
+);
+delayedAuthOptions.authType = "oauth";
+await waitFor(
+  () => delayedAuthSync.widgetText(400).includes("week 94% left"),
+  `post-login runtime auth synchronization was not detected: ${delayedAuthSync.widgetText(400)}`,
+);
+await delayedAuthSync.emit("session_shutdown", { reason: "quit" });
+
 const authTimeout = makePi(
   createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 40 }),
   "openai-codex",
@@ -1797,16 +1873,22 @@ await waitFor(
   () => backwardExpiry.widgetText(400).includes("week 94% left"),
   "backward-expiry fixture did not publish its first window",
 );
-backwardExpiryClock.wallNowMs -= 30_000;
+backwardExpiryClock.wallNowMs -= 120_000;
 const writesBeforeEarlyTimer = backwardExpiry.widgetWriteCount;
 backwardExpiryClock.advanceTimers(60_000);
 assert(backwardExpiry.widgetWriteCount > writesBeforeEarlyTimer, "expiry timer did not revalidate after a clock shift");
 assert(
-  backwardExpiry.widgetText(400).includes("week 94% left"),
-  "an early monotonic expiry callback discarded a wall-clock-fresh window",
+  backwardExpiry.widgetText(400).includes("stale") &&
+    !backwardExpiry.widgetText(400).includes("week 94% left"),
+  "a future-skewed report was presented as fresh",
 );
-backwardExpiryClock.wallNowMs += 90_000;
-backwardExpiryClock.advanceTimers(90_000);
+backwardExpiryClock.wallNowMs += 120_000;
+assert(
+  backwardExpiry.widgetText(400).includes("week 94% left"),
+  "clock recovery did not restore a still-fresh cached window",
+);
+backwardExpiryClock.wallNowMs += 60_000;
+backwardExpiryClock.advanceTimers(60_000);
 assert(!backwardExpiry.widgetText(400).includes("week 94% left"), "rescheduled expiry retained a reset window");
 assert(
   backwardExpiry.widgetText(400).includes("GPT-5.3-Codex-Spark session 100% left"),

@@ -23,6 +23,7 @@ const DEFAULT_REFRESH_MS = 5 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 20 * 1000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_MAX_AUTH_BYTES = 1024 * 1024;
+const DEFAULT_REVISION_CHECK_MS = 1000;
 
 const OFFICIAL_PROVIDER_BASE_URLS: Readonly<Record<string, string>> = {
   anthropic: "https://api.anthropic.com",
@@ -176,6 +177,7 @@ type ActiveSession = {
   refreshTimer: unknown | null;
   expiryTimer: unknown | null;
   modelRefreshTimer: unknown | null;
+  revisionTimer: unknown | null;
 };
 
 function positiveNumber(value: number | undefined, fallback: number): number {
@@ -456,6 +458,12 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (!provider) return "provider-missing";
       const apiKey = provider.auth?.apiKey;
       const oauth = provider.auth?.oauth;
+      const usingOAuth = typeof registry.isUsingOAuth === "function"
+        ? registry.isUsingOAuth.call(ctx.modelRegistry, model)
+        : "unavailable";
+      const authStatus = typeof registry.getProviderAuthStatus === "function"
+        ? registry.getProviderAuthStatus.call(ctx.modelRegistry, model.provider)
+        : undefined;
       return JSON.stringify([
         referenceRevision(provider),
         provider.id,
@@ -479,6 +487,11 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         referenceRevision(provider.streamSimple),
         referenceRevision(provider.fetchDeferred),
         referenceRevision(provider.cancelDeferred),
+        referenceRevision(registry.isUsingOAuth),
+        usingOAuth,
+        referenceRevision(registry.getProviderAuthStatus),
+        authStatus?.configured,
+        authStatus?.source,
       ]);
     } catch {
       return "provider-inspection-failed";
@@ -942,14 +955,24 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (active !== session) return;
       const view = override ?? currentView(session);
       clearExpiry(session);
-      if (view.kind === "fresh") {
+      const renderScheduledAtMs = now();
+      const recoverableSkewView = session.quota?.view.kind === "fresh" &&
+          renderScheduledAtMs < session.quota.view.freshnessTimestampMs - 60_000
+        ? session.quota.view
+        : null;
+      const nextRevalidationMs = view.kind === "fresh"
+        ? view.freshUntilMs
+        : recoverableSkewView
+          ? recoverableSkewView.freshnessTimestampMs - 60_000
+          : null;
+      if (nextRevalidationMs !== null) {
         let timer: unknown;
         timer = timers.setTimeout(() => {
           if (active !== session || session.expiryTimer !== timer) return;
           session.expiryTimer = null;
           cachedQuotaView(session, now());
           render(session);
-        }, Math.max(0, view.freshUntilMs - now()));
+        }, Math.max(0, nextRevalidationMs - renderScheduledAtMs));
         session.expiryTimer = timer;
         unrefTimer(timer);
       }
@@ -962,7 +985,11 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             : boundedComponentWidth;
           const renderNowMs = now();
           const changedModel = changedLiveModelView(session);
-          const renderView = changedModel ?? (view.kind === "fresh" ? currentView(session, renderNowMs) : view);
+          const renderView = changedModel ?? (
+            view.kind === "fresh" || recoverableSkewView !== null
+              ? currentView(session, renderNowMs)
+              : view
+          );
           const plain = formatStatus(renderView, availableWidth, renderNowMs);
           return plain ? [theme.fg("dim", plain)] : [];
         },
@@ -1148,6 +1175,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.refreshTimer = null;
       if (session.modelRefreshTimer !== null) timers.clearTimeout(session.modelRefreshTimer);
       session.modelRefreshTimer = null;
+      if (session.revisionTimer !== null) timers.clearInterval(session.revisionTimer);
+      session.revisionTimer = null;
       clearExpiry(session);
       session.refreshPending = false;
       const watcher = session.credentialWatcher;
@@ -1178,6 +1207,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         refreshTimer: null,
         expiryTimer: null,
         modelRefreshTimer: null,
+        revisionTimer: null,
       };
       active = session;
       watchCredentials(session);
@@ -1185,6 +1215,12 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         void refresh(session);
       }, refreshMs);
       unrefTimer(session.refreshTimer);
+      session.revisionTimer = timers.setInterval(() => {
+        if (active !== session || targetMatchesLiveModel(session)) return;
+        resetForLiveModel(session);
+        void refresh(session);
+      }, Math.min(refreshMs, DEFAULT_REVISION_CHECK_MS));
+      unrefTimer(session.revisionTimer);
       render(session);
       void refresh(session);
     }

@@ -330,12 +330,43 @@ function validKnownPaceAudit(
     pace.projectionBasis === undefined;
 }
 
+function expectedUnknownPaceReason(
+  window: Record<string, unknown>,
+  generatedAtMs: number,
+  providerIsStale: boolean,
+): (typeof QUOTA_PACE_REASONS)[number] | null {
+  if (providerIsStale) return "stale";
+  const percentRemaining = finiteNumber(window.percentRemaining);
+  const percentUsed = window.percentUsed === undefined
+    ? percentRemaining === null ? null : 100 - percentRemaining
+    : finiteNumber(window.percentUsed);
+  if (percentRemaining === null || percentUsed === null) return "missing_usage";
+
+  const resetsAtMs = parseTimestamp(window.resetsAt);
+  if (resetsAtMs === null) return "missing_cycle";
+  if (resetsAtMs <= generatedAtMs) return "expired_reset";
+  if (window.startsAt !== undefined) {
+    const startsAtMs = parseTimestamp(window.startsAt);
+    if (startsAtMs === null || startsAtMs >= resetsAtMs) return "invalid_cycle";
+    return startsAtMs > generatedAtMs ? "future_cycle_start" : null;
+  }
+  const windowSeconds = finiteNumber(window.windowSeconds);
+  if (windowSeconds === null) return "missing_cycle";
+  if (windowSeconds <= 0 || !Number.isFinite(windowSeconds * 1000)) return "invalid_cycle";
+  const impliedStartsAtMs = resetsAtMs - windowSeconds * 1000;
+  if (!Number.isFinite(impliedStartsAtMs) || Number.isNaN(new Date(impliedStartsAtMs).getTime())) {
+    return "invalid_cycle";
+  }
+  return impliedStartsAtMs > generatedAtMs ? "future_cycle_start" : null;
+}
+
 function validPace(
   value: unknown,
   window: Record<string, unknown>,
   generatedAtMs: number,
   requireAuditFields: boolean,
   schemaVersion: number,
+  providerIsStale: boolean,
 ): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
@@ -360,7 +391,7 @@ function validPace(
   if (hasProjection !== (value.projectionConfidence !== undefined)) return false;
   if ((value.cycleBasis !== undefined) !== (value.cycleSeconds !== undefined)) return false;
   if (status === "unknown") {
-    return reason !== null && [
+    return reason === expectedUnknownPaceReason(window, generatedAtMs, providerIsStale) && [
       value.timeRemainingPercent,
       value.elapsedPercent,
       value.reservePercentPoints,
@@ -387,6 +418,7 @@ function parseWindow(
   generatedAtMs: number,
   requirePaceAudit: boolean,
   schemaVersion: number,
+  providerIsStale: boolean,
 ): QuotaWindowView | null {
   if (!isRecord(value)) return null;
   const id = exactText(value.id);
@@ -408,7 +440,14 @@ function parseWindow(
   if (!validOptionalNumber(value.windowSeconds, (number) => number > 0)) return null;
   if (!validOptionalNumber(value.spentUsd, (number) => number >= 0)) return null;
   if (!validOptionalNumber(value.limitUsd, (number) => number >= 0)) return null;
-  if (!validPace(value.pace, value, generatedAtMs, requirePaceAudit, schemaVersion)) return null;
+  if (!validPace(
+    value.pace,
+    value,
+    generatedAtMs,
+    requirePaceAudit,
+    schemaVersion,
+    providerIsStale,
+  )) return null;
 
   const percentRemaining = value.percentRemaining === undefined
     ? null
@@ -481,10 +520,71 @@ function parseAttempts(value: unknown): ParsedAttempt[] | null | undefined {
   return attempts;
 }
 
+function exactTextArray(value: unknown, expected: string[]): boolean {
+  return expected.length === 0
+    ? value === undefined
+    : Array.isArray(value) &&
+      value.length === expected.length &&
+      value.every((entry, index) => entry === expected[index]);
+}
+
+function expectedEffectivePace(
+  boundedBy: string[],
+  rawWindowsById: ReadonlyMap<string, Record<string, unknown>>,
+): {
+  status: (typeof QUOTA_EFFECTIVE_PACE_STATUSES)[number];
+  aheadWindowIds: string[];
+  behindWindowIds: string[];
+  onPaceWindowIds: string[];
+  unknownWindowIds: string[];
+  worstReservePercentPoints: number | null;
+  worstReserveWindowId: string | null;
+} {
+  const aheadWindowIds: string[] = [];
+  const behindWindowIds: string[] = [];
+  const onPaceWindowIds: string[] = [];
+  const unknownWindowIds: string[] = [];
+  let worstReservePercentPoints: number | null = null;
+  let worstReserveWindowId: string | null = null;
+  for (const id of boundedBy) {
+    const pace = rawWindowsById.get(id)?.pace;
+    const paceRecord = isRecord(pace) ? pace : null;
+    if (paceRecord?.status === "ahead") aheadWindowIds.push(id);
+    else if (paceRecord?.status === "behind") behindWindowIds.push(id);
+    else if (paceRecord?.status === "on_pace") onPaceWindowIds.push(id);
+    else unknownWindowIds.push(id);
+    const reserve = finiteNumber(paceRecord?.reservePercentPoints);
+    if (reserve !== null && (worstReservePercentPoints === null || reserve < worstReservePercentPoints)) {
+      worstReservePercentPoints = reserve;
+      worstReserveWindowId = id;
+    }
+  }
+  const knownCount = aheadWindowIds.length + behindWindowIds.length + onPaceWindowIds.length;
+  const status = knownCount === 0
+    ? "unknown"
+    : aheadWindowIds.length > 0 && behindWindowIds.length > 0
+      ? "mixed"
+      : aheadWindowIds.length > 0
+        ? "ahead"
+        : behindWindowIds.length > 0
+          ? "behind"
+          : "on_pace";
+  return {
+    status,
+    aheadWindowIds,
+    behindWindowIds,
+    onPaceWindowIds,
+    unknownWindowIds,
+    worstReservePercentPoints,
+    worstReserveWindowId,
+  };
+}
+
 function validEffectivePace(
   value: unknown,
   requireAuditFields: boolean,
   boundedBy: string[],
+  rawWindowsById: ReadonlyMap<string, Record<string, unknown>>,
 ): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
@@ -515,29 +615,144 @@ function validEffectivePace(
   if ((value.worstReservePercentPoints !== undefined) !== (worstId !== null)) return false;
 
   if (requireAuditFields && seen.size !== boundedBy.length) return false;
+  let structurallyValid: boolean;
   if (status === "unknown") {
-    return value.aheadWindowIds === undefined &&
+    structurallyValid = value.aheadWindowIds === undefined &&
       value.behindWindowIds === undefined &&
       value.onPaceWindowIds === undefined &&
       value.worstReservePercentPoints === undefined &&
       validNonemptyTextArray(value.unknownWindowIds);
+  } else {
+    if (value.worstReservePercentPoints === undefined) return false;
+    if (requireAuditFields && worstId !== null && !seen.has(worstId)) return false;
+    if (status === "ahead") {
+      structurallyValid = validNonemptyTextArray(value.aheadWindowIds) &&
+        value.behindWindowIds === undefined;
+    } else if (status === "behind") {
+      structurallyValid = value.aheadWindowIds === undefined &&
+        (!requireAuditFields || validNonemptyTextArray(value.behindWindowIds));
+    } else if (status === "on_pace") {
+      structurallyValid = value.aheadWindowIds === undefined &&
+        value.behindWindowIds === undefined &&
+        (!requireAuditFields || validNonemptyTextArray(value.onPaceWindowIds));
+    } else {
+      structurallyValid = validNonemptyTextArray(value.aheadWindowIds) &&
+        (!requireAuditFields || validNonemptyTextArray(value.behindWindowIds));
+    }
   }
-  if (value.worstReservePercentPoints === undefined) return false;
-  if (requireAuditFields && worstId !== null && !seen.has(worstId)) return false;
-  if (status === "ahead") {
-    return validNonemptyTextArray(value.aheadWindowIds) && value.behindWindowIds === undefined;
+  if (!structurallyValid || !requireAuditFields) return structurallyValid;
+
+  const expected = expectedEffectivePace(boundedBy, rawWindowsById);
+  return status === expected.status &&
+    exactTextArray(value.aheadWindowIds, expected.aheadWindowIds) &&
+    exactTextArray(value.behindWindowIds, expected.behindWindowIds) &&
+    exactTextArray(value.onPaceWindowIds, expected.onPaceWindowIds) &&
+    exactTextArray(value.unknownWindowIds, expected.unknownWindowIds) &&
+    (expected.worstReservePercentPoints === null
+      ? value.worstReservePercentPoints === undefined && value.worstReserveWindowId === undefined
+      : value.worstReservePercentPoints === expected.worstReservePercentPoints &&
+        value.worstReserveWindowId === expected.worstReserveWindowId);
+}
+
+function expectedEffectiveRunway(
+  boundedBy: string[],
+  rawWindowsById: ReadonlyMap<string, Record<string, unknown>>,
+  generatedAtMs: number,
+  schemaVersion: number,
+): Record<string, unknown> {
+  const windows = boundedBy.map((id) => rawWindowsById.get(id) as Record<string, unknown>);
+  const exhausted = windows.find((window) => finiteNumber(window.percentRemaining) === 0);
+  if (exhausted) {
+    return {
+      status: "exhausted_now",
+      usableRunwaySeconds: 0,
+      projectedExhaustedAt: new Date(generatedAtMs).toISOString(),
+      limitingWindowId: exhausted.id,
+    };
   }
-  if (status === "behind") {
-    return value.aheadWindowIds === undefined &&
-      (!requireAuditFields || validNonemptyTextArray(value.behindWindowIds));
+
+  const unmeasurableWindowIds: string[] = [];
+  const projections: Array<{
+    window: Record<string, unknown>;
+    exhaustedAtMs: number;
+    confidence: "early" | "established";
+  }> = [];
+  let lowestConfidence: "early" | "established" = "established";
+  for (const window of windows) {
+    const id = window.id as string;
+    const remaining = finiteNumber(window.percentRemaining);
+    const pace = isRecord(window.pace) ? window.pace : null;
+    const resetsAtMs = parseTimestamp(window.resetsAt);
+    const explicitPercentUsed = finiteNumber(window.percentUsed);
+    const zeroUse = remaining === 100 && (explicitPercentUsed === null || explicitPercentUsed === 0);
+    if (window.resetsAt === undefined) {
+      if (!zeroUse) unmeasurableWindowIds.push(id);
+      continue;
+    }
+    if (
+      remaining === null ||
+      !pace ||
+      pace.status === "unknown" ||
+      resetsAtMs === null ||
+      resetsAtMs <= generatedAtMs
+    ) {
+      unmeasurableWindowIds.push(id);
+      continue;
+    }
+    if (zeroUse) {
+      if ((finiteNumber(pace.elapsedPercent) ?? 0) < 10) lowestConfidence = "early";
+      continue;
+    }
+    const exhaustedAtMs = parseTimestamp(pace.projectedExhaustedAt);
+    const confidence = exactEnum(pace.projectionConfidence, QUOTA_PROJECTION_CONFIDENCES);
+    if (exhaustedAtMs === null || exhaustedAtMs <= generatedAtMs || confidence === null) {
+      unmeasurableWindowIds.push(id);
+      continue;
+    }
+    if (confidence === "early") lowestConfidence = "early";
+    if (exhaustedAtMs < resetsAtMs) projections.push({ window, exhaustedAtMs, confidence });
   }
-  if (status === "on_pace") {
-    return value.aheadWindowIds === undefined &&
-      value.behindWindowIds === undefined &&
-      (!requireAuditFields || validNonemptyTextArray(value.onPaceWindowIds));
+  if (unmeasurableWindowIds.length > 0) {
+    return { status: "unknown", unmeasurableWindowIds };
   }
-  return validNonemptyTextArray(value.aheadWindowIds) &&
-    (!requireAuditFields || validNonemptyTextArray(value.behindWindowIds));
+  if (projections.length === 0) {
+    return {
+      status: "through_reset",
+      projectionConfidence: lowestConfidence,
+      ...(schemaVersion === 3 ? { projectionBasis: "cycle_average" } : {}),
+    };
+  }
+  const limiting = projections.reduce((earliest, candidate) => (
+    candidate.exhaustedAtMs < earliest.exhaustedAtMs ? candidate : earliest
+  ));
+  return {
+    status: "projected_exhaustion",
+    usableRunwaySeconds: Math.max(0, Math.round((limiting.exhaustedAtMs - generatedAtMs) / 1000)),
+    projectedExhaustedAt: new Date(limiting.exhaustedAtMs).toISOString(),
+    limitingWindowId: limiting.window.id,
+    projectionConfidence: limiting.confidence,
+    ...(schemaVersion === 3 ? { projectionBasis: "cycle_average" } : {}),
+  };
+}
+
+function matchesExpectedRunway(
+  value: Record<string, unknown>,
+  expected: Record<string, unknown>,
+): boolean {
+  for (const field of [
+    "status",
+    "usableRunwaySeconds",
+    "projectedExhaustedAt",
+    "limitingWindowId",
+    "projectionConfidence",
+    "projectionBasis",
+  ] as const) {
+    if (value[field] !== expected[field]) return false;
+  }
+  const expectedBlockers = expected.unmeasurableWindowIds;
+  return Array.isArray(expectedBlockers)
+    ? exactTextArray(value.unmeasurableWindowIds, expectedBlockers as string[])
+    : value.unmeasurableWindowIds === undefined;
 }
 
 function validRunway(
@@ -545,8 +760,10 @@ function validRunway(
   boundedBy: string[],
   allowedBlockers: string[],
   windowsById: ReadonlyMap<string, QuotaWindowView>,
+  rawWindowsById: ReadonlyMap<string, Record<string, unknown>>,
   generatedAtMs: number,
   schemaVersion: number,
+  requireAuditFields: boolean,
 ): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
@@ -572,6 +789,12 @@ function validRunway(
     Array.isArray(value.unmeasurableWindowIds) &&
     value.unmeasurableWindowIds.some((id) => !allowedBlockers.includes(id))
   ) return false;
+  if (requireAuditFields) {
+    return matchesExpectedRunway(
+      value,
+      expectedEffectiveRunway(boundedBy, rawWindowsById, generatedAtMs, schemaVersion),
+    );
+  }
 
   if (status === "unknown") {
     return value.usableRunwaySeconds === undefined &&
@@ -737,14 +960,21 @@ function validEffectiveAvailability(
     return false;
   }
   const allowedBlockers = [...new Set([...value.boundedBy, ...unresolvedWindowIds])];
-  return validEffectivePace(value.pace, requireAuditFields, value.boundedBy) &&
+  return validEffectivePace(
+    value.pace,
+    requireAuditFields,
+    value.boundedBy,
+    rawWindowsById,
+  ) &&
     validRunway(
       value.runway,
       value.boundedBy,
       allowedBlockers,
       windowsById,
+      rawWindowsById,
       generatedAtMs,
       schemaVersion,
+      requireAuditFields,
     ) &&
     validSelection(
       value.selection,
@@ -839,14 +1069,14 @@ function validProviderFields(
   if (value.plan !== undefined && cleanText(value.plan, 48) === null) return false;
   if (!validProviderState(value.state, requireFullFields)) return false;
   if (!Array.isArray(value.windows)) return false;
+  const providerIsStale = isRecord(value.state) && value.state.stale === true;
   const parsedWindows = value.windows.map((window) => (
-    parseWindow(window, generatedAtMs, requireFullFields, schemaVersion)
+    parseWindow(window, generatedAtMs, requireFullFields, schemaVersion, providerIsStale)
   ));
   if (parsedWindows.some((window) => window === null)) return false;
   if (new Set(parsedWindows.map((window) => window?.id)).size !== parsedWindows.length) return false;
   const rawWindows = value.windows.filter(isRecord);
   if (rawWindows.length !== value.windows.length) return false;
-  const providerIsStale = isRecord(value.state) && value.state.stale === true;
   if (!validQuotaSemantics(
     value.quotaSemantics,
     requireFullFields,
@@ -952,6 +1182,7 @@ export function selectActiveProviderQuota(
       report.generatedAtMs,
       report.schemaVersion === 3 || fullProjection,
       report.schemaVersion,
+      rawProvider.state.stale === true,
     );
     if (!window) return malformed(provider);
     windows.push(window);
