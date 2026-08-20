@@ -1,0 +1,170 @@
+### evidence/epflow-05/demo.sh (hermetic fixture) ###
+$ evidence/epflow-05/demo.sh
+==================== fm-epic-status demo ====================
+epic demo - Demo epic
+  dir: /var/folders/6l/_c1hp08x59dg6dz_d4hq17dw0000gn/T//epflow05-demo.HNccWy/home/data/plans/epic-demo
+  signed: yes (signed_off 2026-01-02, status active)
+
+epic branches (from story pr_base):
+  [x] epic/demo in alpha
+  [ ] epic/other in alpha  - MISSING (cut with: fm-epic-branch.sh create other alpha)
+  1/2 cut
+  DRIFT: story base branch(es) differ from the epic slug "demo": other (epic authoring drift - fm-epic-lint territory)
+
+stories:
+  [x] demo-01  DONE  (repo: alpha, base: epic/demo)
+  [>] demo-02  DISPATCHABLE  (repo: alpha, base: epic/demo, deps: demo-01)
+  [-] demo-03  blocked-by: demo-02  (repo: alpha, base: epic/demo, deps: demo-02)
+  [>] demo-04  DISPATCHABLE  (repo: beta, base: main, deps: demo-01)
+  [>] demo-05  DISPATCHABLE  (repo: alpha, base: epic/other, deps: demo-01)
+  [?] demo-06  UNSEEDED (no backlog entry; promote first)  (repo: alpha, base: main)
+  3 dispatchable now
+
+dispatch owner: this home
+
+next: fm-epic-dispatch-plan.sh demo   (prints the ordered cut-branch + dispatch commands)
+
+================= fm-epic-dispatch-plan demo ================
+# dispatch plan for epic demo (/var/folders/6l/_c1hp08x59dg6dz_d4hq17dw0000gn/T//epflow05-demo.HNccWy/home/data/plans/epic-demo)
+# PRINTS ONLY - nothing below is executed. Run the lines you decide to dispatch.
+
+## 1. cut epic branches (the distinct epic/<slug> bases the stories declare)
+# DRIFT: story base branch(es) differ from the epic slug "demo": other (author drift - the create below cuts the branch the story actually names)
+# epic/demo already cut in alpha
+bin/fm-epic-branch.sh create other alpha
+
+## 2. dispatch the currently dispatchable stories
+
+# --- demo-02  (repo: alpha, base: epic/demo) ---
+bin/fm-brief.sh demo-02 alpha --mode local-only --base epic/demo
+# fill the {TASK} placeholder in data/demo-02/brief.md, then (yolo is firstmate's call; off is the registered default):
+bin/fm-spawn.sh demo-02 alpha --mode local-only --yolo off --base epic/demo
+
+# --- demo-04  (repo: beta, base: main) ---
+bin/fm-brief.sh demo-04 beta --mode direct-PR --base main
+# fill the {TASK} placeholder in data/demo-04/brief.md, then (yolo is firstmate's call; off is the registered default):
+bin/fm-spawn.sh demo-04 beta --mode direct-PR --yolo off --base main
+
+# --- demo-05  (repo: alpha, base: epic/other) ---
+bin/fm-brief.sh demo-05 alpha --mode local-only --base epic/other
+# fill the {TASK} placeholder in data/demo-05/brief.md, then (yolo is firstmate's call; off is the registered default):
+bin/fm-spawn.sh demo-05 alpha --mode local-only --yolo off --base epic/other
+
+===================== print-only proof =====================
+the epic-branch tool was invoked only with 'verify' (never 'create'); no spawn ran. Calls:
+  verify demo alpha
+  verify other alpha
+  verify demo alpha
+  verify other alpha
+
+OK - both commands are read-only and print-only.
+
+
+### LIVE epic: epflow (this firstmate engine epic; FM_HOME=distro) ###
+$ FM_HOME=~/Work/homeport/distro bin/fm-epic-status.sh epflow
+epic epflow - Epic-pipeline ENGINE hardening - idempotent handoff, freshness guards, one lint, dispatch + ship gates
+  dir: /Users/tainguyen/Work/homeport/distro/data/plans/260820-1203-epic-epflow-pipeline-hardening
+  signed: yes (signed_off 2026-08-20, status active)
+
+epic branches: none - every story bases on its pr_base directly (no epic branch gates dispatch)
+
+stories:
+  [x] epflow-01-promote-full-reconcile-verify  DONE  (repo: firstmate, base: main)
+  [>] epflow-02-handoff-freshness-guards  DISPATCHABLE  (repo: firstmate, base: main)
+  [x] epflow-03-single-source-design-artifact  DONE  (repo: firstmate, base: main)
+  [>] epflow-04-fm-epic-lint  DISPATCHABLE  (repo: firstmate, base: main)
+  [>] epflow-05-epic-status-dispatch-plan  DISPATCHABLE  (repo: firstmate, base: main, deps: epflow-01-promote-full-reconcile-verify)
+  [x] epflow-06-ship-completeness-gate  DONE  (repo: firstmate, base: main)
+  [-] epflow-07-delivery-mode-frontmatter  blocked-by: epflow-04-fm-epic-lint  (repo: firstmate, base: main, deps: epflow-04-fm-epic-lint)
+  [-] epflow-08-single-repo-story-cardinality  blocked-by: epflow-04-fm-epic-lint  (repo: firstmate, base: main, deps: epflow-04-fm-epic-lint)
+  3 dispatchable now
+
+dispatch owner: this home
+
+next: fm-epic-dispatch-plan.sh epflow   (prints the ordered cut-branch + dispatch commands)
+
+$ FM_HOME=~/Work/homeport/distro bin/fm-epic-dispatch-plan.sh epflow
+# dispatch plan for epic epflow (/Users/tainguyen/Work/homeport/distro/data/plans/260820-1203-epic-epflow-pipeline-hardening)
+# PRINTS ONLY - nothing below is executed. Run the lines you decide to dispatch.
+
+## 1. cut epic branches (the distinct epic/<slug> bases the stories declare)
+# no story bases on an epic/<slug> branch (stories land on their pr_base directly) - no epic branch needed
+
+## 2. dispatch the currently dispatchable stories
+
+# --- epflow-02-handoff-freshness-guards  (repo: firstmate, base: main) ---
+bin/fm-brief.sh epflow-02-handoff-freshness-guards firstmate --mode local-only --base main
+# fill the {TASK} placeholder in data/epflow-02-handoff-freshness-guards/brief.md, then (yolo is firstmate's call; off is the registered default):
+bin/fm-spawn.sh epflow-02-handoff-freshness-guards firstmate --mode local-only --yolo off --base main
+
+# --- epflow-04-fm-epic-lint  (repo: firstmate, base: main) ---
+bin/fm-brief.sh epflow-04-fm-epic-lint firstmate --mode local-only --base main
+# fill the {TASK} placeholder in data/epflow-04-fm-epic-lint/brief.md, then (yolo is firstmate's call; off is the registered default):
+bin/fm-spawn.sh epflow-04-fm-epic-lint firstmate --mode local-only --yolo off --base main
+
+# --- epflow-05-epic-status-dispatch-plan  (repo: firstmate, base: main) ---
+bin/fm-brief.sh epflow-05-epic-status-dispatch-plan firstmate --mode local-only --base main
+# fill the {TASK} placeholder in data/epflow-05-epic-status-dispatch-plan/brief.md, then (yolo is firstmate's call; off is the registered default):
+bin/fm-spawn.sh epflow-05-epic-status-dispatch-plan firstmate --mode local-only --yolo off --base main
+
+
+### LIVE epic: lh (aimica Learning Hub, the incident that motivated epflow; FM_HOME=aimica) ###
+$ FM_HOME=~/Work/homeport/aimica bin/fm-epic-status.sh lh
+epic lh - aimica Learning Hub
+  dir: /Users/tainguyen/Work/homeport/aimica/data/plans/260818-2029-epic-lh-aimica-learning-hub
+  signed: yes (signed_off 2026-08-20, status active)
+
+epic branches (from story pr_base):
+  [x] epic/aimica-learning-hub in infina-training-partner
+  [x] epic/aimica-learning-hub in infina-insurance-partner-webapp
+  [x] epic/aimica-learning-hub in infina-insurance-partner-services
+  3/3 cut
+  DRIFT: story base branch(es) differ from the epic slug "lh": aimica-learning-hub (epic authoring drift - fm-epic-lint territory)
+
+stories:
+  [x] lh-01-contract-handoff-token  DONE  (repo: infina-training-partner, base: epic/aimica-learning-hub)
+  [>] lh-02-scaffold-forked-apps  DISPATCHABLE  (repo: infina-training-partner, base: epic/aimica-learning-hub, deps: lh-01-contract-handoff-token)
+  [-] lh-03-app-local-hs256-auth  blocked-by: lh-02-scaffold-forked-apps  (repo: infina-training-partner, base: epic/aimica-learning-hub, deps: lh-02-scaffold-forked-apps)
+  [-] lh-04-identity-provisioning-schema  blocked-by: lh-03-app-local-hs256-auth  (repo: infina-training-partner, base: epic/aimica-learning-hub, deps: lh-03-app-local-hs256-auth lh-11-storage-base-entityprefix-refactor)
+  [-] lh-05-ctv-door  blocked-by: lh-04-identity-provisioning-schema  (repo: infina-training-partner, base: epic/aimica-learning-hub, deps: lh-04-identity-provisioning-schema lh-10-feature-flag-gating)
+  [-] lh-06-admin-door  blocked-by: lh-04-identity-provisioning-schema  (repo: infina-training-partner, base: epic/aimica-learning-hub, deps: lh-04-identity-provisioning-schema lh-10-feature-flag-gating)
+  [-] lh-07-default-course-golive-e2e  blocked-by: lh-05-ctv-door lh-06-admin-door  (repo: infina-training-partner, base: epic/aimica-learning-hub, deps: lh-05-ctv-door lh-06-admin-door)
+  [-] lh-08-infra-deploy  blocked-by: lh-07-default-course-golive-e2e  (repo: infina-training-partner, base: epic/aimica-learning-hub, deps: lh-07-default-course-golive-e2e)
+  [-] lh-09-post-golive  blocked-by: lh-08-infra-deploy  (repo: infina-training-partner, base: epic/aimica-learning-hub, deps: lh-08-infra-deploy)
+  [x] lh-10-feature-flag-gating  DONE  (repo: infina-insurance-partner-webapp, base: epic/aimica-learning-hub, deps: lh-12-feature-flag-backend)
+  [x] lh-11-storage-base-entityprefix-refactor  DONE  (repo: infina-training-partner, base: epic/aimica-learning-hub)
+  [x] lh-12-feature-flag-backend  DONE  (repo: infina-insurance-partner-services, base: epic/aimica-learning-hub)
+  [-] lh-13-e2e-local-fullstack  blocked-by: lh-05-ctv-door lh-06-admin-door  (repo: infina-training-partner, base: epic/aimica-learning-hub, deps: lh-05-ctv-door lh-06-admin-door)
+  [>] lh-scout-app-layering  DISPATCHABLE  (repo: infina-training-partner, base: epic/aimica-learning-hub)
+  [-] lh-scout-domain-libs  blocked-by: lh-scout-app-layering  (repo: infina-training-partner, base: epic/aimica-learning-hub, deps: lh-scout-app-layering)
+  2 dispatchable now
+
+dispatch owner: this home
+
+next: fm-epic-dispatch-plan.sh lh   (prints the ordered cut-branch + dispatch commands)
+
+$ FM_HOME=~/Work/homeport/aimica bin/fm-epic-dispatch-plan.sh lh
+# dispatch plan for epic lh (/Users/tainguyen/Work/homeport/aimica/data/plans/260818-2029-epic-lh-aimica-learning-hub)
+# PRINTS ONLY - nothing below is executed. Run the lines you decide to dispatch.
+
+## 1. cut epic branches (the distinct epic/<slug> bases the stories declare)
+# DRIFT: story base branch(es) differ from the epic slug "lh": aimica-learning-hub (author drift - the create below cuts the branch the story actually names)
+# epic/aimica-learning-hub already cut in infina-training-partner
+# epic/aimica-learning-hub already cut in infina-insurance-partner-webapp
+# epic/aimica-learning-hub already cut in infina-insurance-partner-services
+# all needed epic branches already cut
+
+## 2. dispatch the currently dispatchable stories
+
+# --- lh-02-scaffold-forked-apps  (repo: infina-training-partner, base: epic/aimica-learning-hub) ---
+# delivery mode NEEDS firstmate surface classification (repo posture is no-mistakes-prod-only):
+#   internal-only tooling/process -> direct-PR ; product-facing/mixed/uncertain -> no-mistakes
+# then run the pair below with your chosen --mode:
+bin/fm-brief.sh lh-02-scaffold-forked-apps infina-training-partner --mode <no-mistakes|direct-PR> --base epic/aimica-learning-hub
+# fill the {TASK} placeholder in data/lh-02-scaffold-forked-apps/brief.md, then (yolo is firstmate's call; off is the registered default):
+bin/fm-spawn.sh lh-02-scaffold-forked-apps infina-training-partner --mode <no-mistakes|direct-PR> --yolo off --base epic/aimica-learning-hub
+
+# --- lh-scout-app-layering  (repo: infina-training-partner, SCOUT - report, no merge) ---
+bin/fm-brief.sh lh-scout-app-layering infina-training-partner --scout
+# fill the {TASK} placeholder in data/lh-scout-app-layering/brief.md, then:
+bin/fm-spawn.sh lh-scout-app-layering infina-training-partner --scout
