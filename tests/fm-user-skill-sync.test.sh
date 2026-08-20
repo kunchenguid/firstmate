@@ -423,6 +423,66 @@ test_mode_only_difference_names_permission_bits() {
   pass "a permission-bit-only difference is diagnosed as such"
 }
 
+test_interrupt_stops_apply() {
+  local home out pid rc i waited
+  home=$(new_home)
+  i=0
+  while [ "$i" -lt 60 ]; do
+    make_skill "$home/.gemini/skills" "skill$i" body
+    i=$((i + 1))
+  done
+  out="$home/apply.out"
+
+  HOME="$home" CODEX_HOME="$home/.codex" "$SCRIPT" --apply > "$out" 2>&1 &
+  pid=$!
+  waited=0
+  while [ "$waited" -lt 400 ]; do
+    grep -q '^APPLY$' "$out" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    set +e
+    wait "$pid"
+    set -e
+    pass "interrupted apply exits nonzero (skipped: run finished before the signal landed)"
+    return 0
+  fi
+
+  kill -TERM "$pid" 2>/dev/null || true
+  set +e
+  wait "$pid"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 143 ] || fail "interrupted apply exited $rc instead of 143"
+  assert_contains "$(cat "$out")" "interrupted by SIGTERM" "interrupted apply lacked an interruption diagnosis"
+  assert_not_contains "$(cat "$out")" "user skills converged" "interrupted apply still claimed convergence"
+  pass "an interrupted apply stops with a nonzero status instead of claiming success"
+}
+
+test_unresolvable_codex_home_reports_one_cause() {
+  local home out errors rc
+  home=$(new_home)
+  printf '%s\n' text > "$home/afile"
+
+  set +e
+  out=$(HOME="$home" CODEX_HOME="$home/afile" "$SCRIPT" 2>&1)
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "CODEX_HOME pointing at a regular file was accepted"
+  assert_contains "$out" "existing CODEX_HOME ancestor is not a directory" \
+    "unresolvable CODEX_HOME refusal lacked its cause"
+  assert_not_contains "$out" "must resolve to an absolute path" \
+    "unresolvable CODEX_HOME emitted a cascading empty-path error"
+  errors=$(printf '%s\n' "$out" | grep -c '^error:')
+  [ "$errors" -eq 1 ] || fail "unresolvable CODEX_HOME reported $errors errors instead of one"
+  pass "an unresolvable CODEX_HOME reports exactly one cause"
+}
+
 test_remote_routes_through_registered_home() {
   local home fakebin argv encoded decoded home_encoded remote_home
   home=$(new_home)
@@ -473,4 +533,6 @@ test_control_character_nested_name_refuses
 test_codex_home_separator_spelling_converges
 test_unreadable_managed_root_refuses
 test_mode_only_difference_names_permission_bits
+test_interrupt_stops_apply
+test_unresolvable_codex_home_reports_one_cause
 test_remote_routes_through_registered_home

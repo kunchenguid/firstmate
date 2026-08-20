@@ -5,7 +5,7 @@ This record owns the current empirical verification boundary.
 
 ## Isolated filesystem verification
 
-On 2026-08-20, the focused temporary-home suite exercised canonicalization, relative Claude and Codex links, verified whole-root link conversion, duplicate removal under default and restrictive umasks, byte and permission-bit conflict refusal, control-character name refusal, CODEX_HOME separator normalization, unreadable-root refusal, permission-bit conflict diagnosis, `.system` preservation, default dry-run behavior, idempotence, unsafe-entry refusal, colliding, nested, and aliased managed-root refusal, and registered-remote command construction.
+On 2026-08-20, the focused temporary-home suite exercised canonicalization, relative Claude and Codex links, verified whole-root link conversion, duplicate removal under default and restrictive umasks, byte and permission-bit conflict refusal, control-character name refusal, CODEX_HOME separator normalization, unreadable-root refusal, permission-bit conflict diagnosis, interrupted-apply termination, `.system` preservation, default dry-run behavior, idempotence, unsafe-entry refusal, colliding, nested, and aliased managed-root refusal, and registered-remote command construction.
 
 Command:
 
@@ -34,6 +34,8 @@ ok - a control character in a nested skill name refuses before mutation
 ok - odd CODEX_HOME separator spelling still links correctly and converges
 ok - an unreadable managed root refuses instead of claiming convergence
 ok - a permission-bit-only difference is diagnosed as such
+ok - an interrupted apply stops with a nonzero status instead of claiming success
+ok - an unresolvable CODEX_HOME reports exactly one cause
 ok - remote invocation binds the registered host and forwards explicit apply
 ```
 

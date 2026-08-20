@@ -135,7 +135,8 @@ physicalize_path() {
   physical=$(cd "$probe" && pwd -P) || die "cannot resolve CODEX_HOME ancestor: $probe"
   printf '%s%s\n' "$physical" "$suffix"
 }
-CODEX_ROOT=$(normalize_absolute_path "$(physicalize_path "$CODEX_ROOT")")
+CODEX_ROOT=$(physicalize_path "$CODEX_ROOT")
+CODEX_ROOT=$(normalize_absolute_path "$CODEX_ROOT")
 case "$CODEX_ROOT" in /*) ;; *) die "CODEX_HOME must resolve to an absolute path: $CODEX_ROOT" ;; esac
 [ "$CODEX_ROOT" != / ] || die "CODEX_HOME must not be the filesystem root"
 
@@ -321,7 +322,22 @@ for managed in "$CANON" "$CLAUDE" "$CODEX" "$GEMINI" "$OPENCODE_CONFIG" "$OPENCO
 done
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-user-skill-sync.XXXXXX") || die "cannot create preflight workspace"
-trap 'rm -rf "$TMP"' EXIT INT TERM
+cleanup_workspace() {
+  rm -rf "$TMP"
+}
+
+# A signal handler that only cleans up would let the interrupted apply loop run
+# to completion and report success, so INT and TERM exit with their conventional
+# statuses instead.
+interrupted() {
+  cleanup_workspace
+  printf 'error: interrupted by %s; any earlier planned changes remain applied\n' "$1" >&2
+  exit "$2"
+}
+
+trap cleanup_workspace EXIT
+trap 'interrupted SIGINT 130' INT
+trap 'interrupted SIGTERM 143' TERM
 INVENTORY="$TMP/inventory"
 ROOT_LINKS="$TMP/root-links"
 PLAN="$TMP/plan"
