@@ -2,10 +2,10 @@
 
 Permission modes are an opt-in, session-scoped advisory harness control for the Firstmate Pi primary.
 They are off by default and change nothing until a mode is explicitly enabled, so Firstmate behavior is preserved exactly when off.
-The active mode is session-persisted through Pi supported extension state, restored on session resume and reload, and never written to a global config file.
+The active mode is session-persisted through Pi's supported extension state, restored on session resume and reload, and never written to a global config file.
 
 This is an advisory harness control, not an OS sandbox.
-Pi extensions execute with the user full privileges, and the bash read-only classifier is a best-effort heuristic because shell is Turing-complete.
+Pi extensions execute with the user's full privileges, and the bash read-only classifier is a best-effort heuristic because shell is Turing-complete.
 Use it to reduce accidental mutations during interactive exploration, not to enforce a security boundary.
 
 ## Modes
@@ -21,7 +21,7 @@ Use it to reduce accidental mutations during interactive exploration, not to enf
 ```
 
 A bare `/fm-permissions` reports the active mode.
-Unknown or missing arguments notify an error and leave the mode unchanged.
+Unknown arguments notify an error and leave the mode unchanged.
 The mode name is case-sensitive and leading or trailing whitespace is trimmed.
 
 ## State and display
