@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports the dispatch judgment rules in `.agents/skills/quota-array-dispatch/SKILL.md` and the bounded vendor probe in `bin/fm-vendor-auth-probe.sh`.
+This record supports the dispatch judgment rules in `.agents/skills/quota-array-dispatch/SKILL.md`, the launch-profile axes in `.agents/skills/harness-adapters/SKILL.md`, and the bounded vendor probe in `bin/fm-vendor-auth-probe.sh`.
 It records only facts that must be re-established when a producer or vendor version changes.
 Task chronology, incident transcripts, and credential metadata stay in private reports or PR evidence.
 
