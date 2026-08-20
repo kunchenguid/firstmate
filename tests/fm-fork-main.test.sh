@@ -798,6 +798,8 @@ test_refresh_parses_current_gh_axi_scalar_envelope() {
   add_topic_and_merge "$w" completed-issue completed-issue.txt current rejected-but-retained
   add_topic_and_merge "$w" declined-issue declined-issue.txt current rejected-but-retained
   add_topic_and_merge "$w" unknown-issue unknown-issue.txt current rejected-but-retained
+  add_topic_and_merge "$w" duplicate-rejected-issue duplicate-rejected-issue.txt current rejected-but-retained
+  add_topic_and_merge "$w" duplicate-pending-issue duplicate-pending-issue.txt current
   repo="$w/admin"
   tmp="$w/manifest-routes"
   jq '
@@ -806,7 +808,9 @@ test_refresh_parses_current_gh_axi_scalar_envelope() {
     (.divergences[] | select(.id == "genuine-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/7" |
     (.divergences[] | select(.id == "completed-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/8" |
     (.divergences[] | select(.id == "declined-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/9" |
-    (.divergences[] | select(.id == "unknown-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/10"
+    (.divergences[] | select(.id == "unknown-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/10" |
+    (.divergences[] | select(.id == "duplicate-rejected-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/11" |
+    (.divergences[] | select(.id == "duplicate-pending-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/12"
   ' "$repo/fork-divergences.json" > "$tmp" || fail "could not build refresh route fixtures"
   mv "$tmp" "$repo/fork-divergences.json"
   git -C "$repo" add fork-divergences.json
@@ -823,6 +827,7 @@ case "${2:-}" in
   /repos/acme/repo/issues/8) payload='{"state":"closed","state_reason":"completed"}' ;;
   /repos/acme/repo/issues/9) payload='{"state":"closed","state_reason":"not_planned"}' ;;
   /repos/acme/repo/issues/10) payload='{"state":"closed","state_reason":null}' ;;
+  /repos/acme/repo/issues/11|/repos/acme/repo/issues/12) payload='{"state":"closed","state_reason":"duplicate"}' ;;
   /repos/*/*/issues/*) payload='{"state":"open","state_reason":null}' ;;
   /repos/*/*/pulls/*) payload='{"state":"open","merged_at":null}' ;;
   *) exit 1 ;;
@@ -843,14 +848,18 @@ SH
     || fail "an owner named issues routed a pull request through the issue endpoint"
   grep -Fxq -- '/repos/acme/repo/issues/7' "$log" \
     || fail "a genuine issue route did not use the issue endpoint"
-  assert_contains "$out" 'manifest unit completed-issue records rejected but its live upstream review is merged' \
+  assert_contains "$out" 'manifest unit completed-issue records rejected but its upstream issue was closed as COMPLETED' \
     "an issue closed as completed satisfied a recorded rejection"
   assert_not_contains "$out" 'manifest unit declined-issue' \
     "an issue closed as not planned did not refresh cleanly"
-  assert_contains "$out" "manifest unit unknown-issue live issue's closure reason is unavailable" \
+  assert_contains "$out" "manifest unit unknown-issue upstream issue's closure REASON IS UNAVAILABLE, so the closure cannot be read as a decline" \
     "an issue with no closure reason was accepted as a decline"
-  [ "$(wc -l < "$log" | tr -d ' ')" -eq 6 ] || fail "refresh queried an unexpected number of API paths"
-  assert_contains "$out" 'errors=2' "refresh did not isolate the two invalid issue closure outcomes"
+  assert_contains "$out" 'manifest unit duplicate-rejected-issue upstream issue was closed as DUPLICATE; this is not a decline because review continues at the canonical issue, and its recorded route must be repointed at that canonical issue by a person' \
+    "an issue closed as duplicate satisfied a recorded rejection"
+  assert_contains "$out" 'manifest unit duplicate-pending-issue upstream issue was closed as DUPLICATE; this is not a decline because review continues at the canonical issue, and its recorded route must be repointed at that canonical issue by a person' \
+    "an issue closed as duplicate left a pending route looking healthy"
+  [ "$(wc -l < "$log" | tr -d ' ')" -eq 8 ] || fail "refresh queried an unexpected number of API paths"
+  assert_contains "$out" 'errors=4' "refresh did not isolate the four invalid issue closure outcomes"
   pass "fork health refresh parses envelopes, routes structurally, and distinguishes issue closure reasons"
 }
 

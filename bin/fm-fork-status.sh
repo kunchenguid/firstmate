@@ -426,7 +426,7 @@ if [ "$REFRESH" -eq 1 ]; then
       issues)
         # A GitHub issue has no merge state; it is open or closed.
         live_output=$(gh-axi api "/repos/$owner/$repo_name/issues/$number" \
-          --jq 'if .state == "open" then "open" elif .state_reason == "completed" then "merged" elif (.state_reason == "not_planned" or .state_reason == "duplicate") then "closed" else "unknown" end' 2>/dev/null || true) ;;
+          --jq 'if .state == "open" then "open" elif .state_reason == "completed" then "merged" elif .state_reason == "not_planned" then "closed" elif .state_reason == "duplicate" then "duplicate" else "unknown" end' 2>/dev/null || true) ;;
       pull)
         live_output=$(gh-axi api "/repos/$owner/$repo_name/pulls/$number" \
           --jq 'if .merged_at != null then "merged" elif .state == "open" then "open" else "closed" end' 2>/dev/null || true) ;;
@@ -437,11 +437,18 @@ if [ "$REFRESH" -eq 1 ]; then
     live=$(printf '%s\n' "$live_output" | fm_fork_gh_axi_scalar || true)
     case "$live" in
       open|closed|merged) ;;
-      unknown) add_error "manifest unit $id live issue's closure reason is unavailable"; continue ;;
+      duplicate) add_error "manifest unit $id upstream issue was closed as DUPLICATE; this is not a decline because review continues at the canonical issue, and its recorded route must be repointed at that canonical issue by a person"; continue ;;
+      unknown) add_error "manifest unit $id upstream issue's closure REASON IS UNAVAILABLE, so the closure cannot be read as a decline"; continue ;;
       *) add_error "manifest unit $id upstream review disposition could not be refreshed from gh-axi's scalar API envelope"; continue ;;
     esac
     if [ "$recorded" = rejected ]; then
-      [ "$live" = closed ] || add_error "manifest unit $id records rejected but its live upstream review is $live"
+      if [ "$live" = closed ]; then
+        :
+      elif [ "$resource" = issues ] && [ "$live" = merged ]; then
+        add_error "manifest unit $id records rejected but its upstream issue was closed as COMPLETED"
+      else
+        add_error "manifest unit $id records rejected but its live upstream review is $live"
+      fi
     elif [ "$recorded" != "$live" ]; then
       add_error "manifest unit $id records $recorded but its live upstream review is $live"
     fi
