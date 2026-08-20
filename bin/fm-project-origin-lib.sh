@@ -10,6 +10,13 @@
 # refused at each end rather than trusted because the other end already looked
 # at it.
 #
+# Because it owns the accepted forms, it also owns the questions a caller holding
+# a clone of its own asks about that clone's origin: whether the origin is spelled
+# as a path at all, and whether a spelling already anchored on THIS machine names a
+# folder a landing may follow. Those are answered at the bottom of this file and
+# are deliberately separate from the transport rules below, which apply only to a
+# value one host hands to another.
+#
 # Validation is STRUCTURE AND SAFETY ONLY, never the forge or the domain.
 # Firstmate is a shared template, so any host must be able to serve a project:
 # GitHub, GitHub Enterprise on a private domain, GitLab hosted or self-hosted,
@@ -180,11 +187,13 @@ fm_project_origin_safe() { # <url>; 0 when the URL is an accepted clone URL
 }
 
 # A `local-only` project's canonical copy is a folder on this machine rather than
-# a forge, so its clones carry a filesystem origin. This answers "is this origin a
-# repository this machine can reach as a path", which is what the guarded landing
-# path in bin/fm-merge-local.sh needs before it may pull a landed change back into
-# that folder. It decides on the URL's form alone and never touches the filesystem,
-# so the caller still proves the path is a git work tree it may write to.
+# a forge, so its clones carry a filesystem origin. This answers "does this
+# TRANSPORTED origin name a repository the receiving machine can reach as a path",
+# so everything fm_project_origin_safe refuses at that boundary stays refused here.
+# A value a caller has already anchored against a clone of its own is a different
+# question, answered by fm_project_origin_anchored_local_path below. It decides on
+# the URL's form alone and never touches the filesystem, so the caller still proves
+# the path is a git work tree it may write to.
 fm_project_origin_local_path() { # <url>; prints the filesystem path, or 1 when the origin is not local
   local url=${1-} path
   fm_project_origin_safe "$url" || return 1
@@ -194,6 +203,42 @@ fm_project_origin_local_path() { # <url>; prints the filesystem path, or 1 when 
     *) return 1 ;;
   esac
   printf '%s\n' "$path"
+}
+
+# An origin a caller has ALREADY ANCHORED against the clone it belongs to is a path
+# on THIS machine, so it is judged on what a local filesystem path has to be rather
+# than on the transport rules fm_project_origin_safe applies to a value bound for
+# another host: it must be absolute, must carry no control character, and must not
+# walk through a ".." segment. A space is ordinary in a local path - a folder named
+# "Job Search" sits in plenty of home directories - so it and every other ordinary
+# path character are accepted here even though a transported origin may not carry
+# them. NEVER ask this about a value that will be handed to another host; that
+# boundary belongs to fm_project_origin_safe alone.
+fm_project_origin_anchored_local_fault() { # <anchored origin>; prints what stops it being followed, nothing when nothing does
+  local url=${1-}
+  case $url in
+    file:///?*) url=${url#file://} ;;
+  esac
+  case $url in
+    /?*) ;;
+    *) printf '%s\n' 'it does not name an absolute path' ; return 0 ;;
+  esac
+  case $url in
+    *[[:cntrl:]]*) printf '%s\n' 'it carries a control character' ; return 0 ;;
+  esac
+  case "$url/" in
+    */../*) printf '%s\n' 'it walks through a ".." segment' ; return 0 ;;
+  esac
+  return 0
+}
+
+fm_project_origin_anchored_local_path() { # <anchored origin>; prints the filesystem path, or 1 when it may not be followed
+  local url=${1-}
+  [ -z "$(fm_project_origin_anchored_local_fault "$url")" ] || return 1
+  case $url in
+    file:///?*) url=${url#file://} ;;
+  esac
+  printf '%s\n' "$url"
 }
 
 # A clone can name a filesystem origin the way a person types a path: relative to
