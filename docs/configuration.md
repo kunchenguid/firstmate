@@ -256,12 +256,13 @@ A `--secondmate` spawn reads the target home's file and a crewmate or scout spaw
 A pinned store is forwarded onto every launch out of that home, whatever harness and whatever kind of agent it launches, because the pin is a statement about the whole home's Claude account rather than about one pane's harness.
 A codex, pi, cursor, grok, or kimi pane still has `claude` on its path and still spawns claude workers of its own, so a pane without the store would put that work on the machine-default account.
 With no pin the forwarded store is firstmate's own `CLAUDE_CONFIG_DIR` and keeps the narrower claude-harness-only rule exactly as before, so an unpinned home's launches are unchanged.
-A pin whose value is not an absolute, traversal-free, readable, searchable directory refuses the spawn before any endpoint exists, naming the home and the path, and never falls back to the primary's account, because silently billing the wrong subscription is the failure this pin exists to prevent.
+A pin whose value is not an absolute, traversal-free, readable, searchable directory refuses the spawn before any endpoint exists, naming the secondmate or task, the pin file, and the store path, and never falls back to the primary's account, because silently billing the wrong subscription is the failure this pin exists to prevent.
 A `config/` directory that exists but that the launching user cannot search refuses on the same grounds, because a pin set there would read as absent and quietly bill the primary.
 A pinned launch reports `claude_account=<path>` on its success line, except for a raw launch command, where an environment-assignment prefix binds only to the shell string's first simple command.
 Such a launch still gets the prefix, but warns on stderr and omits the report rather than name an account it cannot guarantee, so carry the store into a compound raw command yourself.
 `bin/fm-control.sh relaunch` validates the same pin against the task's own recorded home before it stops the running agent, so an unusable pin refuses while the old agent is still up instead of leaving the task with none.
 This file is home-local and is not part of secondmate inherited configuration, so the primary's own pin never propagates downstream; a remote route's pin lives in the remote home's own `config/`, where the host-local spawn reads and validates it against that host's filesystem.
+A remote launch's parent-side success line therefore carries no `claude_account=`, because the parent resolves no store for it; that pin is read, validated, and reported by the host-local launch on the remote host.
 Create the store directory and authenticate it once with `CLAUDE_CONFIG_DIR=<path> claude` before pinning it; Firstmate reads the path and never writes credentials.
 Other harnesses keep their own account mechanisms and are outside this file's scope.
 
