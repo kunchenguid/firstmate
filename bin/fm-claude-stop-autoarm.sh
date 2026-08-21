@@ -169,12 +169,14 @@ autoarm_claimant_alive() {  # <pid>
 }
 
 # Reclaim a stale single-flight claim whose recorded lock holder and epoch
-# claimant are both provably dead. Serialized through its own guard lock and
-# re-verified under it, so two concurrent firings can never both treat the
-# same stale record as theirs; a racing fresh owner wins and this one stands
-# down.
+# claimant are both provably dead. Owner replacement is serialized through the
+# lock library's own steal lock ($OWNER_LOCK.steal) - the same serialization
+# point fm_lock_try_acquire's dead-owner steal path uses - and re-verified
+# under it, so this reclaim can never race the library steal or another
+# firing's reclaim into two live owners; a racing fresh owner wins and this
+# one stands down.
 autoarm_reclaim_stale_claim() {
-  local held epoch_pid guard cur
+  local held epoch_pid steal steal_owner cur
   held=${FM_LOCK_HELD_PID:-}
   case "$held" in
     ''|*[!0-9]*) return 1 ;;
@@ -184,18 +186,19 @@ autoarm_reclaim_stale_claim() {
   if [ -n "$epoch_pid" ] && [ "$epoch_pid" != "$held" ]; then
     autoarm_claimant_alive "$epoch_pid" && return 1
   fi
-  guard="$OWNER_LOCK.reclaim"
-  fm_lock_try_acquire "$guard" || return 1
+  steal="$OWNER_LOCK.steal"
+  fm_lock_try_acquire "$steal" || return 1
+  steal_owner=${FM_LOCK_OWNER_DIR:-}
   cur=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
-  if [ "$cur" != "$held" ]; then
-    fm_lock_release "$guard"
+  if [ "$cur" != "$held" ] || ! fm_lock_points_to_owner "$steal" "$steal_owner"; then
+    fm_lock_release "$steal"
     return 1
   fi
-  if ! fm_lock_remove_path "$OWNER_LOCK" || ! fm_lock_try_acquire "$OWNER_LOCK"; then
-    fm_lock_release "$guard"
+  if ! fm_lock_remove_path "$OWNER_LOCK" || ! fm_lock_try_create "$OWNER_LOCK" "$steal_owner"; then
+    fm_lock_release "$steal"
     return 1
   fi
-  fm_lock_release "$guard"
+  fm_lock_release "$steal"
   return 0
 }
 
