@@ -59,20 +59,24 @@
 # separate later call nobody is forced to make. It records the captain's answer
 # on an actively held hold, records `(none)` as the routed identities because no
 # follow-up work has been routed behind the hold yet, and closes it. It shares
-# every guard `decline` has, including the refusal while any task is still
-# blocked by the hold, so a decision whose follow-up work is already routed still
-# goes through `resolve` and the routed-vs-unrouted distinction survives. It says
-# only that the captain answered; `decline` still says the captain answered with
-# no follow-up work at all.
+# every guard the public `decline` path has, including the refusal while any task
+# is still blocked by the hold, so a substantive decision whose follow-up work is
+# already routed still goes through `resolve` and the routed-vs-unrouted
+# distinction survives. It says only that the captain answered; an ordinary
+# `decline` still says the captain answered with no follow-up work at all. The
+# reserved keyed-answer drop described below is the sole internal exception.
 #
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
 # "A keyed answer closes its matching hold" is a single capability, owned here
 # and nowhere else. `answers` is its channel-agnostic entry point: it reads
 # `<decision-key>\t<answer>\t<label>` lines on stdin, maps each key to this
 # origin's `<origin-id>-decision-<key>` hold, and closes it through the very same
-# `answer` path above, so every guard applies identically no matter which channel
-# the answer arrived on. With `--any-origin` in place of an origin id, each key
-# is instead a FULL hold identity `<origin>-decision-<key>`, split at its first
+# `answer` path above, except that the exact reserved answer `__drop__` closes
+# with a declined "dropped by captain" decision record rather than as a
+# substantive choice. Drop closes only the hold; existing dependent tasks remain
+# queued as independent work. Every other guard applies identically no matter
+# which channel the answer arrived on. With `--any-origin` in place of an origin
+# id, each key is instead a FULL hold identity `<origin>-decision-<key>`, split at its first
 # `-decision-`, so one source can carry answers for holds across origins - the
 # aggregation a bearings board needs. An origin id that itself contains
 # `-decision-` is outside any-origin resolution; bind such a source to its one
@@ -85,15 +89,16 @@
 #
 # A channel's ONLY job is to turn whatever it received into those keyed lines and
 # pipe them here. It must never map keys to holds, build decision records, decide
-# resolve-versus-decline, or close a hold itself. A future channel needs no change
-# here at all.
+# resolve-versus-decline, or close a hold itself. Emitting `__drop__` is how a
+# channel reports that the captain dropped the decision; this intake, not the
+# channel, chooses `decline`. A future channel needs no change here at all.
 #
 # The decision text is a pure function of (source, key, answer, label), which is
 # what makes a replayed delivery an idempotent no-op rather than a rejected
-# "different captain decision". A key whose hold is absent, already closed, or
-# still blocking routed work is reported as `skipped:` and left for `resolve`;
-# skipping is never forced closure, and the command exits nonzero when any key
-# was skipped.
+# "different captain decision". A key whose hold is absent or already closed is
+# reported as `skipped:`; a substantive answer whose hold still blocks routed
+# work is also skipped and left for `resolve`. A reserved drop still closes only
+# that hold, and the command exits nonzero when any key was skipped.
 #
 # `bind`, `unbind`, and `binding` record whether a captured-answer SOURCE belongs
 # to one origin or uses the any-origin intake, for any channel whose answers arrive detached from the origin (a
@@ -107,11 +112,12 @@
 # accepts it, so the process-event runner feeds an any-origin source through the
 # same seam with no runner change.
 #
-# `decline` is the unrouted path for a decision the captain answered with no
-# follow-up work. It takes no --routed-to task, records `(none)` as the routed
-# identities, and closes an actively held hold. It refuses while any task is still
-# blocked by the hold, because releasing routed work without recording it is
-# `resolve`'s job.
+# Public `decline` is the unrouted path for a decision the captain answered with
+# no follow-up work. It takes no --routed-to task, records `(none)` as the routed
+# identities, and closes an actively held hold. It refuses while any task is
+# still blocked by the hold, because releasing routed work without recording it
+# is `resolve`'s job. Only `answers` may invoke its private drop mode, which
+# closes the stale hold without closing or recording existing dependents.
 #
 # `repair` records the missing resolution block on a hold that was already closed
 # outside this script, so `verify` stops failing on an origin whose decision was
@@ -633,14 +639,12 @@ parse_decision_only_flags() {  # <args...>; prints the --decision-file value
   printf '%s' "$decision_file"
 }
 
-# The one unrouted close path, shared by `answer` and `decline`. They differ only
-# in the resolution mode they record and the outcome word they print; every
-# guard - the captain decision file, the active-hold requirement, the retry
-# identity, and the refusal to release still-routed work - is identical, so
-# neither can drift into a weaker close than the other.
-close_unrouted_hold() {  # <mode> <outcome-word> <origin-id> <decision-key> <flag-args...>
-  local mode=$1 outcome=$2 origin=$3 key=$4 decision_file id body hold_show hold_body state dependents
-  shift 4
+# The one non-routing close path, shared by `answer`, `decline`, and the reserved
+# drop intake. Answer and decline refuse still-routed work. Drop closes only the
+# stale hold, leaving existing dependent tasks as independent work.
+close_unrouted_hold() {  # <mode> <outcome-word> <preserve-routed> <origin-id> <decision-key> <flag-args...>
+  local mode=$1 outcome=$2 preserve_routed=$3 origin=$4 key=$5 decision_file id body hold_show hold_body state dependents
+  shift 5
   decision_file=$(parse_decision_only_flags "$@") || exit 2
   validate_slug origin-id "$origin"
   validate_slug decision-key "$key"
@@ -666,7 +670,7 @@ close_unrouted_hold() {  # <mode> <outcome-word> <origin-id> <decision-key> <fla
       ;;
   esac
   dependents=$(tasks_blocked_by "$id") || exit 1
-  [ -z "$dependents" ] \
+  [ -z "$dependents" ] || [ "$preserve_routed" = yes ] \
     || fail "captain hold $id still blocks routed work ($dependents); use resolve to record that work"
   body=$(resolution_body "$mode" "$ROUTED_NONE")
   tasks_axi update "$id" --body "$body" >/dev/null \
@@ -678,7 +682,7 @@ close_unrouted_hold() {  # <mode> <outcome-word> <origin-id> <decision-key> <fla
 
 command_answer() {
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
-  close_unrouted_hold answered answered "$@"
+  close_unrouted_hold answered answered no "$@"
 }
 
 # --- the one keyed-answer intake, and the source bindings that feed it --------
@@ -690,6 +694,11 @@ BINDING_SCHEMA=fm-decision-binding.v1
 # origin id can collide with it; `binding` prints it and `answers` accepts it,
 # which is what lets the runner's feed seam carry an any-origin source unchanged.
 BINDING_ANY='(any)'
+
+# Reserved close/drop answer. Exact match after sanitize. The bearings board's
+# Close / drop control emits this value; this intake declines the matching hold
+# with a "dropped by captain" record rather than recording a substantive answer.
+DROP_ANSWER='__drop__'
 
 validate_source_id() {  # <source-id>
   validate_slug source-id "$1"
@@ -766,6 +775,16 @@ keyed_decision_text() {  # <source> <key> <answer> <label>
   [ -z "$4" ] || printf 'Answer as shown to the captain: %s\n' "$4"
 }
 
+# The durable record for a reserved close/drop answer. Pure function of source,
+# key, and label so a replayed drop is idempotent; it never records `__drop__`
+# as if it were a substantive choice.
+keyed_drop_decision_text() {  # <source> <key> <label>
+  printf 'Captain dropped this decision through %s.\n' "$1"
+  printf 'Decision key: %s\n' "$2"
+  printf 'dropped by captain\n'
+  [ -z "$3" ] || printf 'Answer as shown to the captain: %s\n' "$3"
+}
+
 sanitize_field() {  # <text>
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-512
 }
@@ -825,6 +844,19 @@ command_answers() {
       k_key=$key
       hold="$origin-decision-$key"
     fi
+    if [ "$answer" = "$DROP_ANSWER" ]; then
+      keyed_drop_decision_text "$source" "$k_key" "$label" > "$tmp" \
+        || fail "cannot stage the captain decision for $hold"
+      if "$0" decline "$k_origin" "$k_key" --decision-file "$tmp" --drop >/dev/null 2>"$err"; then
+        printf 'closed: %s\n' "$hold"
+        closed=$((closed + 1))
+      else
+        reason=$(tr -d '\n' < "$err" | sed 's/^fm-decision-hold: //')
+        printf 'skipped: %s (%s)\n' "$hold" "$reason"
+        skipped=$((skipped + 1))
+      fi
+      continue
+    fi
     keyed_decision_text "$source" "$k_key" "$answer" "$label" > "$tmp" \
       || fail "cannot stage the captain decision for $hold"
     if "$0" answer "$k_origin" "$k_key" --decision-file "$tmp" >/dev/null 2>"$err"; then
@@ -842,8 +874,14 @@ command_answers() {
 }
 
 command_decline() {
+  local preserve_routed=no last
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
-  close_unrouted_hold declined declined "$@"
+  if [ "${!#}" = --drop ]; then
+    preserve_routed=yes
+    last=$(($# - 1))
+    set -- "${@:1:last}"
+  fi
+  close_unrouted_hold declined declined "$preserve_routed" "$@"
 }
 
 command_repair() {

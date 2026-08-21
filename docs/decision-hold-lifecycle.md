@@ -31,10 +31,11 @@ The `resolve` subcommand is the routed path and additionally requires at least o
 It clears each dependency edge through tasks-axi and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, and a failed intermediate step leaves the hold open.
 
-The `answer` and `decline` subcommands share one unrouted close implementation and differ only in the `Resolution mode:` they record and the outcome word they print, so neither can drift into a weaker close than the other.
-Both record `(none)` as the routed identities and refuse while any task in the same backlog is still blocked by the hold, because releasing routed work without recording it is `resolve`'s job.
+The public `answer` and `decline` subcommands share one unrouted close implementation and differ only in the `Resolution mode:` they record and the outcome word they print, so neither can drift into a weaker ordinary close than the other.
+Both ordinarily record `(none)` as the routed identities and refuse while any task in the same backlog is still blocked by the hold, because releasing routed work without recording it is `resolve`'s job.
+The keyed-answer intake's reserved drop is the sole exception: its internal decline invocation closes only the stale hold and deliberately leaves existing dependents as independent queued work.
 Every candidate found in the listing prefilter is confirmed against its own structured record before the refusal is reported.
-`answer` exists so the act carrying a captain answer can also be the act that closes its hold; `decline` continues to mean the stronger claim that the answer routes no follow-up work at all.
+`answer` exists so the act carrying a captain answer can also be the act that closes its hold; an ordinary `decline` continues to mean the stronger claim that the answer routes no follow-up work at all.
 
 The `repair` subcommand records the resolution block on a hold that was already closed outside the script, such as by a direct `tasks-axi done`, so an origin whose decision was genuinely answered stops failing `verify`.
 It refuses a hold that is still actively held, never reopens a closed hold, and never clears a dependency edge, so an unanswered decision keeps blocking teardown until the captain's word closes it.
@@ -46,12 +47,14 @@ The live status-log decision ledger has always had answer-time closure through `
 The durable hold ledger did not, so an answer could be captured, believed, and even implemented while its hold stayed open, and the captain could then be asked to re-answer a decision already on disk.
 
 "A keyed answer closes its matching hold" is now one capability with one owner.
-`answers` is its channel-agnostic entry point: it reads a key, answer, and label on each input line and closes the matching hold through the same `answer` path, so every guard applies identically no matter which channel the answer arrived on.
+`answers` is its channel-agnostic entry point: it reads a key, answer, and label on each input line and closes the matching hold through the same `answer` path, except that the exact reserved answer `__drop__` closes with a declined, "dropped by captain" decision record rather than as a substantive choice.
 For a single-origin intake the key is the decision key mapped under that bound origin; for the cross-origin intake it is the full hold identity, while keys that do not name a full decision hold feed nothing.
 `--source` is provenance text recorded in the durable decision, never a behavior switch, and the command carries no per-channel branch and no knowledge of chat, review decks, or any transport.
 A channel's only job is to turn whatever it received into those keyed lines and pipe them in; it never maps keys to holds, builds decision records, chooses between the close paths, or closes a hold itself.
+Emitting `__drop__` is how a channel reports that the captain dropped the decision; the intake, not the channel, chooses `decline`.
 The decision text is a pure function of source, key, answer, and label, which is what makes a replayed delivery an idempotent no-op rather than a rejected different decision.
-A key whose hold is absent, already closed, or still blocking routed work is reported as skipped and left for `resolve`, and the command exits nonzero when any key was skipped.
+A key whose hold is absent or already closed is reported as skipped, as is a substantive answer whose hold still blocks routed work; a reserved drop instead closes only that hold while existing dependents remain independent queued work.
+The command exits nonzero when any key was skipped.
 
 `bind`, `unbind`, and `binding` record whether a captured-answer source belongs to one origin or uses the cross-origin intake, for a channel whose answers arrive detached from the origin.
 The binding is a private record under `state/decision-bindings/`, and a source with no binding feeds nothing, so the path is opt-in per source.
@@ -89,6 +92,7 @@ Plural blocker-readiness and mixed-home projection verification date: 2026-07-22
 Unrouted close-path verification date: 2026-08-13.
 Answer-time closure verification date: 2026-08-16.
 Cross-origin answer-time closure verification date: 2026-08-19.
+Reserved close/drop answer verification date: 2026-08-20.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -108,6 +112,7 @@ The capture is left unacknowledged throughout, so the wake firstmate needs in or
 A replayed delivery closes nothing new and is not rejected as a different decision, a source with no binding closes nothing at all, and the `answer` subcommand itself refuses an empty or missing decision file, an absent hold, and a drifted retry.
 A separate regression drives the real `fm-send` over a stubbed transport to prove the chat channel reaches the same intake for a decision already transferred to its hold, which the status ledger alone can no longer close.
 The cross-origin regression drives a bound source through the real runner and adapter interface, closes full-identity holds from different origins, and proves that over-limit, malformed, non-decision, routed-work, absent-hold, and replayed answers all fail or skip without weakening the existing guards.
+A reserved `__drop__` answer through that same published poll shape declines the matching hold with a dropped-by-captain record and leaves Bearings' Captain's Call even when existing independent work is routed behind it; that dependent work remains queued and is not closed.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -130,6 +135,17 @@ ok - a channel source with no decision binding closes nothing
 ok - an any-origin bound source closes full-identity holds across origins
 ok - the answer path keeps every guard the unrouted close path already had
 ok - the chat channel feeds the same keyed-answer intake a captured review does
+
+$ bash tests/fm-bearings-board.test.sh
+ok - path prints the stable home-scoped board location
+ok - build refuses malformed payloads before touching the board
+ok - build keeps freeform-only credential cards valid
+ok - build injects the payload, binds any-origin, then arms the source
+ok - registration can consume answers only after any-origin binding exists
+ok - build establishes the Lavish session before binding and arming
+ok - rebuild refreshes the board in place without double-arming
+ok - build refuses a template without exactly one data slot
+ok - a reserved close/drop answer declines the hold and leaves Captain's Call
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
