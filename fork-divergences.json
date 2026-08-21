@@ -92,6 +92,20 @@
         "supervision-owner-aware-recovery"
       ],
       "validation_pr": null
+    },
+    {
+      "date": "2026-08-21",
+      "fork_before": "83b5181391f6745108d72db5c2e23a5162be13f7",
+      "upstream_before": "1cb900c28faf23fe23c9bb54e63f7c3b436ea096",
+      "upstream_after": "3d125ad37378441b086d785bb24a555b1e46574a",
+      "touched": [
+        "firstmate-brief-scaffold-trim-v2",
+        "firstmate-next-cache-reclaim",
+        "firstmate-progressive-disclosure-restructure",
+        "fork-main-integration",
+        "supervision-owner-aware-recovery"
+      ],
+      "validation_pr": null
     }
   ],
   "divergences": [
