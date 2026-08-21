@@ -575,7 +575,12 @@ REVIEW_ART="$TMP_ROOT/review.html"
 printf '<h1>review</h1>\n' > "$REVIEW_ART"
 lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REVIEW_ART")
 PE_TRACKED+=("$HLT|$lavish_id")
-PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" arm "$REVIEW_ART" >/dev/null
+# Arm now proves listener liveness before printing armed:, and a Send & End
+# already queued can complete the whole generation inside that verification
+# window, so either outcome here leaves the captured result durable; the wait
+# is bounded only to keep the suite fast.
+PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" FM_PROCEVENT_LAVISH_ARM_WAIT_MS=1000 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REVIEW_ART" >/dev/null || true
 for _ in $(seq 1 6); do
   PATH="$LAVISH_BIN:$PATH" pe "$HLT" reconcile >/dev/null
   sleep 0.3
@@ -594,6 +599,76 @@ assert_grep 'ship it' "$LAVISH_RESULT" "automatic retirement retains the human's
 out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" retire "$REVIEW_ART")
 assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
 pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
+
+# --- arm reports ready only after the exact registered listener is live -----
+# The readiness-ordering defect from issue 2756: arm printed `armed:` the
+# moment registration was accepted, though reconcile - not registration -
+# launches the listener, so a source could sit armed with no live owner and
+# no way for feedback to wake anyone. Arm must prove that the generation it
+# just registered has a verifiably live owner before reporting ready, and
+# must return nonzero without `armed:` when that confirmation cannot be
+# obtained. Both sides run through the adapter's public arm command.
+HLA="$TMP_ROOT/hla"; new_home "$HLA"
+ARM_TRIG="$TMP_ROOT/arm-trigger"
+rm -f "$ARM_TRIG"
+LAVISH_BLOCK_BIN=$(fm_fakebin "$TMP_ROOT/lavish-block-stub")
+cat > "$LAVISH_BLOCK_BIN/lavish-axi" <<SH
+#!/usr/bin/env bash
+# Stand-in for \`lavish-axi poll\`: blocks until the trigger file appears,
+# then emits one feedback result, so completion stays under test control
+# while arm verifies listener liveness.
+while [ ! -e "$ARM_TRIG" ]; do sleep 0.02; done
+printf 'session:\n  file: /review.html\n  status: feedback\nfeedback[1]{text}:\n  looks good\n'
+SH
+chmod +x "$LAVISH_BLOCK_BIN/lavish-axi"
+ARM_ART="$TMP_ROOT/arm-review.html"
+printf '<h1>arm review</h1>\n' > "$ARM_ART"
+arm_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$ARM_ART")
+PE_TRACKED+=("$HLA|$arm_id")
+out=$(PATH="$LAVISH_BLOCK_BIN:$PATH" FM_HOME="$HLA" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$ARM_ART") \
+  || fail "arm refused although its own fresh listener generation went live: $out"
+assert_contains "$out" "armed: $arm_id" "arm prints armed only after its own listener generation is live"
+pe "$HLA" list | grep -Eq "^${arm_id}[[:space:]]+lavish[[:space:]]+live([[:space:]]|\$)" \
+  || fail "arm reported ready but list shows no live owner: $(pe "$HLA" list)"
+printf 'done\n' > "$ARM_TRIG"
+for _ in $(seq 1 30); do
+  case "$(wake_payloads "$HLA")" in *"procevent lavish $arm_id 1"*) break ;; esac
+  sleep 0.1
+done
+assert_contains "$(wake_payloads "$HLA")" "procevent lavish $arm_id 1" \
+  "the confirmed live listener really consumes the source end to end"
+
+# The refusal side: a live owner of an OLDER registration generation keeps
+# reconcile from starting this attempt's listener, so the fresh generation can
+# never be confirmed and arm must return nonzero without printing armed:,
+# leaving the registration in place for later reconciliation.
+HLB="$TMP_ROOT/hlb"; new_home "$HLB"
+OLD_ART="$TMP_ROOT/old-review.html"
+printf '<h1>old review</h1>\n' > "$OLD_ART"
+old_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$OLD_ART")
+PE_TRACKED+=("$HLB|$old_id")
+pe_register "$HLB" lavish "$old_id" -- "$BLOCKER" "$TMP_ROOT/never-trigger" "older generation" >/dev/null
+sleep 300 & sleep_pid=$!
+bash -c '
+  . "$1/bin/fm-pr-lib.sh"; . "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-procevent-lib.sh"
+  fm_procevent_source_lock_acquire "$2" || exit 1
+  fm_procevent_claim_acquire_locked "$2" "$3" "$4" "$3/state/procevent/$2.source" \
+    || { fm_procevent_source_lock_release "$2"; exit 1; }
+  fm_procevent_source_lock_release "$2"
+' _ "$ROOT" "$old_id" "$HLB" "$sleep_pid" \
+  || { kill "$sleep_pid" 2>/dev/null || true; fail "cannot stage an older live generation for the arm refusal cut"; }
+out=$(PATH="$LAVISH_BLOCK_BIN:$PATH" FM_HOME="$HLB" FM_PROCEVENT_LAVISH_ARM_WAIT_MS=300 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$OLD_ART" 2>&1) \
+  && { kill "$sleep_pid" 2>/dev/null || true; fail "arm printed ready although this registration's listener never started: $out"; }
+kill "$sleep_pid" 2>/dev/null || true
+wait "$sleep_pid" 2>/dev/null || true
+assert_not_contains "$out" "armed:" "an unconfirmed listener generation never reports ready"
+assert_contains "$out" "did not confirm live" "the unconfirmed-generation failure names its cause"
+assert_present "$HLB/state/procevent/$old_id.source" \
+  "a refused arm leaves the registration in place for later reconciliation"
+FM_HOME="$HLB" "$ROOT/bin/fm-procevent.sh" retire "$old_id" >/dev/null 2>&1 || true
+pass "arm proves the exact registered listener live before ready and refuses otherwise"
 
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a

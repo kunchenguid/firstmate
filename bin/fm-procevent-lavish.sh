@@ -9,6 +9,15 @@
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #
+# arm        Register the canonical source for the published poll argv, start
+#            this home's liveness reconciliation immediately rather than at a
+#            later watcher cycle, and print `armed:` only after a live owner
+#            of that exact registration is confirmed within a bounded wait
+#            (FM_PROCEVENT_LAVISH_ARM_WAIT_MS milliseconds, default 5000).
+#            Without confirmation arm exits nonzero without printing `armed:`;
+#            the registration stays in place for later reconciliation either
+#            way.
+#
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
 # terminal   Exit 0 when the captured result means this Lavish source will never
@@ -59,7 +68,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,56p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -79,7 +88,7 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local artifact=${1-} id real
+  local artifact=${1-} id real state reg identity wait_ms i=0 max live
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
@@ -88,6 +97,32 @@ cmd_arm() {
     || die "cannot resolve the artifact path: $artifact"
   # The plain blocking form: no --timeout-ms, so completion is a server event.
   "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" -- lavish-axi poll "$real" || exit 1
+  # Registration proves the source definition was accepted; it does not prove
+  # this attempt's listener ever starts, because reconcile owns that launch.
+  # Readiness is therefore proved before it is reported: kick one reconcile so
+  # the runner starts now rather than at the watcher's leisure, then require a
+  # live owner whose claim names THIS registration attempt. Anything else stays
+  # unconfirmed - exit nonzero without armed:, leaving the registration in
+  # place for later reconciliation either way.
+  case "${FM_PROCEVENT_LAVISH_ARM_WAIT_MS:-5000}" in
+    ''|*[!0-9]*) die "FM_PROCEVENT_LAVISH_ARM_WAIT_MS must be a nonnegative integer" ;;
+  esac
+  wait_ms=${FM_PROCEVENT_LAVISH_ARM_WAIT_MS:-5000}
+  state="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+  reg="$(fm_procevent_registry_dir "$state")/$id.source"
+  identity=$(fm_pr_file_identity "$reg") || die "cannot read the registered generation: $id"
+  "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+  max=$((wait_ms / 50 + 1))
+  live=1
+  while [ "$i" -lt "$max" ]; do
+    if fm_procevent_generation_live "$id" "$identity"; then
+      live=0
+      break
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$live" -eq 0 ] || die "listener for $id did not confirm live within ${wait_ms}ms"
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
 }
