@@ -31,13 +31,15 @@ This sweep is a supplemental bounded reconciliation and never replaces, duplicat
 5. Prove each requested update reached the parent append-only status and pending-reply path and appeared in a wake drain under the existing process-event and pending-reply owners.
 6. Use targeted status reads only as delivery evidence and never as current-state truth.
 7. If a secondmate aggregate report is unavailable, invalid, partial, or timed out, resolve its registered placement, use `bin/fm-on.sh <secondmate> fm-fleet-snapshot.sh --secondmate-home-summary` for a remote home, or use the validated local-home execution path owned by `bin/fm-fleet-snapshot.sh` to run `fm-fleet-snapshot.sh --secondmate-home-summary` inside a local home, then validate the bounded structured result.
-8. If the targeted direct-home result is also unavailable, invalid, partial, or truncated where required, classify the lane as unavailable and never infer that it is clear.
-9. Finish only after every requested reply is durably ingested and drained or its named transport failure is surfaced, while ordinary supervision remains active throughout the wait.
+8. For the same failed or incomplete report, send a bounded marked Linear-only fallback through the registered secondmate's existing route, require that home to load and follow its available `orca-linear` owner and version-matched guide, and reconcile the returned current-cycle inventory through the existing pending-reply path.
+9. Route that fallback through `bin/fm-on.sh` and the registered remote home when remote, or through the snapshot-validated registered local home when local, without executing against an unvalidated path or dropping any registered secondmate from scope.
+10. If either targeted fallback is unavailable, invalid, partial, timed out, or truncated where required, classify its fleet or Linear lane explicitly unavailable and unreconciled and never infer that it is clear.
+11. Finish only after every requested reply is durably ingested and drained or its named transport failure is surfaced, while ordinary supervision remains active throughout the wait.
 
 ## Reconcile work and Linear
 
 Load and follow the available `orca-linear` skill before any Linear read or write, including its version-matched runtime guide.
-Sweep every current-cycle Linear item visible across the main home and secondmate reports, and classify each as progressing, genuinely blocked by a named unresolved dependency, or capacity constrained by concrete slot or host-resource evidence.
+Sweep every current-cycle Linear item across the main home, every secondmate report, and every required Linear fallback, and classify each as progressing, genuinely blocked by a named unresolved dependency, or capacity constrained by concrete slot or host-resource evidence.
 Treat a vague, stale, already-cleared, wrong-layer, or standing-policy-cleared blocker as fictitious, then repair it or route it through the existing task owner.
 Correct Linear status only when current live evidence proves the recorded status stale.
 Respect the latest durable captain-shared routing, so a worker that already progressed finishes its current bounded slice while parking applies to unstarted, replacement, and follow-on work.
