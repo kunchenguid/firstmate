@@ -90,4 +90,4 @@ A copy left dirty is skipped rather than re-leased, so uncommitted work is not w
 ## Refreshing this record
 
 Re-run the sequence above against the installed `treehouse` after any upgrade past v2.0.0, and update the version row plus any output that changed.
-The portable half of the same guarantees is enforced continuously by `tests/fm-worktree-custody.test.sh`, whose real-treehouse case self-skips when the binary is absent.
+The portable half of the same guarantees is enforced continuously by `tests/fm-worktree-custody.test.sh`, including rejection of the unsafe literal-root override; its real-treehouse case self-skips when the binary is absent.

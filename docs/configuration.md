@@ -206,13 +206,14 @@ The full zellij home label also includes a short hash of the resolved `FM_ROOT` 
 For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
 
-## Worktree pools (FM_POOL_ROOT / FM_POOL_ROOT_BASE)
+## Worktree pools (FM_POOL_ROOT_BASE)
 
 Crewmate and scout worktrees come from a treehouse pool, and treehouse keys a pool by the repository rather than by the checkout.
 Two firstmate homes that clone the same project would therefore draw from one pool while neither can see the other's task records, so each home gives its own clone a pool of its own instead.
 `bin/fm-pool-root.sh` owns that derivation and its exact mechanics; `bin/fm-spawn.sh` runs it before every crewmate or scout worktree is acquired.
 By default a home's pool root is `$HOME/.treehouse-homes/<home-directory-name>-<short hash of the home's real path>`, and treehouse places the pool itself under `<root>/.treehouse/`.
-`FM_POOL_ROOT_BASE` moves the directory those per-home roots live in, and `FM_POOL_ROOT` names one home's root outright.
+`FM_POOL_ROOT_BASE` moves the directory those per-home roots live in while preserving the mandatory per-home suffix.
+The legacy literal `FM_POOL_ROOT` override is refused because the same inherited value could make multiple homes share a pool.
 The separation applies to worktrees leased from that point on; a worktree already leased keeps its path, is returned normally, and drains out of a previously shared pool on its own.
 A project whose `treehouse.toml` is tracked in git is refused rather than rewritten, because recording a machine-local path there would change project content.
 
@@ -632,7 +633,7 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
-FM_POOL_ROOT=            # this home's treehouse worktree-pool root outright; see "Worktree pools"
+FM_POOL_ROOT=            # unsupported literal override; non-empty values refuse and must migrate to FM_POOL_ROOT_BASE
 FM_POOL_ROOT_BASE=$HOME/.treehouse-homes  # directory the per-home pool roots live in
 FM_SPAWN_RELEASE_DELIVERED_TIMEOUT=60  # seconds bounding a project's own pool:release-delivered run before a spawn leases
 FM_TEARDOWN_CUSTODY_TIMEOUT=120  # seconds bounding a project's own check:worktree-custody run during cleanup

@@ -74,6 +74,25 @@ test_two_homes_configure_distinct_pool_roots() {
   pass "two homes cloning one project configure distinct treehouse pool roots"
 }
 
+test_literal_pool_root_override_is_refused() {
+  local case_dir shared out_a out_b status_a status_b
+  case_dir=$(make_two_homes_one_project literal-root-refused)
+  shared="$case_dir/shared-root"
+
+  out_a=$(FM_HOME="$case_dir/homeA" FM_POOL_ROOT="$shared" \
+    "$POOL_ROOT_BIN" --print 2>&1)
+  status_a=$?
+  out_b=$(FM_HOME="$case_dir/homeB" FM_POOL_ROOT="$shared" \
+    "$POOL_ROOT_BIN" --print 2>&1)
+  status_b=$?
+  expect_code 1 "$status_a" "a literal root override must not bypass the first home's namespace"
+  expect_code 1 "$status_b" "a shared literal root override must not bypass the second home's namespace"
+  assert_contains "$out_a" "use FM_POOL_ROOT_BASE" "the first refusal did not provide the safe relocation setting"
+  assert_contains "$out_b" "use FM_POOL_ROOT_BASE" "the second refusal did not provide the safe relocation setting"
+  assert_absent "$shared" "the refused literal root override created a shared pool path"
+  pass "a literal pool root override cannot disable per-home isolation"
+}
+
 test_pool_root_is_idempotent_and_preserves_other_keys() {
   local case_dir clone before after root
   case_dir=$(make_two_homes_one_project idempotent)
@@ -522,6 +541,7 @@ test_teardown_refuses_an_unparseable_canonical_manifest() {
 }
 
 test_two_homes_configure_distinct_pool_roots
+test_literal_pool_root_override_is_refused
 test_pool_root_is_idempotent_and_preserves_other_keys
 test_pool_root_refuses_a_tracked_config
 test_real_treehouse_stops_sharing_a_pool_between_homes

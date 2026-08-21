@@ -15,7 +15,7 @@
 #   fm-pool-root.sh --print         print this home's pool root, write nothing
 #
 # The root is <base>/<home-basename>-<hash of the home's real path>, with base
-# ${FM_POOL_ROOT_BASE:-$HOME/.treehouse-homes}; FM_POOL_ROOT names one outright.
+# ${FM_POOL_ROOT_BASE:-$HOME/.treehouse-homes}.
 # Treehouse then places the pool itself at <root>/.treehouse/<repo>-<hash>/.
 #
 # Idempotent by design, so running it before every spawn converges without
@@ -30,8 +30,7 @@
 #
 # A clone that TRACKS treehouse.toml is refused rather than rewritten: silently
 # committing a machine-local path would be worse than stopping, and silently
-# sharing a pool is the very thing this exists to prevent. Exclude the file or
-# set FM_POOL_ROOT to resolve it.
+# sharing a pool is the very thing this exists to prevent.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,14 +57,13 @@ short_hash() {  # <string>
 # root, because two homes sharing one code root would still double-claim.
 pool_root() {
   local home base name
-  if [ -n "${FM_POOL_ROOT:-}" ]; then
-    printf '%s' "$FM_POOL_ROOT"
-    return 0
-  fi
-  home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || home=$FM_HOME
+  [ -z "${FM_POOL_ROOT:-}" ] \
+    || die "FM_POOL_ROOT cannot preserve per-home isolation; use FM_POOL_ROOT_BASE"
+  home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) \
+    || die "cannot resolve FM_HOME '$FM_HOME' for pool isolation"
   base=${FM_POOL_ROOT_BASE:-}
   if [ -z "$base" ]; then
-    [ -n "${HOME:-}" ] || die "cannot derive a pool root: neither FM_POOL_ROOT, FM_POOL_ROOT_BASE, nor HOME is set"
+    [ -n "${HOME:-}" ] || die "cannot derive a pool root: neither FM_POOL_ROOT_BASE nor HOME is set"
     base="$HOME/.treehouse-homes"
   fi
   name=$(basename "$home")
@@ -165,7 +163,7 @@ ROOT_VALUE=$(pool_root) || exit 1
 TOML="$PROJECT/treehouse.toml"
 
 if git -C "$PROJECT" ls-files --error-unmatch treehouse.toml >/dev/null 2>&1; then
-  die "project '$PROJECT' tracks treehouse.toml, so this home cannot claim its own worktree pool without changing project content. Untrack or exclude that file, or set FM_POOL_ROOT, then spawn again"
+  die "project '$PROJECT' tracks treehouse.toml, so this home cannot claim its own worktree pool without changing project content. Untrack that file, then spawn again"
 fi
 
 [ ! -L "$TOML" ] || die "'$TOML' is a symlink; refusing to write this home's pool root through it"
