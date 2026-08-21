@@ -146,7 +146,7 @@ command_resolve() {
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"
     state=$(show_field "$show" state)
-    [ "$state" != done ] || [ "$resolution_recorded" = 1 ] \
+    [ "$state" != "done" ] || [ "$resolution_recorded" = 1 ] \
       || fail "routed task $dep is already done"
     blocked=$(normalized_blocked_by "$show")
     list_has_key "$blocked" "$id" || [ "$resolution_recorded" = 1 ] \

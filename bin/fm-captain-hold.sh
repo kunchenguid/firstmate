@@ -729,8 +729,8 @@ command_answers() {
       && { [ "$recorded_digest" = "$digest" ] \
         || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
           && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
-      if { [ -z "$release_flag" ] && [ "$state" = done ] && [ "$recorded_mode" != released ]; } \
-        || { [ "$release_flag" = --release ] && [ "$state" != done ] \
+      if { [ -z "$release_flag" ] && [ "$state" = "done" ] && [ "$recorded_mode" != released ]; } \
+        || { [ "$release_flag" = --release ] && [ "$state" != "done" ] \
           && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
         printf 'closed: %s\n' "$id"
         closed=$((closed + 1))

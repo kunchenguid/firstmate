@@ -357,7 +357,7 @@ test_release_frees_held_work() {
   assert_contains "$show" "Price it at nine dollars." "the new answer was not recorded"
   assert_contains "$show" "Go: ship it as planned." "the new answer erased the earlier record"
 
-  tasks_in "$home" done sample-widget >/dev/null \
+  tasks_in "$home" "done" sample-widget >/dev/null \
     || fail "could not complete the released work item normally"
   if run_captain "$home" answer sample-widget --decision-file "$home/price.txt" \
     > "$home/closed-wrong-mode.out" 2> "$home/closed-wrong-mode.err"; then
@@ -911,7 +911,7 @@ test_legacy_identities_keep_working() {
   printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: none\nResolution mode: answered\n\nCaptain decision:\n%s\n' \
     "$legacy_digest" "$legacy_text" > "$home/legacy-body.txt"
   tasks_in "$home" update "$id-decision-fourth-choice" --body-file "$home/legacy-body.txt" --archive-body >/dev/null
-  tasks_in "$home" done "$id-decision-fourth-choice" >/dev/null
+  tasks_in "$home" "done" "$id-decision-fourth-choice" >/dev/null
   out=$(printf 'fourth-choice\toption c\t\n' \
     | run_captain "$home" answers "$id" --source "legacy replay") \
     || fail "an identical pre-collapse keyed answer was not idempotent"
