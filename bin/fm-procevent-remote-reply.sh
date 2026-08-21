@@ -18,8 +18,9 @@
 # cursor-anchored source. A continuity break is escalated and not re-armed.
 #
 # Ingest accepts bounded, printable UTF-8 status lines with an allowed lifecycle
-# verb. `rebase` advances the cursor only after validating the remote log prefix
-# hash at the requested offset; it never ingests or bypasses line validation.
+# verb and any number of well-formed bracket groups before the colon. `rebase`
+# advances the cursor only after validating the remote log prefix hash at the
+# requested offset; it never ingests or bypasses line validation.
 # New lines must carry corr=<16hex>, while legacy lines without corr= are
 # skipped after the byte-zero compatibility prefix and never block the cursor.
 # Exact lines are appended at most once to the parent's state/<id>.status.
@@ -46,7 +47,7 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -261,7 +262,7 @@ line_bytes_bounded_printable() { # <line>
 line_status_valid() { # <line>
   local line=$1
   line_bytes_bounded_printable "$line" || return 1
-  printf '%s' "$line" | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+\[[^]]+\])?:' || return 1
+  printf '%s' "$line" | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+\[[^]]+\])*:' || return 1
 }
 
 validate_sha256() { # <value>

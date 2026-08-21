@@ -11,16 +11,19 @@ PARENT="$TMP_ROOT/parent"
 REMOTE="$TMP_ROOT/remote"
 REMOTE_INTERLEAVE="$TMP_ROOT/remote-interleave"
 REMOTE_UTF8="$TMP_ROOT/remote-utf8"
+REMOTE_KEYED="$TMP_ROOT/remote-keyed"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE/state" "$REMOTE/data/reply" \
-  "$REMOTE_INTERLEAVE/state" "$REMOTE_INTERLEAVE/data" "$REMOTE_UTF8/state" "$CLAIMS"
+  "$REMOTE_INTERLEAVE/state" "$REMOTE_INTERLEAVE/data" "$REMOTE_UTF8/state" \
+  "$REMOTE_KEYED/state" "$CLAIMS"
 trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; fm_test_cleanup' EXIT
 
 cat > "$PARENT/data/secondmates.md" <<EOF
 - ios - iOS delivery (host: remote-mac; root: $ROOT; home: $REMOTE; scope: iOS work; projects: alpha; added 2026-08-02)
 - interleave - interleaved reply fixture (host: remote-interleave; root: $ROOT; home: $REMOTE_INTERLEAVE; scope: test; projects: alpha; added 2026-08-02)
 - utf8 - utf8 reply fixture (host: remote-utf8; root: $ROOT; home: $REMOTE_UTF8; scope: test; projects: alpha; added 2026-08-02)
+- keyed - keyed reply fixture (host: remote-keyed; root: $ROOT; home: $REMOTE_KEYED; scope: test; projects: alpha; added 2026-08-20)
 EOF
 printf '# Detailed remote answer\n\nThe build is green.\n' > "$REMOTE/data/reply/report.md"
 : > "$REMOTE/state/parent-replies.status"
@@ -39,7 +42,7 @@ done
 host=$1
 entry=$2
 shift 2
-  case "$host" in remote-mac|remote-interleave|remote-utf8) ;;
+  case "$host" in remote-mac|remote-interleave|remote-utf8|remote-keyed) ;;
     *) exit 91 ;;
   esac
 [ "$entry" = fm-remote-entrypoint.sh ] || exit 92
@@ -406,5 +409,64 @@ remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR" >/dev/null 2>&1 || [ "$?" -eq 
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
 pass "remote reply retirement quiesces and refuses unhandled captured results"
+
+# Documented two-bracket keyed/correlated resolved lines must ingest. A single
+# optional bracket group rejected this shape and refused the whole remote delta.
+printf 'resolved [key=work-slug] [corr=cafebabef00d1234]: keyed correlated result\n' \
+  > "$REMOTE_KEYED/state/parent-replies.status"
+KEYED_SID=$(remote_env "$ADAPTER" source-id keyed)
+remote_env "$ADAPTER" arm keyed >/dev/null \
+  || fail "could not arm the keyed reply fixture"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$KEYED_SID" >/dev/null \
+  || fail "keyed reply fixture was not captured"
+KEYED_RESULT="$PARENT/state/procevent-inbox/$KEYED_SID.1.result"
+keyed_out=$(remote_env "$ADAPTER" handle keyed 1 "$KEYED_RESULT") \
+  || fail "a two-bracket keyed correlated resolved line was rejected"
+assert_contains "$keyed_out" 'ingested: keyed appended=1' \
+  "keyed correlated resolved line was not ingested"
+assert_grep 'resolved [key=work-slug] [corr=cafebabef00d1234]: keyed correlated result' \
+  "$PARENT/state/keyed.status" \
+  "keyed correlated resolved line did not reach the parent status channel"
+KEYED_OFFSET=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/keyed.cursor")
+[ "$KEYED_OFFSET" -gt 0 ] \
+  || fail "keyed ingest did not advance the cursor"
+pass "a two-bracket keyed correlated resolved line ingests and advances the cursor"
+
+# Extra bracket groups still have to be well-formed. Empty or malformed groups
+# must keep failing at the public ingest boundary so repeating `[]` does not
+# weaken the existing validator.
+craft_keyed_delta() { # <payload-file> <destination>
+  local payload=$1 destination=$2 boundary bytes hash from_offset from_hash
+  cp "$KEYED_RESULT" "$destination"
+  boundary=$(grep -n -m 1 '^$' "$destination" | cut -d: -f1)
+  bytes=$(LC_ALL=C wc -c < "$payload" | tr -d ' ')
+  hash=$(sha256_file "$payload")
+  from_offset=$(sed -n 's/^to_offset=//p' "$KEYED_RESULT")
+  from_hash=$(sed -n 's/^to_prefix_sha256=//p' "$KEYED_RESULT")
+  head -n "$boundary" "$destination" \
+    | sed "s/^payload_sha256=.*/payload_sha256=$hash/;s/^payload_bytes=.*/payload_bytes=$bytes/;s/^from_offset=.*/from_offset=$from_offset/;s/^from_prefix_sha256=.*/from_prefix_sha256=$from_hash/;s/^to_offset=.*/to_offset=$((from_offset + bytes))/" \
+    > "$destination.header"
+  cat "$destination.header" "$payload" > "$destination"
+  rm -f "$destination.header"
+}
+printf 'resolved [key=work-slug] [] [corr=cafebabef00d9999]: empty extra group\n' \
+  > "$TMP_ROOT/empty-extra.payload"
+printf 'resolved [key=work-slug] [corr=cafebabef00d9999] [unclosed: missing closer\n' \
+  > "$TMP_ROOT/unclosed-extra.payload"
+printf 'resolved [key=work-slug][corr=cafebabef00d9999]: adjacent groups\n' \
+  > "$TMP_ROOT/adjacent-groups.payload"
+for bad in empty-extra unclosed-extra adjacent-groups; do
+  craft_keyed_delta "$TMP_ROOT/$bad.payload" "$TMP_ROOT/$bad.result"
+  set +e
+  bad_out=$(remote_env "$ADAPTER" ingest keyed "$TMP_ROOT/$bad.result" 2>&1)
+  bad_rc=$?
+  set -e
+  [ "$bad_rc" -ne 0 ] || fail "ingest accepted a $bad status line"
+  assert_contains "$bad_out" 'invalid status line' \
+    "$bad delta was not rejected by status-line validation"
+done
+assert_grep "offset=$KEYED_OFFSET" "$PARENT/state/remote-replies/keyed.cursor" \
+  "a rejected extra-bracket delta moved the cursor"
+pass "ingest still rejects empty, unclosed, and adjacent extra bracket groups"
 
 echo "ALL TESTS PASSED"
