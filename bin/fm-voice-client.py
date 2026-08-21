@@ -104,6 +104,9 @@ LISTEN_MODES = (PUSH_TO_TALK, OPEN_MIC)
 # discarded, up to this much. Past it, the stream is not a relay.
 MAX_PREAMBLE = 8192
 
+# The two ends of a turn, queued rather than written, for the reason _sender
+# gives: everything the uplink carries has to stay in the order it happened in.
+START = object()
 END = object()
 
 
@@ -532,11 +535,25 @@ class Client:
     # -------------------------------------------------------------------- threads
 
     def _sender(self):
-        """Own the uplink audio, so talk end is never sent ahead of the last chunk."""
+        """Own the whole uplink, so nothing on it can be sent out of order.
+
+        Every frame a turn consists of goes through this one queue, talk start
+        included. Sending the start from the turn thread instead cost a turn: a
+        turn that ends with no answer to wait for - a failed turn, or the model
+        finishing with the session - returns as soon as it is told, while the last
+        chunk and the talk end may still be here. The next talk start would then
+        overtake them, the relay would open a fresh session and apply the previous
+        turn's talk end to it, and the captain's entire next question was dropped
+        as audio arriving with no turn open. It answered a question nobody had
+        finished asking.
+        """
         while True:
             item = self.up_q.get()
             if item is None:
                 return
+            if item is START:
+                self.uplink.send(frame.TALK_START)
+                continue
             if item is END:
                 with self.lock:
                     self.turn["wire_end"] = time.monotonic()
@@ -620,7 +637,7 @@ class Client:
         self.playback.turn_reset()
         self.reply_done.clear()
         before = self.playback.bytes
-        self.uplink.send(frame.TALK_START)
+        self.up_q.put(START)
 
         # Unreachable while parse_args refuses open-mic, and kept so that turning
         # the mode on later is a small change. It is still missing the turn

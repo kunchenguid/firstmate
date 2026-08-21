@@ -1189,9 +1189,10 @@ async def one_case(how):
 for how in ("handler", "tool-result", "drop"):
     asyncio.run(one_case(how))
 
-# A stream that simply ends is the end of a session, not a failed turn, and the
-# relay reads the two differently: serve treats a clean end as its own reason to
-# stop, so calling one a failure would change what a model-initiated end means.
+# A stream that simply ends is the end of a session, not a failed turn. It is
+# still said out loud, once, and it says what it is: the client is waiting on a
+# turn that is not coming, and only a notice releases it, but calling it a failure
+# would tell the captain something broke when the model merely finished.
 async def clean_end():
     down = Down()
     session = relay.Session(options, down, None)
@@ -1204,7 +1205,9 @@ down, ended = asyncio.run(clean_end())
 check(ended.turn_done.is_set(), "a clean end must release a waiting turn too")
 check(not ended.failed, "a clean end of stream is not a turn failure")
 check(not failures(down),
-      "and nothing should be named to the captain: %r" % (down.notices,))
+      "and no failure should be named to the captain: %r" % (down.notices,))
+check([n.get("event") for n in down.notices] == ["session-ended"],
+      "a clean end must be announced once, as the end it is: %r" % (down.notices,))
 
 # Nor is a stream that went away because close() asked it to. renew closes the
 # old session on every single turn, so announcing that would put a failure notice
@@ -1247,8 +1250,8 @@ async def torn_down():
 down, closed = asyncio.run(torn_down())
 check(closed.ended.is_set(), "the reader must still report the session over")
 check(not closed.failed, "a deliberate close is not a turn failure")
-check(not failures(down),
-      "and an ordinary renew must not look like a failure: %r" % (down.notices,))
+check(not down.notices,
+      "and an ordinary renew must say nothing at all: %r" % (down.notices,))
 PY
 pass "a failure inside the model reader costs one turn, not every later one"
 pass "a reader failure is named to the captain, a clean end and a close are not"
@@ -2120,5 +2123,750 @@ bare_out=$(python3 "$ROOT/bin/fm_voice_records.py" status --home "$bare") \
 assert_contains "$bare_out" '"in_flight": 0' "an empty home should report no work"
 assert_contains "$bare_out" '"workers_on_deck": 0' "an empty home should report no workers"
 pass "a home with no records answers nothing rather than failing"
+
+# --- the whole round trip ----------------------------------------------------
+#
+# Every case above holds one piece of the spoken interface still. This one runs
+# the piece the captain experiences: the laptop client opens the transport, the
+# relay answers a spoken question from the records and hands a spoken request for
+# real work to firstmate, and the reply audio and the timing come back down the
+# same stream. It is the only case that would notice the round trip stopping
+# working while all of the pieces still passed.
+#
+# ONE thing is stood in for: the model. It is a paid service in another region
+# and no test has a credential for it. The stand-in below speaks the same event
+# protocol Nova Sonic does and composes what it says out of the tool results the
+# relay actually hands it, so the words asserted here are the records rather than
+# a script, and it records what the session was opened with so this case can
+# check the account and the model the relay chose. Everything else is real: the
+# client, the frame format, the relay, the reader and bin/fm-inbox.sh.
+#
+# What only this case can hold:
+#   the round trip completes at all, in both of its shapes, a status answer and a
+#   handover, and a second turn is not treated as an interruption of the first;
+#   the headline figure is measured from the captain's talk end rather than from
+#   the start of their speech, which on this clip is the difference between half
+#   a second and two and a half;
+#   the talk-end silence padding really is sent, which is trap 2 and the
+#   difference between an answer and no answer;
+#   the laptop needs no AWS credential: the client runs with an environment that
+#   has none, and the session is opened with the key only the desktop side holds.
+
+E2E="$TMP_ROOT/e2e"
+E2E_KEY=AKIADESKTOPONLYEXAMPLE
+E2E_REGION=eu-north-1
+E2E_MODEL=amazon.nova-2-sonic-v1:0
+E2E_REQUEST="take the flaky sign-in test on alpha and open a pull request for it"
+mkdir -p "$E2E/bin" "$E2E/laptop" "$E2E/desktop-home" "$E2E/laptop-home" \
+  "$E2E/fakesdk/aws_sdk_bedrock_runtime" \
+  "$E2E/home/data" "$E2E/home/state" "$E2E/home/config"
+
+# The laptop holds the two files the guide says to copy, and nothing else.
+cp "$ROOT/bin/fm-voice-client.py" "$ROOT/bin/fm_voice_frame.py" "$E2E/laptop/"
+
+cat > "$E2E/home/data/backlog.md" <<EOF
+# Backlog
+
+## In flight
+- [ ] alpha-one - Fix the sign-in redirect (repo: alpha) (kind: ship) (priority: 0)
+  A note body, which is never assembled: $NEVER_TOKEN and the rate we agreed.
+- [ ] beta-two - Decide the storage shape (repo: beta) (kind: captain)
+
+## Queued
+- [ ] delta-four - Add the retry (repo: delta) (kind: ship) (hold-kind: captain)
+
+## Done
+- [x] old-six - Shipped the $NEVER_TOKEN integration (repo: alpha) (done 2026-07-01)
+EOF
+fm_write_meta "$E2E/home/state/alpha-one.meta" kind=ship mode=no-mistakes \
+  pr=https://github.com/example/alpha/pull/7
+printf 'working: reading the failing test\n' > "$E2E/home/state/alpha-one.status"
+printf '%s\n' "$E2E_REGION" > "$E2E/home/config/voice-region"
+printf '%s\n' "$E2E_MODEL" > "$E2E/home/config/voice-model"
+printf 'full\n' > "$E2E/home/config/voice-read-scope"
+
+# The model stand-in, at exactly the import boundary bin/fm-voice-relay.py uses.
+cat > "$E2E/fakesdk/aws_sdk_bedrock_runtime/__init__.py" <<'PY'
+"""A scripted stand-in for Nova Sonic's bidirectional stream.
+
+It answers with what the relay's own tool results contain, so a spoken answer
+here is derived from firstmate's records rather than from a fixture string, and
+it appends one JSON line per session describing what that session was opened
+with and what it was asked. tests/fm-voice-relay.test.sh reads that record.
+
+  FM_FAKE_SCRIPT   comma-separated turn kinds: status | handover | clean-end
+  FM_FAKE_THINK    seconds before the reply begins, standing in for the model
+  FM_FAKE_STATE    file holding the turn counter across the relay's reconnects
+  FM_FAKE_LOG      where to append the per-session record
+  FM_FAKE_REQUEST  the words the captain uses when asking for real work
+
+A clean-end turn is a session the model finishes with while the captain is still
+speaking: the output stream simply ends, with no error and no answer. That is an
+ordinary end of a Bedrock session rather than a fault, and the relay has to
+survive it, so it is a turn kind here rather than a failure injection.
+"""
+
+import asyncio
+import base64
+import json
+import math
+import os
+import struct
+import sys
+import types
+
+OUT_RATE = 24000
+CHUNK_MS = 100
+
+THINK = float(os.environ.get("FM_FAKE_THINK", "0.4"))
+REPLY_SECONDS = float(os.environ.get("FM_FAKE_REPLY_SECONDS", "0.4"))
+SCRIPT = [s.strip() for s in os.environ.get("FM_FAKE_SCRIPT", "status").split(",")
+          if s.strip()]
+STATE = os.environ.get("FM_FAKE_STATE", "")
+LOG = os.environ.get("FM_FAKE_LOG", "")
+REQUEST = os.environ.get("FM_FAKE_REQUEST", "open a pull request for the retry")
+
+HEARD = {"status": "how is the fleet doing right now", "handover": REQUEST}
+
+# How much of the captain's speech a clean-end session takes before its output
+# stream ends. Three chunks is 300 ms, so on a two second clip the end lands well
+# inside the key press and the rest of that press arrives at a session that is
+# already over.
+CLEAN_END_AFTER_BYTES = 3200 * 3
+
+
+def _turn_kind():
+    """Return this session's turn kind, advancing a counter that lives on disk.
+
+    The relay reconnects per turn on purpose, so the count cannot live in this
+    process: each turn is a new stream in a new session.
+    """
+    index = 0
+    if STATE:
+        try:
+            with open(STATE, encoding="utf-8") as handle:
+                index = int(handle.read().strip() or "0")
+        except (OSError, ValueError):
+            index = 0
+        try:
+            with open(STATE, "w", encoding="utf-8") as handle:
+                handle.write(str(index + 1))
+        except OSError:
+            pass
+    if not SCRIPT:
+        return "status", index
+    return SCRIPT[index % len(SCRIPT)], index
+
+
+def _speech(seconds):
+    """Return reply audio: a quiet tone, so a byte count is a duration."""
+    out = bytearray()
+    for n in range(int(OUT_RATE * seconds)):
+        out += struct.pack("<h", int(6000 * math.sin(2 * math.pi * 220 * n / OUT_RATE)))
+    return bytes(out)
+
+
+def _status_sentence(result):
+    """Compose the spoken answer out of what the records reader returned."""
+    if result.get("error"):
+        return "I could not read the records: {}".format(result["error"])
+    said = "Right now, {} in flight, {} waiting on you, {} open pull requests.".format(
+        result.get("in_flight"), result.get("awaiting_captain"),
+        result.get("open_pull_requests"))
+    names = [row.get("id") for row in result.get("in_flight_detail", [])][:2]
+    if names:
+        said += " The ones moving are {}.".format(" and ".join(names))
+    notes = result.get("captain_notes_waiting") or 0
+    if notes:
+        said += " {} note is queued for the first mate.".format(notes)
+    if result.get("scope") == "counts":
+        said += " Identifiers are not available by voice at this read scope."
+    return said
+
+
+def _queued_sentence(result):
+    if result.get("error"):
+        return "I could not queue that: {}".format(result["error"])
+    return ("That is queued with the first mate as {}. I have not done any of it "
+            "myself.".format(result.get("note_id") or "a note"))
+
+
+class _Result:
+    def __init__(self, payload):
+        self.value = types.SimpleNamespace(bytes_=payload)
+
+
+class _OutputReader:
+    def __init__(self, queue):
+        self._queue = queue
+
+    async def receive(self):
+        item = await self._queue.get()
+        return None if item is None else _Result(item)
+
+
+class _InputStream:
+    def __init__(self, stream):
+        self._stream = stream
+
+    async def send(self, chunk):
+        await self._stream.on_input(chunk.value.bytes_)
+
+    async def close(self):
+        await self._stream.finish()
+
+
+class _Stream:
+    """One bidirectional session, which is one turn the way the relay uses it."""
+
+    def __init__(self, model_id, config):
+        self.kind, self.index = _turn_kind()
+        self.out = asyncio.Queue()
+        self.input_stream = _InputStream(self)
+        self._reader = _OutputReader(self.out)
+        self._audio_content = None
+        self._pending_use = None
+        self._tools = {}
+        self._next_tool = 0
+        self._replied = False
+        self._reply_task = None
+        self._logged = False
+        self._ended_early = False
+        self.record = {
+            "turn": self.index + 1,
+            "turn_kind": self.kind,
+            "model_id": model_id,
+            "endpoint": config.endpoint_uri,
+            "region": config.region,
+            "credential_key_id": config.credentials.get("aws_access_key_id"),
+            "tool_names_offered": [],
+            "audio_bytes_in": 0,
+            "tool_calls": [],
+            "heard": "",
+            "said": [],
+            "reply_audio_bytes": 0,
+        }
+
+    async def await_output(self):
+        return (None, self._reader)
+
+    def _emit(self, event):
+        self.out.put_nowait(json.dumps({"event": event}).encode())
+
+    async def on_input(self, raw):
+        event = json.loads(raw.decode()).get("event", {})
+        for name, body in event.items():
+            if name == "promptStart":
+                self.record["tool_names_offered"] = [
+                    t.get("toolSpec", {}).get("name")
+                    for t in body.get("toolConfiguration", {}).get("tools", [])]
+            elif name == "contentStart" and body.get("type") == "AUDIO":
+                self._audio_content = body.get("contentName")
+            elif name == "contentStart" and body.get("type") == "TOOL":
+                self._pending_use = body.get(
+                    "toolResultInputConfiguration", {}).get("toolUseId")
+            elif name == "audioInput":
+                self.record["audio_bytes_in"] += len(
+                    base64.b64decode(body.get("content", "")))
+                self._maybe_end_cleanly()
+            elif name == "toolResult":
+                self._tool_result(body)
+            elif name == "contentEnd":
+                if (body.get("contentName") == self._audio_content
+                        and not self._replied and not self._ended_early):
+                    # The captain's talk end. Everything measured is measured
+                    # from here, so the reply starts no earlier than this.
+                    self._replied = True
+                    self._audio_content = None
+                    self._reply_task = asyncio.create_task(self._reply())
+
+    def _maybe_end_cleanly(self):
+        """End a clean-end session's output stream, mid-key-press and unannounced.
+
+        None on the output queue is what the SDK gives the reader for a stream
+        that is simply over: no exception, no stop reason, nothing to report. The
+        input half stays open, exactly as it does when the model is the side that
+        finished, so the rest of the captain's key press still arrives here and
+        goes nowhere.
+        """
+        if (self.kind != "clean-end" or self._ended_early
+                or self.record["audio_bytes_in"] < CLEAN_END_AFTER_BYTES):
+            return
+        self._ended_early = True
+        self.record["ended_early"] = True
+        self._write_log()
+        self.out.put_nowait(None)
+
+    def _tool_result(self, body):
+        try:
+            result = json.loads(body.get("content") or "{}")
+        except ValueError:
+            result = {}
+        if self.record["tool_calls"]:
+            self.record["tool_calls"][-1]["result"] = result
+        future = self._tools.pop(self._pending_use, None)
+        if future is not None and not future.done():
+            future.set_result(result)
+
+    async def _call_tool(self, name, arguments):
+        self._next_tool += 1
+        use_id = "use-{}-{}".format(self.index + 1, self._next_tool)
+        future = asyncio.get_running_loop().create_future()
+        self._tools[use_id] = future
+        self.record["tool_calls"].append({"name": name, "arguments": arguments})
+        self._emit({"toolUse": {"toolName": name, "toolUseId": use_id,
+                                "content": json.dumps(arguments)}})
+        try:
+            return await asyncio.wait_for(future, timeout=15)
+        except asyncio.TimeoutError:
+            return {"error": "the relay never answered the tool call"}
+
+    def _say(self, text):
+        self.record["said"].append(text)
+        self._emit({"textOutput": {"role": "ASSISTANT", "content": text}})
+
+    async def _reply(self):
+        await asyncio.sleep(THINK)
+        heard = HEARD.get(self.kind, "how is the fleet doing")
+        self.record["heard"] = heard
+        self._emit({"textOutput": {"role": "USER", "content": heard}})
+        if self.kind == "handover":
+            self._say("I am not the first mate, so I am handing that to it.")
+            result = await self._call_tool("hand_over_to_firstmate",
+                                           {"request": REQUEST})
+            self._say(_queued_sentence(result))
+        else:
+            result = await self._call_tool("get_fleet_status", {})
+            self._say(_status_sentence(result))
+        pcm = _speech(REPLY_SECONDS)
+        step = OUT_RATE * 2 * CHUNK_MS // 1000
+        for at in range(0, len(pcm), step):
+            block = pcm[at:at + step]
+            self._emit({"audioOutput": {
+                "content": base64.b64encode(block).decode()}})
+            self.record["reply_audio_bytes"] += len(block)
+            await asyncio.sleep(0.01)
+        # Trap 1: this, not completionEnd, is what says the reply ended.
+        self._emit({"contentEnd": {"stopReason": "END_TURN"}})
+        self._write_log()
+
+    def _write_log(self):
+        if self._logged or not LOG:
+            return
+        self._logged = True
+        with open(LOG, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(self.record) + "\n")
+
+    async def finish(self):
+        self._write_log()
+        self.out.put_nowait(None)
+
+
+class AsyncBedrockRuntimeConfig:
+    def __init__(self, endpoint_uri, region, credentials):
+        self.endpoint_uri = endpoint_uri
+        self.region = region
+        self.credentials = credentials
+
+    @classmethod
+    async def resolve(cls, endpoint_uri=None, region=None, **credentials):
+        return cls(endpoint_uri, region, credentials)
+
+
+class AsyncBedrockRuntimeClient:
+    def __init__(self, config=None):
+        self.config = config
+
+    async def invoke_model_with_bidirectional_stream(self, operation):
+        return _Stream(operation.model_id, self.config)
+
+
+class InvokeModelWithBidirectionalStreamOperationInput:
+    def __init__(self, model_id=None):
+        self.model_id = model_id
+
+
+class BidirectionalInputPayloadPart:
+    def __init__(self, bytes_=b""):
+        self.bytes_ = bytes_
+
+
+class InvokeModelWithBidirectionalStreamInputChunk:
+    def __init__(self, value=None):
+        self.value = value
+
+
+def _submodule(name, **members):
+    module = types.ModuleType(__name__ + "." + name)
+    for key, value in members.items():
+        setattr(module, key, value)
+    sys.modules[module.__name__] = module
+    return module
+
+
+client = _submodule(
+    "client",
+    AsyncBedrockRuntimeClient=AsyncBedrockRuntimeClient,
+    InvokeModelWithBidirectionalStreamOperationInput=(
+        InvokeModelWithBidirectionalStreamOperationInput))
+config = _submodule("config", AsyncBedrockRuntimeConfig=AsyncBedrockRuntimeConfig)
+models = _submodule(
+    "models",
+    BidirectionalInputPayloadPart=BidirectionalInputPayloadPart,
+    InvokeModelWithBidirectionalStreamInputChunk=(
+        InvokeModelWithBidirectionalStreamInputChunk))
+PY
+
+# What the desktop side of the connection has, and the laptop side does not. The
+# AWS credential is here and nowhere else, which is the whole point of the shape.
+cat > "$E2E/bin/desktop.env" <<EOF
+PATH=$PATH
+HOME=$E2E/desktop-home
+PYTHONPATH=$E2E/fakesdk
+PYTHONDONTWRITEBYTECODE=1
+FM_HOME=$E2E/home
+FM_FAKE_STATE=$E2E/turn-counter
+FM_FAKE_LOG=$E2E/model-sessions.jsonl
+FM_FAKE_THINK=0.4
+FM_FAKE_REPLY_SECONDS=0.4
+FM_FAKE_SCRIPT=status,handover
+FM_FAKE_REQUEST=$E2E_REQUEST
+AWS_ACCESS_KEY_ID=$E2E_KEY
+AWS_SECRET_ACCESS_KEY=desktop-secret-not-a-real-key
+EOF
+
+# Stands in for ssh, so the client takes its real `ssh -T <host> <relay>` path
+# and the desktop's environment is a boundary rather than an assertion: the relay
+# starts from env -i and desktop.env, so nothing the laptop holds can reach it.
+cat > "$E2E/bin/ssh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ "${1:-}" = "-T" ]; then shift; fi
+shift                                   # the host, which is this machine
+desktop_env=()
+while IFS= read -r line; do desktop_env+=("$line"); done < "$DIR/desktop.env"
+exec env -i "${desktop_env[@]}" "$@"
+SH
+chmod +x "$E2E/bin/ssh"
+
+# Two seconds of speech-shaped audio ending on speech, not silence: the relay's
+# own 400 ms of padding is what makes a push-to-talk release answerable, and a
+# clip this long makes a clock started at the wrong end unmistakable.
+python3 - "$E2E/clip.pcm" <<'PY' || fail "could not write the e2e clip"
+import math, struct, sys
+out = bytearray()
+for n in range(16000 * 2):
+    swell = 0.5 + 0.5 * math.sin(2 * math.pi * 2.5 * n / 16000)
+    out += struct.pack("<h", int(9000 * swell * math.sin(2 * math.pi * 190 * n / 16000)))
+open(sys.argv[1], "wb").write(bytes(out))
+PY
+
+printf '0\n' > "$E2E/turn-counter"
+: > "$E2E/model-sessions.jsonl"
+
+# env -i: the laptop has PATH and HOME and nothing else. No AWS variable, no
+# interpreter that can reach Bedrock, no firstmate home.
+laptop_aws=$(env -i PATH="$E2E/bin:$PATH" HOME="$E2E/laptop-home" env \
+  | grep -c '^AWS_' || true)
+[ "$laptop_aws" = 0 ] || fail "the laptop end should hold no AWS variables"
+
+set +e
+env -i PATH="$E2E/bin:$PATH" HOME="$E2E/laptop-home" PYTHONDONTWRITEBYTECODE=1 \
+  python3 "$E2E/laptop/fm-voice-client.py" \
+    --host desktop.example \
+    --relay "$ROOT/bin/fm-voice-relay.py" \
+    --relay-python python3 \
+    --in-file "$E2E/clip.pcm" --out-file "$E2E/reply.pcm" \
+    --runs 2 > "$E2E/runs.jsonl" 2> "$E2E/session.log"
+e2e_code=$?
+set -e
+[ "$e2e_code" = 0 ] || {
+  cat "$E2E/session.log" >&2
+  fail "the spoken round trip exited $e2e_code"
+}
+
+# The reader's own answer, taken independently, so the spoken answer is checked
+# against the records rather than against itself.
+independent=$(python3 "$ROOT/bin/fm_voice_records.py" status \
+  --home "$E2E/home" --scope full) || fail "independent status read failed"
+printf '%s' "$independent" > "$E2E/independent.json"
+
+python3 - "$E2E" "$E2E_KEY" "$E2E_REGION" "$E2E_MODEL" "$E2E_REQUEST" \
+  "$NEVER_TOKEN" <<'PY' || fail "the spoken round trip did not hold"
+import json, os, sys
+
+root, key, region, model, request, never = sys.argv[1:7]
+
+
+def check(cond, label):
+    if not cond:
+        sys.exit("round trip: " + label)
+
+
+def read(name):
+    with open(os.path.join(root, name), encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+runs = read("runs.jsonl")
+sessions = read("model-sessions.jsonl")
+records = json.load(open(os.path.join(root, "independent.json"), encoding="utf-8"))
+transcript = open(os.path.join(root, "session.log"), encoding="utf-8").read()
+
+# Two turns asked, two turns answered with audio, neither of them lost.
+check(len(runs) == 2, "expected two turn records, got %d" % len(runs))
+check(len(sessions) == 2, "expected two model sessions, got %d" % len(sessions))
+for run in runs:
+    check(run["answered"], "turn %s was not answered" % run["run"])
+    check(run["relay_error"] is None,
+          "turn %s failed: %s" % (run["run"], run["relay_error"]))
+    check(run["reply_audio_seconds"] > 0,
+          "turn %s produced no reply audio" % run["run"])
+    # Push to talk is the default and the only mode that runs, and the transport
+    # is the ssh path rather than a local child.
+    check(run["listen"] == "push-to-talk", "listen mode was %r" % run["listen"])
+    check(run["transport"] == "ssh", "transport was %r" % run["transport"])
+    # The per-turn reconnect exists so a second question is not barge-in.
+    check(not run["interrupted"],
+          "turn %s was treated as an interruption" % run["run"])
+
+# Whose account and which model. The relay carries no default for either, so
+# this is the home's configuration reaching Bedrock, and the credential is the
+# one only the desktop side of the connection holds.
+for session in sessions:
+    check(session["model_id"] == model, "model was %r" % session["model_id"])
+    check(session["region"] == region, "region was %r" % session["region"])
+    check(session["endpoint"] ==
+          "https://bedrock-runtime.{}.amazonaws.com".format(region),
+          "endpoint was %r" % session["endpoint"])
+    check(session["credential_key_id"] == key,
+          "session opened with %r" % session["credential_key_id"])
+    check(session["tool_names_offered"] ==
+          ["get_fleet_status", "hand_over_to_firstmate"],
+          "tools offered were %r" % session["tool_names_offered"])
+    # Trap 2: a push-to-talk release supplies no trailing silence, so the relay
+    # appends its own. Without it the model truncates the turn and never answers.
+    check(session["audio_bytes_in"] == 16000 * 2 * 2 + 400 * 32,
+          "the uplink carried %d bytes, so the talk-end padding is not being "
+          "sent" % session["audio_bytes_in"])
+
+# The status answer is the records. Every number the agent said aloud came from
+# the reader, checked against a separate read of the same home.
+status = sessions[0]
+check([c["name"] for c in status["tool_calls"]] == ["get_fleet_status"],
+      "the status turn called %r" % [c["name"] for c in status["tool_calls"]])
+served = status["tool_calls"][0]["result"]
+for field in ("in_flight", "awaiting_captain", "open_pull_requests", "queued"):
+    check(served[field] == records[field],
+          "the reader served %s=%r but the records say %r"
+          % (field, served[field], records[field]))
+said = " ".join(status["said"])
+check("{} in flight".format(records["in_flight"]) in said,
+      "the spoken answer did not carry the count: %r" % said)
+check(records["in_flight_detail"][0]["id"] in said,
+      "the spoken answer named no open work: %r" % said)
+check(never not in said and never not in json.dumps(served),
+      "a note body or finished title reached a spoken answer")
+check(said in transcript, "the captain never saw the answer: %r" % transcript)
+
+# The handover turn queues real work and says so. The note is firstmate's own
+# queue, written by bin/fm-inbox.sh, and the agent's confirmation carries the id
+# that queue gave it, so it cannot be claiming to have queued something it did
+# not.
+handover = sessions[1]
+check([c["name"] for c in handover["tool_calls"]] == ["hand_over_to_firstmate"],
+      "the handover turn called %r" % [c["name"] for c in handover["tool_calls"]])
+check(handover["tool_calls"][0]["arguments"]["request"] == request,
+      "the captain's words were rewritten: %r"
+      % handover["tool_calls"][0]["arguments"])
+queued = handover["tool_calls"][0]["result"]
+check(queued.get("queued") is True, "the request was not queued: %r" % queued)
+note_id = queued.get("note_id")
+check(bool(note_id), "the queue returned no note id: %r" % queued)
+check(runs[1]["queued_note"] == note_id,
+      "the client was told %r, the queue wrote %r"
+      % (runs[1]["queued_note"], note_id))
+check(note_id in " ".join(handover["said"]),
+      "the agent did not confirm the queued note: %r" % handover["said"])
+check("handed to the first mate" in transcript,
+      "the captain was never told it was handed over: %r" % transcript)
+note = os.path.join(root, "home", "state", "inbox", note_id + ".note")
+check(os.path.exists(note), "no note on disk at %s" % note)
+check(request in open(note, encoding="utf-8").read(),
+      "the note does not carry the captain's words")
+
+# THE NUMBER THIS BUILD EXISTS TO PRODUCE, and the instant it is measured from.
+# The clip is two seconds long and the stand-in waits 0.4 s before speaking, so a
+# figure measured from the captain's talk end lands near half a second and one
+# measured from the start of their speech lands near two and a half. The bound is
+# loose enough for a loaded machine and nowhere near the wrong clock.
+for run in runs:
+    first = run["first_audio_s"]
+    check(first is not None, "turn %s reported no first audio" % run["run"])
+    check(0.2 < first < 1.6,
+          "turn %s reported first audio at %.3fs, which is not measured from the "
+          "captain's talk end" % (run["run"], first))
+    marks = run["relay_marks_since_talk_end"]
+    for mark in ("tool_use", "tool_answered", "first_audio", "reply_end"):
+        check(mark in marks, "turn %s is missing the %s mark" % (run["run"], mark))
+    check(marks["tool_use"] <= marks["first_audio"] <= marks["reply_end"],
+          "turn %s reports its marks out of order: %r" % (run["run"], marks))
+    check(run["first_frame_s"] is not None and run["first_played_s"] is not None,
+          "turn %s reported no wire or playback figure" % run["run"])
+
+# The reply audio survived the framing byte for byte.
+sent = sum(s["reply_audio_bytes"] for s in sessions)
+got = os.path.getsize(os.path.join(root, "reply.pcm"))
+check(sent > 0 and sent == got,
+      "the model sent %d bytes of reply audio and the client wrote %d" % (sent, got))
+PY
+pass "a spoken turn goes out and comes back: the records answer, firstmate gets the work"
+
+# --- a model session that ends while the captain is still talking ------------
+#
+# A Bedrock session ending is not a fault. The stream simply stops: no exception,
+# no stop reason, nothing to report. It can happen mid-conversation, and when it
+# does the captain is usually still holding the talk key, because that is when
+# the relay is talking to the model at all.
+#
+# The relay used to treat that as its own reason to stop, which is the worst
+# available failure shape: the relay dies without saying anything the captain can
+# act on, and they find out by speaking a whole question into nothing and getting
+# no answer. Per-turn reconnect already covers this - the next talk key builds a
+# new session, at a measured cost of 0.02 s - and a reconnect that cannot be made
+# is spoken to the captain through the turn-failed path. So the session ending
+# costs them the remainder of one key press, and nothing else.
+#
+# This case is the round trip above with one difference: the model finishes with
+# the first session 300 ms into a two second key press. What it holds is that the
+# relay is still serving afterwards and that the NEXT talk key gets a working
+# session rather than a closed pipe - a real answer, out of the real records, over
+# the same connection. The relay may exit for three reasons and this is not one of
+# them.
+
+SURVIVE="$E2E/survive"
+mkdir -p "$SURVIVE/bin"
+
+# The same desktop, with its own turn script and its own record of what the model
+# was asked, so neither run can read the other's sessions.
+grep -v '^FM_FAKE_' "$E2E/bin/desktop.env" > "$SURVIVE/bin/desktop.env"
+cat >> "$SURVIVE/bin/desktop.env" <<EOF
+FM_FAKE_STATE=$SURVIVE/turn-counter
+FM_FAKE_LOG=$SURVIVE/model-sessions.jsonl
+FM_FAKE_THINK=0.4
+FM_FAKE_REPLY_SECONDS=0.4
+FM_FAKE_SCRIPT=clean-end,status
+EOF
+cp "$E2E/bin/ssh" "$SURVIVE/bin/ssh"
+printf '0\n' > "$SURVIVE/turn-counter"
+: > "$SURVIVE/model-sessions.jsonl"
+
+# Exit 1 is the honest outcome and what is asserted: one of the two turns really
+# was lost, because the model stopped listening part way through it.
+set +e
+env -i PATH="$SURVIVE/bin:$PATH" HOME="$E2E/laptop-home" PYTHONDONTWRITEBYTECODE=1 \
+  python3 "$E2E/laptop/fm-voice-client.py" \
+    --host desktop.example \
+    --relay "$ROOT/bin/fm-voice-relay.py" \
+    --relay-python python3 \
+    --in-file "$E2E/clip.pcm" --out-file "$SURVIVE/reply.pcm" \
+    --timeout 12 --runs 2 > "$SURVIVE/runs.jsonl" 2> "$SURVIVE/session.log"
+survive_code=$?
+set -e
+[ "$survive_code" = 1 ] || {
+  cat "$SURVIVE/session.log" >&2
+  fail "a lost turn and a good one should exit 1, not $survive_code"
+}
+
+python3 - "$SURVIVE" "$E2E/independent.json" <<'PY' \
+  || fail "a model session ending did not leave the relay serving"
+import json, os, sys
+
+root, records_path = sys.argv[1:3]
+
+CLIP_BYTES = 16000 * 2 * 2
+
+
+def check(cond, label):
+    if not cond:
+        sys.exit("session ended: " + label)
+
+
+def read(name):
+    with open(os.path.join(root, name), encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+runs = read("runs.jsonl")
+sessions = read("model-sessions.jsonl")
+records = json.load(open(records_path, encoding="utf-8"))
+transcript = open(os.path.join(root, "session.log"), encoding="utf-8").read()
+
+# The first session really did end part way through the captain's key press,
+# rather than after answering: it took some of the clip and not all of it.
+check(len(sessions) >= 1, "the model was never asked anything")
+first = sessions[0]
+check(first["turn_kind"] == "clean-end" and first.get("ended_early"),
+      "the first session did not end early: %r" % first)
+check(0 < first["audio_bytes_in"] < CLIP_BYTES,
+      "the session ended after %d of %d bytes, so it did not end mid-press"
+      % (first["audio_bytes_in"], CLIP_BYTES))
+check(not first["said"] and not first["reply_audio_bytes"],
+      "the lost turn was answered after all: %r" % first)
+
+# THE POINT. The relay was still there for the next talk key, so two turns were
+# taken over the one connection and the second one was a whole session of its own.
+check(len(runs) == 2,
+      "the relay stopped serving when the model ended its session: %d turn(s) "
+      "taken, %r" % (len(runs), transcript))
+check(len(sessions) == 2,
+      "the next talk key did not get a session: %d opened" % len(sessions))
+check(not runs[0]["answered"], "the lost turn should be the first one: %r" % runs[0])
+check(runs[0]["relay_error"] is None,
+      "an ordinary session end is not a turn failure: %r" % runs[0]["relay_error"])
+
+# And it was a working session rather than a closed pipe: a real answer, composed
+# from a real read of the records, spoken to the captain over the same connection.
+good = runs[1]
+check(good["answered"] and good["reply_audio_seconds"] > 0,
+      "the next talk key got no answer: %r" % good)
+check(good["relay_error"] is None,
+      "the replacement session failed: %r" % good["relay_error"])
+check([c["name"] for c in sessions[1]["tool_calls"]] == ["get_fleet_status"],
+      "the replacement turn called %r"
+      % [c["name"] for c in sessions[1]["tool_calls"]])
+# The whole question, not an answer to nothing: every byte of the clip and the
+# talk-end padding reached the replacement session.
+check(sessions[1]["audio_bytes_in"] == CLIP_BYTES + 400 * 32,
+      "the replacement session heard %d bytes of a %d byte question"
+      % (sessions[1]["audio_bytes_in"], CLIP_BYTES + 400 * 32))
+served = sessions[1]["tool_calls"][0]["result"]
+for field in ("in_flight", "open_pull_requests"):
+    check(served[field] == records[field],
+          "the replacement session served %s=%r but the records say %r"
+          % (field, served[field], records[field]))
+said = " ".join(sessions[1]["said"])
+check("{} in flight".format(records["in_flight"]) in said,
+      "the answer did not carry the count: %r" % said)
+check(said in transcript, "the captain never heard the answer: %r" % transcript)
+check(good["first_audio_s"] is not None and 0.2 < good["first_audio_s"] < 1.6,
+      "the recovered turn reported first audio at %r, which is not measured from "
+      "the captain's talk end" % good["first_audio_s"])
+check(os.path.getsize(os.path.join(root, "reply.pcm"))
+      == sessions[1]["reply_audio_bytes"],
+      "the reply audio the client wrote is not what the good session sent")
+
+# Said once. The rest of that key press is another seventeen audio frames, and
+# the flag saying the session is over stays set for every one of them, so a
+# notice sent from the frame loop instead of from the end itself would put this
+# line in front of the captain ten times a second while they were still speaking.
+check(transcript.count("the relay ended the session") == 1,
+      "the session ending was announced %d times: %r"
+      % (transcript.count("the relay ended the session"), transcript))
+check("connection lost" not in transcript,
+      "the connection should have outlived the session: %r" % transcript)
+PY
+pass "a model session that ends mid-conversation costs one turn, not the relay"
 
 printf 'all voice relay cases passed\n'

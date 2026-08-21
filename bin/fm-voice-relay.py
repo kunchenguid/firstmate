@@ -708,14 +708,22 @@ class Session:
         it can fail on its own rather than only the read can. Either way this
         session is finished, and the finally below is the one thing that must
         still happen: --self-test waits on turn_done for the length of a turn,
-        and both the serve loop and the next talk key read ended to decide
-        whether this session can still be used. Leaving them clear is what turned
-        one dropped stream into a relay that never answered again.
+        and the next talk key reads ended to decide whether this session can
+        still be used. Leaving them clear is what turned one dropped stream into
+        a relay that never answered again.
 
         The two ways out are not the same event and are not reported the same
-        way. A stream that simply ends is the end of a session and nothing more.
-        A stream that raises, here or under an event handler, is this turn
-        failing, so it goes through fail_turn and reaches the captain.
+        way. A stream that simply ends is the end of a session and nothing more,
+        so it is named as that and not as a failure. A stream that raises, here
+        or under an event handler, is this turn failing, so it goes through
+        fail_turn and reaches the captain.
+
+        Either way the client is told, once, because either way it is waiting on
+        a turn that is not coming and a notice is the only thing that releases it.
+        The end is announced HERE rather than from the serve loop because this is
+        the one moment it happens: the flag it sets stays set for every later
+        frame of the same key press, so a loop that announced it would say it ten
+        times a second while the captain was still speaking.
 
         Neither is a stream that went away because close() asked it to: renew
         closes the old session on every single turn, so announcing that would put
@@ -749,11 +757,15 @@ class Session:
                     broke = exc
                     break
         finally:
-            # Not when the uplink has already named this turn: the frame that
-            # broke the model usually breaks the reader an instant later, and the
-            # captain hears about one turn once.
-            if broke is not None and not self.closing and not self.failed:
-                fail_turn(self, self.down, broke)
+            # Neither is said when the uplink has already named this turn: the
+            # frame that broke the model usually breaks the reader an instant
+            # later, and the captain hears about one turn once.
+            if not self.closing and not self.failed:
+                if broke is not None:
+                    fail_turn(self, self.down, broke)
+                else:
+                    self.down.send_json(
+                        frame.NOTICE, {"event": "session-ended"})
             self.ended.set()
             self.turn_done.set()
 
@@ -971,7 +983,17 @@ async def handle_uplink_frame(kind, payload, session, options, down):
 
 
 async def serve(options):
-    """Relay frames between the client on stdin/stdout and one Nova Sonic session."""
+    """Relay frames between the client on stdin/stdout and the model sessions behind it.
+
+    Three things end this, and nothing else does: the client's QUIT frame, the
+    client closing the connection, and an uplink that has stopped being a frame
+    stream. In particular a model session ending is not one of them. It happens
+    on its own, mid-conversation, and the next talk key builds a replacement
+    through the same path every ordinary turn already uses, at a measured cost of
+    0.02 s. A renew that cannot be made is spoken to the captain by fail_turn, so
+    the loud failure is the one they get; ending the relay here would instead
+    leave them speaking a whole question into nothing.
+    """
     loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader()
     await loop.connect_read_pipe(
@@ -995,12 +1017,6 @@ async def serve(options):
             session, serving = await handle_uplink_frame(
                 kind, payload, session, options, down)
             if not serving:
-                break
-            # A session already marked spent is about to be replaced on the next
-            # talk key, so its stream closing is expected rather than the end of
-            # the relay's usefulness.
-            if session.ended.is_set() and not session.failed:
-                down.send_json(frame.NOTICE, {"event": "session-ended"})
                 break
     except (asyncio.IncompleteReadError, ConnectionResetError):
         log(options.verbose, "client closed the connection")
