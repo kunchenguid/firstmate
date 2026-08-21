@@ -18,6 +18,7 @@ FAKE_PERL_LOG="$TMP_ROOT/perl.log"
 REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
+REPEAT_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -25,6 +26,7 @@ mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 cleanup_remote_job_fixture() {
   [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
+  [ -z "$REPEAT_WORKER_PID" ] || kill "$REPEAT_WORKER_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -620,5 +622,57 @@ kill -TERM "$RECOVERY_WORKER_PID"
 wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
 RECOVERY_WORKER_PID=
 pass "quarantine clears only after recorded execution has stopped"
+
+# A replacement stops a Linux worker by signalling its whole isolated group, and
+# the supervisor in that group forwards a second stop signal to the same serving
+# child, so the serving child is always signalled more than once. Keep signalling
+# until it is gone: the first signal starts the shutdown and every later one
+# lands inside it, the same way the group signal and the forwarded signal do. A
+# shutdown that dies part way through leaves its ownership lock behind holding a
+# half-written temp file no later worker can clear, and every replacement then
+# fails to report ready.
+REPEAT_HOME="$TMP_ROOT/repeat-signal-account"
+REPEAT_STATE="$TMP_ROOT/repeat-signal-jobs"
+mkdir -p "$REPEAT_HOME"
+chmod 700 "$REPEAT_HOME"
+HOME="$REPEAT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$REPEAT_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/repeat-signal.out" 2> "$TMP_ROOT/repeat-signal.err" &
+REPEAT_WORKER_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$REPEAT_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$REPEAT_STATE/worker.ready" "the repeated-signal worker did not become ready"
+REPEAT_DEADLINE=$((SECONDS + 30))
+while kill -0 "$REPEAT_WORKER_PID" 2>/dev/null && [ "$SECONDS" -lt "$REPEAT_DEADLINE" ]; do
+  kill -TERM "$REPEAT_WORKER_PID" 2>/dev/null || true
+done
+if kill -0 "$REPEAT_WORKER_PID" 2>/dev/null; then
+  kill -KILL "$REPEAT_WORKER_PID" 2>/dev/null || true
+  wait "$REPEAT_WORKER_PID" 2>/dev/null || true
+  REPEAT_WORKER_PID=
+  fail "the repeatedly signalled worker never finished its shutdown"
+fi
+wait "$REPEAT_WORKER_PID" 2>/dev/null || true
+REPEAT_WORKER_PID=
+assert_absent "$REPEAT_STATE/worker.lock" \
+  "a repeatedly signalled shutdown left its ownership lock behind"
+assert_absent "$REPEAT_STATE/worker.ready" \
+  "a repeatedly signalled shutdown left its readiness heartbeat behind"
+HOME="$REPEAT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$REPEAT_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  >> "$TMP_ROOT/repeat-signal.out" 2>> "$TMP_ROOT/repeat-signal.err" &
+REPEAT_WORKER_PID=$!
+for _ in $(seq 1 600); do
+  [ -f "$REPEAT_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$REPEAT_STATE/worker.ready" \
+  "the worker after a repeatedly signalled shutdown never reported ready"
+kill -TERM "$REPEAT_WORKER_PID"
+wait "$REPEAT_WORKER_PID" 2>/dev/null || true
+REPEAT_WORKER_PID=
+pass "a repeatedly signalled shutdown still releases ownership for the next worker"
 
 echo "ALL TESTS PASSED"
