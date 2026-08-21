@@ -852,9 +852,101 @@ test_oversized_backlog_survives_argv_cap() {
   pass "a backlog larger than the argv cap still snapshots in both output modes"
 }
 
+write_registered_mate() {  # <parent-home> <mate-id> <mate-home> <landed-count>
+  local home=$1 id=$2 mate=$3 count=$4 i
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects" "$mate/bin"
+  printf '# Firstmate fixture\n' > "$mate/AGENTS.md"
+  printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
+  printf -- '- %s - delegated domain (home: %s; scope: delegated work; projects: alpha; added 2026-07-11)\n' \
+    "$id" "$mate" >> "$home/data/secondmates.md"
+  {
+    printf '## In flight\n\n## Queued\n\n## Done\n'
+    i=1
+    while [ "$i" -le "$count" ]; do
+      printf -- '- [x] %s-landed-%04d - Landed change %04d covering the long-running snapshot pipeline refactor stage %04d of the delegated domain https://github.com/kunchenguid/firstmate/pull/%d (repo: alpha) (kind: ship) (merged 2026-07-01)\n' \
+        "$id" "$i" "$i" "$i" "$i"
+      i=$((i + 1))
+    done
+  } > "$mate/data/backlog.md"
+}
+
+# A child-home summary can pass the FM_SNAPSHOT_SECONDMATE_MAX_BYTES acceptance
+# guard (default 262144) while still exceeding the argv cap, because the guard
+# bound is twice MAX_ARG_STRLEN. The documented landed cap-lift
+# (FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0) reaches that window with an
+# ordinary grown Done section, so the parent must carry the accepted summary
+# to jq without putting it back on argv.
+test_oversized_secondmate_summary_survives_argv_cap() {
+  local home mate fakebin out err rc landed_bytes
+  home=$(make_home big-mate-parent)
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  mate=$TMP_ROOT/big-mate-home
+  write_registered_mate "$home" bigmate "$mate" 520
+  fakebin=$(make_fakebin "$home")
+
+  err="$home/snapshot.err"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 FM_SNAPSHOT_SECONDMATE_TIMEOUT=60 \
+    "$SNAPSHOT" --json 2>"$err") && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] || fail "snapshot with an argv-window child summary failed (rc=$rc): $(cat "$err")"
+  assert_no_grep 'Argument list too long' "$err" \
+    "an accepted child summary larger than the argv cap must not ride jq argv"
+
+  landed_bytes=$(printf '%s' "$out" | jq -c '.secondmate_current.records[0].landed' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$landed_bytes" -gt "$ARGV_CAP_BYTES" ] \
+    || fail "fixture child summary landed roll-up is only $landed_bytes bytes; it must exceed $ARGV_CAP_BYTES to exercise the guard window"
+  printf '%s' "$out" | jq -e '
+    (.secondmate_current.records | length) == 1
+      and .secondmate_current.records[0].id == "bigmate"
+      and .secondmate_current.records[0].provenance.selected == "structured-home"
+      and .secondmate_current.records[0].current.state == "no_active_work"
+      and (.secondmate_current.records[0].landed | length) == 520
+      and (.secondmate_landed.records | length) == 520
+  ' >/dev/null || fail "argv-window child summary was not carried into the snapshot intact: $(printf '%s' "$out" | head -c 400)"
+  pass "a child summary between the argv cap and the byte guard still snapshots"
+}
+
+# Individually small summaries still sum into one fleet aggregate; once the
+# combined secondmate_current object crosses the argv cap it must reach the
+# remaining jq handoffs (record roll-up, landed projection, final assembly)
+# through files as well.
+test_secondmate_aggregate_over_argv_cap_survives() {
+  local home fakebin out err rc n biggest total_bytes
+  home=$(make_home fleet-agg-parent)
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  for n in 1 2 3; do
+    write_registered_mate "$home" "aggmate$n" "$TMP_ROOT/fleet-agg-mate-$n" 200
+  done
+  fakebin=$(make_fakebin "$home")
+
+  err="$home/snapshot.err"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 FM_SNAPSHOT_SECONDMATE_TIMEOUT=60 \
+    "$SNAPSHOT" --json 2>"$err") && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] || fail "snapshot with an oversized fleet aggregate failed (rc=$rc): $(cat "$err")"
+  assert_no_grep 'Argument list too long' "$err" \
+    "a fleet aggregate larger than the argv cap must not ride jq argv"
+
+  biggest=$(printf '%s' "$out" | jq '[.secondmate_current.records[] | tojson | length] | max')
+  [ "$biggest" -lt "$ARGV_CAP_BYTES" ] \
+    || fail "fixture per-home summaries must each fit under $ARGV_CAP_BYTES to isolate the aggregate window (largest was $biggest)"
+  total_bytes=$(printf '%s' "$out" | jq -c '.secondmate_current' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$total_bytes" -gt "$ARGV_CAP_BYTES" ] \
+    || fail "fixture fleet aggregate is only $total_bytes bytes; it must exceed $ARGV_CAP_BYTES to exercise the cap"
+  printf '%s' "$out" | jq -e '
+    (.secondmate_current.records | length) == 3
+      and ([.secondmate_current.records[] | select(.provenance.selected == "structured-home")] | length) == 3
+      and ([.secondmate_current.records[] | .landed | length] | add) == 600
+      and (.secondmate_landed.records | length) == 600
+  ' >/dev/null || fail "oversized fleet aggregate produced an incomplete snapshot: $(printf '%s' "$out" | head -c 400)"
+  pass "a fleet aggregate larger than the argv cap still snapshots"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_oversized_backlog_survives_argv_cap
+test_oversized_secondmate_summary_survives_argv_cap
+test_secondmate_aggregate_over_argv_cap_survives
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
