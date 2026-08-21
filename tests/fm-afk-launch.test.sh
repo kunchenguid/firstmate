@@ -22,6 +22,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 START="$ROOT/bin/fm-afk-start.sh"
+export FM_WEDGE_ALARM_EXEC=discard
 
 FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
@@ -41,7 +42,7 @@ GLOBAL_CLEANUP() {
 trap GLOBAL_CLEANUP EXIT
 
 # ---------------------------------------------------------------------------
-# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
+# UNIT 1: fm_afk_clear_stale_artifacts removes the session-scoped delivery artifacts.
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
   local st
@@ -50,6 +51,7 @@ unit_clear_stale() {
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-escalations.since"
   : > "$st/state/.subsuper-inject-wedged"
+  : > "$st/state/.subsuper-delivery-unavailable"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
   # otherwise leak that into this test shell) and call the clear helper.
@@ -57,7 +59,8 @@ unit_clear_stale() {
     bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$START" "$st/state"
   if [ ! -e "$st/state/.subsuper-escalations" ] \
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
-     && [ ! -e "$st/state/.subsuper-inject-wedged" ]; then
+     && [ ! -e "$st/state/.subsuper-inject-wedged" ] \
+     && [ ! -e "$st/state/.subsuper-delivery-unavailable" ]; then
     pass "clear-stale: removes escalations buffer, sidecar, and wedge marker"
   else
     fail "clear-stale: stale artifacts survived"
@@ -488,7 +491,8 @@ unit_native_lifecycle() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=test-pane \
+    FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" start-native >/dev/null 2>&1 \
     && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ] \
     && [ -e "$st/state/.afk" ] \
     && [ ! -e "$st/state/.subsuper-escalations" ]; then
@@ -511,7 +515,8 @@ unit_native_entry_preserves_prepared_state() {
   mkdir -p "$st/state"
   : > "$st/state/.afk"
   : > "$st/state/.subsuper-escalations"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=1 bash -c '
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=test-pane \
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_STATE_PREPARED=1 bash -c '
     . "$1"
     FM_AFK_DAEMON=/bin/true
     fm_afk_start_main
@@ -520,6 +525,46 @@ unit_native_entry_preserves_prepared_state() {
     pass "native entry: launcher-prepared lifecycle state is not rewritten"
   else
     fail "native entry: launcher-prepared lifecycle state was mutated"
+  fi
+  rm -rf "$st"
+}
+
+unit_delivery_preflight_alarm_controls() {
+  local st recorder alerts
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-delivery-preflight.XXXXXX")
+  recorder="$st/record-alert"
+  alerts="$st/alerts"
+  # shellcheck disable=SC2016  # recorder variables expand when the fixture runs
+  printf '#!/usr/bin/env bash\nprintf "%%s\\t%%s\\n" "$1" "$2" >> "$FM_TEST_ALERTS"\n' > "$recorder"
+  chmod +x "$recorder"
+  : > "$alerts"
+
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_WEDGE_ALARM_EXEC="$recorder" \
+    FM_WEDGE_ALARM_CHANNEL=osascript FM_TEST_ALERTS="$alerts" bash -c '
+      . "$1"
+      discover_operator_session_identity() { printf "harness-pid=4242;tty=/dev/ttys042"; }
+      discover_supervisor_target() { printf "UNVERIFIED(no-supported-delivery-target)"; return 1; }
+      discover_supervisor_backend() { printf "UNVERIFIED(no-supported-delivery-backend)"; return 1; }
+      ! fm_afk_launch_delivery_preflight
+    ' _ "$LAUNCH" \
+    && grep -F 'osascript' "$alerts" >/dev/null \
+    && grep -F 'away mode NOT ARMED' "$st/state/.subsuper-delivery-unavailable" >/dev/null \
+    && [ ! -e "$st/state/.afk" ]; then
+    pass "delivery preflight: Ghostty-shaped missing endpoint refuses before away state and fires the independent alarm"
+  else
+    fail "delivery preflight: missing endpoint did not refuse visibly before away state"
+  fi
+
+  : > "$alerts"
+  rm -f "$st/state/.subsuper-delivery-unavailable"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_WEDGE_ALARM_EXEC="$recorder" \
+    FM_WEDGE_ALARM_CHANNEL=osascript FM_TEST_ALERTS="$alerts" \
+    FM_SUPERVISOR_TARGET=test-pane FM_SUPERVISOR_BACKEND=tmux \
+    bash -c '. "$1"; fm_afk_launch_delivery_preflight' _ "$LAUNCH" \
+    && [ ! -s "$alerts" ] && [ ! -e "$st/state/.subsuper-delivery-unavailable" ]; then
+    pass "delivery preflight: discovered endpoint is the negative control and fires no alarm"
+  else
+    fail "delivery preflight: discovered endpoint fired or retained a false alarm"
   fi
   rm -rf "$st"
 }
@@ -759,7 +804,8 @@ unit_clear_failure_aborts_entry() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear-fail.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=test-pane \
+    FM_SUPERVISOR_BACKEND=tmux bash -c '
     . "$1"
     fm_afk_launch_reconcile() { return 0; }
     fm_afk_clear_stale_artifacts() { return 1; }
@@ -812,7 +858,8 @@ unit_flag_write_failure_aborts() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-flag-fail.XXXXXX")
   mkdir -p "$st/state"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=test-pane \
+    FM_SUPERVISOR_BACKEND=tmux bash -c '
     . "$1"
     fm_afk_launch_flag_write() { return 1; }
     ! fm_afk_launch_start_native
@@ -941,6 +988,7 @@ unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
+unit_delivery_preflight_alarm_controls
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed

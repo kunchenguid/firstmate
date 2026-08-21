@@ -124,7 +124,8 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.subsuper-delivery-unavailable"
 }
 
 return_guard() {
@@ -172,6 +173,10 @@ return_reconcile() {
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
     wedge=$(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)
     append_evidence wedge "$wedge" "$evidence"
+  fi
+  if [ -s "$STATE/.subsuper-delivery-unavailable" ]; then
+    wedge=$(head -1 "$STATE/.subsuper-delivery-unavailable" 2>/dev/null || true)
+    append_evidence delivery "$wedge" "$evidence"
   fi
   if [ -s "$STATE/.subsuper-escalations" ]; then
     escalations=$(cat "$STATE/.subsuper-escalations" 2>/dev/null || true)

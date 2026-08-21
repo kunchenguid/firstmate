@@ -67,8 +67,9 @@
 #          FM_SUPERVISOR_TARGET     supervisor pane target (override; otherwise
 #                                   auto-discovered per backend - $TMUX_PANE
 #                                   under tmux, "<session>:<pane-id>" from
-#                                   $HERDR_PANE_ID under herdr - then
-#                                   firstmate:0 fallback). Accepts either a
+#                                   $HERDR_PANE_ID under herdr). A runtime with
+#                                   no supported delivery endpoint refuses and
+#                                   raises the independent alarm. Accepts either a
 #                                   tmux target or a herdr "<session>:<pane-id>"
 #                                   target; which one it's read as is decided by
 #                                   FM_SUPERVISOR_BACKEND (below), independently.
@@ -77,8 +78,8 @@
 #                                   way bin/fm-backend.sh's fm_backend_detect
 #                                   resolves the runtime firstmate itself is
 #                                   executing inside - $TMUX_PANE selects tmux,
-#                                   $HERDR_ENV=1 selects herdr - falling back to
-#                                   tmux). zellij, orca, and cmux are not yet
+#                                   $HERDR_ENV=1 selects herdr). zellij, orca,
+#                                   and cmux are not yet
 #                                   supported as supervisor backends; the daemon
 #                                   refuses loudly at startup rather than trying
 #                                   tmux primitives against a non-tmux pane.
@@ -168,10 +169,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
 
-# Supervisor-pane discovery (FM_SUPERVISOR_TARGET_DEFAULT,
-# FM_SUPERVISOR_BACKEND_DEFAULT, discover_supervisor_target,
-# discover_supervisor_backend). Shared with the script-owned away launcher
-# (bin/fm-afk-launch.sh) so the captain-pane resolution has exactly one owner.
+# Operator-session and delivery-endpoint discovery. Shared with the
+# script-owned away launcher (bin/fm-afk-launch.sh) so identity resolution has
+# exactly one owner.
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_DAEMON_DIR/fm-supervisor-target-lib.sh"
 
@@ -188,7 +188,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # harness-verification discipline. Selecting one refuses loudly at startup
 # instead of silently running tmux primitives against a pane that is not a tmux
 # pane.
-FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
@@ -798,7 +797,7 @@ wedge_alarm_via_osascript() {  # <summary>
   command -v osascript >/dev/null 2>&1 || {
     log "wedge alarm: osascript not found; cannot post a macOS notification"; return 1; }
   wedge_alarm_run_bounded osascript osascript -e 'on run argv' \
-    -e 'display notification (item 1 of argv) with title "firstmate: away-mode escalations WEDGED" sound name "Basso"' \
+    -e 'display notification (item 1 of argv) with title "firstmate: away-mode alarm" sound name "Basso"' \
     -e 'end run' "$summary" >/dev/null 2>&1 && return 0
   log "wedge alarm: osascript notification failed"
   return 1
@@ -886,6 +885,35 @@ wedge_alarm_notify() {  # <summary> <marker>
   return 0
 }
 
+# Refuse an away-mode entry whose operator session has no verified injectable
+# delivery endpoint. This alarm fires before the daemon loop and does not use
+# the endpoint whose discovery failed: stderr is immediate, the marker is
+# durable, and wedge_alarm_notify uses the existing OS/herdr/command channels.
+operator_delivery_unavailable_alarm() {  # <state> <operator-identity> <backend-result> <target-result>
+  local state=$1 operator_identity=$2 backend_result=$3 target_result=$4 marker summary
+  marker="$state/.subsuper-delivery-unavailable"
+  mkdir -p "$state" 2>/dev/null || true
+  summary="away mode NOT ARMED: escalation delivery unavailable; operator_session=$operator_identity; backend=$backend_result; target=$target_result"
+  {
+    printf '%s\n' "$summary"
+    printf 'Firstmate refused to guess an operator delivery endpoint. Configure FM_SUPERVISOR_BACKEND and FM_SUPERVISOR_TARGET for a supported endpoint.\n'
+  } > "$marker" 2>/dev/null || true
+  log "ERROR: $summary; alarm marker=$marker"
+  printf 'error: %s; alarm marker=%s\n' "$summary" "$marker" >&2
+  wedge_alarm_notify "$summary" "$marker"
+}
+
+fm_super_report_delivery_unavailable() {
+  local state operator_identity backend_result target_result LOG
+  state="$(_state_root)"
+  LOG="$state/.supervise-daemon.log"
+  operator_identity="${FM_OPERATOR_SESSION_IDENTITY:-UNVERIFIED(not-provided)}"
+  backend_result="${FM_SUPERVISOR_BACKEND_DISCOVERY:-UNVERIFIED(not-provided)}"
+  target_result="${FM_SUPERVISOR_TARGET_DISCOVERY:-UNVERIFIED(not-provided)}"
+  operator_delivery_unavailable_alarm "$state" "$operator_identity" "$backend_result" "$target_result"
+  return 1
+}
+
 # Raise a loud, rate-limited alarm when escalations cannot be delivered after
 # max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
 # is swallowed). The daemon must NEVER silently wedge: this logs
@@ -914,13 +942,13 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
   } 2>/dev/null > "$marker" || true
-  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
+  target="${FM_SUPERVISOR_TARGET:-}"
+  backend="${FM_SUPERVISOR_BACKEND:-}"
   # Best-effort status-line flash. tmux's display-message is a client-side OSD
   # with no herdr equivalent; the log line + durable marker above are already
   # the primary, backend-independent signal, so a non-tmux backend just skips
   # this cosmetic extra rather than attempting an unsupported call.
-  if [ "$backend" = tmux ]; then
+  if [ "$backend" = tmux ] && [ -n "$target" ]; then
     tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
   fi
   # Backend-independent active alert. Unlike the tmux flash above (skipped on
@@ -1127,13 +1155,16 @@ inject_msg() {  # <message> [state]
   msg=$(_collapse_newlines "$msg")
   fm_operational_input_encode away-supervisor "$msg" encoded || return 1
   msg=$encoded
-  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  target="${FM_SUPERVISOR_TARGET:-}"
   # BACKEND-AWARE (previously a raw `tmux display-message` pane-exists probe):
   # dispatches through bin/fm-backend.sh so a herdr supervisor pane is checked
-  # via the herdr adapter instead of always assuming tmux. Falls back to tmux
-  # when unset (sourced/test contexts that never ran fm_super_main's startup
-  # discovery), matching this function's pre-existing default assumption.
-  backend="${FM_SUPERVISOR_BACKEND:-tmux}"
+  # via the herdr adapter instead of always assuming tmux. Missing delivery
+  # identity fails closed; it is never converted into a guessed endpoint.
+  backend="${FM_SUPERVISOR_BACKEND:-}"
+  if [ -z "$target" ] || [ -z "$backend" ]; then
+    log "inject refused: supervisor delivery identity is unverified (target=${target:-UNVERIFIED}, backend=${backend:-UNVERIFIED})"
+    return 1
+  fi
   fm_backend_target_exists "$backend" "$target" || return 1
   # (3) Busy-guard: never inject into an in-use supervisor pane.
   if pane_is_busy "$target" "$backend"; then
@@ -1367,15 +1398,19 @@ fm_super_main() {
   echo "$$" > "$PIDFILE"
   fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null || true
 
+  # --- identify the operator session independently of its delivery backend --
+  local operator_identity
+  operator_identity=$(discover_operator_session_identity) || true
+
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
-  # (herdr) > tmux fallback. Resolved before the target below, since target
+  # (herdr) > explicit UNVERIFIED refusal. Resolved before the target below, since target
   # discovery composes a herdr "<session>:<pane-id>" string using the same
   # $HERDR_PANE_ID/$HERDR_SESSION markers this checks. Exporting the result
   # into FM_SUPERVISOR_BACKEND makes inject_msg/pane_is_busy/pane_input_pending
   # (which read that env var) dispatch through the right backend without an
   # extra global thread-through.
-  local discovered_backend backend_source
+  local discovered_backend backend_source backend_rc
   backend_source="FM_SUPERVISOR_BACKEND"
   if [ -z "${FM_SUPERVISOR_BACKEND:-}" ]; then
     if [ -n "${TMUX_PANE:-}" ]; then
@@ -1383,33 +1418,18 @@ fm_super_main() {
     elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       backend_source="HERDR_ENV"
     else
-      backend_source="FALLBACK($FM_SUPERVISOR_BACKEND_DEFAULT)"
+      backend_source="UNVERIFIED"
     fi
   fi
-  discovered_backend=$(discover_supervisor_backend) || true
-  FM_SUPERVISOR_BACKEND="$discovered_backend"
-  local BACKEND="$FM_SUPERVISOR_BACKEND"
-
-  # --- refuse an unsupported supervisor backend loudly, before ever trying a
-  # tmux/herdr-specific call against it (zellij, orca, and cmux have no verified
-  # composer/busy primitives wired up for this daemon yet - AGENTS.md section 4
-  # harness-verification discipline). This is the clear refusal the task calls
-  # for, instead of a confusing "does not resolve to a tmux pane" error.
-  if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
-    echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
-    log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"
-    fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
-    exit 1
-  fi
+  discovered_backend=$(discover_supervisor_backend)
+  backend_rc=$?
 
   # --- auto-discover the supervisor target (the pane running firstmate) -----
   # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
   # the pane that launched the daemon, normally firstmate's own) >
-  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > firstmate:0
-  # fallback. Exporting the result into FM_SUPERVISOR_TARGET makes inject_msg
-  # (which reads that env var) use the discovered pane without an extra global.
-  local discovered target_source
+  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > explicit
+  # UNVERIFIED refusal. A guessed session/window name is never returned.
+  local discovered target_source target_rc
   target_source="FM_SUPERVISOR_TARGET"
   if [ -z "${FM_SUPERVISOR_TARGET:-}" ]; then
     if [ -n "${TMUX_PANE:-}" ]; then
@@ -1417,16 +1437,36 @@ fm_super_main() {
     elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       target_source="HERDR_ENV(HERDR_PANE_ID)"
     else
-      target_source="FALLBACK(firstmate:0)"
+      target_source="UNVERIFIED"
     fi
   fi
-  if discovered=$(discover_supervisor_target); then
-    : # resolved cleanly
-  else
-    echo "warn: could not auto-discover supervisor pane (no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV/HERDR_PANE_ID); falling back to '$discovered' — verify this is firstmate's pane" >&2
+  discovered=$(discover_supervisor_target)
+  target_rc=$?
+
+  if [ "$backend_rc" -ne 0 ] || [ "$target_rc" -ne 0 ]; then
+    operator_delivery_unavailable_alarm "$STATE" "${operator_identity:-UNVERIFIED(operator-session-blind)}" "$discovered_backend" "$discovered"
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
   fi
+
+  FM_SUPERVISOR_BACKEND="$discovered_backend"
+  local BACKEND="$FM_SUPERVISOR_BACKEND"
   FM_SUPERVISOR_TARGET="$discovered"
   local TARGET="$FM_SUPERVISOR_TARGET"
+
+  # --- refuse an unsupported supervisor backend loudly, before ever trying a
+  # tmux/herdr-specific call against it (zellij, orca, and cmux have no verified
+  # composer/busy primitives wired up for this daemon yet - AGENTS.md section 4
+  # harness-verification discipline). This is the clear refusal the task calls
+  # for, instead of a confusing "does not resolve to a tmux pane" error.
+  if ! supervisor_delivery_backend_supported "$BACKEND"; then
+    log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"
+    operator_delivery_unavailable_alarm "$STATE" "${operator_identity:-UNVERIFIED(operator-session-blind)}" "UNVERIFIED(unsupported-backend:$BACKEND)" "$TARGET"
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
+  fi
 
   # --- validate supervisor target at startup (a missing target is a typo) ---
   # Dispatches through bin/fm-backend.sh instead of a raw `tmux display-message`
@@ -1434,8 +1474,8 @@ fm_super_main() {
   # backend=tmux this runs the exact same `tmux display-message -p -t "$TARGET"
   # '#{pane_id}'` call as before.
   if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
-    echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
+    operator_delivery_unavailable_alarm "$STATE" "${operator_identity:-UNVERIFIED(operator-session-blind)}" "$BACKEND" "UNVERIFIED(target-not-found:$TARGET)"
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
@@ -1562,7 +1602,10 @@ fm_super_main() {
 
 # Run only when executed, not when sourced (tests source the classifiers).
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
-  fm_super_main "$@"
+  case "${1:-}" in
+    report-delivery-unavailable) fm_super_report_delivery_unavailable ;;
+    *) fm_super_main "$@" ;;
+  esac
 else
   # Library mode: these functions were SOURCED (only tests do this - production
   # execs the daemon, see bin/fm-afk-start.sh). Make it structurally impossible
