@@ -238,6 +238,7 @@ family_for_basename() {
     fm-agy-live-descent.test.sh|\
     fm-spawn-relaunch.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
+    fm-spawn-pool-base-freshen.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;

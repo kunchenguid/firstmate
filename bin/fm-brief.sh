@@ -495,7 +495,7 @@ The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
 1. First action: verify your base is current and create your branch.
-   The worktree may have been pooled before the latest upstream commits landed.
+   The spawn path already refreshed this worktree to the tracked upstream and asserted the base, so HEAD should be current.
    Derive the tracked upstream with \`git rev-parse --abbrev-ref main@{upstream}\` - the same reasoning rule 3 uses for the PR target, so the two cannot drift apart.
    If tracking is not configured, append \`blocked: default branch has no tracking configured; cannot verify base\` to the status file and stop.
    Fetch that remote (the part before the \`/\`) and, if HEAD is behind the upstream ref, fast-forward with \`git merge --ff-only\` before branching.

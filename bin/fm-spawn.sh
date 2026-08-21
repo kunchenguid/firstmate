@@ -153,9 +153,14 @@
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
-#   origin, resolves the current remote default branch, and resets to its tip.
-#   An unreachable origin, unresolved default branch, or non-clean worktree
-#   refuses the spawn rather than risking a PR based on stale history.
+#   the tracked remote (best-effort - an unreachable remote warns but does not
+#   refuse), resolves the current tracked upstream, and resets to its tip.
+#   An unresolved default branch or non-clean worktree refuses the spawn.
+#   After the refresh, an independent tracked-base assertion verifies that
+#   HEAD is descended from the project's tracked upstream using local refs only.
+#   This assertion catches wrong-remote resets and refuses loudly without
+#   modifying the worktree; an unresolvable tracked upstream is treated as
+#   unknown (not wrong) and proceeds with a warning.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1987,7 +1992,7 @@ spawn_require_settled_lease_match() {
 }
 
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default upstream tracked_remote target expected actual status
+  local worktree=$1 default upstream tracked_remote target expected actual status fetch_ok
   # Resolve the default branch name. Try the existing fallback chain first
   # (origin/HEAD, then local main, then master). If origin/HEAD is not set,
   # try auto-detecting it so non-standard names (e.g. trunk) are found.
@@ -2017,11 +2022,23 @@ freshen_spawn_worktree_base() {  # <worktree>
     upstream="origin/$default"
   fi
   target="$upstream"
-  if ! git -C "$worktree" fetch --quiet "$tracked_remote"; then
-    echo "error: could not fetch '$tracked_remote' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  # Fetch is best-effort: an unreachable remote is unknown, not wrong.
+  # bin/fm-startup-network.sh exists because the startup path must not block on
+  # the network; the same principle applies here. When the fetch fails, fall
+  # through to the local-only base assertion below which verifies ancestry from
+  # whatever refs are locally available.
+  fetch_ok=1
+  if ! git -C "$worktree" fetch --quiet "$tracked_remote" 2>/dev/null; then
+    echo "warning: could not fetch '$tracked_remote' for worktree '$worktree'; proceeding with locally available refs" >&2
+    fetch_ok=0
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+    if [ "$fetch_ok" = 0 ]; then
+      # The tracked upstream ref is not available locally and we could not
+      # fetch. This is an unreadable upstream - unknown, not wrong.
+      echo "warning: tracked upstream '$target' is not locally resolvable and remote is unreachable for worktree '$worktree'; launching with unverified base" >&2
+      return 0
+    fi
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
@@ -2046,6 +2063,43 @@ freshen_spawn_worktree_base() {  # <worktree>
   # The assertion sits AFTER the refresh, so it is a post-condition and cannot false-positive.
   if ! git -C "$worktree" merge-base --is-ancestor "$target" HEAD 2>/dev/null; then
     echo "error: pooled worktree '$worktree' has HEAD diverged from tracked '$target'; base is on the wrong remote - refusing to launch" >&2
+    return 1
+  fi
+}
+
+# Independent post-condition: assert the worktree HEAD is based on the project's
+# tracked upstream. This uses local refs only (no fetch), so it is fast and cannot
+# block on the network. It catches the case where freshen_spawn_worktree_base
+# resolved to the wrong remote, or where a non-pool worktree (Orca, relaunch) was
+# created from a stale or wrong base.
+#
+# The assertion is: the tracked upstream commit must be an ancestor of HEAD.
+# - If the tracked upstream ref is not locally resolvable: warn and proceed
+#   (unreadable = unknown, not wrong; see fm-startup-network.sh rationale).
+# - If HEAD is not a descendant: refuse loudly and leave the copy untouched
+#   (AGENTS.md hard rule 1 forbids writing to a project, hard rule 3 forbids
+#   touching unlanded work).
+assert_spawn_tracked_base() {  # <worktree>
+  local worktree=$1 default upstream tracked_sha head_sha
+  default=$(default_branch "$worktree") || {
+    echo "warning: could not determine the default branch for worktree '$worktree'; skipping tracked-base assertion" >&2
+    return 0
+  }
+  upstream=$(git -C "$worktree" rev-parse --abbrev-ref "${default}@{upstream}" 2>/dev/null) || {
+    echo "warning: default branch '$default' has no upstream tracking in worktree '$worktree'; skipping tracked-base assertion" >&2
+    return 0
+  }
+  tracked_sha=$(git -C "$worktree" rev-parse --verify --quiet "$upstream^{commit}" 2>/dev/null) || {
+    echo "warning: tracked upstream '$upstream' is not locally resolvable in worktree '$worktree'; skipping tracked-base assertion (unreadable upstream)" >&2
+    return 0
+  }
+  head_sha=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) || {
+    echo "error: worktree '$worktree' has no HEAD; refusing to launch" >&2
+    return 1
+  }
+  if ! git -C "$worktree" merge-base --is-ancestor "$tracked_sha" "$head_sha" 2>/dev/null; then
+    echo "error: worktree '$worktree' HEAD ($head_sha) is not based on tracked upstream '$upstream' ($tracked_sha); the copy was cut from the wrong base - refusing to launch" >&2
+    echo "The worktree was left untouched. Inspect it and reconcile manually, or remove the pool slot so the next spawn gets a clean one." >&2
     return 1
   fi
 }
@@ -2588,6 +2642,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+  assert_spawn_tracked_base "$WT" || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
