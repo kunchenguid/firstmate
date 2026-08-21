@@ -176,6 +176,7 @@ make_spawn_case() {
   : > "$case_dir/pointer.log"
   : > "$case_dir/agy.state"
   : > "$case_dir/tmux-calls.log"
+  : > "$case_dir/tmux-env.log"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
@@ -190,6 +191,7 @@ run_spawn() {
     FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
     FM_FAKE_AGY_STATE="$case_dir/agy.state" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
+    FM_FAKE_TMUX_ENV_LOG="$case_dir/tmux-env.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_AGY_READY_POLLS=5 FM_AGY_DELIVERY_POLLS=3 FM_AGY_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
@@ -412,11 +414,37 @@ SH
   pass "fm-lock recognizes Agy ancestry and live lock holders"
 }
 
+# A tmux server takes its global environment from the process that starts it,
+# so the launch-time composer scope must not exist yet when fm-spawn ensures the
+# container: otherwise this one spawn's adapter name becomes ambient for every
+# pane created in that server afterwards, and a later pane running a different
+# harness would be read under this one's structural proof.
+test_agy_spawn_does_not_seed_the_container_environment() {
+  local id rec out rc container reads
+  id="agy-envscope-z1-$$"
+  AGY_RUNTIME_TASK_TMP="/tmp/fm-$id"
+  rec=$(make_spawn_case envscope "$id")
+  read_spawn_record "$rec"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "the Agy spawn under scope assertion should succeed"$'\n'"$out"
+  container=$(grep -E '^(has-session|new-session|new-window)\|' "$CASE_DIR/tmux-env.log" || true)
+  [ -n "$container" ] \
+    || fail "the spawn should have ensured its container through the stub"
+  printf '%s\n' "$container" | grep -qv '|$' \
+    && fail "a container-creating call must carry no composer scope: $container"
+  reads=$(grep -c '^capture-pane|agy$' "$CASE_DIR/tmux-env.log" || true)
+  [ "${reads:-0}" -gt 0 ] \
+    || fail "the Agy composer reads should still be scoped to agy"
+  pass "fm-spawn: the launch composer scope never reaches the container it creates"
+}
+
 test_separated_composer_is_structural
 test_separated_composer_is_harness_scoped
 test_agy_busy_signature_is_harness_scoped
 test_plain_backends_share_agy_composer_contract
 test_agy_spawn_delivers_after_trust_and_registers_hook
+test_agy_spawn_does_not_seed_the_container_environment
 test_agy_spawn_refuses_when_all_hook_roots_are_owned
 test_agy_delivery_accepts_fast_completed_turn
 test_agy_omits_unsupported_explicit_effort

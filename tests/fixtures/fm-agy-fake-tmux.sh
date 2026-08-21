@@ -2,6 +2,10 @@
 set -u
 
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
+# The ambient composer scope at the moment of each call, so a test can prove a
+# container-creating call carries none of it into the server it starts.
+[ -z "${FM_FAKE_TMUX_ENV_LOG:-}" ] \
+  || printf '%s|%s\n' "${1:-}" "${FM_COMPOSER_HARNESS-}" >> "$FM_FAKE_TMUX_ENV_LOG"
 state=$(cat "$FM_FAKE_AGY_STATE" 2>/dev/null || true)
 
 fake_screen() {

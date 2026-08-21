@@ -1408,9 +1408,11 @@ fm_super_main() {
   # harness-native paths, so its own detected harness IS the supervisor pane's
   # harness; the launch paths without inherited markers resolve to unknown and
   # simply skip harness-scoped structural checks (fail-safe deferral).
-  if [ -z "${FM_COMPOSER_HARNESS:-}" ]; then
-    FM_COMPOSER_HARNESS=$("$FM_DAEMON_DIR/fm-harness.sh" 2>/dev/null) || FM_COMPOSER_HARNESS=""
-  fi
+  # Detection always runs rather than deferring to an inherited value, because
+  # every OTHER reader of this contract resolves the harness of the exact pane
+  # it is about to read; an ambient value reaching this process came from some
+  # other pane's operation and would claim a different harness's structure.
+  FM_COMPOSER_HARNESS=$("$FM_DAEMON_DIR/fm-harness.sh" 2>/dev/null) || FM_COMPOSER_HARNESS=""
   export FM_COMPOSER_HARNESS
 
   # --- refuse an unsupported supervisor backend loudly, before ever trying a

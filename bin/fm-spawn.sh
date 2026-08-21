@@ -1253,18 +1253,6 @@ case "$ARG3" in
     ;;
 esac
 
-# Declare THIS launch's target harness for every composer read below, the same
-# way bin/fm-send.sh and bin/fm-control.sh declare theirs. It is set on every
-# spawn rather than only for the adapters with a harness-scoped composer proof,
-# because this script also runs as fm-control's relaunch child and would
-# otherwise inherit the REPLACED adapter's declaration while reading the
-# replacement's pane. A raw launch command records its basename, so the value
-# resolves to its verified adapter first and falls back to the recorded name
-# when it resolves to none.
-FM_COMPOSER_HARNESS=$(fm_control_harness_family "$HARNESS") \
-  || FM_COMPOSER_HARNESS=$HARNESS
-export FM_COMPOSER_HARNESS
-
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
 # Claude-compatible hook dialect explicitly rejects the model-reawakening and
@@ -2155,6 +2143,24 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+
+# Declare THIS launch's target harness for every composer read below, the same
+# way bin/fm-send.sh and bin/fm-control.sh declare theirs. It is set on every
+# spawn rather than only for the adapters with a harness-scoped composer proof,
+# because this script also runs as fm-control's relaunch child and would
+# otherwise inherit the REPLACED adapter's declaration while reading the
+# replacement's pane. A raw launch command records its basename, so the value
+# resolves to its verified adapter first and falls back to the recorded name
+# when it resolves to none.
+#
+# Declared HERE, after the backend container exists, and never before it: a
+# tmux server takes its global environment from whichever process starts it, so
+# a spawn that stands the container up would otherwise make this one launch's
+# adapter name ambient for every pane created in that server afterwards - the
+# cross-harness composer claim this scope exists to prevent.
+FM_COMPOSER_HARNESS=$(fm_control_harness_family "$HARNESS") \
+  || FM_COMPOSER_HARNESS=$HARNESS
+export FM_COMPOSER_HARNESS
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
@@ -2899,12 +2905,12 @@ LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 # tools as the parent harness. Clearing at this launch boundary covers every
 # fm-spawn-started session; fm-harness.sh's marker ordering covers hand-started
 # ones.
+# Agy is absent on purpose: its launch must stay a bare `agy ...` literal so
+# the trust gate settles before any delivery, and its own marker outranks any
+# inherited one in bin/fm-harness.sh's precedence order.
 case "$HARNESS" in
   cursor)
     LAUNCH="env -u ANTIGRAVITY_AGENT $LAUNCH"
-    ;;
-  agy)
-    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
   claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT $LAUNCH"
