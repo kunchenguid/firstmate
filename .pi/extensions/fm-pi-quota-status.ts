@@ -422,6 +422,7 @@ type CompatibleProvider = {
 
 type CompatibleModelRegistry = {
   getProvider?: (provider: string) => CompatibleProvider | undefined;
+  find?: (provider: string, modelId: string) => ActiveModel | undefined;
   getRegisteredProviderConfig?: (provider: string) => unknown;
   getRegisteredNativeProvider?: (provider: string) => unknown;
   isUsingOAuth?: (model: ActiveModel) => boolean;
@@ -817,7 +818,6 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
   const width = options.width;
   const timers = options.timers ?? defaultTimers;
   const authFile = options.authFile ?? defaultAuthFile();
-  const modelsFile = options.modelsFile ?? join(dirname(authFile), "models.json");
   const watchAuthDirectory: AuthDirectoryWatcher = options.watchAuthDirectory ?? (
     (path, watchOptions, listener) => watch(path, watchOptions, listener)
   );
@@ -909,18 +909,9 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     | { kind: "ok"; value: unknown }
     | { kind: "missing" | "failed" | "timeout" | "cancelled" | "overflow" };
 
-  function normalizeModelsJson(input: string): string {
-    return input
-      .replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (match) => (match.startsWith("\"") ? match : ""))
-      .replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (match, tail: string | undefined) => (
-        tail ?? (match.startsWith("\"") ? match : "")
-      ));
-  }
-
   function readBoundedJson(
     path: string,
     signal: AbortSignal,
-    allowModelsJsonSyntax = false,
   ): Promise<BoundedJsonResult> {
     return new Promise((resolve) => {
       let settled = false;
@@ -962,7 +953,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           const input = buffer.subarray(0, bytesRead).toString("utf8");
           return {
             kind: "ok",
-            value: JSON.parse(allowModelsJsonSyntax ? normalizeModelsJson(input) : input) as unknown,
+            value: JSON.parse(input) as unknown,
           };
         } catch (error) {
           return (error as NodeJS.ErrnoException).code === "ENOENT"
@@ -986,27 +977,6 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     if (!isRecord(result.value)) return { kind: "failed" };
     const credential = result.value[provider];
     return { kind: "ok", credential, revision: credentialRevision(credential) };
-  }
-
-  function modelsProviderHasAuthOverride(value: unknown, provider: string, modelId: string): boolean {
-    if (!isRecord(value)) return true;
-    if (value.providers === undefined) return false;
-    if (!isRecord(value.providers)) return true;
-    const rawProvider = value.providers[provider];
-    if (rawProvider === undefined) return false;
-    if (!isRecord(rawProvider)) return true;
-    if (rawProvider.headers !== undefined) return true;
-    if (rawProvider.models !== undefined) {
-      if (!Array.isArray(rawProvider.models)) return true;
-      const model = rawProvider.models.find((entry) => isRecord(entry) && entry.id === modelId);
-      if (isRecord(model) && model.headers !== undefined) return true;
-    }
-    if (rawProvider.modelOverrides !== undefined) {
-      if (!isRecord(rawProvider.modelOverrides)) return true;
-      const override = rawProvider.modelOverrides[modelId];
-      if (isRecord(override) && override.headers !== undefined) return true;
-    }
-    return false;
   }
 
   function resolveOAuthAuth(
@@ -1097,6 +1067,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       const registry = ctx.modelRegistry as unknown as CompatibleModelRegistry;
       if (
         typeof registry.getProvider !== "function" ||
+        typeof registry.find !== "function" ||
         typeof registry.getRegisteredProviderConfig !== "function" ||
         typeof registry.getRegisteredNativeProvider !== "function" ||
         typeof registry.isUsingOAuth !== "function"
@@ -1112,6 +1083,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       try {
         provider = registry.getProvider.call(ctx.modelRegistry, model.provider);
         if (
+          registry.find.call(ctx.modelRegistry, model.provider, model.id) !== model ||
           registry.getRegisteredProviderConfig.call(ctx.modelRegistry, model.provider) !== undefined ||
           registry.getRegisteredNativeProvider.call(ctx.modelRegistry, model.provider) !== undefined
         ) {
@@ -1215,36 +1187,6 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         return {
           kind: "unsupported",
           view: unsupportedView(model.provider, "auth-unavailable"),
-          modelRevision: preflight.modelRevision,
-          compositionRevision: preflight.compositionRevision,
-          credentialRevision: credentialResult.revision,
-        };
-      }
-      const modelsResult = await readBoundedJson(modelsFile, signal, true);
-      if (modelsResult.kind === "ok" && modelsProviderHasAuthOverride(
-        modelsResult.value,
-        model.provider,
-        model.id,
-      )) {
-        return {
-          kind: "unsupported",
-          view: unsupportedView(model.provider, "provider-override"),
-          modelRevision: preflight.modelRevision,
-          compositionRevision: preflight.compositionRevision,
-          credentialRevision: credentialResult.revision,
-        };
-      }
-      if (modelsResult.kind !== "ok" && modelsResult.kind !== "missing") {
-        const reason: QuotaUnsupportedReason = modelsResult.kind === "timeout"
-          ? "auth-timeout"
-          : modelsResult.kind === "cancelled"
-            ? "auth-cancelled"
-            : modelsResult.kind === "overflow"
-              ? "auth-overflow"
-              : "auth-unavailable";
-        return {
-          kind: "unsupported",
-          view: unsupportedView(model.provider, reason),
           modelRevision: preflight.modelRevision,
           compositionRevision: preflight.compositionRevision,
           credentialRevision: credentialResult.revision,
@@ -1890,6 +1832,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           render(session);
           return;
         }
+        const processStartedAtWallMs = now();
         const processStartedAtMonotonicMs = monotonicNow();
         const running = runQuotaAxiJson({
           command,
@@ -1980,11 +1923,19 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             const recoverable = recoverableFreshView(selected);
             const publication = recoverable ? quotaPublicationFreshView(recoverable) : null;
             const publishedAtMonotonicMs = monotonicNow();
-            const elapsedAtPublicationMs = Math.max(
+            const publishedAtWallMs = now();
+            const timelineOriginMs = publication?.generatedAtMs ?? report?.generatedAtMs ?? publishedAtWallMs;
+            const processElapsedMs = Math.max(
               0,
               publishedAtMonotonicMs - processStartedAtMonotonicMs,
             );
-            const timelineOriginMs = publication?.generatedAtMs ?? report?.generatedAtMs ?? now();
+            const wallElapsedMs = publishedAtWallMs - processStartedAtWallMs;
+            const generationProgress = wallElapsedMs === 0
+              ? 0
+              : (timelineOriginMs - processStartedAtWallMs) / wallElapsedMs;
+            const elapsedAtPublicationMs = processElapsedMs * (
+              1 - Math.min(1, Math.max(0, Number.isFinite(generationProgress) ? generationProgress : 0))
+            );
             session.quota = {
               view: publication
                 ? revalidateFreshQuotaView(

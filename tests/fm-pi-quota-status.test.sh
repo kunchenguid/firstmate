@@ -2385,7 +2385,11 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
           },
         },
       },
-      getModels() { return []; },
+      getModels() {
+        const model = ctx.model;
+        if (!model || model.provider !== providerId) return [];
+        return [providerOptions.composedModels ? { ...model } : model];
+      },
       stream() {},
       streamSimple() {},
     };
@@ -2412,6 +2416,9 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
       : {
           getProvider(providerId) {
             return providerComposition(providerId);
+          },
+          find(providerId, modelId) {
+            return providerComposition(providerId).getModels().find((model) => model.id === modelId);
           },
           getRegisteredProviderConfig(providerId) {
             return registeredProviderConfigs.get(providerId);
@@ -2783,7 +2790,7 @@ await waitFor(
 );
 await commentedModelsJson.emit("session_shutdown", { reason: "quit" });
 
-const commandHeaderOptions = {};
+const commandHeaderOptions = { composedModels: true };
 await writeFile(`${process.env.PI_CODING_AGENT_DIR}/models.json`, JSON.stringify({
   providers: {
     "openai-codex": {
@@ -2801,6 +2808,7 @@ const commandHeaderOverlay = makePi(
   "tui",
   commandHeaderOptions,
 );
+await fs.promises.rm(`${process.env.PI_CODING_AGENT_DIR}/models.json`);
 await commandHeaderOverlay.emit("session_start", { reason: "startup" });
 await waitFor(
   () => commandHeaderOverlay.widgetText(240).includes("provider override"),
@@ -2813,7 +2821,6 @@ const callsAfterCommandHeader = (await readFile(process.env.FM_QUOTA_TEST_CALLS,
 assert(commandHeaderOptions.authCalls === undefined, "command-backed headers reached the effective auth resolver");
 assert(callsAfterCommandHeader === callsBeforeCommandHeader, "command-backed headers invoked quota-axi");
 await commandHeaderOverlay.emit("session_shutdown", { reason: "quit" });
-await fs.promises.rm(`${process.env.PI_CODING_AGENT_DIR}/models.json`);
 
 const delayedAuthWatcher = new EventEmitter();
 delayedAuthWatcher.close = () => {};
@@ -2920,14 +2927,22 @@ await waitFor(
   () => modelsReadFailure.widgetText(400).includes("week 94% left"),
   "models-read-failure fixture did not publish initial quota",
 );
+const callsBeforeMalformedModels = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
 await writeFile(`${process.env.PI_CODING_AGENT_DIR}/models.json`, "{\n");
 await waitFor(
-  () => modelsReadFailure.widgetText(400).includes("auth unavailable"),
-  `models.json read failure was not exposed: ${modelsReadFailure.widgetText(400)}`,
+  async () => (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+    .trim()
+    .split(/\n/)
+    .filter(Boolean).length > callsBeforeMalformedModels,
+  "quota did not refresh against Pi's unchanged effective provider",
 );
 assert(
-  modelsReadFailure.widgetText(400).includes("week 94% left"),
-  "transient models.json read failure discarded independently fresh quota",
+  modelsReadFailure.widgetText(400).includes("week 94% left") &&
+    !modelsReadFailure.widgetText(400).includes("auth unavailable"),
+  "an unapplied models.json write changed effective-provider quota",
 );
 await modelsReadFailure.emit("session_shutdown", { reason: "quit" });
 await fs.promises.rm(`${process.env.PI_CODING_AGENT_DIR}/models.json`);
@@ -3499,6 +3514,50 @@ await waitFor(
 );
 assert(!processAge.widgetText(400).includes("94%"), "expired process output was published as fresh");
 await processAge.emit("session_shutdown", { reason: "quit" });
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
+const postStartupGenerationStart = Date.now();
+const postStartupGenerationDelayMs = 15_000;
+process.env.FM_QUOTA_TEST_NOW_MS = String(postStartupGenerationStart + postStartupGenerationDelayMs);
+process.env.FM_QUOTA_TEST_FIRST_RESET_MS = String(10_000);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  postStartupGenerationStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const callsBeforePostStartupGeneration = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+const postStartupGeneration = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => {
+    const calls = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+      .trim()
+      .split(/\n/)
+      .filter(Boolean).length;
+    return postStartupGenerationStart + (calls > callsBeforePostStartupGeneration
+      ? postStartupGenerationDelayMs
+      : 0);
+  },
+  monotonicNow: () => {
+    const calls = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+      .trim()
+      .split(/\n/)
+      .filter(Boolean).length;
+    return calls > callsBeforePostStartupGeneration ? postStartupGenerationDelayMs : 0;
+  },
+}));
+await postStartupGeneration.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => postStartupGeneration.widgetText(400).includes("week 94% left"),
+  "pre-generation startup time expired a newly generated quota window",
+);
+await postStartupGeneration.emit("session_shutdown", { reason: "quit" });
+delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
 const overflowSkewStart = Date.now();
