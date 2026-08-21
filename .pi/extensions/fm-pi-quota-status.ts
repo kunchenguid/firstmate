@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, watch, type FSWatcher } from "node:fs";
 import { open } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, uptime } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { TextDecoder } from "node:util";
@@ -323,6 +323,14 @@ const NON_ROUTING_MODEL_OVERRIDE_FIELDS = new Set([
   "maxTokens",
   "samplingParams",
 ]);
+const MODEL_DEFINITION_FIELDS = new Set([
+  "id",
+  ...NON_ROUTING_MODEL_OVERRIDE_FIELDS,
+  "api",
+  "baseUrl",
+  "headers",
+  "compat",
+]);
 const FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 type QuotaProcessResult =
@@ -359,6 +367,7 @@ export type FirstmateQuotaStatusOptions = {
   maxAuthBytes?: number;
   now?: () => number;
   monotonicNow?: () => number;
+  continuousNow?: () => number;
   width?: () => number;
   timers?: QuotaTimerScheduler;
   authFile?: string;
@@ -461,6 +470,7 @@ type CachedQuota = {
     validUntilMs: number;
   } | null;
   publishedAtMonotonicMs: number;
+  publishedAtContinuousMs: number;
   elapsedAtPublicationMs: number;
   elapsedThroughMs: number;
   timelineOriginMs: number;
@@ -615,8 +625,19 @@ function modelsConfigPreservesQuotaProvenance(value: unknown, model: ActiveModel
   if (value.models !== undefined) {
     if (!Array.isArray(value.models)) return false;
     for (const candidate of value.models) {
-      if (!isRecord(candidate)) return false;
-      if (candidate.id === model.id) return false;
+      if (!isRecord(candidate) || typeof candidate.id !== "string") return false;
+      if (candidate.id !== model.id) continue;
+      if (Object.keys(candidate).some((field) => !MODEL_DEFINITION_FIELDS.has(field))) return false;
+      if (candidate.headers !== undefined || candidate.compat !== undefined) return false;
+      const configuredApi = candidate.api ?? value.api ?? model.api;
+      if (configuredApi !== model.api || !isOfficialProviderModelApi(model.provider, configuredApi)) {
+        return false;
+      }
+      const configuredBaseUrl = candidate.baseUrl ?? value.baseUrl ?? model.baseUrl;
+      if (
+        typeof configuredBaseUrl !== "string" ||
+        !isOfficialProviderBaseUrl(model.provider, configuredBaseUrl)
+      ) return false;
     }
   }
   if (value.modelOverrides !== undefined) {
@@ -940,8 +961,19 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
   const maxAuthBytes = Math.floor(positiveNumber(options.maxAuthBytes, DEFAULT_MAX_AUTH_BYTES));
   const now = options.now ?? Date.now;
   const monotonicClock = options.monotonicNow ?? (options.now ? now : () => performance.now());
+  const continuousClock = options.continuousNow ?? (
+    options.monotonicNow
+      ? monotonicClock
+      : options.now
+        ? now
+        : () => uptime() * 1000
+  );
   const monotonicNow = () => {
     const value = monotonicClock();
+    return Number.isFinite(value) ? value : 0;
+  };
+  const continuousNow = () => {
+    const value = continuousClock();
     return Number.isFinite(value) ? value : 0;
   };
   const width = options.width;
@@ -1541,22 +1573,23 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       return view?.kind === "stale" ? view.recoverable ?? null : null;
     }
 
-    function authoritativeTimelineMs(quota: CachedQuota): number {
-      const elapsedMs = quota.elapsedAtPublicationMs + Math.max(
+    function authoritativeElapsedSincePublicationMs(quota: CachedQuota): number {
+      return Math.max(
         quota.elapsedThroughMs,
         monotonicNow() - quota.publishedAtMonotonicMs,
+        continuousNow() - quota.publishedAtContinuousMs,
         0,
       );
-      return quota.timelineOriginMs + elapsedMs;
+    }
+
+    function authoritativeTimelineMs(quota: CachedQuota): number {
+      return quota.timelineOriginMs + quota.elapsedAtPublicationMs +
+        authoritativeElapsedSincePublicationMs(quota);
     }
 
     function advanceAuthoritativeQuota(session: ActiveSession, quota: CachedQuota): void {
       if (session.quota !== quota || quota.publication === null) return;
-      quota.elapsedThroughMs = Math.max(
-        quota.elapsedThroughMs,
-        monotonicNow() - quota.publishedAtMonotonicMs,
-        0,
-      );
+      quota.elapsedThroughMs = authoritativeElapsedSincePublicationMs(quota);
       quota.view = revalidateFreshQuotaView(
         quota.publication,
         quota.timelineOriginMs + quota.elapsedAtPublicationMs + quota.elapsedThroughMs,
@@ -2128,6 +2161,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             const publication = recoverable ? quotaPublicationFreshView(recoverable) : null;
             const publishedAt = clockSample();
             const publishedAtMonotonicMs = publishedAt?.monotonicAfterMs ?? monotonicNow();
+            const publishedAtContinuousMs = continuousNow();
             const publishedAtWallMs = publishedAt?.wallMs ?? now();
             const timelineOriginMs = publication?.generatedAtMs ?? report?.generatedAtMs ?? publishedAtWallMs;
             const publicationAgeMs = conservativePublicationAgeMs(
@@ -2148,6 +2182,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
               publication: retainedPublication,
               wallFilter: null,
               publishedAtMonotonicMs,
+              publishedAtContinuousMs,
               elapsedAtPublicationMs,
               elapsedThroughMs: 0,
               timelineOriginMs,

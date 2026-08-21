@@ -2843,6 +2843,36 @@ await waitFor(
 );
 await cosmeticModelOverlay.emit("session_shutdown", { reason: "quit" });
 
+const metadataModelDefinition = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
+  "openai-codex",
+  "tui",
+  {
+    composedModels: true,
+    modelsConfig: {
+      "openai-codex": {
+        models: [{
+          id: "fixture-model",
+          name: "Metadata-only Codex",
+          api: "openai-codex-responses",
+          baseUrl: "https://chatgpt.com/backend-api",
+          reasoning: true,
+          input: ["text", "image"],
+          cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
+          contextWindow: 512_000,
+          maxTokens: 64_000,
+        }],
+      },
+    },
+  },
+);
+await metadataModelDefinition.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => metadataModelDefinition.widgetText(400).includes("week 94% left"),
+  `metadata-only models.json definition suppressed official quota: ${metadataModelDefinition.widgetText(400)}`,
+);
+await metadataModelDefinition.emit("session_shutdown", { reason: "quit" });
+
 await writeFile(`${process.env.PI_CODING_AGENT_DIR}/models.json`, `{
   // Pi models.json accepts line comments and trailing commas.
   "providers": {
@@ -3961,6 +3991,41 @@ assert(
 );
 await idleForward.emit("session_shutdown", { reason: "quit" });
 assert(idleForwardClock.tasks.size === 0, "idle forward-clock check leaked a timer");
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
+const suspendStart = Date.now();
+const suspendClock = new SplitClock(suspendStart);
+let suspendInclusiveMs = 0;
+process.env.FM_QUOTA_TEST_NOW_MS = String(suspendStart);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  suspendStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const suspendAware = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => suspendClock.wallNowMs,
+  monotonicNow: () => suspendClock.timerNowMs,
+  continuousNow: () => suspendInclusiveMs,
+  timers: suspendClock.timers,
+}));
+await suspendAware.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => suspendAware.widgetText(400).includes("week 94% left"),
+  "suspend-aware fixture did not publish fresh quota",
+);
+suspendInclusiveMs += 7 * 60_000;
+suspendClock.wallNowMs = suspendStart + 2 * 60_000;
+assert(
+  suspendAware.widgetText(400).includes("stale") &&
+    !suspendAware.widgetText(400).includes("94%"),
+  "sleep-inclusive expiry allowed suspended quota to resurrect after wall rollback",
+);
+await suspendAware.emit("session_shutdown", { reason: "quit" });
+assert(suspendClock.tasks.size === 0, "suspend-aware expiry leaked a timer");
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
 const delayedCountdownStart = Date.now();
