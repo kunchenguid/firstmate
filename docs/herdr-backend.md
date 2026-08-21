@@ -2,7 +2,7 @@
 
 Herdr is an experimental agent-native terminal backend with native per-pane agent state and push events.
 Firstmate requires Herdr protocol 14 or newer; broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, and 0.7.5, while the presentation-projection suite is additionally verified on 0.8.0 protocol 19 and protocol-16 features remain gated by availability.
-Herdr provides the terminal session while Treehouse continues to provide task worktrees.
+Herdr provides the terminal session while Treehouse provides ship and writer scout worktrees and reader scouts use checkout-free scratch directories.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
 ## Setup
@@ -25,7 +25,7 @@ It is also auto-detected when the primary runs natively under `HERDR_ENV=1` and 
 A tmux pane nested inside Herdr resolves to tmux because the innermost multiplexer wins.
 An auto-detected Herdr spawn prints an opt-out notice.
 
-Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
+Spawn stops before creating a Herdr container or acquiring a writer task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
 No separate first-run provisioning is required.
 
 The required CI lane self-bootstraps only its pinned Herdr build through `bin/fm-install-herdr.sh` and requires Treehouse from the runner's existing tracked owner.

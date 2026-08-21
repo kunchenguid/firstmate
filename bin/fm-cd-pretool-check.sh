@@ -24,8 +24,8 @@
 #   ALLOW - exit 0 and no output.
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
 #          deny object on stdout unless --claude was supplied.
-#   INERT - not the real primary checkout (a crewmate/scout task worktree or a
-#           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
+#   INERT - not the real primary checkout (a child writer worktree, reader
+#           scratch, or non-firstmate repo): exit 0 with no output, exactly like ALLOW.
 #   FAIL OPEN - malformed or empty stdin, missing jq for stdin transport,
 #               missing Node or policy owner, or an invalid policy response.
 #
@@ -46,7 +46,7 @@ Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude]
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, or Claude/Codex tool_input.command).
 Fires only in the real primary firstmate checkout; it is a silent no-op in a
-crewmate/scout task worktree or any non-firstmate repo.
+child writer worktree, reader scratch directory, or any non-firstmate repo.
 Exits 0 to allow and 2 to deny a persistent top-level cwd change.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
@@ -124,8 +124,8 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && 
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
 
 # Scope to a plain, non-worktree firstmate checkout, where git-dir equals
-# git-common-dir. A crewmate/scout task worktree - the shape bin/fm-spawn.sh
-# always hands out - is a linked git worktree where the two differ. This guard
+# git-common-dir. A ship or writer scout task worktree is a linked git worktree
+# where the two differ, while a reader scratch is not a checkout. This guard
 # does not inspect .fm-secondmate-home, so it applies in a git-cloned secondmate
 # home but remains inert when the secondmate home is itself a treehouse-leased
 # linked worktree. docs/cd-guard.md owns this scope; docs/turnend-guard.md owns

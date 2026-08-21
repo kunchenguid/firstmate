@@ -33,10 +33,22 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
-# Scout tasks (kind=scout in meta) carve out of that check: their worktree is
+# Writer scout tasks (kind=scout with absent access= in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# Reader scouts (access=reader in meta, written only by fm-spawn's --access
+# reader path) hold NO pool worktree: their worktree= is a disposable scratch
+# directory under the task temp root. Reader teardown passes the same scout
+# report and decision gates, then removes the scratch directly and never calls
+# treehouse return. Reader-specific refusals guard the axis: a git
+# checkout found anywhere inside the task temp root is evidence the reader violated
+# its no-tracked-file-writes contract by falling back to editing, so teardown
+# refuses (its content may be unlanded work) until the captain explicitly
+# approves discard via --force; and access=reader recorded on any
+# non-scout kind, or an unknown access value, refuses as record damage even
+# under --force, because honoring it would silently skip that task's
+# pool-worktree return and leak the lease.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -62,7 +74,8 @@
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--terminal-payload <json>]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
-#   checks, discards secondmate child work for kind=secondmate, and bypasses an
+#   checks, skips the reader grown-checkout refusal, discards secondmate child
+#   work for kind=secondmate, and bypasses an
 #   unsealed linked kit-run outcome seal after recording the bypass in
 #   data/teardown-kit-seal-forces.jsonl. Only use it when the captain has
 #   explicitly said to discard the work.
@@ -165,6 +178,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$SCRIPT_DIR/fm-backend-hometag-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -435,7 +450,8 @@ fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
-# (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
+# (writer /tmp/fm-<id>/ or a home-scoped reader root); absent for tasks spawned
+# before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
@@ -448,6 +464,75 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+# Reader/writer access axis (fm-spawn's --access): absent means writer. An
+# unknown value, or a reader marker on any non-scout kind, is record damage,
+# not a cleanup preference - honoring a forged reader marker would silently
+# skip a pool-worktree return and leak its lease - so both refuse even under
+# --force, exactly like the telemetry seal: repair the record, then re-run.
+if ! ACCESS=$(fm_meta_optional_exact_value "$META" access); then
+  echo "error: task $ID records invalid or duplicate access metadata; repair $META before teardown" >&2
+  exit 1
+fi
+[ -n "$ACCESS" ] || ACCESS=writer
+case "$ACCESS" in
+  reader|writer) ;;
+  *)
+    echo "error: task $ID records an unknown access '$ACCESS'; repair $META before teardown" >&2
+    exit 1
+    ;;
+esac
+if [ "$ACCESS" = reader ] && [ "$KIND" != scout ]; then
+  echo "error: task $ID records access=reader with kind=$KIND, but only a scout can be a reader; repair $META before teardown so this task's worktree return is not silently skipped" >&2
+  exit 1
+fi
+# Reader destruction anchor: cleanup removes only the recorded tasktmp= root,
+# but tasktmp= and worktree= must remain non-symlinked and mutually confined as
+# fm-spawn writes them. A reader record whose tasktmp is not this task's
+# canonical temp root (by spelling or physical resolution), whose worktree
+# resolves outside that root, or whose cleanup anchor is a symlink is record
+# damage. Refuse even under --force; a missing scratch is fine (already
+# cleaned), so worktree containment only checks a still-present target.
+if [ "$ACCESS" = reader ]; then
+  if ! fm_reader_task_tmp "$ID"; then
+    echo "error: task $ID records access=reader but this home's identity '$FM_READER_TASK_TMP_HOMETAG' is not safe for a task temp root" >&2
+    exit 1
+  fi
+  READER_CANONICAL_TMP=$FM_READER_TASK_TMP
+  if [ -L "$READER_CANONICAL_TMP" ] || [ -L "$TASK_TMP" ] || [ -L "$WT" ]; then
+    echo "error: task $ID records access=reader with a symlinked destruction anchor (tasktmp '${TASK_TMP:-<absent>}', worktree '${WT:-<absent>}'); repair $META before teardown so cleanup cannot follow attacker-chosen paths" >&2
+    exit 1
+  fi
+  READER_TASKTMP_REAL=
+  if [ -n "$TASK_TMP" ]; then
+    READER_TASKTMP_REAL=$(CDPATH='' cd -- "$TASK_TMP" 2>/dev/null && pwd -P) || READER_TASKTMP_REAL=
+  fi
+  READER_TASKTMP_OK=0
+  if [ "$TASK_TMP" = "$READER_CANONICAL_TMP" ]; then
+    READER_TASKTMP_OK=1
+  elif [ -n "$READER_TASKTMP_REAL" ]; then
+    READER_CANONICAL_TMP_REAL=$(CDPATH='' cd -- "$READER_CANONICAL_TMP" 2>/dev/null && pwd -P) || READER_CANONICAL_TMP_REAL=
+    if [ -n "$READER_CANONICAL_TMP_REAL" ] && [ "$READER_TASKTMP_REAL" = "$READER_CANONICAL_TMP_REAL" ]; then
+      READER_TASKTMP_OK=1
+    fi
+  fi
+  if [ "$READER_TASKTMP_OK" != 1 ]; then
+    echo "error: task $ID records access=reader with tasktmp '${TASK_TMP:-<absent>}', which is not this task's canonical temp root $READER_CANONICAL_TMP; repair $META before teardown so a damaged record cannot make this cleanup delete an arbitrary directory" >&2
+    exit 1
+  fi
+  if [ -e "$WT" ] || [ -L "$WT" ]; then
+    READER_WT_REAL=$(CDPATH='' cd -- "$WT" 2>/dev/null && pwd -P) || READER_WT_REAL=
+    READER_WT_CONTAINED=0
+    if [ -n "$READER_WT_REAL" ] && [ -n "$READER_TASKTMP_REAL" ]; then
+      case "$READER_WT_REAL" in
+        "$READER_TASKTMP_REAL"/*) READER_WT_CONTAINED=1 ;;
+      esac
+    fi
+    if [ "$READER_WT_CONTAINED" != 1 ]; then
+      echo "error: task $ID records access=reader but its worktree '$WT' does not resolve inside its recorded tasktmp '${TASK_TMP:-<absent>}'; repair $META before teardown so a damaged record cannot make this cleanup delete an arbitrary directory" >&2
+      exit 1
+    fi
+  fi
+fi
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -1796,7 +1881,7 @@ reap_task_backend_process_group() {  # <label>
   fi
 }
 
-# Reap every process rooted (by cwd) under this task's own worktree or tasktmp
+# Reap every process rooted (by cwd) under this task's own environment or tasktmp
 # - both unique per task and never shared - before either is removed. TERM
 # first, then KILL after a short grace period for anything still alive; a
 # process that exits on its own between the two passes is simply absent from
@@ -2594,6 +2679,33 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+# Reader boundary, enforced at the destruction edge: a reader can never write
+# to a tracked file, so a git checkout found anywhere this cleanup is about to
+# erase means the reader fell back to editing instead of stopping at the wall
+# its brief mandates. The scan covers the whole task temp root, matching the
+# rm -rf scope below (the scratch is inside it and a violating checkout could
+# sit beside the scratch, e.g. <tasktmp>/wt); a record without tasktmp= falls
+# back to scanning the scratch alone, its only removed path. That checkout's
+# content may be unlanded work - refuse loudly and investigate. The scratch's
+# own read handle is a bare repo.git, never a .git entry, so it does not trip
+# this check.
+reader_refuse_grown_checkout() {
+  local scan_root=$WT grown_checkout=
+  [ "$ACCESS" = reader ] && [ "$FORCE" != "--force" ] || return 0
+  if [ -n "$TASK_TMP" ] && [ -d "$TASK_TMP" ]; then
+    scan_root=$TASK_TMP
+  fi
+  if [ -d "$scan_root" ]; then
+    grown_checkout=$(find "$scan_root" -name .git -print -quit 2>/dev/null || true)
+  fi
+  if [ -n "$grown_checkout" ]; then
+    echo "REFUSED: reader task $ID grew a git checkout inside its task temp root ($grown_checkout)." >&2
+    echo "A reader must never edit tracked files; inspect that checkout for unlanded work, land or discard it explicitly, then re-run (--force only after the captain explicitly approves discarding it)." >&2
+    return 1
+  fi
+}
+reader_refuse_grown_checkout || exit 1
+
 # A public commitment is not kept until its final reply lands in the ORIGINAL
 # thread, and this cleanup removes the task records that make the promise
 # reconcilable. Refuse while this home still owes a public reply for exactly this
@@ -2832,6 +2944,11 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$ACCESS" = reader ]; then
+  # A reader holds no pool worktree, so it skips the branch drop and treehouse
+  # return below entirely - but its operator still gets the same pre-return
+  # reminders every other kind gets before its work directory is destroyed.
+  teardown_before_worktree_removal
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   teardown_before_worktree_removal
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -2931,8 +3048,9 @@ fi
 remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
+# Remove the recorded per-task temp root, including its gotmp and any reader scratch.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
+reader_refuse_grown_checkout || exit 1
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1

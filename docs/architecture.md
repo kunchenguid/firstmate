@@ -71,7 +71,7 @@ A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if 
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on unhealthy supervision.
 It leads with a prominent bordered tangle banner, while `bin/fm-guard.sh` owns the watcher-down banner and reminder policy so repeated guarded commands stay noisy without reprinting the full banner in the same episode.
 On every verified primary harness, tracked hook integration gives the primary session a push-based backstop: when work, a process-event source, or X-mode relay polling needs supervision and no identity-matched watcher lock with a fresh beacon is live, direct Stop hooks block and passive turn-end hooks force one bounded follow-up.
-The guard covers the main primary and genuinely marked secondmate homes, exempts child crewmate/scout worktrees, is loop-safe per harness, and is documented in [turnend-guard.md](turnend-guard.md).
+The guard covers the main primary and genuinely marked secondmate homes, stays inert in child task environments, is loop-safe per harness, and is documented in [turnend-guard.md](turnend-guard.md).
 
 A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill starts it through the tracked foreground helper `bin/fm-afk-start.sh`, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
 The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs, declared-external-wait vocabulary, and status-scan primitives.
@@ -122,24 +122,25 @@ tmux, zellij, orca, and cmux expose no native busy primitive at all, so a task o
 That poll loop is still the default event source for backends with no native push events, so this stays an extraction of the abstraction rather than a watcher rewrite.
 For capable Herdr sessions, the same watcher replaces its terminal sleep with a bounded native event wait that immediately surfaces `blocked`; [Push events and polling fallback](herdr-backend.md#push-events-and-polling-fallback) owns the current mechanism and capability gates, while [runtime backend verification](verification/runtime-backends.md#native-blocked-event) owns the active evidence.
 The deeper session-start agent-process liveness probe is separate from that busy-state poll: tmux and Herdr have verified classifiers for secondmate recovery, Zellij remains unverified, and Orca and cmux do not support secondmate spawns.
-Herdr is experimental and can be selected explicitly or by runtime auto-detection: Treehouse remains its worktree provider, [`herdr-backend.md`](herdr-backend.md) owns current setup and safety limits, and [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) owns active empirical evidence.
+Herdr is experimental and can be selected explicitly or by runtime auto-detection: Treehouse remains its writer worktree provider, [`herdr-backend.md`](herdr-backend.md) owns current setup and safety limits, and [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) owns active empirical evidence.
 Herdr uses one tab per task; [Watching and task containers](herdr-backend.md#watching-and-task-containers) owns launcher-bound workspace placement, the label-only fallback, and recovery scope.
 Its default-on presentation projection may place one clean new task in a disposable workspace without changing endpoint authority or lifecycle ownership; [Presentation spaces](herdr-backend.md#presentation-spaces) owns that conditional design and its narrow home-local restored-shell cleanup at locked session start.
-Zellij is experimental and selected only explicitly: Treehouse remains its worktree provider, [`zellij-backend.md`](zellij-backend.md) owns current setup and limits, and [`verification/runtime-backends.md`](verification/runtime-backends.md#zellij) owns active empirical evidence.
+Zellij is experimental and selected only explicitly: Treehouse remains its writer worktree provider, [`zellij-backend.md`](zellij-backend.md) owns current setup and limits, and [`verification/runtime-backends.md`](verification/runtime-backends.md#zellij) owns active empirical evidence.
 Zellij's container shape is simpler than herdr's: one shared `firstmate` session, one tab per task, with no per-home workspace split; visible tab titles are scoped by the active home label plus a short hash of the resolved `FM_ROOT` path.
 Orca is experimental and selected only explicitly: Orca owns both worktree and terminal lifecycle, records `orca_worktree_id=` and `terminal=`, and removes worktrees through `orca worktree rm` only after the usual firstmate teardown checks pass.
 [`orca-backend.md`](orca-backend.md) owns current behavior and limitations, while [`verification/runtime-backends.md`](verification/runtime-backends.md#orca) owns active smoke evidence.
-cmux is experimental, GUI-first, macOS-only, and can be selected explicitly or by runtime auto-detection from its primary `CMUX_WORKSPACE_ID` marker plus documented fallback signals: Treehouse remains its worktree provider, [`cmux-backend.md`](cmux-backend.md) owns current setup and limits, and [`verification/runtime-backends.md`](verification/runtime-backends.md#cmux) owns active source and live evidence.
+cmux is experimental, GUI-first, macOS-only, and can be selected explicitly or by runtime auto-detection from its primary `CMUX_WORKSPACE_ID` marker plus documented fallback signals: Treehouse remains its writer worktree provider, [`cmux-backend.md`](cmux-backend.md) owns current setup and limits, and [`verification/runtime-backends.md`](verification/runtime-backends.md#cmux) owns active source and live evidence.
 cmux's container shape is one workspace per task with one surface, no per-home container split; workspace titles are scoped by the active home label plus a short hash of the resolved `FM_ROOT` path, and `--secondmate` spawns are refused, mirroring Orca.
 Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectable as a runtime backend.
 
-## Worktrees, not branches in your checkout
+## Task environments, not branches in your checkout
 
-Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
-For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks that require a checkout, while Orca creates its own worktrees for `backend=orca`.
+For ship work and writer scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+The checkout-free reader scout path instead creates a bare shared-object read handle with no remote, validates its disposable scratch outside the primary checkout and every Git work tree or Git directory, and wraps the worker process so the target project is read-only while its scratch, report, and status surfaces remain writable.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
-Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
+Its operating checkout (`FM_ROOT`) and disposable writer task worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.
 Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 
@@ -152,10 +153,10 @@ Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-
 
 ## No-mistakes gate authority boundary
 
-Firstmate's own no-mistakes gate runs agents inside a checkout that also contains the fleet-captain identity in `AGENTS.md`, so gate execution needs an authority boundary separate from ordinary crewmate worktree isolation.
+Firstmate's own no-mistakes gate runs agents inside a checkout that also contains the fleet-captain identity in `AGENTS.md`, so gate execution needs an authority boundary separate from ordinary crewmate task isolation.
 The tracked `.no-mistakes.yaml` sets `disable_project_settings: true`; no-mistakes honors that setting only from the trusted default-branch copy, so a pushed branch cannot enable its own project instructions during validation.
 Independently, `fm-spawn.sh`, `fm-send.sh`, and `fm-teardown.sh` source `bin/fm-gate-refuse-lib.sh` and exit with status 3 before fleet mutation when the gate environment marker is present or the current checkout matches the default no-mistakes gate-repository topology.
-A normal primary checkout or crewmate worktree has neither signal and remains unaffected.
+A normal primary checkout or child task environment has neither signal and remains unaffected.
 The helper's header owns the exact signal detection, relocated-home limitation, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard.
 
 ## Two task shapes
@@ -187,7 +188,7 @@ Remote placement pins the remote second-mate agent to Herdr while leaving the re
 [`remote-secondmates.md`](remote-secondmates.md) owns current setup, transport, relay, failure, and retirement behavior.
 `fm-home-seed.sh` provisions a local isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same session-provider and status-file path as any direct report.
 `fm-remote-home-seed.sh` sends a bounded charter and origin manifest through the generic transport so the remote host clones and provisions its own home and projects.
-For a domain whose subject is the firstmate repo itself, a deliberate `--no-projects` seed creates a project-less home whose crews take pooled worktrees of that repo instead of separate clones.
+For a domain whose subject is the firstmate repo itself, a deliberate `--no-projects` seed creates a project-less home whose writers take pooled worktrees of that repo and whose reader scouts use checkout-free scratch directories instead of separate clones.
 The signal cannot be mixed with project names or omitted accidentally, and a populated home cannot be converted in place; the full seed contract is in [configuration.md](configuration.md#secondmate-routes-datasecondmatesmd).
 Herdr secondmate and child placement follows the launcher-binding contract in [Watching and task containers](herdr-backend.md#watching-and-task-containers).
 When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
@@ -250,7 +251,7 @@ The same ledger may hold a pre-registered routing-candidate comparison and at mo
 A spawn refused before it ever produced a model attempt leaves a `spawn-failure` event instead, carrying the refused pool, model, and task class with the exact cause but no attempt identifier, so credential or quota-read rot is visible per pool without a refusal ever being counted as an attempt or reaching the candidate-comparison invariants.
 Spawn capability and quota-reader availability are recorded as separate axes on that event, because a pool whose quota-read credential expired is still dispatchable and must never be marked unsupported by the gap.
 `bin/fm-model-telemetry.sh` is the single validator, writer, sealer, crash-recovery owner, routing-candidate evidence guard, and read-only sheet reader of that ledger; nothing else appends to it, repairs it, or reads it as an authority.
-The mechanism boundary is deliberately narrow: it hooks the resolved-profile spawn boundary in `bin/fm-spawn.sh` after the profile, backend, and worktree checks already passed, publishes only opaque attempt and task-root identifiers into the existing task metadata, and seals through `bin/fm-teardown.sh` after every existing safety, report, and public-followup gate but before any endpoint, worktree, or task state is deleted.
+The mechanism boundary is deliberately narrow: it hooks the resolved-profile spawn boundary in `bin/fm-spawn.sh` after the profile, backend, and task-isolation checks already passed, publishes only opaque attempt and task-root identifiers into the existing task metadata, and seals through `bin/fm-teardown.sh` after every existing safety, report, and public-followup gate but before any endpoint, task environment, or task state is deleted.
 The only capture ahead of that boundary is the spawn-failure record, written where `bin/fm-spawn.sh` has already decided to refuse: it observes the refusal it was handed and adds no check, no candidate judgment, and no launch decision of its own.
 Routing judgment, quota queries, model selection, scheduling, task-state ownership, runtime backend behavior, and harness behavior keep the owners they already had: the ledger records the axes and evidence a decision already produced, and firstmate may read that record back through the owner's read-only sheet as one inspectable input to its own next choice at intake.
 The deliberate exploration rotation and candidate-to-adopted-or-discarded transition are owned by the [`harness-adapters` skill](../.agents/skills/harness-adapters/SKILL.md); the rotation is exactly that lookup, and the choice it informs stays firstmate's, made at intake and recorded on the attempt it produced.
@@ -258,7 +259,7 @@ That transition requires the telemetry owner to freeze its method, exact model/v
 It counts one eligible quality outcome per distinct task root, excludes cancellation, incompleteness, quota stops, and known execution-environment failures, reports model/version/CLI plus task class, n, accepted-first-pass count, and rate for every cell, and enforces the frozen threshold for adoption plus rollback evidence for either verdict; the guard owns no other approval.
 The forbidden thing is the telemetry closed loop, not the lookup: no code path derives, ranks, weights, or rewrites a routing rule, dispatch profile, effort default, or harness pin from model-run ledger data, and that ledger never changes routing behavior without a human decision, so this mechanism holds no scheduler, scorer, control plane, or auto-tuner.
 A selection candidate is still resolved exactly as the [dispatch profiles](#dispatch-profiles) section describes.
-Recording is fail-closed at both ends because a silently missing outcome is worse than a stopped lifecycle step: a refused intake stops before the launch command is submitted, and a refused seal preserves the endpoint, worktree, and task state instead of cleaning up, with no bypass flag, `--force` included.
+Recording is fail-closed at both ends because a silently missing outcome is worse than a stopped lifecycle step: a refused intake stops before the launch command is submitted, and a refused seal preserves the endpoint, task environment, and task state instead of cleaning up, with no bypass flag, `--force` included.
 That fail-closed contract covers the attempt an intake opens; the spawn-failure record is deliberately best-effort in the other direction, because a refusal is already a stopped spawn and telemetry must help delivery rather than wedge it, so an unrecordable failure warns on stderr and leaves the spawn's own message and exit status untouched.
 Absent terminal evidence is sealed as an explicit incomplete outcome rather than inferred from cleanup; a final operator-visible `failed:` event records failure, and a forced cleanup without stronger evidence records cancellation.
 Those two initiating triggers are retained as bounded transition evidence refs while the original V1 gate-source enum remains unchanged for rollback compatibility.

@@ -13,4 +13,4 @@ When this session owns supervision and away mode is not active:
 9. Do not rely on this plugin in headless `opencode run`; firstmate primary supervision targets persistent OpenCode TUI sessions.
 
 OpenCode's persistent TUI plugin runtime is the wake mechanism.
-The plugin applies in the main primary checkout and a secondmate's own home, and stays silent only in child crewmate and scout worktrees.
+The plugin applies in the main primary checkout and a secondmate's own home, and stays silent outside those primary homes, including in child writer worktrees and reader scout scratch directories.

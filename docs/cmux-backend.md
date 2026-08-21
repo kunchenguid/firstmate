@@ -1,7 +1,7 @@
 # cmux runtime backend
 
 cmux is an experimental macOS GUI terminal backend.
-It provides task workspaces and surfaces while Treehouse continues to provide git worktrees.
+It provides task workspaces and surfaces while Treehouse provides ship and writer scout worktrees and reader scouts use checkout-free scratch directories.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared selection and metadata semantics.
 
 ## Setup

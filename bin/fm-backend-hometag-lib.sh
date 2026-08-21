@@ -1,23 +1,16 @@
 #!/usr/bin/env bash
 # bin/fm-backend-hometag-lib.sh - shared per-installation home-tag derivation
-# for session-provider backends whose container has ONE namespace shared by
-# every firstmate home on the machine, with no native per-home split (cmux's
-# one app-global workspace list, zellij's one shared "firstmate" session's
-# tab bar). Without a per-home discriminator embedded in the actual
-# title/name, two firstmate homes (two secondmates, a primary plus a
-# secondmate, or two independent primary installations) whose task ids
-# happen to collide can send/peek/close each other's tabs - the gap a
-# captain-directed no-mistakes review gate caught for cmux
-# (docs/cmux-backend.md) and this same tag mechanism was later ported to
-# zellij to close for the same reason (docs/zellij-backend.md "Home-scoped
-# tab titles").
+# for machine-global namespaces with no native per-home split: cmux's workspace
+# list, zellij's shared session tab bar, and reader task roots under /tmp.
+# Without the tag, equal task ids in distinct homes can address the same
+# backend endpoint or disposable reader storage.
 #
 # fm_backend_hometag() derives a short, stable tag: a readable prefix
 # ("firstmate" for the primary home, "2ndmate-<id>" for a secondmate home
 # carrying .fm-secondmate-home) plus a short hash of the resolved FM_ROOT
 # path, so distinct installations - including multiple primaries on one
-# machine - never collide even though they share one backend-global
-# namespace. Callers source this file AFTER resolving their own
+# machine - never collide in the shared namespace. Callers source this file
+# AFTER resolving their own
 # FM_HOME/FM_ROOT fallbacks (both adapters already do this for their own
 # purposes before any other function runs).
 #
@@ -49,4 +42,25 @@ fm_backend_hometag() {
     hash=$(printf '%s' "$root" | cksum | awk '{printf "%08x", $1}')
   fi
   printf '%s-%s' "$prefix" "$hash"
+}
+
+# fm_reader_task_tmp() is the single owner of a reader task's temp-root
+# spelling. fm-spawn records it as tasktmp= and fm-teardown recomputes it as
+# the destruction anchor it refuses to deviate from, even under --force; two
+# independent spellings would make every already-spawned reader permanently
+# untearable-down the moment one side changed. It sets FM_READER_TASK_TMP on
+# success and returns non-zero when the derived tag cannot safely name a
+# directory, leaving FM_READER_TASK_TMP_HOMETAG for the caller's diagnostic.
+FM_READER_TASK_TMP=
+FM_READER_TASK_TMP_HOMETAG=
+
+fm_reader_task_tmp() {  # <task-id>
+  local id=$1
+  FM_READER_TASK_TMP=
+  FM_READER_TASK_TMP_HOMETAG=$(fm_backend_hometag)
+  case "$FM_READER_TASK_TMP_HOMETAG" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  # shellcheck disable=SC2034 # Output global consumed by scripts sourcing this library.
+  FM_READER_TASK_TMP="/tmp/fm-$FM_READER_TASK_TMP_HOMETAG-$id"
 }

@@ -139,8 +139,9 @@ This is the same predicate `bin/fm-sessionstart-nudge.sh` and `bin/fm-turnend-gu
 A home is in scope when it has `AGENTS.md`, a `bin/` directory, an existing state directory, and either a plain checkout where git-dir equals git-common-dir or a valid `.fm-secondmate-home` marker.
 A marked secondmate home is in scope on purpose: it operates its own fleet and must dispatch through it for the same durability reasons.
 
-A crewmate's disposable task worktree is a linked git worktree, which is the shape `bin/fm-spawn.sh` always hands out, so it is out of scope.
-A crewmate using delegation tools inside its own task worktree is legitimate and stays allowed.
+A ship or writer scout's disposable task worktree is a linked git worktree, so it is out of scope.
+A reader scout's scratch directory is not a firstmate checkout and is out of scope for the same reason as any non-firstmate directory.
+A crewmate using delegation tools inside its own task environment is legitimate and stays allowed.
 A non-firstmate repo is out of scope.
 Any failure to confirm the home is inert, never a block, so a broken environment can never deny a tool call.
 

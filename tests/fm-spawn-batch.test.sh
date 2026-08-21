@@ -141,8 +141,46 @@ test_scout_batch_refuses_delivery_flags() {
   pass "scout batch refuses ship delivery flags instead of ignoring them"
 }
 
+# The shared reader axis must reach each re-executed pair. A writer brief gives
+# the child a behavioral oracle: only a forwarded --access reader can produce
+# the reader-vs-writer contract mismatch.
+test_reader_batch_forwards_shared_access() {
+  local home id project out status
+  home="$TMP_ROOT/reader-batch-home"
+  id=reader-batch-forward-z13
+  project="$home/projects/alpha"
+  mkdir -p "$home/data/$id"
+  fm_git_init_commit "$project"
+  printf 'writer scout brief\n\n# Task\nfixture\n' > "$home/data/$id/brief.md"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+    "$SPAWN" "$id=projects/alpha" --scout --access reader 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "reader batch with a writer brief should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'access mismatch' >/dev/null \
+    || fail "batch child did not receive the shared --access reader axis"
+  printf '%s\n' "$out" | grep -F "batch: FAILED to spawn $id (projects/alpha)" >/dev/null \
+    || fail "reader batch did not report the refused pair"
+  pass "batch dispatch forwards shared --access reader to each scout pair"
+}
+
+test_reader_refuses_orca_before_task_setup() {
+  local out status
+  out=$(run_spawn reader-orca-refuse-z14 projects/none --scout --access reader --backend orca)
+  status=$?
+  [ "$status" -ne 0 ] || fail "reader scout on Orca should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'backend=orca does not support --access reader' >/dev/null \
+    || fail "reader-Orca refusal did not name the conflicting allocation contract"
+  printf '%s\n' "$out" | grep -F 'no brief' >/dev/null \
+    && fail "reader-Orca conflict was not rejected before task setup"
+  pass "reader scouts refuse Orca before task setup because Orca allocates a worktree"
+}
+
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_batch_requires_the_shared_delivery_contract
 test_scout_batch_refuses_delivery_flags
+test_reader_batch_forwards_shared_access
+test_reader_refuses_orca_before_task_setup
 test_projects_path_scoping

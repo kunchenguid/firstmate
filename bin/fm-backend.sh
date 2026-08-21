@@ -341,6 +341,23 @@ fm_meta_get() {  # <meta-file> <key>
   grep "^$key=" "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+# fm_meta_optional_exact_value: the one non-empty value of `key=` in
+# <meta-file>, or empty when the key is absent. Missing files, blank values,
+# and duplicate values fail.
+fm_meta_optional_exact_value() {  # <meta-file> <key>
+  local meta=$1 key=$2 count value
+  [ -f "$meta" ] || return 1
+  count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
+  case "$count" in
+    0) return 0 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+  value=$(grep "^$key=" "$meta" | cut -d= -f2-)
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
 # fm_backend_of_meta: the backend recorded in <meta-file>, defaulting to
 # `tmux` when the field is absent - the P1 compatibility contract.
 fm_backend_of_meta() {  # <meta-file>
@@ -369,10 +386,8 @@ fm_backend_target_of_meta() {  # <meta-file>
 # On success, sets FM_BACKEND_VALIDATED_BACKEND and
 # FM_BACKEND_VALIDATED_TARGET. On failure, prints one refusal and returns 1.
 fm_backend_meta_exact_value() {  # <meta-file> <key>
-  local meta=$1 key=$2 count value
-  count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
-  [ "$count" -eq 1 ] || return 1
-  value=$(grep "^$key=" "$meta" | cut -d= -f2-)
+  local value
+  value=$(fm_meta_optional_exact_value "$1" "$2") || return 1
   [ -n "$value" ] || return 1
   printf '%s' "$value"
 }

@@ -9,7 +9,8 @@ import { spawn } from "node:child_process";
 // of the watcher-arm one. tool.execute.before can block by throwing (verified
 // 2026-07-09 against OpenCode 1.17.15 for the watcher-arm plugin; the same
 // mechanism carries this guard). The owner script is itself inert outside the
-// real primary checkout, so a crewmate/scout worktree is never affected.
+// real primary checkout, so child writer worktrees and reader scratch directories
+// are never affected.
 
 function runProcess(command, args) {
   return new Promise((resolvePromise) => {

@@ -92,8 +92,8 @@ test_changed_file_selection_is_conservative() {
 }
 
 init_changed_fixture_repo() {
-  local repo=$1 script
-  mkdir -p "$repo/bin" "$repo/tests"
+  local repo=$1 script opencode_plugin
+  mkdir -p "$repo/bin" "$repo/tests" "$repo/.opencode/plugins"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
@@ -124,6 +124,12 @@ init_changed_fixture_repo() {
     >"$repo/tests/fixture-helpers.sh"
   printf '# tests/fixture-helpers.sh\n' >>"$repo/tests/fm-pr-merge.test.sh"
   : >"$repo/bin/fm-fixture-shared.sh"
+  # Single-file fixtures kept directly under tests/fixtures/: one named by a
+  # suite, one named by nothing.
+  mkdir -p "$repo/tests/fixtures"
+  : >"$repo/tests/fixtures/flat-named.golden"
+  : >"$repo/tests/fixtures/flat-orphan.golden"
+  printf '# tests/fixtures/flat-named.golden\n' >>"$repo/tests/fm-brief.test.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-launch-axis-lib.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
@@ -137,6 +143,10 @@ init_changed_fixture_repo() {
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  # Keep the path split so this regression proves the explicit path map instead
+  # of satisfying the runner's source-reference scan with its own test text.
+  opencode_plugin="$repo/.opencode/plugins/fm-primary-"
+  : >"${opencode_plugin}cd-check.js"
   : >"$repo/src/unmapped.ts"
   git -C "$repo" init -q
   git -C "$repo" add .
@@ -144,7 +154,7 @@ init_changed_fixture_repo() {
 }
 
 test_changed_dependency_selection_and_unmapped_failure() {
-  local tmp repo listed rc
+  local tmp repo listed rc opencode_plugin
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
@@ -206,6 +216,37 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  opencode_plugin="$repo/.opencode/plugins/fm-primary-"
+  printf '\n' >>"${opencode_plugin}cd-check.js"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-cd-pretool-check.test.sh" \
+    "OpenCode cd adapter changes select cd-guard coverage"
+  git -C "$repo" add .opencode
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm opencode-cd-adapter-change
+
+  printf '\n' >>"$repo/tests/fixtures/flat-named.golden"
+  set +e
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD 2>"$tmp/flat-err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "a single-file fixture named by a suite must stay mapped: $(cat "$tmp/flat-err")"
+  assert_contains "$listed" "tests/fm-brief.test.sh" \
+    "a single-file fixture selects the suite that names it"
+  git -C "$repo" add tests/fixtures/flat-named.golden
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm flat-fixture-change
+
+  printf '\n' >>"$repo/tests/fixtures/flat-orphan.golden"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "a single-file fixture no suite names must fail closed, got $rc"
+  grep -Fq 'no changed-test mapping for source path: tests/fixtures/flat-orphan.golden' "$tmp/err" \
+    || fail "unnamed single-file fixture failure is not actionable: $(cat "$tmp/err")"
+  git -C "$repo" add tests/fixtures/flat-orphan.golden
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm flat-orphan-change
 
   printf '\n' >>"$repo/src/unmapped.ts"
   set +e

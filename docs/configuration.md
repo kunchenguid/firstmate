@@ -57,7 +57,7 @@ The file format is unchanged in both modes; tasks-axi and manual edits produce t
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
 `tmux` is the verified reference backend (see [`docs/tmux-backend.md`](tmux-backend.md)); `herdr`, `zellij`, `orca`, and `cmux` are experimental spawn backends (see [`docs/herdr-backend.md`](herdr-backend.md), [`docs/zellij-backend.md`](zellij-backend.md), [`docs/orca-backend.md`](orca-backend.md), and [`docs/cmux-backend.md`](cmux-backend.md)).
-Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
+Treehouse remains the worktree provider for ship and writer scout tasks on tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; reader scouts use checkout-free scratch directories, while Orca provides both the task worktree and terminal endpoint.
 New spawns choose the backend in this order: an explicit `--backend` flag that current authority for that exact task alone has authorized (a present captain instruction or the task's own accepted brief; never later-task precedent by analogy), then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
 If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals - tmux or herdr started from inside a cmux terminal is the innermost, currently-executing layer, while cmux itself (a terminal application, not a nestable multiplexer) is always checked last.
 See [`docs/cmux-backend.md`](cmux-backend.md#runtime-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
@@ -65,6 +65,7 @@ Auto-detected herdr or cmux prints a stderr notice naming `config/backend` and `
 Zellij and Orca are never auto-detected; select them by putting the name in a local `config/backend` file, by exporting `FM_BACKEND=<name>`, or by telling the first mate in chat.
 Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected until another adapter is implemented and verified.
 `fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, and `cmux` for ship and scout tasks; `backend=orca` and `backend=cmux` both still refuse `--secondmate` until secondmate launch semantics are designed for each.
+`backend=orca` also refuses reader scout spawns (`--access reader`), which avoid the managed worktree Orca allocates per task.
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 The session-start secondmate liveness sweep uses the recovery-grade `fm_backend_agent_state` classifier where verified.
 The comment above that function in `bin/fm-backend.sh` is the single owner of its detailed state contract and recovery authorization.
@@ -296,10 +297,10 @@ When `config/crew-dispatch.json` exists, crewmate and scout spawns require an ex
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
-For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
-For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a per-task `.fm-kimi-turnend` pointer in the worktree, and records the matching private registry token for teardown.
+For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the task root, with teardown removing the task token and pointer.
+For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a per-task `.fm-kimi-turnend` pointer in the task root, and records the matching private registry token for teardown.
 Kimi continues to use the captain's normal Kimi home, including the existing config, skills, and memory; Firstmate does not create an isolated Kimi home.
-Because Kimi asks for workspace trust per worktree root, `fm-spawn.sh` pre-trusts the validated worktree before launch by writing Kimi's own record under `~/.kimi-code/workspace-trust/`, so a spawned crewmate never dies on that dialog; [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md#kimi-verified-2026-08-16-kimi-0361-trust-and-submit-paths) owns the record format and workspace-id derivation.
+Because Kimi asks for workspace trust per task root, `fm-spawn.sh` pre-trusts the validated worktree or reader scratch before launch by writing Kimi's own record under `~/.kimi-code/workspace-trust/`, so a spawned crewmate never dies on that dialog; [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md#kimi-verified-2026-08-16-kimi-0361-trust-and-submit-paths) owns the record format and workspace-id derivation.
 That record is validated by `bin/fm-kimi-trust-check.sh`, which requires `jq`, and a Kimi spawn refuses loudly rather than launching when trust cannot be established or cannot be evaluated at all.
 The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
@@ -401,6 +402,8 @@ Backend tool availability uses the adapter's own executable resolver, so bootstr
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
+Reader scouts have one access-specific dependency outside that home-wide delta: `fm-spawn.sh` requires `sandbox-exec` on macOS or `bwrap` on Linux and refuses reader launch on any other platform or when the platform sandbox cannot pass its confinement preflight.
+Bootstrap does not report this dependency because writer tasks on the same backend do not need it; `fm-spawn.sh` checks it before creating the reader endpoint.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
@@ -629,7 +632,7 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
-FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
+FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/cmux support ship, writer-scout, and reader-scout spawns, Orca supports ship and writer-scout spawns, and codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state

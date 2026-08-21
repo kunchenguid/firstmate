@@ -14,6 +14,8 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 COOLDOWN="$ROOT/bin/fm-quota-cooldown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$ROOT/bin/fm-backend-hometag-lib.sh"
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
@@ -21,16 +23,23 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -n "${FM_FAKE_TMUX_CMDLOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CMDLOG"
+fi
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   capture-pane) printf '%s\n' "${FM_FAKE_TMUX_CAPTURE:-}"; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    [ -z "${FM_FAKE_TMUX_WINDOWS:-}" ] || printf '%s\n' "$FM_FAKE_TMUX_WINDOWS"
+    exit 0
+    ;;
   has-session|new-session|kill-window) exit 0 ;;
   new-window)
     [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf 'created\n' >> "$FM_FAKE_ENDPOINT_LOG"
+    printf '@1\n'
     exit 0
     ;;
   send-keys)
@@ -39,6 +48,13 @@ case "${1:-}" in
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          if [ "${FM_FAKE_EXEC_LAUNCH:-0}" = 1 ]; then
+            (
+              cd "${FM_FAKE_EXEC_CWD:?}"
+              /bin/bash -c "$a"
+            ) > "${FM_FAKE_EXEC_STDOUT:?}" 2> "${FM_FAKE_EXEC_STDERR:?}"
+            printf '%s\n' "$?" > "${FM_FAKE_EXEC_STATUS:?}"
+          fi
         fi
         prev=$a
       done
@@ -49,6 +65,45 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/bwrap" <<'SH'
+#!/usr/bin/env bash
+set -u
+project=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --bind|--dev-bind)
+      shift 3
+      ;;
+    --ro-bind)
+      [ "$2" = / ] || project=$2
+      shift 3
+      ;;
+    --cap-drop)
+      shift 2
+      ;;
+    --die-with-parent)
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      exit 2
+      ;;
+  esac
+done
+if [ -n "$project" ]; then
+  chmod -R u-w "$project"
+fi
+"$@"
+status=$?
+if [ -n "$project" ]; then
+  chmod -R u+w "$project"
+fi
+exit "$status"
+SH
+  chmod +x "$fakebin/bwrap"
   fm_fake_exit0 "$fakebin" treehouse pi-signed no-mistakes gh-axi gh tasks-axi
   cat > "$fakebin/claude" <<'SH'
 #!/usr/bin/env bash
@@ -390,11 +445,13 @@ test_no_profile_keeps_claude_profile_defaults() {
   expect_code 0 "$status" "claude spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  assert_no_grep "access=" "$HOME_DIR/state/$id.meta" \
+    "the default writer spawn added an access field to legacy metadata"
 
   launch=$(cat "$LAUNCH_LOG")
   expected="GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and types the claude launch instructions"
+  pass "no --model/--effort records defaults, writer metadata omits access, and the claude launch is canonical"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -2195,6 +2252,902 @@ test_active_profile_records_override_reason_in_meta
 test_active_profile_refuses_both_attestations
 test_active_profile_refuses_override_reason_without_explicit_harness
 test_no_profile_does_not_require_attestation
+# --- the reader/writer access axis (--access, scouts only) ------------------
+#
+# A reader scout is dispatched slot-free: no `treehouse get`, no pool worktree.
+# fm-spawn builds a disposable scratch directory at the task temp root, refuses
+# to launch unless that directory resolves outside the primary checkout and
+# outside every git work tree or git dir (the reader isolation enforcement
+# predicate), creates a fresh per-launch bare object-store read handle at
+# scratch/repo.git cloned from the launched project, and records access=reader
+# in the task meta. Distinct guards protect that path and each is pinned through its
+# own diagnostic so they can never be
+# conflated: a symlinked task temp root or scratch entry is refused BEFORE the
+# scratch mkdir ever runs ("sits behind a symlink"), so spawn never creates
+# anything through an attacker-chosen path. The descendant-link guard allows
+# only stable relative links that resolve within scratch. The symlink-free cases
+# reach validate_reader_scratch itself and kill its mutants - the primary-checkout
+# branch ("resolves into the primary checkout") via a project located at the
+# task temp root, and the any-checkout branch ("is inside a git checkout or
+# git dir") via a foreign repo grown at the task temp root.
+
+# Ask the shipped owner of the reader temp-root spelling (fm_reader_task_tmp)
+# where this task's root is, so these oracles follow fm-spawn and fm-teardown
+# instead of pinning a third private copy of the path.
+reader_task_tmp() {  # <task-id> [home]
+  local id=$1 home=${2:-$HOME_DIR}
+  (
+    FM_HOME=$home FM_ROOT=$ROOT
+    fm_reader_task_tmp "$id" || exit 1
+    printf '%s\n' "$FM_READER_TASK_TMP"
+  ) || fail "the reader temp-root owner refused to derive a path for $id"
+}
+
+reader_meta_value() {  # <meta> <key>
+  grep "^$2=" "$1" | tail -1 | cut -d= -f2-
+}
+
+write_reader_brief() {  # <home> <task-id>
+  mkdir -p "$1/data/$2"
+  printf 'brief for %s\nAccess contract: access=reader\n\n# Task\nfixture\n' "$2" > "$1/data/$2/brief.md"
+}
+
+install_reader_realpath_test_double() {  # <fakebin>
+  local fakebin=$1 real_realpath
+  real_realpath=$(command -v realpath) || fail "reader symlink tests require realpath"
+  cat > "$fakebin/realpath" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "${FM_TEST_REALPATH_MODE:-delegate}" in
+  resolution-error) exit 1 ;;
+esac
+"${FM_TEST_REALPATH_BIN:?}" "$@"
+SH
+  chmod +x "$fakebin/realpath"
+  printf '%s\n' "$real_realpath"
+}
+
+test_reader_scout_spawn_skips_pool_and_builds_scratch() {
+  local rec id out status task_tmp scratch_real proj_head cmdlog hook message hook_out hook_status launch
+  id=access-reader-ok-z1
+  rec=$(make_spawn_case access-reader-ok claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp" "/tmp/fm-$id"
+  cmdlog="$CASE_DIR/tmux-cmd.log"
+
+  out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  expect_code 0 "$status" "reader scout spawn should succeed"
+  assert_contains "$out" "spawned $id harness=claude kind=scout access=reader" \
+    "reader spawn did not report the access axis"
+
+  [ -d "$task_tmp/scratch" ] || fail "reader spawn did not create the scratch directory"
+  scratch_real=$(cd "$task_tmp/scratch" && pwd -P)
+  assert_grep "worktree=$scratch_real" "$HOME_DIR/state/$id.meta" \
+    "reader meta did not record the scratch directory as its working directory"
+  assert_grep "kind=scout" "$HOME_DIR/state/$id.meta" "reader meta lost kind=scout"
+  assert_grep "access=reader" "$HOME_DIR/state/$id.meta" "reader meta did not record access=reader"
+
+  [ "$(git --git-dir="$task_tmp/scratch/repo.git" rev-parse --is-bare-repository 2>/dev/null)" = true ] \
+    || fail "reader spawn did not create a bare read handle at scratch/repo.git"
+  proj_head=$(git -C "$PROJ_DIR" rev-parse HEAD)
+  assert_grep "base_commit=$proj_head" "$HOME_DIR/state/$id.meta" \
+    "reader meta did not record the read revision as base_commit"
+  [ "$(git --git-dir="$task_tmp/scratch/repo.git" rev-parse HEAD)" = "$proj_head" ] \
+    || fail "the reader read handle does not read the launched project's revision"
+
+  grep -F "new-window" "$cmdlog" | grep -Fq "$scratch_real" \
+    || fail "reader task window was not created in the scratch directory"
+  assert_no_grep "treehouse get" "$cmdlog" \
+    "reader spawn still sent treehouse get, which takes a pool slot"
+  [ -s "$LAUNCH_LOG" ] || fail "reader spawn did not submit a launch command"
+  grep -Fq "$HOME_DIR/data/$id/brief.md" "$LAUNCH_LOG" \
+    || fail "reader launch command did not carry the brief"
+  hook="$task_tmp/git-hooks/commit-msg"
+  assert_present "$hook" "reader launch did not receive the ordinary-worker co-author sanitizer"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" 'core.hooksPath' \
+    "reader launch did not select the task-local sanitizer relay"
+  message="$CASE_DIR/reader-commit-message"
+  printf 'Reader note\n\nCo-authored-by: Codex <codex@openai.com>\n' > "$message"
+  hook_out=$("$hook" "$message" 2>&1)
+  hook_status=$?
+  expect_code 0 "$hook_status" "reader sanitizer relay should execute: $hook_out"
+  assert_not_contains "$(cat "$message")" 'Codex <codex@openai.com>' \
+    "reader sanitizer relay did not strip the recognized agent co-author"
+
+  rm -rf "$task_tmp"
+  pass "reader scout spawn is slot-free: scratch dir + bare read handle, no treehouse get"
+}
+
+test_reader_launch_cannot_write_absolute_project_path() {
+  local rec id out status task_tmp scratch probe raw exec_status
+  id=access-reader-process-boundary-z16
+  rec=$(make_spawn_case access-reader-process-boundary claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  scratch="$task_tmp/scratch"
+  rm -rf "$task_tmp"
+  probe="$CASE_DIR/reader-probe.sh"
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+set -u
+project_file=$1
+scratch=$2
+handle=$3
+if printf 'reader boundary violation\n' >> "$project_file" 2>/dev/null; then
+  project_write=allowed
+else
+  project_write=denied
+fi
+printf 'scratch write allowed\n' > "$scratch/scratch-write.txt"
+if git --git-dir="$handle" show HEAD:README.md > "$scratch/read-handle.txt"; then
+  read_handle=allowed
+else
+  read_handle=denied
+fi
+printf 'project_write=%s\nread_handle=%s\n' "$project_write" "$read_handle" > "$scratch/probe-result"
+SH
+  chmod +x "$probe"
+  raw="$probe $PROJ_DIR/README.md $scratch $scratch/repo.git"
+  exec_status="$CASE_DIR/exec.status"
+
+  out=$(FM_FAKE_EXEC_LAUNCH=1 FM_FAKE_EXEC_CWD="$scratch" \
+    FM_FAKE_EXEC_STDOUT="$CASE_DIR/exec.stdout" FM_FAKE_EXEC_STDERR="$CASE_DIR/exec.stderr" \
+    FM_FAKE_EXEC_STATUS="$exec_status" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --scout --access reader --harness "$raw")
+  status=$?
+  expect_code 0 "$status" "reader scout spawn should submit its confined launch"
+  [ "$(cat "$exec_status")" = 0 ] || fail "the launched reader probe did not complete"
+  grep -qx 'project_write=denied' "$scratch/probe-result" \
+    || fail "the launched reader wrote a tracked file through the absolute project path"
+  [ -z "$(git -C "$PROJ_DIR" status --porcelain)" ] \
+    || fail "the launched reader left the project checkout dirty"
+  grep -qx 'scratch write allowed' "$scratch/scratch-write.txt" \
+    || fail "process confinement blocked the reader's own scratch writes"
+  grep -qx 'read_handle=allowed' "$scratch/probe-result" \
+    || fail "process confinement blocked Git reads through the bare handle"
+  cmp -s "$PROJ_DIR/README.md" "$scratch/read-handle.txt" \
+    || fail "the confined read handle returned different tracked content"
+
+  rm -rf "$task_tmp"
+  pass "reader launch confinement denies absolute tracked writes while preserving scratch and Git reads"
+}
+
+test_reader_spawn_does_not_probe_harness_version_outside_confinement() {
+  local rec id out status task_tmp probe raw project_status
+  id=access-reader-version-probe-z19
+  rec=$(make_spawn_case access-reader-version-probe claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+  probe="$FAKEBIN_DIR/side-effecting-harness"
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --version ]; then
+  printf 'unconfined version probe\n' >> "${FM_TEST_READER_PROJECT_FILE:?}"
+  printf 'side-effecting-harness 1.0\n'
+fi
+SH
+  chmod +x "$probe"
+  raw="side-effecting-harness --run"
+
+  out=$(FM_TEST_READER_PROJECT_FILE="$PROJ_DIR/README.md" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --scout --access reader --harness "$raw")
+  status=$?
+  expect_code 0 "$status" "reader scout spawn should submit its confined launch"
+  project_status=$(git -C "$PROJ_DIR" status --porcelain)
+
+  rm -rf "$task_tmp"
+  [ -z "$project_status" ] \
+    || fail "reader spawn executed the harness version probe outside confinement"
+  pass "reader spawn never probes its harness version outside confinement"
+}
+
+# The read handle is READ access only: `git clone --bare --shared` records
+# origin=<project>, and a push through it deletes any project branch that is
+# not the project's checked-out one - on this repo, another task's unlanded
+# fm/<id> work. The reader boundary is enforced, not promised, so the shipped
+# handle must carry no configured ref-write path while every read still works.
+test_reader_read_handle_holds_no_ref_write_path_to_project() {
+  local rec id out status task_tmp handle push_out push_status proj_head
+  id=access-reader-no-origin-z15
+  rec=$(make_spawn_case access-reader-no-origin claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+  git -C "$PROJ_DIR" branch fm/victim-task
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  expect_code 0 "$status" "reader scout spawn should succeed"
+  handle="$task_tmp/scratch/repo.git"
+
+  [ -z "$(git --git-dir="$handle" remote)" ] \
+    || fail "the reader read handle still records a remote, a configured ref-write path into the project it may only read"
+
+  push_out=$(git --git-dir="$handle" push origin --delete fm/victim-task 2>&1)
+  push_status=$?
+  [ "$push_status" -ne 0 ] \
+    || fail "a reader-side ref write reached the project through the read handle: $push_out"
+  git -C "$PROJ_DIR" rev-parse --verify -q fm/victim-task >/dev/null \
+    || fail "a reader-side push deleted a branch in the project the reader may only read"
+
+  proj_head=$(git -C "$PROJ_DIR" rev-parse HEAD)
+  [ "$(git --git-dir="$handle" rev-parse HEAD)" = "$proj_head" ] \
+    || fail "closing the ref-write path cost the reader its view of the project revision"
+  [ "$(git --git-dir="$handle" show "$proj_head:README.md")" = "$(cat "$PROJ_DIR/README.md")" ] \
+    || fail "closing the ref-write path cost the reader object-store reads"
+  git --git-dir="$handle" archive "$proj_head" | tar -tf - | grep -qx README.md \
+    || fail "closing the ref-write path cost the reader archive snapshots"
+
+  rm -rf "$task_tmp"
+  pass "the reader read handle keeps object-store reads with no ref-write path back into the project"
+}
+
+test_reader_same_id_scopes_scratch_by_home_identity() {
+  local rec id out status home_one proj_one meta_one tmp_one head_one
+  local home_two proj_two meta_two tmp_two head_two
+  id=access-reader-home-scope-z7
+
+  rec=$(make_spawn_case access-reader-home-one claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  rm -rf "$(reader_task_tmp "$id" "$HOME_DIR")" "/tmp/fm-$id"
+  home_one=$HOME_DIR
+  proj_one=$PROJ_DIR
+  meta_one="$HOME_DIR/state/$id.meta"
+  head_one=$(git -C "$PROJ_DIR" rev-parse HEAD)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  expect_code 0 "$status" "the first home reader spawn should succeed"
+  tmp_one=$(reader_meta_value "$meta_one" tasktmp)
+
+  rec=$(make_spawn_case access-reader-home-two claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  printf '%s\n' second-home > "$HOME_DIR/.fm-secondmate-home"
+  rm -rf "$(reader_task_tmp "$id" "$HOME_DIR")"
+  printf '%s\n' second-home > "$PROJ_DIR/second-home.txt"
+  git -C "$PROJ_DIR" add second-home.txt
+  git -C "$PROJ_DIR" -c user.email=t@t -c user.name=t commit -q -m "second home identity"
+  home_two=$HOME_DIR
+  proj_two=$PROJ_DIR
+  meta_two="$HOME_DIR/state/$id.meta"
+  head_two=$(git -C "$PROJ_DIR" rev-parse HEAD)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  expect_code 0 "$status" "the second home reader spawn should succeed"
+  tmp_two=$(reader_meta_value "$meta_two" tasktmp)
+
+  [ "$tmp_one" != "$tmp_two" ] \
+    || fail "two homes with the same reader task id shared one task temp root"
+  [ "$(git --git-dir="$tmp_one/scratch/repo.git" rev-parse HEAD)" = "$head_one" ] \
+    || fail "the first home's reader handle changed after the second home spawned"
+  [ "$(git --git-dir="$tmp_two/scratch/repo.git" rev-parse HEAD)" = "$head_two" ] \
+    || fail "the second home's reader handle points at the first home's project"
+  [ "$home_one" != "$home_two" ] && [ "$proj_one" != "$proj_two" ] \
+    || fail "reader home-scope fixture did not create distinct homes and projects"
+
+  rm -rf "$tmp_one" "$tmp_two"
+  pass "reader task temp roots are scoped by home identity"
+}
+
+test_reader_access_flag_is_scout_only_and_closed_set() {
+  local rec id out status
+  id=access-reader-flags-z2
+  rec=$(make_spawn_case access-reader-flags claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --access reader)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--access reader on a ship spawn should be refused"
+  assert_contains "$out" "--access applies only to scout spawns" \
+    "ship access refusal did not explain the axis scope"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --secondmate --access reader)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--access reader on a secondmate spawn should be refused"
+  assert_contains "$out" "--access applies only to scout spawns" \
+    "secondmate access refusal did not explain the axis scope"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --scout --access sometimes)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unknown --access value should be refused"
+  assert_contains "$out" "--access must be reader or writer" \
+    "unknown access value refusal did not name the closed set"
+
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused access spawn still wrote task metadata"
+  pass "fm-spawn: --access is scout-only, closed-set, and refused loudly"
+}
+
+test_reader_brief_access_contract_cross_check() {
+  local rec id out status cmdlog brief staged
+  id=access-reader-brief-spoof-z5
+  rec=$(make_spawn_case access-reader-brief-spoof claude "$id")
+  read_case_record "$rec"
+  cmdlog="$CASE_DIR/tmux-cmd.log"
+
+  brief="$HOME_DIR/data/$id/brief.md"
+  rm -f "$brief"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" project --scout >/dev/null 2>&1 \
+    || fail "writer scout brief scaffold should succeed"
+  staged="$CASE_DIR/spoofed-writer-brief.md"
+  sed 's/^{TASK}$/Access contract: access=reader/' "$brief" > "$staged"
+  mv "$staged" "$brief"
+
+  out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] || fail "task text spoofed a writer brief into a reader spawn"
+  assert_contains "$out" "access mismatch" "task-text access spoof refusal did not name the mismatch"
+  [ ! -s "$cmdlog" ] || fail "the task-text access spoof still created a task window"
+
+  id=access-reader-brief-generated-z6
+  rec=$(make_spawn_case access-reader-brief-generated claude "$id")
+  read_case_record "$rec"
+  brief="$HOME_DIR/data/$id/brief.md"
+  rm -f "$brief"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" project --scout --access reader >/dev/null 2>&1 \
+    || fail "reader scout brief scaffold should succeed"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "writer scout spawn with a reader brief should be refused"
+  assert_contains "$out" "access mismatch" "writer spawn did not catch the reader brief"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  expect_code 0 "$status" "generated reader brief should satisfy a reader spawn"
+
+  id=access-writer-brief-legacy-z7
+  rec=$(make_spawn_case access-writer-brief-legacy claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "legacy writer brief without an access contract should remain valid"
+  pass "fm-spawn: only the scaffold-owned access contract can select a reader spawn"
+}
+
+test_reader_symlinked_scratch_refuses_before_creation() {
+  local rec id out status task_tmp cmdlog
+  id=access-reader-symlink-z3
+  rec=$(make_spawn_case access-reader-symlink claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp" "/tmp/fm-$id"
+  ln -s "$PROJ_DIR" "$task_tmp"
+  cmdlog="$CASE_DIR/tmux-cmd.log"
+
+  out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a symlinked reader task temp root must refuse to launch"
+  assert_contains "$out" "sits behind a symlink" "symlinked task temp root refusal did not name the symlink gate"
+  [ ! -e "$PROJ_DIR/scratch" ] || fail "the refused reader spawn created a scratch entry inside the symlink target"
+  [ ! -s "$cmdlog" ] || fail "the refused reader spawn still created a task window"
+  assert_absent "$HOME_DIR/state/$id.meta" "the refused reader spawn still wrote task metadata"
+  rm -f "$task_tmp"
+
+  mkdir -p "$task_tmp"
+  ln -s "$PROJ_DIR" "$task_tmp/scratch"
+  out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a reader scratch entry that is itself a symlink must refuse to launch"
+  assert_contains "$out" "sits behind a symlink" "symlinked scratch entry refusal did not name the symlink gate"
+  [ ! -s "$cmdlog" ] || fail "the refused reader spawn still created a task window"
+  assert_absent "$HOME_DIR/state/$id.meta" "the refused reader spawn still wrote task metadata"
+
+  rm -rf "$task_tmp"
+  pass "reader symlink gate: a symlinked task temp root or scratch entry refuses to launch before anything is created through it"
+}
+
+test_reader_scratch_predicate_refuses_primary_checkout() {
+  local rec id out status task_tmp cmdlog
+  id=access-reader-prim-z4
+  rec=$(make_spawn_case access-reader-prim claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+  fm_git_init_commit "$task_tmp"
+  cmdlog="$CASE_DIR/tmux-cmd.log"
+
+  out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$task_tmp" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a symlink-free reader scratch resolving into the primary checkout must refuse to launch"
+  assert_contains "$out" "resolves into the primary checkout" \
+    "primary-checkout refusal did not come from the isolation predicate's own branch"
+  [ ! -s "$cmdlog" ] || fail "the refused reader spawn still created a task window"
+  assert_absent "$HOME_DIR/state/$id.meta" "the refused reader spawn still wrote task metadata"
+
+  rm -rf "$task_tmp"
+  pass "reader predicate: a scratch inside the primary checkout refuses to launch through the predicate's primary-checkout branch"
+}
+
+test_reader_scratch_predicate_refuses_any_checkout() {
+  local rec id out status task_tmp cmdlog
+  id=access-reader-foreign-z5
+  rec=$(make_spawn_case access-reader-foreign claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+  mkdir -p "$task_tmp/scratch"
+  git init -q "$task_tmp"
+  cmdlog="$CASE_DIR/tmux-cmd.log"
+
+  out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a symlink-free reader scratch inside ANY git checkout must refuse to launch, not just the primary"
+  assert_contains "$out" "is inside a git checkout or git dir" \
+    "foreign-checkout refusal did not come from the isolation predicate's own branch"
+  [ ! -s "$cmdlog" ] || fail "the refused reader spawn still created a task window"
+  assert_absent "$HOME_DIR/state/$id.meta" "the refused reader spawn still wrote task metadata"
+
+  rm -rf "$task_tmp"
+  pass "reader predicate: a scratch inside any git checkout refuses to launch through the predicate's git branch"
+}
+
+test_reader_scratch_predicate_refuses_descendant_checkout() {
+  local rec id out status task_tmp cmdlog
+  id=access-reader-descendant-z6
+  rec=$(make_spawn_case access-reader-descendant claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+  mkdir -p "$task_tmp/scratch"
+  git init -q "$task_tmp/scratch/hack"
+  cmdlog="$CASE_DIR/tmux-cmd.log"
+
+  out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a reader scratch containing a descendant checkout must refuse to launch"
+  assert_contains "$out" "contains a git checkout" \
+    "descendant-checkout refusal did not come from the isolation predicate"
+  [ -d "$task_tmp/scratch/hack/.git" ] || fail "the refusal removed the descendant checkout"
+  [ ! -s "$cmdlog" ] || fail "the refused reader spawn still created a task window"
+  assert_absent "$HOME_DIR/state/$id.meta" "the refused reader spawn still wrote task metadata"
+
+  rm -rf "$task_tmp"
+  pass "reader predicate: a descendant checkout in stale scratch refuses launch"
+}
+
+test_reader_scratch_predicate_allows_contained_archive_symlink_on_relaunch() {
+  local rec id out status task_tmp cmdlog
+  id=access-reader-contained-link-z8
+  rec=$(make_spawn_case access-reader-contained-link claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  printf 'archive target\n' > "$PROJ_DIR/archive-target.txt"
+  ln -s archive-target.txt "$PROJ_DIR/archive-link.txt"
+  git -C "$PROJ_DIR" add archive-target.txt archive-link.txt
+  git -C "$PROJ_DIR" -c user.email=t@t -c user.name=t commit -q -m "reader archive symlink fixture"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+  cmdlog="$CASE_DIR/tmux-cmd.log"
+
+  out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  expect_code 0 "$status" "the initial reader spawn should succeed before extracting a snapshot"
+  mkdir -p "$task_tmp/scratch/snapshot"
+  git --git-dir="$task_tmp/scratch/repo.git" archive HEAD \
+    | tar -x -C "$task_tmp/scratch/snapshot" \
+    || fail "could not extract the sanctioned reader archive snapshot"
+  [ -L "$task_tmp/scratch/snapshot/archive-link.txt" ] \
+    || fail "git archive did not preserve the tracked relative symlink fixture"
+  [ "$(cat "$task_tmp/scratch/snapshot/archive-link.txt")" = "archive target" ] \
+    || fail "the archived relative symlink did not resolve inside reader scratch"
+
+  : > "$cmdlog"
+  out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  expect_code 0 "$status" "a reader relaunch should allow an existing relative symlink contained within scratch"
+  [ -s "$LAUNCH_LOG" ] || fail "the contained archive symlink prevented reader relaunch submission"
+  assert_grep "access=reader" "$HOME_DIR/state/$id.meta" \
+    "the relaunched contained-symlink reader lost its access contract"
+
+  rm -rf "$task_tmp"
+  pass "reader predicate: a contained Git-archive symlink survives reader relaunch"
+}
+
+test_reader_scratch_predicate_refuses_absolute_descendant_symlink() {
+  local rec id out status task_tmp cmdlog
+  id=access-reader-absolute-link-z9
+  rec=$(make_spawn_case access-reader-absolute-link claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+  mkdir -p "$task_tmp/scratch"
+  ln -s "$PROJ_DIR" "$task_tmp/scratch/project"
+  cmdlog="$CASE_DIR/tmux-cmd.log"
+
+  out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a reader scratch containing an absolute descendant symlink must refuse to launch"
+  assert_contains "$out" "uses an absolute target" \
+    "absolute descendant-symlink refusal did not name the unsafe target class"
+  [ -L "$task_tmp/scratch/project" ] || fail "the refusal removed the descendant symlink"
+  [ ! -s "$cmdlog" ] || fail "the refused reader spawn still created a task window"
+  assert_absent "$HOME_DIR/state/$id.meta" "the refused reader spawn still wrote task metadata"
+  assert_absent "$task_tmp/scratch/repo.git" "the refused reader spawn still created a read handle"
+
+  rm -rf "$task_tmp"
+  pass "reader predicate: an absolute descendant symlink refuses launch"
+}
+
+test_reader_scratch_predicate_refuses_unresolvable_or_escaping_symlinks() {
+  local class rec id out status task_tmp scratch cmdlog expected real_realpath=
+  for class in relative-outside dangling cyclic resolution-error; do
+    id="access-reader-${class}-link-z10"
+    rec=$(make_spawn_case "access-reader-${class}-link" claude "$id")
+    read_case_record "$rec"
+    write_reader_brief "$HOME_DIR" "$id"
+    task_tmp=$(reader_task_tmp "$id")
+    rm -rf "$task_tmp"
+    scratch="$task_tmp/scratch"
+    mkdir -p "$scratch"
+    cmdlog="$CASE_DIR/tmux-cmd.log"
+    case "$class" in
+      relative-outside)
+        mkdir -p "$task_tmp/outside"
+        printf 'outside scratch\n' > "$task_tmp/outside/secret.txt"
+        ln -s ../outside "$scratch/link"
+        expected="resolves outside"
+        ;;
+      dangling)
+        ln -s missing "$scratch/link"
+        expected="cannot be resolved"
+        ;;
+      cyclic)
+        ln -s cycle "$scratch/link"
+        ln -s link "$scratch/cycle"
+        expected="cannot be resolved"
+        ;;
+      resolution-error)
+        printf 'inside scratch\n' > "$scratch/target"
+        ln -s target "$scratch/link"
+        real_realpath=$(install_reader_realpath_test_double "$FAKEBIN_DIR")
+        expected="cannot be resolved"
+        ;;
+    esac
+
+    if [ "$class" = resolution-error ]; then
+      out=$(FM_TEST_REALPATH_MODE=resolution-error FM_TEST_REALPATH_BIN="$real_realpath" \
+        FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+        run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+    else
+      out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+        run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+    fi
+    status=$?
+    [ "$status" -ne 0 ] || fail "a reader scratch containing a $class symlink must refuse to launch"
+    assert_contains "$out" "$expected" "$class symlink refusal did not name its unsafe resolution"
+    [ -d "$scratch" ] || fail "$class symlink refusal removed reader scratch"
+    [ -L "$scratch/link" ] || fail "$class symlink refusal removed the planted link"
+    [ ! -s "$cmdlog" ] || fail "$class symlink refusal still created a task window"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$class symlink refusal still submitted a harness launch"
+    assert_absent "$HOME_DIR/state/$id.meta" "$class symlink refusal still wrote task metadata"
+    assert_absent "$scratch/repo.git" "$class symlink refusal still created a read handle"
+    rm -rf "$task_tmp"
+  done
+  pass "reader predicate: outside, dangling, cyclic, and resolution-error symlinks refuse without launch"
+}
+
+test_reader_stale_handle_replaced_with_current_project() {
+  local rec id out status task_tmp foreign proj_head
+  id=access-reader-stale-handle-z11
+  rec=$(make_spawn_case access-reader-stale-handle claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+  mkdir -p "$task_tmp/scratch"
+  foreign="$CASE_DIR/foreign-project"
+  mkdir -p "$foreign"
+  git -C "$foreign" init -q
+  printf 'foreign\n' > "$foreign/foreign.txt"
+  git -C "$foreign" add foreign.txt
+  git -C "$foreign" -c user.email=t@t -c user.name=t commit -q -m "foreign repo"
+  git clone -q --bare --shared "$foreign" "$task_tmp/scratch/repo.git"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  expect_code 0 "$status" "a reader spawn over a stale foreign handle should succeed with a fresh handle"
+  proj_head=$(git -C "$PROJ_DIR" rev-parse HEAD)
+  [ "$(git --git-dir="$task_tmp/scratch/repo.git" rev-parse HEAD)" = "$proj_head" ] \
+    || fail "the reader read handle still reads the stale foreign repository instead of the launched project"
+  assert_grep "base_commit=$proj_head" "$HOME_DIR/state/$id.meta" \
+    "reader meta did not record the launched project's revision as base_commit"
+
+  rm -rf "$task_tmp"
+  pass "reader handle is per-launch: a stale foreign handle is replaced by a clone of the launched project"
+}
+
+test_reader_relaunch_onto_different_project_refuses_loudly() {
+  local rec id out status task_tmp other first_head
+  id=access-reader-project-flip-z12
+  rec=$(make_spawn_case access-reader-project-flip claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  expect_code 0 "$status" "the initial reader spawn should succeed"
+  first_head=$(git -C "$PROJ_DIR" rev-parse HEAD)
+
+  other="$CASE_DIR/other-project"
+  mkdir -p "$other"
+  git -C "$other" init -q
+  printf 'other\n' > "$other/other.txt"
+  git -C "$other" add other.txt
+  git -C "$other" -c user.email=t@t -c user.name=t commit -q -m "other repo"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$other" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a reader relaunch pointed at a different project must refuse, not silently record one project while reading another"
+  assert_contains "$out" "refusing to replace its launch boundary" \
+    "the cross-project reader relaunch refusal did not name the launch boundary"
+  assert_grep "base_commit=$first_head" "$HOME_DIR/state/$id.meta" \
+    "the refused cross-project relaunch overwrote the original launch boundary"
+
+  rm -rf "$task_tmp"
+  pass "reader relaunch onto a different project refuses instead of mixing repositories"
+}
+
+test_access_flip_on_existing_task_refuses() {
+  local rec id out status task_tmp
+  id=access-flip-z13
+  rec=$(make_spawn_case access-flip claude "$id")
+  read_case_record "$rec"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+
+  mkdir -p "$HOME_DIR/state"
+  printf 'window=firstmate:fm-%s\nendpoint_task_id=%s\nworktree=%s\nproject=%s\nharness=claude\nkind=scout\ntasktmp=/tmp/fm-%s\n' \
+    "$id" "$id" "$WT_DIR" "$PROJ_DIR" "$id" > "$HOME_DIR/state/$id.meta"
+  write_reader_brief "$HOME_DIR" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a reader relaunch of an existing writer task must refuse before overwriting its pool lease record"
+  assert_contains "$out" "leak the pool lease" \
+    "the writer-to-reader flip refusal did not name the leaked pool lease"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "the refused writer-to-reader flip overwrote the writer's pool worktree record"
+  [ ! -e "$task_tmp" ] || fail "the refused writer-to-reader flip still created a reader temp root"
+
+  printf 'window=firstmate:fm-%s\nendpoint_task_id=%s\nworktree=%s/scratch\nproject=%s\nharness=claude\nkind=scout\naccess=reader\ntasktmp=%s\n' \
+    "$id" "$id" "$task_tmp" "$PROJ_DIR" "$task_tmp" > "$HOME_DIR/state/$id.meta"
+  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a writer relaunch of an existing reader task must refuse before orphaning its scratch record"
+  assert_contains "$out" "orphan its scratch cleanup" \
+    "the reader-to-writer flip refusal did not name the orphaned scratch"
+  assert_grep "access=reader" "$HOME_DIR/state/$id.meta" \
+    "the refused reader-to-writer flip overwrote the reader's access record"
+
+  printf 'window=firstmate:fm-%s\nendpoint_task_id=%s\nworktree=%s/scratch\nproject=%s\nharness=claude\nkind=scout\naccess=sometimes\ntasktmp=%s\n' \
+    "$id" "$id" "$task_tmp" "$PROJ_DIR" "$task_tmp" > "$HOME_DIR/state/$id.meta"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a writer relaunch over an unknown access record must refuse instead of laundering the damaged meta"
+  assert_contains "$out" "unknown access" \
+    "the unknown-access writer relaunch refusal did not name the record damage"
+  assert_grep "access=sometimes" "$HOME_DIR/state/$id.meta" \
+    "the refused unknown-access writer relaunch rewrote the damaged record"
+
+  write_reader_brief "$HOME_DIR" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a reader relaunch over an unknown access record must refuse instead of laundering the damaged meta"
+  assert_contains "$out" "unknown access" \
+    "the unknown-access reader relaunch refusal did not name the record damage"
+  assert_grep "access=sometimes" "$HOME_DIR/state/$id.meta" \
+    "the refused unknown-access reader relaunch rewrote the damaged record"
+
+  rm -rf "$task_tmp"
+  pass "the access axis of an existing task id is immutable: flips and unknown values refuse in both directions"
+}
+
+test_duplicate_access_record_refuses_before_reader_relaunch_mutation() {
+  local rec id out status task_tmp before
+  id=access-duplicate-z14
+  rec=$(make_spawn_case access-duplicate claude "$id")
+  read_case_record "$rec"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+
+  printf 'window=firstmate:fm-%s\nendpoint_task_id=%s\nworktree=%s\nproject=%s\nharness=claude\nkind=scout\naccess=writer\naccess=reader\ntasktmp=/tmp/fm-%s\n' \
+    "$id" "$id" "$WT_DIR" "$PROJ_DIR" "$id" > "$HOME_DIR/state/$id.meta"
+  before=$(cat "$HOME_DIR/state/$id.meta")
+  write_reader_brief "$HOME_DIR" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a reader relaunch over duplicate access metadata must refuse before laundering a writer pool lease"
+  assert_contains "$out" "ambiguous access" \
+    "the duplicate-access refusal did not name the ambiguous task record"
+  [ "$(cat "$HOME_DIR/state/$id.meta")" = "$before" ] \
+    || fail "the duplicate-access refusal rewrote the writer's task record"
+  [ ! -e "$task_tmp" ] \
+    || fail "the duplicate-access refusal still created a reader temp root"
+  [ ! -s "$LAUNCH_LOG" ] \
+    || fail "the duplicate-access refusal launched a reader over the writer record"
+  pass "duplicate access metadata refuses before reader relaunch mutation"
+}
+
+test_reader_relaunch_refuses_missing_base_commit_before_mutation() {
+  local rec id out status task_tmp meta before cmdlog
+  id=access-reader-missing-base-z17
+  rec=$(make_spawn_case access-reader-missing-base claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  expect_code 0 "$status" "the initial reader spawn should succeed"
+
+  meta="$HOME_DIR/state/$id.meta"
+  grep -v '^base_commit=' "$meta" > "$meta.next"
+  mv "$meta.next" "$meta"
+  touch "$task_tmp/scratch/repo.git/FM-TEST-SENTINEL"
+  before=$(cat "$meta")
+  : > "$LAUNCH_LOG"
+  cmdlog="$CASE_DIR/relaunch-tmux.log"
+  : > "$cmdlog"
+
+  out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a reader relaunch without base_commit replaced its handle and advanced the task baseline"
+  assert_contains "$out" "exactly one non-empty base_commit" \
+    "the missing-baseline refusal did not name the damaged reader record"
+  [ "$(cat "$meta")" = "$before" ] \
+    || fail "the missing-baseline refusal rewrote the reader task record"
+  [ -f "$task_tmp/scratch/repo.git/FM-TEST-SENTINEL" ] \
+    || fail "the missing-baseline refusal replaced the existing reader handle"
+  assert_no_grep "list-windows" "$cmdlog" \
+    "the missing-baseline refusal checked endpoint liveness before validating the baseline"
+  [ ! -s "$LAUNCH_LOG" ] \
+    || fail "the missing-baseline refusal submitted another reader launch"
+
+  rm -rf "$task_tmp"
+  pass "reader relaunch refuses a missing immutable baseline before mutation"
+}
+
+test_reader_relaunch_refuses_duplicate_base_commit_before_mutation() {
+  local rec id out status task_tmp meta base_commit before cmdlog
+  id=access-reader-duplicate-base-z18
+  rec=$(make_spawn_case access-reader-duplicate-base claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  expect_code 0 "$status" "the initial reader spawn should succeed"
+
+  meta="$HOME_DIR/state/$id.meta"
+  base_commit=$(reader_meta_value "$meta" base_commit)
+  printf 'base_commit=%s\n' "$base_commit" >> "$meta"
+  touch "$task_tmp/scratch/repo.git/FM-TEST-SENTINEL"
+  before=$(cat "$meta")
+  : > "$LAUNCH_LOG"
+  cmdlog="$CASE_DIR/relaunch-tmux.log"
+  : > "$cmdlog"
+
+  out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a reader relaunch with duplicate base_commit values replaced its handle and laundered the task record"
+  assert_contains "$out" "exactly one non-empty base_commit" \
+    "the duplicate-baseline refusal did not name the ambiguous reader record"
+  [ "$(cat "$meta")" = "$before" ] \
+    || fail "the duplicate-baseline refusal rewrote the reader task record"
+  [ -f "$task_tmp/scratch/repo.git/FM-TEST-SENTINEL" ] \
+    || fail "the duplicate-baseline refusal replaced the existing reader handle"
+  assert_no_grep "list-windows" "$cmdlog" \
+    "the duplicate-baseline refusal checked endpoint liveness before validating the baseline"
+  [ ! -s "$LAUNCH_LOG" ] \
+    || fail "the duplicate-baseline refusal submitted another reader launch"
+
+  rm -rf "$task_tmp"
+  pass "reader relaunch refuses duplicate immutable baselines before mutation"
+}
+
+test_reader_live_duplicate_refuses_before_handle_replacement() {
+  local rec id out status task_tmp base_commit advanced_head
+  id=access-reader-live-dup-z14
+  rec=$(make_spawn_case access-reader-live-dup claude "$id")
+  read_case_record "$rec"
+  write_reader_brief "$HOME_DIR" "$id"
+  task_tmp=$(reader_task_tmp "$id")
+  rm -rf "$task_tmp"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  expect_code 0 "$status" "the initial reader spawn should succeed"
+  base_commit=$(git -C "$PROJ_DIR" rev-parse HEAD)
+  printf 'advanced after reader launch\n' > "$PROJ_DIR/advanced.txt"
+  git -C "$PROJ_DIR" add advanced.txt
+  git -C "$PROJ_DIR" -c user.email=t@t -c user.name=t commit -q -m "advance reader source"
+  advanced_head=$(git -C "$PROJ_DIR" rev-parse HEAD)
+  [ "$advanced_head" != "$base_commit" ] || fail "reader relaunch fixture did not advance the project HEAD"
+  touch "$task_tmp/scratch/repo.git/FM-TEST-SENTINEL"
+
+  out=$(FM_FAKE_TMUX_WINDOWS="fm-$id" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a duplicate relaunch of a not-provably-dead reader must refuse before touching its read handle"
+  assert_contains "$out" "refusing a duplicate launch" \
+    "the live-reader duplicate refusal did not name the duplicate"
+  [ -f "$task_tmp/scratch/repo.git/FM-TEST-SENTINEL" ] \
+    || fail "the refused duplicate relaunch still destructively replaced the live reader's read handle"
+  assert_grep "access=reader" "$HOME_DIR/state/$id.meta" \
+    "the refused duplicate relaunch damaged the live reader's task record"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  expect_code 0 "$status" "a relaunch against the provably dead endpoint should proceed"
+  [ ! -f "$task_tmp/scratch/repo.git/FM-TEST-SENTINEL" ] \
+    || fail "the dead-endpoint relaunch did not replace the disposable read handle"
+  [ "$(git --git-dir="$task_tmp/scratch/repo.git" rev-parse HEAD)" = "$base_commit" ] \
+    || fail "the reader relaunch moved its read handle past the immutable task baseline"
+  assert_grep "base_commit=$base_commit" "$HOME_DIR/state/$id.meta" \
+    "the reader relaunch overwrote the immutable task baseline"
+
+  touch "$task_tmp/scratch/repo.git/FM-TEST-SENTINEL"
+  printf '%s\n' 'backend=zellij' >> "$HOME_DIR/state/$id.meta"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a reader relaunch with unknown backend liveness must refuse"
+  assert_contains "$out" "targeted inspection" \
+    "the unknown-liveness refusal did not route the preserved reader to targeted inspection"
+  [ -f "$task_tmp/scratch/repo.git/FM-TEST-SENTINEL" ] \
+    || fail "the unknown-liveness refusal replaced the reader's existing read handle"
+  assert_grep "backend=zellij" "$HOME_DIR/state/$id.meta" \
+    "the unknown-liveness refusal rewrote the recorded backend"
+  [ ! -s "$LAUNCH_LOG" ] \
+    || fail "the unknown-liveness refusal launched a second worker"
+
+  rm -rf "$task_tmp"
+  pass "a reader duplicate refuses before handle replacement unless the endpoint is provably dead"
+}
+
 test_active_profile_batch_forwards_resolved_attestation
 test_active_profile_batch_refuses_without_attestation
 test_active_quota_cooldown_suppresses_resolved_spawn
@@ -2238,5 +3191,26 @@ test_telemetry_precedes_submission_and_metadata_is_opaque
 test_exploration_requires_an_explicit_rotated_model_and_effort
 test_no_mistakes_spawn_requires_one_quota_eligible_reviewer
 test_linked_telemetry_identifiers_chain_one_task_root
+test_reader_scout_spawn_skips_pool_and_builds_scratch
+test_reader_launch_cannot_write_absolute_project_path
+test_reader_spawn_does_not_probe_harness_version_outside_confinement
+test_reader_read_handle_holds_no_ref_write_path_to_project
+test_reader_same_id_scopes_scratch_by_home_identity
+test_reader_access_flag_is_scout_only_and_closed_set
+test_reader_brief_access_contract_cross_check
+test_reader_symlinked_scratch_refuses_before_creation
+test_reader_scratch_predicate_refuses_primary_checkout
+test_reader_scratch_predicate_refuses_any_checkout
+test_reader_scratch_predicate_refuses_descendant_checkout
+test_reader_scratch_predicate_allows_contained_archive_symlink_on_relaunch
+test_reader_scratch_predicate_refuses_absolute_descendant_symlink
+test_reader_scratch_predicate_refuses_unresolvable_or_escaping_symlinks
+test_reader_stale_handle_replaced_with_current_project
+test_reader_relaunch_onto_different_project_refuses_loudly
+test_access_flip_on_existing_task_refuses
+test_duplicate_access_record_refuses_before_reader_relaunch_mutation
+test_reader_relaunch_refuses_missing_base_commit_before_mutation
+test_reader_relaunch_refuses_duplicate_base_commit_before_mutation
+test_reader_live_duplicate_refuses_before_handle_replacement
 
 echo "# all fm-spawn-dispatch-profile tests passed"

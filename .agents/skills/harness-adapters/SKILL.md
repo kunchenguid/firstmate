@@ -218,7 +218,7 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
-First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
+First launch in a fresh task root, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.
 If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 
@@ -326,9 +326,9 @@ Multiple positional args become separate queued messages; `fm-spawn`'s template 
 
 Project trust dialog can appear on the first pi run in any not-yet-trusted directory, observed even on clean worktrees.
 Accept with Enter.
-The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same worktree slot skip it.
+The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same task root skip it.
 
-`fm-spawn` keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse and pollute the project.
+`fm-spawn` keeps the turn-end extension in `state/`, outside the task root, because task-local extension files make the trust gate strictly worse and would also pollute a writer's project worktree.
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Pi sets `PI_CODING_AGENT=true` for its children; this is its harness-detection env marker.
 
@@ -362,7 +362,7 @@ The tmux backend's structural `fm_tmux_composer_state` read sees placeholder-fil
 The Herdr adapter (`fm_backend_herdr_composer_state`, `bin/backends/herdr.sh`) classifies the composer's own row structurally instead of diffing raw content; see `docs/herdr-backend.md` "Composer and injection safety" for the current boundary and `tests/fm-backend-herdr.test.sh` for regression coverage.
 
 Startup dialog: the "Run Grok Build in a project directory?" project picker appears ONLY when grok is launched from a non-project directory (home, Desktop, Downloads, `/tmp`).
-`fm-spawn` launches inside the treehouse worktree (a git repo root), so the picker never appears and grok treats the worktree as a trusted project automatically - no post-launch keystroke is needed.
+A writer launch starts inside a treehouse worktree (a git repo root), so the picker never appears and grok treats the worktree as a trusted project automatically; a reader scout starts in checkout-free scratch under `/tmp`, so inspect and clear the picker after launch when it appears.
 Pin `[hints] project_picker_disabled = true` in `~/.grok/config.toml` if a non-project launch ever needs to skip it.
 
 **TRUECOLOR placeholder styling: covered (task afk-herdr-false-pending, 2026-07-10).**
@@ -382,10 +382,10 @@ grok loads PROJECT hooks (`<worktree>/.grok/hooks/`, `<worktree>/.claude/setting
 GLOBAL hooks in `~/.grok/hooks/` are always trusted and load on first launch.
 So `fm-spawn` installs ONE firstmate-owned global hook, `~/.grok/hooks/fm-turn-end.json`, plus the companion `~/.grok/hooks/fm-turn-end.sh`, guarded as a no-op for every non-firstmate grok session.
 Its `Stop` command fires only when the current workspace holds a `.fm-grok-turnend` token pointer that matches the firstmate-owned hook registry under `~/.grok/hooks/fm-turn-end.d/`.
-`fm-spawn` writes that per-task pointer (`<worktree>/.fm-grok-turnend`, gitignored via git info/exclude like the other harnesses' worktree hook files) and a matching registry entry naming this task's `state/<id>.turn-ended`.
-The hook reads `$GROK_WORKSPACE_ROOT`, which is always set for hooks and equals the worktree.
-This keeps the hook outside the worktree, needs no trust grant, and writes only firstmate-owned files.
-`fm-teardown` removes the worktree pointer before returning a pooled worktree.
+`fm-spawn` writes that per-task pointer (`<task-root>/.fm-grok-turnend`, excluded through git info/exclude for writer worktrees) and a matching registry entry naming this task's `state/<id>.turn-ended`.
+The hook reads `$GROK_WORKSPACE_ROOT`, which is always set for hooks and equals the task root.
+This keeps the hook itself outside the task root, needs no trust grant, and writes only firstmate-owned files.
+`fm-teardown` removes the pointer before returning a pooled writer worktree or deleting a reader scratch root.
 Secondmate spawns skip the pointer (idle panes are healthy, no stale-pane detection for them).
 
 **Primary-session guard fact (verified 2026-07-28, Grok 0.2.112 and 0.2.73).**
@@ -403,13 +403,13 @@ Cursor Agent launches with a positional prompt as `cursor-agent --trust --force 
 
 | Fact | Value |
 |---|---|
-| Busy state | Project-local `beforeSubmitPrompt` opens the turn as `busy cursor-hook`; `stop` and `SessionEnd` close it as `idle cursor-hook`, and `stop` also writes the turn-end notification. A successful firstmate Escape records `idle fm-interrupt`. A spinner, `Working`, and `ctrl+c to stop` remain rendered presentation, not state sources. |
+| Busy state | Task-root-local `beforeSubmitPrompt` opens the turn as `busy cursor-hook`; `stop` and `SessionEnd` close it as `idle cursor-hook`, and `stop` also writes the turn-end notification. A successful firstmate Escape records `idle fm-interrupt`. A spinner, `Working`, and `ctrl+c to stop` remain rendered presentation, not state sources. |
 | Exit command | One `Ctrl+D` from the empty composer exits after a short delay. |
 | Interrupt | Single Escape, live-verified by cancelling an active `sleep 30` tool call. |
 | Resume | `cursor-agent --continue` resumes the most recent session for the workspace. The CLI also exposes `--resume [chatId]`, `cursor-agent resume`, and `cursor-agent ls`. |
 | Skill invocation | Unverified. Use natural language until firstmate's skills are ported to Cursor and an invocation is confirmed. |
 | Autonomy | `--force`, with `--yolo` documented by the CLI as its alias. |
-| Trust dialog | A fresh worktree asks for workspace trust even under `--force`; firstmate includes `--trust` in every launch. |
+| Trust dialog | A fresh task root asks for workspace trust even under `--force`; firstmate includes `--trust` in every launch. |
 | Environment marker | None verified. Detection uses the exact `cursor-agent` command name in process ancestry. |
 | Composer | The idle bordered `→ Add a follow-up` placeholder is dim text and the shared composer reader already classifies it as empty. No `FM_COMPOSER_IDLE_RE` override or new bare glyph is needed. |
 | Effort | Effort lives in the selected model id or parameterized model selector, never in a separate flag. `fm-spawn` records the requested effort metadata while passing the model unchanged. |
@@ -425,7 +425,7 @@ Always confirm current availability with `cursor-agent models`, because the acco
 
 Cursor project hooks and Pedro's existing global hooks compose on 2026.08.11-e8db854.
 A controlled listener made the existing global hook observable without editing it: global `SessionStart`/`SessionEnd` events and a project hook fired in the same run, and a real interactive submission emitted `Start` (`beforeSubmitPrompt`) followed by `Stop`.
-`fm-spawn` installs that lifecycle in the disposable worktree's `.cursor/hooks.json` and excludes only that generated file through git info/exclude so it cannot surface in project diffs or pull requests while project-owned `.cursor/` files remain reviewable.
+`fm-spawn` installs that lifecycle in the disposable task root's `.cursor/hooks.json` and, for a writer worktree, excludes only that generated file through git info/exclude so it cannot surface in project diffs or pull requests while project-owned `.cursor/` files remain reviewable.
 The hooks drive the classifier through the trusted `cursor-hook` source, `SessionEnd` prevents a process exit from stranding busy state, and a successful firstmate Escape records the interrupt close directly.
 The watcher can absorb ordinary turn-end wakes while a new turn is provably active.
 Ordinary Cursor crewmate and scout dispatch is unattended-capable. Cursor secondmate seats are accepted only as a degraded persistent-seat production test: existing lifecycle and busy integration are reused where they already apply, while the supervising firstmate relies on bounded foreground checkpoints because native seat session-start and Stop-hook delivery are not verified. This slice does not add a Cursor primary watcher, Stop-hook adapter, session-start transport, recovery daemon, or second supervision mechanism.
@@ -451,7 +451,7 @@ Treat everything downstream of an accepted submission — real turn execution, t
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; firstmate skills are discovered. |
 | Autonomy | `--auto`; `-y` and `--yolo` are weaker and are not used. |
-| Trust dialog | Kimi 0.36.1 shows a per-root "Trust this folder / Don't trust" dialog in a fresh pooled worktree. `fm-spawn` pre-trusts the validated worktree before launch by writing `~/.kimi-code/workspace-trust/<workspace-id>` in Kimi's native `{"root":"<worktree>","trustedAt":<ms>}` format. The workspace ID is `wd_<lowercase-basename-slug>_<first-12-sha256-of-normalized-root>`. |
+| Trust dialog | Kimi 0.36.1 shows a per-root "Trust this folder / Don't trust" dialog in a fresh task root. `fm-spawn` pre-trusts the validated writer worktree or reader scratch before launch by writing `~/.kimi-code/workspace-trust/<workspace-id>` in Kimi's native `{"root":"<task-root>","trustedAt":<ms>}` format. The workspace ID is `wd_<lowercase-basename-slug>_<first-12-sha256-of-normalized-root>`. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; detection relies on process ancestry command name `kimi`. |
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
@@ -460,7 +460,7 @@ Treat everything downstream of an accepted submission — real turn execution, t
 `fm-spawn.sh` launches Kimi bare, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
 This launch-then-send shape is mandatory because Kimi rejects a positional brief as an unknown command.
 Sending before readiness was reproduced as a silent drop with a zero exit status, an empty composer, `context: 0%`, no echoed user message, and a healthy-looking idle pane.
-The brief path must be absolute because the brief lives outside the task worktree, and Kimi reads it there without `--add-dir`.
+The brief path must be absolute because the brief lives outside the task root, and Kimi reads it there without `--add-dir`.
 
 Observed live spinner captures included optional leading whitespace, a moon-phase glyph, whitespace around `·`, and rotating tip text, with the same shape observed during tool execution.
 Because every captured spinner row had whitespace on both sides of `·`, the matcher requires that whitespace, deliberately does not match the never-observed zero-whitespace form, and does not require trailing tip text.
@@ -476,6 +476,6 @@ The delivery-only spinner match covers the full moon-phase glyph set rather than
 
 [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns Kimi's verified global hook surface and captain-approved crew wake integration.
 `fm-spawn.sh` installs one marker-delimited Firstmate entry in `$HOME/.kimi-code/config.toml`, one silent always-zero hook script, and one private token registry under `$HOME/.kimi-code/fm-turn-end.d/`.
-Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
+Each Kimi task root receives a `.fm-kimi-turnend` token pointer, excluded from Git for writer worktrees, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.

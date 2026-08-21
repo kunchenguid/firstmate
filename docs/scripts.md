@@ -50,7 +50,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-remote-readiness-lib.sh` | Shared remote second-mate readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
-| `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
+| `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for backend titles and reader temp roots |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
 | `backends/tmux.sh`       | Verified tmux session-provider adapter                                               |
 | `backends/herdr.sh`      | Experimental herdr session-provider adapter                                          |
@@ -104,7 +104,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Refresh validated PR identity, then atomically arm a static merge poll                |
 | `fm-pr-merge.sh`         | Record PR identity and any missing-Review override, then merge the canonical GitHub URL |
-| `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
+| `fm-promote.sh`          | Promote a writer scout task in place to a protected ship task with an explicit delivery mode |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-worktree-unique-content.sh` | Prove whether a worktree holds content reachable from no surviving ref, so dirty-state refusals judge held content instead of stale-index noise |
 | `fm-model-telemetry.sh`  | Sole validator, writer, sealer, recovery owner, routing-candidate evidence guard, and read-only sheet reader of the private model-attempt ledger |

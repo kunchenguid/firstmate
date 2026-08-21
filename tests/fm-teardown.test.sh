@@ -241,6 +241,10 @@ if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
   exit 0
 fi
+if [ "${1:-}" = hold ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi hold <id> --reason <reason> [--kind captain]'
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
@@ -3795,6 +3799,327 @@ test_forced_teardown_still_requires_ledger_repair() {
   pass "a damaged ledger blocks even a forced teardown and prints its repair-then-re-run route"
 }
 
+# --- reader scouts (access=reader in meta): no pool worktree to return -------
+#
+# A reader scout was dispatched slot-free: its worktree= is a disposable scratch
+# directory, never a treehouse pool worktree. Teardown must clean it WITHOUT
+# calling treehouse return, must fail loudly when the scratch dir grew a git
+# checkout (evidence the reader fell back to editing, so its content may be
+# unlanded work), and must refuse a reader marker on any non-scout record as a
+# contradiction rather than silently skipping that task's pool return.
+
+# Reader records are only honored with the canonical home-scoped task temp root
+# and worktree=<tasktmp>/scratch, exactly as fm-spawn writes them.
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$ROOT/bin/fm-backend-hometag-lib.sh"
+READER_TMP=$(
+  FM_HOME="$TMP_ROOT/reader-home" FM_ROOT="$ROOT"
+  fm_reader_task_tmp task-x1 || exit 1
+  printf '%s\n' "$FM_READER_TASK_TMP"
+) || fail "the reader temp-root owner refused to derive a path for task-x1"
+
+make_reader_case() {  # <name>
+  local case_dir
+  case_dir=$(make_case "$1")
+  add_compatible_tasks_axi "$case_dir"
+  # Log every treehouse invocation so reader teardowns can prove none happened.
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+if [ "\${1:-}" = return ] && [ "\${2:-}" = --force ] && [ -n "\${3:-}" ]; then
+  rm -rf -- "\$3"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  rm -rf "$READER_TMP" "/tmp/fm-task-x1"
+  mkdir -p "$READER_TMP/scratch" "$case_dir/data/task-x1"
+  printf 'notes\n' > "$READER_TMP/scratch/notes.txt"
+  printf 'findings\n' > "$case_dir/data/task-x1/report.md"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$READER_TMP/scratch" \
+    "project=$case_dir/project" \
+    "harness=claude" \
+    "kind=scout" \
+    "access=reader" \
+    "tasktmp=$READER_TMP" \
+    "decisions_reviewed=1"
+  git clone -q --bare --shared "$case_dir/project" "$READER_TMP/scratch/repo.git"
+  printf '%s\n' "$case_dir"
+}
+
+run_reader_teardown() {  # <case-dir> [teardown args...]
+  local case_dir=$1
+  shift
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" "$@"
+}
+
+test_reader_teardown_skips_pool_return_and_removes_scratch() {
+  local case_dir out rc
+  case_dir=$(make_reader_case reader-clean)
+  set +e
+  out=$(run_reader_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "reader teardown should complete"
+  assert_contains "$out" "teardown task-x1 complete" "reader teardown did not report completion"
+  assert_contains "$out" "Retro acceleration:" \
+    "reader teardown skipped the pre-return reminders every other non-secondmate kind gets"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "reader teardown called treehouse, but a reader holds no pool worktree to return"
+  [ ! -d "$READER_TMP/scratch" ] || fail "reader teardown left the scratch directory behind"
+  [ ! -d "$READER_TMP" ] || fail "reader teardown left the task temp root behind"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "reader teardown left the task record behind"
+  pass "reader teardown cleans the scratch directory without any treehouse return"
+}
+
+test_reader_teardown_fails_loudly_on_grown_checkout() {
+  local case_dir out rc
+  case_dir=$(make_reader_case reader-violation)
+  git init -q "$READER_TMP/scratch/hack"
+  set +e
+  out=$(run_reader_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a reader scratch that grew a git checkout must refuse teardown"
+  assert_contains "$out" "grew a git checkout" "reader violation refusal did not name the checkout"
+  [ -d "$READER_TMP/scratch/hack/.git" ] || fail "the refusal removed the checkout it should preserve for inspection"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "the refusal discarded the task record"
+
+  set +e
+  out=$(run_reader_teardown "$case_dir" --force 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "--force after explicit discard approval should complete the reader teardown"
+  [ ! -d "$READER_TMP" ] || fail "forced reader teardown left the task temp root behind"
+  [ ! -s "$case_dir/treehouse.log" ] || fail "forced reader teardown still called treehouse"
+  pass "a checkout grown inside a reader scratch refuses teardown loudly; --force is the approved discard path"
+}
+
+test_reader_marker_on_nonscout_meta_refuses() {
+  local case_dir out rc
+  case_dir=$(make_reader_case reader-contradiction)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "access=reader"
+  set +e
+  out=$(run_reader_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a reader marker on a ship record must refuse teardown"
+  assert_contains "$out" "access=reader with kind=ship" "contradiction refusal did not name the disagreeing records"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "the contradiction refusal discarded the task record"
+  [ -d "$case_dir/wt" ] || fail "the contradiction refusal removed the worktree"
+
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "harness=claude" \
+    "kind=scout" \
+    "access=partial"
+  set +e
+  out=$(run_reader_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unknown access value must refuse teardown"
+  assert_contains "$out" "unknown access" "unknown-access refusal did not name the bad record"
+  pass "reader markers outside kind=scout and unknown access values refuse teardown as record damage"
+}
+
+test_reader_worktree_outside_tasktmp_refuses() {
+  local case_dir out rc
+  case_dir=$(make_reader_case reader-escape)
+  mkdir -p "$case_dir/loot"
+  printf 'precious\n' > "$case_dir/loot/keep.txt"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/loot" \
+    "project=$case_dir/project" \
+    "harness=claude" \
+    "kind=scout" \
+    "access=reader" \
+    "tasktmp=$READER_TMP" \
+    "decisions_reviewed=1"
+  set +e
+  out=$(run_reader_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a reader worktree outside its recorded tasktmp must refuse teardown"
+  assert_contains "$out" "does not resolve inside its recorded tasktmp" \
+    "escape refusal did not name the containment damage"
+  [ -f "$case_dir/loot/keep.txt" ] || fail "the containment refusal deleted the out-of-tasktmp directory"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "the containment refusal discarded the task record"
+
+  set +e
+  out=$(run_reader_teardown "$case_dir" --force 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--force must not bypass the reader worktree containment refusal"
+  [ -f "$case_dir/loot/keep.txt" ] || fail "a forced containment refusal deleted the out-of-tasktmp directory"
+  rm -rf "$READER_TMP"
+  pass "a reader worktree outside its recorded tasktmp refuses teardown as record damage, --force included"
+}
+test_reader_forged_tasktmp_refuses() {
+  local case_dir out rc
+  case_dir=$(make_reader_case reader-forged-tasktmp)
+  mkdir -p "$case_dir/loot-root/scratch"
+  printf 'precious\n' > "$case_dir/loot-root/keep.txt"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/loot-root/scratch" \
+    "project=$case_dir/project" \
+    "harness=claude" \
+    "kind=scout" \
+    "access=reader" \
+    "tasktmp=$case_dir/loot-root" \
+    "decisions_reviewed=1"
+  set +e
+  out=$(run_reader_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a reader tasktmp pointing outside the canonical per-task temp root must refuse teardown"
+  assert_contains "$out" "not this task's canonical temp root" \
+    "forged-tasktmp refusal did not name the record damage"
+  [ -f "$case_dir/loot-root/keep.txt" ] || fail "the forged-tasktmp refusal deleted the recorded directory"
+  [ -d "$case_dir/loot-root/scratch" ] || fail "the forged-tasktmp refusal deleted the recorded scratch"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "the forged-tasktmp refusal discarded the task record"
+
+  set +e
+  out=$(run_reader_teardown "$case_dir" --force 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--force must not bypass the forged-tasktmp refusal"
+  [ -f "$case_dir/loot-root/keep.txt" ] || fail "a forced forged-tasktmp refusal deleted the recorded directory"
+  rm -rf "$READER_TMP"
+  pass "a reader record with a non-canonical tasktmp refuses teardown as record damage, --force included"
+}
+
+test_reader_symlinked_tasktmp_refuses_without_deleting_target() {
+  local case_dir out rc target
+  case_dir=$(make_reader_case reader-symlinked-tasktmp)
+  target="$case_dir/loot-root"
+  mkdir -p "$target/scratch"
+  printf 'precious\n' > "$target/scratch/keep.txt"
+  rm -rf "$READER_TMP"
+  ln -s "$target" "$READER_TMP"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$target/scratch" \
+    "project=$case_dir/project" \
+    "harness=claude" \
+    "kind=scout" \
+    "access=reader" \
+    "tasktmp=$target" \
+    "decisions_reviewed=1"
+
+  set +e
+  out=$(run_reader_teardown "$case_dir" --force 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--force must not accept a symlinked reader tasktmp destruction anchor"
+  assert_contains "$out" "symlinked destruction anchor" \
+    "symlinked-tasktmp refusal did not name the record damage"
+  [ -f "$target/scratch/keep.txt" ] || fail "the symlinked-tasktmp refusal deleted the target scratch"
+  [ -L "$READER_TMP" ] || fail "the symlinked-tasktmp refusal removed the recorded anchor"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "the symlinked-tasktmp refusal discarded the task record"
+  rm -f "$READER_TMP"
+  pass "a symlinked reader tasktmp refuses teardown without deleting its target"
+}
+
+test_reader_symlinked_worktree_refuses_without_deleting_target() {
+  local case_dir out rc target
+  case_dir=$(make_reader_case reader-symlinked-worktree)
+  target="$case_dir/loot-scratch"
+  mkdir -p "$target"
+  printf 'precious\n' > "$target/keep.txt"
+  rm -rf "$READER_TMP/scratch"
+  ln -s "$target" "$READER_TMP/scratch"
+
+  set +e
+  out=$(run_reader_teardown "$case_dir" --force 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--force must not accept a symlinked reader worktree destruction anchor"
+  assert_contains "$out" "symlinked destruction anchor" \
+    "symlinked-worktree refusal did not name the record damage"
+  [ -f "$target/keep.txt" ] || fail "the symlinked-worktree refusal deleted the target"
+  [ -L "$READER_TMP/scratch" ] || fail "the symlinked-worktree refusal removed the recorded anchor"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "the symlinked-worktree refusal discarded the task record"
+  rm -rf "$READER_TMP"
+  pass "a symlinked reader worktree refuses teardown without deleting its target"
+}
+
+test_reader_checkout_created_while_reaping_refuses_before_cleanup() {
+  local case_dir out rc pid survived=0
+  case_dir=$(make_reader_case reader-reap-checkout-race)
+
+  ( cd "$READER_TMP/scratch" && exec perl -e '
+      my ($checkout) = @ARGV;
+      $SIG{TERM} = sub {
+        system "git", "init", "-q", $checkout;
+        exit 0;
+      };
+      sleep 300;
+    ' "$READER_TMP/scratch/hack" ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "reader-reap-checkout-race: setup process did not start"
+
+  set +e
+  out=$(run_reader_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  if kill -0 "$pid" 2>/dev/null; then
+    survived=1
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  [ "$rc" -ne 0 ] || fail "a checkout created while reaping the reader must refuse teardown"
+  [ "$survived" -eq 0 ] || fail "reader-reap-checkout-race: reaped process survived"
+  assert_contains "$out" "grew a git checkout" \
+    "reader-reap-checkout-race: final violation scan did not refuse the new checkout"
+  [ -d "$READER_TMP/scratch/hack/.git" ] || fail "reader-reap-checkout-race: refusal erased the new checkout"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "reader-reap-checkout-race: refusal discarded task metadata"
+  rm -rf "$READER_TMP"
+  pass "a checkout created during process reaping is preserved and refuses teardown"
+}
+
+test_reader_sibling_checkout_in_tasktmp_refuses() {
+  local case_dir out rc
+  case_dir=$(make_reader_case reader-sibling-violation)
+  git init -q "$READER_TMP/wt"
+  set +e
+  out=$(run_reader_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a checkout grown beside the scratch inside the task temp root must refuse teardown"
+  assert_contains "$out" "grew a git checkout" "sibling-checkout refusal did not name the checkout"
+  [ -d "$READER_TMP/wt/.git" ] || fail "the refusal removed the sibling checkout it should preserve for inspection"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "the sibling-checkout refusal discarded the task record"
+
+  set +e
+  out=$(run_reader_teardown "$case_dir" --force 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "--force after explicit discard approval should complete the reader teardown"
+  [ ! -d "$READER_TMP" ] || fail "forced reader teardown left the task temp root behind"
+  [ ! -s "$case_dir/treehouse.log" ] || fail "forced reader teardown still called treehouse"
+  pass "a checkout grown beside the scratch refuses teardown loudly; the violation scan covers the whole removed temp root"
+}
+
 test_teardown_records_failed_terminal_status_and_forced_cancellation
 test_local_only_zero_work_does_not_seal_accepted
 test_sealed_terminal_records_the_observed_usage_source
@@ -3887,3 +4212,12 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_reader_teardown_skips_pool_return_and_removes_scratch
+test_reader_teardown_fails_loudly_on_grown_checkout
+test_reader_marker_on_nonscout_meta_refuses
+test_reader_worktree_outside_tasktmp_refuses
+test_reader_forged_tasktmp_refuses
+test_reader_symlinked_tasktmp_refuses_without_deleting_target
+test_reader_symlinked_worktree_refuses_without_deleting_target
+test_reader_checkout_created_while_reaping_refuses_before_cleanup
+test_reader_sibling_checkout_in_tasktmp_refuses

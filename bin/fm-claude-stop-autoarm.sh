@@ -9,7 +9,8 @@
 #
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
-#     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
+#     exact fm-turnend-guard.sh scope. Child writer worktrees and reader scout
+#     scratch directories stay inert.
 #   - Identity: only when THIS session's harness ancestor holds state/.lock.
 #     When an existing numeric owner fails the shared harness-liveness predicate,
 #     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies

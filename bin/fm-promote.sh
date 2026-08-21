@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Promote a scout task to a ship task in place: the crewmate keeps its window,
+# Promote a writer scout task to a ship task in place: the crewmate keeps its window,
 # worktree, and loaded context; only the contract changes. Flips kind= to ship in
 # state/<task-id>.meta so fm-teardown.sh applies the full ship-task teardown protection
 # again. After promoting, send the crewmate its ship instructions via fm-send.sh
 # (inventory scratch state, reset to a clean default-branch base, carry over only
 # intended fix changes, create branch fm/<task-id>, implement, then report done
 # according to this task's delivery mode).
-# A scout records no delivery posture, so promotion is where this task's delivery
+# A writer scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
@@ -19,6 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 MODE=
 YOLO=
@@ -73,6 +76,25 @@ ID=${POS[0]}
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+# A reader scout (fm-spawn's --access reader) has no project worktree - its
+# worktree= is a disposable scratch directory - so in-place promotion would
+# mint a ship task that cannot branch, commit, or pass teardown's worktree
+# safety checks.
+if ! ACCESS=$(fm_meta_optional_exact_value "$META" access); then
+  echo "error: task $ID records invalid or duplicate access metadata; expected no access line, access=writer, or access=reader" >&2
+  exit 1
+fi
+case "$ACCESS" in
+  ""|writer) ;;
+  reader)
+    echo "error: task $ID is a reader scout with no project worktree; promotion reuses the scout's worktree, so dispatch the implementation as a fresh ship task instead" >&2
+    exit 1
+    ;;
+  *)
+    echo "error: task $ID records unknown access metadata; expected no access line, access=writer, or access=reader" >&2
+    exit 1
+    ;;
+esac
 
 TMP="$META.tmp"
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"

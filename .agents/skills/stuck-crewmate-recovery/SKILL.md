@@ -27,12 +27,15 @@ A no-mistakes run matched to the crew's branch and current code remains authorit
 
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.
 Use `treehouse status` for treehouse-backed tmux, herdr, zellij, or cmux tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
+A reader scout (`access=reader` in its metadata) holds no treehouse entry by design: its recorded `worktree=` is a disposable scratch directory, so verify that directory directly.
+Only a recovery-grade dead or missing result licenses relaunch; re-pass the same `--access reader` flag because the brief cross-check in `bin/fm-spawn.sh` refuses a writer relaunch.
+An `unknown` liveness result preserves the recorded worktree or reader scratch, metadata, and any unlanded work and surfaces the task for targeted inspection; never relaunch under uncertainty, following `AGENTS.md` section 3's secondmate-liveness rule and `process-event-sources`' uncertain-process-identity rule.
 Do not sweep another home's endpoints or infer ownership from a matching window label.
 
-Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
-Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
-Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
-If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
+Before relaunch, prove that no live agent still owns the recorded task and that its recorded writer worktree or reader scratch remains available.
+Preserve a writer's uncommitted changes and commits or a reader's scratch evidence, keep the same task identity, and resume or relaunch the recorded harness in that same task environment with the same brief plus a concise progress note.
+Do not use a fresh generic spawn while the recorded task environment is unaccounted for, because allocating another worktree or scratch root can split one task across two copies.
+If the task environment or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
 ## Live-endpoint escalation
 
@@ -45,7 +48,7 @@ Escalate in order:
 4. If the crewmate is genuinely wedged after redirection, exit the agent with the adapter's exit command and relaunch through the escalation ladder below, with the same brief plus a `progress so far` note appended to it.
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
-   The worktree and commits persist, so relaunch is cheap.
+   A writer's worktree and commits persist; a reader's scratch persists while `fm-spawn.sh` replaces its disposable read handle at the recorded baseline.
 5. If the ladder's verdict is `escalate-captain`, stop relaunching: write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
 
 ## Escalation ladder on relaunch
@@ -65,7 +68,7 @@ Failure classes and their signals:
 
 Act on the verdict:
 
-- `relaunch` - respawn through `bin/fm-spawn.sh` into the same worktree with the emitted `--harness`, `--model`, and `--effort` values, re-pass an emitted `account_profile=` alias as `--account-profile` unchanged, and pass `--routing-source fallback` again so the task stays ladder-eligible on the respawned meta.
+- `relaunch` - respawn through `bin/fm-spawn.sh` into the same recorded task environment with the emitted `--harness`, `--model`, and `--effort` values, re-pass an emitted `account_profile=` alias as `--account-profile` unchanged, and pass `--routing-source fallback` again so the task stays ladder-eligible on the respawned meta.
   When `config/crew-dispatch.json` is active, the respawn must also carry `--dispatch-override-reason "escalation-ladder relaunch <class>"`: the routing came from the ladder, not from fresh profile consultation, and the attestation backstop refuses an unattested explicit harness.
   A relaunch is an ordinary crewmate or scout spawn for the durable routing cooldowns too, so while `data/quota-cooldowns.json` exists it carries the catalog-established `--dispatch-provider` and `--dispatch-model-family` axes like any other spawn (`AGENTS.md` section 4; `docs/configuration.md` "Routing cooldowns").
 - `report` (`routing-pinned` or `unknown-provenance`) - the ladder may not touch this task's routing: an explicit captain instruction or a configured dispatch profile or pin resolved the tuple, or the meta predates provenance recording.

@@ -546,8 +546,10 @@ test_secondmate_no_projects_charter() {
   assert_grep "# Project clones" "$brief" "project-less charter dropped the Project clones heading"
   assert_grep "None. This is a project-less domain" "$brief" \
     "project-less charter did not render a sensible no-clones note"
-  assert_grep "its crews take pooled worktrees of that repo" "$brief" \
-    "project-less charter operating model lost the pooled-worktree note"
+  assert_grep "its writers take pooled worktrees of that repo" "$brief" \
+    "project-less charter operating model lost the writer pooled-worktree note"
+  assert_grep "its reader scouts use checkout-free scratch directories" "$brief" \
+    "project-less charter operating model lost the reader scratch note"
   assert_no_grep "The projects above are local clones" "$brief" \
     "project-less charter kept the with-projects operating-model line"
   assert_grep 'working [key=<work-slug>]' "$brief" \
@@ -865,6 +867,153 @@ test_scout_evidence_archive_opt_in() {
   pass "fm-brief.sh: evidence archive is opt-in for scouts and rejected elsewhere"
 }
 
+# The reader/writer access axis (--access, scouts only). A reader scout is
+# dispatched slot-free: a scratch directory plus a bare object-store read handle
+# instead of a pool worktree. Its brief must record the machine-readable access
+# contract fm-spawn cross-checks, describe the checkout-free environment, and
+# state the hard no-tracked-file-writes boundary with its fail-loud wall
+# procedure, while the default writer scaffold stays byte-identical to the
+# historical scout brief.
+test_scout_access_reader_scaffold_contract() {
+  local home brief project_rules
+  home="$TMP_ROOT/access-reader-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" access-reader-r1 someproj --scout --access reader >/dev/null 2>&1 \
+    || fail "reader scout scaffold should succeed"
+  brief="$home/data/access-reader-r1/brief.md"
+  assert_present "$brief" "reader scout brief was not scaffolded"
+  grep -qx "Access contract: access=reader" "$brief" \
+    || fail "reader brief did not record the machine-readable access contract line"
+  grep -qx "The fleet lock and bin/fm-session-start.sh are firstmate-only." "$brief" \
+    || fail "reader brief omitted the firstmate-only session-lock contract"
+  assert_no_grep "A lock refusal never makes a crewmate read-only" "$brief" \
+    "reader brief inherited the writer-only worktree session-lock contract"
+  assert_grep "disposable scratch directory, not a checkout" "$brief" \
+    "reader brief did not declare the checkout-free environment"
+  assert_no_grep "disposable git worktree" "$brief" \
+    "reader brief still claims a git worktree environment"
+  assert_grep 'git --git-dir=repo.git show' "$brief" \
+    "reader brief did not teach object-store reads through the bare handle"
+  project_rules=$(sed -n '/^# Project rules for this reader task$/,/^# Setup$/p' "$brief")
+  [ -n "$project_rules" ] \
+    || fail "reader brief omitted its task-local project-rules section"
+  assert_contains "$project_rules" '{PROJECT_RULES}' \
+    "reader brief omitted the project-rules replacement slot"
+  assert_contains "$project_rules" "only the rules this reader task genuinely requires" \
+    "reader brief did not bound copied project rules to the task"
+  assert_contains "$project_rules" "Name each copied rule with its source file and section or rule name." \
+    "reader brief did not require copied project rules to be named explicitly"
+  assert_contains "$project_rules" "Do not copy an entire \`AGENTS.md\` or \`CLAUDE.md\`." \
+    "reader brief invited mirroring the whole project instruction surface"
+  assert_grep "READER BOUNDARY" "$brief" \
+    "reader brief did not carry the hard reader boundary"
+  assert_grep "blocked: reader task needs a working checkout" "$brief" \
+    "reader brief did not give the fail-loud wall procedure for needed edits"
+  assert_grep "cleanup fails loudly if a checkout appears" "$brief" \
+    "reader brief did not state the violation consequence"
+  assert_grep "$home/data/access-reader-r1/report.md" "$brief" \
+    "reader brief lost the scout report deliverable"
+  assert_grep "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "$brief" \
+    "reader brief lost the unresolved-decision completion gate"
+  assert_no_grep "firstmate may promote this task in place" "$brief" \
+    "reader brief still promises in-place promotion, which reader tasks refuse"
+  pass "fm-brief.sh: --scout --access reader carries bounded project rules, read access, and the hard boundary"
+}
+
+test_scout_access_reader_evidence_archive() {
+  local home id brief index boundary_exceptions plain_exceptions
+  home="$TMP_ROOT/access-reader-archive-home"
+  mkdir -p "$home/data"
+  id='access-reader-archive-r1'
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --scout --access reader --evidence-archive >/dev/null 2>&1 \
+    || fail "reader scout scaffold with --evidence-archive should succeed"
+  brief="$home/data/$id/brief.md"
+  index="$home/data/$id/sources/index.md"
+  assert_present "$brief" "reader evidence-archive scaffold did not write the brief"
+  assert_present "$index" "reader evidence-archive scaffold did not create sources/index.md"
+  grep -qx "Access contract: access=reader" "$brief" \
+    || fail "reader evidence-archive brief lost the machine-readable access contract line"
+  # shellcheck disable=SC2016 # Backticks are literal brief markup.
+  assert_grep 'raw captures belong under its own `sources/`' "$brief" \
+    "reader evidence-archive brief silently dropped the provenance contract"
+  assert_grep "and the evidence archive under" "$brief" \
+    "reader rule 2 did not add the archive to its outside-scratch exception list"
+  assert_grep "$home/data/$id/sources/" "$brief" \
+    "reader rule 2 did not name the sanctioned archive path"
+  # The hard-contract boundary paragraph enumerates the same sanctioned writes
+  # as rule 2. When the two lists disagree, a reader obeying the paragraph
+  # marked HARD SAFETY CONTRACT archives nothing and the accepted
+  # --evidence-archive is silently dropped.
+  boundary_exceptions=$(grep 'are the only exceptions' "$brief" || true)
+  [ -n "$boundary_exceptions" ] || fail "reader evidence-archive brief lost the hard-contract exception list"
+  case "$boundary_exceptions" in
+    *"$home/data/$id/sources/"*) ;;
+    *) fail "the reader hard-contract boundary contradicts rule 2 by omitting the sanctioned evidence archive" ;;
+  esac
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" access-reader-plain-r2 someproj --scout --access reader >/dev/null 2>&1 \
+    || fail "plain reader scout scaffold should succeed"
+  assert_no_grep "and the evidence archive under" "$home/data/access-reader-plain-r2/brief.md" \
+    "an archive-free reader brief still lists the archive exception"
+  plain_exceptions=$(grep 'are the only exceptions' "$home/data/access-reader-plain-r2/brief.md" || true)
+  [ -n "$plain_exceptions" ] || fail "an archive-free reader brief lost the hard-contract exception list"
+  case "$plain_exceptions" in
+    *"evidence archive"*) fail "an archive-free reader brief sanctions an evidence archive in its hard-contract boundary" ;;
+  esac
+  assert_absent "$home/data/access-reader-plain-r2/sources" \
+    "an archive-free reader scaffold still created a sources directory"
+  pass "fm-brief.sh: a reader scout honors --evidence-archive with the archive as a sanctioned write destination"
+}
+
+test_scout_access_writer_is_default_and_byte_identical() {
+  local home saved brief normalized expected
+  home="$TMP_ROOT/access-writer-home"
+  mkdir -p "$home/data" "$home/state"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" FM_CLASSIFY_PAUSED_VERB=paused \
+    "$ROOT/bin/fm-brief.sh" access-writer-w1 someproj --scout >/dev/null 2>&1 \
+    || fail "default scout scaffold should succeed"
+  brief="$home/data/access-writer-w1/brief.md"
+  assert_no_grep "Access contract" "$brief" \
+    "default scout brief must not carry an access contract line"
+  normalized="$TMP_ROOT/access-writer-default-normalized"
+  expected="$ROOT/tests/fixtures/fm-brief-writer-scout.golden"
+  sed -e "s|$home|{{FM_HOME}}|g" -e "s|$ROOT|{{FM_ROOT}}|g" "$brief" > "$normalized"
+  if ! cmp -s "$expected" "$normalized"; then
+    diff -u "$expected" "$normalized" >&2 || true
+    fail "default writer scout scaffold changed from its owned pre-reader golden contract"
+  fi
+  saved="$TMP_ROOT/access-writer-default-saved.md"
+  mv "$brief" "$saved"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" FM_CLASSIFY_PAUSED_VERB=paused \
+    "$ROOT/bin/fm-brief.sh" access-writer-w1 someproj --scout --access writer >/dev/null 2>&1 \
+    || fail "explicit writer scout scaffold should succeed"
+  cmp -s "$saved" "$brief" \
+    || fail "--access writer changed the scout scaffold; the writer path must stay byte-identical"
+  pass "fm-brief.sh: writer is the default access and the explicit flag changes nothing"
+}
+
+test_access_flag_is_scout_only_and_closed_set() {
+  local home out status label args expect
+  home="$TMP_ROOT/access-refused-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain why"
+  done <<'ROWS'
+access on a ship brief|access-ref-b1 some-proj --mode direct-PR --access reader|--access applies only to scout briefs
+access on a secondmate charter|access-ref-b2 --secondmate --no-projects --access reader|--access applies only to scout briefs
+bogus access value on a scout|access-ref-b3 some-proj --scout --access sometimes|--access must be reader or writer
+access without a value|access-ref-b4 some-proj --scout --access|--access requires a value
+ROWS
+  pass "fm-brief.sh: --access is scout-only, closed-set, and never silently dropped"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -909,4 +1058,9 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_all_brief_kinds_delivery_evidence_contracts
 test_scout_evidence_archive_opt_in
+
+test_scout_access_reader_scaffold_contract
+test_scout_access_reader_evidence_archive
+test_scout_access_writer_is_default_and_byte_identical
+test_access_flag_is_scout_only_and_closed_set
 test_scout_and_secondmate_scaffold

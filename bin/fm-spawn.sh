@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
-# secondmate in its isolated firstmate home.
+# Spawn a direct report: a crewmate in a treehouse or Orca worktree, a reader
+# scout in checkout-free scratch, or a secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--exploration] [--backend <name>] [--routing-source <captain|profile|fallback>] [--matched-rule <default|rule-<n>>] [--quota-decision <selected|stopped|not-applicable|unknown>] [--quota-headroom <sufficient|tight|exhausted|unmeasurable|unknown>] [--quota-runway <sufficient|tight|exhausted|unmeasurable|unknown>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--backend <name>] [--routing-source <captain|profile|fallback>] [--matched-rule <default|rule-<n>>] [--quota-decision <selected|stopped|not-applicable|unknown>] [--quota-headroom <sufficient|tight|exhausted|unmeasurable|unknown>] [--quota-runway <sufficient|tight|exhausted|unmeasurable|unknown>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--access <reader|writer>] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--backend <name>] [--routing-source <captain|profile|fallback>] [--matched-rule <default|rule-<n>>] [--quota-decision <selected|stopped|not-applicable|unknown>] [--quota-headroom <sufficient|tight|exhausted|unmeasurable|unknown>] [--quota-runway <sufficient|tight|exhausted|unmeasurable|unknown>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -58,9 +58,9 @@
 #   every new intake so exploration results retain their observed load condition.
 #   An explicit model selector is retained as modelVersion. When no selector is
 #   supplied, model stays default while modelVersion is honestly unreported.
-#   The resolved harness executable's first `--version` line is retained as
-#   cliVersion. An unavailable version is recorded explicitly as unreported and
-#   cannot satisfy a routing candidate comparison tuple.
+#   A writer's resolved harness executable contributes its first `--version` line
+#   as cliVersion. A reader never executes its harness before confinement, so its
+#   CLI version is unreported and cannot satisfy a routing candidate comparison.
 #   --telemetry-task-root links a retry or escalation to an existing opaque task
 #   root, and --telemetry-parent names that root's immediately prior attempt.
 #   They are per-attempt values, so a batch dispatch refuses them.
@@ -74,7 +74,7 @@
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
-#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
+#   terminal, so ship/writer-scout Orca spawns do not run treehouse get; cmux is a
 #   session provider only, exactly like herdr/zellij, so it does. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
@@ -172,17 +172,42 @@
 #   secondmate receives the primary's read-only shared captain-preference file
 #   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
 #   config reread generations because the new agent reads the converged files.
-#   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
-#   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
+#   --scout records kind=scout in the task's meta (report deliverable, disposable
+#   task environment; see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   --access <reader|writer> is the scout reader/writer axis, classified by
+#   firstmate at intake exactly like --task-class, and refused on ship and
+#   secondmate spawns (a ship delivers a project change through an isolated
+#   worktree by definition). writer, the default, keeps today's scout contract
+#   and metadata byte-identical. reader dispatches the scout SLOT-FREE: no
+#   `treehouse get`, no pool worktree. The task pane starts in a disposable
+#   scratch directory at a home-scoped <tasktmp>/scratch, spawn creates a bare shared-object
+#   read handle at scratch/repo.git (git clone --bare --shared of the project;
+#   the handle is disposable and per-launch - every launch replaces whatever
+#   sits at that path with a fresh clone of the current project, and a same-boundary
+#   relaunch pins its HEAD to the task's preserved base commit), records
+#   access=reader plus worktree=<scratch> in the meta, records base_commit=
+#   from the initial handle's HEAD (the immutable task baseline), and appends
+#   " access=reader" to the success
+#   line. The reader isolation boundary refuses unless validate_reader_scratch
+#   proves the scratch is outside tracked territory and the OS-specific launch
+#   sandbox can deny project writes inherited by the harness and its children;
+#   a reader brief must carry fm-brief.sh's
+#   "Access contract: access=reader" line and the spawn refuses reader/writer
+#   drift between the brief and the flag in both directions. backend=orca is
+#   refused for readers because orca allocates a managed worktree per task,
+#   which is exactly the allocation a reader avoids. fm-teardown.sh owns the
+#   reader cleanup contract (no pool return, fail-loud on a grown checkout),
+#   and fm-promote.sh refuses to promote a reader in place.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
-#   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   Ship spawns and writer scout spawns refuse to launch unless the resolved
+#   task path is a real git worktree root distinct from the primary project
+#   checkout. Reader scout isolation is owned by the path and launch gates below.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--task-class/
+#   source of truth; shared --scout/--access/--harness/--model/--effort/--task-class/
 #   --exploration/--backend/--mode/--yolo applies to every pair. A ship batch
 #   therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
@@ -197,18 +222,18 @@
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
-#                  written by this script; outside the worktree to avoid pi's trust gate)
+#                  written by this script; outside the task root to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
-# Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
+# Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the task root.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
-# a firstmate-owned global hook and registry, and a gitignored per-task pointer.
+# a firstmate-owned global hook and registry, and a task-root pointer excluded from Git for writer worktrees.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
-# plus a gitignored .fm-grok-turnend worktree pointer and a state token.
-# Cursor Agent uses project-local .cursor/hooks.json, excluded through the
-# worktree's git info/exclude so Firstmate machinery never enters project diffs.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+# plus a task-root .fm-grok-turnend pointer, excluded from Git for writer worktrees, and a state token.
+# Cursor Agent uses task-root-local .cursor/hooks.json, excluded through Git
+# info/exclude for writer worktrees so Firstmate machinery never enters project diffs.
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [access=reader] [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -219,8 +244,11 @@
 # teardown seals the attempt against them. A refused intake exits without submitting
 # the launch command, so no model attempt runs unrecorded; that owner's header owns
 # the refusal reasons and their repair route.
-# Ship/scout metadata also records base_commit= from the exact worktree HEAD before
-# the worker launches. A same-worktree relaunch preserves the original value. This
+# Ship and writer scout metadata record base_commit= from the exact worktree HEAD
+# before launch; reader scout metadata records it from the initial bare read handle's HEAD.
+# A writer relaunch in the same worktree preserves the original value; a reader relaunch pins
+# the fresh per-launch handle to it and refuses when it no longer names a commit
+# readable through that handle. This
 # task-scoped fact, not the recycled lane's retained reflog, bounds local-only
 # delivery to work produced after this task started.
 # When the home session's frozen trace-context decision is enabled (see
@@ -287,6 +315,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$SCRIPT_DIR/fm-backend-hometag-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -407,6 +437,8 @@ fm_classify_cooldown_refusal() {
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
+ACCESS=writer
+ACCESS_SET=0
 HARNESS_ARG=
 MODEL=
 EFFORT=
@@ -454,6 +486,7 @@ for a in "$@"; do
       --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
     esac
     case "$want_value" in
+      access) ACCESS=$a; ACCESS_SET=1 ;;
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
@@ -481,6 +514,8 @@ for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
+    --access) want_value=access ;;
+    --access=*) ACCESS=${a#--access=}; ACCESS_SET=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -526,6 +561,7 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$ACCESS_SET" -eq 0 ] || [ -n "$ACCESS" ] || { echo "error: --access requires a non-empty value" >&2; exit 1; }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
@@ -660,6 +696,16 @@ else
     echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
     exit 1
   }
+fi
+# Reader/writer access axis (scouts only): closed-set validated here so an
+# unknown value or a misapplied kind refuses before any fleet mutation.
+case "$ACCESS" in
+  reader|writer) ;;
+  *) echo "error: --access must be reader or writer (got '$ACCESS')" >&2; exit 1 ;;
+esac
+if [ "$ACCESS_SET" -eq 1 ] && [ "$KIND" != scout ]; then
+  echo "error: --access applies only to scout spawns; a ship delivers a project change through an isolated worktree and a secondmate operates its own home" >&2
+  exit 1
 fi
 if [ "$ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA" -eq 1 ] && { [ "$KIND" != ship ] || [ "$MODE" != no-mistakes ]; }; then
   echo "error: --allow-no-mistakes-without-reviewer-quota applies only to a no-mistakes ship" >&2
@@ -1068,6 +1114,10 @@ if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=cmux does not support --secondmate spawns yet" >&2
   exit 1
 fi
+if [ "$BACKEND" = orca ] && [ "$ACCESS" = reader ]; then
+  echo "error: backend=orca does not support --access reader yet; orca allocates a managed worktree per task, which is exactly the allocation a reader avoids" >&2
+  exit 1
+fi
 if [ "$BACKEND" = orca ]; then
   fm_backend_orca_runtime_check || exit 1
 fi
@@ -1139,7 +1189,7 @@ spawn_abort_cleanup() {
             echo "kind=$KIND"
             [ -z "${MODE:-}" ] || echo "mode=$MODE"
             [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
-            echo "tasktmp=${TASK_TMP:-}"
+            echo "tasktmp=${OWNED_TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
             echo "backend=orca"
@@ -1212,6 +1262,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   fi
   rc=0
   shared_args=()
+  [ "$ACCESS_SET" -eq 0 ] || shared_args+=(--access "$ACCESS")
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
@@ -1333,7 +1384,7 @@ launch_template() {
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
-    # per-task worktree token, so no launch placeholder belongs here.
+    # per-task-root token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
     # Cursor Agent accepts a positional prompt. --force is its unattended
     # command-approval mode, while --trust bypasses the separate first-workspace
@@ -1544,7 +1595,7 @@ kimi_workspace_trust_path() {  # <absolute-worktree-root>
 # Forwards the predicate owner's three-valued contract unchanged: 0 valid,
 # 1 rejected, 2 the predicate could not be evaluated at all (jq missing).
 # Collapsing 2 into 1 would report a missing dependency as a trust rejection.
-kimi_workspace_trust_is_valid() {  # <absolute-worktree-root> <trust-file>
+kimi_workspace_trust_is_valid() {  # <absolute-task-root> <trust-file>
   "$SCRIPT_DIR/fm-kimi-trust-check.sh" "$1" "$2" >/dev/null 2>&1
 }
 
@@ -1557,10 +1608,10 @@ kimi_trust_now_ms() {
   fi
 }
 
-# Returns 0 when the worktree is trusted, 2 when trust could not be EVALUATED
+# Returns 0 when the task root is trusted, 2 when trust could not be EVALUATED
 # (the predicate owner is unusable, so nothing is written), and 1 for every
 # other failure to establish trust.
-kimi_prest_trust_workspace() {  # <absolute-worktree-root>
+kimi_prest_trust_workspace() {  # <absolute-task-root>
   local root=$1 trust_dir trust_file tmp trusted_at status
   root=$(cd "$root" && pwd -P) || return 1
   trust_file=$(kimi_workspace_trust_path "$root") || return 1
@@ -1836,6 +1887,43 @@ if [ "$KIND" = ship ]; then
   fi
 fi
 
+# Brief/spawn access agreement, checked before any endpoint exists (the exact
+# analog of the ship delivery-contract check above). fm-brief.sh records a
+# reader scout brief's axis as exactly one fixed "Access contract:
+# access=reader" line before the scaffold-owned "# Task" boundary.
+# Drift in either direction launches a worker whose instructions describe the
+# wrong environment: a writer brief in a checkout-free scratch dir tells the
+# worker to branch and commit in a worktree it does not have, and a reader
+# brief in a pool worktree hands a no-checkout contract to a worker that holds
+# one. A brief scaffolded before this axis existed carries no line and remains
+# a valid writer brief, so the default writer path launches it unchanged.
+if [ "$KIND" = scout ]; then
+  BRIEF_ACCESS=$(awk '
+    /^# Task$/ { task_boundary = 1; exit }
+    /^Access contract: access=[^ ]+$/ {
+      count++
+      value = $0
+      sub(/^Access contract: access=/, "", value)
+    }
+    END {
+      if (count > 1 || (count > 0 && !task_boundary)) print "invalid"
+      else if (count == 1) print value
+    }
+  ' "$BRIEF")
+  if [ "$BRIEF_ACCESS" = invalid ]; then
+    echo "error: access mismatch for $ID: the brief's machine-owned access contract must appear exactly once before its # Task section; re-scaffold the brief" >&2
+    exit 1
+  fi
+  if [ "$ACCESS" = reader ] && [ "$BRIEF_ACCESS" != reader ]; then
+    echo "error: access mismatch for $ID: this spawn passed --access reader but the brief records no reader access contract; re-scaffold with fm-brief.sh --scout --access reader so the worker's instructions match its checkout-free environment" >&2
+    exit 1
+  fi
+  if [ "$ACCESS" != reader ] && [ "$BRIEF_ACCESS" = reader ]; then
+    echo "error: access mismatch for $ID: the brief records a reader access contract but this spawn would grant a writer worktree; pass --access reader or re-scaffold the brief" >&2
+    exit 1
+  fi
+fi
+
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
@@ -1857,6 +1945,207 @@ real_path_or_raw() {  # <path>
     printf '%s\n' "$real"
   else
     printf '%s\n' "$path"
+  fi
+}
+
+# READER ISOLATION ENFORCEMENT PREDICATE (--access reader). The scratch path
+# checks below keep the launch root outside tracked territory; the reader-only
+# process sandbox applied to the final launch command denies absolute-path
+# writes back into the project while preserving the task's scratch and
+# firstmate-owned report/status surfaces. Both gates must pass before launch.
+reader_validate_descendant_symlinks() {  # <canonical-scratch-dir>
+  local scratch=$1 links link raw_target target_real
+  links=$(find "$scratch" -type l -print 2>/dev/null) || {
+    echo "error: reader scratch directory $scratch could not be inspected for descendant symlinks; refusing to launch - a reader must never be able to write a tracked file" >&2
+    return 1
+  }
+  while IFS= read -r link || [ -n "$link" ]; do
+    [ -n "$link" ] || continue
+    raw_target=$(readlink "$link" 2>/dev/null) || {
+      echo "error: reader scratch directory $scratch contains an unsafe symlink at $link whose target cannot be read; refusing to launch - a reader must never be able to write a tracked file" >&2
+      return 1
+    }
+    case "$raw_target" in
+      /*)
+        echo "error: reader scratch directory $scratch contains an unsafe symlink at $link that uses an absolute target; refusing to launch - a reader must never be able to write a tracked file" >&2
+        return 1
+        ;;
+    esac
+    target_real=$(realpath "$link" 2>/dev/null) || {
+      echo "error: reader scratch directory $scratch contains an unsafe symlink at $link whose target cannot be resolved; refusing to launch - a reader must never be able to write a tracked file" >&2
+      return 1
+    }
+    [ -e "$target_real" ] || {
+      echo "error: reader scratch directory $scratch contains an unsafe symlink at $link whose target cannot be resolved; refusing to launch - a reader must never be able to write a tracked file" >&2
+      return 1
+    }
+    case "$target_real" in
+      "$scratch"|"$scratch"/*) ;;
+      *)
+        echo "error: reader scratch directory $scratch contains an unsafe symlink at $link that resolves outside its canonical root; refusing to launch - a reader must never be able to write a tracked file" >&2
+        return 1
+        ;;
+    esac
+  done <<EOF
+$(printf '%s\n' "$links" | LC_ALL=C sort)
+EOF
+}
+
+validate_reader_scratch() {  # <scratch-dir>
+  local scratch=$1 scratch_real inside_work_tree inside_git_dir descendant_git
+  scratch_real=$(cd "$scratch" 2>/dev/null && pwd -P) || {
+    echo "error: reader scratch directory cannot be resolved: $scratch; refusing to launch" >&2
+    return 1
+  }
+  case "$scratch_real" in
+    "$PROJ_ABS_REAL"|"$PROJ_ABS_REAL"/*)
+      echo "error: reader scratch directory $scratch_real resolves into the primary checkout $PROJ_ABS_REAL; refusing to launch - a reader must never be able to write a tracked file" >&2
+      return 1
+      ;;
+  esac
+  inside_work_tree=$(git -C "$scratch_real" rev-parse --is-inside-work-tree 2>/dev/null) || inside_work_tree=false
+  inside_git_dir=$(git -C "$scratch_real" rev-parse --is-inside-git-dir 2>/dev/null) || inside_git_dir=false
+  if [ "$inside_work_tree" = true ] || [ "$inside_git_dir" = true ]; then
+    echo "error: reader scratch directory $scratch_real is inside a git checkout or git dir; refusing to launch - a reader must never be able to write a tracked file" >&2
+    return 1
+  fi
+  reader_validate_descendant_symlinks "$scratch_real" || return 1
+  descendant_git=$(find "$scratch_real" -name .git -print -quit 2>/dev/null) || {
+    echo "error: reader scratch directory $scratch_real could not be inspected for descendant git metadata; refusing to launch - a reader must never be able to write a tracked file" >&2
+    return 1
+  }
+  if [ -n "$descendant_git" ]; then
+    echo "error: reader scratch directory $scratch_real contains a git checkout at $descendant_git; refusing to launch - a reader must never be able to write a tracked file" >&2
+    return 1
+  fi
+}
+
+reader_sandbox_preflight() {
+  local platform sandbox_bin report_dir state_dir profile
+  platform=$(uname -s)
+  report_dir=$(cd "$DATA/$ID" 2>/dev/null && pwd -P) || return 1
+  state_dir=$(cd "$STATE" 2>/dev/null && pwd -P) || return 1
+  case "$report_dir" in
+    "$PROJ_ABS_REAL")
+      echo "error: reader report directory cannot be the project root; refusing to launch without process-level write confinement" >&2
+      return 1
+      ;;
+  esac
+  case "$state_dir" in
+    "$PROJ_ABS_REAL")
+      echo "error: reader state directory cannot be the project root; refusing to launch without process-level write confinement" >&2
+      return 1
+      ;;
+  esac
+  case "$platform" in
+    Darwin)
+      sandbox_bin=$(command -v sandbox-exec 2>/dev/null || true)
+      [ -n "$sandbox_bin" ] || {
+        echo "error: sandbox-exec is required for reader process confinement on macOS; refusing to launch" >&2
+        return 1
+      }
+      profile='(version 1)(allow default)(deny file-write* (subpath (param "PROJECT")))(allow file-write* (subpath (param "SCRATCH")))(allow file-write* (subpath (param "REPORT")))(allow file-write* (subpath (param "STATE")))'
+      "$sandbox_bin" -D "PROJECT=$PROJ_ABS_REAL" -D "SCRATCH=$READER_SCRATCH" \
+        -D "REPORT=$report_dir" -D "STATE=$state_dir" -p "$profile" /usr/bin/true >/dev/null 2>&1 || {
+        echo "error: sandbox-exec could not establish reader process confinement; refusing to launch" >&2
+        return 1
+      }
+      READER_SANDBOX_PROFILE=$profile
+      ;;
+    Linux)
+      sandbox_bin=$(command -v bwrap 2>/dev/null || true)
+      [ -n "$sandbox_bin" ] || {
+        echo "error: bwrap is required for reader process confinement on Linux; refusing to launch" >&2
+        return 1
+      }
+      "$sandbox_bin" --die-with-parent --cap-drop ALL --bind / / --dev-bind /dev /dev \
+        --ro-bind "$PROJ_ABS_REAL" "$PROJ_ABS_REAL" -- /bin/true >/dev/null 2>&1 || {
+        echo "error: bwrap could not establish reader process confinement; refusing to launch" >&2
+        return 1
+      }
+      ;;
+    *)
+      echo "error: reader process confinement is unsupported on $platform; refusing to launch" >&2
+      return 1
+      ;;
+  esac
+  READER_SANDBOX_PLATFORM=$platform
+  READER_SANDBOX_BIN=$sandbox_bin
+  READER_REPORT_DIR=$report_dir
+  READER_STATE_DIR=$state_dir
+}
+
+reader_confine_launch() {  # <launch-command>
+  local launch=$1 confined allowed
+  case "$READER_SANDBOX_PLATFORM" in
+    Darwin)
+      printf '%s' "$(shell_quote "$READER_SANDBOX_BIN") -D $(shell_quote "PROJECT=$PROJ_ABS_REAL") -D $(shell_quote "SCRATCH=$READER_SCRATCH") -D $(shell_quote "REPORT=$READER_REPORT_DIR") -D $(shell_quote "STATE=$READER_STATE_DIR") -p $(shell_quote "$READER_SANDBOX_PROFILE") /bin/bash -c $(shell_quote "$launch")"
+      ;;
+    Linux)
+      confined="$(shell_quote "$READER_SANDBOX_BIN") --die-with-parent --cap-drop ALL --bind / / --dev-bind /dev /dev --ro-bind $(shell_quote "$PROJ_ABS_REAL") $(shell_quote "$PROJ_ABS_REAL")"
+      for allowed in "$READER_REPORT_DIR" "$READER_STATE_DIR"; do
+        case "$allowed" in
+          "$PROJ_ABS_REAL"/*)
+            confined="$confined --bind $(shell_quote "$allowed") $(shell_quote "$allowed")"
+            ;;
+        esac
+      done
+      printf '%s' "$confined -- /bin/bash -c $(shell_quote "$launch")"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# The reader's read access: a bare shared-object clone at scratch/repo.git.
+# It has no working tree, so `git --git-dir=repo.git show/grep/log/archive`
+# read any commit from the object store without materializing tracked files in
+# scratch, while the launch sandbox keeps existing project paths read-only.
+# --shared borrows the project's objects
+# through an objects/info/alternates pointer instead of copying them, which is
+# what makes a reader spawn cheap; the alternates target is the project's own
+# object store, so the handle stays readable only while that project retains
+# those objects (a project-side gc or prune can drop borrowed objects), and its
+# lifetime is exactly this task's launch-to-teardown window - never archive a
+# handle or point anything durable at it. The handle is DISPOSABLE AND
+# PER-LAUNCH: whatever occupies scratch/repo.git (a stale handle from an
+# earlier launch, or anything squatting on the path inside the already
+# validated scratch) is removed unfollowed and replaced with a fresh clone of
+# the CURRENT project, so one home/task/project launch reads exactly the
+# project it was passed by construction; a same-boundary relaunch pins HEAD to
+# its immutable task baseline instead of adopting a newer project HEAD.
+reader_ensure_read_handle() {  # <canonical-scratch-dir> [task-base-commit]
+  local handle="$1/repo.git" task_base_commit=${2:-}
+  rm -rf "$handle" || {
+    echo "error: could not remove the stale reader read handle at $handle" >&2
+    return 1
+  }
+  git clone --quiet --bare --shared "$PROJ_ABS" "$handle" || {
+    echo "error: could not create the reader read handle at $handle from $PROJ_ABS" >&2
+    return 1
+  }
+  # The clone records origin=<project>, a configured ref-write path back into
+  # the repository a reader may only read: `push origin --delete <branch>` from
+  # the handle deletes any branch that is not the project's checked-out one -
+  # on this repo, another task's unlanded fm/<id> work. Nothing in the reader
+  # path uses origin (a bare clone materializes every ref locally, and
+  # --shared's alternates pointer is independent of the remote), so removing it
+  # keeps the boundary enforced instead of promised.
+  git --git-dir="$handle" remote remove origin || {
+    echo "error: could not remove the origin remote from the reader read handle at $handle; refusing to launch - a reader must never hold a ref-write path into the project" >&2
+    return 1
+  }
+  if [ -n "$task_base_commit" ]; then
+    if ! [[ "$task_base_commit" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+      || ! git --git-dir="$handle" cat-file -e "$task_base_commit^{commit}" 2>/dev/null; then
+      echo "error: existing task base commit is invalid; refusing to replace its launch boundary" >&2
+      return 1
+    fi
+    git --git-dir="$handle" update-ref --no-deref HEAD "$task_base_commit" || {
+      echo "error: could not pin the reader read handle to the immutable task base commit" >&2
+      return 1
+    }
   fi
 }
 
@@ -1962,6 +2251,115 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+# Per-task temp root. Writers retain /tmp/fm-<id>/; readers take the home-scoped
+# root from fm_reader_task_tmp, the one owner fm-teardown recomputes its
+# destruction anchor from, so equal task ids in different homes cannot share
+# custody and the two scripts can never disagree about the spelling.
+TASK_TMP="/tmp/fm-$ID"
+if [ "$ACCESS" = reader ]; then
+  if ! fm_reader_task_tmp "$ID"; then
+    echo "error: reader home identity '$FM_READER_TASK_TMP_HOMETAG' is not safe for a task temp root; refusing to launch" >&2
+    exit 1
+  fi
+  TASK_TMP=$FM_READER_TASK_TMP
+fi
+
+# The access axis of an existing task id is immutable across relaunches: a
+# writer record's worktree= names a pool lease that only a writer teardown
+# returns, and a reader record's tasktmp= names a home-scoped scratch that only
+# a reader teardown removes. Overwriting either record with the other axis
+# would silently orphan that cleanup obligation (a writer flipped to reader
+# leaks its pool worktree lease forever), so an axis flip refuses before any
+# endpoint or metadata exists; tear the task down first, or relaunch it with
+# its recorded axis.
+if [ -f "$STATE/$ID.meta" ]; then
+  if ! EXISTING_ACCESS=$(fm_meta_optional_exact_value "$STATE/$ID.meta" access); then
+    echo "error: existing task $ID records ambiguous access metadata; expected exactly zero or one non-empty access= value - repair $STATE/$ID.meta before relaunching so a duplicate axis cannot launder a writer pool lease into a reader scratch record" >&2
+    exit 1
+  fi
+  # The recorded axis is a closed set, exactly as teardown treats it: an
+  # unknown value is record damage, and relaunching over it would launder the
+  # damaged record into a clean writer or reader meta - erasing the evidence
+  # while orphaning whichever cleanup obligation the original record carried.
+  case "$EXISTING_ACCESS" in
+    ''|writer|reader) ;;
+    *)
+      echo "error: existing task $ID records unknown access '$EXISTING_ACCESS'; this is record damage - repair $STATE/$ID.meta before relaunching so the damaged axis cannot be laundered into a clean writer or reader record" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$ACCESS" = reader ] && [ "$EXISTING_ACCESS" != reader ]; then
+    echo "error: existing task $ID is recorded as a writer task whose worktree must be returned to the pool; relaunching it with --access reader would overwrite that record and leak the pool lease - tear it down first or relaunch it as a writer" >&2
+    exit 1
+  fi
+  if [ "$ACCESS" != reader ] && [ "$EXISTING_ACCESS" = reader ]; then
+    echo "error: existing task $ID is recorded as a reader task with a scratch directory instead of a pool worktree; relaunching it without --access reader would overwrite that record and orphan its scratch cleanup - keep --access reader or tear it down first" >&2
+    exit 1
+  fi
+fi
+
+READER_BASE_COMMIT=
+
+# A reader relaunch destructively replaces scratch/repo.git (the per-launch
+# disposable handle), which under a LIVE reader would silently swap the
+# revision its in-flight reads come from - past the recorded base_commit=,
+# with no refusal anywhere. Prove the recorded endpoint dead BEFORE anything
+# destructive happens; only a positively dead endpoint (the recovery skill's
+# relaunch case) may proceed. Alive endpoints refuse as duplicates, while an
+# unknown liveness result preserves the task for targeted inspection.
+if [ "$ACCESS" = reader ] && [ -f "$STATE/$ID.meta" ]; then
+  if ! READER_BASE_COMMIT=$(fm_meta_optional_exact_value "$STATE/$ID.meta" base_commit) \
+    || [ -z "$READER_BASE_COMMIT" ]; then
+    echo "error: existing reader task $ID must record exactly one non-empty base_commit before relaunch; refusing to replace its immutable launch boundary" >&2
+    exit 1
+  fi
+  if ! [[ "$READER_BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+    || ! git -C "$PROJ_ABS" cat-file -e "$READER_BASE_COMMIT^{commit}" 2>/dev/null; then
+    echo "error: existing task base commit is invalid; refusing to replace its launch boundary" >&2
+    exit 1
+  fi
+  READER_EXISTING_BACKEND=$(fm_backend_of_meta "$STATE/$ID.meta")
+  READER_EXISTING_TARGET=$(fm_backend_target_of_meta "$STATE/$ID.meta")
+  if [ -z "$READER_EXISTING_TARGET" ]; then
+    echo "error: existing reader task $ID records no endpoint to prove dead; refusing a duplicate launch before its read handle would be replaced - tear it down first" >&2
+    exit 1
+  fi
+  READER_EXISTING_STATE=$(fm_backend_agent_alive "$READER_EXISTING_BACKEND" "$READER_EXISTING_TARGET")
+  case "$READER_EXISTING_STATE" in
+    dead) ;;
+    unknown)
+      echo "error: existing $READER_EXISTING_BACKEND endpoint for reader task $ID has unknown liveness; refusing a duplicate launch and preserving its scratch and metadata for targeted inspection - only a recovery-grade dead or missing endpoint licenses relaunch" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: existing $READER_EXISTING_BACKEND endpoint for reader task $ID is $READER_EXISTING_STATE; refusing a duplicate launch - replacing the per-launch read handle under a possibly live reader would silently change the revision it reads; tear the task down first" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+# Reader environment (--access reader): build and validate the slot-free
+# working directory BEFORE any endpoint exists, and start the task pane
+# directly in it - the ship and writer scout pool path keeps starting in the
+# project and moving via `treehouse get` below.
+SPAWN_TASK_CWD="$PROJ_ABS"
+if [ "$ACCESS" = reader ]; then
+  if [ -L "$TASK_TMP" ] || [ -L "$TASK_TMP/scratch" ]; then
+    echo "error: reader scratch path $TASK_TMP/scratch sits behind a symlink; refusing to launch before creating anything through it - a reader must never be able to write a tracked file" >&2
+    exit 1
+  fi
+  mkdir -p "$TASK_TMP/scratch" || {
+    echo "error: could not create the reader scratch directory at $TASK_TMP/scratch" >&2
+    exit 1
+  }
+  validate_reader_scratch "$TASK_TMP/scratch" || exit 1
+  READER_SCRATCH=$(cd "$TASK_TMP/scratch" && pwd -P)
+  reader_sandbox_preflight || exit 1
+  reader_ensure_read_handle "$READER_SCRATCH" "$READER_BASE_COMMIT" || exit 1
+  SPAWN_TASK_CWD="$READER_SCRATCH"
+  WT="$READER_SCRATCH"
+fi
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -1973,7 +2371,7 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_TASK_CWD") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -2030,7 +2428,7 @@ case "$BACKEND" in
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$W" "$SPAWN_TASK_CWD"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -2081,7 +2479,7 @@ case "$BACKEND" in
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$SPAWN_TASK_CWD" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -2134,7 +2532,7 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_TASK_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -2147,7 +2545,7 @@ EOF
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$SPAWN_TASK_CWD") || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -2159,7 +2557,7 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$SPAWN_TASK_CWD") || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -2293,7 +2691,10 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+# A reader already sits in its validated scratch directory (WT was set above),
+# so it never runs `treehouse get` - that is the whole point of the slot-free
+# path - and skips the pool worktree settle/validation below.
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$ACCESS" != reader ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -2361,25 +2762,34 @@ if [ "$KIND" != secondmate ]; then
   if [ -f "$EXISTING_META" ] && [ "$(fm_meta_get "$EXISTING_META" worktree)" = "$WT" ]; then
     TASK_BASE_COMMIT=$(fm_meta_get "$EXISTING_META" base_commit)
   fi
+  # A reader has no checkout: its base commit is the read handle's HEAD, the
+  # exact revision its evidence is drawn from.
+  if [ "$ACCESS" = reader ]; then
+    base_commit_git=(git --git-dir="$WT/repo.git")
+  else
+    base_commit_git=(git -C "$WT")
+  fi
   if [ -z "$TASK_BASE_COMMIT" ]; then
-    TASK_BASE_COMMIT=$(git -C "$WT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || {
+    TASK_BASE_COMMIT=$("${base_commit_git[@]}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || {
       echo "error: could not record the task base commit before launch" >&2
       exit 1
     }
   elif ! [[ "$TASK_BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
-    || ! git -C "$WT" cat-file -e "$TASK_BASE_COMMIT^{commit}" 2>/dev/null; then
+    || ! "${base_commit_git[@]}" cat-file -e "$TASK_BASE_COMMIT^{commit}" 2>/dev/null; then
     echo "error: existing task base commit is invalid; refusing to replace its launch boundary" >&2
     exit 1
   fi
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
+# Go's build temp nested inside the per-task temp root (TASK_TMP, named above
+# where the reader scratch derives from it). Go won't create GOTMPDIR, so mkdir
+# before it is used; fm-teardown removes the whole root. Nested at
+# <tasktmp>/gotmp so other per-task temp - a reader's scratch included -
+# lives alongside, and teardown cleans one deterministic path. GOTMPDIR (not
+# TMPDIR) is the targeted knob: TMPDIR is too broad (affects every program's
+# temp, not just Go's).
 mkdir -p "$TASK_TMP/gotmp"
+OWNED_TASK_TMP=$TASK_TMP
 
 # Every supported worker harness inherits this launch-scoped Git configuration.
 # The relay lives under the task temp root, never in the project, composes every
@@ -2389,6 +2799,12 @@ mkdir -p "$TASK_TMP/gotmp"
 # agent trailer cannot enter permanent history.
 install_agent_coauthor_sanitizer() {
   local hooks=$TASK_TMP/git-hooks original_hooks prior_count next_count hook original relay raw_count
+  local -a task_git
+  if [ "$ACCESS" = reader ]; then
+    task_git=(git --git-dir="$WT/repo.git")
+  else
+    task_git=(git -C "$WT")
+  fi
   raw_count=${GIT_CONFIG_COUNT:-0}
   case "$raw_count" in
     ''|*[!0-9]*)
@@ -2399,9 +2815,9 @@ install_agent_coauthor_sanitizer() {
   prior_count=$((10#$raw_count))
   next_count=$((prior_count + 1))
   hook=$hooks/commit-msg
-  original_hooks=$(git -C "$WT" config --path --get core.hooksPath 2>/dev/null || true)
+  original_hooks=$("${task_git[@]}" config --path --get core.hooksPath 2>/dev/null || true)
   if [ -z "$original_hooks" ]; then
-    original_hooks=$(git -C "$WT" rev-parse --path-format=absolute --git-path hooks 2>/dev/null) || {
+    original_hooks=$("${task_git[@]}" rev-parse --path-format=absolute --git-path hooks 2>/dev/null) || {
       echo "error: agent co-author sanitizer installation failed; refusing worker launch" >&2
       return 1
     }
@@ -2459,9 +2875,9 @@ install_agent_coauthor_sanitizer() {
 }
 
 # Per-harness turn-end hook where enabled: a file that touches
-# state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
-# and token pointers stay out of git's view so they never block teardown's dirty
-# check or leak into a commit.
+# state/<id>.turn-ended when the agent finishes a turn. Task-root hooks and token
+# pointers stay out of Git's view in writer worktrees so they never block
+# teardown's dirty check or leak into a commit; reader scratch has no Git view.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
@@ -2584,9 +3000,9 @@ EOF
       exclude_path '.opencode/plugins/fm-busy-state.js'
       ;;
     pi|pi-signed)
-      # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
-      # loaded from inside the project (verified live), but an explicit -e path
-      # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
+      # Written OUTSIDE the task root: Pi's trust gate fires on an extension loaded
+      # from inside the project (verified live), but an explicit -e path elsewhere
+      # loads without a dialog. Lives in state/, cleaned by teardown.
       cat > "$STATE/$ID.pi-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
@@ -2617,11 +3033,12 @@ export default function (pi: any) {
 EOF
       ;;
     cursor-agent*)
-      # Cursor composes project-local hooks with the operator's global hooks.
+      # Cursor composes task-root-local hooks with the operator's global hooks.
       # beforeSubmitPrompt opens the semantic turn; stop and SessionEnd close it.
       # Stop also preserves the watcher's turn-end notification. Only the generated
-      # hooks file is excluded through git info/exclude, so real project-owned
-      # Cursor configuration remains visible in diffs and pull requests.
+      # hooks file is excluded through git info/exclude in writer worktrees, so
+      # real project-owned Cursor configuration remains visible in diffs and pull
+      # requests; reader scratch has no Git view to pollute.
       mkdir -p "$WT/.cursor"
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source cursor-hook"
@@ -2646,17 +3063,17 @@ EOF
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
       # clean equivalent of codex's notify= and pi's turn_end. But grok only loads
-      # PROJECT hooks (<worktree>/.grok/hooks/, <worktree>/.claude/settings.local.json)
+      # PROJECT hooks (<writer-worktree>/.grok/hooks/, <writer-worktree>/.claude/settings.local.json)
       # after the folder is granted hook-trust, which is not automatic and which
       # firstmate cannot establish at launch without editing grok's own managed
       # trust store (a high-blast-radius write). GLOBAL hooks in ~/.grok/hooks/ are
       # always trusted and load on first launch with no gate. So the turn-end hook
-      # lives OUTSIDE the worktree as a single firstmate-owned global hook that is a
+      # lives OUTSIDE the task root as a single firstmate-owned global hook that is a
       # guarded no-op for every non-firstmate grok session: it fires only when the
       # current workspace holds a .fm-grok-turnend token pointer that matches the
       # firstmate-owned hook registry. firstmate then drops that per-task pointer
-      # (gitignored, like the other harnesses' worktree hook files).
-      # Result: the hook is outside the worktree, needs no trust grant, and never
+      # in the task root and excludes it from Git when that root is a writer worktree.
+      # Result: the hook is outside the task root, needs no trust grant, and never
       # touches grok's managed config - only firstmate-owned files.
       GROK_HOOKS_DIR="${GROK_HOME:-$HOME/.grok}/hooks"
       GROK_AUTH_DIR="$GROK_HOOKS_DIR/fm-turn-end.d"
@@ -2761,7 +3178,7 @@ TELEMETRY_MODEL_VERSION=${MODEL:-unreported}
 TELEMETRY_EFFORT=${EFFORT:-default}
 TELEMETRY_CLI_VERSION=unreported
 TELEMETRY_CLI_BIN=${KIMI_BIN:-$HARNESS}
-if command -v "$TELEMETRY_CLI_BIN" >/dev/null 2>&1; then
+if [ "$ACCESS" != reader ] && command -v "$TELEMETRY_CLI_BIN" >/dev/null 2>&1; then
   TELEMETRY_CLI_VERSION=$("$TELEMETRY_CLI_BIN" --version 2>/dev/null | sed -n '1{s/\r$//;p;}' || true)
   [ -n "$TELEMETRY_CLI_VERSION" ] || TELEMETRY_CLI_VERSION=unreported
   TELEMETRY_CLI_VERSION=$(printf '%.160s' "$TELEMETRY_CLI_VERSION")
@@ -2823,6 +3240,9 @@ TELEMETRY_TASK_ROOT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.taskRootId | se
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
+  # access= is written only for readers, so every writer meta stays
+  # byte-identical (absent access= means writer, mirroring absent backend=).
+  [ "$ACCESS" != reader ] || echo "access=reader"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
@@ -2913,6 +3333,12 @@ if [ "$HARNESS" = claude ] && [ -n "$CLAUDE_ACCOUNT_CONFIG_DIR" ]; then
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+if [ "$ACCESS" = reader ]; then
+  LAUNCH=$(reader_confine_launch "$LAUNCH") || {
+    echo "error: reader process confinement could not wrap the launch command; refusing to launch" >&2
+    exit 1
+  }
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
@@ -2998,4 +3424,6 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+SPAWN_ACCESS=
+[ "$ACCESS" != reader ] || SPAWN_ACCESS=" access=reader"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_ACCESS$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"

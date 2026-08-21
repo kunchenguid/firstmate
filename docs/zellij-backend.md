@@ -1,7 +1,7 @@
 # Zellij runtime backend
 
 Zellij is an experimental explicit-only session backend.
-It provides the terminal session while Treehouse continues to provide task worktrees.
+It provides the terminal session while Treehouse provides ship and writer scout worktrees and reader scouts use checkout-free scratch directories.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared selection and metadata semantics.
 
 ## Setup
@@ -16,7 +16,7 @@ Prerequisites:
 
 Select it with local `config/backend` containing `zellij`, `FM_BACKEND=zellij` for one launch, or an explicit request to Firstmate.
 It is never auto-detected.
-A spawn stops before creating a session or acquiring a worktree when Zellij or `jq` is missing or Zellij is below 0.44.
+A spawn stops before creating a session or acquiring a writer task worktree when Zellij or `jq` is missing or Zellij is below 0.44.
 
 Firstmate uses one shared session named `firstmate` by default.
 `FM_ZELLIJ_SESSION` can select another name for isolated verification.

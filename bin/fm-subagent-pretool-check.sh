@@ -41,8 +41,8 @@
 #   ALLOW - exit 0 and no output.
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
 #          deny object on stdout unless --claude was supplied.
-#   INERT - not a genuine primary home (a crewmate/scout task worktree or a
-#           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
+#   INERT - not a genuine primary home (a child writer worktree, reader
+#           scratch, or non-firstmate repo): exit 0 with no output, exactly like ALLOW.
 #   ESCAPE - FM_ALLOW_SUBAGENT=1 in the environment allows deliberately.
 #   FAIL OPEN - malformed or empty stdin, or missing jq for stdin transport.
 #
@@ -96,7 +96,7 @@ worktrees inherit it and legitimate crewmates would lose their delegation tools.
 This hook remains as the shipped guard for future delegation-shaped names
 outside any local fixed list.
 Fires only in a genuine firstmate primary home; it is a silent no-op in a
-crewmate/scout task worktree or any non-firstmate repo, where a worker using
+child writer worktree, reader scratch directory, or any non-firstmate repo, where a worker using
 delegation tools is legitimate.
 Exits 0 to allow and 2 to deny, naming the real crewmate dispatch path instead.
 Set FM_ALLOW_SUBAGENT=1 in the session environment to allow deliberately.
@@ -178,9 +178,9 @@ STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 # Scope to a genuine primary home, exactly as the session-start nudge and the
 # turn-end guard do. fm_primary_scope_matches accepts a plain checkout or a
 # marked secondmate home - both operate a fleet and must dispatch through it -
-# and rejects a linked task worktree, which is the shape bin/fm-spawn.sh always
-# hands a crewmate. A crewmate using delegation tools inside its own task
-# worktree is legitimate and stays allowed. Any failure to confirm the home is
+# and rejects a linked writer task worktree; a reader scratch is already outside
+# firstmate checkout scope. A crewmate using delegation tools inside its own task
+# environment is legitimate and stays allowed. Any failure to confirm the home is
 # inert (exit 0), never a block, so a broken environment never denies a call.
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"

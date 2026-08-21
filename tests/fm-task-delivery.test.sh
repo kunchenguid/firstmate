@@ -238,6 +238,43 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+# A reader scout has no project worktree - its worktree= is a disposable scratch
+# directory - so in-place promotion (which reuses the scout's worktree as the
+# ship worktree) must refuse rather than mint a ship task that cannot build,
+# commit, or pass teardown's worktree safety checks.
+test_promote_refuses_a_reader_scout() {
+  local home meta out status
+  home="$TMP_ROOT/promote-reader/home"
+  mkdir -p "$home/state"
+  meta="$home/state/promote-r1.meta"
+  printf 'window=fm-promote-r1\nkind=scout\naccess=reader\nworktree=/tmp/fm-promote-r1/scratch\n' > "$meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-r1 --mode direct-PR --yolo on 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promoting a reader scout should exit non-zero"
+  assert_contains "$out" "reader scout" "promote refusal did not name the reader axis"
+  assert_grep 'kind=scout' "$meta" "refused reader promotion still changed the task record"
+  assert_no_grep 'kind=ship' "$meta" "refused reader promotion minted a ship record"
+  pass "fm-promote: a reader scout is never promoted in place"
+}
+
+test_promote_refuses_unknown_access_metadata() {
+  local home meta before out status
+  home="$TMP_ROOT/promote-unknown-access/home"
+  mkdir -p "$home/state"
+  meta="$home/state/promote-u1.meta"
+  printf 'window=fm-promote-u1\nkind=scout\naccess=partial\nworktree=/tmp/fm-promote-u1\n' > "$meta"
+  before=$(cat "$meta")
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-u1 --mode direct-PR --yolo on 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promoting a scout with unknown access metadata should exit non-zero"
+  assert_contains "$out" "unknown access" "promote refusal did not name the damaged access metadata"
+  [ "$(cat "$meta")" = "$before" ] || fail "unknown access refusal still rewrote the task record"
+  assert_no_grep 'kind=ship' "$meta" "unknown access promotion minted a ship record"
+  pass "fm-promote: unknown access metadata fails closed before record mutation"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -278,5 +315,7 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_refuses_a_reader_scout
+test_promote_refuses_unknown_access_metadata
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

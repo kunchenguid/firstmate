@@ -1047,6 +1047,9 @@ families_for_changed_path() {
     docs/fm-test-isolation-proof.json)
       printf '%s\n' pure-contract-unit
       ;;
+    .opencode/plugins/fm-primary-cd-check.js)
+      printf '%s\n' pure-contract-unit
+      ;;
     .github/*|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
@@ -1064,6 +1067,15 @@ families_for_changed_path() {
       fixture_ref=${fixture_ref%%/*}
       if [ -d "tests/fixtures/$fixture_ref" ]; then
         families_for_test_reference "fixtures/$fixture_ref" \
+          || printf '%s\n' "__unmapped__:$path"
+      fi
+      ;;
+    tests/fixtures/*)
+      # A fixture kept as a single file directly under tests/fixtures/ is named
+      # in full by its consuming suite, so the same reference scan resolves it.
+      # A removed fixture file has no consuming suite left to select.
+      if [ -e "$path" ]; then
+        families_for_test_reference "fixtures/${path#tests/fixtures/}" \
           || printf '%s\n' "__unmapped__:$path"
       fi
       ;;
