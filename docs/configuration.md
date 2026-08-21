@@ -123,6 +123,7 @@ Every generated ship brief's task-branch language - the branch-creation step, th
 An absent file, or one that is empty or whitespace-only, resolves to the historical default `fm/`.
 This exists for a shared repo where another fleet already owns the `fm/*` namespace: per-task instructions can name a distinct prefix (e.g. `ryan-fm/`) and the scaffold now carries it consistently instead of the stock `fm/` language silently overriding it.
 `bin/fm-brief.sh` reads the file once per scaffold from the resolved `FM_HOME/config`, so it is not inherited: a secondmate home wanting a non-default prefix sets its own `config/branch-prefix` file.
+`bin/fm-merge-local.sh` and `bin/fm-review-diff.sh` do not yet read this file and still look up `fm/<task-id>` unconditionally, so a configured non-default prefix breaks the local-only merge path and diff review for that task.
 
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
