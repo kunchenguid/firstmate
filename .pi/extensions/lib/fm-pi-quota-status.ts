@@ -152,7 +152,7 @@ export function quotaProviderForPiProvider(piProvider: string): string | null {
 
 export function parseQuotaAxiJson(
   raw: string,
-  options: { projection?: QuotaAxiProjection } = {},
+  options: { projection?: QuotaAxiProjection; expectedProvider?: string } = {},
 ): ParsedQuotaAxiReport | null {
   let value: unknown;
   try {
@@ -178,6 +178,11 @@ export function parseQuotaAxiJson(
   ) {
     return null;
   }
+  if (options.expectedProvider !== undefined && (
+    value.providers.length !== 1 ||
+    !isRecord(value.providers[0]) ||
+    value.providers[0].provider !== options.expectedProvider
+  )) return null;
   return {
     generatedAtMs,
     schemaVersion,
@@ -1319,6 +1324,10 @@ function validProviderState(value: unknown, requireSourcesTried: boolean): boole
     : exactEnum(value.authStatus, QUOTA_AUTH_STATUSES);
   if (value.authStatus !== undefined && authStatus === null) return false;
   if (status === "fresh" && authStatus !== null && authStatus !== "usable") return false;
+  if (
+    status === "fresh" &&
+    (value.error !== undefined || value.retryAfter !== undefined || value.remedyCommand !== undefined)
+  ) return false;
   const reason = value.reason === undefined
     ? null
     : exactEnum(value.reason, QUOTA_STATE_REASONS);

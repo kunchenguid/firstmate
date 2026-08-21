@@ -698,6 +698,38 @@ assert(
   selectActiveProviderQuota(missingFullSourcesParsed, "openai-codex", { nowMs: now }).kind === "malformed",
   "schema-5 full output missing sourcesTried was accepted as fresh",
 );
+for (const field of ["error", "retryAfter", "remedyCommand"]) {
+  const freshWithFailureDiagnostic = structuredClone(schema5Full);
+  freshWithFailureDiagnostic.providers[1].state[field] = "unexpected diagnostic";
+  const freshWithFailureDiagnosticParsed = parseQuotaAxiJson(
+    JSON.stringify(freshWithFailureDiagnostic),
+    { projection: "full" },
+  );
+  assert(
+    selectActiveProviderQuota(freshWithFailureDiagnosticParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+    `fresh provider with ${field} was accepted as fresh`,
+  );
+}
+const scopedCodexReport = structuredClone(schema5Full);
+scopedCodexReport.providers = [scopedCodexReport.providers[1]];
+assert(
+  parseQuotaAxiJson(JSON.stringify(scopedCodexReport), {
+    projection: "full",
+    expectedProvider: "codex",
+  }),
+  "exact provider-scoped report was rejected",
+);
+for (const sibling of [null, { provider: "kimi" }]) {
+  const invalidScopedReport = structuredClone(scopedCodexReport);
+  invalidScopedReport.providers.push(sibling);
+  assert(
+    parseQuotaAxiJson(JSON.stringify(invalidScopedReport), {
+      projection: "full",
+      expectedProvider: "codex",
+    }) === null,
+    "provider-scoped output with an unexpected sibling was accepted",
+  );
+}
 const missingFullWindowPace = structuredClone(schema5Full);
 delete missingFullWindowPace.providers[1].windows[0].pace;
 const missingFullWindowPaceParsed = parseQuotaAxiJson(
@@ -1699,8 +1731,15 @@ const officialBaseUrls = {
   "openai-codex": "https://chatgpt.com/backend-api",
   xai: "https://api.x.ai/v1",
 };
+const officialModelApis = {
+  anthropic: "anthropic-messages",
+  "github-copilot": "openai-responses",
+  "kimi-coding": "anthropic-messages",
+  "openai-codex": "openai-codex-responses",
+  xai: "openai-responses",
+};
 function fixtureModel(provider, id = "fixture-model", baseUrl = officialBaseUrls[provider] ?? "https://custom.example.invalid") {
-  return { provider, id, baseUrl };
+  return { provider, id, api: officialModelApis[provider] ?? "custom-api", baseUrl };
 }
 function fixtureAccessToken(accountId, additionalClaims = {}) {
   if (!accountId) return "opaque-fixture-token";
@@ -2102,6 +2141,40 @@ assert(
   "custom provider implementation invoked quota-axi",
 );
 await providerOverride.emit("session_shutdown", { reason: "quit" });
+
+const modelsJsonOverlay = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 500,
+}));
+await modelsJsonOverlay.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => modelsJsonOverlay.widgetText(400).includes("week 94% left"),
+  "models.json overlay fixture did not publish built-in quota",
+);
+const callsBeforeModelsJsonOverlay = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+modelsJsonOverlay.ctx.model = {
+  ...fixtureModel("openai-codex"),
+  api: "openai-responses",
+};
+const modelsJsonOverlayText = modelsJsonOverlay.widgetText(240);
+assert(
+  modelsJsonOverlayText.includes("provider override"),
+  `models.json API overlay was not rejected: ${modelsJsonOverlayText}`,
+);
+assert(!modelsJsonOverlayText.includes("94%"), "models.json API overlay retained built-in quota");
+await sleep(30);
+const callsAfterModelsJsonOverlay = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+assert(
+  callsAfterModelsJsonOverlay === callsBeforeModelsJsonOverlay,
+  "models.json API overlay invoked quota-axi",
+);
+await modelsJsonOverlay.emit("session_shutdown", { reason: "quit" });
 
 const delayedAuthWatcher = new EventEmitter();
 delayedAuthWatcher.close = () => {};

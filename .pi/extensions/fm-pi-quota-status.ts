@@ -298,6 +298,14 @@ const OFFICIAL_PROVIDER_BASE_URLS: Readonly<Record<string, string>> = {
   xai: "https://api.x.ai/v1",
 };
 
+const OFFICIAL_PROVIDER_MODEL_APIS: Readonly<Record<string, readonly string[]>> = {
+  anthropic: ["anthropic-messages"],
+  "github-copilot": ["anthropic-messages", "openai-completions", "openai-responses"],
+  "kimi-coding": ["anthropic-messages"],
+  "openai-codex": ["openai-codex-responses"],
+  xai: ["openai-completions", "openai-responses"],
+};
+
 type QuotaProcessResult =
   | { kind: "ok"; stdout: string }
   | { kind: QuotaFailureReason };
@@ -535,10 +543,15 @@ function isOfficialProviderBaseUrl(provider: string, value: string): boolean {
   return Boolean(expected && canonical === canonicalBaseUrl(expected));
 }
 
+function isOfficialProviderModelApi(provider: string, value: unknown): boolean {
+  return typeof value === "string" &&
+    Boolean(OFFICIAL_PROVIDER_MODEL_APIS[provider]?.includes(value));
+}
+
 function activeModelRevision(model: ActiveModel | undefined): string {
   if (!model) return "no-model";
   const endpoint = canonicalBaseUrl(model.baseUrl) ?? model.baseUrl;
-  return JSON.stringify([model.provider, model.id, endpoint]);
+  return JSON.stringify([model.provider, model.id, model.api, endpoint]);
 }
 
 function effectiveEndpointRevision(provider: string, endpoint: string): string {
@@ -957,6 +970,14 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         return {
           kind: "unsupported",
           view: unsupportedProvider(model.provider),
+          modelRevision,
+          compositionRevision,
+        };
+      }
+      if (!isOfficialProviderModelApi(model.provider, model.api)) {
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, "provider-override"),
           modelRevision,
           compositionRevision,
         };
@@ -1551,7 +1572,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         const completedProvider = completedTarget.piProvider;
         if (result.kind === "ok") {
           session.lastFailure = null;
-          const report = parseQuotaAxiJson(result.stdout, { projection: "full" });
+          const report = parseQuotaAxiJson(result.stdout, {
+            projection: "full",
+            expectedProvider: quotaProvider,
+          });
           const selected = report
             ? selectTargetReport(report, completedTarget, now())
             : { kind: "malformed", provider: completedProvider } as const;
