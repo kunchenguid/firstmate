@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed omp grok kimi cursor muse"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -48,6 +48,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     opencode) printf '/exit\tEscape\t2\t\n' ;;
     pi) printf '/quit\tEscape\t1\t\n' ;;
     pi-signed) printf '/quit\tEscape\t1\t\n' ;;
+    omp) printf '/quit\tEscape\t1\t\n' ;;
     grok) printf '/exit\tC-c\t1\t\n' ;;
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
@@ -119,6 +120,10 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_tty*)
+          [ -z "${FM_FAKE_OMP_PROCESS:-}" ] || printf '/dev/ttys999\n'
+          exit 0
+          ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
@@ -134,6 +139,24 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  cat > "$fb/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_OMP_PROCESS:-}" ]; then
+  case "$*" in
+    *'-t ttys999 '*'-o pid=,pgid=,tpgid=,comm='*)
+      printf '101 101 101 bun\n'
+      exit 0
+      ;;
+    *'-p 101 '*'-o args='*)
+      printf 'bun /Users/test/.bun/bin/omp --advisor --model claude-sonnet-5 --thinking low Reply with exactly the word PONG and nothing else.\n'
+      exit 0
+      ;;
+  esac
+fi
+exec /bin/ps "$@"
+SH
+  chmod +x "$fb/ps"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ] \
@@ -197,6 +220,7 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_OMP_PROCESS="${FM_FAKE_OMP_PROCESS:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -223,10 +247,16 @@ test_exit_types_each_harness_verified_command() {
     add_task "$dir" t1 "$harness"
     if [ "$harness" = cursor ]; then
       alive_as "$dir" cursor-agent
+    elif [ "$harness" = omp ]; then
+      alive_as "$dir" bun
     else
       alive_as "$dir" "$harness"
     fi
-    out=$(run_control "$dir" t1 exit); rc=$?
+    if [ "$harness" = omp ]; then
+      out=$(FM_FAKE_OMP_PROCESS=1 run_control "$dir" t1 exit); rc=$?
+    else
+      out=$(run_control "$dir" t1 exit); rc=$?
+    fi
     expect_code 0 "$rc" "exit on $harness should succeed"$'\n'"$out"
     IFS=$'\t' read -r expected key repeat clear <<< "$(verified_adapter_contract "$harness")"
     [ "$(literals "$dir")" = "$expected" ] \
@@ -243,10 +273,16 @@ test_interrupt_sends_each_harness_verified_key() {
     add_task "$dir" t1 "$harness"
     if [ "$harness" = cursor ]; then
       alive_as "$dir" cursor-agent
+    elif [ "$harness" = omp ]; then
+      alive_as "$dir" bun
     else
       alive_as "$dir" "$harness"
     fi
-    out=$(run_control "$dir" t1 interrupt); rc=$?
+    if [ "$harness" = omp ]; then
+      out=$(FM_FAKE_OMP_PROCESS=1 run_control "$dir" t1 interrupt); rc=$?
+    else
+      out=$(run_control "$dir" t1 interrupt); rc=$?
+    fi
     expect_code 0 "$rc" "interrupt on $harness should succeed"$'\n'"$out"
     IFS=$'\t' read -r expected key repeat clear <<< "$(verified_adapter_contract "$harness")"
     want=$(for _ in $(seq 1 "$repeat"); do printf '%s\n' "$key"; done)
@@ -267,7 +303,7 @@ test_harness_family_resolution() {
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
       cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
-      pi-signed:pi-signed; do
+      pi-signed:pi-signed omp:omp; do
     recorded=${pair%%:*}
     want=${pair#*:}
     got=$(fm_control_harness_family "$recorded") \

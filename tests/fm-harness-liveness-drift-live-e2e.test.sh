@@ -100,7 +100,7 @@ SKIPPED=
 # cursor matters for the same reason muse does, from the other direction: it
 # runs as a bundled node script, so its pane title is a bare `node` that no name
 # pattern can own, and identity has to come from its install path or argv[0].
-for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
+for harness in claude codex opencode pi pi-signed omp grok kimi cursor muse; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its classification is unverified here"
@@ -115,14 +115,17 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   # which would hang this probe rather than classify anything; --trust is the
   # same flag fm-spawn passes for the same reason.
   launch_args=""
-  [ "$harness" = cursor ] && launch_args="--trust"
+  case "$harness" in
+    cursor) launch_args="--trust" ;;
+    omp) launch_args="--advisor --approval-mode=yolo" ;;
+  esac
   # shellcheck disable=SC2086  # deliberate: an empty value must add no argument
   "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" -- "$bin_path" $launch_args \
     || fail "$harness ($version): could not launch a window for the liveness probe"
 
   state=
   for _ in $(seq 1 300); do
-    state=$(fm_backend_agent_state tmux "$target")
+    state=$(fm_backend_agent_state tmux "$target" "$harness")
     [ "$state" = alive ] && break
     sleep 0.2
   done

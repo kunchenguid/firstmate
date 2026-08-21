@@ -76,6 +76,7 @@ SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
+  make_spawn_pi_probe "$fakebin" omp
   printf '%s\n' "$fakebin"
 }
 
@@ -632,6 +633,32 @@ test_pi_threads_model_and_max_effort() {
   pass "pi receives --model and --thinking max profile flags"
 }
 
+test_omp_threads_advisor_autonomy_model_and_max_effort() {
+  local rec id out status launch
+  id=profile-omp-z8a
+  rec=$(make_spawn_case profile-omp omp "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort max)
+  status=$?
+  expect_code 0 "$status" "OMP spawn with max effort should succeed"
+  assert_contains "$out" "spawned $id harness=omp" "OMP spawn did not preserve its visible identity"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" omp openai-codex/gpt-5.6-sol max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$FAKEBIN_DIR/omp' --advisor --approval-mode=yolo --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "OMP launch did not use advisor, explicit autonomy, model, thinking, and extension wiring"
+  assert_not_contains "$launch" "FM_PI_HARNESS=" \
+    "OMP launch must not inherit Pi's executable-identity marker"
+  assert_not_contains "$launch" "--tui-mode" \
+    "OMP launch must not borrow Pi's version-dependent TUI probe"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "OMP launch lost the canonical one-positional launch-brief envelope"
+  assert_present "$HOME_DIR/state/$id.pi-ext.ts" "OMP launch did not install the verified Pi-compatible turn-end extension"
+  assert_present "$HOME_DIR/state/$id.busy-gen" "OMP spawn did not arm its busy-state contract"
+  pass "OMP preserves its executable identity and launches advisor mode with explicit autonomy"
+}
+
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   local rec id out status launch
   id=profile-pi-signed-z8b
@@ -718,6 +745,29 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
   pass "pi-signed refuses safely and actionably when the selected executable is unavailable"
 }
 
+test_omp_missing_binary_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=profile-omp-missing-z8c
+  rec=$(make_spawn_case profile-omp-missing omp "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/omp"
+  : > "$LAUNCH_LOG"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "a missing OMP executable should refuse the spawn"
+  assert_contains "$out" "omp executable not found on PATH" \
+    "missing OMP refusal did not name the actionable requirement"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing OMP refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing OMP refusal typed a launch command"
+  pass "OMP refuses safely and actionably when the selected executable is unavailable"
+}
+
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   local rec id sm out status launch
   id=profile-pi-signed-secondmate-z8d
@@ -738,6 +788,28 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
+}
+
+test_omp_secondmate_uses_advisor_and_pi_compatible_extension_paths() {
+  local rec id sm out status launch
+  id=profile-omp-secondmate-z8e
+  rec=$(make_spawn_case profile-omp-secondmate codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' omp > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "OMP secondmate launch should succeed"
+  assert_contains "$out" "spawned $id harness=omp kind=secondmate" \
+    "OMP secondmate launch did not preserve its runtime identity"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" omp default default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$FAKEBIN_DIR/omp' --advisor --approval-mode=yolo -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+    "OMP secondmate did not build the verified advisor and extension launch template"
+  pass "OMP secondmate launch uses advisor mode and Pi-compatible extension paths"
 }
 
 test_batch_forwards_shared_profile_flags() {
@@ -848,10 +920,13 @@ test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
+test_omp_threads_advisor_autonomy_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
+test_omp_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
+test_omp_secondmate_uses_advisor_and_pi_compatible_extension_paths
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
