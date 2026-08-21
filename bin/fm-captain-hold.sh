@@ -650,8 +650,8 @@ sanitize_field() {  # <text>
 }
 
 command_answers() {
-  local origin='' source='' key answer label mode id show state hold_kind body digest legacy_digest legacy_key
-  local recorded_digest recorded_mode tmp err closed=0 skipped=0 reason release_flag
+  local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
+  local recorded_digest recorded_mode tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
@@ -673,7 +673,14 @@ command_answers() {
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-keyed-decision.XXXXXX") || fail "cannot stage the captain decision"
   err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-keyed-decision-err.XXXXXX") \
     || { rm -f -- "$tmp"; fail "cannot stage the captain decision diagnostics"; }
-  while IFS=$'\t' read -r key answer label mode; do
+  while IFS= read -r row; do
+    key=${row%%"$tab"*}
+    rest=''
+    case "$row" in *"$tab"*) rest=${row#*"$tab"} ;; esac
+    answer=${rest%%"$tab"*}
+    case "$rest" in *"$tab"*) rest=${rest#*"$tab"} ;; *) rest='' ;; esac
+    label=${rest%%"$tab"*}
+    case "$rest" in *"$tab"*) mode=${rest#*"$tab"} ;; *) mode='' ;; esac
     [ -n "${key:-}" ] || continue
     case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
     [ "${#key}" -le 128 ] || continue

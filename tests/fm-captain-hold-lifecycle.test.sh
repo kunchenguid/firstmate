@@ -303,7 +303,7 @@ test_answer_records_and_closes() {
 # --release lifts the hold instead of closing, preserving the work item's own
 # body under the record; a re-held task later accepts a new answer.
 test_release_frees_held_work() {
-  local home show
+  local home show out
   home=$(make_home release-work)
   tasks_in "$home" add sample-widget "Ship the sample widget" --kind ship --repo sample \
     --body 'The widget plan body. Literal escape: \n. Unicode: café.' >/dev/null \
@@ -332,6 +332,20 @@ test_release_frees_held_work() {
   show=$(tasks_in "$home" show sample-widget --full)
   assert_contains "$show" "state: queued" "a mismatched release replay closed the work item"
   assert_contains "$show" "held: no" "a mismatched release replay re-held the work item"
+
+  tasks_in "$home" add sample-empty-label-widget "Ship without a display label" \
+    --kind ship --repo sample >/dev/null
+  run_captain "$home" hold sample-empty-label-widget --reason "captain go needed" >/dev/null
+  out=$(printf 'sample-empty-label-widget\tgo\t\trelease\n' \
+    | run_captain "$home" answers --source "empty-label release fixture") \
+    || fail "an empty answer label shifted the release close mode"
+  assert_contains "$out" "closed: sample-empty-label-widget" \
+    "the empty-label release was not accepted"
+  show=$(tasks_in "$home" show sample-empty-label-widget --full)
+  assert_contains "$show" "state: queued" "an empty-label release completed its work item"
+  assert_contains "$show" "held: no" "an empty-label release did not lift the hold"
+  assert_contains "$show" "Resolution mode: released" \
+    "an empty-label release recorded the wrong close mode"
 
   # A NEW captain gate on the same task later takes a NEW answer.
   run_captain "$home" hold sample-widget --reason "captain pricing call needed" >/dev/null \
@@ -788,7 +802,7 @@ EOF
 # identities through the shim, short decision keys in recorded metadata, a
 # concrete-origin binding, and the chat fallback for old rows.
 test_legacy_identities_keep_working() {
-  local home id hold out show legacy_text legacy_digest
+  local home id hold out show legacy_text legacy_digest old_hold
   home=$(make_home legacy-compat)
   id=sample-legacy-review
   mkdir -p "$home/data/$id"
@@ -842,6 +856,28 @@ test_legacy_identities_keep_working() {
   assert_contains "$show" "- sample-legacy-work" "the shim resolve lost the routed identities"
   show=$(tasks_in "$home" show sample-legacy-work --full)
   assert_contains "$show" "blocked: no" "the shim resolve did not release the routed work"
+
+  old_hold=$(run_shim "$home" hold "$id" old-route \
+    --title "Old routed choice" --reason "captain old route pending" --repo sample)
+  tasks_in "$home" add sample-old-routed-work "Apply the old routed choice" \
+    --kind ship --repo sample --blocked-by "$old_hold" >/dev/null
+  printf 'Use the historical route.\n' > "$home/old-route.txt"
+  legacy_text=$(cat "$home/old-route.txt")
+  if command -v shasum >/dev/null 2>&1; then
+    legacy_digest=$(printf '%s' "$legacy_text" | shasum -a 256 | awk '{print $1}')
+  else
+    legacy_digest=$(printf '%s' "$legacy_text" | sha256sum | awk '{print $1}')
+  fi
+  printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: sample-old-routed-work\nResolution mode: routed\n\nCaptain decision:\n%s\n\nRouted work:\n- sample-old-routed-work\n' \
+    "$legacy_digest" "$legacy_text" > "$home/old-route-body.txt"
+  tasks_in "$home" update "$old_hold" --body-file "$home/old-route-body.txt" --archive-body >/dev/null
+  run_shim "$home" resolve "$id" old-route --decision-file "$home/old-route.txt" \
+    --routed-to sample-old-routed-work >/dev/null \
+    || fail "the shim did not replay a matching pre-collapse routed record"
+  show=$(tasks_in "$home" show "$old_hold" --full)
+  assert_contains "$show" "state: done" "the replayed legacy resolve did not close its hold"
+  show=$(tasks_in "$home" show sample-old-routed-work --full)
+  assert_contains "$show" "blocked_by: none" "the replayed legacy resolve did not clear its recorded edge"
 
   # The shim decline path maps onto the same recorded answer.
   printf 'Declined: keep the current shape.\n' > "$home/decline.txt"

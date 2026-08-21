@@ -81,8 +81,30 @@ list_has_key() {
   esac
 }
 
+sha256_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  else
+    fail "shasum or sha256sum is required"
+  fi
+}
+
+recorded_field() {
+  local rest=$1 label=$2
+  case "$rest" in
+    *"$label: "*) rest=${rest#*"$label: "} ;;
+    *) return 1 ;;
+  esac
+  rest=${rest%%\\n*}
+  rest=${rest%%$'\n'*}
+  printf '%s' "$rest"
+}
+
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' routed='' id dep tmp show state blocked hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' routed='' routed_csv id dep tmp answer_file show state blocked hold_show hold_body
+  local resolution_recorded=0 legacy_replay=0 decision_text decision_digest recorded_digest recorded_routes
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -98,10 +120,24 @@ command_resolve() {
   [ -f "$decision_file" ] || fail "decision file does not exist: $decision_file"
   [ -n "$routed" ] || fail "at least one --routed-to task is required; use answer when the captain's answer routes no work"
   routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
+  routed_csv=$(printf '%s' "$routed" | tr ' ' ',')
+  decision_text=$(cat "$decision_file")
+  [ -n "$decision_text" ] || fail "decision file must not be empty"
+  decision_digest=$(sha256_text "$decision_text")
   hold_show=$(task_show "$id") || fail "captain decision $id does not exist in the active home"
   hold_body=$(show_field "$hold_show" body)
   case "$hold_body" in
-    *"Resolution recorded by fm-captain-hold."*|*"Resolution recorded by fm-decision-hold."*)
+    *"Resolution recorded by fm-decision-hold."*"Routed identities: "*)
+      recorded_digest=$(recorded_field "$hold_body" "Decision digest" || true)
+      recorded_routes=$(recorded_field "$hold_body" "Routed identities" || true)
+      [ "$recorded_digest" = "$decision_digest" ] \
+        || fail "captain decision $id records a different captain decision"
+      [ "$recorded_routes" = "$routed_csv" ] \
+        || fail "captain decision $id records different routed work"
+      resolution_recorded=1
+      legacy_replay=1
+      ;;
+    *"Resolution recorded by fm-captain-hold."*)
       resolution_recorded=1
       ;;
   esac
@@ -121,7 +157,9 @@ command_resolve() {
     rm -f -- "$tmp"
     fail "cannot stage the captain decision for $id"
   fi
-  if ! "$CAPTAIN_HOLD" answer "$id" --decision-file "$tmp"; then
+  answer_file=$tmp
+  [ "$legacy_replay" = 0 ] || answer_file=$decision_file
+  if ! "$CAPTAIN_HOLD" answer "$id" --decision-file "$answer_file"; then
     rm -f -- "$tmp"
     exit 1
   fi
