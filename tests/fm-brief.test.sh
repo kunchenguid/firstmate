@@ -354,6 +354,117 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# assert_evidence_precedes_every_finish <brief> <label>: the evidence section
+# must appear before every line that permits the worker to stop, and each such
+# line must itself require the recording.
+assert_evidence_precedes_every_finish() {
+  local brief=$1 label=$2 section_line finish_line
+  section_line=$(grep -n '^## Record the commit your evidence was measured on$' "$brief" | head -1 | cut -d: -f1)
+  [ -n "$section_line" ] || fail "$label: no evidence section to order"
+  # A finishing line is one that permits a SUCCESSFUL stop: it appends a `done:`
+  # state. Abort and escalation paths (blocked, needs-decision, failed) also stop
+  # the worker but never reach a merge, so they impose no ordering.
+  while IFS=: read -r finish_line _; do
+    [ -n "$finish_line" ] || continue
+    [ "$section_line" -lt "$finish_line" ] \
+      || fail "$label: the finishing line at $finish_line comes before the evidence section at $section_line - a worker reading in order stops there and never reaches it"
+  done < <(grep -n 'append `done:' "$brief")
+  grep -q 'record the commit your reported verification was measured on as above' "$brief" \
+    || fail "$label: the finishing line must make recording part of its own condition, not an appendix"
+}
+
+# The evidence-recording contract is what makes bin/fm-pr-merge.sh's refusal
+# reachable: only the worker knows which commit its figures came from. It belongs
+# to the two PR-based modes and to neither of the paths that never reach a PR
+# merge, so an instruction with no enforcer is never scaffolded.
+test_pr_modes_require_recording_the_measured_commit() {
+  local home id brief
+  home="$TMP_ROOT/evidence-home"
+  mkdir -p "$home/data"
+  for id in brief-evidence-nm brief-evidence-dpr; do
+    case "$id" in
+      brief-evidence-nm) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "## Record the commit your evidence was measured on" "$brief" \
+      "$id: PR-based brief lost the evidence-recording contract"
+    # The recorded form is the one the merge guard reads: the home this brief was
+    # scaffolded against, then the task id, then the commit resolved in the
+    # worktree at measurement time.
+    assert_grep "FM_HOME='$home' '$ROOT/bin/fm-evidence-record.sh' '$id' \"\$(git rev-parse HEAD)\"" "$brief" \
+      "$id: brief must show the exact recording command, bound to this home and resolving the commit in the worktree"
+    assert_grep "Record it again after EVERY re-measurement" "$brief" \
+      "$id: brief must require re-recording, which is what a final-head instruction cannot win"
+    assert_grep "The merge refuses when the recorded commit is not the pull request's head" "$brief" \
+      "$id: brief must state the consequence that makes the record load-bearing"
+
+    # The ordering is the contract, not a nicety. A worker reads the definition
+    # of done in order and stops at the first line that says it may; an evidence
+    # section below that line is unreachable in the ordinary case, which is how
+    # the merge guard's own input went missing in the first place. Assert the
+    # section precedes EVERY finishing line, and that each finishing line names
+    # recording as part of its own condition rather than leaving it an appendix.
+    assert_evidence_precedes_every_finish "$brief" "$id"
+  done
+
+  for id in brief-evidence-local brief-evidence-scout; do
+    case "$id" in
+      brief-evidence-local) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1 ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_no_grep "fm-evidence-record.sh" "$brief" \
+      "$id: a scaffold that never reaches the PR merge guard must not carry its recording contract"
+  done
+  pass "fm-brief.sh: PR-based ship briefs require recording the commit their evidence was measured on"
+}
+
+# The scaffolded recording command is the worker's half of the merge guard: the
+# guard refuses until it runs, so an unrunnable command strands the task. Two
+# ways it can be unrunnable, both invisible to a substring assertion: a firstmate
+# root or home whose path holds a space or an apostrophe, and a crew pane that
+# inherits no FM_HOME and would otherwise record into whichever home the
+# recorder resolves for itself. Run the command exactly as the brief prints it,
+# from a worktree, with none of the firstmate variables in the environment.
+test_evidence_record_command_runs_as_printed_from_a_foreign_home() {
+  local home foreign_root id brief cmd repo head
+  home="$TMP_ROOT/firstmate helper's home"
+  foreign_root="$TMP_ROOT/firstmate helper's root"
+  repo="$TMP_ROOT/evidence-command-worktree"
+  id="brief-evidence-foreign-d3"
+  mkdir -p "$home/data" "$home/state" "$foreign_root"
+  ln -s "$ROOT/bin" "$foreign_root/bin"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" \
+    "$ROOT/bin/fm-brief.sh" "$id" foreign --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "foreign-home: brief was not scaffolded"
+
+  # The durable record the command writes into, and a worktree for the commit it
+  # resolves - the two things a real crewmate already has when it measures.
+  fm_write_meta "$home/state/$id.meta" \
+    "window=fm-$id" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fm_git_init_commit "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+
+  cmd=$(grep -F 'fm-evidence-record.sh' "$brief" | head -1)
+  [ -n "$cmd" ] || fail "foreign-home: the brief carries no recording command to run"
+  (
+    cd "$repo" || exit 1
+    unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE
+    bash -c "$cmd"
+  ) >/dev/null 2>"$TMP_ROOT/foreign-home.err" \
+    || fail "foreign-home: the scaffolded recording command did not run as printed: $(cat "$TMP_ROOT/foreign-home.err")"
+
+  assert_grep "evidence_head=$head" "$home/state/$id.meta" \
+    "foreign-home: the recording command did not reach the home the brief was scaffolded against"
+  pass "fm-brief.sh: the scaffolded recording command runs as printed and records into its own home"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -721,6 +832,8 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_pr_modes_require_recording_the_measured_commit
+test_evidence_record_command_runs_as_printed_from_a_foreign_home
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

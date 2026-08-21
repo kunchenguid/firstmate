@@ -49,6 +49,16 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# PR-based ship briefs (no-mistakes and direct-PR) carry an evidence-recording
+# section: the worker records the commit each reported verification was measured
+# on through bin/fm-evidence-record.sh, and bin/fm-pr-merge.sh refuses to merge
+# unless that commit is still the PR head. local-only and scout scaffolds omit it
+# because neither reaches that merge path.
+# That section must stay ABOVE every line that tells the worker it is finished,
+# and each finishing line must name recording as part of its own condition. A
+# worker reads the definition of done in order and stops at the first line that
+# says it may; an evidence section placed after that line is unreachable in the
+# ordinary case, which is exactly how the merge guard's own input went missing.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -348,6 +358,37 @@ echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
 fi
 
+# Every PR-based ship mode carries the same evidence-recording contract, because
+# bin/fm-pr-merge.sh refuses to merge unless the recorded commit equals the pull
+# request's live head. The worker is the only party that knows which commit its
+# figures came from, and the pipeline can commit after the worker's last action,
+# so the contract is stated as "record at measurement time, re-record after every
+# re-measurement" rather than "measure the final head", which cannot win that
+# race. local-only ships no PR and scouts ship no change, so neither carries it.
+#
+# The command has to run exactly as printed from the worker's pane, so it is
+# shell-quoted like every other absolute path this scaffold emits and it carries
+# the home this brief was scaffolded against. A crew pane inherits no FM_HOME,
+# and the recorder falls back to its own root, so an unbound command would
+# record into a different firstmate home than the one the merge guard reads -
+# the same reason $STATE/$ID.status is baked in absolute above.
+EVIDENCE_RECORD_CMD="FM_HOME=$(shell_quote "$FM_HOME")"
+if [ "$STATE" != "$FM_HOME/state" ]; then
+  EVIDENCE_RECORD_CMD="$EVIDENCE_RECORD_CMD FM_STATE_OVERRIDE=$(shell_quote "$STATE")"
+fi
+EVIDENCE_RECORD_CMD="$EVIDENCE_RECORD_CMD $(shell_quote "$FM_ROOT/bin/fm-evidence-record.sh") $(shell_quote "$ID")"
+IFS= read -r -d '' EVIDENCE_SECTION <<EOF || true
+## Record the commit your evidence was measured on
+Whatever you report as verification - a full-suite figure, a targeted test result, an exploit that stays blocked, a benchmark - firstmate merges on the strength of it, so it must name the commit it describes.
+Immediately after each such run, from this worktree, record it:
+\`\`\`
+$EVIDENCE_RECORD_CMD "\$(git rev-parse HEAD)" '<what you measured, one line>'
+\`\`\`
+Record it again after EVERY re-measurement, and after anything that moves your branch head - a review fix round, a documentation commit, a rebase onto a newer base - because your earlier figures then describe a commit that is no longer the head.
+The merge refuses when the recorded commit is not the pull request's head, and it refuses when nothing is recorded, so an unrecorded measurement stops the task rather than shipping unverified.
+EOF
+EVIDENCE_SECTION=${EVIDENCE_SECTION%$'\n'}
+
 # Ship task: shape Setup / Rule 1 / Definition of done by this task's explicit
 # delivery mode, validated above. The generated DOD opens with the fixed
 # "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
@@ -360,8 +401,11 @@ case "$MODE" in
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+The task is complete only when committed on your branch AND the commit your reported verification was measured on is recorded.
+
+$EVIDENCE_SECTION
+
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, record the commit your reported verification was measured on as above, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -385,7 +429,10 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
+The task is complete only when committed on your branch AND the commit your reported verification was measured on is recorded.
+
+$EVIDENCE_SECTION
+
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
@@ -400,7 +447,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), re-record the commit your reported verification was measured on as above - the pipeline has almost certainly committed since you last measured - and only then append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
     ;;
 esac

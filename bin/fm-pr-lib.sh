@@ -213,6 +213,111 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# evidence_head=<sha> records the exact commit a task's reported verification
+# evidence was measured on, and optional evidence_note=<one line> records what
+# that measurement was. bin/fm-evidence-record.sh is the only writer and
+# bin/fm-pr-merge.sh the only reader: a merge is refused unless evidence_head
+# equals the pull request's live head, so a suite figure or exploit result
+# measured before a later fix, documentation, or rebase commit can never be
+# presented as the merging head's result.
+FM_PR_EVIDENCE_HEAD=
+FM_PR_EVIDENCE_NOTE=
+FM_PR_EVIDENCE_TMP=
+FM_PR_EVIDENCE_LOCK=
+FM_PR_EVIDENCE_LOCK_HELD=0
+
+# fm_pr_evidence_note_valid <note>: a note is one line of at most 200
+# characters carrying no control character, so it can never split the key=value
+# record it is stored in nor drive the terminal a refusal is printed to.
+# The text itself is not restricted to ASCII, because workers routinely write an
+# em dash or an accented word and a guard that refuses valid work is worked
+# around rather than fixed. The bound counts characters, which is what the
+# refusal claims it counts: matching is byte-wise under LC_ALL=C, so a UTF-8
+# sequence is folded to its single leading byte by dropping continuation bytes
+# before the length is taken.
+fm_pr_evidence_note_valid() {
+  local note=${1-}
+  local LC_ALL=C
+  local characters
+  if [[ "$note" =~ [[:cntrl:]] ]]; then
+    return 1
+  fi
+  characters=${note//[$'\x80'-$'\xbf']/}
+  [ "${#characters}" -le 200 ]
+}
+
+# fm_pr_evidence_read <meta>: load the task's evidence record into
+# FM_PR_EVIDENCE_HEAD and FM_PR_EVIDENCE_NOTE. Returns 0 with an empty head when
+# no record exists, and non-zero when the metadata is unreadable or the recorded
+# head is malformed, so a corrupt record is never mistaken for a matching one.
+fm_pr_evidence_read() {
+  local meta=${1-} head note
+  FM_PR_EVIDENCE_HEAD=
+  FM_PR_EVIDENCE_NOTE=
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  head=$(grep '^evidence_head=' "$meta" | tail -1 || true)
+  [ -n "$head" ] || return 0
+  head=${head#evidence_head=}
+  fm_pr_head_valid "$head" || return 1
+  note=$(grep '^evidence_note=' "$meta" | tail -1 || true)
+  note=${note#evidence_note=}
+  fm_pr_evidence_note_valid "$note" || return 1
+  FM_PR_EVIDENCE_HEAD=$head
+  FM_PR_EVIDENCE_NOTE=$note
+}
+
+# fm_pr_evidence_cleanup: remove any in-progress evidence temp and release the
+# per-task metadata lock if this process still holds it. Callers install it as
+# their EXIT trap, so an interrupted write leaves neither a stray temp file in
+# the state directory nor a lock another process has to reclaim through
+# stale-owner recovery. Releasing is idempotent: the held flag is cleared here,
+# so the normal path and the trap together release exactly once.
+fm_pr_evidence_cleanup() {
+  [ -z "$FM_PR_EVIDENCE_TMP" ] || rm -f -- "$FM_PR_EVIDENCE_TMP"
+  FM_PR_EVIDENCE_TMP=
+  if [ "$FM_PR_EVIDENCE_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$FM_PR_EVIDENCE_LOCK" || true
+    FM_PR_EVIDENCE_LOCK_HELD=0
+  fi
+}
+
+# fm_pr_evidence_write <meta> <sha> [note]: atomically replace the task's
+# evidence record, preserving every other metadata line, and re-read the result
+# so a partially written record can never be reported as recorded. Requires
+# bin/fm-wake-lib.sh for the shared per-task metadata lock.
+fm_pr_evidence_write() {
+  local meta=$1 head=$2 note=${3-} dir base rc=0
+  fm_pr_head_valid "$head" || return 1
+  fm_pr_evidence_note_valid "$note" || return 1
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
+  dir=${meta%/*}
+  base=${meta##*/}
+  [ "$dir" != "$meta" ] || dir=.
+  FM_PR_EVIDENCE_LOCK=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$FM_PR_EVIDENCE_LOCK"
+  FM_PR_EVIDENCE_LOCK_HELD=1
+  FM_PR_EVIDENCE_TMP=$(mktemp "$dir/.${base}.fm-evidence.XXXXXX") \
+    || { fm_pr_evidence_cleanup; return 1; }
+  while :; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(fm_pr_file_link_count "$meta")" = 1 ] || { rc=1; break; }
+    fm_pr_regular_destination_or_absent "$meta" || { rc=1; break; }
+    { grep -vE '^evidence_head=|^evidence_note=' "$meta" || true; } > "$FM_PR_EVIDENCE_TMP" || { rc=1; break; }
+    printf 'evidence_head=%s\n' "$head" >> "$FM_PR_EVIDENCE_TMP" || { rc=1; break; }
+    if [ -n "$note" ]; then
+      printf 'evidence_note=%s\n' "$note" >> "$FM_PR_EVIDENCE_TMP" || { rc=1; break; }
+    fi
+    chmod 0600 "$FM_PR_EVIDENCE_TMP" || { rc=1; break; }
+    mv -f -- "$FM_PR_EVIDENCE_TMP" "$meta" || { rc=1; break; }
+    FM_PR_EVIDENCE_TMP=
+    break
+  done
+  fm_pr_evidence_cleanup
+  [ "$rc" = 0 ] || return 1
+  fm_pr_evidence_read "$meta" || return 1
+  [ "$FM_PR_EVIDENCE_HEAD" = "$head" ] && [ "$FM_PR_EVIDENCE_NOTE" = "$note" ]
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null
@@ -285,6 +390,32 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# fm_pr_meta_key_line <line>: true when a metadata line is a well-formed
+# `key=value` record line, where the key is a bare identifier. Every metadata
+# key firstmate writes has that shape, so the test admits a key this parser has
+# never seen while still rejecting a line that is not a record line at all.
+fm_pr_meta_key_line() {
+  local LC_ALL=C
+  [[ "${1-}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]
+}
+
+# What this parse tolerates after pr=, and what it still refuses.
+#
+# Tolerated: any well-formed `key=value` line whose key this parser does not
+# recognise. Enumerating the permitted keys was tried and was wrong three times
+# running - the evidence recorder, bin/fm-spawn.sh's traceparent and relaunch
+# transaction, and bin/fm-decision-hold.sh's review record each append after
+# pr=, and nothing stops a fourth writer appearing. Every such writer was a
+# latent refusal of a merge on valid work, found only when a correct merge was
+# wrongly blocked. Position in the record carries no meaning for keys this
+# function does not read, so an unrecognised key is not evidence of corruption.
+#
+# Still refused, loudly: a line that is not a record line at all (no `key=`
+# prefix, an empty line, or a fragment left by a truncated write), a second pr=
+# line, a pr= whose URL does not parse, and a pr_head= that is not a commit.
+# Those are the shapes a value carrying an embedded newline would inject, and
+# they remain the reason this positional check exists. Do not relax this into
+# accepting any line: the `key=value` shape is the whole remaining guard.
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=
@@ -315,10 +446,10 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
       *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
+        if [ "$seen_pr" -eq 1 ] && ! fm_pr_meta_key_line "$line"; then
+          post_pr_invalid=1
+        fi
         ;;
     esac
   done < "$file"

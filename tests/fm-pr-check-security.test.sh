@@ -116,6 +116,14 @@ write_task_meta() {
     "project=$dir/project" \
     "kind=ship" \
     "mode=no-mistakes"
+  # bin/fm-pr-merge.sh refuses a merge whose recorded evidence commit is not the
+  # PR head, so every merge fixture here needs that record. It is written through
+  # the real recorder rather than as a literal line, so this suite cannot drift
+  # from the writer's format. The commit matches the gh mock's default head.
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir/home" \
+    "$ROOT/bin/fm-evidence-record.sh" "$id" 0123456789abcdef0123456789abcdef01234567 \
+    'fixture verification run' > /dev/null \
+    || fail "write_task_meta: recording the evidence commit for $id failed"
 }
 
 write_poll_meta() {
@@ -125,12 +133,20 @@ write_poll_meta() {
     "pr=$url"
 }
 
+# An ambiguous record is one whose PR identity cannot be resolved: two pr= lines
+# naming different pull requests, so no single identity can be rebuilt from it.
+# This deliberately does NOT use an unrecognised key after pr=. That shape used
+# to be refused by an enumerated allowlist, but the allowlist was wrong for
+# every legitimate later writer that appends there, so the parse now tolerates
+# any well-formed key=value line - see fm_pr_metadata_identity_parse. A second
+# pr= is ambiguity in the literal sense the fixture's name claims, and is
+# refused by both the old parse and the current one.
 write_ambiguous_poll() {
   local dir=$1 id=${2:-task-a}
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" \
     'pr=https://github.com/o/r/pull/10' \
-    'window=unexpected-after-pr'
+    'pr=https://github.com/o/r/pull/11'
   printf 'legacy ambiguous bytes\n' > "$dir/home/state/$id.check.sh"
 }
 
@@ -611,6 +627,10 @@ SH
       "project=$dir/project" \
       'kind=ship' \
       'mode=local-only'
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir/home" \
+      "$ROOT/bin/fm-evidence-record.sh" "$id" 0123456789abcdef0123456789abcdef01234567 \
+      'fixture verification run' > /dev/null \
+      || fail "legacy fixture: recording the evidence commit for $id failed"
     mkdir -p "$dir/home/state/.pr-check-quarantine"
     chmod 0700 "$dir/home/state/.pr-check-quarantine"
     printf 'reserved migration evidence\n' \
@@ -2073,12 +2093,14 @@ test_nonexecuting_migration() {
   snap_after=$(cat "$state/task-x.meta")
   [ "$snap_after" = "$snap_before" ] || fail "X-linked migration changed task metadata"
 
+  # Ambiguity is two irreconcilable pr= identities, not an unrecognised key after
+  # pr= - see write_ambiguous_poll for why that shape is now tolerated.
   dir=$(make_case migration-ambiguous)
   state="$dir/home/state"
   fm_write_meta "$state/task-b.meta" \
     'window=fm-task-b' \
     'pr=https://github.com/o/r/pull/10' \
-    'window=injected-after-pr'
+    'pr=https://github.com/o/r/pull/11'
   printf 'legacy ambiguous bytes\n' > "$state/task-b.check.sh"
   FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
     || fail "ambiguous migration failed to quarantine"

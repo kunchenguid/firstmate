@@ -14,6 +14,18 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#
+# The evidence-head guard is the reason a merge can be refused after every one
+# of those checks passes: a worker's reported figures describe the commit they
+# were measured on, and a validation pipeline can commit after that measurement.
+#   (i) a recorded evidence commit equal to the live head merges unchanged
+#   (j) a recorded evidence commit behind the live head is refused, naming both
+#   (k) no recorded evidence commit is refused, naming how to record one
+#   (l) a live head gh could not answer for is refused rather than merged
+#       unverified, pointing at GitHub access
+#   (m) a missing plain gh is refused by its own cause, naming the binary the
+#       guard needs rather than an auth check that cannot diagnose it
+#   (n) the refuse -> re-measure -> merge round trip works after a poll is armed
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -42,8 +54,20 @@ make_case() {
   printf '%s\n' "$case_dir"
 }
 
+# Record a task's evidence commit through the real bin/fm-evidence-record.sh, so
+# these cases exercise the same writer a crewmate uses rather than hand-writing
+# the metadata line the guard reads. Args: case_dir sha [note]
+record_evidence() {
+  local case_dir=$1 sha=$2 note=${3-}
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-evidence-record.sh" task-x1 "$sha" "$note" > /dev/null \
+    || fail "${case_dir##*/}: recording the evidence commit failed"
+}
+
 # gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# headRefOid for the merge guard and fm-pr-check.sh's pr_head lookup.
+# Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
@@ -68,7 +92,7 @@ SH
 # gh-axi mock that fails the merge call but succeeds everything else, so a
 # real merge failure is distinguishable from the recording step.
 add_gh_mocks_merge_fails() {
-  local case_dir=$1
+  local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
@@ -77,11 +101,48 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  cat > "$case_dir/fakebin/gh" <<'SH'
+  cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+    esac
+    ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# gh mock that cannot answer headRefOid at all, standing in for a lost or
+# unauthenticated GitHub connection at merge time.
+add_gh_mocks_head_unavailable() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "error: could not reach GitHub" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# PATH with every directory that provides an executable `gh` removed, so a case
+# can stand in for a host that has gh-axi but no plain GitHub CLI without
+# guessing where gh is installed.
+path_without_gh() {
+  local dir out=
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    [ -x "$dir/gh" ] && continue
+    out="${out:+$out:}$dir"
+  done < <(printf '%s\n' "$PATH" | tr ':' '\n')
+  printf '%s\n' "$out"
 }
 
 run_pr_merge() {
@@ -89,7 +150,7 @@ run_pr_merge() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
-  PATH="$case_dir/fakebin:$PATH" \
+  PATH="$case_dir/fakebin:${FM_TEST_BASE_PATH:-$PATH}" \
     "$PR_MERGE" "$@"
   rc=$?
   if [ "${case_dir##*/}" = unsafe-url-segment ] && [ "$rc" -eq 2 ]; then
@@ -104,6 +165,7 @@ test_records_pr_and_head_before_merging() {
   case_dir=$(make_case records-before-merge)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  record_evidence "$case_dir" deadbeefcafefeed0000000000000000deadbeef 'full suite 4131 pass'
   : > "$case_dir/gh-axi.log"
 
   set +e
@@ -126,7 +188,8 @@ test_merge_failure_propagates_after_recording() {
   local case_dir rc
   case_dir=$(make_case merge-fails)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks_merge_fails "$case_dir"
+  add_gh_mocks_merge_fails "$case_dir" 1111111111111111111111111111111111111111
+  record_evidence "$case_dir" 1111111111111111111111111111111111111111
   : > "$case_dir/gh-axi.log"
 
   set +e
@@ -146,6 +209,7 @@ test_extra_merge_args_forwarded() {
   case_dir=$(make_case extra-args)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 2222222222222222222222222222222222222222
+  record_evidence "$case_dir" 2222222222222222222222222222222222222222
   : > "$case_dir/gh-axi.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/15 -- --squash --delete-branch \
@@ -261,6 +325,7 @@ test_explicit_merge_method_not_overridden() {
   case_dir=$(make_case explicit-merge-method)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 5555555555555555555555555555555555555555
+  record_evidence "$case_dir" 5555555555555555555555555555555555555555
   : > "$case_dir/gh-axi.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/22 -- --merge \
@@ -276,6 +341,7 @@ test_method_equals_merge_method_not_overridden() {
   case_dir=$(make_case method-equals-merge-method)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 7777777777777777777777777777777777777777
+  record_evidence "$case_dir" 7777777777777777777777777777777777777777
   : > "$case_dir/gh-axi.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/23 -- --method=merge \
@@ -291,6 +357,7 @@ test_parses_pr_url_for_gh_axi() {
   case_dir=$(make_case url-parsing)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+  record_evidence "$case_dir" 6666666666666666666666666666666666666666
   : > "$case_dir/gh-axi.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/126 \
@@ -299,6 +366,192 @@ test_parses_pr_url_for_gh_axi() {
   grep -qxF 'pr merge 126 --repo my-org/my-repo --squash' "$case_dir/gh-axi.log" \
     || fail "url-parsing: gh-axi pr merge was not invoked as number + --repo + default --squash"
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
+}
+
+EVIDENCE_MEASURED=a291594aa291594aa291594aa291594aa291594a
+EVIDENCE_LIVE_HEAD=44c3c63744c3c63744c3c63744c3c63744c3c637
+
+test_matching_evidence_commit_merges() {
+  local case_dir rc
+  case_dir=$(make_case evidence-matches)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$EVIDENCE_LIVE_HEAD"
+  record_evidence "$case_dir" "$EVIDENCE_LIVE_HEAD" 'full suite 4208 pass; injection exploit blocked'
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/119 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "evidence-matches: a merge whose evidence commit is the live head should proceed"
+  grep -qxF 'pr merge 119 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "evidence-matches: gh-axi pr merge was not invoked for matching evidence"
+  assert_grep "pr=https://github.com/example/repo/pull/119" "$case_dir/state/task-x1.meta" \
+    "evidence-matches: pr= was not recorded on the merging path"
+  assert_grep "evidence_head=$EVIDENCE_LIVE_HEAD" "$case_dir/state/task-x1.meta" \
+    "evidence-matches: the evidence record was not preserved through fm-pr-check.sh"
+  pass "fm-pr-merge merges unchanged when the evidence commit is the pull request head"
+}
+
+test_stale_evidence_commit_refuses_naming_both() {
+  local case_dir rc cmd
+  case_dir=$(make_case evidence-stale)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$EVIDENCE_LIVE_HEAD"
+  record_evidence "$case_dir" "$EVIDENCE_MEASURED" 'full suite 4202 pass'
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/119 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "evidence-stale: fm-pr-merge should refuse evidence measured before the head"
+  assert_grep "evidence measured on: $EVIDENCE_MEASURED" "$case_dir/stderr" \
+    "evidence-stale: the refusal did not name the commit the evidence was measured on"
+  assert_grep "pull request head:    $EVIDENCE_LIVE_HEAD" "$case_dir/stderr" \
+    "evidence-stale: the refusal did not name the live pull request head"
+  assert_grep 'full suite 4202 pass' "$case_dir/stderr" \
+    "evidence-stale: the refusal did not say what has to be re-measured"
+  assert_grep "fm-evidence-record.sh' 'task-x1' $EVIDENCE_LIVE_HEAD" "$case_dir/stderr" \
+    "evidence-stale: the refusal did not name the command that records the re-measurement"
+
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "evidence-stale: gh-axi pr merge was invoked despite stale evidence"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/119' "$case_dir/state/task-x1.meta" \
+    "evidence-stale: a refused merge still recorded PR metadata"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "evidence-stale: a refused merge still armed a merge poll"
+
+  # The printed command IS the whole remedy, so it has to run exactly as printed
+  # from a shell carrying none of this merge's environment - a firstmate home
+  # holding a space, or a reader whose FM_HOME names a different home, would
+  # otherwise leave the refusal unclearable. Run it verbatim, then merge again:
+  # the round trip is what proves the refusal names a way out.
+  cmd=$(grep -F 'fm-evidence-record.sh' "$case_dir/stderr" | head -1)
+  [ -n "$cmd" ] || fail "evidence-stale: the refusal printed no recording command"
+  (
+    unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE
+    bash -c "$cmd"
+  ) > /dev/null 2> "$case_dir/record-err" \
+    || fail "evidence-stale: the printed recording command did not run as printed: $(cat "$case_dir/record-err")"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/119 \
+    > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "evidence-stale: the merge stayed refused after the command the refusal printed was run"
+  grep -qxF 'pr merge 119 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "evidence-stale: the merge did not proceed after the re-measurement was recorded"
+  pass "fm-pr-merge refuses stale evidence, names both commits, and prints a remedy that runs as printed"
+}
+
+test_absent_evidence_record_refuses_actionably() {
+  local case_dir rc
+  case_dir=$(make_case evidence-absent)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$EVIDENCE_LIVE_HEAD"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/160 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "evidence-absent: fm-pr-merge should refuse when no evidence commit is recorded"
+  assert_grep 'no verification evidence commit is recorded' "$case_dir/stderr" \
+    "evidence-absent: the refusal did not say the record is missing"
+  assert_grep "fm-evidence-record.sh' 'task-x1'" "$case_dir/stderr" \
+    "evidence-absent: the refusal did not name the command that records the evidence"
+  assert_grep "FM_HOME=" "$case_dir/stderr" \
+    "evidence-absent: the printed command must bind the home it records into, which a reader does not inherit"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "evidence-absent: gh-axi pr merge was invoked with no evidence recorded"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/160' "$case_dir/state/task-x1.meta" \
+    "evidence-absent: a refused merge still recorded PR metadata"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "evidence-absent: a refused merge still armed a merge poll"
+
+  # The remedy is recording the measured commit, not a bypass: a task that
+  # predates the evidence record is unblocked by one command, so refusing here
+  # strands nothing.
+  record_evidence "$case_dir" "$EVIDENCE_LIVE_HEAD" 'full suite pass'
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/160 \
+    > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "evidence-absent: recording the evidence commit did not unblock the merge"
+  grep -qxF 'pr merge 160 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "evidence-absent: the merge did not proceed after the evidence was recorded"
+  pass "fm-pr-merge refuses an absent evidence record and names the one command that clears it"
+}
+
+test_unconfirmable_head_refuses() {
+  local case_dir rc
+  case_dir=$(make_case evidence-head-unavailable)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_head_unavailable "$case_dir"
+  record_evidence "$case_dir" "$EVIDENCE_LIVE_HEAD" 'full suite pass'
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/119 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "evidence-head-unavailable: fm-pr-merge should refuse when the head cannot be confirmed"
+  assert_grep 'pull request head could not be confirmed' "$case_dir/stderr" \
+    "evidence-head-unavailable: the refusal did not explain the unconfirmable head"
+  assert_grep 'gh is installed but did not answer' "$case_dir/stderr" \
+    "evidence-head-unavailable: the refusal did not distinguish an installed gh that could not answer"
+  assert_grep "the recorded evidence commit for task task-x1 is $EVIDENCE_LIVE_HEAD" "$case_dir/stderr" \
+    "evidence-head-unavailable: the refusal did not name the recorded evidence commit"
+  assert_grep 'gh auth status' "$case_dir/stderr" \
+    "evidence-head-unavailable: the refusal did not point at GitHub access"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "evidence-head-unavailable: gh-axi pr merge was invoked without a confirmed head"
+  pass "fm-pr-merge refuses rather than merging against a head it could not confirm"
+}
+
+# A host with gh-axi but no plain gh cannot read a pull request head at all, so
+# it is blocked by design. It has to be blocked by its own cause: an auth check
+# diagnoses nothing when the binary is simply absent.
+test_missing_gh_cli_refuses_by_its_own_cause() {
+  local case_dir rc
+  local FM_TEST_BASE_PATH
+  case_dir=$(make_case evidence-gh-missing)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$EVIDENCE_LIVE_HEAD"
+  record_evidence "$case_dir" "$EVIDENCE_LIVE_HEAD" 'full suite pass'
+  rm -f "$case_dir/fakebin/gh"
+  FM_TEST_BASE_PATH=$(path_without_gh)
+  if PATH="$case_dir/fakebin:$FM_TEST_BASE_PATH" command -v gh > /dev/null 2>&1; then
+    fail "evidence-gh-missing: the sandbox PATH still provides gh"
+  fi
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/119 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "evidence-gh-missing: fm-pr-merge should refuse when gh is not on PATH"
+  assert_grep 'GitHub CLI (gh), which is not on PATH' "$case_dir/stderr" \
+    "evidence-gh-missing: the refusal did not name the missing binary"
+  assert_grep 'fix: install the GitHub CLI (gh)' "$case_dir/stderr" \
+    "evidence-gh-missing: the refusal did not name the one step that fixes it"
+  assert_no_grep 'gh auth status' "$case_dir/stderr" \
+    "evidence-gh-missing: the refusal pointed at an auth check that cannot diagnose a missing binary"
+  assert_grep "the recorded evidence commit for task task-x1 is $EVIDENCE_LIVE_HEAD" "$case_dir/stderr" \
+    "evidence-gh-missing: the refusal did not name the recorded evidence commit"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "evidence-gh-missing: gh-axi pr merge was invoked with no way to read the head"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/119' "$case_dir/state/task-x1.meta" \
+    "evidence-gh-missing: a refused merge still recorded PR metadata"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "evidence-gh-missing: a refused merge still armed a merge poll"
+  pass "fm-pr-merge refuses a missing GitHub CLI by name instead of pointing at an auth check"
 }
 
 test_records_pr_and_head_before_merging
@@ -311,3 +564,53 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+# The whole point of the guard is the round trip it forces: a stale merge is
+# refused, the worker re-measures on the named head and re-records, and the merge
+# then proceeds. By that point the task has already armed its merge poll, so the
+# re-recorded lines land after pr= in the metadata - the arrangement that must
+# still parse as a valid PR record.
+test_re_measured_evidence_merges_after_the_poll_is_armed() {
+  local case_dir rc
+  case_dir=$(make_case evidence-re-measured)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$EVIDENCE_LIVE_HEAD"
+  record_evidence "$case_dir" "$EVIDENCE_LIVE_HEAD" 'full suite 4208 pass'
+  : > "$case_dir/gh-axi.log"
+
+  # PR-ready arming, exactly as bin/fm-pr-check.sh is run when the PR is reported.
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-check.sh" task-x1 https://github.com/example/repo/pull/119 > /dev/null \
+    || fail "evidence-re-measured: arming the merge poll failed"
+
+  # A later pipeline commit moves the head, so the recorded evidence goes stale.
+  add_gh_mocks "$case_dir" 0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/119 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "evidence-re-measured: a head moved by a later commit should refuse"
+  assert_grep 'pull request head:    0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f' "$case_dir/stderr" \
+    "evidence-re-measured: the refusal did not name the moved head"
+
+  # The worker re-measures on the named head and re-records; the merge proceeds.
+  record_evidence "$case_dir" 0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f 'full suite 4212 pass'
+  : > "$case_dir/gh-axi.log"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/119 \
+    > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "evidence-re-measured: re-recording on the live head did not clear the refusal"
+  grep -qxF 'pr merge 119 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "evidence-re-measured: the merge did not proceed after re-measurement"
+  assert_grep 'pr=https://github.com/example/repo/pull/119' "$case_dir/state/task-x1.meta" \
+    "evidence-re-measured: the re-recorded metadata no longer holds a valid PR record"
+  pass "fm-pr-merge completes the refuse, re-measure, and merge round trip on an armed task"
+}
+
+test_matching_evidence_commit_merges
+test_stale_evidence_commit_refuses_naming_both
+test_absent_evidence_record_refuses_actionably
+test_unconfirmable_head_refuses
+test_missing_gh_cli_refuses_by_its_own_cause
+test_re_measured_evidence_merges_after_the_poll_is_armed
