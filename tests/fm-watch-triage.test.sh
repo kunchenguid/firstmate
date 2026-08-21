@@ -119,6 +119,10 @@ record_cursor_busy() {  # <state-dir> <id>
     --source cursor-hook --event before-submit-prompt
 }
 
+record_claude_busy() {  # <state-dir> <id>
+  "$ROOT/bin/fm-busy-event.sh" arm "$1" "$2" >/dev/null
+}
+
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
@@ -1300,6 +1304,71 @@ test_cursor_busy_turn_absorbs_observed_413s_false_wedge() {
   pass "Cursor's semantic busy turn absorbs the observed 413s false wedge, then stop makes the same pane actionable"
 }
 
+# A Claude lifecycle hook is the authoritative open-turn signal. A rendered
+# timer or spinner cannot establish progress. The initial busy fm-spawn seed is
+# intentionally narrower: it must still age into the normal busy-turn wedge.
+test_claude_hook_busy_never_ages_into_a_wedge() {
+  local dir state fakebin out capture_file window key sig pid gen verdict
+  dir=$(make_case claude-semantic-busy); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-claude-busy"
+  printf 'Claude is processing a tool result\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/claude-busy.meta"
+  record_claude_busy "$state" claude-busy
+  printf 'working: processing the requested change\n' > "$state/claude-busy.status"
+  sig=$(seen_sig "$state/claude-busy.status"); printf '%s' "$sig" > "$state/.seen-claude-busy_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/claude-busy.meta"
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+
+  gen=$(fm_busy_current_gen "$state" claude-busy)
+  verdict=$(fm_busy_classify tmux "$window" claude claude-busy "$state" '')
+  [ "$verdict" = "busy fm-spawn" ] \
+    || fail "Claude spawn seed did not keep its distinct semantic source: $verdict"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a stale busy/fm-spawn seed bypassed the busy-turn age guard"
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "the stale busy/fm-spawn seed did not reach the busy-turn wedge path: $(<"$out")"
+  : > "$state/.wake-queue"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" claude-busy busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  verdict=$(fm_busy_classify tmux "$window" claude claude-busy "$state" '')
+  [ "$verdict" = "busy claude-hook" ] \
+    || fail "Claude UserPromptSubmit did not classify the open turn busy: $verdict"
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an open Claude lifecycle turn aged into a wedge: $(<"$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "an open Claude lifecycle turn printed a wake: $(<"$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "an open Claude lifecycle turn enqueued a wake"; }
+  reap "$pid"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" claude-busy idle --gen "$gen" \
+    --source claude-hook --event stop
+  verdict=$(fm_busy_classify tmux "$window" claude claude-busy "$state" '')
+  [ "$verdict" = "idle claude-hook" ] \
+    || fail "Claude Stop did not classify the same turn idle: $verdict"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the stale Claude pane did not surface after Stop"
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "the idle Claude pane did not surface as stale: $(<"$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "the idle Claude pane was incorrectly classified through the busy-turn path"
+  pass "a Claude hook turn bypasses aging, while its spawn seed and stopped turn still surface"
+}
+
 test_busy_pane_below_turn_age_bound_is_absorbed() {
   local dir state fakebin out capture_file window key sig pid
   dir=$(make_case busy-below-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2019,6 +2088,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_cursor_busy_turn_absorbs_observed_413s_false_wedge
+test_claude_hook_busy_never_ages_into_a_wedge
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
