@@ -916,22 +916,32 @@ retire_busy_state() {
 }
 
 remove_agy_turnend_auth() {
-  local state_dir=$1 id=$2 token auth_dir
-  token=$(sed -n '1p' "$state_dir/$id.agy-turnend-token" 2>/dev/null || true)
+  local state_dir=$1 id=$2 token_path token='' path
+  token_path=$(fm_control_harness_turnend_token_path agy "$state_dir" "$id") || return 1
+  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
+  fi
   case "$token" in fm.????????????) ;; *) return 0 ;; esac
-  case "$token" in *[!A-Za-z0-9._-]*) return 0 ;; esac
-  auth_dir="$state_dir/agy-turn-end.d"
-  rm -f "$auth_dir/$token"
-  rmdir "$auth_dir" 2>/dev/null || true
+  path=$(fm_control_harness_turnend_auth_path agy "$token" "$state_dir") || return 1
+  [ -n "$path" ] || return 0
+  rm -f -- "$path"
+  rmdir "${path%/*}" 2>/dev/null || true
 }
 
+# Only the worktree-resident half of Agy's wiring is retired here: the state
+# token still has to name the auth entry that remove_agy_turnend_auth revokes
+# afterwards, so it is read through the same owner rather than removed with the
+# rest.
 remove_agy_task_hook() {
-  local wt=$1 state_dir=$2 id=$3 token hook_root
+  local wt=$1 state_dir=$2 id=$3 token_path token='' hook_root=''
   [ -n "$wt" ] && [ -d "$wt" ] || return 0
-  token=$(sed -n '1p' "$state_dir/$id.agy-turnend-token" 2>/dev/null || true)
-  hook_root=$(sed -n '2p' "$state_dir/$id.agy-turnend-token" 2>/dev/null || true)
+  token_path=$(fm_control_harness_turnend_token_path agy "$state_dir" "$id") || return 1
+  [ -n "$token_path" ] || return 0
+  if [ -f "$token_path" ]; then
+    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 0
+    hook_root=$(sed -n '2p' "$token_path" 2>/dev/null || true)
+  fi
   case "$token" in fm.????????????) ;; *) return 0 ;; esac
-  case "$token" in *[!A-Za-z0-9._-]*) return 0 ;; esac
   case "$hook_root" in .agents|.agent|_agents|_agent) ;; *) return 0 ;; esac
   rm -f "$wt/$hook_root/hooks.json" "$wt/.fm-agy-turnend"
   rmdir "$wt/$hook_root" 2>/dev/null || true

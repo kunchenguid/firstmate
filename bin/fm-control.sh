@@ -306,6 +306,15 @@ HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
 fm_control_harness_supported "$HARNESS" \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
 
+# Declare the target's harness for every composer read this plane performs, the
+# same way bin/fm-send.sh and bin/fm-spawn.sh's launch path do. The verified
+# adapter resolved above is what is exported, so a task recorded under a raw
+# command's basename still reaches its adapter's composer contract. Without it
+# an adapter whose composer is recognized only under its own harness scope
+# falls through to the generic classifier, and the retried Enter that a slash
+# command's completion popup makes load-bearing would stop after one press.
+export FM_COMPOSER_HARNESS="$HARNESS"
+
 fm_backend_validate "$BACKEND" || exit 1
 
 # --- shared helpers ---------------------------------------------------------
