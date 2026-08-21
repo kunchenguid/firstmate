@@ -306,10 +306,6 @@ def _last_event(state_dir, task_id):
         return None, None
     lines = [text.strip() for text in
              window.decode("utf-8", errors="replace").splitlines() if text.strip()]
-    if size > STATUS_TAIL_BYTES and len(lines) > 1:
-        # The window can open part way through a line, and a fragment is not an
-        # event. It is kept only when it is all there is.
-        lines = lines[1:]
     if not lines:
         return None, None
     line = lines[-1]

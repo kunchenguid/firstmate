@@ -660,7 +660,7 @@ FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
 # spoken interface and captain inbox; see "Spoken interface and captain inbox" above
 FM_VOICE_REGION=        # overrides config/voice-region for one relay run
 FM_VOICE_MODEL=         # overrides config/voice-model for one relay run
-FM_VOICE_PROFILE=       # overrides config/voice-profile; absent means environment credentials only
+FM_VOICE_PROFILE=       # overrides config/voice-profile; explicitly empty forces ambient credentials
 FM_VOICE_ID=            # overrides config/voice-id; matthew when neither is set
 FM_VOICE_RELAY=         # laptop-side path to bin/fm-voice-relay.py on the desktop; required by fm-voice-client.py unless --relay is passed
 FM_VOICE_PYTHON=python3 # laptop-side interpreter used to start the relay over ssh

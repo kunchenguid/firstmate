@@ -635,6 +635,7 @@ def fake_profile(profile, verbose=False):
     return {"aws_access_key_id": "FROM-PROFILE",
             "aws_secret_access_key": "s", "aws_session_token": None}, None
 
+real_profile = relay.profile_credentials
 relay.profile_credentials = fake_profile
 os.environ["AWS_ACCESS_KEY_ID"] = "AKIAENVIRONMENT"
 os.environ["AWS_SECRET_ACCESS_KEY"] = "s3cret"
@@ -654,8 +655,49 @@ check([c["aws_access_key_id"] for c in later] == ["FROM-PROFILE"] * 3,
 check(len(exports) == 1,
       "and the profile answer is then cached like any other: %d exports" % len(exports))
 
+# WITH NO PROFILE THERE IS NOTHING TO ESCALATE TO, and a relay configured that
+# way is a documented shape. Giving up on the environment there would end every
+# turn from the margin onwards, with a message saying there are no credentials in
+# the environment while the process is still holding them. The bound becomes a
+# re-read instead: the keys may be stale, which is between AWS and whoever
+# exported them, but the conversation survives.
+del exports[:]
+cache = Bounded("")
+kept = [asyncio.run(cache.get())]
+for _ in range(3):
+    time.sleep(0.1)
+    kept.append(asyncio.run(cache.get()))
+check([c["aws_session_token"] for c in kept] == ["stale-token"] * 4,
+      "a profile-free relay must keep answering from the environment: %r" % kept)
+check(exports == [], "and must not try to export from a profile it does not have")
+
+# Even a credential whose stated deadline has already passed, for the same
+# reason: there is no fresher source, so refusing is a dead relay rather than a
+# safer one.
+os.environ["AWS_CREDENTIAL_EXPIRATION"] = iso(time.time() - 60)
+cache = Bounded("")
+past = asyncio.run(cache.get())
+check(past["aws_session_token"] == "stale-token",
+      "an expired ambient credential is still the only answer available: %r" % past)
+# With a profile, that same credential is abandoned for it, as before.
+cache = Bounded("a-profile")
+check(asyncio.run(cache.get())["aws_access_key_id"] == "FROM-PROFILE",
+      "an expired ambient credential should be abandoned when a profile exists")
+os.environ.pop("AWS_CREDENTIAL_EXPIRATION", None)
+
+# An environment with nothing in it and no profile is still a named refusal, so
+# this restores the real resolver rather than asking the stub to pretend.
 for name in AWS_VARS:
     os.environ.pop(name, None)
+relay.profile_credentials = real_profile
+refused = None
+try:
+    asyncio.run(Bounded("").get())
+except relay.CredentialError as exc:
+    refused = str(exc)
+check(refused is not None, "no credentials anywhere should refuse")
+check("voice-profile" in refused,
+      "and the refusal should name the file to write: %s" % refused)
 PY
 pass "credentials are resolved once per relay, refreshed before expiry, off the event loop"
 
@@ -1284,7 +1326,10 @@ pass "one deny decision per item covers every list that item could appear in"
 # therefore closed to the states bin/fm-brief.sh gives every crewmate plus the two
 # bin/fm-classify-lib.sh adds when a decision closes, and anything else is a note.
 VERB_HOME="$TMP_ROOT/status-verbs"
-CUSTOMER_TOKEN=ACMECORPMIGRATION
+# Lowercase on purpose. The reader lowercases a verb before it could ever be
+# emitted, and assert_not_contains compares case-sensitively, so an uppercase
+# marker here would make the assertion below unable to fail on leaking code.
+CUSTOMER_TOKEN=acmecorpmigration
 mkdir -p "$VERB_HOME/data" "$VERB_HOME/state"
 cat > "$VERB_HOME/data/backlog.md" <<'EOF'
 # Backlog

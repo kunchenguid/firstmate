@@ -236,7 +236,7 @@ def _expires_at(stamp):
     return when.timestamp()
 
 
-def ambient_credentials(verbose=False, margin=0):
+def ambient_credentials(verbose=False, margin=0, only_source=False):
     """Return (credentials, expiry) from the environment, or None if it has none to give.
 
     None means "ask the profile instead", and there are three ways to get it.
@@ -246,6 +246,13 @@ def ambient_credentials(verbose=False, margin=0):
     And one whose AWS_CREDENTIAL_EXPIRATION has passed, or passes within margin
     seconds, is no longer usable: os.environ cannot get fresher values while
     this process runs, so the only way forward is the profile.
+
+    only_source says there is no profile to ask, which changes what a passed
+    deadline means. The environment is then the only place a credential can come
+    from, so a stale one is still the best answer available, and refusing it
+    would end a live conversation over something only the operator can refresh.
+    AWS says so itself if the credential really is dead. An environment with no
+    keys in it at all is a refusal either way.
 
     Temporary credentials with no stated deadline are reported as
     EXPIRY_UNKNOWN rather than as eternal, because a session token always has a
@@ -263,7 +270,8 @@ def ambient_credentials(verbose=False, margin=0):
     expires = _expires_at(os.environ.get("AWS_CREDENTIAL_EXPIRATION"))
     if expires is None and token:
         expires = EXPIRY_UNKNOWN
-    if expires not in (None, EXPIRY_UNKNOWN) and time.time() + margin >= expires:
+    if (not only_source and expires not in (None, EXPIRY_UNKNOWN)
+            and time.time() + margin >= expires):
         log(verbose, "the credentials in the environment have expired")
         return None
     log(verbose, "using credentials already in the environment")
@@ -311,9 +319,20 @@ def resolve_credentials(profile, verbose=False, margin=0, allow_ambient=True):
     second, so Credentials below owns when this runs and keeps it out of a turn.
     The source is reported because only one of the two can be asked again for
     something fresher, and the cache has to know which it is holding.
+
+    A relay with no profile at all is a supported shape, so the environment gets
+    a second look when there is nothing to escalate to. Giving up on the only
+    source there is would turn "these credentials are getting old" into "this
+    relay is over", which is a worse answer than handing over keys that AWS can
+    refuse for itself.
     """
     if allow_ambient:
         ambient = ambient_credentials(verbose, margin)
+        if ambient is None and not profile:
+            ambient = ambient_credentials(verbose, margin, only_source=True)
+            if ambient is not None:
+                log(verbose, "keeping the credentials in the environment anyway: "
+                             "there is no profile to fall back to")
         if ambient is not None:
             return ambient[0], ambient[1], FROM_ENVIRONMENT
     creds, expires = profile_credentials(profile, verbose)
@@ -343,6 +362,12 @@ class Credentials:
     bound above would be a bound in name only. Once an ambient answer is spent,
     this asks the profile from then on.
 
+    An ambient answer is only ever spent when there IS a profile to spend it on.
+    With no profile the environment is the only source, so the bound becomes a
+    re-read of it rather than an escalation: a relay configured that way keeps
+    answering, and whether the keys still work is between AWS and the operator
+    who exported them.
+
     Every resolution, the first one included, runs in a worker thread, so the
     event loop keeps reading the captain's audio while it happens.
     """
@@ -371,7 +396,7 @@ class Credentials:
     async def get(self):
         async with self._lock:
             if not self._usable():
-                if self._source == FROM_ENVIRONMENT:
+                if self._source == FROM_ENVIRONMENT and self.profile:
                     log(self.verbose, "the credentials from the environment are "
                                       "spent; asking the profile from now on")
                     self._ambient_spent = True
@@ -717,7 +742,11 @@ class Session:
 
         try:
             if name == "get_fleet_status":
-                result = records.fleet_status(home=self.home, scope=self.scope)
+                # Off the loop like the handover below it: the model is told to
+                # call this on every question, and its directory and file reads
+                # would otherwise stop the relay reading the captain's audio.
+                result = await asyncio.to_thread(
+                    records.fleet_status, self.home, self.scope)
             elif name == "hand_over_to_firstmate":
                 request = (arguments.get("request") or "").strip()
                 result = await asyncio.to_thread(
