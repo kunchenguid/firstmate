@@ -21,17 +21,24 @@
 #                                    [ -f ] test and nothing else runs.
 #   2. fm_pf_has_registrations       O(1) presence check on the registry created
 #      / fm_pf_has_events            only by the relay path (fm-public-followup.sh
-#                                    register). Relay-enabled homes with no
-#                                    public commitments stop here, so no
-#                                    tasks-axi call and no backlog scan happens.
+#      / fm_pf_has_open_loops        register). Open loops ARE registrations:
+#                                    a delivered final keeps the record, so this
+#                                    same check is the fail-loud session-start
+#                                    gate. Relay-enabled homes with no public
+#                                    loops stop here, so no tasks-axi call and
+#                                    no backlog scan happens.
 #
 # Private transport layout, all under <home>/state/public-followup (mode 0700,
 # created only by `fm-public-followup.sh register`):
 #   registry/<obligation-id>   registration record: the bounded public-safe
 #                              binding (obligation, relation, work ref,
-#                              generation, platform, request id). Presence hint
-#                              and reverse work->obligation index only; the
-#                              obligation itself always remains tasks-axi truth.
+#                              generation, platform, request id) plus the loop
+#                              fields that survive delivery (state, delivered_at,
+#                              followup_expires_at, request_context_b64). Presence
+#                              means the public loop is still open. Delivery
+#                              stamps state=delivered; only `retire` removes the
+#                              record. The obligation itself always remains
+#                              tasks-axi truth.
 #   events/<event-id>.json     inbound typed terminal events awaiting
 #                              reconciliation, one file per event id.
 #   consumed/<event-id>        idempotency ledger: an accepted event id is never
@@ -107,6 +114,11 @@ fm_pf_dir_has_entry() {
 
 fm_pf_has_registrations() { fm_pf_dir_has_entry "$(fm_pf_registry_dir "$1")"; }
 fm_pf_has_events()        { fm_pf_dir_has_entry "$(fm_pf_events_dir "$1")"; }
+# Every retained registration is an open public loop (owed or delivered). Same
+# O(1) directory presence check as fm_pf_has_registrations; the name is the
+# post-retention semantic so callers do not treat "a reply is owed" as the
+# only reason a record exists.
+fm_pf_has_open_loops()    { fm_pf_has_registrations "$1"; }
 
 # fm_pf_active <home> <state>: both gates, in order. The single predicate every
 # caller outside the relay path should use before doing any public-followup work.
@@ -222,6 +234,105 @@ fm_pf_registry_ids_for_work() {
   done <<EOF
 $(fm_pf_registry_ids "$state")
 EOF
+}
+
+# fm_pf_now_epoch: wall clock as epoch seconds. FMX_NOW_OVERRIDE pins it for
+# tests, matching bin/fm-x-lib.sh.
+fm_pf_now_epoch() {
+  printf '%s\n' "${FMX_NOW_OVERRIDE:-$(date +%s)}"
+}
+
+# fm_pf_now_rfc3339: UTC timestamp for delivered_at and similar stamps.
+fm_pf_now_rfc3339() {
+  local epoch
+  epoch=$(fm_pf_now_epoch)
+  date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+# fm_pf_rfc3339_to_epoch <rfc3339>: parse a Zulu timestamp. Empty on failure.
+fm_pf_rfc3339_to_epoch() {
+  local ts=$1
+  [ -n "$ts" ] || return 1
+  date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null \
+    || date -u -d "$ts" +%s 2>/dev/null \
+    || return 1
+}
+
+# fm_pf_followup_window_class <rfc3339>: ok, closing (<48h), expired, or unknown.
+fm_pf_followup_window_class() {
+  local ts=$1 exp now
+  exp=$(fm_pf_rfc3339_to_epoch "$ts") || { printf 'unknown\n'; return 0; }
+  now=$(fm_pf_now_epoch)
+  if [ "$now" -ge "$exp" ]; then
+    printf 'expired\n'
+  elif [ $((exp - now)) -lt 172800 ]; then
+    printf 'closing\n'
+  else
+    printf 'ok\n'
+  fi
+}
+
+# fm_pf_b64_encode: stdin to a single-line base64 payload (no wrapping).
+fm_pf_b64_encode() {
+  base64 2>/dev/null | tr -d '\n\r'
+}
+
+# fm_pf_b64_decode: stdin (single-line or wrapped base64) to bytes on stdout.
+fm_pf_b64_decode() {
+  local data
+  data=$(cat)
+  printf '%s\n' "$data" | base64 -d 2>/dev/null \
+    || printf '%s\n' "$data" | base64 -D 2>/dev/null
+}
+
+# fm_pf_registry_loop_state <state> <id>: open or delivered. A pre-change
+# record with no state= is treated as open so live homes never crash.
+fm_pf_registry_loop_state() {
+  local v
+  v=$(fm_pf_registry_get "$1" "$2" state)
+  case "$v" in
+    delivered) printf 'delivered\n' ;;
+    *) printf 'open\n' ;;
+  esac
+}
+
+# fm_pf_registry_rechainable <state> <id>: 0 when request_context_b64 is present.
+fm_pf_registry_rechainable() {
+  local ctx
+  ctx=$(fm_pf_registry_get "$1" "$2" request_context_b64)
+  [ -n "$ctx" ]
+}
+
+# fm_pf_has_delivered_open_loops <state>: 0 when any retained record is
+# state=delivered (an open loop with nothing owed). Pre-change records have no
+# state= and are treated as still-owed, not delivered.
+fm_pf_has_delivered_open_loops() {
+  local state=$1 id
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    [ "$(fm_pf_registry_get "$state" "$id" state)" = delivered ] || continue
+    return 0
+  done <<EOF
+$(fm_pf_registry_ids "$state")
+EOF
+  return 1
+}
+
+# fm_pf_registry_stamp_delivered <state> <id> <rfc3339>: rewrite one record
+# with state=delivered and delivered_at, keeping every other field. The record
+# stays; only retire removes it.
+fm_pf_registry_stamp_delivered() {
+  local state=$1 id=$2 delivered_at=$3 file rest
+  fm_pf_slug_valid "$id" || return 1
+  [ -n "$delivered_at" ] || return 1
+  file="$(fm_pf_registry_dir "$state")/$id"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  rest=$(grep -v -E '^(state|delivered_at|delivered_obligation)=' "$file" 2>/dev/null || true)
+  printf '%s\nstate=delivered\ndelivered_at=%s\ndelivered_obligation=%s\n' \
+    "$rest" "$delivered_at" "$id" \
+    | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$state")" "$id" 600
 }
 
 # --- pending-event signature ------------------------------------------------

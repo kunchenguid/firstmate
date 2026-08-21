@@ -150,6 +150,34 @@ seed_commitment() {
     || fail "could not register the public commitment"
 }
 
+# The pi-rearm shape: a report-ready promised-final bound to a secondmate.
+seed_repro_commitment() {   # <home> <obligation> <request> <work-home> <work-id>
+  local home=$1 obligation=$2 request=$3 work_home=$4 work_id=$5
+  jq -n --arg r "$request" \
+    '{request_id:$r, platform:"discord",
+      context_binding:{version:"ctx1", value:("ctx1_" + $r)},
+      public_safe_summary:"reproduce a Pi recovery notification loop",
+      received_at:"2026-08-21T01:12:00Z",
+      followup_expires_at:"2026-08-28T01:12:00Z",
+      reservation_expires_at:"2026-08-28T01:12:00Z"}' > "$home/request.json"
+  jq -n '{type:"report-ready", project:"firstmate",
+          required_deliverables:["report_path"], completion_policy:"all-required"}' \
+    > "$home/expected.json"
+  jq -n --arg h "$work_home" --arg w "$work_id" \
+    '{relation_id:"rel-code", work_ref:{home_id:$h, task_id:$w},
+      role:"fulfills", required:true, generation:1}' > "$home/relation.json"
+  tasks_in "$home" public-followup add "$obligation" --request-context-file "$home/request.json" \
+    --purpose promised-final --expected-final-file "$home/expected.json" \
+    --expires-at 2026-10-01T00:00:00Z >/dev/null || fail "add failed"
+  tasks_in "$home" public-followup bind-work "$obligation" --relation-file "$home/relation.json" >/dev/null \
+    || fail "bind-work failed"
+  FM_HOME="$home" bash -c \
+    ". '$ROOT/bin/fm-x-lib.sh'; fmx_context_registry_set '$home/state' '$request' discord 2000" \
+    || fail "context retain failed"
+  run_pf "$home" register "$obligation" --relation rel-code --work-home "$work_home" \
+    --work-id "$work_id" --generation 1 >/dev/null || fail "register failed"
+}
+
 emit_terminal() {  # <child-run-dir> <owning-home> <obligation> <work-home> <work-id> [pr-url] [outcome]
   local owning=$2 obligation=$3 work_home=$4 work_id=$5
   local pr=${6:-https://github.com/example/repo/pull/7} outcome=${7:-pr-merged}
@@ -1165,6 +1193,14 @@ SH
     [ -z "$out" ] || fail "'$cmd' must print nothing in a relay-disabled home, got: $out"
   done
 
+  # New fields and the open-loop gate must not create work in a disabled home.
+  # shellcheck disable=SC1091
+  . "$ROOT/bin/fm-public-followup-lib.sh"
+  fm_pf_has_open_loops "$home/state" \
+    && fail "a relay-disabled home must not grow an open-loop registry"
+  fm_pf_has_delivered_open_loops "$home/state" \
+    && fail "a relay-disabled home must not grow a delivered open-loop registry"
+
   rc=0
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FAKE_TASKS_AXI_LOG="$tasks_log" "$PF" active || rc=$?
@@ -1290,7 +1326,7 @@ test_session_start_surfaces_only_when_owed() {
   out=$(PATH="$on/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$on" \
     FM_STATE_OVERRIDE="$on/state" FM_DATA_OVERRIDE="$on/data" \
     FM_CONFIG_OVERRIDE="$on/config" "$SESSION_START" 2>&1)
-  assert_contains "$out" "Public commitments awaiting delivery" \
+  assert_contains "$out" "Public commitments" \
     "an unresolved commitment must be surfaced at startup"
   assert_contains "$out" "unresolved pf-start state=pending-work platform=discord" \
     "the startup summary must be typed and actionable"
@@ -1321,6 +1357,259 @@ test_typed_records_exclude_raw_public_material() {
   assert_no_grep 'please fix worker placement' "$home/typed.json" \
     "the typed obligation must never carry raw public message text"
   pass "typed public-followup records carry only public-safe summaries and deliverables"
+}
+
+# --- 10. delivery does not close the public loop --------------------------------
+
+test_dropped_baton_now_surfaces_open_loop() {
+  local parent child log
+  parent=$(make_home baton-parent)
+  child="$TMP_ROOT/baton-child"
+  FM_SECONDMATE_CHARTER='Baton repro charter.' FM_HOME="$parent" \
+    "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null || fail "seed failed"
+  child=$(cd "$child" && pwd -P)
+  make_fake_curl "$child" >/dev/null
+  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  log="$TMP_ROOT/curl.log"; : > "$log"
+
+  seed_repro_commitment "$parent" public-final-pi-rearm-repro req-pirearm \
+    secondmate:mate pi-rearm-loop-repro-s1
+  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+
+  "$EMIT" --home "$parent" --obligation public-final-pi-rearm-repro --relation rel-code \
+    --source-home secondmate:mate --work-id pi-rearm-loop-repro-s1 --generation 1 \
+    --outcome report-ready --deliverable report_path=data/pi-rearm-loop-repro-s1/report.md \
+    --outcome-text 'Reproduced the loop. A bounded fix is scoped and waiting on you, captain.' >/dev/null \
+    || fail "emit failed"
+  FAKE_CURL_LOG="$log" run_pf "$parent" consume | grep -q '^ready ' || fail "consume not ready"
+  FAKE_CURL_LOG="$log" run_pf "$parent" deliver public-final-pi-rearm-repro >/dev/null || fail "deliver failed"
+  [ "$(followup_posts "$log")" = 1 ] || fail "expected exactly one closing post"
+  assert_present "$parent/state/public-followup/registry/public-final-pi-rearm-repro" \
+    "delivery must retain the registration"
+
+  fm_write_meta "$child/state/pi-rearm-loop-fix-r1.meta" \
+    "window=firstmate:fm-pi-rearm-loop-fix-r1" "endpoint_task_id=pi-rearm-loop-fix-r1" \
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+
+  PATH="$parent/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$parent" \
+    FM_STATE_OVERRIDE="$parent/state" "$PF" guard-work secondmate:mate pi-rearm-loop-fix-r1 \
+    || fail "guard-work unexpectedly blocked the unregistered follow-on"
+
+  run_pf "$parent" pending > "$TMP_ROOT/pending.out"
+  grep -q '^open-loop public-final-pi-rearm-repro ' "$TMP_ROOT/pending.out" \
+    || fail "pending must print the open-loop line after delivery"
+  grep -q 'request=req-pirearm' "$TMP_ROOT/pending.out" \
+    || fail "the open-loop line must name the original request"
+
+  PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+    FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" FAKE_CURL_LOG="$log" \
+    "$TEARDOWN" pi-rearm-loop-fix-r1 > "$TMP_ROOT/td.out" 2>&1 || true
+  case "$(cat "$TMP_ROOT/td.out")" in
+    *"still owes a public reply"*) fail "teardown unexpectedly guarded the unregistered follow-on" ;;
+  esac
+  [ "$(followup_posts "$log")" = 1 ] || fail "unexpected extra post"
+  pass "dropped-baton regression: delivery retains the loop and pending prints open-loop"
+}
+
+test_control_registered_followon_is_guarded() {
+  local parent child
+  parent=$(make_home baton-control-parent)
+  child="$TMP_ROOT/baton-control-child"
+  FM_SECONDMATE_CHARTER='Baton control charter.' FM_HOME="$parent" \
+    "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null || fail "seed failed"
+  child=$(cd "$child" && pwd -P)
+  make_fake_curl "$child" >/dev/null
+  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  seed_repro_commitment "$parent" public-final-pi-rearm-ship req-pirearm2 \
+    secondmate:mate pi-rearm-loop-fix-r1
+  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  fm_write_meta "$child/state/pi-rearm-loop-fix-r1.meta" \
+    "window=firstmate:fm-pi-rearm-loop-fix-r1" "endpoint_task_id=pi-rearm-loop-fix-r1" \
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+  PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+    FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
+    expect_failure "registered follow-on must be guarded" "$TEARDOWN" pi-rearm-loop-fix-r1
+  assert_contains "$EXPECT_OUT" "still owes a public reply" "the guard fires only on presence"
+  pass "CONTROL: the identical teardown REFUSES the moment a commitment is registered"
+}
+
+test_rechain_delivers_second_post_on_same_thread() {
+  local parent log out posts
+  parent=$(make_home rechain-parent)
+  log="$parent/curl.log"; : > "$log"
+  seed_repro_commitment "$parent" public-final-a req-rechain main scout-a
+  "$EMIT" --home "$parent" --obligation public-final-a --relation rel-code \
+    --source-home main --work-id scout-a --generation 1 \
+    --outcome report-ready --deliverable report_path=data/scout-a/report.md \
+    --outcome-text 'Reproduced. A fix is waiting.' >/dev/null || fail "emit failed"
+  FAKE_CURL_LOG="$log" run_pf "$parent" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf "$parent" deliver public-final-a >/dev/null || fail "deliver failed"
+  [ "$(followup_posts "$log")" = 1 ] || fail "expected the investigation post"
+
+  out=$(FAKE_CURL_LOG="$log" run_pf "$parent" rechain public-final-b --from public-final-a \
+    --work-home main --work-id ship-b --expected pr-merged) \
+    || fail "rechain failed: $out"
+  assert_contains "$out" "retired public-final-a reason=handed on to public-final-b" \
+    "rechain must retire the source loop"
+  assert_contains "$out" "--deliverable pr_url=<value>" \
+    "rechain brief must name the actual required deliverable key"
+  assert_absent "$parent/state/public-followup/registry/public-final-a" \
+    "the source registration must be gone after rechain"
+  assert_present "$parent/state/public-followup/registry/public-final-b" \
+    "the follow-on registration must exist"
+
+  "$EMIT" --home "$parent" --obligation public-final-b --relation rel-1 \
+    --source-home main --work-id ship-b --generation 1 \
+    --outcome pr-merged --deliverable pr_url=https://github.com/example/repo/pull/99 \
+    --outcome-text 'Shipped: the Pi recovery loop is fixed.' >/dev/null || fail "follow-on emit failed"
+  FAKE_CURL_LOG="$log" run_pf "$parent" consume | grep -q '^ready public-final-b ' \
+    || fail "follow-on consume not ready"
+  FAKE_CURL_LOG="$log" run_pf "$parent" deliver public-final-b >/dev/null || fail "follow-on deliver failed"
+  posts=$(followup_posts "$log")
+  [ "$posts" = 2 ] || fail "expected exactly two posts in the same thread, got $posts"
+  assert_grep 'Shipped: the Pi recovery loop is fixed.' "$log" \
+    "the second post must carry the shipped text"
+  assert_grep '"request_id":"req-rechain"' "$log" \
+    "both posts must target the original request"
+  pass "rechain posts the shipped follow-on into the same thread"
+}
+
+test_retire_reason_closes_the_open_loop() {
+  local home log out
+  home=$(make_home retire-reason)
+  log="$home/curl.log"; : > "$log"
+  seed_commitment "$home" pf-retire req-retire discord main work-retire
+  emit_terminal "$home" "$home" pf-retire main work-retire >/dev/null || fail "emit failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-retire >/dev/null || fail "deliver failed"
+  run_pf "$home" pending | grep -q '^open-loop pf-retire ' \
+    || fail "pending must show the delivered open loop"
+  expect_failure "retire without --reason must refuse" run_pf "$home" retire pf-retire
+  assert_contains "$EXPECT_OUT" "--reason" "the refusal must name the required reason"
+  assert_present "$home/state/public-followup/registry/pf-retire" \
+    "a reason-less retire must keep the registration"
+  out=$(run_pf "$home" retire pf-retire --reason "the public loop is finished") \
+    || fail "retire --reason failed"
+  assert_contains "$out" "retired pf-retire reason=the public loop is finished" \
+    "retire must record the reason"
+  assert_absent "$home/state/public-followup/registry/pf-retire" \
+    "retire is the only removal"
+  out=$(run_pf "$home" pending || true)
+  case "$out" in
+    *pf-retire*) fail "pending must stop listing a retired loop: $out" ;;
+  esac
+  pass "retire --reason closes the loop and drops the open-loop line"
+}
+
+test_retention_creates_no_false_teardown_refusal() {
+  local home home2 rc out
+  home=$(make_home retain-teardown)
+  seed_commitment "$home" pf-retain req-retain discord main ship-retain
+  fm_write_meta "$home/state/ship-retain.meta" \
+    "window=firstmate:fm-ship-retain" \
+    "worktree=$home/projects/gone" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  emit_terminal "$home" "$home" pf-retain main ship-retain >/dev/null || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$home/curl.log" run_pf "$home" deliver pf-retain >/dev/null || fail "delivery failed"
+  run_pf "$home" guard-work main ship-retain \
+    || fail "guard-work must pass for the work whose reply already landed"
+  assert_present "$home/state/public-followup/registry/pf-retain" \
+    "the delivered registration must still be present"
+  rc=0
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" ship-retain \
+    > "$home/td.out" 2> "$home/td.err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "teardown must proceed with a retained delivered registration (rc=$rc)"
+  case "$(cat "$home/td.err")" in
+    *"still owes a public reply"*) fail "retention must not create a false public-reply refusal" ;;
+  esac
+  # pending still sees the loop because teardown does not retire it
+  home2=$(make_home retain-pending)
+  seed_commitment "$home2" pf-keep req-keep discord main work-keep
+  emit_terminal "$home2" "$home2" pf-keep main work-keep >/dev/null || fail "emit2 failed"
+  run_pf "$home2" consume >/dev/null || fail "consume2 failed"
+  FAKE_CURL_LOG="$home2/curl.log" run_pf "$home2" deliver pf-keep >/dev/null || fail "deliver2 failed"
+  out=$(run_pf "$home2" pending)
+  assert_contains "$out" "open-loop pf-keep" "pending must keep a delivered registration as an open loop"
+  pass "retention creates no false teardown refusal and pending no longer prunes"
+}
+
+test_expiry_escalation_uses_now_override() {
+  local home out exp now_closing now_expired
+  home=$(make_home expiry-window)
+  seed_repro_commitment "$home" pf-exp req-exp main work-exp
+  "$EMIT" --home "$home" --obligation pf-exp --relation rel-code \
+    --source-home main --work-id work-exp --generation 1 \
+    --outcome report-ready --deliverable report_path=data/x/report.md \
+    --outcome-text 'Reproduced.' >/dev/null || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$home/curl.log" run_pf "$home" deliver pf-exp >/dev/null || fail "deliver failed"
+  exp=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' '2026-08-28T01:12:00Z' +%s 2>/dev/null) \
+    || exp=$(date -u -d '2026-08-28T01:12:00Z' +%s)
+  now_closing=$((exp - 3600))
+  now_expired=$((exp + 60))
+  out=$(FMX_NOW_OVERRIDE="$now_closing" run_pf "$home" pending)
+  assert_contains "$out" "open-loop pf-exp" "closing window must still list the loop"
+  assert_contains "$out" "DEADLINE:" "a window under 48 hours must escalate"
+  assert_contains "$out" "under 48 hours" "the closing wording must name the remaining window"
+  out=$(FMX_NOW_OVERRIDE="$now_expired" run_pf "$home" pending)
+  assert_contains "$out" "can no longer be reached" "a past expiry must name the unreachable thread"
+  assert_contains "$out" "captain decision" "a past expiry is a captain call"
+  FMX_NOW_OVERRIDE="$now_expired" expect_failure "rechain past expiry must refuse" \
+    run_pf "$home" rechain pf-exp-next --from pf-exp --work-home main --work-id work-next --expected pr-merged
+  assert_contains "$EXPECT_OUT" "can no longer be reached" "rechain must name the closed window"
+  pass "expiry escalation is pinned by FMX_NOW_OVERRIDE"
+}
+
+test_prechange_registration_is_open_and_unrechainable() {
+  local home file out
+  home=$(make_home prechange)
+  mkdir -p "$home/state/public-followup/registry"
+  file="$home/state/public-followup/registry/pf-legacy"
+  printf 'obligation_id=pf-legacy\nrelation_id=rel-code\nwork_home=main\nwork_id=work-legacy\ngeneration=1\nplatform=discord\nrequest_id=req-legacy\n' \
+    > "$file"
+  chmod 600 "$file"
+  out=$(run_pf "$home" pending) || fail "pending must not crash on a pre-change registration"
+  assert_contains "$out" "open-loop pf-legacy" "a pre-change record is an open loop"
+  assert_contains "$out" "unrechainable" "a pre-change record must be reported un-rechainable"
+  expect_failure "rechain of a pre-change record must refuse" \
+    run_pf "$home" rechain pf-new --from pf-legacy --work-home main --work-id work-next --expected pr-merged
+  case "$EXPECT_OUT" in
+    *un-rechainable*) ;;
+    *'not state=delivered'*) ;;
+    *) fail "rechain must refuse a pre-change record without crashing: $EXPECT_OUT" ;;
+  esac
+  printf 'state=delivered\ndelivered_at=2026-08-21T00:00:00Z\n' >> "$file"
+  expect_failure "delivered pre-change record without context is un-rechainable" \
+    run_pf "$home" rechain pf-new --from pf-legacy --work-home main --work-id work-next --expected pr-merged
+  assert_contains "$EXPECT_OUT" "un-rechainable" "missing request_context_b64 must be named"
+  pass "pre-change registrations are open loops and un-rechainable, never a crash"
+}
+
+test_x_request_teardown_warns_when_final_unposted() {
+  local home rc
+  home=$(make_home xreq-warn)
+  fm_write_meta "$home/state/linked-task.meta" \
+    "window=firstmate:fm-linked-task" \
+    "worktree=$home/projects/gone" \
+    "project=$home/projects/sample" \
+    "kind=ship" \
+    "mode=local-only" \
+    "x_request=req-legacy-final"
+  rc=0
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" linked-task \
+    > "$home/td.out" 2> "$home/td.err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "legacy-link warning must not block teardown (rc=$rc)"
+  assert_grep "still carries a Relay request link (req-legacy-final)" "$home/td.err" \
+    "teardown must warn when x_request= is still present"
+  pass "teardown warns when a legacy Relay link is torn down with its final unposted"
 }
 
 test_outcome_text_is_bounded_without_corrupting_characters
@@ -1355,3 +1644,11 @@ test_exhausted_binding_is_not_retried
 test_relay_poll_stays_inert_and_surfaces_once
 test_session_start_surfaces_only_when_owed
 test_typed_records_exclude_raw_public_material
+test_dropped_baton_now_surfaces_open_loop
+test_control_registered_followon_is_guarded
+test_rechain_delivers_second_post_on_same_thread
+test_retire_reason_closes_the_open_loop
+test_retention_creates_no_false_teardown_refusal
+test_expiry_escalation_uses_now_override
+test_prechange_registration_is_open_and_unrechainable
+test_x_request_teardown_warns_when_final_unposted

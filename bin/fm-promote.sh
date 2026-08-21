@@ -24,6 +24,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-public-followup-lib.sh
+. "$SCRIPT_DIR/fm-public-followup-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 
 MODE=
 YOLO=
@@ -123,3 +127,38 @@ META_LOCK_HELD=0
 HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
 echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
+
+# After a scout's promised-final has been delivered, the same task id is still
+# bound but the expected outcome was report-ready. Print the rechain line the
+# consent-holding home must run; a secondmate home cannot register or post.
+promote_print_rechain_hint() {
+  local consent_state=$1 work_home=$2 task_id=$3 id
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    [ "$(fm_pf_registry_get "$consent_state" "$id" state)" = delivered ] || continue
+    echo "next: bin/fm-public-followup.sh rechain <new-obligation-id> --from $id --work-home $work_home --work-id $task_id --expected pr-merged"
+  done <<EOF
+$(fm_pf_registry_ids_for_work "$consent_state" "$work_home" "$task_id")
+EOF
+}
+if [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ]; then
+  PROMOTE_MATE_ID=$(sed -n '1p' "$FM_HOME/.fm-secondmate-home" 2>/dev/null || true)
+  if fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" \
+      && [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] \
+      && [ -n "$FM_SECONDMATE_PARENT_HOME" ] \
+      && [ -d "$FM_SECONDMATE_PARENT_HOME/state" ] \
+      && fm_pf_relay_active "$FM_SECONDMATE_PARENT_HOME"; then
+    while IFS= read -r PROMOTE_LOOP_ID; do
+      [ -n "$PROMOTE_LOOP_ID" ] || continue
+      [ "$(fm_pf_registry_get "$FM_SECONDMATE_PARENT_HOME/state" "$PROMOTE_LOOP_ID" state)" = delivered ] || continue
+      echo "warning: the parent home holds an open public loop for this work; it must rechain (this home cannot register or post)."
+      echo "next: FM_HOME=$(printf '%q' "$FM_SECONDMATE_PARENT_HOME") bin/fm-public-followup.sh rechain <new-obligation-id> --from $PROMOTE_LOOP_ID --work-home secondmate:$PROMOTE_MATE_ID --work-id $ID --expected pr-merged"
+    done <<EOF
+$(fm_pf_registry_ids_for_work "$FM_SECONDMATE_PARENT_HOME/state" "secondmate:$PROMOTE_MATE_ID" "$ID")
+EOF
+  fi
+else
+  if fm_pf_relay_active "$FM_HOME"; then
+    promote_print_rechain_hint "$STATE" main "$ID"
+  fi
+fi
