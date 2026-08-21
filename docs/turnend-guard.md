@@ -141,6 +141,13 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - The hook remains inert unless the payload `cwd` contains a per-task token pointer that resolves through Firstmate's private registry to one `state/<id>.turn-ended` marker.
 - Installation refuses before writing unless `python3` with `tomllib` and `jq` are available.
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
+- Antigravity CLI (agy) 1.1.15 exposes only global lifecycle hooks in `~/.gemini/config/hooks.json` - `PreToolUse`, `PostToolUse`, `PreInvocation`, `PostInvocation`, and `Stop` - whose commands run with the working directory set to that config directory.
+- agy has no project-level hook configuration Firstmate can use: workspace `.agents/hooks.json` exists but needs a folder-trust grant Firstmate will not write, so agy stays outside the primary guard integrations above.
+- agy's `Stop` payload carries `conversationId`, `artifactDirectoryPath`, `transcriptPath`, `modelName`, `terminationReason`, `fullyIdle`, and `workspacePaths`, and offers no blocking channel or reawakening, so it is a crew wake notification only.
+- agy crew wake support uses `bin/fm-agy-config.sh` to add exactly one `firstmate-turn-end` key to that shared config and install a silent always-zero hook.
+- The hook remains inert unless one path in the payload's `workspacePaths` holds a per-task token pointer that resolves through Firstmate's private registry, and a `Stop` carrying `fullyIdle: false` publishes nothing because the turn has not finished.
+- `workspacePaths` is EMPTY unless the launch passes `--add-dir`, which is why `bin/fm-spawn.sh` binds the task worktree that way.
+- Installation refuses before writing unless `python3` and `jq` are available; if `jq` is removed afterwards the hook stays silent and exits 0, and agy crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
 - No harness adapter uses a shell ampersand to manufacture supervision.
 
@@ -152,6 +159,7 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, child-worktree exclusion, and that the adapter never exits 2.
 `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` is the opt-in guard that proves the same behavior against the installed cursor-agent and fails naming the harness and version.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
+`tests/fm-agy-harness.test.sh` covers the agy crew hook the same way - surgical shared-JSON editing, idempotence, refusal cases, the workspace-token guard including the `fullyIdle` and empty-`workspacePaths` cases, spawn registration, and teardown cleanup - and `FM_AGY_SIGNALS_LIVE_E2E=1 tests/fm-agy-signals-live-e2e.test.sh` is the opt-in guard that proves the same behavior against the installed binary.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
 [`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the 2026-07-24 Claude `asyncRewake` revalidation.

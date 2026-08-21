@@ -37,6 +37,14 @@ command -v tmux >/dev/null 2>&1 || fail "tmux not found"
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-drift-$$"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness-drift.XXXXXX")
+# Resolved, not raw: on macOS $TMPDIR ends in a slash, so that template yields a
+# path carrying a redundant `//`, which defeats agy's folder-trust match and
+# renders its dialog even under the --add-dir below.
+# fm-spawn always launches on a resolved worktree, so the raw shape is one this
+# guard would probe and production never produces.
+# A failed resolve keeps the raw path rather than emptying LAB, which the
+# cleanup below removes with `rm -rf`.
+LAB_RESOLVED=$(cd "$LAB" && pwd -P) && LAB=$LAB_RESOLVED
 SESSION=drift
 
 cleanup_all() {
@@ -100,7 +108,7 @@ SKIPPED=
 # cursor matters for the same reason muse does, from the other direction: it
 # runs as a bundled node script, so its pane title is a bare `node` that no name
 # pattern can own, and identity has to come from its install path or argv[0].
-for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
+for harness in claude codex opencode pi pi-signed grok kimi cursor muse agy; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its classification is unverified here"
@@ -116,6 +124,11 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   # same flag fm-spawn passes for the same reason.
   launch_args=""
   [ "$harness" = cursor ] && launch_args="--trust"
+  # agy blocks on its own folder-trust dialog in a directory it has never seen.
+  # --add-dir is what suppresses that dialog (--dangerously-skip-permissions
+  # does not, and agy has no --trust flag), and it is the same flag fm-spawn
+  # passes on every agy launch.
+  [ "$harness" = agy ] && launch_args="--add-dir $LAB/wt"
   # shellcheck disable=SC2086  # deliberate: an empty value must add no argument
   "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" -- "$bin_path" $launch_args \
     || fail "$harness ($version): could not launch a window for the liveness probe"

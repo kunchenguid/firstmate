@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -161,11 +161,18 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+#     __AGYBIN__    absolute agy executable resolved from PATH
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# agy uses one firstmate-owned key in the shared global $HOME/.gemini/config/hooks.json
+# plus a gitignored .fm-agy-turnend worktree pointer, a state token, and a private
+# registry entry carrying both the turn-end marker and the busy-event coordinates;
+# the same installer declares firstmate's skills root in that home's skills.json,
+# without which an agy crewmate cannot see the no-mistakes skill. agy is
+# crewmate/scout only and is refused for --secondmate.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse is crewmate/scout only and is refused for --secondmate.
@@ -1046,7 +1053,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1148,7 +1155,7 @@ launch_template() {
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
     # only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u ANTIGRAVITY_AGENT -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -1175,7 +1182,26 @@ launch_template() {
     # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
-    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u ANTIGRAVITY_AGENT XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # agy (Antigravity CLI). -i / --prompt-interactive runs the initial prompt AND
+    # keeps the session interactive, which is the supervised pane firstmate needs;
+    # -p / --print is headless and would exit after one turn, so it is never used.
+    # --dangerously-skip-permissions auto-approves every tool request. It does
+    # NOT cover the folder-trust dialog; --add-dir below is what does.
+    # --add-dir pins the task worktree into the session's workspace set, and it
+    # is load-bearing TWICE over. It is what makes the guarded global turn-end
+    # hook usable: agy's hook payload carries workspacePaths, and without
+    # --add-dir that array is EMPTY even when the launch cwd is a git repo, so
+    # the per-task guard would never match. It ALSO suppresses agy's folder-trust
+    # dialog, which --dangerously-skip-permissions does not and for which agy
+    # exposes no --trust flag (verified live on two fresh never-trusted paths,
+    # agy 1.1.15, 2026-08-20: with the flag no dialog renders and the initial
+    # prompt runs immediately; without it the dialog blocks the session).
+    # Dropping the flag would therefore break the hook guard AND leave every
+    # unattended spawn parked on a dialog nobody is there to answer.
+    # agy encodes reasoning level in the model id itself, so the shared effort
+    # axis is deliberately omitted and stays in task metadata only.
+    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS __AGYBIN__ --dangerously-skip-permissions --add-dir __WORKTREE__ __MODELFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1216,14 +1242,17 @@ case "$ARG3" in
     ;;
 esac
 
-# muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
-# instance, so it needs a primary supervision protocol; muse has none, and its
-# Claude-compatible hook dialect explicitly rejects the model-reawakening and
-# asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
-  echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+# muse and agy are verified as CREWMATE/SCOUT adapters only. A secondmate is a
+# firstmate instance, so it needs a primary supervision protocol, and neither has
+# one. muse's Claude-compatible hook dialect explicitly rejects the
+# model-reawakening and asyncRewake handlers firstmate's primary turn-end
+# supervision is built on (muse 0.1.0-R708.1); agy's Stop hook is a plain
+# notification with no blocking channel and no reawakening at all (agy 1.1.15),
+# so a blind turn could never be held open. Refusing here keeps that gap loud
+# instead of standing up a secondmate whose supervision cycle could never be
+# armed, and it happens before any endpoint or global config is touched.
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = agy ]; }; then
+  echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
@@ -1308,9 +1337,14 @@ resolve_kimi_binary() {
   return 1
 }
 
-resolve_muse_binary() {
-  local candidate dir
-  candidate=$(command -v muse 2>/dev/null || true)
+# The PATH-only resolver agy and muse share: one published name, no documented
+# fallback location, so an absent binary refuses before any endpoint exists
+# rather than guessing a path. kimi keeps its own resolver because it genuinely
+# differs - it HAS a documented HOME fallback. The caller supplies its own
+# diagnostic so each refusal still names the product a captain would install.
+resolve_path_binary() {  # <name> <not-found-message>
+  local name=$1 message=$2 candidate dir
+  candidate=$(command -v "$name" 2>/dev/null || true)
   if [ -n "$candidate" ] && [ -x "$candidate" ]; then
     case "$candidate" in
       /*) printf '%s\n' "$candidate"; return 0 ;;
@@ -1323,8 +1357,20 @@ resolve_muse_binary() {
         ;;
     esac
   fi
-  echo "error: muse executable not found on PATH; install Muse Code or select a different verified harness" >&2
+  echo "$message" >&2
   return 1
+}
+
+# The published agy install is ~/.local/bin/agy, but nothing documents a
+# fallback the way kimi's does, so PATH is the whole search.
+resolve_agy_binary() {
+  resolve_path_binary agy \
+    "error: agy executable not found on PATH; install the Antigravity CLI or select a different verified harness"
+}
+
+resolve_muse_binary() {
+  resolve_path_binary muse \
+    "error: muse executable not found on PATH; install Muse Code or select a different verified harness"
 }
 
 # muse_credential_present: 0 when a launched muse pane can reach its provider
@@ -1361,7 +1407,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1420,7 +1466,14 @@ effort_flag_for_harness() {
     # kimi likewise has no reasoning-effort flag; the requested axis stays in
     # task metadata but never reaches the launch command. Cursor encodes effort
     # in model ids such as cursor-grok-4.5-high, so it also receives no separate
-    # effort flag.
+    # effort flag. agy DOES expose --effort low|medium|high, and it is
+    # deliberately not passed: agy's own catalog already encodes the level in the
+    # model id (gemini-3.7-flash-low|medium|high; verified against `agy models`,
+    # agy 1.1.15), which is the axis firstmate selects, and emitting both would
+    # let a profile ask for --model gemini-3.7-flash-high --effort low - a
+    # contradiction the launch has no way to resolve. Select the reasoning class
+    # through a model id the live listing actually returns, exactly as cursor
+    # does, and leave the separate effort axis unset.
   esac
 }
 
@@ -1441,6 +1494,26 @@ case "$LAUNCH" in
     LAUNCH=${LAUNCH//__MUSEBIN__/$(shell_quote "$MUSE_BIN")}
     LAUNCH=${LAUNCH//__MUSECONFIG__/$(shell_quote "$MUSE_CONFIG_HOME")}
     LAUNCH=${LAUNCH//__MUSEDATA__/$(shell_quote "$MUSE_DATA_HOME")}
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__AGYBIN__*)
+    AGY_BIN=$(resolve_agy_binary) || exit 1
+    LAUNCH=${LAUNCH//__AGYBIN__/$(shell_quote "$AGY_BIN")}
+    # Both halves of agy's global wiring are installed before launch: the
+    # guarded turn-end/busy hook, and the skills declaration without which a
+    # crewmate could not see the no-mistakes skill at all (agy scans neither
+    # ~/.claude/skills nor ~/.agents/skills on its own). bin/fm-agy-config.sh
+    # owns the surgical edits and refuses rather than damaging a shared config.
+    # Its stderr is deliberately NOT redirected: a missing user skills root is a
+    # permitted skip that install reports there, and swallowing it would hide
+    # the one warning explaining a crewmate that later says it cannot find
+    # no-mistakes.
+    "$FM_ROOT/bin/fm-agy-config.sh" install || {
+      echo "error: refusing agy spawn because its global hook and skills wiring could not be installed safely" >&2
+      exit 1
+    }
     ;;
 esac
 
@@ -2319,7 +2392,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|agy*)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2571,6 +2644,27 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
       ;;
+    agy*)
+      # agy's lifecycle hooks are global and shared with every agy session the
+      # captain runs by hand, so the installed hook is a guarded no-op unless the
+      # payload's workspacePaths holds this task's .fm-agy-turnend pointer AND
+      # that pointer's token names an entry in the private registry below. The
+      # registry entry - never the pointer, which lives in the agent's own
+      # writable worktree - carries the turn-end marker plus the busy-event
+      # coordinates, so the same one hook serves both the wake signal and the
+      # semantic busy source without any per-home value reaching hooks.json.
+      # The five-line format is owned by bin/fm-agy-config.sh's hook header.
+      AGY_AUTH_DIR="${FM_AGY_CONFIG_DIR:-$HOME/.gemini/config}/fm-agy-turn-end.d"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$AGY_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n%s\n%s\n%s\n%s\n' "$TURNEND" \
+        "$FM_ROOT/bin/fm-busy-event.sh" "$STATE_REAL" "$ID" "$BUSY_GEN" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.agy-turnend-token"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-agy-turnend"
+      exclude_path '.fm-agy-turnend'
+      ;;
   esac
 fi
 
@@ -2729,8 +2823,18 @@ esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
   claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
-    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
+    # ANTIGRAVITY_AGENT is retired here for the same reason cursor's markers
+    # are: bin/fm-harness.sh reads it as a layer-1 verdict AHEAD of ancestry, so
+    # an inherited copy (fm-spawn run from inside an agy pane, starting the
+    # multiplexer daemon that then holds it for every later pane) would make a
+    # markerless codex/opencode/kimi/muse worker report `agy` and route it to
+    # the wrong busy source, interrupt mechanics, and supervision model.
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT $LAUNCH"
     ;;
+  # agy's own template already opens with a full env -u of every foreign
+  # primary marker, including cursor's, so a second prefix would be redundant.
+  # It deliberately keeps ANTIGRAVITY_AGENT: agy sets that marker itself, for
+  # its own children.
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls

@@ -228,6 +228,10 @@ EOF
   # rules to Meta-hosted inference on every crewmate turn.
   assert_contains "$launch" 'MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on' \
     "muse launch omitted the foreign-personal-context kill"
+  # muse is markerless, so an inherited ANTIGRAVITY_AGENT would outrank its own
+  # ancestry detection and report this worker as agy.
+  assert_contains "$launch" '-u ANTIGRAVITY_AGENT' \
+    "muse launch did not clear agy's identity marker"
   # exec-only flag: the interactive TUI exits with "unexpected argument" on it.
   assert_not_contains "$launch" '--no-foreign-personal-context' \
     "muse launch passed the exec-only foreign-context flag to the TUI"

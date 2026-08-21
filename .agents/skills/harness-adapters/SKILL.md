@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, muse, and agy.
 user-invocable: false
 metadata:
   internal: true
@@ -63,9 +63,11 @@ The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
 `opencode`, `pi`, and `pi-signed` expose passive lifecycle callbacks and force one bounded follow-up when the shared predicate blocks.
 Grok selects native blocking or its pre-native bounded resume fallback from the exact running Stop payload; [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns that contract.
-Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
+Kimi and agy are outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns each one's separate guarded global hook for crew wake signals.
 muse is CREWMATE/SCOUT ONLY and has no primary integration at all: its plugin engine (its only hook surface) is disabled in the default build, and its Claude-compatible hook dialect names `asyncRewake` and model reawakening as explicitly unsupported, which is exactly what a firstmate primary's turn-end supervision needs.
 `bin/fm-spawn.sh` refuses a `--secondmate` launch on muse for that reason.
+agy is CREWMATE/SCOUT ONLY for a different reason: its `Stop` hook is a plain notification with no blocking channel and no reawakening, so a firstmate primary's "no turn ends blind" guard has nothing to hold a turn open with, and no supervision protocol exists for it under `docs/supervision-protocols/`.
+`bin/fm-spawn.sh` refuses a `--secondmate` launch on agy the same way.
 cursor HAS a full hooks system: 20 lifecycle events configurable at project scope in `.cursor/hooks.json`, plus a Claude-Code compatibility name map that also loads `<project>/.claude/settings.json`.
 Its `stop` step cannot block - exit 2 there is a silent no-op - so `bin/fm-turnend-guard-cursor.sh` parks the turn boundary on the watcher and returns one bounded `followup_message` instead.
 Because Cursor loads the tracked Claude settings too, every Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload.
@@ -132,6 +134,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
+| agy | `--model <model>` | none for firstmate's launch | Verified 2026-08-20 on agy 1.1.15. `--effort low\|medium\|high` exists but is deliberately not passed: agy's own catalog already encodes the level in the model id (`gemini-3.7-flash-low\|medium\|high`), which is the axis firstmate selects, and emitting both would allow `--model gemini-3.7-flash-high --effort low`. The requested effort is recorded in task metadata only, the same shape as cursor and kimi. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
@@ -152,6 +155,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
 | cursor | Run `cursor-agent --list-models` (or the legacy `agent --list-models`), which lists the ids available to the current Cursor account. `cursor` is not the CLI name. |
+| agy | Run `agy models`, which lists the id and display name of every model the current Antigravity account can reach. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -173,12 +177,14 @@ Natural language is acceptable if uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the shared structural composer classifier; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
 - cursor: `/<skill>`, for example `/no-mistakes`. Cursor discovers firstmate's user-level skills. Its slash popup swallows the first Enter, so a genuine second Enter submits; the shared submit retry handles it.
+- agy: `/<skill>`, for example `/no-mistakes`, but ONLY after `bin/fm-agy-config.sh install` declares firstmate's skills root, because agy scans neither `~/.claude/skills` nor `~/.agents/skills` on its own. `fm-spawn` runs that installer on every agy spawn. One Enter submits, with no popup swallow.
 
 ## Submission acknowledgement hazards
 
 A send or key action reporting success is not proof that the intended action happened.
 OpenCode can accept and queue an Enter while leaving text visible, Grok can consume Enter in its slash popup without submitting, and Kimi can silently drop a message sent before readiness even though the send returns success.
 The shared symptom is a healthy-looking pane with no work in progress, so each adapter must verify the observable postcondition that is specific to its TUI.
+agy was checked for the same slash-popup hazard and does not have it; its `/exit` nonetheless reports delivery unconfirmed through `fm-send`, because the pane is a dead shell by the time the postcondition is read - which is one more reason lifecycle goes through `bin/fm-control.sh`, not the data plane.
 
 ## claude (VERIFIED; busy-state hooks live-verified 2026-07-28 on Claude Code 2.1.220)
 
@@ -469,6 +475,69 @@ The delivery-only spinner match covers the full moon-phase glyph set rather than
 Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
+
+## agy (VERIFIED CREWMATE/SCOUT 2026-08-20 on tmux, agy 1.1.15, macOS arm64)
+
+Antigravity CLI (`agy`), Google's Gemini-backed coding CLI.
+It runs crewmate and scout work only.
+`bin/fm-spawn.sh` refuses `--secondmate` on agy and no supervision protocol exists for it under `docs/supervision-protocols/`, so a firstmate primary detected as agy falls back to the `unknown` protocol.
+The captain's reason for adding it is quota: Gemini is a separate pool from the Claude subscription, and the Flash ids are cheap enough for mechanical work.
+
+| Fact | Value |
+|---|---|
+| Binary | Executable `agy` from `PATH`, resolved to an absolute path; the published install is `~/.local/bin/agy`. There is no documented fallback location, so a missing binary refuses the spawn before any endpoint exists. |
+| Launch | `agy --dangerously-skip-permissions --add-dir <worktree> [--model <id>] -i "<brief>"`. `-i` / `--prompt-interactive` runs the initial prompt AND keeps the session interactive; `-p` / `--print` is headless and is never used. |
+| Models | Validate against `agy models` for the current account. The live catalog is `gemini-3.7-flash-{low,medium,high}`, `gemini-3.6-flash-*`, `gemini-3.5-flash-*`, `gemini-3.1-pro-{low,high}`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, and `gpt-oss-120b-medium`. The Gemini ids encode the reasoning level, which is why the separate effort flag is omitted (see the launch-profile table above). |
+| Busy state | The Firstmate-owned guarded global hook: `PreInvocation` opens a turn, and a `Stop` whose payload carries `fullyIdle: true` closes it. Source `agy-hook`. A `Stop` with `fullyIdle: false` is a mid-turn boundary and publishes nothing. Like Claude, agy fires NO hook for a manual interrupt, so a cancelled turn keeps its last recorded state until the next turn settles it. Both halves are live-verified and both are pinned by the opt-in guard named below, which drives an interactive session and requires the busy-state sequence to advance twice: only a `PreInvocation` that resolved the registered worktree can produce the first of those two events. agy has no second busy source by design, so a `PreInvocation` that stopped carrying a workspace would leave a working crewmate reading idle, and that guard is what would say so. |
+| Exit command | `/exit`, which exits cleanly and prints `Resume with -c` plus `agy --conversation=<uuid>`. `Ctrl+C` or `Ctrl+D` twice also exits. |
+| Interrupt | Single Escape. The composer is left bare afterwards, so no clear key is needed. `bin/fm-control-lib.sh` claims no cancellation acknowledgement, because no hook fires. |
+| Skill invocation | `/<skill>`, but only after firstmate's skills root is declared - see below. |
+| Slash submission | One Enter submits. The popup that opens on a bare `/<name>` selects AND runs the exact match on that single Enter, and it closes entirely once a space and argument text follow, so agy has NEITHER grok's nor cursor's swallow hazard. Verified against both a built-in (`/usage`) and a firstmate skill (`/find-skills`). |
+| Autonomy | `--dangerously-skip-permissions`, which auto-approves every tool request. It does NOT cover the folder-trust dialog below. |
+| Trust dialog | Cannot appear on firstmate's launch path, because `--add-dir <worktree>` suppresses it (verified live, agy 1.1.15, 2026-08-20, two fresh never-trusted paths: with the flag no dialog renders and the initial prompt runs immediately, without it the dialog blocks). `--dangerously-skip-permissions` does NOT suppress it and agy exposes no `--trust` flag, so the flag is the only thing that does, and `fm-spawn` always passes it. A launch WITHOUT `--add-dir` is what shows `Do you trust the contents of this project?` with `Yes, I trust this folder` preselected. Firstmate accepts nothing in the pane and writes no entry to agy's `trustedWorkspaces` store. |
+| Environment marker | `ANTIGRAVITY_AGENT=1` on child and tool processes. `ANTIGRAVITY_CONVERSATION_ID`, `ANTIGRAVITY_TRAJECTORY_ID`, `ANTIGRAVITY_PROJECT_ID`, `ANTIGRAVITY_LS_ADDRESS`, and `ANTIGRAVITY_AGENTAPI_EXE` are also exported but name a conversation, a port, or a path rather than an identity, so only the first is a marker. `fm-spawn` clears `ANTIGRAVITY_AGENT` at every OTHER harness's launch boundary, the way it clears cursor's markers: `bin/fm-harness.sh` reads it ahead of ancestry, so an inherited copy would make a markerless codex/opencode/kimi/muse worker report `agy`. |
+| Composer | The SEPARATED shape (pi's), not a bordered box: content rows between two solid `─` rules with no side border, carrying a `>` prompt glyph on the input row. No ghost or placeholder text was observed. Footer reads `? for shortcuts` idle and `esc to cancel` while a turn runs. |
+| Effort | No effort flag is emitted; the requested axis is recorded in task metadata only. |
+| Resume | `agy --conversation=<uuid>` or `agy -c` / `--continue`. The id is printed on exit. |
+
+### Two global files, and why one hook is safe to share
+
+agy has no per-project hook surface firstmate can use: workspace `.agents/hooks.json` exists but needs folder trust, and the trust grant is exactly what firstmate must not write.
+So `bin/fm-agy-config.sh` installs one Firstmate-owned key, `firstmate-turn-end`, into the SHARED `~/.gemini/config/hooks.json`, plus a guarded hook script and a private registry directory beside it.
+That installer is the sole owner of both edits: it adds or replaces only its own key, preserves every other key the captain wrote, and refuses on a missing directory, a symlinked file, malformed JSON, or a non-object top level without writing anything.
+
+The hook fires for a firstmate task and no other agy session because it matches on TWO things the captain's own sessions never have: a `.fm-agy-turnend` pointer inside a workspace the payload names, and a token in that pointer naming an entry in the mode-0700 registry.
+The registry entry, never the worktree pointer, carries the turn-end marker path and the busy-event coordinates, so the agent cannot reach them by editing its own worktree.
+That is also why `--add-dir <worktree>` is on the launch command: agy's hook payload carries `workspacePaths`, and without `--add-dir` that array is EMPTY even when the launch cwd is a git repo, so the guard would never match.
+`tests/fm-agy-signals-live-e2e.test.sh` (opt-in, `FM_AGY_SIGNALS_LIVE_E2E=1`) proves both halves against the real binary and re-checks that `--add-dir` is still required.
+
+Teardown retires this task's registry entry, worktree pointer, and state token, and deliberately leaves the shared hook and skills entry installed - they are install-once machine state, the same way Kimi's config region is, and re-installing on every spawn is idempotent.
+`bin/fm-agy-config.sh remove` is the uninstall, and it takes the same optional skills root so it drops only the entry it could have written.
+
+Those two are the only exceptions.
+agy's own `trustedWorkspaces` store is NOT a third one: firstmate never writes it, and the `--add-dir` launch shape means no dialog is ever answered, so a firstmate spawn adds no entry there for teardown to retire.
+That is the same boundary that keeps firstmate out of grok's trust store.
+
+The second file is `~/.gemini/config/skills.json`, and without it an agy crewmate cannot run no-mistakes at all: agy scans neither `~/.claude/skills` nor `~/.agents/skills`, discovering skills only from a workspace `.agents/skills`, its own `builtin/skills`, and roots declared in that file.
+The same installer adds one entry for the user-level skills root, written ABSOLUTE because agy's documented `~/` home-relative form is accepted but not resolved in the global config - a tilde entry silently loads nothing.
+With it in place a fresh agy worker lists `no-mistakes` with firstmate's own description and invokes it.
+A missing root is skipped rather than refused, because a scout never needs the skill and refusing would block agy wherever the captain's skills live only under `~/.claude/skills`.
+The skip is not silent.
+`install` names the absent root on stderr and says what it costs, and `fm-spawn` passes that warning straight through, so a spawn that wanted no-mistakes mode says so up front instead of failing confusingly mid-task.
+
+`FM_AGY_CONFIG_DIR` overrides the config directory for test isolation only.
+agy resolves its own root from `$HOME` alone and honours no override, so pointing that variable anywhere else in production installs a hook agy will never load.
+
+### The composer needed the separated shape, not a new one
+
+agy's composer is pi's shape with a prompt glyph, so it reaches `bin/fm-composer-lib.sh`'s existing identity-gated separated verdict rather than any new shape.
+Two things were added there, and both are deliberately narrow.
+The glyph strip that lets a bare `>` row read `empty` is scoped to an agy identity, because applied to pi it would read a real typed line beginning `> ` as an empty composer - the exact false `empty` the away-mode injector must never see.
+And the scan now keeps the separator pair holding the cursor instead of the last pair on screen, because agy draws a SECOND pair below its composer whenever a background task is running, which previously handed the classifier the task strip and answered `unknown`.
+`bin/fm-tmux-lib.sh`'s foreground-process identity probe answers `agy<TAB>idle|working` from the exact process name plus that footer, the same way it already answers for pi.
+
+The `esc to cancel` footer is also shown while agy's slash popup is open, which is idle.
+That costs nothing here: a popup can only be open once a `/` has been typed, so the composer carries text in exactly that case and the row verdict is reached before the footer is consulted.
 
 ## muse (VERIFIED 2026-08-05, Muse Code 0.1.0-R708.1, build sha 427a430436)
 

@@ -61,12 +61,14 @@
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
-#   separated  - pi: content rows between two solid horizontal `─` rules, no
-#                glyph and no side border. Provable only with a live agent
-#                identity reporting an idle/done/blocked pi (herdr `agent
-#                get`; the tmux foreground-process probe), because a blank
-#                region between two transcript rules is otherwise exactly the
-#                strict rule's unidentifiable blank row.
+#   separated  - pi and agy: content rows between two solid horizontal `─`
+#                rules with no side border. Pi draws that region bare; agy
+#                draws the same region with a leading `>` prompt glyph on its
+#                input row. Provable only with a live agent identity reporting
+#                an idle/done/blocked pi or agy (herdr `agent get`; the tmux
+#                foreground-process probe), because a blank region between two
+#                transcript rules is otherwise exactly the strict rule's
+#                unidentifiable blank row.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -290,7 +292,8 @@ fm_composer_strip_ghost() {
 # Matching a footer to confirm a keystroke landed is a different question from
 # asking what a worker is doing, and the two must not be conflated.
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel";
+# agy: "esc to cancel".
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -311,7 +314,7 @@ fm_composer_strip_ghost() {
 # part of that union for the same reason the others are: without it a cursor
 # submit could never be acknowledged, because cursor parks its terminal cursor
 # outside its composer and the composer verdict is therefore always `unknown`.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop|esc to cancel'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
@@ -325,6 +328,15 @@ FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # injection. Cursor's recorded worker state comes from its transcript fold in
 # bin/fm-busy-lib.sh, never from this row.
 FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
+# agy (Antigravity CLI) swaps its whole footer hint between states: `? for
+# shortcuts` when idle and `esc to cancel` while a turn runs (verified live,
+# agy 1.1.15). The same `esc to cancel` hint is also shown while agy's slash
+# popup is open, which is idle - but a popup can only be open once a `/` has
+# been TYPED, so the composer carries text in exactly that case and every
+# consumer here reaches its verdict from the composer rows before the footer
+# ever decides. On an EMPTY agy composer the token therefore means a running
+# turn and nothing else.
+FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc to cancel'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
@@ -341,6 +353,7 @@ fm_busy_lines_match() {  # [harness]
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
+      agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
@@ -586,6 +599,21 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
 
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
+# True when an already-latched separator pair encloses <cursor-row>. The scan
+# otherwise keeps only the LAST pair on screen, and agy draws a second pair
+# below its composer whenever a background task is running (verified live, agy
+# 1.1.15), which would hand the classifier the task strip instead of the input
+# row. In cursor mode the pair holding the cursor is the composer, so once one
+# is latched no lower pair may displace it. Always false without a cursor row,
+# leaving the cursorless bottom-most-wins selection untouched.
+_fm_composer_pi_pair_holds_cursor() {  # <cursor-or-empty>
+  local cy=${1:-}
+  [ -n "$cy" ] || return 1
+  [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] || return 1
+  [ "$FM_COMPOSER_SCAN_PI_OPEN" -lt "$cy" ] || return 1
+  [ "$cy" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]
+}
+
 _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   local pane=$1 cy=${2:-}
   local line indent left_stripped trimmed kind family side_family
@@ -635,7 +663,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     # earlier transcript rule can never outrank the live bottom composer pair.
     if _fm_composer_pi_separator_row "$trimmed"; then
       FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
-      if [ "$pi_open" -ge 0 ]; then
+      if [ "$pi_open" -ge 0 ] && ! _fm_composer_pi_pair_holds_cursor "$cy"; then
         FM_COMPOSER_SCAN_PI_PAIR_FOUND=1
         FM_COMPOSER_SCAN_PI_OPEN=$pi_open
         FM_COMPOSER_SCAN_PI_CLOSE=$row
@@ -1337,13 +1365,32 @@ fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
   fi
 }
 
-_fm_composer_classify_pi_rows() {  # <screen> <styled>
-  local screen=$1 styled=$2 row raw content
+# The agents whose composer is the separated shape: content rows between two
+# solid `─` rules with no side border. Declared once so the identity gate and
+# the row reader below cannot drift apart.
+_fm_composer_separated_agent() {  # <agent>
+  case "${1-}" in
+    pi|agy) return 0 ;;
+  esac
+  return 1
+}
+
+# agy draws a `>` prompt glyph on its separated input row where pi draws
+# nothing, so an empty agy composer reads as one glyph rather than a blank row.
+# The strip is scoped to the agy identity on purpose: applied to pi it would
+# read a real typed line beginning `> ` as an empty composer, which is exactly
+# the false `empty` the away-mode injector must never see.
+_fm_composer_classify_pi_rows() {  # <screen> <styled> [agent]
+  local screen=$1 styled=$2 agent=${3:-pi} row raw content glyph
   row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
   while [ "$row" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     fm_composer_normalize_trim_var content
+    if [ "$agent" = agy ] && fm_composer_leading_shell_glyph_var glyph "$content"; then
+      content=${content#"$glyph"}
+      fm_composer_normalize_trim_var content
+    fi
     if [ -n "$content" ]; then
       printf 'pending'
       return 0
@@ -1368,18 +1415,19 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
     return 0
   fi
   agent=${identity%%$'\t'*}
-  if [ "$agent" = pi ]; then
+  if _fm_composer_separated_agent "$agent"; then
     _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
   else
     _fm_composer_classify_bare_row "$screen" "$styled" "$row"
   fi
 }
 
-# The pi separated-shape verdict: identity + structure conjunction (herdr's
+# The separated-shape verdict: identity + structure conjunction (herdr's
 # rule, now fleet-wide). A missing identity capability keeps the shape
 # unknown; an unfetched identity on an identity-capable backend asks the
 # adapter to probe (lazily) and re-call. Proven input remains pending for every
-# live pi state, while only an idle/done/blocked pi proves an empty composer.
+# live pi or agy state, while only an idle/done/blocked one proves an empty
+# composer.
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
   if [ "$has_identity" != 1 ]; then
@@ -1396,11 +1444,11 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   agent=${identity%%$'\t'*}
   agent_status=${identity#*$'\t'}
-  if [ "$agent" != pi ] || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
+  if ! _fm_composer_separated_agent "$agent" || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
     printf 'unknown'
     return 0
   fi
-  state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
+  state=$(_fm_composer_classify_pi_rows "$screen" "$styled" "$agent")
   if [ "$state" = pending ]; then
     printf 'pending'
     return 0

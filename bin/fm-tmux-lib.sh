@@ -7,8 +7,9 @@
 # backend dispatch, while bin/fm-composer-lib.sh owns the shared verdict.
 #
 # Composer shapes and verdicts are owned by bin/fm-composer-lib.sh.
-# This file owns only tmux's styled capture, cursor and Pi identity primitives,
-# delivery busy read, and submit conversions that consume the shared verdict.
+# This file owns only tmux's styled capture, cursor and separated-shape
+# identity primitives, delivery busy read, and submit conversions that consume
+# the shared verdict.
 # Styled captures remain internal; fm-peek and every human-facing capture stay
 # plain.
 #
@@ -37,9 +38,9 @@
 # bin/fm-composer-lib.sh (fm_composer_classify_screen), sourced below and
 # reused by every backend adapter so the decision cannot drift. This file
 # keeps only tmux's genuine capture-side primitives - the styled pane
-# capture, the #{cursor_y} cursor read, the pi foreground-process identity
-# probe, and the capability descriptor - plus the busy detection and submit
-# cores that consume the shared verdict.
+# capture, the #{cursor_y} cursor read, the separated-shape foreground-process
+# identity probe, and the capability descriptor - plus the busy detection and
+# submit cores that consume the shared verdict.
 
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
@@ -85,22 +86,28 @@ fm_tmux_composer_caps() {
 }
 
 # fm_tmux_composer_identity: the tmux agent-identity probe backing the
-# separated (pi) composer shape, tmux's analogue of herdr's native
-# `agent get`. It answers only for pi, from two live signals:
+# separated composer shape (pi and agy), tmux's analogue of herdr's native
+# `agent get`. It answers only for those two, from two live signals:
 #   - identity: the pane tty's FOREGROUND process group (pgid = tpgid, the
 #     same scoping as fm_backend_tmux_foreground_comms) contains a pi-family
 #     process (pi, pi-signed, pi-launcher - docs/verification/
-#     runtime-backends.md "Agent liveness name sources"), falling back to
-#     tmux's own foreground-derived #{pane_current_command}. A pane whose
-#     agent died to a shell has no pi foreground process and gets NO identity,
+#     runtime-backends.md "Agent liveness name sources") or the exact agy
+#     binary, falling back to tmux's own foreground-derived
+#     #{pane_current_command}. A pane whose
+#     agent died to a shell has no such foreground process and gets NO identity,
 #     which is exactly what keeps the strict blank-row rule honest: a blank
 #     row between two stale rules stays unknown.
-#   - status: pi's verified busy footer via fm_pane_is_busy, mapped onto the
-#     idle/working vocabulary herdr's probe reports natively.
-# Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
-# live pi.
+#   - status: that harness's verified busy footer via fm_pane_is_busy, mapped
+#     onto the idle/working vocabulary herdr's probe reports natively.
+# Prints "<agent><TAB>idle" or "<agent><TAB>working"; exits 1 when the pane is
+# not a live pi or agy.
+#
+# agy is matched on the EXACT name because that is what the live process
+# reports: agy ships as a Go binary whose comm is exactly `agy` (verified,
+# agy 1.1.15), so no version-named or interpreter-wrapped form has to be
+# tolerated the way Pi's launcher family does.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pgid tpgid comm found=0 status
+  local target=$1 tty pgid tpgid comm found='' status
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)
@@ -108,24 +115,26 @@ fm_tmux_composer_identity() {  # <target>
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
         case "${comm##*/}" in
-          pi|pi-signed|pi-launcher|Pi) found=1 ;;
+          pi|pi-signed|pi-launcher|Pi) found=pi ;;
+          agy) found=agy ;;
         esac
       done <<EOF
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
 EOF
       ;;
   esac
-  if [ "$found" -ne 1 ]; then
+  if [ -z "$found" ]; then
     comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
     case "${comm##*/}" in
-      pi|pi-signed|pi-launcher) found=1 ;;
+      pi|pi-signed|pi-launcher) found=pi ;;
+      agy) found=agy ;;
     esac
   fi
-  [ "$found" -eq 1 ] || return 1
-  status=$(fm_pane_busy_state "$target" pi)
+  [ -n "$found" ] || return 1
+  status=$(fm_pane_busy_state "$target" "$found")
   case "$status" in
-    busy) printf 'pi\tworking' ;;
-    idle) printf 'pi\tidle' ;;
+    busy) printf '%s\tworking' "$found" ;;
+    idle) printf '%s\tidle' "$found" ;;
     *) return 1 ;;
   esac
 }
