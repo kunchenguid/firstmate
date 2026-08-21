@@ -59,7 +59,7 @@ The projection remains read-only and does not inspect historical prose beyond th
 
 A captain call can have two records, and closing one does not close the other.
 A `resolved [key=...]` line closes the status-log fold; the structured captain-held task closes only through `answer`.
-Until this guard existed, answering on the status side alone left no trace of the disagreement: the fold went quiet, the durable record kept saying the captain owed an answer, and nothing warned.
+Until this guard existed, closing on the status side alone left no trace of the disagreement: the fold went quiet, the durable record kept saying the captain owed an answer, and nothing warned.
 
 `bin/fm-captain-hold.sh diverged` is the read-only report of that state, and `bin/fm-wake-drain.sh` prints it as a bounded `RECORD DIVERGENCE` section beside OPEN DECISIONS on every drain.
 It flags exactly one condition: a task still open and still carrying the captain-hold annotations, whose key was closed on the status side by the resolve verb, resolved through the collapsed identity (the key is the task id) or the legacy derived one.

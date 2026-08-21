@@ -872,7 +872,7 @@ EOF
 # A captain call can be written down twice, and until now nothing said when
 # those two records disagreed. A `resolved [key=...]` line closes the status-log
 # fold outright; the structured captain-held task is closed by a SEPARATE act
-# (`answer` above). Answering only on the status side therefore looks complete
+# (`answer` above). Closing only on the status side therefore looks complete
 # there while the durable record still says the captain owes an answer and
 # keeps resurfacing it. The defect was never the separation; it was the silence.
 #
