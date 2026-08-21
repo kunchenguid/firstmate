@@ -237,27 +237,153 @@ case "$HARNESS" in
     python3 - "$BASE/pi-events.jsonl" "$RESULT" <<'PY'
 import json
 import pathlib
+import re
 import sys
 
 source = pathlib.Path(sys.argv[1])
 destination = pathlib.Path(sys.argv[2])
-final = None
-ended = False
-for line in source.read_text(encoding="utf-8").splitlines():
-    event = json.loads(line)
-    if event.get("type") == "turn_end":
-        message = event.get("message") or {}
-        if message.get("role") == "assistant" and message.get("stopReason") == "stop":
+
+# BEGIN PI_VERDICT_BODY_CONTRACT
+PI_FENCED_BLOCK_RE = re.compile(
+    r"```[A-Za-z0-9_+.-]*[ \t]*\r?\n(?P<body>.*?)\r?\n?```",
+    re.DOTALL,
+)
+
+
+def pi_verdict_body(final_text: str) -> str:
+    """Return the JSON body of a Pi reviewer's final assistant text.
+
+    An UNTERMINATED fence anywhere in the message refuses outright, before the
+    block count is even consulted. That ordering is the whole safety property.
+    A truncated verdict fence contributes ZERO complete blocks, so a model that
+    emitted any complete fence earlier in the same message - a draft, an
+    example, a quoted snippet - left the count at exactly one, and this
+    returned THAT EARLIER BLOCK as the verdict while silently discarding the
+    truncated real one. `stopReason` is `stop` in that shape (the exact live
+    condition seen on attempt 3), and the parse SUCCEEDS on the wrong block, so
+    nothing else downstream catches it: a superseded draft gets certified as
+    the review. That is strictly worse than the failure it replaced, which at
+    least failed loudly.
+    """
+
+    stripped = final_text.strip()
+    # An odd number of fence markers means one was opened and never closed.
+    # Refusing on the marker count rather than on "no complete block found"
+    # is what makes a preceding complete fence unable to rescue a truncated
+    # one; returning the raw text sends it to the parser, which fails.
+    if stripped.count("```") % 2:
+        return stripped
+    blocks = PI_FENCED_BLOCK_RE.findall(stripped)
+    if len(blocks) != 1:
+        return stripped
+    # The block must be the ONLY JSON-bearing content in the message. An even
+    # fence count is not enough on its own: a COMPLETE example fence followed
+    # by a truncated BARE verdict also counts one block, and unwrapping there
+    # would certify the example and discard the real answer. Prose carries no
+    # braces, so this still tolerates a wrapper while refusing every shape
+    # where a second candidate verdict exists.
+    remainder = PI_FENCED_BLOCK_RE.sub("", stripped, count=1)
+    if "{" in remainder or "}" in remainder:
+        return stripped
+    return blocks[0].strip()
+# END PI_VERDICT_BODY_CONTRACT
+
+
+turn_count = 0
+attempt_turn_count = 0
+agent_ended = False
+final_text = None
+final_stop_reason = None
+final_error = None
+for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1):
+    if not line.strip():
+        continue
+    try:
+        event = json.loads(line)
+    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise SystemExit(
+            f"model guest: Pi returned malformed JSON events at line {line_number}: {exc}"
+        )
+    if not isinstance(event, dict):
+        raise SystemExit(
+            f"model guest: Pi returned a non-object event at line {line_number}"
+        )
+    event_type = event.get("type")
+    if event_type == "turn_end":
+        if agent_ended:
+            raise SystemExit("model guest: Pi emitted a turn after agent completion")
+        turn_count += 1
+        attempt_turn_count += 1
+        final_text = None
+        final_stop_reason = None
+        final_error = None
+        message = event.get("message")
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            stop_reason = message.get("stopReason")
+            if isinstance(stop_reason, str):
+                final_stop_reason = stop_reason
+            error_message = message.get("errorMessage")
+            if isinstance(error_message, str) and error_message.strip():
+                final_error = error_message.strip()
             content = message.get("content")
             if isinstance(content, str):
-                final = content
+                final_text = content
             elif isinstance(content, list):
-                final = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-    elif event.get("type") == "agent_end":
-        ended = True
-if not ended or not final:
-    raise SystemExit("model guest: Pi stopped without a successful verdict")
-value = json.loads(final)
+                text_parts = [
+                    part["text"]
+                    for part in content
+                    if isinstance(part, dict)
+                    and part.get("type") == "text"
+                    and isinstance(part.get("text"), str)
+                ]
+                if text_parts:
+                    final_text = "".join(text_parts)
+    elif event_type == "agent_end":
+        if agent_ended:
+            raise SystemExit("model guest: Pi emitted duplicate agent completion")
+        agent_ended = True
+    elif event_type == "auto_retry_start":
+        if not agent_ended:
+            raise SystemExit(
+                "model guest: Pi announced a retry while its agent was still running"
+            )
+        if attempt_turn_count == 0:
+            raise SystemExit(
+                "model guest: Pi announced a retry after an attempt that executed no turn"
+            )
+        if final_stop_reason == "stop":
+            raise SystemExit(
+                "model guest: Pi announced a retry after a successful assistant turn"
+            )
+        agent_ended = False
+        attempt_turn_count = 0
+        final_text = None
+        final_stop_reason = None
+        final_error = None
+if turn_count == 0:
+    raise SystemExit("model guest: Pi completed without executing a turn")
+if not agent_ended:
+    raise SystemExit("model guest: Pi stopped before agent completion")
+if attempt_turn_count == 0:
+    raise SystemExit("model guest: Pi final attempt completed without executing a turn")
+if final_stop_reason != "stop":
+    raise SystemExit(
+        "model guest: Pi final assistant turn did not stop successfully: "
+        f"stopReason={final_stop_reason!r}"
+        + (f": {final_error[:500]}" if final_error else "")
+    )
+if final_text is None or not final_text.strip():
+    raise SystemExit("model guest: Pi completed without a verdict artifact")
+body = pi_verdict_body(final_text)
+try:
+    value = json.loads(body)
+except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+    raise SystemExit(
+        f"model guest: Pi returned a malformed verdict artifact: {exc}; "
+        f"final assistant text began {body[:240]!r}"
+    )
+if not isinstance(value, dict):
+    raise SystemExit("model guest: Pi verdict artifact must be an object")
 destination.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
 PY
     ;;

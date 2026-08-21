@@ -1971,6 +1971,51 @@ verdict, turn_count = module.pi_review_result(stream([
 assert verdict == {"verdict": "clear"}, verdict
 assert turn_count == 2, turn_count
 
+# A retry is a continuation of a failed attempt, never a way to reopen a
+# successfully completed review. The refusal occurs at the retry boundary,
+# before a later empty agent_end could reuse the successful verdict.
+try:
+    module.pi_review_result(stream([
+        {"type": "agent_start"},
+        assistant_turn(verdict_text, "stop"),
+        {"type": "agent_end", "messages": []},
+        {"type": "auto_retry_start"},
+        {"type": "agent_end", "messages": []},
+    ]))
+except module.CrosscheckToolError as exc:
+    assert "retry after a successful assistant turn" in str(exc), str(exc)
+else:
+    raise AssertionError("a successful attempt was reopened as a retry")
+
+# Opening a valid retry clears all terminal state and starts a new per-attempt
+# turn count. An empty final attempt therefore cannot inherit either a verdict
+# or the provider error from the completed failed attempt.
+try:
+    module.pi_review_result(stream([
+        {"type": "agent_start"},
+        assistant_turn("", "error", RATE_LIMIT),
+        {"type": "agent_end", "messages": []},
+        {"type": "auto_retry_start"},
+        {"type": "agent_end", "messages": []},
+    ]))
+except module.CrosscheckToolError as exc:
+    assert "final attempt completed without executing a turn" in str(exc), str(exc)
+    assert "RateLimitReached" not in str(exc), str(exc)
+else:
+    raise AssertionError("an empty retry attempt inherited stale terminal state")
+
+# The completed attempt that earns a retry must itself have executed a turn.
+try:
+    module.pi_review_result(stream([
+        {"type": "agent_start"},
+        {"type": "agent_end", "messages": []},
+        {"type": "auto_retry_start"},
+    ]))
+except module.CrosscheckToolError as exc:
+    assert "retry after an attempt that executed no turn" in str(exc), str(exc)
+else:
+    raise AssertionError("an empty completed attempt opened a retry")
+
 # Exhausted retries surface the PROVIDER error, never the retry mechanics.
 try:
     module.pi_review_result(stream([

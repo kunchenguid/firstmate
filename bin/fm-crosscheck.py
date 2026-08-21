@@ -3795,6 +3795,7 @@ def pi_reviewer_command() -> list[str]:
 # never closes its fence, so it yields zero complete blocks, falls through to
 # the bare text, and still fails to parse - and `stopReason` refuses it one
 # step earlier regardless. Both remain pinned by tests.
+# BEGIN PI_VERDICT_BODY_CONTRACT
 PI_FENCED_BLOCK_RE = re.compile(
     r"```[A-Za-z0-9_+.-]*[ \t]*\r?\n(?P<body>.*?)\r?\n?```",
     re.DOTALL,
@@ -3837,10 +3838,12 @@ def pi_verdict_body(final_text: str) -> str:
     if "{" in remainder or "}" in remainder:
         return stripped
     return blocks[0].strip()
+# END PI_VERDICT_BODY_CONTRACT
 
 
 def pi_review_result(output: str) -> tuple[dict[str, Any], int]:
     turn_count = 0
+    attempt_turn_count = 0
     agent_ended = False
     final_text: str | None = None
     final_stop_reason: str | None = None
@@ -3869,6 +3872,7 @@ def pi_review_result(output: str) -> tuple[dict[str, Any], int]:
             if agent_ended:
                 tool_fail("Pi reviewer emitted a turn after agent completion")
             turn_count += 1
+            attempt_turn_count += 1
             final_text = None
             final_stop_reason = None
             final_error = None
@@ -3908,11 +3912,21 @@ def pi_review_result(output: str) -> tuple[dict[str, Any], int]:
             # refused above, so the original defense stands.
             if not agent_ended:
                 tool_fail("Pi reviewer announced a retry while its agent was still running")
+            if attempt_turn_count == 0:
+                tool_fail("Pi reviewer announced a retry after an attempt that executed no turn")
+            if final_stop_reason == "stop":
+                tool_fail("Pi reviewer announced a retry after a successful assistant turn")
             agent_ended = False
+            attempt_turn_count = 0
+            final_text = None
+            final_stop_reason = None
+            final_error = None
     if turn_count == 0:
         tool_fail("Pi reviewer completed without executing a turn")
     if not agent_ended:
         tool_fail("Pi reviewer stopped before agent completion")
+    if attempt_turn_count == 0:
+        tool_fail("Pi reviewer final attempt completed without executing a turn")
     if final_stop_reason != "stop":
         tool_fail(
             "Pi reviewer final assistant turn did not stop successfully: "

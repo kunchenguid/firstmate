@@ -376,6 +376,188 @@ PY
   pass "the model guest derives the host's executing account, refuses foreign ones, and dispatches every registered lane"
 }
 
+model_guest_pi_verdict_unit() {
+  python3 - "$MODEL_GUEST" "$CORE" <<'PY' \
+    || fail "model guest Pi verdict parser contract failed"
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+guest_path, core_path = map(Path, sys.argv[1:3])
+guest_source = guest_path.read_text(encoding="utf-8")
+core_source = core_path.read_text(encoding="utf-8")
+
+# The guest is self-contained inside its image-pinned run command. Keep its
+# pure fenced-body parser byte-identical to the host contract so neither copy
+# can drift weaker while still passing a hand-reimplemented test.
+contract_start = "# BEGIN PI_VERDICT_BODY_CONTRACT\n"
+contract_end = "# END PI_VERDICT_BODY_CONTRACT"
+
+
+def contract(source):
+    start = source.index(contract_start)
+    end = source.index(contract_end, start) + len(contract_end)
+    return source[start:end]
+
+
+assert contract(guest_source) == contract(core_source), (
+    "the model guest fenced-body parser drifted from the host contract"
+)
+
+# EXECUTE the exact verdict heredoc shipped to the paid VM. Testing a helper
+# that merely resembles this block would not catch the live json.loads(final)
+# failure that prompted this regression.
+marker = 'python3 - "$BASE/pi-events.jsonl" "$RESULT" <<\'PY\'\n'
+start = guest_source.index(marker) + len(marker)
+end = guest_source.index("\nPY\n", start)
+guest_block = guest_source[start:end]
+assert "PI_VERDICT_BODY_CONTRACT" in guest_block, "extracted the wrong guest block"
+
+
+def assistant(text, stop_reason="stop", error=None):
+    message = {
+        "role": "assistant",
+        "stopReason": stop_reason,
+        "content": [{"type": "text", "text": text}],
+    }
+    if error is not None:
+        message["errorMessage"] = error
+    return {"type": "turn_end", "message": message}
+
+
+def events(*items):
+    return "\n".join(json.dumps(item) for item in items) + "\n"
+
+
+def run_guest(stream):
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        source = root / "pi-events.jsonl"
+        result = root / "result.json"
+        script = root / "guest-verdict.py"
+        source.write_text(stream, encoding="utf-8")
+        script.write_text(guest_block, encoding="utf-8")
+        completed = subprocess.run(
+            [sys.executable, str(script), str(source), str(result)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        value = json.loads(result.read_text(encoding="utf-8")) if result.is_file() else None
+        return completed, value
+
+
+verdict = json.dumps({"verdict": "clear"})
+for label, text in (
+    ("bare object", verdict),
+    ("json fence", f"```json\n{verdict}\n```"),
+    ("plain fence with harmless prose", f"Here is the verdict:\n```\n{verdict}\n```\nDone."),
+):
+    completed, value = run_guest(events(assistant(text), {"type": "agent_end"}))
+    assert completed.returncode == 0, (label, completed.stdout, completed.stderr)
+    assert value == {"verdict": "clear"}, (label, value)
+
+for label, text in (
+    ("unterminated fence", f"```json\n{verdict}"),
+    ("multiple complete fences", f"```json\n{verdict}\n```\n```json\n{verdict}\n```"),
+    (
+        "complete example then truncated fenced candidate",
+        f"Example:\n```json\n{verdict}\n```\nFinal:\n```json\n{{\"verdict\":\"block",
+    ),
+    (
+        "complete example then truncated bare candidate",
+        f"Example:\n```json\n{verdict}\n```\n{{\"verdict\":\"block",
+    ),
+    (
+        "complete example then complete bare candidate",
+        f"Example:\n```json\n{verdict}\n```\n{{\"verdict\":\"blocking\"}}",
+    ),
+    ("malformed object", '{"verdict":'),
+    ("non-object", '[{"verdict":"clear"}]'),
+):
+    completed, value = run_guest(events(assistant(text), {"type": "agent_end"}))
+    assert completed.returncode != 0, (label, completed.stdout, completed.stderr, value)
+    assert value is None, (label, value)
+
+# The parser admits only the terminal successful assistant turn of a completed
+# agent. Earlier successful text cannot survive a later failed turn, and an
+# agent_end is neither optional nor repeatable. Pi's explicit retry boundary
+# remains the one allowed way to continue after an agent_end.
+terminal_failures = (
+    ("no turn", events({"type": "agent_end"})),
+    ("no agent end", events(assistant(verdict))),
+    ("truncated stop", events(assistant(verdict, "length"), {"type": "agent_end"})),
+    (
+        "later failed turn",
+        events(assistant(verdict), assistant("", "error", "provider failed"), {"type": "agent_end"}),
+    ),
+    (
+        "turn after completion",
+        events(assistant(verdict), {"type": "agent_end"}, assistant(verdict)),
+    ),
+    (
+        "duplicate completion",
+        events(assistant(verdict), {"type": "agent_end"}, {"type": "agent_end"}),
+    ),
+)
+for label, stream in terminal_failures:
+    completed, value = run_guest(stream)
+    assert completed.returncode != 0, (label, completed.stdout, completed.stderr, value)
+    assert value is None, (label, value)
+
+retry_terminal_failures = (
+    (
+        "successful attempt retried into an empty attempt",
+        events(
+            assistant(verdict),
+            {"type": "agent_end"},
+            {"type": "auto_retry_start"},
+            {"type": "agent_end"},
+        ),
+        "retry after a successful assistant turn",
+    ),
+    (
+        "failed attempt retried into an empty attempt",
+        events(
+            assistant("", "error", "provider failed"),
+            {"type": "agent_end"},
+            {"type": "auto_retry_start"},
+            {"type": "agent_end"},
+        ),
+        "final attempt completed without executing a turn",
+    ),
+    (
+        "empty completed attempt opened a retry",
+        events(
+            {"type": "agent_end"},
+            {"type": "auto_retry_start"},
+        ),
+        "retry after an attempt that executed no turn",
+    ),
+)
+for label, stream, expected in retry_terminal_failures:
+    completed, value = run_guest(stream)
+    combined = completed.stdout + completed.stderr
+    assert completed.returncode != 0, (label, combined, value)
+    assert expected in combined, (label, combined)
+    assert value is None, (label, value)
+
+completed, value = run_guest(events(
+    assistant("", "error", "retryable"),
+    {"type": "agent_end"},
+    {"type": "auto_retry_start"},
+    assistant(f"```json\n{verdict}\n```"),
+    {"type": "agent_end"},
+))
+assert completed.returncode == 0, (completed.stdout, completed.stderr)
+assert value == {"verdict": "clear"}, value
+print("GUEST Pi verdict parser is byte-bound to the host and fails closed")
+PY
+  pass "the exact model guest accepts one fenced verdict and preserves terminal-turn safety"
+}
+
 cross_family_provider_host_unit() {
   python3 - "$ADAPTER" "$CORE" <<'PY' || fail "model-aware provider host derivation failed"
 import importlib.util
@@ -410,7 +592,7 @@ for lane in module.CROSS_FAMILY_LANES.values():
     )
 
 # The model decides the host: every cross-family review derives its own exact
-# Foundry host, refuses a conflicting configured host, and the codex-family
+# pinned provider host, refuses a conflicting configured host, and the codex-family
 # fallback keeps its existing derivation. The retired claude harness derives
 # nothing.
 for lane in module.CROSS_FAMILY_LANES.values():
@@ -492,7 +674,7 @@ else:
         "a cross-family ledger record with a foreign provider host validated"
     )
 PY
-  pass "the reviewer model derives the exact Foundry host and the claude host lane is retired"
+  pass "the reviewer model derives the exact provider host and the claude host lane is retired"
 }
 
 cross_family_credential_lane_unit() {
@@ -1937,6 +2119,7 @@ adapter_mode_unit
 cross_family_provider_host_unit
 cross_family_credential_lane_unit
 model_guest_executing_account_unit
+model_guest_pi_verdict_unit
 identity_outcome_unit
 account_and_cleanup_identity_unit
 bridge_security_unit
