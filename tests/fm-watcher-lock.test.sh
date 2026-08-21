@@ -220,6 +220,32 @@ test_lock_single_winner_under_concurrency() {
   pass "concurrent fm_lock_try_acquire yields exactly one winner"
 }
 
+# BSD readlink parses a leading dash as an option bundle, so a lock path whose
+# first character is a dash is unreadable unless the call passes `--` first.
+# Measured on macOS 26.4.1 (build 25E253): `readlink "-weird"` fails with
+# `readlink: illegal option -- w` while `readlink -- "-weird"` prints the target.
+# The lock helpers resolve their owner link through readlink, so this pins the
+# guard that keeps a dash-prefixed lock path readable rather than silently
+# unresolvable. Drop the `--` from fm_lock_link_owner or fm_lock_points_to_owner
+# and this fails, because the helper reports the link as unreadable.
+test_lock_helpers_resolve_dash_prefixed_lock_path() {
+  local dir state out
+  dir=$(make_case lock-dash-link)
+  state="$dir/state"
+  out=$(cd "$state" && FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    mkdir -p -- owner.d
+    ln -s -- "$PWD/owner.d" "-dash.lock"
+    resolved=$(fm_lock_link_owner "-dash.lock") || { printf "unreadable\n"; exit 1; }
+    [ "$resolved" = "$PWD/owner.d" ] || { printf "wrong-owner:%s\n" "$resolved"; exit 1; }
+    fm_lock_points_to_owner "-dash.lock" "$PWD/owner.d" || { printf "mismatch\n"; exit 1; }
+    printf "ok\n"
+  ' _ "$LIB" 2>&1)
+  [ "$out" = ok ] \
+    || fail "a dash-prefixed lock link must resolve through the lock helpers, got: $out"
+  pass "lock helpers resolve a dash-prefixed lock path through readlink"
+}
+
 test_lock_steals_dead_pid_lock() {
   local dir state lockdir dead rc newpid
   dir=$(make_case lock-dead-steal)
@@ -1107,6 +1133,7 @@ test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
+test_lock_helpers_resolve_dash_prefixed_lock_path
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
