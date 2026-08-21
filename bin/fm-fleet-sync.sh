@@ -28,16 +28,18 @@
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
 # this home's projects dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE).
-# Bare names and "projects/<name>" forms prefer this home's projects dir before
-# falling back to an explicit path. Example: from anywhere,
+# Bare names use fm-project-mode.sh --path, so a declared path wins while
+# legacy entries still resolve to this home's projects dir. "projects/<name>"
+# keeps its explicit firstmate-home meaning. Example: from anywhere,
 # `fm-fleet-sync.sh dotfiles-private` syncs just that one clone, same as
-# passing its full projects/dotfiles-private path.
+# passing its resolved project path.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+PROJECT_ARG_LABEL=
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
@@ -73,6 +75,10 @@ fi
 [ $# -le 1 ] || { usage; exit 1; }
 
 project_label() {
+  if [ -n "${PROJECT_ARG_LABEL:-}" ]; then
+    printf '%s\n' "$PROJECT_ARG_LABEL"
+    return 0
+  fi
   case "$PROJ" in
     "$PROJECTS"/*) basename "$PROJ" ;;
     projects/*) basename "$PROJ" ;;
@@ -81,13 +87,15 @@ project_label() {
 }
 
 # resolve_project_arg <arg>: accept a path (used as-is when it already exists)
-# or a bare/"projects/<name>" project name, resolved against $PROJECTS. Falls
-# back to the original argument unresolved so a genuinely bad path still hits
-# sync_project's existing "not a directory" skip.
+# or a bare/"projects/<name>" project name, resolved through the registry path
+# API before falling back to this home's projects dir. A malformed declared path
+# is reported instead of being silently treated as a legacy projects/<name> path.
 resolve_project_arg() {
   local arg=$1 candidate
+  PROJECT_ARG_LABEL=
   case "$arg" in
     projects/*)
+      PROJECT_ARG_LABEL=$(basename "$arg")
       candidate="$PROJECTS/${arg#projects/}"
       if [ -d "$candidate" ]; then
         printf '%s\n' "$candidate"
@@ -95,13 +103,19 @@ resolve_project_arg() {
       fi
       ;;
     */*)
+      PROJECT_ARG_LABEL=$(basename "$arg")
       if [ -d "$arg" ]; then
         printf '%s\n' "$arg"
         return 0
       fi
       ;;
     *)
-      candidate="$PROJECTS/$arg"
+      PROJECT_ARG_LABEL=$arg
+      candidate=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-$FM_HOME/data}" \
+        "$FM_ROOT/bin/fm-project-mode.sh" --path "$arg" 2>/dev/null) || {
+        echo "error: registered path for project \"$arg\" is invalid" >&2
+        return 1
+      }
       if [ -d "$candidate" ]; then
         printf '%s\n' "$candidate"
         return 0
@@ -112,7 +126,7 @@ resolve_project_arg() {
       fi
       ;;
   esac
-  printf '%s\n' "$arg"
+  printf '%s\n' "${candidate:-$arg}"
 }
 
 default_branch() {
@@ -299,6 +313,7 @@ report_stuck() {
 
 sync_project() {
   PROJ=$1
+  PROJECT_ARG_LABEL=${2:-${PROJECT_ARG_LABEL:-}}
   label=$(project_label)
 
   if [ ! -d "$PROJ" ]; then
@@ -441,7 +456,12 @@ sync_project() {
 }
 
 if [ $# -eq 1 ]; then
-  sync_project "$(resolve_project_arg "$1")"
+  case "$1" in
+    */*) PROJECT_ARG_LABEL=$(basename "$1") ;;
+    *) PROJECT_ARG_LABEL=$1 ;;
+  esac
+  resolved_project=$(resolve_project_arg "$1")
+  sync_project "$resolved_project" "$PROJECT_ARG_LABEL"
   exit 0
 fi
 

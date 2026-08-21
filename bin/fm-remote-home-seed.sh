@@ -154,6 +154,18 @@ while IFS= read -r line || [ -n "$line" ]; do
   printf '%s\n' "${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}"
 done < "$BRIEF" > "$TMP/charter.remote"
 
+project_path_in_home() {
+  local project=$1 path
+  path=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-project-mode.sh" --path "$project" 2>/dev/null) || {
+    die "project $project has an invalid registered path"
+  }
+  case "$path" in
+    ''|*[[:space:]]*) path="$PROJECTS/$project" ;;
+  esac
+  printf '%s\n' "$path"
+}
+
 PROJECTS_CSV=
 : > "$TMP/project.records"
 PROJECT_INDEX=0
@@ -172,8 +184,9 @@ EOF
   # An origin named on the command line is authoritative. Reading one from a
   # clone this home happens to have is only a convenience for the already-cloned
   # case; it is never a reason to create one.
-  if [ -z "$ORIGIN" ] && [ -d "$PROJECTS/$project/.git" ]; then
-    ORIGIN=$(git -C "$PROJECTS/$project" remote get-url origin 2>/dev/null || true)
+  SOURCE_PATH=$(project_path_in_home "$project")
+  if [ -z "$ORIGIN" ] && [ -d "$SOURCE_PATH/.git" ]; then
+    ORIGIN=$(git -C "$SOURCE_PATH" remote get-url origin 2>/dev/null || true)
   fi
   [ -n "$ORIGIN" ] \
     || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"

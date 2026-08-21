@@ -456,9 +456,24 @@ EOF
   return 1
 }
 
+project_path_in_home() {
+  local home=$1 project=$2 path
+  path=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    "$FM_ROOT/bin/fm-project-mode.sh" --path "$project" 2>/dev/null) || {
+    echo "error: project $project has an invalid registered path" >&2
+    return 1
+  }
+  # An older FM_ROOT may not know --path and returns its historical two-word
+  # posture output. Keep mixed-version homes on the legacy projects/<name> path.
+  case "$path" in
+    ''|*[[:space:]]*) path="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}/$project" ;;
+  esac
+  printf '%s\n' "$path"
+}
+
 clone_project() {
   local project=$1 home=$2 src dst url dst_url mode
-  src="$PROJECTS/$project"
+  src=$(project_path_in_home "$FM_HOME" "$project") || return 1
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
@@ -486,7 +501,7 @@ EOF
 
 validate_seed_project() {
   local project=$1 src mode url
-  src="$PROJECTS/$project"
+  src=$(project_path_in_home "$FM_HOME" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   read -r mode _ <<EOF

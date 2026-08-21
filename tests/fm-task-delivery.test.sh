@@ -272,6 +272,41 @@ EOF
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
 }
 
+# The path API preserves the old projects/<name> behavior, resolves a declared
+# path without exposing registry parsing to callers, and rejects malformed input.
+test_project_mode_resolves_registered_project_path() {
+  local home out err status
+  home="$TMP_ROOT/project-path/home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- legacy [direct-PR] - fixture (added 2026-01-01)
+- declared [direct-PR] - fixture (path: diaria/api-v2; added 2026-01-01)
+- invalid-path [direct-PR] - fixture (path: bad path; added 2026-01-01)
+EOF
+
+  out=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path/home-dir" "$PROJECT_MODE" --path legacy)
+  [ "$out" = "$home/projects/legacy" ] || fail "legacy project path did not retain projects/<name> fallback (got '$out')"
+
+  out=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path/home-dir" "$PROJECT_MODE" --path declared)
+  [ "$out" = "$TMP_ROOT/project-path/home-dir/dpe/diaria/api-v2" ] \
+    || fail "declared project path was not resolved from the declared value (got '$out')"
+
+  set +e
+  err=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path/home-dir" "$PROJECT_MODE" --path invalid-path 2>&1 >/dev/null)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "an invalid project path was accepted by --path"
+  assert_contains "$err" 'invalid path' "invalid project path did not fail visibly"
+
+  set +e
+  err=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path/home-dir" "$PROJECT_MODE" invalid-path 2>&1 >/dev/null)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "an invalid project path was accepted by the default API"
+  assert_contains "$err" 'invalid path' "default project lookup hid an invalid path"
+  pass "fm-project-mode: legacy and declared project paths resolve through --path, malformed paths fail"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -279,4 +314,5 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_project_mode_maps_the_conditional_policy
+test_project_mode_resolves_registered_project_path
 echo "# all fm-task-delivery tests passed"

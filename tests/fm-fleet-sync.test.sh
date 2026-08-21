@@ -437,6 +437,23 @@ test_single_project_by_bare_name_ignores_cwd_shadow() {
   pass "single-project bare name resolution is not cwd-sensitive"
 }
 
+test_single_project_by_registered_path_resolves() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" solar)
+  advance_origin "$home" solar C1
+  mkdir -p "$home/diaria"
+  mv "$clone" "$home/diaria/api-v2"
+  mkdir -p "$home/data"
+  printf -- '- solar [direct-PR] - test project (path: %s; added 2026-06-27)\n' \
+    "$home/diaria/api-v2" > "$home/data/projects.md"
+
+  out=$(run_sync "$home" solar)
+
+  assert_contains "$out" "solar: synced" "bare project name did not use its registered path"
+  pass "single-project bare name resolves through the registered path"
+}
+
 test_single_project_by_projects_relative_name_resolves() {
   local home out
   home=$(new_home)
@@ -706,6 +723,7 @@ test_no_origin_skipped
 test_local_only_skipped
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
+test_single_project_by_registered_path_resolves
 test_single_project_by_projects_relative_name_resolves
 test_single_project_by_projects_relative_name_ignores_cwd_shadow
 test_single_project_unresolvable_name_still_skips
