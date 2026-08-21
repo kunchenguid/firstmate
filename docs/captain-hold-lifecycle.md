@@ -28,6 +28,9 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 `verify` requires the recorded attestation, requires every recorded inventory entry to still be durable (actively captain-held, or carrying a recorded answer), and fails on any keyed status decision that opened after the last `complete`, which makes re-running `complete` the repair.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
+This ledger is not a tracker-resolution record.
+Wayfinder child resolution is owned by `.agents/skills/wayfinder-parent-gate/SKILL.md` and `bin/fm-wayfinder-parent.sh`.
+
 ## Answer-time closure
 
 "A keyed answer closes its matching captain-held task" is one capability with one owner.

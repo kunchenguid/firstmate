@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--wayfinder-state <file>|--wayfinder-independent]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -58,6 +58,14 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   A fresh ship spawn against a project that publishes
+#   bin/wayfinder-lifecycle-gate requires that command's handoff through
+#   bin/fm-wayfinder-parent.sh before any worker endpoint exists. Pass
+#   --wayfinder-state <snapshot> with the GitHub snapshot that command
+#   consumes. Pass --wayfinder-independent only when this ship does not
+#   depend on the Wayfinder map. Scout, secondmate, and --relaunch spawns
+#   skip that check. The project command owns the resolution policy;
+#   Firstmate only invokes it.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -142,7 +150,8 @@
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
 #   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
-#   applies to every pair. A ship batch therefore carries one delivery contract, and each
+#   and the ship-only --wayfinder-state/--wayfinder-independent flags
+#   apply to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
@@ -275,6 +284,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+WAYFINDER_STATE=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -282,6 +292,8 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+WAYFINDER_STATE_SET=0
+WAYFINDER_INDEPENDENT=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -298,6 +310,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      wayfinder-state) WAYFINDER_STATE=$a; WAYFINDER_STATE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -321,6 +334,9 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --wayfinder-state) want_value=wayfinder-state ;;
+    --wayfinder-state=*) WAYFINDER_STATE=${a#--wayfinder-state=}; WAYFINDER_STATE_SET=1 ;;
+    --wayfinder-independent) WAYFINDER_INDEPENDENT=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -332,6 +348,7 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$WAYFINDER_STATE_SET" -eq 0 ] || [ -n "$WAYFINDER_STATE" ] || { echo "error: --wayfinder-state requires a non-empty value" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -359,6 +376,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  [ "$WAYFINDER_STATE_SET" -eq 0 ] || { echo "error: --relaunch does not re-run Wayfinder handoff; --wayfinder-state cannot override it" >&2; exit 1; }
+  [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || { echo "error: --relaunch does not re-run Wayfinder handoff; --wayfinder-independent cannot override it" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -391,6 +410,14 @@ else
     }
     [ "$YOLO_SET" -eq 0 ] || {
       echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
+      exit 1
+    }
+    [ "$WAYFINDER_STATE_SET" -eq 0 ] || {
+      echo "error: --wayfinder-state applies only to ship spawns; a scout stays off the map-dependent handoff path" >&2
+      exit 1
+    }
+    [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || {
+      echo "error: --wayfinder-independent applies only to ship spawns; a scout stays off the map-dependent handoff path" >&2
       exit 1
     }
   fi
@@ -868,6 +895,8 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  [ "$WAYFINDER_STATE_SET" -eq 0 ] || shared_args+=(--wayfinder-state "$WAYFINDER_STATE")
+  [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || shared_args+=(--wayfinder-independent)
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -1674,6 +1703,23 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+
+# Map-dependent implementation may not launch while the consuming project's
+# Wayfinder lifecycle command rejects handoff. Presence of that public command
+# is the project-local signal; --wayfinder-independent is the explicit opt-out
+# for work that does not depend on the map. Scout and secondmate spawns never
+# enter this path. Relaunch recovery of an already-dispatched ship is skipped
+# above because --relaunch refuses these flags and returns before this check.
+if [ "$KIND" = ship ] && [ "$RELAUNCH" -eq 0 ] && [ -f "$PROJ_ABS/bin/wayfinder-lifecycle-gate" ]; then
+  if [ "$WAYFINDER_INDEPENDENT" -eq 0 ]; then
+    if [ "$WAYFINDER_STATE_SET" -eq 0 ]; then
+      echo "error: $ID ships against a project with bin/wayfinder-lifecycle-gate; pass --wayfinder-state <snapshot> so Firstmate can verify handoff, or --wayfinder-independent when this work does not depend on the Wayfinder map" >&2
+      exit 1
+    fi
+    "$FM_ROOT/bin/fm-wayfinder-parent.sh" handoff --project "$PROJ_ABS" --state "$WAYFINDER_STATE" \
+      || exit $?
   fi
 fi
 

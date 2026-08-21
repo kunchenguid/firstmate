@@ -32,6 +32,8 @@ Chat already feeds it through `bin/fm-send.sh --resolve-key`, and a captured-ans
 An unbound source and a key that names no captain-held task both simply feed nothing: the answer is still captured and firstmate is still woken, and closing falls back to the direct command above.
 A captain-held task closed outside this owner leaves no durable answer, so the completion gate keeps failing until `answer` records the decision the captain actually gave.
 Resolved findings, recommendations that need no captain choice, and prose that merely sounds decision-like do not create held tasks.
+Passing `complete`, including `--none`, inventories captain calls; it does not resolve a Wayfinder ticket, close GitHub issues, or satisfy a consuming project's lifecycle command.
+When a child names a Wayfinder ticket, load `wayfinder-parent-gate` before treating that child as tracker-resolved.
 Bearings reads the resulting structured state and must never compensate by scraping historical reports, visual-review artifacts, terminal output, chat, or other prose.
 
 A captain call can be written down twice - as the keyed status decision the fold reads, and as the backlog task held for the captain - and those two records can disagree without either surface saying so.

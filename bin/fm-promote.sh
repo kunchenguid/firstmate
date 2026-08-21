@@ -12,7 +12,10 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--wayfinder-state <file>|--wayfinder-independent]
+# Promoting a scout onto a project that publishes bin/wayfinder-lifecycle-gate
+# is map-dependent implementation dispatch: it requires that command's handoff
+# through bin/fm-wayfinder-parent.sh unless --wayfinder-independent is passed.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,8 +30,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 MODE=
 YOLO=
+WAYFINDER_STATE=
 MODE_SET=0
 YOLO_SET=0
+WAYFINDER_STATE_SET=0
+WAYFINDER_INDEPENDENT=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -39,6 +45,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      wayfinder-state) WAYFINDER_STATE=$a; WAYFINDER_STATE_SET=1 ;;
     esac
     want_value=
     continue
@@ -48,11 +55,15 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --wayfinder-state) want_value=wayfinder-state ;;
+    --wayfinder-state=*) WAYFINDER_STATE=${a#--wayfinder-state=}; WAYFINDER_STATE_SET=1 ;;
+    --wayfinder-independent) WAYFINDER_INDEPENDENT=1 ;;
     *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
-[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
+[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--wayfinder-state <file>|--wayfinder-independent]" >&2; exit 1; }
+[ "$WAYFINDER_STATE_SET" -eq 0 ] || [ -n "$WAYFINDER_STATE" ] || { echo "error: --wayfinder-state requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 1 ] || {
   echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
   exit 1
@@ -107,6 +118,18 @@ fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+
+PROMOTE_PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -n "$PROMOTE_PROJECT" ] && [ -f "$PROMOTE_PROJECT/bin/wayfinder-lifecycle-gate" ]; then
+  if [ "$WAYFINDER_INDEPENDENT" -eq 0 ]; then
+    if [ "$WAYFINDER_STATE_SET" -eq 0 ]; then
+      echo "error: $ID promotes onto a project with bin/wayfinder-lifecycle-gate; pass --wayfinder-state <snapshot> so Firstmate can verify handoff, or --wayfinder-independent when this work does not depend on the Wayfinder map" >&2
+      exit 1
+    fi
+    "$FM_ROOT/bin/fm-wayfinder-parent.sh" handoff --project "$PROMOTE_PROJECT" --state "$WAYFINDER_STATE" \
+      || exit $?
+  fi
+fi
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"

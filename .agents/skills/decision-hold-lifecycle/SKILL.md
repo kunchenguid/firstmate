@@ -13,3 +13,4 @@ metadata:
 The separate decision concept was collapsed into the one primitive the captain cares about: a task held for the captain.
 Read and follow `.agents/skills/captain-hold-lifecycle/SKILL.md`; it owns the completion gate, the recorded-answer rule, and every command this skill used to describe.
 Where an older brief says `bin/fm-decision-hold.sh`, that command still works as a one-release compatibility shim over `bin/fm-captain-hold.sh`.
+Passing that captain-call completion gate does not resolve a Wayfinder ticket; load `wayfinder-parent-gate` for the parent map-owner check.
