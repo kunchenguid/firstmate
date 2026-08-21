@@ -355,6 +355,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 ### PR ready, landing, and teardown
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
+On a GitLab-hosted project the brief scaffolds the same signals with that forge's vocabulary - `done: MR <url> checks green` and `done: MR <url>` - and firstmate's reconciliation reads either token, so the change of vocabulary never hides a CI-ready crew.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
@@ -508,6 +509,7 @@ Every ship brief must retain the worktree-isolation assertion and stop if launch
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
+Crewmate briefs carry forge-specific vocabulary, detected best-effort from the project clone's origin; when the scaffold warns that it could not detect the forge, re-scaffold with `--forge` rather than hand-editing the generated wording.
 
 Load `secondmate-provisioning` before creating or using a charter brief and preserve its idle-by-default and marked-return-channel contracts.
 Status appends are sparse supervisor-actionable events, not routine progress; `bin/fm-classify-lib.sh` owns keyed open and resolved semantics.

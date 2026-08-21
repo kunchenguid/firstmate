@@ -6,11 +6,25 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--forge <github|gitlab>] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--forge <github|gitlab>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   --forge selects the forge vocabulary in generated crewmate briefs:
+#   gh-axi and "PR" on GitHub, glab and "merge request" (MR) on GitLab.
+#   It is best-effort by default: the clone's origin remote is read from
+#   <projects-dir>/<repo-name> - $FM_HOME/projects unless FM_PROJECTS_OVERRIDE
+#   moves it - and its host decides the vocabulary.
+#   That directory must itself be the clone's root; a placeholder or partial
+#   directory inside an enclosing repo is treated as no clone at all rather
+#   than inheriting the enclosing repo's origin.
+#   github.com means GitHub, any host whose name contains "gitlab" means
+#   GitLab, and anything else - a missing clone, a local path, or a
+#   self-hosted host with no "gitlab" in its name - means unknown.
+#   Unknown scaffolds forge-neutral wording ("your forge CLI", "PR/MR") and
+#   warns loudly at scaffold time; pass --forge to choose explicitly.
+#   Secondmate charters are forge-neutral and refuse this flag.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -31,7 +45,7 @@
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
+#   direct-PR    implement -> push + open PR via the forge CLI (gh-axi on GitHub, glab on GitLab) (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
@@ -101,11 +115,14 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+FORGE=auto
+FORGE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -115,6 +132,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      forge) FORGE=$a; FORGE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -127,6 +145,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --forge) want_value=forge ;;
+    --forge=*) FORGE=${a#--forge=}; FORGE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -154,10 +174,20 @@ elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
+if [ "$FORGE_SET" -eq 1 ]; then
+  case "$FORGE" in
+    github|gitlab) ;;
+    *) echo "error: --forge must be one of github or gitlab (got '$FORGE'); omit it to auto-detect from the project's origin remote" >&2; exit 1 ;;
+  esac
+fi
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+if [ "$KIND" = secondmate ] && [ "$FORGE_SET" -eq 1 ]; then
+  echo "error: --forge applies only to crewmate ship or scout briefs; a secondmate charter is forge-neutral" >&2
   exit 1
 fi
 
@@ -266,6 +296,68 @@ fi
 
 REPO=${POS[1]}
 
+# Forge vocabulary for generated briefs: --forge is the explicit mechanism,
+# and a missing flag falls back to best-effort detection from the project's
+# clone under $PROJECTS/<repo-name>. Detection never guesses: an
+# unrecognized or missing origin scaffolds forge-neutral wording and warns
+# loudly at scaffold time, so a self-hosted GitLab host without "gitlab" in
+# its name is a supported outcome rather than a silent mis-flag.
+# The project directory only counts as a clone when it is that clone's own root:
+# git resolves a repository by walking upward, and FM_HOME defaults to the
+# firstmate checkout, so a placeholder or half-finished projects/<repo-name>
+# directory would otherwise report the firstmate repo's own origin.
+if [ "$FORGE" = auto ]; then
+  FORGE_ORIGIN=
+  PROJECT_DIR=$(CDPATH='' cd -- "$PROJECTS/$REPO" 2>/dev/null && pwd -P) || PROJECT_DIR=
+  if [ -n "$PROJECT_DIR" ]; then
+    PROJECT_TOPLEVEL=$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || true)
+    if [ -n "$PROJECT_TOPLEVEL" ]; then
+      PROJECT_TOPLEVEL=$(CDPATH='' cd -- "$PROJECT_TOPLEVEL" 2>/dev/null && pwd -P) || PROJECT_TOPLEVEL=
+    fi
+    if [ -n "$PROJECT_TOPLEVEL" ] && [ "$PROJECT_TOPLEVEL" = "$PROJECT_DIR" ]; then
+      FORGE_ORIGIN=$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/null || true)
+    fi
+  fi
+  if [ -n "$FORGE_ORIGIN" ]; then
+    ORIGIN_HOST=$(printf '%s\n' "$FORGE_ORIGIN" | sed -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' -e 's#^[^/]*@##' -e 's#[:/].*##')
+    case "$ORIGIN_HOST" in
+      github.com) FORGE=github ;;
+      *gitlab*) FORGE=gitlab ;;
+      *) FORGE=unknown ;;
+    esac
+  else
+    ORIGIN_HOST=
+    FORGE=unknown
+  fi
+  if [ "$FORGE" = unknown ]; then
+    if [ -n "$FORGE_ORIGIN" ]; then
+      echo "warning: could not detect forge for '$REPO' from origin '$FORGE_ORIGIN' (host '${ORIGIN_HOST:-?}'); scaffolded forge-neutral wording - pass --forge <github|gitlab> to choose" >&2
+    else
+      echo "warning: no origin remote found for '$REPO' at $PROJECTS/$REPO; scaffolded forge-neutral wording - pass --forge <github|gitlab> to choose" >&2
+    fi
+  fi
+fi
+case "$FORGE" in
+  github)
+    FORGE_CLI='gh-axi'
+    FORGE_PR='PR'
+    FORGE_PR_SHORT='PR'
+    FORGE_RULE3='Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.'
+    ;;
+  gitlab)
+    FORGE_CLI='glab'
+    FORGE_PR='merge request'
+    FORGE_PR_SHORT='MR'
+    FORGE_RULE3='Use glab for GitLab operations and chrome-devtools-axi for browser operations.'
+    ;;
+  *)
+    FORGE_CLI='your forge CLI'
+    FORGE_PR='PR/MR'
+    FORGE_PR_SHORT='PR/MR'
+    FORGE_RULE3='Use your forge CLI (gh-axi on GitHub, glab on GitLab) for forge operations and chrome-devtools-axi for browser operations.'
+    ;;
+esac
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -309,14 +401,14 @@ $HERDR_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
-This is a SCOUT task: the deliverable is a written report, not a PR.
+This is a SCOUT task: the deliverable is a written report, not a $FORGE_PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
 
 # Rules
-1. Never push to any remote and never open a PR.
+1. Never push to any remote and never open a $FORGE_PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. $FORGE_RULE3
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -355,24 +447,24 @@ fi
 case "$MODE" in
   direct-PR)
     SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a '"$FORGE_PR"'.'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=direct-PR
-This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+This task ships **direct-PR**: you raise the $FORGE_PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+When it is implemented and committed, push your branch and open a $FORGE_PR with \`$FORGE_CLI\`, then append \`done: $FORGE_PR_SHORT {url}\` to the status file and stop.
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the $FORGE_PR; firstmate relays the outcome.
 EOF
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE1="1. Never push to any remote and never open a $FORGE_PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=local-only
-This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+This task ships **local-only**: no remote, no $FORGE_PR_SHORT, no pipeline.
+The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a $FORGE_PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
@@ -381,13 +473,13 @@ EOF
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-    RULE1='1. Never push to the default branch. Never merge a PR.'
+    RULE1='1. Never push to the default branch. Never merge a '"$FORGE_PR"'.'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a $FORGE_PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -400,7 +492,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: $FORGE_PR_SHORT {url} checks green\` and stop. You are finished.
 EOF
     ;;
 esac
@@ -430,7 +522,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. $FORGE_RULE3
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

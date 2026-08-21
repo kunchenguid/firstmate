@@ -294,6 +294,7 @@ log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
   case "$(status_line_note "$LOG_LINE")" in
     *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
+    *MR*"checks green"*|*"checks green"*MR*) return 0 ;;
     *) return 1 ;;
   esac
 }

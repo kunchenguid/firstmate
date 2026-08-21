@@ -240,6 +240,10 @@ missing --mode||ship briefs require --mode
 empty --mode value|--mode|requires a value
 unknown mode value|--mode nope|must be one of no-mistakes, direct-PR, local-only
 conditional policy is not a task mode|--mode no-mistakes-prod-only|classify this task's surface
+invalid forge value|--mode direct-PR --forge bitbucket|--forge must be one of github or gitlab
+internal auto sentinel is not a user value|--mode direct-PR --forge auto|--forge must be one of github or gitlab
+internal auto sentinel is not a user value with =|--mode direct-PR --forge=auto|--forge must be one of github or gitlab
+forge on a secondmate charter|brief-refused-b6 --secondmate --no-projects --forge github|--forge applies only to crewmate ship or scout briefs
 ROWS
   pass "fm-brief.sh: ship --mode is required and closed-set validated"
 }
@@ -286,6 +290,7 @@ yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yol
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
+forge on a secondmate charter|brief-refused-b5 --secondmate --no-projects --forge github|--forge applies only to crewmate ship or scout briefs
 ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
@@ -295,7 +300,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   home="$TMP_ROOT/configured-authority-home"
   write_registry "$home"
   id="brief-direct-authority-a4"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR --forge github >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
     "direct-PR brief lost configured merge authority"
@@ -313,7 +318,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
     "local-only brief must not include the no-mistakes --intent contract"
   id="brief-direct-intent-a4"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR --forge github >/dev/null 2>&1
   assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
     "direct-PR brief must not include the no-mistakes --intent contract"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
@@ -712,6 +717,167 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Forge-aware generated briefs: --forge selects the CLI and PR/MR vocabulary in
+# crewmate ship and scout briefs, so a GitLab-hosted project stops needing
+# per-dispatch hand-edits of the gh-axi/PR wording.
+test_forge_flag_selects_vocabulary() {
+  local home id brief
+  home="$TMP_ROOT/forge-flag-home"
+  mkdir -p "$home/data"
+
+  # --forge github renders the historical gh-axi/PR wording, with no glab.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forge-gh-ship gh-proj --mode direct-PR --forge github >/dev/null 2>&1 \
+    || fail "github-forge ship brief should scaffold"
+  brief="$home/data/forge-gh-ship/brief.md"
+  assert_grep "3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations." "$brief" \
+    "github-forge ship brief lost the gh-axi rule"
+  assert_grep "open a PR with \`gh-axi\`, then append \`done: PR {url}\`" "$brief" \
+    "github-forge ship brief lost the gh-axi PR-opening instruction"
+  assert_grep "Never merge a PR." "$brief" \
+    "github-forge ship brief lost the PR merge rule"
+  assert_no_grep "glab" "$brief" \
+    "github-forge ship brief leaked glab wording"
+
+  # --forge gitlab renders glab/merge-request wording and no gh-axi.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forge-gl-ship gl-proj --mode direct-PR --forge gitlab >/dev/null 2>&1 \
+    || fail "gitlab-forge ship brief should scaffold"
+  brief="$home/data/forge-gl-ship/brief.md"
+  assert_grep "3. Use glab for GitLab operations and chrome-devtools-axi for browser operations." "$brief" \
+    "gitlab-forge ship brief lost the glab rule"
+  assert_grep "open a merge request with \`glab\`, then append \`done: MR {url}\`" "$brief" \
+    "gitlab-forge ship brief lost the glab merge-request instruction"
+  assert_grep "Never merge a merge request." "$brief" \
+    "gitlab-forge ship brief lost the merge-request merge rule"
+  assert_no_grep "gh-axi" "$brief" \
+    "gitlab-forge ship brief leaked gh-axi wording"
+
+  # no-mistakes mode carries the same forge vocabulary.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forge-gl-nm gl-proj --mode no-mistakes --forge gitlab >/dev/null 2>&1 \
+    || fail "gitlab-forge no-mistakes brief should scaffold"
+  brief="$home/data/forge-gl-nm/brief.md"
+  assert_grep "validate and ship a merge request" "$brief" \
+    "gitlab-forge no-mistakes brief kept PR wording in the ship instruction"
+  assert_grep "append \`done: MR {url} checks green\`" "$brief" \
+    "gitlab-forge no-mistakes brief kept PR wording in the done gate"
+  assert_no_grep "gh-axi" "$brief" \
+    "gitlab-forge no-mistakes brief leaked gh-axi wording"
+
+  # Scout briefs adopt the same vocabulary.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forge-gl-scout gl-proj --scout --forge gitlab >/dev/null 2>&1 \
+    || fail "gitlab-forge scout brief should scaffold"
+  brief="$home/data/forge-gl-scout/brief.md"
+  assert_grep "never open a merge request" "$brief" \
+    "gitlab-forge scout brief lost the merge-request push rule"
+  assert_grep "written report, not a merge request" "$brief" \
+    "gitlab-forge scout brief lost the merge-request deliverable wording"
+  assert_no_grep "gh-axi" "$brief" \
+    "gitlab-forge scout brief leaked gh-axi wording"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forge-gh-scout gh-proj --scout --forge github >/dev/null 2>&1 \
+    || fail "github-forge scout brief should scaffold"
+  assert_grep "written report, not a PR." "$home/data/forge-gh-scout/brief.md" \
+    "github-forge scout brief lost the PR deliverable wording"
+  pass "fm-brief.sh: --forge selects github or gitlab vocabulary in ship and scout briefs"
+}
+
+# Auto-detection reads the clone's origin remote when --forge is absent; the
+# explicit flag still wins, and an unrecognized or missing origin scaffolds
+# forge-neutral wording with a loud scaffold-time warning.
+test_forge_auto_detection() {
+  local home out status brief
+  home="$TMP_ROOT/forge-detect-home"
+  mkdir -p "$home/data" "$home/projects"
+
+  # github.com origin -> github vocabulary.
+  git init -q -b main "$home/projects/gh-detect"
+  git -C "$home/projects/gh-detect" remote add origin https://github.com/acme/widgets.git
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" det-gh-a1 gh-detect --mode direct-PR 2>&1); status=$?
+  expect_code 0 "$status" "github-origin auto-detect should scaffold"
+  assert_not_contains "$out" "could not detect forge" \
+    "github origin auto-detect warned despite a recognizable host"
+  brief="$home/data/det-gh-a1/brief.md"
+  assert_grep "open a PR with \`gh-axi\`" "$brief" \
+    "github origin did not auto-select github vocabulary"
+  assert_no_grep "glab" "$brief" \
+    "github origin auto-select leaked glab wording"
+
+  # gitlab.example.com origin -> gitlab vocabulary.
+  git init -q -b main "$home/projects/gl-detect"
+  git -C "$home/projects/gl-detect" remote add origin https://gitlab.example.com/team/widgets.git
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" det-gl-a2 gl-detect --mode direct-PR >/dev/null 2>&1 \
+    || fail "gitlab origin auto-detect should scaffold"
+  brief="$home/data/det-gl-a2/brief.md"
+  assert_grep "open a merge request with \`glab\`" "$brief" \
+    "gitlab origin did not auto-select gitlab vocabulary"
+  assert_no_grep "gh-axi" "$brief" \
+    "gitlab origin auto-select leaked gh-axi wording"
+
+  # Unrecognizable self-hosted host -> forge-neutral wording plus a loud note.
+  git init -q -b main "$home/projects/noc-detect"
+  git -C "$home/projects/noc-detect" remote add origin https://noc-git.orion.co.com/team/widgets.git
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" det-noc-a3 noc-detect --mode direct-PR 2>&1); status=$?
+  expect_code 0 "$status" "unrecognized host should still scaffold"
+  assert_contains "$out" "could not detect forge" "unrecognized host did not warn loudly"
+  assert_contains "$out" "--forge" "unrecognized host warning did not point at --forge"
+  brief="$home/data/det-noc-a3/brief.md"
+  assert_grep "open a PR/MR with \`your forge CLI\`" "$brief" \
+    "unrecognized host did not scaffold forge-neutral wording"
+  assert_grep "3. Use your forge CLI" "$brief" \
+    "unrecognized host neutral brief lost the neutral forge rule"
+
+  # Missing clone (no origin available) -> the same loud neutral fallback.
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" det-noclone-a4 ghost-proj --mode direct-PR 2>&1); status=$?
+  expect_code 0 "$status" "missing-clone auto-detect should still scaffold"
+  assert_contains "$out" "no origin remote found" "missing clone did not warn loudly"
+  brief="$home/data/det-noclone-a4/brief.md"
+  assert_grep "your forge CLI" "$brief" \
+    "missing clone did not scaffold forge-neutral wording"
+
+  # The explicit flag is authoritative even when detection would choose otherwise.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" det-flag-a5 gh-detect --mode direct-PR --forge gitlab >/dev/null 2>&1 \
+    || fail "explicit --forge should override auto-detection"
+  assert_grep "open a merge request with \`glab\`" "$home/data/det-flag-a5/brief.md" \
+    "explicit --forge gitlab was overridden by github-host detection"
+
+  # Homes whose clones live elsewhere via FM_PROJECTS_OVERRIDE must detect from
+  # that directory, like every other script that resolves project clones.
+  local elsewhere
+  elsewhere="$TMP_ROOT/forge-elsewhere-clones"
+  mkdir -p "$elsewhere"
+  git init -q -b main "$elsewhere/gl-elsewhere"
+  git -C "$elsewhere/gl-elsewhere" remote add origin https://gitlab.example.com/team/widgets.git
+  out=$(FM_HOME="$home" FM_PROJECTS_OVERRIDE="$elsewhere" "$ROOT/bin/fm-brief.sh" det-override-a6 gl-elsewhere --mode direct-PR 2>&1); status=$?
+  expect_code 0 "$status" "overridden projects dir should scaffold"
+  assert_not_contains "$out" "no origin remote found" \
+    "overridden projects dir was ignored and warned about a missing clone"
+  assert_grep "open a merge request with \`glab\`" "$home/data/det-override-a6/brief.md" \
+    "overridden projects dir did not auto-select gitlab vocabulary"
+  # The warning must name the directory actually searched, not the default one.
+  out=$(FM_HOME="$home" FM_PROJECTS_OVERRIDE="$elsewhere" "$ROOT/bin/fm-brief.sh" det-override-a7 ghost-proj --mode direct-PR 2>&1); status=$?
+  expect_code 0 "$status" "overridden projects dir missing clone should still scaffold"
+  assert_contains "$out" "$elsewhere/ghost-proj" \
+    "missing-clone warning pointed at a directory that holds no clones"
+
+  # A projects/<repo> directory that is not the clone's own root must not inherit
+  # the enclosing repo's origin. FM_HOME defaults to the firstmate checkout, so a
+  # placeholder or interrupted clone would otherwise report firstmate's own
+  # github.com origin and silently mis-flag a GitLab project as GitHub.
+  local enclosing
+  enclosing="$TMP_ROOT/forge-enclosing-home"
+  mkdir -p "$enclosing/data" "$enclosing/projects/placeholder-proj"
+  git init -q -b main "$enclosing"
+  git -C "$enclosing" remote add origin https://github.com/acme/firstmate.git
+  out=$(FM_HOME="$enclosing" "$ROOT/bin/fm-brief.sh" det-enclosing-a6 placeholder-proj --mode direct-PR 2>&1); status=$?
+  expect_code 0 "$status" "non-clone project directory should still scaffold"
+  assert_contains "$out" "no origin remote found" \
+    "non-clone project directory did not warn loudly"
+  brief="$enclosing/data/det-enclosing-a6/brief.md"
+  assert_grep "open a PR/MR with \`your forge CLI\`" "$brief" \
+    "non-clone project directory inherited the enclosing repo's forge instead of staying neutral"
+  assert_grep "3. Use your forge CLI" "$brief" \
+    "non-clone project directory neutral brief lost the neutral forge rule"
+  pass "fm-brief.sh: forge auto-detection covers github, gitlab, unknown, and missing clones"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -720,6 +886,8 @@ test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
+test_forge_flag_selects_vocabulary
+test_forge_auto_detection
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
