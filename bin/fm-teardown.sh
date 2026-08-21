@@ -192,6 +192,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-dev-remote-lib.sh
+. "$SCRIPT_DIR/fm-dev-remote-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -813,11 +815,16 @@ pr_number_from_target() {
 }
 
 ensure_commit_object() {
-  local target=$1 commit=$2 n
+  local target=$1 commit=$2 n default remote
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  # A PR lives on the remote this checkout actually develops on (e.g. a
+  # fork), not necessarily "origin" - see resolve_update_base.
+  default=$(default_branch) || return 1
+  resolve_update_base "$PROJ" "$default"
+  remote=$RESOLVE_BASE_REMOTE
+  git -C "$WT" remote get-url "$remote" >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet "$remote" "refs/pull/$n/head" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
@@ -907,11 +914,18 @@ pr_open_state() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
+  local name remote branch ref default_tree merged_tree
   name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
-    ref="refs/remotes/origin/$name"
+  # Compare against the remote this checkout actually develops on (e.g. a
+  # fork), not necessarily "origin" - see resolve_update_base. Otherwise a
+  # checkout tracking a diverged fork would be checked against the wrong
+  # default branch's tree entirely.
+  resolve_update_base "$PROJ" "$name"
+  remote=$RESOLVE_BASE_REMOTE
+  branch=$RESOLVE_BASE_BRANCH
+  if git -C "$WT" remote get-url "$remote" >/dev/null 2>&1; then
+    git -C "$WT" fetch --quiet "$remote" "+refs/heads/$branch:refs/remotes/$remote/$branch" >/dev/null 2>&1 || return 1
+    ref="refs/remotes/$remote/$branch"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else

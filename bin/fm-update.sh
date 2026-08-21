@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Self-update a running firstmate and its secondmates to the latest origin.
+# Self-update a running firstmate and its secondmates to the latest upstream.
 #
 # Mechanical half of the /updatefirstmate skill. Fast-forwards the running
-# firstmate repo's default branch from origin, then fast-forwards every
+# firstmate repo's default branch from its own configured upstream (the
+# checkout's own branch tracking, e.g. a fork the repo actually develops on -
+# falls back to origin/<default> when no upstream is configured; see
+# resolve_update_base in bin/fm-dev-remote-lib.sh), then fast-forwards every
 # registered secondmate home. Local homes are treehouse worktrees or standalone
 # clones; remote routes update their configured code root on that host and then
 # fast-forward the persistent home to that root. FAST-FORWARD ONLY, exactly like

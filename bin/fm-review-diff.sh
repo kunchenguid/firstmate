@@ -19,6 +19,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
+# shellcheck source=bin/fm-dev-remote-lib.sh
+. "$SCRIPT_DIR/fm-dev-remote-lib.sh"
 
 usage() {
   echo "usage: fm-review-diff.sh <task-id> [--stat]" >&2
@@ -67,6 +69,16 @@ default_branch() {
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
+# resolve_update_base (fm-dev-remote-lib.sh) follows $PROJ's own configured
+# upstream for $DEFAULT - e.g. a fork tracking fork/main - rather than
+# hardcoding origin, so review diffs against the lineage this checkout
+# actually develops on, and a PR (opened against that same remote) is fetched
+# from the right place. Falls back to origin/$DEFAULT when no upstream is
+# configured, unchanged from before.
+resolve_update_base "$PROJ" "$DEFAULT"
+DEV_REMOTE=$RESOLVE_BASE_REMOTE
+DEV_BRANCH=$RESOLVE_BASE_BRANCH
+
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
   BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
@@ -93,10 +105,12 @@ pr_number_from_target() {
 
 fetch_pull_head() {
   local n=$1 resolved
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  # A PR lives on the remote this checkout actually develops on (DEV_REMOTE,
+  # e.g. a fork), not necessarily "origin" - see resolve_update_base above.
+  git -C "$WT" remote get-url "$DEV_REMOTE" >/dev/null 2>&1 || return 1
   # Fetch into a private ref so a later base-branch fetch cannot clobber the
   # compare tip via FETCH_HEAD, and so we never review a stale local object.
-  git -C "$WT" fetch --quiet origin \
+  git -C "$WT" fetch --quiet "$DEV_REMOTE" \
     "+refs/pull/$n/head:refs/fm-review/pull/$n/head" >/dev/null 2>&1 || return 1
   resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/pull/$n/head^{commit}" 2>/dev/null) || return 1
   [ -n "$resolved" ] || return 1
@@ -133,11 +147,11 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
-if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+if git -C "$PROJ" remote get-url "$DEV_REMOTE" >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
-  # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  # <remote>/<default> stale on some Git versions and only refresh FETCH_HEAD.
+  git -C "$WT" fetch "$DEV_REMOTE" "+refs/heads/$DEV_BRANCH:refs/remotes/$DEV_REMOTE/$DEV_BRANCH" --quiet
+  BASE="$RESOLVE_BASE_REF"
 else
   BASE="$DEFAULT"
 fi

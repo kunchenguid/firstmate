@@ -92,6 +92,7 @@ init_changed_fixture_repo() {
   local repo=$1 script
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/bin/fm-dev-remote-lib.sh" "$repo/bin/fm-dev-remote-lib.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
@@ -202,6 +203,44 @@ assert doc["families"] == []
 ' "$json" || { rm -rf "$tmp"; fail "empty selection JSON summary is wrong"; }
   rm -rf "$tmp"
   pass "empty changed selection emits deterministic text and JSON summaries"
+}
+
+# Regression for a checkout whose local main tracks a fork rather than origin
+# (this repo's own case: fork/main and origin/main have genuinely diverged).
+# With no --base given, --changed must diff against main's configured
+# upstream, not a hardcoded origin/main - otherwise the "changed" set is
+# inflated or shrunk by the two remotes' unrelated drift instead of the
+# branch's real edits.
+test_changed_default_base_prefers_mains_upstream() {
+  local tmp repo json base
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-upstream.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/bin/fm-dev-remote-lib.sh" "$repo/bin/fm-dev-remote-lib.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  git -C "$repo" init -q -b main
+  git -C "$repo" add -A
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid \
+    commit -q -m c0
+  git clone -q --bare "$repo" "$tmp/origin.git"
+  git clone -q --bare "$repo" "$tmp/fork.git"
+  git -C "$repo" remote add origin "$tmp/origin.git"
+  git -C "$repo" remote add fork "$tmp/fork.git"
+  git -C "$repo" fetch -q origin
+  git -C "$repo" fetch -q fork
+  git -C "$repo" branch --quiet --set-upstream-to=fork/main main
+
+  (cd "$repo" && bin/fm-test-run.sh --changed --json "$tmp/timing.json" >/dev/null 2>"$tmp/err") \
+    || { rm -rf "$tmp"; fail "changed run with no --base failed: $(cat "$tmp/err")"; }
+  base=$(python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1]))["selection"])
+' "$tmp/timing.json")
+  assert_contains "$base" "base=fork/main" "default --changed base did not follow main's configured upstream"
+  assert_not_contains "$base" "base=origin/main" "default --changed base fell back to origin/main despite a configured upstream"
+  rm -rf "$tmp"
+  pass "fm-test-run.sh --changed defaults to main's configured upstream, not a hardcoded origin/main"
 }
 
 test_timing_markers_and_json() {
@@ -507,6 +546,7 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
   cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-dev-remote-lib.sh" "$repo/bin/fm-dev-remote-lib.sh"
   cat >"$fake_bin/stat" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "-c" ] && [ "$2" = "%a" ]; then
@@ -709,6 +749,7 @@ test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
+test_changed_default_base_prefers_mains_upstream
 test_timing_markers_and_json
 test_aggregate_exit_behavior
 test_gate_skip_accounting

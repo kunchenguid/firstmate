@@ -211,7 +211,8 @@ Changed live routes receive a marked instruction to re-read the transferred file
 The primary records that remote nudge before delivery and retries it during locked startup convergence after a failed send.
 Local secondmates retain their generation-specific local pointer contract; remote transfers do not copy those primary-local instruction paths.
 
-`/updatefirstmate` updates each remote code root from its own origin, then guardedly fast-forwards the persistent remote home to that code-root commit.
+`/updatefirstmate` updates each remote code root from its own configured upstream - the same checkout-local git branch tracking the primary checkout itself follows, falling back to `origin/<default>` when none is set - then guardedly fast-forwards the persistent remote home to that code-root commit.
+The remote code root's own git remotes are that host's responsibility to keep pointed at the lineage the fleet actually develops on; a code root whose upstream resolves to a different repository than the primary checkout's own fork updates from the wrong lineage with no error, the same failure mode a misconfigured primary checkout has.
 Dirty, diverged, unavailable, or otherwise unsafe targets are reported and left untouched.
 
 Retire a remote second mate with the normal guarded command:

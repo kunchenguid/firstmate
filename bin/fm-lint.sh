@@ -10,9 +10,10 @@
 #
 # With no explicit paths, the file set depends on context:
 #   - In CI (GITHUB_ACTIONS=true or CI=true), on the main branch, or when no
-#     merge-base against origin/main (or local main) can be found, it lints
-#     the full canonical set: bin/*.sh bin/backends/*.sh tests/*.sh. This is
-#     what CI always runs, so CI coverage never depends on a local diff.
+#     merge-base against main's configured upstream (or origin/main, or local
+#     main) can be found, it lints the full canonical set: bin/*.sh
+#     bin/backends/*.sh tests/*.sh. This is what CI always runs, so CI
+#     coverage never depends on a local diff.
 #   - Otherwise (an ordinary local branch with a real merge-base) it lints
 #     only the canonical-set files changed since that merge-base, including
 #     uncommitted local edits, via plain local `git diff` (no network, no
@@ -44,6 +45,8 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/fm-lint.sh"
 ROOT="$(cd "$SELF_DIR/.." && pwd)"
 cd "$ROOT" || exit 1
+# shellcheck source=bin/fm-dev-remote-lib.sh
+. "$SELF_DIR/fm-dev-remote-lib.sh"
 
 FM_LINT_WORKER_SHELLCHECK_PID=
 # shellcheck disable=SC2329 # Registered by the private worker's signal traps.
@@ -145,12 +148,18 @@ case "$JOBS" in
 esac
 
 # fm_lint_changed_base_ref prints the ref to diff the working branch against:
-# the local origin/main tracking ref when present, else local main. Returns
-# nonzero when neither is resolvable, which the caller treats as "no
+# resolve_update_base's pick for local main (fm-dev-remote-lib.sh) - its own
+# configured upstream when one is set and locally resolvable, so a checkout
+# tracking a fork diffs against that fork rather than a hardcoded origin/main
+# that may have diverged from it and would otherwise inflate the "changed" set
+# with commits that are only the two remotes' unrelated drift; that resolver's
+# own fallback is origin/main when no upstream is configured. Else local main.
+# Returns nonzero when neither is resolvable, which the caller treats as "no
 # merge-base found" and falls back to a full lint.
 fm_lint_changed_base_ref() {
-  if git rev-parse --verify -q origin/main >/dev/null 2>&1; then
-    printf 'origin/main\n'
+  resolve_update_base "$ROOT" main
+  if git rev-parse --verify -q "$RESOLVE_BASE_REF" >/dev/null 2>&1; then
+    printf '%s\n' "$RESOLVE_BASE_REF"
     return 0
   fi
   if git rev-parse --verify -q main >/dev/null 2>&1; then

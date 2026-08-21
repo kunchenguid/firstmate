@@ -1750,7 +1750,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 default remote branch target expected actual status
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -1763,8 +1763,20 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+  # resolve_update_base (fm-ff-lib.sh) follows this checkout's own configured
+  # upstream for $default - e.g. a fork tracking fork/main - rather than
+  # hardcoding origin, so a task worktree is provisioned from the lineage this
+  # repo actually develops on. Falls back to origin/$default when no upstream
+  # is configured, unchanged from before.
+  resolve_update_base "$worktree" "$default"
+  remote=$RESOLVE_BASE_REMOTE
+  branch=$RESOLVE_BASE_BRANCH
+  target=$RESOLVE_BASE_REF
+  if ! git -C "$worktree" remote get-url "$remote" >/dev/null 2>&1; then
+    echo "error: no $remote remote for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  if ! git -C "$worktree" fetch --quiet "$remote" "+refs/heads/$branch:refs/remotes/$target"; then
     echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi

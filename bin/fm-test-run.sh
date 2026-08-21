@@ -27,7 +27,8 @@
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run
 #   --list          print selected script paths (one per line) and exit 0
-#   --base <ref>    with --changed, compare against this ref (default: origin/main)
+#   --base <ref>    with --changed, compare against this ref (default: local main's
+#                   configured upstream when set, else origin/main)
 #   --exclude-family <name>
 #                   drop scripts whose primary family matches <name> after selection
 #                   (repeatable; portable CI lanes exclude real-herdr-gated so the
@@ -70,8 +71,11 @@
 # under-selecting, and never expands to the complete suite unless --all.
 set -eu
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SELF_DIR/.." && pwd)"
 cd "$ROOT" || exit 1
+# shellcheck source=bin/fm-dev-remote-lib.sh
+. "$SELF_DIR/fm-dev-remote-lib.sh"
 
 MODE=
 LIST_ONLY=0
@@ -81,7 +85,7 @@ CHECK_COVERAGE=0
 AGGREGATE_OUT=
 FAMILY=
 LANE=
-BASE_REF=origin/main
+BASE_REF=
 JSON_PATH=
 SCRIPTS=()
 EXCLUDE_FAMILIES=()
@@ -1054,6 +1058,23 @@ families_for_changed_path() {
   esac
 }
 
+# default_changed_base_ref prints the --changed default when --base was not
+# passed explicitly: resolve_update_base's pick for local main
+# (fm-dev-remote-lib.sh) - its own configured upstream when one is set and
+# locally resolvable, so a checkout tracking a fork diffs against that fork
+# rather than a hardcoded origin/main that may have diverged from it and would
+# otherwise inflate or shrink the "changed" set with the two remotes'
+# unrelated drift; that resolver's own fallback is origin/main when no
+# upstream is configured.
+default_changed_base_ref() {
+  resolve_update_base "$ROOT" main
+  if git -C "$ROOT" rev-parse --verify -q "$RESOLVE_BASE_REF" >/dev/null 2>&1; then
+    printf '%s\n' "$RESOLVE_BASE_REF"
+    return 0
+  fi
+  printf 'origin/main\n'
+}
+
 select_changed() {
   local base=$1 path entry fam script_name s
   local -a wanted_families=()
@@ -1411,6 +1432,7 @@ case "${MODE:-}" in
     SELECTION_DESC="proven-isolated"
     ;;
   changed)
+    [ -n "$BASE_REF" ] || BASE_REF=$(default_changed_base_ref)
     select_changed "$BASE_REF"
     SELECTION_DESC="changed:base=$BASE_REF"
     ;;
