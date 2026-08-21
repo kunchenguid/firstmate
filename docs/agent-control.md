@@ -62,6 +62,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
    A recorded raw-command basename that differs from its resolved adapter cannot reproduce the command actually running, so relaunch refuses before the checkpoint unless the caller passes an explicit `--harness` to choose the replacement runtime deliberately.
    A harness change resets model and effort unless they are named too, because a model chosen for one adapter does not transfer to another.
    The launch owner separately re-resolves the target home's own `config/claude-account` pin, so a relaunch also puts the replacement agent back on that home's Claude account rather than the relaunching environment's ([`configuration.md`](configuration.md)).
+   That pin is validated here as well, against the task's own recorded home and through the launch owner's own validator, so a home whose store was deleted, renamed, or made unreadable refuses while its agent is still running rather than being stopped for a launch that must be refused.
 2. **Safe checkpoint.**
    The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
    For a `kind=secondmate` task, the home's identity marker must match and its child records must be readable, so a relaunch can never strand child work behind an unreadable home.

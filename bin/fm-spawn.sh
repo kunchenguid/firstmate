@@ -146,7 +146,14 @@
 #   config/ is gitignored so it stays home-local
 #   and is never inherited between homes. A remote route's pin lives in the
 #   remote home's own config/ and is read and validated by the host-local spawn.
-#   A pinned launch reports `claude_account=<path>` on its success line.
+#   bin/fm-claude-account-lib.sh owns the pin's schema and usability rules, so
+#   bin/fm-control.sh can refuse an unusable pin BEFORE its relaunch stops the
+#   running agent and can never disagree with this owner about what is usable.
+#   A pinned launch reports `claude_account=<path>` on its success line. A RAW
+#   launch command is the one exception: an environment-assignment prefix binds
+#   only to a shell string's first simple command, so a pinned raw launch still
+#   gets the prefix but WARNS and omits the report rather than claim an account
+#   this script cannot prove the command actually runs under.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -196,7 +203,7 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path> [ claude_account=<path>]
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -282,6 +289,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-config-line-lib.sh
 . "$SCRIPT_DIR/fm-config-line-lib.sh"
+# shellcheck source=bin/fm-claude-account-lib.sh
+. "$SCRIPT_DIR/fm-claude-account-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -994,6 +1003,9 @@ fi
 SPAWN_TASK_LOCK_HELD=1
 PROJ=
 ARG3=
+# A raw launch command is an opaque shell string rather than a template this
+# script composed, so what a prefix binds to inside it is not knowable here.
+LAUNCH_IS_RAW=0
 FIRSTMATE_HOME=
 
 # --relaunch adoption: every identity axis comes from the task's own validated
@@ -1205,6 +1217,7 @@ launch_template() {
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    LAUNCH_IS_RAW=1
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -1685,71 +1698,17 @@ fi
 # A pin that does not name a usable store REFUSES the spawn here, before any
 # endpoint exists: silently falling back to the primary's account is the
 # wrong-account billing this pin exists to prevent.
-CLAUDE_STORE=
-CLAUDE_STORE_PINNED=0
-
-resolve_claude_store() {  # <config-dir> <subject>
-  local config_dir=$1 subject=$2 pin_file value
-  pin_file="$config_dir/claude-account"
-  # An existing config/ that cannot be searched makes every test below it lie:
-  # stat of the pin file fails, so a pin that IS set reads as absent and the
-  # launch quietly falls back to the primary's account. Refuse first, so "no
-  # pin" is only ever concluded from a directory this user can actually look in.
-  # A config/ that does not exist at all is the ordinary unpinned case and is
-  # left exactly as before.
-  if [ -e "$config_dir" ] && { [ ! -d "$config_dir" ] || [ ! -x "$config_dir" ]; }; then
-    echo "error: $subject may pin a Claude account at $pin_file, but $config_dir is not a searchable directory for this user, so an absent pin cannot be told apart from an unreadable one; fix its permissions (launching would bill the primary's Claude account instead)" >&2
-    return 1
-  fi
-  if [ ! -e "$pin_file" ]; then
-    # A dangling symlink is a pin the operator meant to set, not an absent one.
-    if [ -L "$pin_file" ]; then
-      echo "error: $subject pins a Claude account at $pin_file, but that path is a broken symlink; repair or remove it (launching would bill the primary's Claude account instead)" >&2
-      return 1
-    fi
-    CLAUDE_STORE=${CLAUDE_CONFIG_DIR:-}
-    return 0
-  fi
-  if [ ! -f "$pin_file" ] || [ ! -r "$pin_file" ]; then
-    echo "error: $subject pins a Claude account at $pin_file, but that is not a readable regular file; fix or remove it (launching would bill the primary's Claude account instead)" >&2
-    return 1
-  fi
-  value=$(fm_config_first_line "$pin_file")
-  if [ -z "$value" ]; then
-    echo "error: $subject has an empty Claude account pin at $pin_file; put the absolute path of its Claude config store on the first line, or remove the file to use the primary's account" >&2
-    return 1
-  fi
-  case "$value" in
-    /*) ;;
-    *)
-      echo "error: $subject pins Claude account store '$value' in $pin_file, which is not an absolute path; use the store directory's full path" >&2
-      return 1
-      ;;
-  esac
-  case "/$value/" in
-    */../*|*/./*)
-      echo "error: $subject pins Claude account store '$value' in $pin_file, which contains traversal components; use the store directory's resolved path" >&2
-      return 1
-      ;;
-  esac
-  if [ ! -d "$value" ]; then
-    echo "error: $subject pins Claude account store '$value' in $pin_file, but no such directory exists; create it and authenticate that store once with CLAUDE_CONFIG_DIR='$value' claude, or correct the pin" >&2
-    return 1
-  fi
-  if [ ! -r "$value" ] || [ ! -x "$value" ]; then
-    echo "error: $subject pins Claude account store '$value' in $pin_file, but that directory is not readable and searchable by this user; fix its permissions or correct the pin" >&2
-    return 1
-  fi
-  CLAUDE_STORE=$value
-  CLAUDE_STORE_PINNED=1
-  return 0
-}
-
+# bin/fm-claude-account-lib.sh owns the pin's schema and its usability rules,
+# because bin/fm-control.sh asks the same question on the pre-stop side of a
+# relaunch and the two answers must never differ.
 if [ "$KIND" = secondmate ]; then
-  resolve_claude_store "$PROJ_ABS/config" "secondmate $ID" || exit 1
+  CLAUDE_ACCOUNT_CONFIG="$PROJ_ABS/config"
+  CLAUDE_ACCOUNT_SUBJECT="secondmate $ID"
 else
-  resolve_claude_store "$CONFIG" "task $ID" || exit 1
+  CLAUDE_ACCOUNT_CONFIG="$CONFIG"
+  CLAUDE_ACCOUNT_SUBJECT="task $ID"
 fi
+fm_claude_account_resolve "$CLAUDE_ACCOUNT_CONFIG" "$CLAUDE_ACCOUNT_SUBJECT" || exit 1
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
@@ -2853,13 +2812,26 @@ esac
 # still has `claude` on its PATH, and any stray invocation there, or any claude
 # worker that pane's own agent spawns, would otherwise land on the machine
 # default and bill the primary. Forwarding on every pinned launch is also what
-# makes the claude_account= success line below true by construction.
+# makes the claude_account= success line below true by construction - for every
+# launch this script COMPOSED from a verified adapter template.
 # An AMBIENT inherited CLAUDE_CONFIG_DIR with no pin keeps the original narrower
 # rule exactly: claude harness only. It is firstmate's own environment rather
 # than a durable decision about this home, so it must not widen anything.
-if [ "$CLAUDE_STORE_PINNED" -eq 1 ] \
-   || { [ -n "$CLAUDE_STORE" ] && [ "$HARNESS" = claude ]; }; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_STORE") $LAUNCH"
+if [ "$FM_CLAUDE_ACCOUNT_PINNED" -eq 1 ] \
+   || { [ -n "$FM_CLAUDE_ACCOUNT_STORE" ] && [ "$HARNESS" = claude ]; }; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$FM_CLAUDE_ACCOUNT_STORE") $LAUNCH"
+fi
+# A RAW launch command is the one launch this script did not compose, and an
+# environment-assignment prefix binds only to the first simple command of a
+# shell string: in `CLAUDE_CONFIG_DIR=/store cd /srv && my-agent` the store
+# reaches `cd` and never the agent. The prefix above is still added because it
+# does carry a simple raw command, but this script cannot prove it carried THIS
+# one, so the success line below withholds its claude_account= claim rather than
+# state an account the launch may not actually bill. The escape hatch stays
+# usable - a raw command is how an unverified adapter gets tried at all - and
+# the operator is told exactly what they own.
+if [ "$LAUNCH_IS_RAW" -eq 1 ] && [ "$FM_CLAUDE_ACCOUNT_PINNED" -eq 1 ]; then
+  echo "warning: $CLAUDE_ACCOUNT_SUBJECT pins Claude account store '$FM_CLAUDE_ACCOUNT_STORE', but this is a raw launch command, where a CLAUDE_CONFIG_DIR prefix binds only to the first simple command; export the store inside the command yourself if it is compound, and note that this spawn's success line omits claude_account= because it cannot guarantee the claim" >&2
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
@@ -2970,9 +2942,10 @@ SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 # Report a pinned Claude account so the operator can confirm which subscription
 # this launch bills without reading the pane. Absent when nothing is pinned, so
-# an unpinned spawn's success line is unchanged.
+# an unpinned spawn's success line is unchanged, and absent for a raw launch
+# command, whose prefix binding this script cannot vouch for (warned above).
 SPAWN_CLAUDE_ACCOUNT=
-if [ "$CLAUDE_STORE_PINNED" -eq 1 ]; then
-  SPAWN_CLAUDE_ACCOUNT=" claude_account=$CLAUDE_STORE"
+if [ "$FM_CLAUDE_ACCOUNT_PINNED" -eq 1 ] && [ "$LAUNCH_IS_RAW" -eq 0 ]; then
+  SPAWN_CLAUDE_ACCOUNT=" claude_account=$FM_CLAUDE_ACCOUNT_STORE"
 fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_CLAUDE_ACCOUNT"

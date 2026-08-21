@@ -258,7 +258,9 @@ A codex, pi, cursor, grok, or kimi pane still has `claude` on its path and still
 With no pin the forwarded store is firstmate's own `CLAUDE_CONFIG_DIR` and keeps the narrower claude-harness-only rule exactly as before, so an unpinned home's launches are unchanged.
 A pin whose value is not an absolute, traversal-free, readable, searchable directory refuses the spawn before any endpoint exists, naming the home and the path, and never falls back to the primary's account, because silently billing the wrong subscription is the failure this pin exists to prevent.
 A `config/` directory that exists but that the launching user cannot search refuses on the same grounds, because a pin set there would read as absent and quietly bill the primary.
-A pinned launch reports `claude_account=<path>` on its success line.
+A pinned launch reports `claude_account=<path>` on its success line, except for a raw launch command, where an environment-assignment prefix binds only to the shell string's first simple command.
+Such a launch still gets the prefix, but warns on stderr and omits the report rather than name an account it cannot guarantee, so carry the store into a compound raw command yourself.
+`bin/fm-control.sh relaunch` validates the same pin against the task's own recorded home before it stops the running agent, so an unusable pin refuses while the old agent is still up instead of leaving the task with none.
 This file is home-local and is not part of secondmate inherited configuration, so the primary's own pin never propagates downstream; a remote route's pin lives in the remote home's own `config/`, where the host-local spawn reads and validates it against that host's filesystem.
 Create the store directory and authenticate it once with `CLAUDE_CONFIG_DIR=<path> claude` before pinning it; Firstmate reads the path and never writes credentials.
 Other harnesses keep their own account mechanisms and are outside this file's scope.

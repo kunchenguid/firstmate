@@ -1009,6 +1009,37 @@ test_pinned_home_carries_its_account_onto_a_non_claude_crewmate() {
   pass "a pinned home carries its Claude account onto non-claude crewmates, so claude_account= is true for them"
 }
 
+# The claude_account= report is true by construction only for a launch this
+# script COMPOSED from an adapter template. A raw launch command is an opaque
+# shell string, and an environment-assignment prefix binds only to its first
+# simple command, so a compound one runs the real agent without the store. The
+# escape hatch must stay usable, so the spawn still succeeds - but it warns and
+# withholds the claim rather than name an account it cannot guarantee.
+test_raw_compound_launch_from_a_pinned_home_warns_instead_of_claiming_the_account() {
+  local rec id store out status launch spawned_line
+  id=profile-raw-account-z31
+  rec=$(make_spawn_case profile-raw-account claude "$id")
+  read_case_record "$rec"
+  store="$CASE_DIR/claude-brandt"
+  pin_claude_account "$HOME_DIR" "$store"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "cd $CASE_DIR && custom-agent --flag")
+  status=$?
+  expect_code 0 "$status" "a raw launch command must stay usable from a pinned home"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=cd" "the raw launch command should still spawn"
+  # Scoped to the success line: the warning names the field it is withholding.
+  spawned_line=$(printf '%s\n' "$out" | grep "^spawned $id ")
+  assert_not_contains "$spawned_line" "claude_account=" \
+    "a raw launch command must not claim an account its prefix may not reach"
+  assert_contains "$out" "raw launch command" \
+    "a pinned raw launch should warn that carrying the store is the operator's"
+  assert_contains "$out" "$store" "the warning did not name the store the operator must carry"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "custom-agent --flag" "the raw launch command was not preserved"
+  pass "a pinned raw launch command warns and omits claude_account= instead of claiming it"
+}
+
 test_unsearchable_config_directory_refuses_rather_than_reading_as_unpinned() {
   local rec id sm store out status
   if [ "$(id -u)" -eq 0 ]; then
@@ -1149,6 +1180,7 @@ test_secondmate_pin_reaches_the_crewmates_that_home_spawns
 test_secondmate_respawn_without_a_home_argument_still_honours_the_pin
 test_pinned_home_carries_its_account_onto_a_non_claude_crewmate
 test_unusable_secondmate_account_pin_refuses_loudly
+test_raw_compound_launch_from_a_pinned_home_warns_instead_of_claiming_the_account
 test_unsearchable_config_directory_refuses_rather_than_reading_as_unpinned
 test_malformed_secondmate_account_pins_refuse_rather_than_fall_back
 

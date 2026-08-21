@@ -953,8 +953,11 @@ families_for_changed_path() {
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
-    bin/fm-config-line-lib.sh|\
+    bin/fm-config-line-lib.sh|bin/fm-claude-account-lib.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
+      # fm-claude-account-lib.sh is shared by the launch owner and by
+      # bin/fm-control.sh's pre-stop relaunch refusal, both of which live in
+      # backend-dispatch (fm-spawn-dispatch-profile, fm-control-relaunch).
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       ;;
