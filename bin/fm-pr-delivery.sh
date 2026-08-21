@@ -292,9 +292,8 @@ task_hold_reason() { # <task-id>
       return 0
     fi
     if [ "$verb" = blocked ]; then
-      case "$lower" in
-        *migration*) printf 'migration-hold\t%s\n' "$(clean_field "$note")"; return 0 ;;
-      esac
+      printf 'task-blocked\t%s\n' "$(clean_field "$note")"
+      return 0
     fi
   done <<EOF
 $open

@@ -507,6 +507,29 @@ test_generic_authority_hold_ignores_yolo() {
   pass "generic authority holds override yolo"
 }
 
+test_generic_task_block_hold_ignores_yolo() {
+  local home fixture out
+  home=$(make_world task-blocked)
+  fixture="$TMP_ROOT/fix-task-blocked"
+  setup_project "$home" "$fixture"
+  write_open "$fixture" acme/alpha '[{"number":20,"url":"https://github.com/acme/alpha/pull/20","headRefName":"fm/task-blocked20","headRefOid":"ttt","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/alpha 20 '{"number":20,"url":"https://github.com/acme/alpha/pull/20","headRefName":"fm/task-blocked20","headRefOid":"ttt","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  fm_write_meta "$home/state/task-blocked20.meta" \
+    'window=fm-task-blocked20' "worktree=$home/projects/task-blocked20" 'project=alpha' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/20'
+  printf 'blocked [key=implementation]: waiting for the implementation fix\n' > "$home/state/task-blocked20.status"
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  [ -z "$out" ] || fail "generic task blocker should hold even with yolo"
+  run_delivery "$home" "$fixture" show | grep -Fq 'task-blocked' \
+    || fail "generic task blocker did not produce a task-blocked hold"
+  printf 'resolved [key=implementation]: fix landed\n' >> "$home/state/task-blocked20.status"
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
+    || fail "resolved generic task blocker did not re-evaluate"
+  pass "generic task blockers override yolo"
+}
+
 test_open_pr_inventory_paginates() {
   local home fixture out open key
   home=$(make_world inventory)
@@ -810,6 +833,7 @@ test_closed_snapshot_holds_delivery
 test_review_thread_revalidation
 test_check_evidence_requires_success
 test_generic_authority_hold_ignores_yolo
+test_generic_task_block_hold_ignores_yolo
 test_open_pr_inventory_paginates
 test_partial_scan_preserves_blocked_queue
 test_repository_state_keys_do_not_alias
