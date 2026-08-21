@@ -250,6 +250,35 @@ test_base_records_pr_base_and_branch_wiring() {
   pass "fm-brief.sh: --base records the PR base, branches from it, and names the target"
 }
 
+# --base is the epic-story signal, so an epic ship brief must carry the plan
+# workflow (epwf-02): refresh-not-reauthor the attached upfront plan, the
+# mandatory/skip condition, always-commit under plans/<id>-plan/, the plan-review
+# divergence gate, and the escalate-epic-breaks rule - while an ORDINARY brief
+# (no --base) carries none of it, so the section is scoped to epic stories only.
+test_base_carries_epic_plan_workflow() {
+  local home brief
+  home="$TMP_ROOT/epic-plan-home"
+  write_registry "$home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" epw-01 some-proj --mode direct-PR --base epic/things >/dev/null 2>&1 \
+    || fail "epic ship brief should scaffold"
+  brief="$home/data/epw-01/brief.md"
+  assert_grep "# Epic plan workflow" "$brief" "epic brief missing the plan-workflow section"
+  assert_grep "REFRESH it against the current HEAD" "$brief" "epic brief must instruct refresh, not re-author"
+  assert_grep "MANDATORY when HEAD moved" "$brief" "epic brief must state the mandatory refresh condition"
+  assert_grep "SKIP it only for a frozen-contract" "$brief" "epic brief must state the skip condition"
+  assert_grep "ALWAYS commit your task-time plan (refreshed or as-is) under \`plans/epw-01-plan/\`" "$brief" \
+    "epic brief must instruct always-commit under the story's own plan dir"
+  assert_grep "key=plan-review" "$brief" "epic brief must keep the plan-review divergence gate"
+  assert_grep "epic-level plan-review" "$brief" "epic brief must escalate epic-breaking discoveries"
+
+  # An ordinary (no --base) brief carries none of it.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ord-01 some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "ordinary brief should scaffold"
+  assert_no_grep "# Epic plan workflow" "$home/data/ord-01/brief.md" \
+    "an ordinary brief must not carry the epic plan workflow"
+  pass "fm-brief.sh: --base carries the epic plan workflow; an ordinary brief does not"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -791,6 +820,7 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_base_records_pr_base_and_branch_wiring
+test_base_carries_epic_plan_workflow
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

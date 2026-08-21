@@ -58,6 +58,7 @@ This skill only records a settled design in the standard shape.
    Never pre-fill `signed_off:` - an empty value is the gate that blocks dispatch before the captain signs.
 
 5. **Write one file per story** under `stories/<id>.md`, each starting with the required frontmatter below, then a self-contained body: **Goal**, **Context / dependency**, **Implementation plan** (a POINTER, filled by `/epic-plan` - leave a placeholder here, do not hand-write the plan), **Scope**, **Definition of done**, **Evidence**, **Delivery**.
+   The plan `/epic-plan` fills is an upfront skeleton - the DAG, sequencing, and security criteria, not line-accurate steps - that the dispatched worker refreshes against HEAD and, on plan-review approval, promotes back into canonical; `/epic-plan` owns that lifecycle, so keep the scaffold's plan section a placeholder and do not restate it here.
 
 6. **Make the first story the contract gate.**
    The shared contract (API shape, schema, proto, types package) lands first, as its own story, before anything that consumes it.

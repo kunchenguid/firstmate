@@ -27,6 +27,23 @@ A hand-written "implementation plan" inside a story tends to be a paragraph of g
 A real plan directory breaks the work into phases with success criteria and risks, in structured files a worker can execute step by step.
 Writing one per story is what keeps dispatch honest: the worker has phases to follow, so it does not hallucinate the shape of the work.
 
+## The plan lifecycle: upfront skeleton, task-time refresh, gated, promoted
+
+The plan you author here is the UPFRONT plan, and its job is skeleton and coherence, not line-accurate execution steps.
+It fixes the direction: the dependency DAG, cross-story sequencing, the security acceptance criteria, and the paper-level breakage review that catches a cross-story break before any code.
+It is a direction contract; the exact files and line anchors will have moved by the time the story is dispatched.
+
+So the upfront plan is not the last word - it is the starting point for a task-time refresh:
+
+- When the story is dispatched, the worker STARTS from this upfront plan and REFRESHES it against the current HEAD - re-verifying anchors and folding in whatever landed since design - rather than re-authoring a plan from scratch or following a stale one blindly.
+  Refreshing is mandatory when HEAD moved materially since design (a refactor or extraction landed), the story is security-sensitive, or a scout report supersedes the plan; it is skipped only for a frozen-contract mechanical story whose upfront plan still matches HEAD exactly.
+- The worker commits its task-time plan durably (under the target repo's `plans/<id>-plan/`) - it is the record of what the code was actually built against.
+- A refresh that materially diverges from the upfront plan stops at a captain plan-review gate before implementation.
+  That gate is the divergence firewall: it turns "diverge and fragment" into "refresh and realign", and a discovery that breaks the epic's assumptions beyond this one story is escalated to epic-level plan-review rather than silently re-planned around.
+- On plan-review approval, the approved task-time plan is promoted back into this canonical `stories/<id>-plan/` directory, replacing the design-time draft, so downstream stories read the fresh, HEAD-bound plan instead of the stale one.
+
+Author the upfront plan with that lifecycle in mind: get the direction, dependencies, sequencing, and security criteria right, and do not over-invest in line-exact steps that the task-time refresh will re-bind anyway.
+
 ## Procedure
 
 Do this once per story in the epic.

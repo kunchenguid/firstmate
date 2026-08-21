@@ -108,6 +108,10 @@ This flow is packaged as the harness-agnostic public epic pipeline - the `/epic-
 `/epic-new` stands up the umbrella lab; `/epic-handoff` wraps `bin/fm-umbrella-promote.sh` (section 9 step 2a); `/epic-ship` wraps `bin/fm-epic-ship.sh`.
 Each skill's `SKILL.md` is the single owner of its step, and the AGENTS.md that `bin/fm-umbrella.sh` writes into a lab points the design agent at that chain regardless of harness.
 
+The upfront per-story plan `/epic-plan` authors is a skeleton, not the last word: at dispatch each epic ship brief (generated with `bin/fm-brief.sh --base`) instructs the worker to refresh it against current HEAD, commit the task-time plan, and gate a material divergence at the captain plan-review step.
+When firstmate approves that plan-review, it promotes the worker's committed plan back into the canonical `stories/<id>-plan/` with `bin/fm-epic-plan-promote.sh <epic-slug> <story-id>` (defer to its `--help` for the exact contract), so the stories that depend on it read the fresh, HEAD-bound plan rather than the design-time draft.
+`/epic-plan`'s `SKILL.md` owns the harness-agnostic lifecycle; that helper is the firstmate-side mechanism.
+
 ## 6. Concrete changes required
 
 ### 6.1 New: `bin/fm-umbrella.sh`
