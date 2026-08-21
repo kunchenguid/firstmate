@@ -2639,15 +2639,21 @@ await waitFor(
   "outbound-auth fixture did not publish fresh Codex quota",
 );
 const outboundHeaders = {
-  Authorization: `Bearer ${fixtureAccessToken("fixture-codex-account")}`,
-  "chatgpt-account-id": "fixture-codex-account",
+  Authorization: `Bearer ${fixtureAccessToken("replacement-codex-account")}`,
+  "chatgpt-account-id": "replacement-codex-account",
 };
 await outboundHook.emit("before_provider_headers", { headers: outboundHeaders });
-outboundHeaders.Authorization = `Bearer ${fixtureAccessToken("replacement-codex-account")}`;
 assert(
-  outboundHook.widgetText(240).includes("account correlation unavailable") &&
-    !outboundHook.widgetText(400).includes("94%"),
-  "a later outbound Authorization override left unrelated quota visible",
+  outboundHook.widgetText(400).includes("week 94% left") &&
+    !outboundHook.widgetText(240).includes("account correlation unavailable"),
+  "non-final provider headers suppressed verified active-account quota",
+);
+await outboundHook.emit("model_select", {
+  model: fixtureModel("openai-codex", "codex-outbound-reevaluation"),
+});
+await waitFor(
+  () => outboundHook.widgetText(400).includes("week 94% left"),
+  "same-provider model change did not retain verified active-account quota",
 );
 await outboundHook.emit("session_shutdown", { reason: "quit" });
 
@@ -4454,9 +4460,11 @@ assert(callsAfterMissingIdentity === callsBeforeMissingIdentity, "missing Codex 
 await missingCodexIdentity.emit("session_shutdown", { reason: "quit" });
 
 const validCodexToken = fixtureAccessToken("fixture-codex-account");
+const validCodexTokenParts = validCodexToken.split(".");
 for (const malformedToken of [
-  validCodexToken.split(".").slice(0, 2).join("."),
+  validCodexTokenParts.slice(0, 2).join("."),
   `${validCodexToken}.extra`,
+  `${validCodexTokenParts[0]}.${validCodexTokenParts[1]}!.${validCodexTokenParts[2]}`,
 ]) {
   await setStoredOAuth("openai-codex", malformedToken);
   const callsBeforeMalformedToken = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
