@@ -67,18 +67,11 @@ Assignment is longest-processing-time bin packing over per-script duration hints
 The hints came from that run's `fm-test-timing-portable-serial` artifact on 2026-08-02, where the lane ran 69 scripts in 1143762 ms of serial work.
 A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
+`bin/fm-test-run.sh --list --lane portable-serial-<k>of<4>` is the authoritative current membership; timing artifacts are the authoritative measured durations.
 
-| Lane | Script count | Estimated duration |
-|---|---:|---:|
-| `portable-serial-1of4` | 15 | 285945 ms (~285.9 s) |
-| `portable-serial-2of4` | 18 | 285944 ms (~285.9 s) |
-| `portable-serial-3of4` | 17 | 285929 ms (~285.9 s) |
-| `portable-serial-4of4` | 19 | 285944 ms (~285.9 s) |
-| imbalance | | 16 ms |
+Among the measured hints, `tests/fm-pr-check-security.test.sh` at 199573 ms is the floor for any shard count.
 
-The single longest script, `tests/fm-pr-check-security.test.sh` at 199573 ms, is the floor for any shard count.
-
-Refresh the hints by downloading the per-shard timing artifacts from a green CI run, replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the measured `path`/`duration_ms` pairs, and updating the table above:
+Refresh the hints by downloading the per-shard timing artifacts from a green CI run and replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the measured `path`/`duration_ms` pairs:
 
 ```sh
 gh run download <run-id> -R kunchenguid/firstmate --pattern 'fm-test-timing-portable-serial-*' -D /tmp/fm-serial
@@ -108,7 +101,7 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 | Lane | Bound | Rationale |
 |---|---|---|
 | portable parallel 1/2 | job `timeout-minutes: 10` | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
-| portable serial 1-4 | job `timeout-minutes: 15` | Each balanced shard is about five minutes, leaving roughly 3x hang-tripwire margin. |
+| portable serial 1-4 | job `timeout-minutes: 15` | The cap bounds each separately balanced shard as a hang tripwire; timing artifacts record healthy duration. |
 | Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finish around 7 minutes, so the step bound is the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. |
 
 Timeouts are hang tripwires rather than expected healthy durations.
