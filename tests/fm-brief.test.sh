@@ -730,8 +730,10 @@ test_scout_deepapi_guidance_requires_the_skill() {
   home="$TMP_ROOT/deepapi-guidance-home"
   mkdir -p "$home/data"
 
-  HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" deepapi-absent firstmate --scout >/dev/null 2>&1
+  HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" deepapi-absent firstmate --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold without DeepAPI skill exited non-zero"
   brief="$home/data/deepapi-absent/brief.md"
+  assert_present "$brief" "scout brief without DeepAPI skill was not scaffolded"
   # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
   assert_no_grep 'Use the `deepapi` skill' "$brief" \
     "scout brief emitted DeepAPI guidance when the skill was absent"
