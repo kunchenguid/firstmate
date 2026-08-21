@@ -210,6 +210,134 @@ for bad in (frame.HEADER.pack(frame.AUDIO, frame.MAX_PAYLOAD + 1),
 PY
 pass "the relay refuses a desynchronised uplink header instead of waiting for its payload"
 
+# --- whose account, whose model ---------------------------------------------
+#
+# A region, a model id and an AWS profile name somebody's account and somebody's
+# choices, so nothing here ships one. A home that has configured none of them
+# cannot start the relay at all, and it is told which file to write rather than
+# quietly reaching an API in somebody else's account. That configuration IS the
+# opt-in, so this case is what keeps the feature off by default.
+
+CONFIG_HOME="$TMP_ROOT/unconfigured"
+mkdir -p "$CONFIG_HOME/config"
+
+python3 - "$ROOT/bin" "$CONFIG_HOME" <<'PY' || fail "relay configuration"
+import sys
+sys.path.insert(0, sys.argv[1])
+import importlib.util, os, pathlib
+spec = importlib.util.spec_from_file_location(
+    "relay", str(pathlib.Path(sys.argv[1]) / "fm-voice-relay.py"))
+relay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(relay)
+import fm_voice_records as records
+
+home = sys.argv[2]
+for name in ("FM_VOICE_REGION", "FM_VOICE_MODEL", "FM_VOICE_PROFILE", "FM_VOICE_ID",
+             "FM_CONFIG_OVERRIDE"):
+    os.environ.pop(name, None)
+
+def check(cond, label):
+    if not cond:
+        sys.exit("configuration: " + label)
+
+# An unconfigured home refuses, and the refusal is the path to write.
+try:
+    relay.resolve_settings(relay.parse_args(["--serve", "--home", home]))
+    sys.exit("configuration: an unconfigured home started the relay")
+except records.RecordError as exc:
+    check("voice-region" in str(exc),
+          "the refusal should name the file to write: %s" % exc)
+    check(home in str(exc), "and it should be this home's path: %s" % exc)
+
+# One file at a time: the region alone is not enough to reach a model.
+with open(os.path.join(home, "config", "voice-region"), "w") as handle:
+    handle.write("# the region this home talks to\neu-somewhere-1\n")
+try:
+    relay.resolve_settings(relay.parse_args(["--serve", "--home", home]))
+    sys.exit("configuration: a home with no model id started the relay")
+except records.RecordError as exc:
+    check("voice-model" in str(exc),
+          "the refusal should name the missing model file: %s" % exc)
+
+with open(os.path.join(home, "config", "voice-model"), "w") as handle:
+    handle.write("some.model-v1:0\n")
+options = relay.resolve_settings(relay.parse_args(["--serve", "--home", home]))
+check(options.region == "eu-somewhere-1",
+      "the configured region should be used, comment and all: %r" % options.region)
+check(options.model == "some.model-v1:0",
+      "the configured model should be used: %r" % options.model)
+# No profile configured means ambient credentials only, which is a real choice
+# rather than a missing one, so it is not a refusal.
+check(options.profile == "", "an absent profile should stay empty: %r" % options.profile)
+check(options.voice == relay.VOICE,
+      "an absent voice should fall back to the shipped one: %r" % options.voice)
+
+# The environment overrides a file for a single run.
+os.environ["FM_VOICE_REGION"] = "eu-elsewhere-2"
+os.environ["FM_VOICE_ID"] = "amy"
+options = relay.resolve_settings(relay.parse_args(["--serve", "--home", home]))
+check(options.region == "eu-elsewhere-2",
+      "the environment should override the file: %r" % options.region)
+check(options.voice == "amy", "the voice should be overridable: %r" % options.voice)
+
+# And an explicit flag overrides both.
+options = relay.resolve_settings(
+    relay.parse_args(["--serve", "--home", home, "--region", "eu-flag-3"]))
+check(options.region == "eu-flag-3", "a flag should win: %r" % options.region)
+
+# --help must work in a home that has configured nothing, or the captain cannot
+# read how to configure it.
+PY
+pass "the relay reads whose account to use from this home and refuses to guess"
+
+set +e
+help_out=$(python3 "$ROOT/bin/fm-voice-relay.py" --help 2>&1)
+help_code=$?
+set -e
+expect_code 0 "$help_code" "--help must work with no configuration: $help_out"
+assert_contains "$help_out" 'voice-region' \
+  "--help should name the files a home has to write"
+pass "an unconfigured home can still read how to configure the relay"
+
+# The captain inbox is the same rule with a different consequence: note, status,
+# list and drain make no model call, so they must keep working unconfigured. The
+# voice handover depends on note, so that is not a nicety.
+inbox_env=(FM_HOME="$CONFIG_HOME" FM_STATE_OVERRIDE="$CONFIG_HOME/state"
+           FM_CONFIG_OVERRIDE="$CONFIG_HOME/config")
+
+set +e
+ask_out=$(env "${inbox_env[@]}" "$ROOT/bin/fm-inbox.sh" ask "how is the fleet" 2>&1)
+ask_code=$?
+set -e
+[ "$ask_code" -ne 0 ] || fail "ask ran with nothing configured"
+assert_contains "$ask_out" 'inbox-region' \
+  "the first refusal should name the region file: $ask_out"
+
+# One file at a time, so each refusal names one thing to do.
+printf 'eu-somewhere-1\n' > "$CONFIG_HOME/config/inbox-region"
+set +e
+ask_out=$(env "${inbox_env[@]}" "$ROOT/bin/fm-inbox.sh" ask "how is the fleet" 2>&1)
+ask_code=$?
+set -e
+[ "$ask_code" -ne 0 ] || fail "ask ran without a configured model"
+assert_contains "$ask_out" 'inbox-ask-model' \
+  "the refusal should name the model file to write: $ask_out"
+
+set +e
+say_out=$(printf '' | env "${inbox_env[@]}" "$ROOT/bin/fm-inbox.sh" say 2>&1)
+say_code=$?
+set -e
+[ "$say_code" -ne 0 ] || fail "say ran without a configured model"
+assert_contains "$say_out" 'inbox-stt-model' \
+  "the refusal should name the model file to write: $say_out"
+
+rm -f "$CONFIG_HOME/config/inbox-region"
+unconfigured_note=$(env "${inbox_env[@]}" \
+  "$ROOT/bin/fm-inbox.sh" note "the handover must work with no configuration") \
+  || fail "note should not need any configuration"
+assert_contains "$unconfigured_note" 'queued ' "note should still queue a record"
+pass "the model-backed subcommands refuse by name while note keeps working"
+
 # --- the tool surface the two sides share -----------------------------------
 #
 # The relay declares the tools and fm_voice_records implements them. Renaming one
@@ -302,8 +430,11 @@ os.environ["AWS_CREDENTIAL_EXPIRATION"] = iso(time.time() + 3600)
 check(isinstance(relay.ambient_credentials()[1], float),
       "a stated deadline should be carried through as the expiry")
 # The environment wins while it is usable, so this never shells out to a profile.
-check(relay.resolve_credentials("no-such-profile")[0]["aws_session_token"] == "t0ken",
+picked = relay.resolve_credentials("no-such-profile")
+check(picked[0]["aws_session_token"] == "t0ken",
       "the environment should be preferred over the profile while it is usable")
+check(picked[2] == relay.FROM_ENVIRONMENT,
+      "the resolver must say where the credentials came from: %r" % (picked[2],))
 
 os.environ["AWS_CREDENTIAL_EXPIRATION"] = iso(time.time() - 1)
 check(relay.ambient_credentials() is None,
@@ -315,6 +446,37 @@ check(relay.ambient_credentials(margin=300) is None,
 check(relay.ambient_credentials(margin=0) is not None,
       "the same credentials are still usable when no margin is asked for")
 
+# A profile export that fails must be an ordinary exception. SystemExit would walk
+# straight through the per-turn boundary in handle_uplink_frame and end the relay,
+# and since credentials are resolved lazily this refusal can land mid-conversation.
+class Failed:
+    returncode = 1
+    stdout = ""
+    stderr = "The config profile (nobody) could not be found"
+
+real_run = relay.subprocess.run
+relay.subprocess.run = lambda *a, **k: Failed()
+try:
+    relay.profile_credentials("nobody")
+    sys.exit("credentials: a failed profile export was accepted")
+except relay.CredentialError as exc:
+    check(isinstance(exc, Exception),
+          "the refusal must be an ordinary exception, not a SystemExit")
+    check("nobody" in str(exc), "the refusal should name the profile: %s" % exc)
+except SystemExit:
+    sys.exit("credentials: a failed profile export raised SystemExit")
+finally:
+    relay.subprocess.run = real_run
+
+# No profile and no environment is also a named refusal rather than a traceback
+# from inside the AWS CLI argument list.
+try:
+    relay.profile_credentials("")
+    sys.exit("credentials: an empty profile was accepted")
+except relay.CredentialError as exc:
+    check("voice-profile" in str(exc),
+          "the refusal should name the file to write: %s" % exc)
+
 for name in AWS_VARS:
     os.environ.pop(name, None)
 
@@ -322,14 +484,15 @@ calls = []
 stamp = [""]
 delay = [0.0]
 
-def fake(profile, verbose=False, margin=0):
+def fake(profile, verbose=False, margin=0, allow_ambient=True):
     # Whatever the profile says about expiry reaches the cache through the real
     # parser, so the fixture hands it a stamp rather than a decided answer.
     calls.append(profile)
     time.sleep(delay[0])
     return ({"aws_access_key_id": "AK%d" % len(calls)},
-            relay._expires_at(stamp[0]))
+            relay._expires_at(stamp[0]), relay.FROM_PROFILE)
 
+real_resolve = relay.resolve_credentials
 relay.resolve_credentials = fake
 
 async def take(cache, count):
@@ -407,6 +570,41 @@ async def resolve_while_the_loop_runs():
 during = asyncio.run(resolve_while_the_loop_runs())
 check(during >= 2,
       "the event loop ran %d times during a 0.3s credential resolution" % during)
+
+# GIVING UP ON AMBIENT CREDENTIALS HAS TO STICK. A bound that re-reads the same
+# environment is not a bound: os.environ never gets fresher values while this
+# process runs, so the same stale keys would come back every time and every
+# session past the real deadline would fail while a working profile went untried.
+# This drives the real resolver, with only the profile export replaced.
+relay.resolve_credentials = real_resolve
+exports = []
+
+def fake_profile(profile, verbose=False):
+    exports.append(profile)
+    return {"aws_access_key_id": "FROM-PROFILE",
+            "aws_secret_access_key": "s", "aws_session_token": None}, None
+
+relay.profile_credentials = fake_profile
+os.environ["AWS_ACCESS_KEY_ID"] = "AKIAENVIRONMENT"
+os.environ["AWS_SECRET_ACCESS_KEY"] = "s3cret"
+os.environ["AWS_SESSION_TOKEN"] = "stale-token"
+os.environ.pop("AWS_CREDENTIAL_EXPIRATION", None)
+
+cache = Bounded("a-profile")
+first = asyncio.run(cache.get())
+check(first["aws_session_token"] == "stale-token",
+      "usable ambient credentials should be preferred: %r" % first)
+check(exports == [], "the profile should not be consulted while ambient ones hold")
+time.sleep(0.1)
+later = [asyncio.run(cache.get()) for _ in range(3)]
+check([c["aws_access_key_id"] for c in later] == ["FROM-PROFILE"] * 3,
+      "past the margin the relay must ask the profile, not re-read the "
+      "environment it already gave up on: %r" % later)
+check(len(exports) == 1,
+      "and the profile answer is then cached like any other: %d exports" % len(exports))
+
+for name in AWS_VARS:
+    os.environ.pop(name, None)
 PY
 pass "credentials are resolved once per relay, refreshed before expiry, off the event loop"
 
@@ -501,10 +699,28 @@ check([n["event"] for n in down.notices] == ["turn-failed"],
 check("ThrottlingException" in down.notices[0].get("error", ""),
       "the notice should name the failure: %s" % down.notices[0])
 
+# ONCE PER TURN, not once per frame. The captain is still holding the talk key
+# when the failure lands, so the rest of that press is another thirty audio
+# frames, one per hundred milliseconds. The client says every notice out loud on
+# stderr, so reporting each one would put ten identical lines a second in front of
+# the captain while they are still speaking, and would keep calling into a session
+# that is already gone.
+held = Stub(raises=RuntimeError("ValidationException"))
+frames = [(frame.TALK_START, b"")] + [(frame.AUDIO, b"x" * 3200)] * 30
+frames.append((frame.TALK_END, b""))
+session, serving, down = asyncio.run(drive(held, frames))
+check(serving, "a failed turn must not stop the relay")
+check(len(down.notices) == 1,
+      "a failed turn must be announced once, not once per frame: %d notices"
+      % len(down.notices))
+check(held.calls == ["talk_start"],
+      "nothing after the failure should reach the dead session: %s" % held.calls)
+
 # And the next talk key rebuilds instead of reusing it, which is what marking it
 # spent is for.
 renewed = []
 fresh = Stub()
+real_renew = relay.renew
 
 async def fake_renew(session, options, down):
     renewed.append(session)
@@ -534,6 +750,44 @@ check(spent.calls == [], "a session whose reconnect failed must not be spoken to
 # Quit still ends the loop, so the relay exits when the client says so.
 session, serving, down = asyncio.run(drive(Stub(), [(frame.QUIT, b"")]))
 check(not serving, "quit must end the loop")
+
+# A reconnect that fails part way must not strand the session it was building.
+# start() opens the model stream and a reader task before it sends anything, and
+# the relay now survives the failure and retries, so a session left open here
+# would accumulate one live stream and one live task per retry, all of them still
+# writing into the shared downlink.
+class Partial:
+    """A session whose start fails after it would have opened the stream."""
+
+    def __init__(self, *args):
+        self.closed = 0
+        self.credentials = None
+        self.connect_seconds = None
+
+    async def start(self):
+        raise RuntimeError("ServiceUnavailableException")
+
+    async def close(self):
+        self.closed += 1
+
+built = []
+
+def make_partial(options, down, credentials):
+    session = Partial()
+    built.append(session)
+    return session
+
+relay.Session = make_partial
+outgoing = Partial()
+try:
+    asyncio.run(real_renew(outgoing, options, Down()))
+    sys.exit("failed turn: a failed reconnect was reported as success")
+except RuntimeError:
+    pass
+check(len(built) == 1, "renew should have built one replacement: %d" % len(built))
+check(built[0].closed == 1,
+      "a session whose start failed must be closed, not stranded: %d closes"
+      % built[0].closed)
 PY
 pass "a turn the model refuses is announced and costs one turn, not the relay"
 
@@ -547,7 +801,7 @@ pass "a turn the model refuses is announced and costs one turn, not the relay"
 # protocol bug and is not.
 
 python3 - "$ROOT/bin" <<'PY' || fail "laptop client"
-import io, sys
+import io, os, sys
 sys.path.insert(0, sys.argv[1])
 import importlib.util, pathlib
 spec = importlib.util.spec_from_file_location(
@@ -559,6 +813,24 @@ import fm_voice_frame as frame
 def check(cond, label):
     if not cond:
         sys.exit("client: " + label)
+
+# Where the relay lives on the desktop is one operator's directory layout, so the
+# client carries no default for it and says so rather than trying a path that
+# belongs to somebody else. The refusal is checked before the variable below is
+# set, because after that every other case supplies it.
+os.environ.pop("FM_VOICE_RELAY", None)
+try:
+    client.parse_args(["--host", "desk"])
+    sys.exit("client: started with no relay path at all")
+except SystemExit as exc:
+    check(exc.code != 0, "a missing relay path must be a refusal, not a default")
+
+os.environ["FM_VOICE_RELAY"] = "/desktop/firstmate/bin/fm-voice-relay.py"
+check(client.parse_args(["--host", "desk"]).relay
+      == "/desktop/firstmate/bin/fm-voice-relay.py",
+      "FM_VOICE_RELAY should supply the relay path for a whole shell")
+check(client.parse_args(["--host", "desk", "--relay", "/other/relay.py"]).relay
+      == "/other/relay.py", "an explicit --relay must win over the variable")
 
 # Push to talk is the default for this build, and open mic is the one flip.
 check(client.parse_args(["--host", "h"]).listen == client.PUSH_TO_TALK,
@@ -706,14 +978,35 @@ assert_not_contains "$wide" 'needs a credential' \
   "full scope must not carry the raw event line of a bracketed status"
 pass "the wide scope names open work and reports state without quoting event lines"
 
-# The default is the wide scope, because that is the access the captain granted.
+# THE DEFAULT IS THE NARROW SCOPE. A home that has configured nothing has granted
+# nothing, and sending task identifiers, titles and pull request links to a model
+# in another region is not something to inherit from somebody else's settings
+# file. Widening is one line the captain of those records writes themselves.
 default=$(records_status) || fail "default scope failed"
-assert_contains "$default" '"scope": "full"' "the default read scope should be full"
-pass "an absent read-scope setting means the access the captain granted"
+assert_contains "$default" '"scope": "counts"' \
+  "an unconfigured home should get the narrow scope"
+assert_not_contains "$default" 'alpha-one' \
+  "an unconfigured home must not name work"
+assert_not_contains "$default" 'sign-in redirect' \
+  "an unconfigured home must not carry titles"
+assert_not_contains "$default" 'github.com' \
+  "an unconfigured home must not carry pull request links"
+assert_contains "$default" '"in_flight": 3' \
+  "an unconfigured home should still say how much is waiting"
+pass "an absent read-scope setting means the narrowest answer, not the widest"
+
+# Widening is what the file is for, and it takes effect without a flag.
+printf 'full\n' > "$HOME_FIXTURE/config/voice-read-scope"
+widened=$(records_status) || fail "configured wide scope failed"
+assert_contains "$widened" '"scope": "full"' \
+  "writing full into config/voice-read-scope should widen the answer"
+assert_contains "$widened" 'alpha-one' "the wide scope should then name work"
+rm -f "$HOME_FIXTURE/config/voice-read-scope"
+pass "a home widens its own read scope by writing the setting"
 
 # --- the confidentiality boundary -------------------------------------------
 #
-# This is the case that lets the wide scope be the default.
+# This is the case that lets a home widen to the full scope at all.
 
 for scope in full counts; do
   answer=$(records_status --scope "$scope") || fail "scope $scope failed"
@@ -798,9 +1091,15 @@ rm -f "$HOME_FIXTURE/config/voice-read-deny"
 # That is not a narrower answer, it is a leak with a reassuring count beside it.
 # Both items below sit in all three lists, and each is matched on a field only
 # one of those lists reads.
+#
+# The third item is the one an in-flight-only fixture cannot catch: a QUEUED item
+# that nothing holds for the captain, so no list iterates it, while its pull
+# request link still reaches the answer through the worker records. Assembling its
+# fields only where some list walks past it misses a match on its own title.
 LEAK_HOME="$TMP_ROOT/deny-every-list"
 TITLE_TOKEN=LEAKSBYTITLE
 HOLD_TOKEN=LEAKSBYHOLD
+QUEUED_TOKEN=LEAKSFROMQUEUED
 mkdir -p "$LEAK_HOME/data" "$LEAK_HOME/state" "$LEAK_HOME/config"
 cat > "$LEAK_HOME/data/backlog.md" <<EOF
 # Backlog
@@ -808,11 +1107,16 @@ cat > "$LEAK_HOME/data/backlog.md" <<EOF
 ## In flight
 - [ ] omega-nine - Renew the $TITLE_TOKEN contract (repo: omega) (kind: captain)
 - [ ] sigma-ten - Move the account onto the new tier (repo: sigma) (kind: ship) (hold-kind: captain) (hold: waiting on the $HOLD_TOKEN owner)
+
+## Queued
+- [ ] zeta-eight - Migrate the $QUEUED_TOKEN estate (repo: zeta) (kind: ship)
 EOF
 fm_write_meta "$LEAK_HOME/state/omega-nine.meta" \
   kind=captain pr=https://github.com/example/omega/pull/11
 fm_write_meta "$LEAK_HOME/state/sigma-ten.meta" \
   kind=ship pr=https://github.com/example/sigma/pull/12
+fm_write_meta "$LEAK_HOME/state/zeta-eight.meta" \
+  kind=ship pr=https://github.com/example/zeta/pull/99
 
 leak_status() {
   python3 "$ROOT/bin/fm_voice_records.py" status --home "$LEAK_HOME" --scope full
@@ -826,7 +1130,10 @@ assert_contains "$reachable" 'pull/11' "fixture: its pull request should be reac
 assert_contains "$reachable" 'sigma-ten' "fixture: the held item should be named"
 assert_contains "$reachable" 'pull/12' "fixture: its pull request should be reachable"
 assert_contains "$reachable" '"awaiting_captain": 2' \
-  "fixture: both items should be waiting on the captain"
+  "fixture: both in-flight items should be waiting on the captain"
+assert_contains "$reachable" 'pull/99' \
+  "fixture: the queued item should reach the answer through its pull request"
+assert_contains "$reachable" '"queued": 1' "fixture: the queued item should be counted"
 
 # Matched on its title, which only the in-flight list reads.
 printf '%s\n' "$TITLE_TOKEN" > "$LEAK_HOME/config/voice-read-deny"
@@ -838,10 +1145,11 @@ assert_not_contains "$by_title" 'pull/11' \
   "a denied item must not surface through its pull request link"
 assert_contains "$by_title" '"withheld_as_confidential": 1' \
   "the denied item should be counted once"
-# The other item is untouched, so this is a substring list and not a switch.
+# The other items are untouched, so this is a substring list and not a switch.
 assert_contains "$by_title" 'sigma-ten' "the deny list must not suppress everything"
-assert_contains "$by_title" 'pull/12' "the other pull request should still be named"
-assert_contains "$by_title" '"open_pull_requests": 2' \
+assert_contains "$by_title" 'pull/12' "the other pull requests should still be named"
+assert_contains "$by_title" 'pull/99' "the other pull requests should still be named"
+assert_contains "$by_title" '"open_pull_requests": 3' \
   "denying an item must not change the count of open pull requests"
 
 # Matched on its hold text, which only the captain list reads. The mirror of the
@@ -858,6 +1166,24 @@ assert_contains "$by_hold" 'omega-nine' "the deny list must not suppress everyth
 assert_contains "$by_hold" 'pull/11' "the other pull request should still be named"
 assert_contains "$by_hold" '"in_flight": 2' \
   "denying an item must not change the count of in-flight work"
+
+# Matched on the title of a QUEUED item that no list iterates. Its only way into
+# the answer is its pull request link, and the pull request list knows nothing
+# about titles, so a field set assembled per list never sees the match at all.
+printf '%s\n' "$QUEUED_TOKEN" > "$LEAK_HOME/config/voice-read-deny"
+by_queued=$(leak_status) || fail "deny by queued title failed"
+assert_not_contains "$by_queued" "$QUEUED_TOKEN" \
+  "a queued item's title match must be suppressed"
+assert_not_contains "$by_queued" 'zeta-eight' \
+  "a denied queued item must not be named"
+assert_not_contains "$by_queued" 'pull/99' \
+  "a denied queued item must not surface through its pull request link"
+assert_contains "$by_queued" '"withheld_as_confidential": 1' \
+  "a denied queued item must be counted, so nothing is hidden silently"
+assert_contains "$by_queued" '"queued": 1' \
+  "denying it must not change the count of queued work"
+assert_contains "$by_queued" 'pull/11' "the other pull requests should still be named"
+assert_contains "$by_queued" 'pull/12' "the other pull requests should still be named"
 pass "one deny decision per item covers every list that item could appear in"
 
 # --- refusals ---------------------------------------------------------------

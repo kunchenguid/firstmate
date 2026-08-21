@@ -20,7 +20,7 @@ laptop, which is the whole reason for this shape.
 laptop                          this desktop                      AWS
 ------                          ------------                      ---
 microphone --> fm-voice-client.py --(ssh)--> fm-voice-relay.py --> Nova Sonic 2
-speaker    <-------------------------------------------------      (eu-north-1)
+speaker    <-------------------------------------------------      (your region)
                                         |
                                         +--> the first mate's records (read)
                                         +--> fm-inbox.sh note (queue real work)
@@ -78,10 +78,24 @@ python3 -m venv ~/.fm-voice-venv
 ~/.fm-voice-venv/bin/pip install aws-sdk-bedrock-runtime
 ```
 
+Then tell this home which account and model to use.
+The relay carries no default for any of these, because a region, a model id and an AWS profile name somebody's account and somebody's choices, and inheriting those from whoever wrote the code is not a sensible way to start talking to a paid API.
+Each value is one line in your gitignored `config/` directory, and each has an environment variable that overrides it for a single run.
+
+| File | Environment | Holds |
+| --- | --- | --- |
+| `config/voice-region` | `FM_VOICE_REGION` | The Bedrock region to open the session in, required. |
+| `config/voice-model` | `FM_VOICE_MODEL` | The Nova Sonic model id, required. |
+| `config/voice-profile` | `FM_VOICE_PROFILE` | The AWS profile to export credentials from, optional: with no profile the relay uses only credentials that are already in its environment. |
+| `config/voice-id` | `FM_VOICE_ID` | The output voice, optional and `matthew` when unset. |
+
+A missing required value refuses with the path to write, so an unconfigured home cannot start the relay by accident, and that configuration is the whole opt-in.
+`docs/configuration.md` is the registry for these files.
+
 Check it end to end without a microphone, using a recorded question:
 
 ```
-cd /workplace/inthuson/firstmate
+cd <your firstmate home>
 ~/.fm-voice-venv/bin/python bin/fm-voice-relay.py --self-test <clip.pcm>
 ```
 
@@ -101,8 +115,8 @@ device setup to be where it fails.
 Copy the two files the laptop needs, and install the one dependency:
 
 ```
-scp <desktop>:/workplace/inthuson/firstmate/bin/fm-voice-client.py .
-scp <desktop>:/workplace/inthuson/firstmate/bin/fm_voice_frame.py .
+scp <desktop>:<firstmate home>/bin/fm-voice-client.py .
+scp <desktop>:<firstmate home>/bin/fm_voice_frame.py .
 python3 -m pip install sounddevice
 ```
 
@@ -112,25 +126,27 @@ will ask for microphone permission for whichever terminal you run this from, onc
 Then talk:
 
 ```
-python3 fm-voice-client.py --host <desktop> --relay-python ~/.fm-voice-venv/bin/python
+python3 fm-voice-client.py --host <desktop> \
+  --relay <firstmate home>/bin/fm-voice-relay.py \
+  --relay-python ~/.fm-voice-venv/bin/python
 ```
+
+The client has no built-in idea of where the relay lives on your desktop, so `--relay` is required and `FM_VOICE_RELAY` sets it once for a shell.
 
 Press Enter to start talking, press Enter again when you have finished. It prints
 the timings for each turn as JSON on stdout and everything human on stderr, so
 `--runs 5 > runs.jsonl` gives you your own spread to compare against the table
 above.
 
-If the audio devices are not the ones you want, `--input-device` and
-`--output-device` take a name or an index; run with `--verbose` to see what it
-picked. If it fails before any audio, add `--verbose` and look for the handshake:
-a chatty login shell on the desktop printing to stdout is the one failure that
-looks like a protocol error and is not.
+If the audio devices are not the ones you want, `--input-device` and `--output-device` take a name or an index.
+Neither the client nor this guide can yet tell you which device it resolved, so an unexpected device is diagnosed by trying the other name or index rather than by reading a log line.
+If it fails before any audio, add `--verbose` and look for the handshake: a chatty login shell on the desktop printing to stdout is the one failure that looks like a protocol error and is not.
 
 ## What it may read
 
-The captain granted the voice agent full read access to the first mate's records.
-Two whole classes of record are still excluded, and excluded by construction
-rather than filtered on the way out:
+An unconfigured home gets the narrow scope: counts of what is in flight, what is waiting on the captain and what is open for review, with no identifier, title or link assembled at all.
+Widening that is one line the captain of those records writes into `config/voice-read-scope` themselves.
+Two whole classes of record are excluded at every scope, and excluded by construction rather than filtered on the way out:
 
 - **Finished work**, because a spoken "what is happening" answer is about open
   work, and old engagements accumulate in the history.
@@ -144,12 +160,12 @@ so nothing a status answer can say names a customer.
 `tests/fm-voice-relay.test.sh` holds that boundary as an executable check, so
 widening the reader later fails a test instead of quietly widening what is sent.
 
-Two settings narrow it further, both optional and both in `config/`:
+Two settings control it, both optional and both in `config/`:
 
 | File | Effect |
 | --- | --- |
-| `voice-read-scope` | `full` (the default) sends counts plus the names, titles and pull request links of open work. `counts` sends counts only, with no record free text assembled at all. |
-| `voice-read-deny` | One plain case-insensitive substring per line; `#` comments. Anything matching becomes a withheld count, so the agent still says how much is waiting without saying what it is. An absent file means an empty list. |
+| `voice-read-scope` | `counts` (the default, and what an absent file means) sends counts only, with no record free text assembled at all. `full` sends counts plus the names, titles and pull request links of open work. |
+| `voice-read-deny` | One plain case-insensitive substring per line; `#` comments. Each open item is matched once, against its identifier, its title, its tag values and its pull request link together, and a match is withheld from every list it could have appeared in and reduced to a count, so the agent still says how much is waiting without saying what it is. An absent file means an empty list. |
 
 `voice-read-deny` exists so that one future open item carrying a customer name
 can be excluded in a single line rather than by turning the feature off.

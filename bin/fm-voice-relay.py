@@ -39,14 +39,34 @@ recorded in data/speech-to-speech-survey-s2/report.md section 10:
 Read scope, deny list and the handover queue all belong to bin/fm_voice_records.py.
 docs/voice-relay.md is the operator-facing guide and owns the wire contract.
 
+CONFIGURATION. The region, the model and the AWS profile name somebody's account
+and somebody's choices, so this file carries no default for them. Each is read
+from the home's gitignored config/ directory, or from the matching environment
+variable, and a missing one refuses with the path to write rather than reaching
+for a value that belongs to another home. That configuration is also the opt-in:
+an unconfigured home cannot start this relay at all.
+
+  config/voice-region   FM_VOICE_REGION   Bedrock region.        required
+  config/voice-model    FM_VOICE_MODEL    Nova Sonic model id.   required
+  config/voice-profile  FM_VOICE_PROFILE  AWS profile.           optional
+  config/voice-id       FM_VOICE_ID       output voice.          default matthew
+
+An absent profile means the relay uses only credentials that are already in its
+environment, which is what `--profile ""` forces when a config file exists.
+
+On the model: amazon.nova-sonic-v1:0 is marked legacy by AWS and measured 25
+percent slower on the tool-backed path, which is the path this interface actually
+uses, so amazon.nova-2-sonic-v1:0 is what the figures in docs/voice-relay.md were
+taken against.
+
 Usage:
   fm-voice-relay.py [--serve] [options]
   fm-voice-relay.py --self-test <file.pcm> [options]
 
 Options:
-  --region <name>       Bedrock region.              default eu-north-1
-  --model <id>          Nova Sonic model id.         default amazon.nova-2-sonic-v1:0
-  --profile <name>      AWS profile.                 default inthuson-ct-sandbox
+  --region <name>       Bedrock region.              default from config
+  --model <id>          Nova Sonic model id.         default from config
+  --profile <name>      AWS profile.                 default from config
   --voice <id>          output voice.                default matthew
   --home <dir>          firstmate home for records.  default $FM_HOME or this repo
   --scope <name>        override the read scope for this run.
@@ -74,12 +94,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fm_voice_frame as frame              # noqa: E402
 import fm_voice_records as records          # noqa: E402
 
-REGION = "eu-north-1"
-# amazon.nova-sonic-v1:0 is marked legacy by AWS and measured 25 percent slower
-# on the tool-backed path, which is the path this interface actually uses.
-MODEL = "amazon.nova-2-sonic-v1:0"
-PROFILE = "inthuson-ct-sandbox"
+# A voice id names nobody and costs nothing to inherit, so this one has a
+# default. The region, the model and the profile do not; see CONFIGURATION above.
 VOICE = "matthew"
+SETTINGS = {
+    "region": ("voice-region", "FM_VOICE_REGION", "Bedrock region"),
+    "model": ("voice-model", "FM_VOICE_MODEL", "Nova Sonic model id"),
+    "profile": ("voice-profile", "FM_VOICE_PROFILE", "AWS profile"),
+    "voice": ("voice-id", "FM_VOICE_ID", "output voice"),
+}
 
 IN_RATE = 16000
 OUT_RATE = 24000
@@ -173,6 +196,23 @@ def widen_path():
 # same thing as not having one.
 EXPIRY_UNKNOWN = object()
 
+# Where a set of credentials came from. The difference matters to the cache: the
+# profile can be asked again for fresher credentials, and the environment of an
+# already-running process cannot.
+FROM_ENVIRONMENT = "environment"
+FROM_PROFILE = "profile"
+
+
+class CredentialError(Exception):
+    """No usable AWS credentials, and the caller is told which door was tried.
+
+    An ordinary exception rather than SystemExit, because credentials are now
+    resolved lazily and a refresh can therefore land in the middle of a turn.
+    SystemExit would walk straight through the turn boundary in
+    handle_uplink_frame and end the relay over one bad refresh, which is the
+    failure that boundary exists to absorb.
+    """
+
 
 def _expires_at(stamp):
     """Return the expiry as epoch seconds, None when there is none, or EXPIRY_UNKNOWN.
@@ -233,16 +273,13 @@ def ambient_credentials(verbose=False, margin=0):
     }, expires
 
 
-def resolve_credentials(profile, verbose=False, margin=0):
-    """Return (credentials dict, expiry epoch or None), preferring the environment.
-
-    The sandbox profile's credential_process costs about a second, so ambient
-    credentials win while they are usable. It also blocks the caller for that
-    second, so Credentials below owns when this runs and keeps it out of a turn.
-    """
-    ambient = ambient_credentials(verbose, margin)
-    if ambient is not None:
-        return ambient
+def profile_credentials(profile, verbose=False):
+    """Return (credentials, expiry) exported from an AWS profile, or refuse by name."""
+    if not profile:
+        raise CredentialError(
+            "no credentials in the environment and no AWS profile configured: "
+            "write one into config/voice-profile, set FM_VOICE_PROFILE, or "
+            "export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
     log(verbose, "exporting credentials from profile {}".format(profile))
     widen_path()
     done = subprocess.run(
@@ -254,8 +291,8 @@ def resolve_credentials(profile, verbose=False, margin=0):
         stdin=subprocess.DEVNULL,
         capture_output=True, text=True, timeout=60, check=False)
     if done.returncode != 0:
-        raise SystemExit(
-            "fm-voice-relay: could not get credentials for profile {}: {}".format(
+        raise CredentialError(
+            "could not get credentials for profile {}: {}".format(
                 profile, (done.stderr or done.stdout).strip()))
     blob = json.loads(done.stdout)
     return {
@@ -263,6 +300,23 @@ def resolve_credentials(profile, verbose=False, margin=0):
         "aws_secret_access_key": blob["SecretAccessKey"],
         "aws_session_token": blob.get("SessionToken"),
     }, _expires_at(blob.get("Expiration"))
+
+
+def resolve_credentials(profile, verbose=False, margin=0, allow_ambient=True):
+    """Return (credentials, expiry, source), preferring the environment when allowed.
+
+    The sandbox profile's credential_process costs about a second, so ambient
+    credentials win while they are usable. It also blocks the caller for that
+    second, so Credentials below owns when this runs and keeps it out of a turn.
+    The source is reported because only one of the two can be asked again for
+    something fresher, and the cache has to know which it is holding.
+    """
+    if allow_ambient:
+        ambient = ambient_credentials(verbose, margin)
+        if ambient is not None:
+            return ambient[0], ambient[1], FROM_ENVIRONMENT
+    creds, expires = profile_credentials(profile, verbose)
+    return creds, expires, FROM_PROFILE
 
 
 class Credentials:
@@ -281,6 +335,13 @@ class Credentials:
     margin is handed to the resolver as well, because credentials taken from the
     environment cannot be refreshed in place and have to be abandoned for the
     profile once they are that close to the end.
+
+    That abandonment has to be remembered, not just decided. os.environ never
+    gets fresher values while this process runs, so re-reading it after giving up
+    on an ambient credential would hand back the same stale keys forever and the
+    bound above would be a bound in name only. Once an ambient answer is spent,
+    this asks the profile from then on.
+
     Every resolution, the first one included, runs in a worker thread, so the
     event loop keeps reading the captain's audio while it happens.
     """
@@ -292,7 +353,9 @@ class Credentials:
         self.verbose = verbose
         self._creds = None
         self._expires = None
+        self._source = None
         self._resolved = None
+        self._ambient_spent = False
         self._lock = asyncio.Lock()
 
     def _usable(self):
@@ -307,9 +370,13 @@ class Credentials:
     async def get(self):
         async with self._lock:
             if not self._usable():
-                self._creds, self._expires = await asyncio.to_thread(
+                if self._source == FROM_ENVIRONMENT:
+                    log(self.verbose, "the credentials from the environment are "
+                                      "spent; asking the profile from now on")
+                    self._ambient_spent = True
+                self._creds, self._expires, self._source = await asyncio.to_thread(
                     resolve_credentials, self.profile, self.verbose,
-                    self.REFRESH_MARGIN)
+                    self.REFRESH_MARGIN, not self._ambient_spent)
                 self._resolved = time.monotonic()
             return dict(self._creds)
 
@@ -702,7 +769,15 @@ async def renew(session, options, down):
     log(options.verbose, "renewing the session for a new turn")
     await session.close()
     fresh = Session(options, down, session.credentials)
-    await fresh.start()
+    try:
+        await fresh.start()
+    except BaseException:
+        # start() creates the reader task before it sends anything, so a
+        # reconnect that fails part way leaves a live task holding an open
+        # bidirectional stream. Nothing would ever close it, and it would keep
+        # writing into the shared Downlink, so each retry would strand one more.
+        await fresh.close()
+        raise
     down.send_json(frame.NOTICE, {
         "event": "renewed", "connect_seconds": fresh.connect_seconds})
     return fresh
@@ -733,11 +808,20 @@ async def handle_uplink_frame(kind, payload, session, options, down):
     on the stderr the client inherits, and cost the captain a whole session for
     a single bad reconnect. Instead it is named in a notice and the session is
     marked spent, so the next press of the talk key builds a new one and tries
-    again. A failure the model cannot recover from repeats the notice per turn,
-    which is a captain who can hear what is wrong rather than a dead pipe.
+    again. A failure the model cannot recover from is named once per turn, which
+    is a captain who can hear what is wrong rather than a dead pipe.
+
+    Once per TURN and not once per frame: the captain is still holding the talk
+    key when the failure lands, and the rest of that key press is another thirty
+    audio frames a second apart in tenths. Reporting each one would put ten
+    identical lines a second in front of the captain and keep calling into a
+    session that is already gone, so the remainder of a failed turn is dropped
+    where it arrives.
     """
     if kind == frame.QUIT:
         return session, False
+    if session.failed and kind != frame.TALK_START:
+        return session, True
     try:
         if kind == frame.TALK_START:
             if session.failed or session.replies or session.ended.is_set():
@@ -928,10 +1012,19 @@ def parse_args(argv):
         description=__doc__.splitlines()[0])
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--self-test", metavar="FILE")
-    parser.add_argument("--region", default=REGION)
-    parser.add_argument("--model", default=MODEL)
-    parser.add_argument("--profile", default=PROFILE)
-    parser.add_argument("--voice", default=VOICE)
+    parser.add_argument("--region",
+                        help="Bedrock region; required, from config/voice-region "
+                             "or FM_VOICE_REGION when not given here")
+    parser.add_argument("--model",
+                        help="Nova Sonic model id; required, from config/voice-model "
+                             "or FM_VOICE_MODEL when not given here")
+    parser.add_argument("--profile",
+                        help="AWS profile; optional, from config/voice-profile or "
+                             "FM_VOICE_PROFILE, and empty means the credentials "
+                             "already in the environment")
+    parser.add_argument("--voice",
+                        help="output voice; from config/voice-id or FM_VOICE_ID, "
+                             "default {}".format(VOICE))
     parser.add_argument("--home")
     parser.add_argument("--scope", choices=records.SCOPES)
     parser.add_argument("--tail-ms", type=int, default=TAIL_MS)
@@ -944,13 +1037,34 @@ def parse_args(argv):
     return options
 
 
+def resolve_settings(options):
+    """Fill in what this home configures, refusing rather than guessing.
+
+    Deliberately not part of parse_args: --help and the flags this file can
+    answer for itself must work in a home that has configured nothing, and only
+    a run that is about to reach Bedrock needs to know whose account it is.
+    """
+    home = options.home or records.default_home()
+    options.home = home
+    if not options.region:
+        options.region = records.require_setting(home, *SETTINGS["region"])
+    if not options.model:
+        options.model = records.require_setting(home, *SETTINGS["model"])
+    if options.profile is None:
+        options.profile = records.read_setting(home, *SETTINGS["profile"][:2]) or ""
+    if not options.voice:
+        options.voice = records.read_setting(home, *SETTINGS["voice"][:2]) or VOICE
+    return options
+
+
 def main(argv):
     options = parse_args(argv)
     try:
+        resolve_settings(options)
         if options.self_test:
             return asyncio.run(self_test(options))
         return asyncio.run(serve(options)) or 0
-    except records.RecordError as exc:
+    except (records.RecordError, CredentialError) as exc:
         sys.stderr.write("fm-voice-relay: {}\n".format(exc))
         return 2
     except KeyboardInterrupt:

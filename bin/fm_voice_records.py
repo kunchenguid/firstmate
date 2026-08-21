@@ -25,14 +25,19 @@ the test rather than quietly widening what is sent.
 
 READ SCOPE. config/voice-read-scope selects what a status answer may contain:
 
-  full (the default, and the value used when the file is absent)
-      Counts plus the identifiers, titles and pull request links of open work.
-      This is the access the captain granted.
-
-  counts
+  counts (the default, and the value used when the file is absent)
       Counts, states and one basis note, with no record free text assembled at
-      all. Safe by construction rather than by filtering, for anyone who wants
-      the agent able to say how much is waiting without saying what it is.
+      all. Safe by construction rather than by filtering: the agent can say how
+      much is waiting without saying what it is. This is the default because a
+      home that has configured nothing has granted nothing, and sending task
+      identifiers, titles and pull request links to a model in another region is
+      not something to inherit from somebody else's settings file.
+
+  full
+      Counts plus the identifiers, titles and pull request links of open work.
+      A home widens to this by writing `full` into config/voice-read-scope,
+      which is the access being granted deliberately by the captain whose
+      records they are.
 
 DENY LIST. config/voice-read-deny holds anything that must never leave this
 host even in full scope: one plain case-insensitive substring per line, `#`
@@ -76,7 +81,7 @@ import sys
 SCOPE_COUNTS = "counts"
 SCOPE_FULL = "full"
 SCOPES = (SCOPE_FULL, SCOPE_COUNTS)
-SCOPE_DEFAULT = SCOPE_FULL
+SCOPE_DEFAULT = SCOPE_COUNTS
 
 BASIS = "Last recorded event, which is history and not a live check."
 
@@ -127,8 +132,16 @@ def state_dir(home):
     return os.path.join(home, "state")
 
 
+def config_dir(home):
+    """Return the configuration directory, honouring the repo-wide override."""
+    override = os.environ.get("FM_CONFIG_OVERRIDE")
+    if override:
+        return override
+    return os.path.join(home, "config")
+
+
 def _read_config(home, name):
-    path = os.path.join(home, "config", name)
+    path = os.path.join(config_dir(home), name)
     try:
         with open(path, encoding="utf-8") as handle:
             return handle.read()
@@ -136,8 +149,40 @@ def _read_config(home, name):
         return None
 
 
+def read_setting(home, name, env=None):
+    """Return a one-line setting from the environment or this home's config, else None.
+
+    The values this feature needs, an AWS profile and a region and a model id,
+    name somebody's account and somebody's choices. They belong to the home that
+    runs the relay rather than to the repository, so they are read from gitignored
+    config/ with an environment override and never carry a tracked default.
+    """
+    if env:
+        value = (os.environ.get(env) or "").strip()
+        if value:
+            return value
+    raw = _read_config(home, name)
+    if raw is None:
+        return None
+    for line in raw.splitlines():
+        text = line.split("#", 1)[0].strip()
+        if text:
+            return text
+    return None
+
+
+def require_setting(home, name, env, what):
+    """Return a setting, or refuse naming the file to write and the variable to set."""
+    value = read_setting(home, name, env)
+    if value is None:
+        raise RecordError(
+            "no {} is configured: write one line into {} or set {}".format(
+                what, os.path.join(config_dir(home), name), env))
+    return value
+
+
 def read_scope(home):
-    """Return the configured read scope, defaulting to full."""
+    """Return the configured read scope, defaulting to the narrowest one."""
     raw = _read_config(home, "voice-read-scope")
     if raw is None:
         return SCOPE_DEFAULT
@@ -321,13 +366,22 @@ def fleet_status(home=None, scope=None):
     # name it in another, which is not a narrower answer but a leak with a
     # reassuring count beside it. It also makes the count what it says it is,
     # distinct items rather than refusals.
-    listable = {}
-    for item in in_flight + held_for_captain:
-        listable.setdefault(item["id"], item)
+    #
+    # The fields come from every OPEN item, not only the ones a list iterates. A
+    # queued item that is not held for the captain still reaches the answer
+    # through its pull request link, and assembling its fields only where a list
+    # walks past it is how a title match gets missed on exactly that item. What
+    # is COUNTED is narrower: an item that no list could have named is not
+    # something the captain is having withheld.
+    known = {}
+    for item in open_items:
+        known.setdefault(item["id"], item)
+    nameable = ({i["id"] for i in in_flight} | {i["id"] for i in held_for_captain}
+                | {w["id"] for w in with_pr})
 
     withheld_ids = set()
-    for item_id in set(listable) | {w["id"] for w in with_pr}:
-        item = listable.get(item_id)
+    for item_id in nameable:
+        item = known.get(item_id)
         worker = by_id.get(item_id)
         fields = [item_id]
         if item is not None:

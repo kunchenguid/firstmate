@@ -40,9 +40,10 @@ Options:
   --host <name>          SSH destination of the desktop holding the relay.
   --local                run the relay as a local child process instead. This is
                          how the relay path is measured without a laptop.
-  --relay <path>         relay script on the desktop.
-                         default $FM_VOICE_RELAY or
-                         /workplace/inthuson/firstmate/bin/fm-voice-relay.py
+  --relay <path>         path to fm-voice-relay.py on the desktop, or set
+                         $FM_VOICE_RELAY. Required: this file carries no default,
+                         because one operator's home directory is not a path to
+                         hand anybody else.
   --relay-python <path>  interpreter that has aws-sdk-bedrock-runtime installed.
                          default $FM_VOICE_PYTHON or python3
   --relay-arg <arg>      extra argument for the relay, repeatable. Write it
@@ -92,8 +93,6 @@ OUT_BLOCK = 2400
 PUSH_TO_TALK = "push-to-talk"
 OPEN_MIC = "open-mic"
 LISTEN_MODES = (PUSH_TO_TALK, OPEN_MIC)
-
-DEFAULT_RELAY = "/workplace/inthuson/firstmate/bin/fm-voice-relay.py"
 
 # Anything the relay's login shell prints on stdout ahead of the first frame is
 # discarded, up to this much. Past it, the stream is not a relay.
@@ -715,8 +714,9 @@ def parse_args(argv):
         description=__doc__.splitlines()[0])
     parser.add_argument("--host")
     parser.add_argument("--local", action="store_true")
-    parser.add_argument("--relay",
-                        default=os.environ.get("FM_VOICE_RELAY", DEFAULT_RELAY))
+    parser.add_argument("--relay", default=os.environ.get("FM_VOICE_RELAY"),
+                        help="path to fm-voice-relay.py on the desktop; required, "
+                             "and FM_VOICE_RELAY sets it for a whole shell")
     parser.add_argument("--relay-python",
                         default=os.environ.get("FM_VOICE_PYTHON", "python3"))
     parser.add_argument("--relay-arg", action="append")
@@ -741,6 +741,10 @@ def parse_args(argv):
     options = parser.parse_args(argv)
     if bool(options.host) == bool(options.local):
         parser.error("give exactly one of --host <sshhost> or --local")
+    if not options.relay:
+        parser.error(
+            "say where the relay is: --relay <path to fm-voice-relay.py on the "
+            "desktop>, or set FM_VOICE_RELAY")
     if options.runs < 1:
         parser.error("--runs must be at least 1")
     if options.listen == OPEN_MIC and options.in_file:

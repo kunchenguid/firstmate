@@ -26,12 +26,27 @@
 #   fm-inbox.sh list
 #   fm-inbox.sh drain [--ack <id>...]
 #
+# Configuration. A region, a model id and an AWS profile name somebody's account
+# and somebody's choices, so this file carries no default for any of them. Each is
+# read from the home's gitignored config/ directory, or from the matching
+# environment variable, and the model-backed subcommands refuse with the path to
+# write rather than reaching for a value that belongs to another home. That
+# configuration is also the opt-in: `say` and `ask` are off until it exists.
+#
+#   config/inbox-region     FM_INBOX_REGION     AWS region.            required
+#   config/inbox-stt-model  FM_INBOX_STT_MODEL  speech-to-text model.  required by say
+#   config/inbox-ask-model  FM_INBOX_ASK_MODEL  side-question model.   required by ask
+#   config/inbox-profile    FM_INBOX_PROFILE    AWS profile.           optional
+#
+# An absent profile means the call uses whatever credentials are already in the
+# environment, which is also what FM_INBOX_PROFILE= (empty) forces.
+#
+# `note`, `status`, `list` and `drain` need NO configuration at all, because they
+# make no model call. The voice handover depends on `note`, so it keeps working in
+# a home that has configured nothing.
+#
 # Environment:
 #   FM_HOME              operational home whose state/ and data/ are used.
-#   FM_INBOX_REGION      AWS region for model calls.   default eu-west-1
-#   FM_INBOX_STT_MODEL   speech-to-text model.         default mistral.voxtral-small-24b-2507
-#   FM_INBOX_ASK_MODEL   side-question model.          default eu.anthropic.claude-haiku-4-5-20251001-v1:0
-#   FM_INBOX_PROFILE     AWS profile for model calls.  default inthuson-ct-sandbox
 #
 # PRIVACY: `say` sends your audio and `ask` sends your question to Bedrock.
 # `note`, `status`, `list` and `drain` make no network call at all.
@@ -66,12 +81,56 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="$FM_HOME/data"
 INBOX="$STATE/inbox"
 
-REGION="${FM_INBOX_REGION:-eu-west-1}"
-STT_MODEL="${FM_INBOX_STT_MODEL:-mistral.voxtral-small-24b-2507}"
-ASK_MODEL="${FM_INBOX_ASK_MODEL:-eu.anthropic.claude-haiku-4-5-20251001-v1:0}"
-PROFILE="${FM_INBOX_PROFILE:-inthuson-ct-sandbox}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 die() { printf 'fm-inbox: %s\n' "$*" >&2; exit 1; }
+
+# First non-comment, non-blank line of a config file, or nothing.
+read_setting() {  # <file-name>
+  local path="$CONFIG/$1" line
+  [ -r "$path" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%%#*}
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    [ -n "$line" ] || continue
+    printf '%s' "$line"
+    return 0
+  done < "$path"
+}
+
+# Refuse by naming the file to write. A model call that guessed at a region or an
+# account would either fail confusingly or, worse, succeed against a stranger's.
+require_setting() {  # <file-name> <env-var> <what>
+  local value
+  value=$(read_setting "$1")
+  [ -n "$value" ] || die "no $3 is configured: write one line into $CONFIG/$1 or set $2"
+  printf '%s' "$value"
+}
+
+REGION="${FM_INBOX_REGION:-}"
+STT_MODEL="${FM_INBOX_STT_MODEL:-}"
+ASK_MODEL="${FM_INBOX_ASK_MODEL:-}"
+# Unset falls through to config; explicitly empty means "use ambient credentials".
+PROFILE="${FM_INBOX_PROFILE-$(read_setting inbox-profile)}"
+
+# Resolved only by the subcommands that make a model call, so note, status, list
+# and drain keep working in a home that has configured nothing.
+need_region() {
+  [ -n "$REGION" ] || REGION=$(require_setting inbox-region FM_INBOX_REGION "AWS region")
+}
+
+need_stt_model() {
+  need_region
+  [ -n "$STT_MODEL" ] || STT_MODEL=$(require_setting inbox-stt-model \
+    FM_INBOX_STT_MODEL "speech-to-text model")
+}
+
+need_ask_model() {
+  need_region
+  [ -n "$ASK_MODEL" ] || ASK_MODEL=$(require_setting inbox-ask-model \
+    FM_INBOX_ASK_MODEL "side-question model")
+}
 
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 
@@ -151,6 +210,9 @@ cmd_note() {
 # ---------------------------------------------------------------- say
 
 cmd_say() {
+  # Before the tool checks, so an unconfigured home is told what to configure
+  # rather than what to install for a call it is not yet allowed to make.
+  need_stt_model
   need aws
   need python3
   need base64
@@ -257,9 +319,10 @@ cmd_status() {
 # ---------------------------------------------------------------- ask
 
 cmd_ask() {
+  [ "$#" -gt 0 ] || die "usage: fm-inbox.sh ask <question>..."
+  need_ask_model
   need aws
   need python3
-  [ "$#" -gt 0 ] || die "usage: fm-inbox.sh ask <question>..."
   local q="$*" msg
   msg=$(mktemp /tmp/fm-inbox-ask-XXXXXX.json)
   # shellcheck disable=SC2064
