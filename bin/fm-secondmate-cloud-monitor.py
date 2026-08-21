@@ -105,26 +105,30 @@ one place that validates them and spends anything.
     FM_HOME is left exactly as this monitor received it, which is the
     controller's own home, so the money document needs no pin and none is set
     (see spawn_environment for why a pin here would be a durable trap and why
-    moving FM_HOME aims at a second money document). Nothing about home,
-    account, worktree, harness, SKU, project, or repository comes from the
-    cloud side - the project is local policy (FM_SECONDMATE_CHILD_PROJECT,
-    else that home's single project), and the harness is the cloud lane's only
-    runtime. The child's backlog row is filed first, because fm-spawn refuses
-    a new ship/scout task that has none.
-  - STILL REFUSED HERE, but no longer for want of a capability. The two
-    missing pieces this comment used to name - an assertable owner kind and an
-    authorized task-home parameter - both landed in PR #278: fm-spawn takes
-    FM_SPAWN_TASK_HOME, derives owner_kind from THAT home's marker rather than
-    from its own, and forwards it to the controller as `--task-home`, which
-    authorize_task_home proves under the same lock hold that inserts (marker,
-    canonical registry link, then the unchanged child bounds).
-    This relay does not set FM_SPAWN_TASK_HOME, so its spawn's task home is
-    still the controller's primary home, owner_kind is still derived as
-    primary, and verify_request still refuses a primary-owned request carrying
-    a parent pair - the refusal round-trips as a durable delivered answer and
-    no child is recorded, exactly as before. Wiring the compartment's own home
-    through as the task home is a behavior change with its own bounds to
-    prove, so it is a follow-up, not a side effect of the chain tip lane.
+    moving FM_HOME aims at a second money document). What DOES travel is
+    FM_SPAWN_TASK_HOME, the compartment's own home, which is where this
+    child's state/, data/ and projects/ live and where fm-spawn derives
+    owner_kind=secondmate from - the B.5 step 3 split (AMENDMENT 2). Nothing
+    about home, account, worktree, harness, SKU, project, or repository comes
+    from the cloud side - the project is local policy
+    (FM_SECONDMATE_CHILD_PROJECT, else that home's single project), and the
+    harness is the cloud lane's only runtime. The child's brief and backlog
+    row are written into the TASK home, because that is the data/ fm-spawn
+    reads, and the row is filed first because fm-spawn refuses a new
+    ship/scout task that has none.
+  - ADMITTED HERE, and bounded. The two capabilities this comment used to
+    name as missing - an assertable owner kind and an authorized task-home
+    parameter - landed in PR #278: fm-spawn takes FM_SPAWN_TASK_HOME, derives
+    owner_kind from THAT home's marker rather than from its own, and forwards
+    it to the controller as `--task-home`, which authorize_task_home proves
+    under the same lock hold that inserts (marker, canonical registry link,
+    then the unchanged child bounds). This relay now supplies that task home,
+    so the request is secondmate-owned, its bindings are minted from the
+    child's meta under the compartment's home, and its home_binding names
+    that home while the money document keeps the primary's. What bounds it is
+    unchanged and not this file's to relax: depth one, fan-out, lifetime
+    total and parent liveness, all enforced by enforce_child_bounds under the
+    one lock, over the one document FM_HOME still names.
   - ACCEPTANCE IS PROVEN BY THE QUEUE. A zero exit from fm-spawn is evidence
     the script ran, never that the controller admitted a bounded child, so a
     served request is confirmed by reading the one controller document back
@@ -1009,6 +1013,11 @@ class Relay:
         self.childreq.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.inbox = Path(args.inbox)
         # TWO HOMES, deliberately separate (see spawn_environment):
+        # spawn_home is the PRIMARY's, and names the ONE money document that
+        # every child request is admitted into; home is THIS compartment's
+        # own, and is the TASK home a child's authorities, brief, backlog,
+        # project and result live under, plus the worktree deltas are cut
+        # from. Confusing them is the whole bug class this split exists for.
         self.spawn_home = Path(args.spawn_home)
         self.home = Path(args.home) if args.home else None
         self.controller = Path(args.controller)
@@ -1183,11 +1192,14 @@ class Relay:
 
         Returns (path, "") or ("", failed check). Nothing about the repository
         is expressible from the cloud side, so this is decided here from the
-        secondmate home alone.
+        COMPARTMENT's own home alone - the same home fm-spawn resolves the
+        project argument under, because FM_SPAWN_TASK_HOME points its
+        projects/ there (see spawn_environment). Reading the primary's
+        projects/ instead would name a directory the spawn cannot use.
         """
-        if not self.spawn_home.is_dir():
+        if self.home is None or not self.home.is_dir():
             return "", "child spawn refused: the requesting home is unavailable locally"
-        projects = self.spawn_home / "projects"
+        projects = self.home / "projects"
         chosen = os.environ.get("FM_SECONDMATE_CHILD_PROJECT", "")
         if chosen:
             if "/" in chosen or chosen in ("", ".", ".."):
@@ -1213,8 +1225,12 @@ class Relay:
         markdown append is the documented fallback shape fm-spawn itself scans
         when the tasks-axi backend is unavailable. Returns "" or a failed
         check.
+
+        The backlog fm-spawn actually scans is the TASK home's, because
+        FM_SPAWN_TASK_HOME points data/ at the compartment's own home; a row
+        filed under the primary would leave that gate refusing every child.
         """
-        data = self.spawn_home / "data"
+        data = self.home / "data"
         backlog = data / "backlog.md"
         summary = ""
         for line in brief.splitlines():
@@ -1287,54 +1303,72 @@ class Relay:
         return False
 
     def spawn_environment(self):
-        """The child spawn's environment: this home, no pins, no overrides.
+        """The child spawn's environment: the primary's FM_HOME, the
+        compartment's own home as the TASK home, no pins, no overrides.
 
-        WHAT ACTUALLY BLOCKS A COMPARTMENT CHILD, stated correctly (an earlier
+        THE SPLIT, and why it is the whole capability (design B.5 step 3 as
+        rewritten by AMENDMENT 2). Stated correctly, because an earlier
         revision of this comment blamed verify_state's home fence, which is
-        wrong and pointed at the one guard here that must NOT be weakened):
+        wrong and pointed at a guard that must NOT be weakened: the controller
+        never inspected FM_HOME to decide owner_kind, and the home fence was
+        never the blocker.
 
-        The controller already admits a compartment child. `--owner-kind` is a
-        plain argv flag on `request`; the controller never inspects FM_HOME to
-        decide it. A request minted with FM_HOME set to the controller's own
-        home and `--owner-kind secondmate` plus the parent pair is admitted
-        with all four B.1 bounds enforced and children_total incremented.
+        FM_HOME does three separable jobs at once: (1) where the requesting
+        task's local authorities live, because authoritative_request_bindings
+        reads `<home>/state/<task>.meta`; (2) the identity stamped into the
+        request's home_binding; and (3) the identity of the money document.
+        Jobs 1 and 2 belong to the requester, job 3 belongs to the controller,
+        and the compartment child is the first case where they differ. PR #278
+        split them; this method is what supplies the split half. So:
 
-        The pinch point was that FM_HOME did three separable jobs at once:
-        (1) where the requesting task's local authorities live, because
-        authoritative_request_bindings reads `env["home"]/state/<task>.meta`;
-        (2) the identity stamped into the request's home_binding; and (3) the
-        identity of the money document. Jobs 1 and 2 belong to the requester,
-        job 3 belongs to the controller, and the compartment child is the
-        first case where they differ.
+          - FM_HOME is left EXACTLY as this monitor received it, which is the
+            controller's own home. FM_HOME keeps job 3 alone. It is what names
+            the ONE money document, and it must not move (see the rejected
+            alternatives).
+          - FM_SPAWN_TASK_HOME names the COMPARTMENT's own home and carries
+            jobs 1 and 2. fm-spawn reads this spawn's state/, data/ and
+            projects/ from there, derives owner_kind=secondmate from THAT
+            home's marker rather than from its own, and forwards the path as
+            `--task-home`, which the controller refuses outside a compartment
+            child request and then proves through authorize_task_home under
+            the same lock hold that inserts. Nothing in that chain is
+            self-authorizing: home marker, canonical registry link, then the
+            unchanged child bounds.
 
-        PR #278 SPLIT THEM, so that capability is no longer missing: FM_HOME
-        keeps job 3 only and never moves for the spawn, while
-        FM_SPAWN_TASK_HOME carries jobs 1 and 2 and travels to the controller
-        as `--task-home`, which authorize_task_home proves under the same lock
-        hold that inserts. Nothing in that chain is self-authorizing (home
-        marker, canonical registry link, then the unchanged child bounds).
+        The path is `--home`, this compartment's own leased home, which the
+        wrapper reads from the durable `<primary state>/<id>.cloud-worktree`
+        the compartment's own spawn wrote. It is never reconstructed here
+        from a task id, a naming convention, or a registry read.
 
-        This method still does NOTHING clever, and now that is a CHOICE rather
-        than a constraint: it leaves FM_HOME as the monitor's own home, which
-        is the controller's home, so the money document stays one document and
-        the default worker state directory is already the right one. Because
-        it also sets no FM_SPAWN_TASK_HOME, the spawn's task home is the
-        primary home, owner_kind derives as primary, and the lane still
-        refuses early and honestly at verify_request. Passing the
-        compartment's own home as the task home is the follow-up that would
-        actually admit a compartment child, and it is a behavior change with
-        its own bounds to prove.
+        ORDERING HAZARD, deliberately survived: this method pops
+        FM_STATE_OVERRIDE and every FM_SECONDMATE_* key, so the assignment is
+        made after the pops and its name sits outside both popped namespaces.
+        The FM_STATE_OVERRIDE pop is an interlock rather than a nicety -
+        fm-spawn refuses FM_SPAWN_TASK_HOME combined with FM_STATE_OVERRIDE,
+        so a leg-scoped state override reaching this argv would refuse the
+        whole lane. FM_DATA_OVERRIDE and FM_PROJECTS_OVERRIDE are NOT popped
+        here; fm-spawn refuses those two alongside a task home as well, so an
+        inherited one fails the lane closed rather than silently re-pointing
+        the child's data/ or projects/. That is a refusal this method relies
+        on, not one it performs.
 
-        Two ideas remain rejected on evidence:
+        Two earlier ideas stay rejected on evidence, and this is the reasoning
+        that keeps a future edit from re-introducing either:
           - Pinning FM_AZURE_WORKER_STATE_DIR is a DURABLE TRAP, not a
-            one-shot: that name is inside SPAWN_CLOUD_ENV_ALLOWLIST, so it is
-            persisted into the child's <id>.cloud-env and would misdirect
-            every later execute and release. The doc says the same thing.
-          - Moving FM_HOME itself to the secondmate home aims the request at a
-            SECOND money document (the one the documented local-secondmate
-            lane already creates) and refuses at parent liveness. #278's
-            answer is exactly this comment's answer: move the TASK home, never
-            FM_HOME.
+            one-shot: that name is inside SPAWN_CLOUD_ENV_ALLOWLIST
+            (bin/fm-spawn.sh), so it is persisted into the child's
+            <id>.cloud-env and would permanently pair a foreign FM_HOME with
+            this state dir for every later execute and release.
+            FM_SPAWN_TASK_HOME is deliberately NOT on that allowlist for the
+            same reason: it is consumed once, by this spawn, and the durable
+            record of the split is the queue item's own `task_home` field,
+            which the release lane reads back through authority_home.
+          - Moving FM_HOME to the secondmate home aims the request at a SECOND
+            money document (the one the documented local-secondmate lane
+            already creates) and refuses at parent liveness, which is both the
+            outcome the design forbids and a refusal that names the wrong
+            cause. The answer is this method's answer: move the TASK home,
+            never FM_HOME.
         """
         env = dict(os.environ)
         # The compartment's own leg configuration and any state override must
@@ -1346,15 +1380,24 @@ class Relay:
         env["FM_SPAWN_CLOUD"] = "azure"
         env["FM_SPAWN_PARENT_TASK"] = self.task
         env["FM_SPAWN_PARENT_TASK_GENERATION"] = self.generation
+        # After the pops, on purpose: see ORDERING HAZARD above.
+        env["FM_SPAWN_TASK_HOME"] = str(self.home)
         return env
 
     def spawn_child(self, message, digest, landed):
+        # resolve_project is the ONE place that decides the compartment's own
+        # home is usable, and it refuses by name before any side effect, so
+        # spawn_environment below can rely on self.home being a real
+        # directory. Repeating that check here would put one invariant in two
+        # places; a silent fallback to the primary would be the exact home
+        # confusion this split exists to prevent.
         project, failed = self.resolve_project()
         if failed:
             self.refuse(digest, landed, failed)
             return
         child_task = "{}-c{}".format(self.task, digest[:8])
-        brief = self.spawn_home / "data" / child_task / "brief.md"
+        # The TASK home's data/, which is where fm-spawn looks for the brief.
+        brief = self.home / "data" / child_task / "brief.md"
         try:
             write_atomic(brief, message["brief"].encode("utf-8"))
         except OSError as exc:
@@ -1487,8 +1530,14 @@ class Relay:
         The controller queue records reaching a terminal state, never whether
         the work succeeded, so the split comes from the result the child's own
         lane wrote; absent, the honest answer says so rather than guessing.
+
+        The child's lane writes that result under the TASK home's state/,
+        because the split aimed this task's state/ there; the primary's
+        state/ holds the money document and this compartment's own files.
         """
-        path = self.spawn_home / "state" / "{}.worker-result.json".format(child_task)
+        if self.home is None:
+            return "complete (this compartment's own home is not recorded locally)"
+        path = self.home / "state" / "{}.worker-result.json".format(child_task)
         try:
             result = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -1769,7 +1818,11 @@ def main(argv=None):
     )
     relay.add_argument(
         "--home", required=True,
-        help="the compartment's local secondmate home (delta bundles only)",
+        help=(
+            "the compartment's own local secondmate home: the TASK home for its "
+            "children (state/, data/, projects/) and the worktree delta bundles "
+            "are cut from"
+        ),
     )
     relay.add_argument("--controller", required=True, help="the ONE money authority document")
     relay.add_argument("--spawn-bin", required=True)
