@@ -1226,12 +1226,12 @@ validate_worktree_custody() {  # <worktree> <project>
   fm_project_script_declared "$wt" "$CUSTODY_CHECK_SCRIPT" || wt_declared=$?
   if [ "$project_declared" = "$FM_PROJECT_SCRIPT_UNCONFIRMED" ]; then
     echo "REFUSED: cannot confirm whether project $project publishes a $CUSTODY_CHECK_SCRIPT check." >&2
-    echo "Make its package.json readable and valid, or get the captain's explicit OK to discard, then --force." >&2
+    echo "Make its package.json readable and valid before retrying." >&2
     return 1
   fi
   if [ "$wt_declared" = "$FM_PROJECT_SCRIPT_UNCONFIRMED" ]; then
     echo "REFUSED: cannot confirm whether worktree $wt publishes a $CUSTODY_CHECK_SCRIPT check." >&2
-    echo "Make its package.json readable and valid, or get the captain's explicit OK to discard, then --force." >&2
+    echo "Make its package.json readable and valid before retrying." >&2
     return 1
   fi
   if [ "$project_declared" = "$FM_PROJECT_SCRIPT_ABSENT" ] \
@@ -1241,7 +1241,7 @@ validate_worktree_custody() {  # <worktree> <project>
   case "$CUSTODY_CHECK_TIMEOUT" in
     ''|*[!0-9]*|0)
       echo "REFUSED: $CUSTODY_CHECK_SCRIPT requires a positive integer timeout, not '$CUSTODY_CHECK_TIMEOUT'." >&2
-      echo "Set FM_TEARDOWN_CUSTODY_TIMEOUT correctly, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Set FM_TEARDOWN_CUSTODY_TIMEOUT correctly before retrying." >&2
       return 1
       ;;
   esac
@@ -1249,12 +1249,12 @@ validate_worktree_custody() {  # <worktree> <project>
   [ "$rc" -eq 0 ] && return 0
   if [ "$rc" -eq 127 ]; then
     echo "REFUSED: worktree $wt publishes a $CUSTODY_CHECK_SCRIPT check but $(fm_project_script_manager "$wt") is unavailable to run it." >&2
-    echo "Install it, or get the captain's explicit OK to discard, then --force." >&2
+    echo "Install it before retrying." >&2
     return 1
   fi
   echo "REFUSED: $CUSTODY_CHECK_SCRIPT says worktree $wt is not this task's to discard (exit $rc)." >&2
   printf '%s\n' "$out" >&2
-  echo "Resolve what that check reports first, or get the captain's explicit OK to discard, then --force." >&2
+  echo "Resolve what that check reports first, then retry." >&2
   return 1
 }
 
@@ -2096,6 +2096,30 @@ validate_firstmate_home_children_removal() {
   done
 }
 
+validate_firstmate_home_children_custody() {
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home
+  sub_state="$home/state"
+  [ -d "$sub_state" ] || return 0
+  for child_meta in "$sub_state"/*.meta; do
+    [ -e "$child_meta" ] || continue
+    child_id=$(basename "$child_meta" .meta)
+    child_wt=$(meta_value "$child_meta" worktree)
+    child_proj=$(meta_value "$child_meta" project)
+    child_kind=$(meta_value "$child_meta" kind)
+    [ -n "$child_kind" ] || child_kind=ship
+    if [ "$child_kind" = secondmate ]; then
+      child_home=$(meta_value "$child_meta" home)
+      [ -n "$child_home" ] || child_home=$child_wt
+      validate_firstmate_home_children_custody "$child_home" || return 1
+    elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+      validate_worktree_custody "$child_wt" "$child_proj" || {
+        echo "REFUSED: child task $child_id failed its custody check; forced cleanup changed nothing." >&2
+        return 1
+      }
+    fi
+  done
+}
+
 TEARDOWN_HERDR_LOCK_RECORDS=
 teardown_release_herdr_locks() {
   local lock_session lock_path
@@ -2345,6 +2369,7 @@ if [ "$KIND" = secondmate ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+    validate_firstmate_home_children_custody "$HOME_PATH" || exit 1
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
     fi
@@ -2452,7 +2477,7 @@ fi
 # Custody comes after the landed-work verdict and before anything destructive:
 # a copy whose work has landed can still be somebody else's copy. Not for
 # kind=secondmate, whose home is not a pooled task working copy.
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ] && [ "$KIND" != secondmate ]; then
+if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   validate_worktree_custody "$WT" "$PROJ" || exit 1
 fi
 

@@ -1791,6 +1791,7 @@ assert_worktree_unclaimed() {  # <worktree>
     claimed_real=$(real_path_or_raw "$claimed")
     [ "$claimed_real" = "$wt_real" ] || continue
     echo "error: task $other_id already claims the working copy '$claimed' that treehouse just handed task $ID; refusing to launch a second owner into it, because either task's cleanup would hard-reset the other's work. Nothing was returned or reset - reconcile $other_id first (tear it down once its work has landed, or correct its record), then spawn $ID again. Endpoint $T is parked in that copy." >&2
+    HERDR_PROJECTION_ABORT_CLEANUP=0
     exit 1
   done
 }

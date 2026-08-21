@@ -457,6 +457,75 @@ test_teardown_refuses_a_red_custody_verdict() {
   pass "cleanup refuses when the project's custody check says the copy is not this task's"
 }
 
+test_forced_teardown_still_refuses_a_red_custody_verdict() {
+  local case_dir out status
+  case_dir=$(make_teardown_case teardown-custody-force-red)
+  add_custody_check "$case_dir" 1
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  out=$(run_teardown_case "$case_dir" --force)
+  status=$?
+  expect_code 1 "$status" "forced cleanup should still refuse another owner's copy"
+  assert_contains "$out" "check:worktree-custody" "the forced refusal did not name the project's check"
+  assert_present "$case_dir/state/task-c1.meta" "forced custody refusal removed the task record"
+  assert_absent "$case_dir/treehouse.log" "forced custody refusal returned the working copy"
+  [ -d "$case_dir/wt" ] || fail "forced custody refusal removed the working copy"
+  pass "--force discards own work but never bypasses a red custody verdict"
+}
+
+test_forced_secondmate_cleanup_preflights_child_custody() {
+  local case_dir home out status
+  case_dir=$(make_teardown_case teardown-child-custody-force-red)
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-c1 > "$home/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-c1.meta" \
+    "window=firstmate:fm-task-c1" \
+    "endpoint_task_id=task-c1" \
+    "worktree=$home" \
+    "home=$home" \
+    "project=$case_dir/project" \
+    "kind=secondmate" \
+    "mode=secondmate"
+  fm_write_meta "$home/state/child-c1.meta" \
+    "window=firstmate:fm-child-c1" \
+    "endpoint_task_id=child-c1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  : > "$home/state/child-c1.status"
+  add_custody_check "$case_dir" 1
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/endpoint.log"
+exit 0
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+
+  out=$(run_teardown_case "$case_dir" --force)
+  status=$?
+  expect_code 1 "$status" "forced secondmate cleanup should refuse a child owned elsewhere"
+  assert_contains "$out" "child task child-c1 failed its custody check" "the refusal did not identify the protected child"
+  assert_absent "$case_dir/endpoint.log" "child custody refusal closed an endpoint"
+  assert_absent "$case_dir/treehouse.log" "child custody refusal returned a working copy"
+  assert_present "$case_dir/state/task-c1.meta" "child custody refusal removed the parent record"
+  assert_present "$home/state/child-c1.meta" "child custody refusal removed the child record"
+  [ -d "$case_dir/wt" ] && [ -d "$home" ] \
+    || fail "child custody refusal removed the child worktree or secondmate home"
+  pass "forced secondmate cleanup validates every child before any mutation"
+}
+
 test_teardown_proceeds_on_a_green_custody_verdict() {
   local case_dir out status
   case_dir=$(make_teardown_case teardown-custody-green)
@@ -553,6 +622,8 @@ test_spawn_continues_when_the_release_step_fails
 test_spawn_bounds_a_hanging_release_step_without_external_timeout
 test_spawn_rejects_a_nonpositive_release_timeout
 test_teardown_refuses_a_red_custody_verdict
+test_forced_teardown_still_refuses_a_red_custody_verdict
+test_forced_secondmate_cleanup_preflights_child_custody
 test_teardown_proceeds_on_a_green_custody_verdict
 test_teardown_skips_projects_that_publish_no_check
 test_teardown_refuses_when_a_published_check_cannot_be_run

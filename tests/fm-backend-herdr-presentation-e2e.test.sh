@@ -155,7 +155,7 @@ if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.tab.tab_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-tab"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-pane"
       ;;
-    $'└ abort-a · p:'*|$'└ abort-b · p:'*)
+    $'└ abort-a · p:'*|$'└ abort-b · p:'*|$'└ custody-conflict · p:'*)
       task=${label#$'└ '}; task=${task%% *}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" > "$POST_CREATE_ABORT_CONTROL/$task/workspace"
@@ -168,7 +168,7 @@ if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/task-pane"
       printf '%s\n' task-created > "$ACTIVE_SEEDED_CONTROL/stage"
       ;;
-    fm-abort-a|fm-abort-b)
+    fm-abort-a|fm-abort-b|fm-custody-conflict)
       task=${label#fm-}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
@@ -176,10 +176,14 @@ if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
   esac
 fi
 if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
-  for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
+  for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-* "$POST_CREATE_ABORT_CONTROL"/custody-conflict; do
     [ -d "$task_dir" ] || continue
     [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
-    out=$(printf '%s' "$out" | jq --arg cwd "$POST_CREATE_ABORT_CONTROL/not-a-worktree" '.result.pane.foreground_cwd = $cwd')
+    task_cwd="$POST_CREATE_ABORT_CONTROL/not-a-worktree"
+    if [ "$(basename "$task_dir")" = custody-conflict ]; then
+      task_cwd=$(cat "$POST_CREATE_ABORT_CONTROL/lease-path")
+    fi
+    out=$(printf '%s' "$out" | jq --arg cwd "$task_cwd" '.result.pane.foreground_cwd = $cwd')
     break
   done
 fi
@@ -207,6 +211,10 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
+if [ -f "$POST_CREATE_ABORT_CONTROL/lease-path" ] && [ "${1:-}" = get ]; then
+  cat "$POST_CREATE_ABORT_CONTROL/lease-path"
+  exit 0
+fi
 if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
   exit 0
 fi
@@ -478,6 +486,38 @@ assert_no_projection_mutation_since() {  # <line-count> <case-name>
   fi
 }
 
+test_projected_custody_conflict() {
+  local conflict_wt conflict_head conflict_start conflict_pane
+  conflict_wt="$TMP_ROOT/custody-conflict-wt"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$conflict_wt" HEAD
+  conflict_head=$(git -C "$conflict_wt" rev-parse HEAD)
+  printf 'window=firstmate:fm-other-owner\nworktree=%s\nproject=%s\nkind=ship\nmode=no-mistakes\n' \
+    "$conflict_wt" "$PROJECT_DIR" > "$HOME_DIR/state/other-owner.meta"
+  mkdir -p "$POST_CREATE_ABORT_CONTROL"
+  printf '%s\n' "$conflict_wt" > "$POST_CREATE_ABORT_CONTROL/lease-path"
+  conflict_start=$(log_line_count)
+  if spawn_task custody-conflict "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/custody-conflict.out" 2> "$TMP_ROOT/custody-conflict.err"; then
+    fail "projected custody conflict unexpectedly spawned a second owner"
+  fi
+  grep -F "other-owner already claims" "$TMP_ROOT/custody-conflict.err" >/dev/null 2>&1 \
+    || fail "projected custody conflict did not name the existing owner"
+  conflict_pane=$(cat "$POST_CREATE_ABORT_CONTROL/custody-conflict/task-pane")
+  lab pane get "$conflict_pane" >/dev/null 2>&1 \
+    || fail "projected custody conflict closed the parked endpoint"
+  if sed -n "$((conflict_start + 1)),\$p" "$HERDR_CALL_LOG" \
+      | grep -F $'pane\tclose\t'"$conflict_pane" >/dev/null 2>&1; then
+    fail "projected custody conflict attempted to close the parked endpoint"
+  fi
+  [ ! -e "$HOME_DIR/state/custody-conflict.meta" ] \
+    || fail "projected custody conflict published a second owner record"
+  [ "$(git -C "$conflict_wt" rev-parse HEAD)" = "$conflict_head" ] \
+    || fail "projected custody conflict changed the existing owner's worktree"
+  rm -rf "$POST_CREATE_ABORT_CONTROL"
+  rm -f "$HOME_DIR/state/custody-conflict.herdr-presentation" "$HOME_DIR/state/other-owner.meta"
+  git -C "$PROJECT_DIR" worktree remove --force "$conflict_wt"
+  pass "real Herdr lab: custody conflict preserves the projected endpoint and claimed copy"
+}
+
 HOME_DIR="$TMP_ROOT/home"
 PROJECT_DIR="$TMP_ROOT/project"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" \
@@ -486,7 +526,7 @@ mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" \
   "$HOME_DIR/data/order-fail" "$HOME_DIR/data/fm-hibit-resume-r1" \
   "$HOME_DIR/data/wheelhouse-healing-r1"
 mkdir -p "$HOME_DIR/data/active-seeded" "$HOME_DIR/data/abort-a" "$HOME_DIR/data/abort-b" \
-  "$HOME_DIR/data/lock-contended" "$HOME_DIR/data/default-on"
+  "$HOME_DIR/data/custody-conflict" "$HOME_DIR/data/lock-contended" "$HOME_DIR/data/default-on"
 touch "$HOME_DIR/state/.last-watcher-beat"
 # Presentation spaces are on by default, so the flat baseline below opts out
 # explicitly; the projected cases each restate the setting they exercise.
@@ -501,6 +541,7 @@ printf 'Wheelhouse-style projection restart fixture.\n' > "$HOME_DIR/data/wheelh
 printf 'Projection active seeded fixture.\n' > "$HOME_DIR/data/active-seeded/brief.md"
 printf 'Projection abort fixture A.\n' > "$HOME_DIR/data/abort-a/brief.md"
 printf 'Projection abort fixture B.\n' > "$HOME_DIR/data/abort-b/brief.md"
+printf 'Projection custody-conflict fixture.\n' > "$HOME_DIR/data/custody-conflict/brief.md"
 printf 'Projection lock contention fixture.\n' > "$HOME_DIR/data/lock-contended/brief.md"
 printf 'Projection default-on fixture.\n' > "$HOME_DIR/data/default-on/brief.md"
 make_project "$PROJECT_DIR"
@@ -643,6 +684,12 @@ SECOND_TWO_INFO=$(lab workspace get "$SECOND_TWO_WSID") || fail "focused secondm
 [ "$(printf '%s' "$SECOND_TWO_INFO" | jq -r '.result.workspace.focused')" = true ] \
   || fail "projected create or workspace.move stole focus from the captain's current space"
 pass "real Herdr lab: every projected create, task-tab create, seeded prune, and move preserves active workspace and tab"
+if [ "${FM_HERDR_PRESENTATION_CUSTODY_ONLY:-0}" = 1 ]; then
+  test_projected_custody_conflict
+  cleanup_all
+  trap - EXIT
+  exit 0
+fi
 
 mkdir -p "$ACTIVE_SEEDED_CONTROL"
 printf '%s\n' requested > "$ACTIVE_SEEDED_CONTROL/stage"
@@ -1411,6 +1458,8 @@ assert_no_projection_mutation_since "$START" "live duplicate-token recovery"
 lab workspace get "$DUP1_WSID" >/dev/null 2>&1 || fail "live duplicate refusal removed the first workspace"
 lab workspace get "$DUP2_WSID" >/dev/null 2>&1 || fail "live duplicate refusal removed the second workspace"
 pass "real Herdr lab: missing, renamed, and duplicate tokens trigger zero destructive or adoptive calls, and live duplicate risk refuses launch"
+
+test_projected_custody_conflict
 
 STATUS_JSON=$(lab status --json)
 HERDR_VERSION=$(printf '%s' "$STATUS_JSON" | jq -r '.client.version // "unknown"')
