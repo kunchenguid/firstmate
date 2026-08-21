@@ -31,7 +31,6 @@ const DEFAULT_TIMEOUT_MS = 20 * 1000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_MAX_AUTH_BYTES = 1024 * 1024;
 const DEFAULT_REVISION_CHECK_MS = 1000;
-const WALL_CLOCK_QUANTIZATION_MS = 2;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const WINDOWS_TREE_KILL_TIMEOUT_MS = 5000;
 const WINDOWS_JOB_SUPERVISOR = String.raw`
@@ -660,12 +659,10 @@ type ClockSample = {
 function conservativePublicationAgeMs(
   processStartedAt: ClockSample | null,
   publishedAt: ClockSample | null,
-  generatedAtMs: number,
 ): number | null {
   if (
     !processStartedAt ||
     !publishedAt ||
-    !Number.isFinite(generatedAtMs) ||
     publishedAt.monotonicBeforeMs < processStartedAt.monotonicAfterMs
   ) return null;
   const minimumProcessElapsedMs =
@@ -678,21 +675,7 @@ function conservativePublicationAgeMs(
     minimumProcessElapsedMs < 0 ||
     maximumProcessElapsedMs < minimumProcessElapsedMs
   ) return null;
-
-  const wallElapsedMs = publishedAt.wallMs - processStartedAt.wallMs;
-  const consistentClocks =
-    wallElapsedMs >= minimumProcessElapsedMs - WALL_CLOCK_QUANTIZATION_MS &&
-    wallElapsedMs <= maximumProcessElapsedMs + WALL_CLOCK_QUANTIZATION_MS;
-  const generatedDuringProcess =
-    generatedAtMs >= processStartedAt.wallMs - WALL_CLOCK_QUANTIZATION_MS &&
-    generatedAtMs <= publishedAt.wallMs + WALL_CLOCK_QUANTIZATION_MS;
-  if (!consistentClocks || !generatedDuringProcess) return maximumProcessElapsedMs;
-
-  const publicationSampleWidthMs =
-    publishedAt.monotonicAfterMs - publishedAt.monotonicBeforeMs;
-  const mappedAgeMs = Math.max(0, publishedAt.wallMs - generatedAtMs) +
-    publicationSampleWidthMs + WALL_CLOCK_QUANTIZATION_MS;
-  return Math.min(maximumProcessElapsedMs, mappedAgeMs);
+  return maximumProcessElapsedMs;
 }
 
 function decodeUtf8(value: Uint8Array): string | null {
@@ -2150,7 +2133,6 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             const publicationAgeMs = conservativePublicationAgeMs(
               processStartedAt,
               publishedAt,
-              timelineOriginMs,
             );
             const retainedPublication = publicationAgeMs === null ? null : publication;
             const elapsedAtPublicationMs = publicationAgeMs ?? 0;

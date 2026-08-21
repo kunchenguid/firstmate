@@ -3702,10 +3702,59 @@ const transientClockGap = makePi(createFirstmateQuotaStatusExtension({
 }));
 await transientClockGap.emit("session_start", { reason: "startup" });
 await waitFor(
-  () => transientClockGap.widgetText(400).includes("week 94% left"),
-  "pre-generation process startup expired a newly generated quota window",
+  () => transientClockGap.widgetText(400).includes("GPT-5.3-Codex-Spark session 100% left"),
+  "conservative process-age fixture did not publish a fresh sibling window",
+);
+assert(
+  !transientClockGap.widgetText(400).includes("week 94% left"),
+  "ambiguous process startup under-aged quota at publication",
 );
 await transientClockGap.emit("session_shutdown", { reason: "quit" });
+delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
+const clockAbaStart = Date.now();
+process.env.FM_QUOTA_TEST_NOW_MS = String(clockAbaStart + 15_000);
+process.env.FM_QUOTA_TEST_FIRST_RESET_MS = String(10_000);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  clockAbaStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const callsBeforeClockAba = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+const clockAba = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => {
+    const calls = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+      .trim()
+      .split(/\n/)
+      .filter(Boolean).length;
+    return clockAbaStart + (calls > callsBeforeClockAba ? 20_000 : 0);
+  },
+  monotonicNow: () => {
+    const calls = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+      .trim()
+      .split(/\n/)
+      .filter(Boolean).length;
+    return calls > callsBeforeClockAba ? 20_000 : 0;
+  },
+}));
+await clockAba.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => clockAba.widgetText(400).includes("GPT-5.3-Codex-Spark session 100% left"),
+  "clock-ABA fixture did not publish a fresh sibling window",
+);
+assert(
+  !clockAba.widgetText(400).includes("week 94% left"),
+  "clock ABA under-aged expired quota at publication",
+);
+await clockAba.emit("session_shutdown", { reason: "quit" });
 delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
