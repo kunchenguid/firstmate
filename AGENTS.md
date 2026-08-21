@@ -100,6 +100,9 @@ state/               runtime records and signals; gitignored
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire
+  <id>.completion-receipt  atomic completion receipt published by fm-complete.sh, bound to spawn_gen, kind, mode, outcome, worktree HEAD, and optional PR URL; stale incarnations are rejected (fm-completion-lib.sh)
+  <id>.process-exit-receipt  atomic process-exit receipt published by fm-harness-run.sh, bound to spawn_gen, harness, backend, the exact child PID, and its kernel-derived process identity; persistent secondmates are excluded
+  <id>.completion-shadow  per-harness, per-backend shadow comparison log between receipt conclusions and the unchanged current crew state, written by fm-completion-shadow.sh
   .pr-check-quarantine/  private non-runnable storage for checks neutralized by the non-executing migration
   .pr-check-migration.log  private per-task outcomes distinguishing rebuilt or canonically registered replacement polls, quarantined unarmed polls, and incomplete migrations
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs

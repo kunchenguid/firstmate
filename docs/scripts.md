@@ -52,6 +52,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-remote-readiness-lib.sh` | Shared remote second-mate readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
 | [`fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) | Accepted origin-form owner shared by both remote provisioning boundaries |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
+| `fm-harness-run.sh`      | Wait for one exact ordinary harness child and publish its observation-only process-exit receipt |
+| `fm-complete.sh`         | Publish a current-incarnation completion receipt and its migration-compatible status event |
+| `fm-completion-lib.sh`   | Validate completion and process-exit receipt schemas and process identities |
+| `fm-completion-shadow.sh` | Record and read per-harness, per-backend comparisons between receipts and current crew state |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer shapes, capability-aware screen classification, and verdicts |

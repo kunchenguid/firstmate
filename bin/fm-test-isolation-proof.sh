@@ -99,6 +99,9 @@ exclusion_reason() {
     fm-spawn-dispatch-profile.test.sh|fm-spawn-worktree-settle.test.sh|fm-trace-context-spawn.test.sh)
       printf '%s\n' 'real isolated git worktrees plus spawn settle loops; gray zone until dedicated proof'
       ;;
+    fm-completion-receipt.test.sh)
+      printf '%s\n' 'real process-signal waits plus isolated git fixtures; keep serial until dedicated proof'
+      ;;
     fm-pr-check-security.test.sh)
       printf '%s\n' 'watcher lock / migration / poll security surface; intentional shared-lock class'
       ;;
@@ -189,6 +192,7 @@ list_exclusions_for_report() {
 fm-test-isolation-proof.test.sh
 fm-backend-tmux-smoke.test.sh
 fm-backend.test.sh
+fm-completion-receipt.test.sh
 fm-spawn-dispatch-profile.test.sh
 fm-spawn-worktree-settle.test.sh
 fm-trace-context-spawn.test.sh

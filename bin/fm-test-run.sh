@@ -201,6 +201,7 @@ family_for_basename() {
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
+    fm-completion-receipt.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
@@ -413,6 +414,7 @@ tests/fm-grok-stop-live-e2e.test.sh 19
 tests/fm-guard-stale-banner.test.sh 2917
 tests/fm-herdr-session-cleanup.test.sh 4802
 tests/fm-kimi-harness.test.sh 12590
+tests/fm-completion-receipt.test.sh 16000
 tests/fm-opencode-primary-live-e2e.test.sh 18
 tests/fm-operational-input.test.sh 184
 tests/fm-pending-reply.test.sh 7328
@@ -886,6 +888,9 @@ families_for_changed_path() {
     bin/fm-backend.sh|bin/fm-backend-hometag-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
+      ;;
+    bin/fm-complete.sh|bin/fm-completion-lib.sh|bin/fm-completion-shadow.sh|bin/fm-harness-run.sh)
+      printf '%s\n' backend-dispatch
       ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
