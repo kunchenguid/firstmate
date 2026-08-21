@@ -16,7 +16,7 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--wayfinder-state <file>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -26,8 +26,8 @@
 #   backend, kind, project or home, worktree, endpoint - comes from the task's
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
-#   model, and effort may change, which is what makes a harness switch one
-#   ordinary relaunch. It refuses unless the recorded endpoint is positively
+#   model, effort, and a fresh Wayfinder snapshot may change. It refuses unless
+#   the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
 #   worktree, and clears the previous harness's per-task wiring before arming
@@ -63,8 +63,8 @@
 #   bin/fm-wayfinder-parent.sh before any worker endpoint exists. Pass
 #   --wayfinder-state <snapshot> with the GitHub snapshot that command
 #   consumes. Pass --wayfinder-independent only when this ship does not
-#   depend on the Wayfinder map. Scout, secondmate, and --relaunch spawns
-#   skip that check. The project command owns the resolution policy;
+#   depend on the Wayfinder map. Scout and secondmate spawns skip that check.
+#   The project command owns the resolution policy;
 #   Firstmate only invokes it.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
@@ -294,6 +294,7 @@ YOLO_SET=0
 TRACEPARENT_SET=0
 WAYFINDER_STATE_SET=0
 WAYFINDER_INDEPENDENT=0
+WAYFINDER_MAP_INDEPENDENT=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -350,6 +351,13 @@ done
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
 [ "$WAYFINDER_STATE_SET" -eq 0 ] || [ -n "$WAYFINDER_STATE" ] || { echo "error: --wayfinder-state requires a non-empty value" >&2; exit 1; }
 [ "$WAYFINDER_STATE_SET" -eq 0 ] || [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || { echo "error: --wayfinder-state and --wayfinder-independent cannot be combined" >&2; exit 1; }
+resolve_project_dir_arg() {
+  local path=$1
+  case "$path" in
+    projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
+    *) printf '%s\n' "$path" ;;
+  esac
+}
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -377,8 +385,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
-  [ "$WAYFINDER_STATE_SET" -eq 0 ] || { echo "error: --relaunch does not re-run Wayfinder handoff; --wayfinder-state cannot override it" >&2; exit 1; }
-  [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || { echo "error: --relaunch does not re-run Wayfinder handoff; --wayfinder-independent cannot override it" >&2; exit 1; }
+  [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded Wayfinder dependency; --wayfinder-independent cannot override it" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -896,7 +903,27 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
-  [ "$WAYFINDER_STATE_SET" -eq 0 ] || shared_args+=(--wayfinder-state "$WAYFINDER_STATE")
+  if [ "$WAYFINDER_STATE_SET" -eq 1 ]; then
+    batch_wayfinder_project=
+    for pair in "${POS[@]}"; do
+      case "$pair" in
+        *=*) ;;
+        *) continue ;;
+      esac
+      batch_project=$(resolve_project_dir_arg "${pair#*=}")
+      [ -f "$batch_project/bin/wayfinder-lifecycle-gate" ] || continue
+      batch_project=$(cd "$batch_project" && pwd -P) || {
+        echo "error: batch Wayfinder project cannot be resolved: ${pair#*=}" >&2
+        exit 1
+      }
+      if [ -n "$batch_wayfinder_project" ] && [ "$batch_wayfinder_project" != "$batch_project" ]; then
+        echo "error: --wayfinder-state cannot be shared by distinct projects that publish bin/wayfinder-lifecycle-gate; dispatch each project separately" >&2
+        exit 1
+      fi
+      batch_wayfinder_project=$batch_project
+    done
+    shared_args+=(--wayfinder-state "$WAYFINDER_STATE")
+  fi
   [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || shared_args+=(--wayfinder-independent)
   for pair in "${POS[@]}"; do
     case "$pair" in
@@ -1038,6 +1065,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  case "$(fm_meta_get "$RELAUNCH_META" wayfinder_independent)" in
+    ''|0) WAYFINDER_MAP_INDEPENDENT=0 ;;
+    1) WAYFINDER_MAP_INDEPENDENT=1 ;;
+    *) echo "error: task $ID has an invalid wayfinder_independent record; refusing to relaunch" >&2; exit 1 ;;
+  esac
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1497,14 +1529,6 @@ resolved_existing_dir() {
   cd "$path" && pwd -P
 }
 
-resolve_project_dir_arg() {
-  local path=$1
-  case "$path" in
-    projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
-    *) printf '%s\n' "$path" ;;
-  esac
-}
-
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
   [ -n "$ancestor" ] || return 1
@@ -1711,16 +1735,19 @@ fi
 # Wayfinder lifecycle command rejects handoff. Presence of that public command
 # is the project-local signal; --wayfinder-independent is the explicit opt-out
 # for work that does not depend on the map. Scout and secondmate spawns never
-# enter this path. Relaunch recovery of an already-dispatched ship is skipped
-# above because --relaunch refuses these flags and returns before this check.
-if [ "$KIND" = ship ] && [ "$RELAUNCH" -eq 0 ] && [ -f "$PROJ_ABS/bin/wayfinder-lifecycle-gate" ]; then
-  if [ "$WAYFINDER_INDEPENDENT" -eq 0 ]; then
+# enter this path.
+[ "$RELAUNCH" -eq 1 ] || WAYFINDER_MAP_INDEPENDENT=$WAYFINDER_INDEPENDENT
+if [ "$KIND" = ship ] && [ -f "$PROJ_ABS/bin/wayfinder-lifecycle-gate" ]; then
+  if [ "$WAYFINDER_MAP_INDEPENDENT" -eq 0 ]; then
     if [ "$WAYFINDER_STATE_SET" -eq 0 ]; then
       echo "error: $ID ships against a project with bin/wayfinder-lifecycle-gate; pass --wayfinder-state <snapshot> so Firstmate can verify handoff, or --wayfinder-independent when this work does not depend on the Wayfinder map" >&2
       exit 1
     fi
     "$FM_ROOT/bin/fm-wayfinder-parent.sh" handoff --project "$PROJ_ABS" --state "$WAYFINDER_STATE" \
       || exit $?
+  elif [ "$WAYFINDER_STATE_SET" -eq 1 ]; then
+    echo "error: $ID is recorded map-independent; --wayfinder-state does not apply to its relaunch" >&2
+    exit 1
   fi
 fi
 
@@ -2679,7 +2706,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo wayfinder_independent tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2694,6 +2721,7 @@ preserve_relaunch_meta() {
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  [ "$WAYFINDER_MAP_INDEPENDENT" -eq 0 ] || echo "wayfinder_independent=1"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

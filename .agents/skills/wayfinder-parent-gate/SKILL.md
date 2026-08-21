@@ -37,9 +37,11 @@ Build the GitHub snapshot as that help describes; include local reports, captain
 
 ## Dispatch enforcement
 
-A ship spawn or scout promotion against a project that publishes `bin/wayfinder-lifecycle-gate` requires a passing `handoff` check.
+A ship spawn, scout promotion, or map-dependent ship relaunch against a project that publishes `bin/wayfinder-lifecycle-gate` requires a passing `handoff` check.
 Pass `--wayfinder-state <snapshot>` to `bin/fm-spawn.sh` or `bin/fm-promote.sh`.
 Pass `--wayfinder-independent` only when the work does not depend on the Wayfinder map.
+A relaunch takes its fresh snapshot through `bin/fm-control.sh <task-id> relaunch --wayfinder-state <snapshot>`.
+A map-independent spawn or promotion records that exemption for later relaunches.
 A scout spawn stays off that handoff path so read-only research can still run.
 
 ## Operating sequence
@@ -48,5 +50,5 @@ A scout spawn stays off that handoff path so read-only research can still run.
 2. If the worker is a research scout whose task forbids project or GitHub mutation, leave it read-only and take its report as input.
 3. Complete captain-call inventory through `captain-hold-lifecycle` as local input.
 4. As parent, write the project's tracker resolution, then verify `accept-child` before recording the child as Wayfinder-resolved.
-5. Verify `handoff` before a map-dependent ship spawn or promotion.
+5. Verify `handoff` before a map-dependent ship spawn, promotion, or relaunch.
 6. Stop if either project command rejects the snapshot; repair tracker state and rerun the same command rather than archiving or dispatching on local completion alone.

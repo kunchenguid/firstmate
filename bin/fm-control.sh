@@ -5,7 +5,7 @@
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
-#                                         [--effort <level>]
+#                                         [--effort <level>] [--wayfinder-state <file>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -187,9 +187,11 @@ fi
 NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
+WAYFINDER_STATE=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+WAYFINDER_STATE_SET=0
 NOTE=
 NOTE_SET=0
 want_value=
@@ -202,6 +204,7 @@ for a in "$@"; do
       harness) NEW_HARNESS=$a; HARNESS_SET=1 ;;
       model) NEW_MODEL=$a; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$a; EFFORT_SET=1 ;;
+      wayfinder-state) WAYFINDER_STATE=$a; WAYFINDER_STATE_SET=1 ;;
       note) NOTE=$a; NOTE_SET=1 ;;
       note-file)
         [ -f "$a" ] || die "--note-file '$a' is not a readable file"
@@ -219,6 +222,8 @@ for a in "$@"; do
     --model=*) NEW_MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) NEW_EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --wayfinder-state) want_value=wayfinder-state ;;
+    --wayfinder-state=*) WAYFINDER_STATE=${a#--wayfinder-state=}; WAYFINDER_STATE_SET=1 ;;
     --note) want_value=note ;;
     --note=*) NOTE=${a#--note=}; NOTE_SET=1 ;;
     --note-file) want_value=note-file ;;
@@ -233,12 +238,13 @@ done
 [ -z "$want_value" ] || die "--$want_value requires a value"
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$WAYFINDER_STATE_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+    || die "--harness, --model, --effort, --wayfinder-state, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
+[ "$WAYFINDER_STATE_SET" = 0 ] || [ -n "$WAYFINDER_STATE" ] || die "--wayfinder-state requires a non-empty value"
 case "$NEW_EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) die "--effort must be one of low, medium, high, xhigh, max" ;;
@@ -766,7 +772,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line project map_independent
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -789,6 +795,26 @@ do_relaunch() {
       die "task $ID records kind '$KIND', which has no defined relaunch shape"
       ;;
   esac
+
+  if [ "$KIND" = ship ]; then
+    project=$(fm_meta_get "$META" project)
+    if [ -f "$project/bin/wayfinder-lifecycle-gate" ]; then
+      map_independent=$(fm_meta_get "$META" wayfinder_independent)
+      case "$map_independent" in
+        ''|0)
+          [ "$WAYFINDER_STATE_SET" = 1 ] \
+            || die "task $ID relaunches against a project with bin/wayfinder-lifecycle-gate; pass --wayfinder-state <snapshot> so Firstmate can verify handoff"
+          "$SCRIPT_DIR/fm-wayfinder-parent.sh" handoff --project "$project" --state "$WAYFINDER_STATE" \
+            || die "the Wayfinder handoff for $ID was rejected before its agent was stopped"
+          ;;
+        1)
+          [ "$WAYFINDER_STATE_SET" = 0 ] \
+            || die "task $ID is recorded map-independent; --wayfinder-state does not apply to its relaunch"
+          ;;
+        *) die "task $ID has an invalid wayfinder_independent record; refusing to relaunch" ;;
+      esac
+    fi
+  fi
 
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"
@@ -814,6 +840,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  [ "$WAYFINDER_STATE_SET" = 0 ] || spawn_args+=(--wayfinder-state "$WAYFINDER_STATE")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1

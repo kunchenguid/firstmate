@@ -587,7 +587,46 @@ test_map_dependent_spawn_and_promote() {
   set -e
   expect_code 0 "$rc" "promotion with passing handoff should succeed"$'\n'"$out"
   assert_grep "kind=ship" "$home/state/$id.meta" "passing promotion did not become a ship"
+
+  id=promote-independent
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$project" \
+    "project=$project" \
+    "harness=codex" \
+    "kind=scout"
+  out=$(run_promote "$home" "$id" --mode no-mistakes --yolo off --wayfinder-independent)
+  rc=$?
+  expect_code 0 "$rc" "map-independent promotion should succeed without a snapshot"$'\n'"$out"
+  assert_grep "wayfinder_independent=1" "$home/state/$id.meta" \
+    "map-independent promotion did not preserve its relaunch exemption"
   pass "map-dependent dispatch is refused while handoff rejects and allowed when it passes"
+}
+
+test_batch_refuses_foreign_wayfinder_snapshot() {
+  local home first second fakebin snap out rc first_id second_id
+  home=$(make_home batch-wayfinder)
+  first=$(make_gated_project "$home" first)
+  second=$(make_gated_project "$home" second)
+  fakebin=$(fakebin_for "$home")
+  snap="$TMP_ROOT/batch-resolved.json"
+  write_snapshot "$snap" resolved
+  first_id=batch-wayfinder-first
+  second_id=batch-wayfinder-second
+  write_ship_brief "$home" "$first_id"
+  write_ship_brief "$home" "$second_id"
+
+  set +e
+  out=$(run_spawn "$home" "$fakebin" "$first_id=$first" "$second_id=$second" \
+    --harness claude --mode no-mistakes --yolo off --wayfinder-state "$snap")
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a Wayfinder snapshot must not cross gated projects"$'\n'"$out"
+  assert_contains "$out" "cannot be shared by distinct projects" \
+    "batch dispatch accepted a foreign Wayfinder snapshot"
+  assert_absent "$home/state/$first_id.meta" "foreign-snapshot batch wrote first task metadata"
+  assert_absent "$home/state/$second_id.meta" "foreign-snapshot batch wrote second task metadata"
+  pass "batch dispatch refuses a Wayfinder snapshot shared across gated projects"
 }
 
 test_missing_project_command_is_loud() {
@@ -611,4 +650,5 @@ test_historical_local_completion_is_not_resolution
 test_resolved_research_and_decision_children_pass
 test_complete_none_alone_remains_insufficient
 test_map_dependent_spawn_and_promote
+test_batch_refuses_foreign_wayfinder_snapshot
 test_missing_project_command_is_loud

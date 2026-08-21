@@ -181,6 +181,36 @@ run_spawn() {  # <case-dir> <args...>
     "$SPAWN" "$@" 2>&1
 }
 
+install_relaunch_wayfinder_gate() {  # <project-dir>
+  mkdir -p "$1/bin"
+  cat > "$1/bin/wayfinder-lifecycle-gate" <<'PY'
+#!/usr/bin/env python3
+import json
+import sys
+
+if len(sys.argv) == 4 and sys.argv[1] == "--state" and sys.argv[3] == "handoff":
+    with open(sys.argv[2], encoding="utf-8") as source:
+        if json.load(source).get("handoff") == "allowed":
+            print("handoff accepted")
+            raise SystemExit(0)
+print("gate failed", file=sys.stderr)
+raise SystemExit(2)
+PY
+  chmod +x "$1/bin/wayfinder-lifecycle-gate"
+}
+
+write_relaunch_wayfinder_snapshot() {  # <path> <allowed|rejected>
+  python3 - "$1" "$2" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    json.dumps({"handoff": sys.argv[2]}) + "\n", encoding="utf-8"
+)
+PY
+}
+
 meta_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.meta" | tail -1 | cut -d= -f2-
 }
@@ -785,6 +815,55 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+test_gated_ship_relaunch_rechecks_handoff_before_stopping() {
+  local dir bad good out rc before direct_before
+  dir=$(new_case wayfinder-relaunch rl36)
+  add_ship_task "$dir" rl36 claude
+  install_relaunch_wayfinder_gate "$dir/proj"
+  bad="$dir/rejected.json"
+  good="$dir/allowed.json"
+  write_relaunch_wayfinder_snapshot "$bad" rejected
+  write_relaunch_wayfinder_snapshot "$good" allowed
+  before=$(cat "$dir/home/data/rl36/brief.md")
+
+  out=$(run_control "$dir" rl36 relaunch --wayfinder-state "$bad" --note "resume safely")
+  rc=$?
+  expect_code 1 "$rc" "a rejecting handoff must refuse a gated relaunch"$'\n'"$out"
+  assert_contains "$out" "gate failed" "relaunch did not surface the project handoff rejection"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a rejecting handoff must not stop the running agent"
+  [ "$(cat "$dir/home/data/rl36/brief.md")" = "$before" ] \
+    || fail "a rejecting handoff must not append a relaunch note"
+
+  out=$(run_control "$dir" rl36 relaunch --wayfinder-state "$good" --note "resume safely")
+  rc=$?
+  expect_code 0 "$rc" "a passing handoff must allow a gated relaunch"$'\n'"$out"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a passing handoff did not start the replacement agent"
+
+  printf 'zsh' > "$dir/fake/command"
+  direct_before=$(cat "$dir/fake/literal")
+  out=$(run_spawn "$dir" rl36 --relaunch --wayfinder-state "$bad")
+  rc=$?
+  expect_code 2 "$rc" "a direct relaunch must recheck a rejecting handoff"$'\n'"$out"
+  assert_contains "$out" "gate failed" "direct relaunch did not surface the project handoff rejection"
+  [ "$(cat "$dir/fake/command")" = zsh ] \
+    || fail "a rejecting direct relaunch must not start a replacement agent"
+  [ "$(cat "$dir/fake/literal")" = "$direct_before" ] \
+    || fail "a rejecting direct relaunch must not deliver a launch command"
+
+  dir=$(new_case wayfinder-independent rl37)
+  add_ship_task "$dir" rl37 claude
+  install_relaunch_wayfinder_gate "$dir/proj"
+  printf 'wayfinder_independent=1\n' >> "$dir/home/state/rl37.meta"
+  out=$(run_control "$dir" rl37 relaunch --note "resume independent work")
+  rc=$?
+  expect_code 0 "$rc" "a recorded map-independent relaunch should not require a snapshot"$'\n'"$out"
+  [ "$(meta_field "$dir" rl37 wayfinder_independent)" = 1 ] \
+    || fail "a map-independent relaunch must preserve its recorded exemption"
+  pass "fm-control relaunch rechecks map-dependent handoff and preserves map independence"
+}
+
 # fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
 # from a raw command records that command's basename rather than the exact
 # adapter name. Retirement must resolve the same way, or a task recorded as
@@ -1334,6 +1413,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_gated_ship_relaunch_rechecks_handoff_before_stopping
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch

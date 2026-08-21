@@ -295,7 +295,7 @@ Write the task-specific brief under section 11 before spawning.
 
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
-A ship spawn or promotion against a project that publishes `bin/wayfinder-lifecycle-gate` requires that command's `handoff` unless the work is explicitly map-independent; load `wayfinder-parent-gate`.
+A ship spawn, promotion, or relaunch against a project that publishes `bin/wayfinder-lifecycle-gate` requires that command's `handoff` unless the work is explicitly map-independent; load `wayfinder-parent-gate`.
 After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship or scout work as under way.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 

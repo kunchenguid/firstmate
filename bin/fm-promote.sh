@@ -133,11 +133,12 @@ if [ -n "$PROMOTE_PROJECT" ] && [ -f "$PROMOTE_PROJECT/bin/wayfinder-lifecycle-g
 fi
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^wayfinder_independent=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || echo "wayfinder_independent=1"
 } >> "$TMP"
 mv "$TMP" "$META"
 TMP=
