@@ -1,0 +1,8 @@
+# Laptop-side systemd USER unit. Install to ~/.config/systemd/user/.
+[Unit]
+Description=Relay a short-lived Actions registration token to gex
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/gh-runner-token-relay.sh

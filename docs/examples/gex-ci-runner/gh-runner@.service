@@ -1,0 +1,21 @@
+# One ephemeral GitHub Actions runner. The instance name is <repo>-<slot>,
+# e.g. gh-runner@lensclash-1.service; supervise.sh splits it.
+#
+# Restart=always is what makes this ephemeral rather than long-lived: the
+# container serves exactly one job and exits, and the restart registers a
+# brand-new runner with a brand-new workspace.
+[Unit]
+Description=Ephemeral GitHub Actions runner %i (gex)
+After=network-online.target
+
+[Service]
+Type=exec
+Slice=gh-runner.slice
+ExecStart=/opt/gh-runner/supervise.sh %i
+Restart=always
+RestartSec=10
+# A job may be mid-run when systemd stops us; give it room to finish cleanly.
+TimeoutStopSec=300
+
+[Install]
+WantedBy=default.target

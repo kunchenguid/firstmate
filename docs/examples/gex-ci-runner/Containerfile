@@ -1,0 +1,62 @@
+# Ephemeral GitHub Actions runner image for gex44.
+# Built on gex by the unprivileged `ghrunner` user with rootless podman.
+#
+# Deliberately NOT based on a third-party runner image: the runner tarball is
+# fetched from GitHub's own release and pinned by SHA256, and nothing else in
+# here comes from an untrusted source.
+#
+# No docker client, no docker socket, no container runtime inside. None of the
+# CI workflows this serves uses `container:`, `services:` or docker (checked
+# 21.08.2026 across lensclash, SnackSuite, LensclashDB, GEX_GATEWAY), so the
+# capability is absent rather than merely unused.
+#
+# THE TOOLBOX IS DELIBERATELY SMALL. GitHub's `ubuntu-latest` image ships
+# hundreds of preinstalled tools; this one ships what our workflows actually
+# need. A workflow that silently relied on a hosted-image extra fails here
+# with `command not found` -- see docs/gex-ci-laeufer.md, "Was dem gehosteten
+# Bild fehlt". Node and Python are NOT baked in: setup-node and setup-uv
+# fetch their own.
+#
+# Layer order is chosen so that adding a tool does not invalidate the 226 MB
+# runner download.
+FROM docker.io/library/ubuntu:24.04
+
+ARG RUNNER_VERSION=2.336.0
+ARG RUNNER_SHA256=04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Layer 1: just enough to fetch and unpack the runner.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl tar \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --uid 1001 --shell /bin/bash runner
+
+# Layer 2: the runner itself, pinned. Stable across toolbox changes.
+WORKDIR /home/runner
+RUN curl -fsSL -o runner.tar.gz \
+      "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
+ && echo "${RUNNER_SHA256}  runner.tar.gz" | sha256sum -c - \
+ && tar xzf runner.tar.gz \
+ && rm runner.tar.gz \
+ && chown -R runner:runner /home/runner
+
+# Layer 3: the CI toolbox. Edit this line when a workflow needs more.
+#   libicu74                 - required by the runner's .NET host
+#   build-essential, python3 - npm packages with native addons (node-gyp)
+#   shellcheck               - testlab's gate; hosted images preinstall it
+#   python-is-python3        - hosted images provide `python`, Ubuntu does not
+#   python3-yaml             - preinstalled on hosted images, used by testlab
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      git jq unzip zip xz-utils zstd gzip \
+      libicu74 build-essential python3 python-is-python3 python3-yaml \
+      shellcheck \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
+
+USER runner
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
