@@ -123,7 +123,7 @@ unit_relative_paths_are_absolute_before_daemon_launch() {
 # current session's buffered escalations.
 # ---------------------------------------------------------------------------
 unit_fresh_vs_refresh() {
-  local st sleep_pid lock
+  local st sleep_pid lock out
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
@@ -136,7 +136,12 @@ unit_fresh_vs_refresh() {
   mkdir -p "$lock"
   printf '%s' "$sleep_pid" > "$lock/pid"
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$START" >/dev/null 2>&1
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_OWNED=1 "$START" 2>&1)
+  if printf '%s\n' "$out" | grep -F 'afk: daemon already running pid=' >/dev/null; then
+    pass "refresh: the entry reached the live-daemon check instead of refusing"
+  else
+    fail "refresh: the entry never reached the live-daemon check ($out)"
+  fi
   if [ -e "$st/state/.subsuper-escalations" ] && [ -e "$st/state/.subsuper-inject-wedged" ]; then
     pass "refresh: daemon already alive - stale artifacts preserved (current session's buffer kept)"
   else

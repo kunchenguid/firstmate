@@ -146,7 +146,7 @@ check_may_proceed() {  # <mode>
   [ "$mode" = check ] || return 0
   [ ! -e "$GATE" ] || return 0
   [ -e "$STATE/.afk" ] || [ -e "$STATE/.afk-daemon-terminal" ] || return 0
-  printf 'fm-afk-return: refusing to start the away-mode return from check: away mode is still active and no return catch-up is open\n' >&2
+  printf 'fm-afk-return: refusing to start the away-mode return from check: away-mode lifecycle state is still live and no return catch-up is open\n' >&2
   printf 'fm-afk-return: check re-presents and closes an already-open catch-up; it is not a read-only status probe\n' >&2
   printf 'fm-afk-return: run bin/fm-afk-return.sh (or begin) to return, or bin/fm-afk-return.sh guard to report without changing anything\n' >&2
   return 1

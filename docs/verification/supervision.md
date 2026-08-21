@@ -490,6 +490,10 @@ Both launch shapes were hosted in a Claude Code tracked background job against `
 
 `exec` replaces the job shell, so the daemon becomes the tracked job process itself (`ps` reported it as a session leader); that does not shorten its life.
 
+Both rows are historical evidence for why the launch-shape hypothesis was rejected, not a current reproduction recipe.
+They were measured before the launcher-ownership guard landed in the same change, and a bare or `exec`-wrapped `bin/fm-afk-start.sh` now exits 2 before any state write.
+To re-measure either shape today, declare the launcher-owned shape the entry requires: `FM_AFK_STATE_PREPARED=1` after `bin/fm-afk-launch.sh start-native`, or `FM_AFK_LAUNCH_OWNED=1`.
+
 What did end it was `bin/fm-afk-return.sh check` run with away mode active and no catch-up gate open, which shares `begin`'s stop-and-drain body:
 
 ```
@@ -500,18 +504,19 @@ AFTER: daemon alive=no; .afk present=no
 ```
 
 The daemon logged its ordinary signal-trapped `daemon shutting down` line and its background job reported exit 0, which is why the shutdown read as spontaneous.
-`check` now refuses that case (`tests/fm-afk-return.test.sh`), and re-running the same call against a live daemon leaves it running:
+`check` now refuses that case (`tests/fm-afk-return.test.sh`), and re-running the same call against a live daemon leaves it running.
+The refusal wording below was finalized after this capture; the `rc=2` refusal and the surviving daemon are what was observed.
 
 ```
 T+30s: daemon pid=60600 alive=yes
-fm-afk-return: refusing to start the away-mode return from check: away mode is still active and no return catch-up is open
+fm-afk-return: refusing to start the away-mode return from check: away-mode lifecycle state is still live and no return catch-up is open
 rc=2
 === T+75s ===
 daemon alive=yes
 .afk present=yes
 ```
 
-Portable regressions for both refusals:
+Portable regressions for both refusals, plus the launcher lifecycle units that now run under the declared launch shape:
 
 ```sh
 bin/fm-test-run.sh tests/fm-afk-return.test.sh tests/fm-daemon.test.sh tests/fm-afk-launch.test.sh
