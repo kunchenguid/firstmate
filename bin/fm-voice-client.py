@@ -107,6 +107,10 @@ MAX_PREAMBLE = 8192
 END = object()
 
 
+class DeviceError(Exception):
+    """A microphone or speaker could not be opened, said in one line."""
+
+
 def log(enabled, message):
     if enabled:
         sys.stderr.write("client: {}\n".format(message))
@@ -382,6 +386,22 @@ class Client:
     # ------------------------------------------------------------------ lifecycle
 
     def open(self):
+        """Start the relay, the audio devices and the two frame threads.
+
+        A startup that refuses part way through releases whatever it already
+        started, including on the SystemExit _wait_ready raises: a started
+        PortAudio stream left open at interpreter shutdown is a known hang on
+        macOS, which is the laptop this runs on. Whether it releases them
+        correctly against a real device is not something this host can show, for
+        the reason the module docstring gives.
+        """
+        try:
+            self._start()
+        except BaseException:
+            self.close()
+            raise
+
+    def _start(self):
         argv = relay_command(self.options)
         log(self.verbose, "starting relay: {}".format(" ".join(argv)))
         self.proc = subprocess.Popen(
@@ -390,15 +410,25 @@ class Client:
         self.reader = frame.Reader(self.proc.stdout)
         self.uplink = Uplink(self.proc.stdin)
 
-        if self.options.out_file:
-            self.playback = FilePlayback(self.options.out_file)
-        else:
-            self.playback = SpeakerPlayback(self.options.output_device)
+        try:
+            if self.options.out_file:
+                self.playback = FilePlayback(self.options.out_file)
+            else:
+                self.playback = SpeakerPlayback(self.options.output_device)
 
-        if self.options.in_file:
-            self.capture = FileCapture(self.options.in_file)
-        else:
-            self.capture = MicCapture(self.options.input_device)
+            if self.options.in_file:
+                self.capture = FileCapture(self.options.in_file)
+            else:
+                self.capture = MicCapture(self.options.input_device)
+        except Exception as exc:                   # noqa: BLE001
+            # A named refusal with a next step, like every other refusal here.
+            # sounddevice raises its own error types and is an optional import,
+            # so neither shape reaches main as an OSError on its own.
+            raise DeviceError(
+                "could not open the audio devices ({}: {}). Name another device "
+                "with --input-device or --output-device, or run without them "
+                "using --in-file and --out-file".format(
+                    type(exc).__name__, exc))
         self.capture.start(self.up_q, self.talking)
 
         threading.Thread(target=self._downlink, daemon=True).start()
@@ -433,14 +463,26 @@ class Client:
                     "hand over SSH to see why")
             self.ready.wait(0.2)
 
-    def close(self):
+    def _quietly(self, what, action):
+        """Run one cleanup step without letting it mask why we are cleaning up."""
         try:
-            self.uplink.send(frame.QUIT)
-        except Exception:                      # noqa: BLE001
-            pass
-        self.capture.close()
-        self.playback.drain()
-        self.playback.close()
+            action()
+        except Exception as exc:                   # noqa: BLE001
+            log(self.verbose, "{} did not close cleanly: {}: {}".format(
+                what, type(exc).__name__, exc))
+
+    def close(self):
+        # Every step is guarded and every field is checked, because close() also
+        # runs from a startup that refused part way through, where the later
+        # fields are still None and the original refusal is the message worth
+        # keeping.
+        if self.uplink is not None:
+            self._quietly("the uplink", lambda: self.uplink.send(frame.QUIT))
+        if self.capture is not None:
+            self._quietly("the microphone", self.capture.close)
+        if self.playback is not None:
+            self._quietly("the speaker", self.playback.drain)
+            self._quietly("the speaker", self.playback.close)
         if self.proc is not None:
             try:
                 self.proc.stdin.close()
@@ -544,6 +586,10 @@ class Client:
         before = self.playback.bytes
         self.uplink.send(frame.TALK_START)
 
+        # Unreachable while parse_args refuses open-mic, and kept so that turning
+        # the mode on later is a small change. It is still missing the turn
+        # boundary: it opens the gate and nothing ever closes it, so no talk end
+        # is ever sent. Do not lift the refusal without adding that first.
         if self.options.listen == OPEN_MIC:
             release = None
             self.talking.set()
@@ -796,8 +842,19 @@ def main(argv):
     client = Client(options)
     try:
         client.open()
-    except (frame.FrameError, OSError) as exc:
+    except SystemExit as exc:
+        # _wait_ready refuses this way and its message is already the whole
+        # story. open() has released what it started; this turns the refusal
+        # into the same one-line exit the rest of this file gives.
+        if exc.code not in (None, 0):
+            sys.stderr.write("{}\n".format(exc.code))
+        return 2
+    except (frame.FrameError, OSError, DeviceError) as exc:
         sys.stderr.write("fm-voice-client: {}\n".format(exc))
+        return 2
+    except Exception as exc:                       # noqa: BLE001
+        sys.stderr.write("fm-voice-client: could not start: {}: {}\n".format(
+            type(exc).__name__, exc))
         return 2
     try:
         return client.run()

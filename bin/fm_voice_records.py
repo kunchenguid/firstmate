@@ -25,11 +25,21 @@ the test rather than quietly widening what is sent.
 
 Runtime records outlive the work they describe: a task keeps its state/<id>.meta
 until teardown removes it, which happens separately from marking the item done.
-So every reading here is filtered to ids that are still open, pull requests
-included. A finished task's pull request is therefore not counted and not named,
-and that lost count is a deliberate cost: the alternative names finished work and
-puts it out of reach of the deny list, which has no title to match without an
-open item to take it from.
+Two readings here treat that differently, on purpose.
+
+  Pull requests, the count and the list, cover OPEN ids only. They name work, and
+  they feed the deny decision, which needs an open item to take a title from. A
+  finished task's pull request is therefore not counted and not named, and that
+  lost count is a deliberate cost: the alternative names finished work and puts
+  it out of reach of the deny list, which has no title to match without an open
+  item to take it from.
+
+  The worker count and the state histogram cover every live runtime record,
+  finished ids included, because a task with a meta file still on disk is still
+  on deck and still needs tearing down. That is the question those two figures
+  answer, and it is the same meaning bin/fm-inbox.sh gives "workers" in the human
+  rendering. Neither can carry record free text: one is an integer, and the
+  other's keys are the state verb folded through the closed set below.
 
 READ SCOPE. config/voice-read-scope selects what a status answer may contain:
 

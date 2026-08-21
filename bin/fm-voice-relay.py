@@ -584,7 +584,16 @@ class Session:
             log(self.verbose, "close: {}: {}".format(type(exc).__name__, exc))
         if self.reader_task is not None:
             try:
-                await asyncio.wait_for(self.reader_task, timeout=10)
+                # gather collects a reader that died on its own instead of
+                # re-raising it here, the same way the sends above are absorbed.
+                # Awaiting a failed task raises on EVERY await, and close() is
+                # the first statement of renew and of serve's finally, so a
+                # close that re-raises is the difference between one failed turn
+                # and a relay that can never build another session or even say
+                # goodbye to the client.
+                await asyncio.wait_for(
+                    asyncio.gather(self.reader_task, return_exceptions=True),
+                    timeout=10)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
 
@@ -688,26 +697,42 @@ class Session:
             log(True, "event {}{}".format(name, detail))
 
     async def _read_model(self):
-        while True:
-            try:
-                out = await self.stream.await_output()
-                result = await out[1].receive()
-            except Exception as exc:                   # noqa: BLE001
-                log(self.verbose, "model stream ended: {}: {}".format(
-                    type(exc).__name__, exc))
-                break
-            if result is None:
-                break
-            raw = result.value.bytes_
-            if not raw:
-                continue
-            try:
-                event = json.loads(raw.decode()).get("event", {})
-            except ValueError:
-                continue
-            await self._handle(event)
-        self.ended.set()
-        self.turn_done.set()
+        """Read the model's events until the stream ends, then say the session is over.
+
+        Handling an event reaches back into the model, to answer a tool call, so
+        it can fail on its own rather than only the read can. Either way this
+        session is finished, and the one thing that must still happen is the
+        finally below: a turn waiting on turn_done, and a serve loop watching
+        ended, are how the relay recovers. Leaving them clear is what turned one
+        dropped stream into a relay that never answered again.
+        """
+        try:
+            while True:
+                try:
+                    out = await self.stream.await_output()
+                    result = await out[1].receive()
+                except Exception as exc:               # noqa: BLE001
+                    log(self.verbose, "model stream ended: {}: {}".format(
+                        type(exc).__name__, exc))
+                    break
+                if result is None:
+                    break
+                raw = result.value.bytes_
+                if not raw:
+                    continue
+                try:
+                    event = json.loads(raw.decode()).get("event", {})
+                except ValueError:
+                    continue
+                try:
+                    await self._handle(event)
+                except Exception as exc:               # noqa: BLE001
+                    log(self.verbose, "handling {} failed: {}: {}".format(
+                        ", ".join(event) or "an event", type(exc).__name__, exc))
+                    break
+        finally:
+            self.ended.set()
+            self.turn_done.set()
 
     async def _handle(self, event):
         if self.verbose:

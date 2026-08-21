@@ -1014,6 +1014,138 @@ check(session.audio_content is None, "talk end must close the block")
 PY
 pass "audio that arrives with no turn open is dropped, not turned into a turn"
 
+# --- a model stream that dies while answering --------------------------------
+#
+# The reader task is the other place a turn can fail, and it fails in the middle
+# of work: handling an event reaches back into the model to answer a tool call. A
+# failure there must still tell a waiting turn the session is over, and close()
+# must absorb it, because close() is the first thing renew does. Neither held
+# once, and the cost was not one lost turn but every later one: the reader task
+# kept its exception, close() re-raised it on every await, renew never reached
+# the line that builds a replacement, and the captain heard the same failure
+# forever with no way back short of restarting the relay.
+
+python3 - "$ROOT/bin" "$TMP_ROOT/reader-home" <<'PY' || fail "reader failure"
+import asyncio, json, os, sys
+sys.path.insert(0, sys.argv[1])
+import importlib.util, pathlib
+spec = importlib.util.spec_from_file_location(
+    "relay", str(pathlib.Path(sys.argv[1]) / "fm-voice-relay.py"))
+relay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(relay)
+
+home = sys.argv[2]
+os.makedirs(home, exist_ok=True)
+options = relay.parse_args(["--serve", "--home", home])
+
+def check(cond, label):
+    if not cond:
+        sys.exit("reader failure: " + label)
+
+class Down:
+    def __init__(self):
+        self.notices = []
+
+    def send(self, kind, payload=b""):
+        pass
+
+    def send_json(self, kind, obj):
+        self.notices.append(obj)
+
+    def arm_turn(self):
+        pass
+
+    def first_audio(self):
+        return None
+
+class Input:
+    async def send(self, chunk):
+        pass
+
+    async def close(self):
+        pass
+
+class Payload:
+    def __init__(self, raw):
+        self.bytes_ = raw
+
+class Result:
+    def __init__(self, raw):
+        self.value = Payload(raw)
+
+class Receiver:
+    def __init__(self, raw):
+        self._raw = raw
+
+    async def receive(self):
+        return Result(self._raw)
+
+class Stream:
+    """One model event, then a stream that has gone away."""
+
+    def __init__(self, raws):
+        self._raws = list(raws)
+        self.input_stream = Input()
+
+    async def await_output(self):
+        if not self._raws:
+            raise RuntimeError("the model stream is gone")
+        return (None, Receiver(self._raws.pop(0)))
+
+TOOL_EVENT = json.dumps({"event": {"toolUse": {
+    "toolName": "no_such_tool", "toolUseId": "t-1", "content": "{}"}}}).encode()
+
+async def one_case(fail_in_handler):
+    """Poison a session the way the finding describes, then try the next turn."""
+    session = relay.Session(options, Down(), None)
+    session.stream = Stream([TOOL_EVENT])
+    if fail_in_handler:
+        async def boom(event):
+            raise RuntimeError("handling blew up")
+        session._handle = boom
+    else:
+        # The real _handle and _run_tool, with the tool-result send failing: the
+        # shape a dropped stream takes while the relay answers a tool call.
+        async def refuse(obj):
+            raise RuntimeError("the model stream is gone")
+        session._send = refuse
+    session.reader_task = asyncio.create_task(session._read_model())
+    await asyncio.wait_for(session.ended.wait(), timeout=5)
+    check(session.turn_done.is_set(), "a waiting turn must be released")
+
+    # close() absorbs the stored failure however many times it is asked, which is
+    # what lets the next turn get as far as building a replacement.
+    for _ in range(3):
+        await session.close()
+
+    built = []
+
+    class Fresh:
+        def __init__(self, *args):
+            self.connect_seconds = 0.02
+            built.append(self)
+
+        async def start(self):
+            pass
+
+    real, relay.Session = relay.Session, Fresh
+    try:
+        replacement = await relay.renew(session, options, Down())
+    finally:
+        relay.Session = real
+    return replacement, built
+
+for fails_in_handler in (True, False):
+    where = "the event handler" if fails_in_handler else "the tool result send"
+    replacement, built = asyncio.run(one_case(fails_in_handler))
+    check(len(built) == 1,
+          "after a failure in %s the next turn must build a session: %r"
+          % (where, built))
+    check(replacement is built[0],
+          "and renew must hand that replacement back for %s" % where)
+PY
+pass "a failure inside the model reader costs one turn, not every later one"
+
 # --- the laptop end ---------------------------------------------------------
 #
 # The microphone and speaker paths cannot be tested from a host with neither, and
@@ -1146,6 +1278,96 @@ except SystemExit as exc:
 check(timed_out is not None, "a silent relay was treated as ready")
 check("never reported ready" in timed_out,
       "a silent relay should time out with its own message: %s" % timed_out)
+
+# A startup that refuses part way through releases what it already started, and
+# close() therefore has to survive a half-built client. The real devices cannot be
+# opened on this host, so these stand in for them; what is tested here is the
+# release path and the refusal, not the devices themselves.
+class Recorder:
+    def __init__(self, closed):
+        self._closed = closed
+        self.bytes = 0
+        self.first_played = None
+        self.device_latency = None
+
+    def drain(self, timeout=5):
+        pass
+
+    def close(self):
+        self._closed.append("closed")
+
+    def start(self, out_q, talking):
+        pass
+
+# Nothing built yet: close() must not trip over the fields that are still None.
+client.Client(client.parse_args(["--host", "desk"])).close()
+
+# Built part way, then refused: whatever was started is released once.
+half = client.Client(client.parse_args(["--host", "desk"]))
+speaker, microphone = [], []
+half.playback = Recorder(speaker)
+half.capture = Recorder(microphone)
+half.close()
+check(speaker == ["closed"] and microphone == ["closed"],
+      "a half-built client must release both devices: %r %r" % (speaker, microphone))
+
+# open() releases them itself when a later step refuses, so no caller has to.
+refusing = client.Client(client.parse_args(["--host", "desk"]))
+speaker, microphone = [], []
+
+def half_start():
+    refusing.playback = Recorder(speaker)
+    refusing.capture = Recorder(microphone)
+    raise SystemExit("fm-voice-client: the relay closed the connection")
+
+refusing._start = half_start
+raised = None
+try:
+    refusing.open()
+except SystemExit as exc:
+    raised = str(exc)
+check(raised is not None, "open must not swallow the refusal")
+check(speaker == ["closed"] and microphone == ["closed"],
+      "open must release the devices it started: %r %r" % (speaker, microphone))
+
+# A device that cannot be opened is one named line with a next step, not a
+# traceback, because this is the path the guide warns will fail first. The relay
+# side is stubbed out here so nothing is launched: the subject is the refusal.
+class Boom:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("PortAudio said no")
+
+class FakeProc:
+    def __init__(self, *args, **kwargs):
+        self.stdin = io.BytesIO()
+        self.stdout = io.BytesIO(frame.MAGIC)
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        pass
+
+real_speaker = client.SpeakerPlayback
+real_popen = client.subprocess.Popen
+real_sync = client.sync_magic
+client.SpeakerPlayback = Boom
+client.subprocess.Popen = FakeProc
+client.sync_magic = lambda stream, verbose=False: None
+named = None
+try:
+    client.Client(client.parse_args(["--host", "desk"])).open()
+except client.DeviceError as exc:
+    named = str(exc)
+except Exception as exc:                       # noqa: BLE001
+    named = "wrong type: %s: %s" % (type(exc).__name__, exc)
+finally:
+    client.SpeakerPlayback = real_speaker
+    client.subprocess.Popen = real_popen
+    client.sync_magic = real_sync
+check(named is not None and "could not open the audio devices" in named,
+      "a device failure should be a named refusal: %s" % named)
+check("--in-file" in named, "and should name a way to run without them: %s" % named)
 
 # A login shell banner is discarded with a warning naming it, not an error.
 noise = b"You have mail.\n"
@@ -1627,18 +1849,34 @@ assert_not_contains "$open_only" 'pull/3' \
   "an item under Done must not have its pull request named"
 assert_not_contains "$open_only" "$FINISHED_TOKEN" \
   "no finished title may reach the answer at any scope"
-
-# The deny list is the only control the guide offers for a customer name, and it
-# could not touch these items at all, because their titles were never in the field
-# set it matches against.
-printf '%s\n' "$FINISHED_TOKEN" > "$DONE_HOME/config/voice-read-deny"
-denied_done=$(done_status) || fail "deny by a finished title failed"
-assert_not_contains "$denied_done" 'pull/2' \
-  "a deny substring matching a finished title must not leave its link named"
-assert_not_contains "$denied_done" 'pull/3' \
-  "a deny substring matching a finished title must not leave its link named"
-assert_contains "$denied_done" 'pull/1' "the open task is unaffected"
+# Excluded by construction, not withheld and counted. A later change that put
+# finished work back in and leaned on the deny list to hide it would fail here.
+assert_contains "$open_only" '"withheld_as_confidential": 0' \
+  "finished work is left out rather than counted as withheld"
+# The worker count is deliberately NOT open-only: a task keeps its runtime record
+# until teardown removes it, and that record is what "on deck" counts. Asserted in
+# the same case as the pull request count so the two cannot quietly converge.
+assert_contains "$open_only" '"workers_on_deck": 3' \
+  "every live runtime record is still on deck, finished or not"
 pass "a finished task's pull request is neither counted nor named"
+
+# The deny list, observed doing its job on the one list that still carries links.
+# A substring matching an OPEN task's title takes that task out of the pull
+# request detail and says one thing is being withheld, while the count stays
+# honest: that split is the contract this module states and the earlier cases
+# pin, so the captain learns how much is waiting without learning what it is.
+printf '%s\n' 'Fix the retry' > "$DONE_HOME/config/voice-read-deny"
+denied_open=$(done_status) || fail "deny by an open title failed"
+assert_not_contains "$denied_open" 'still-open' \
+  "a denied open task must not be named in the pull request detail"
+assert_not_contains "$denied_open" 'pull/1' \
+  "a denied open task's pull request link must go with it"
+assert_contains "$denied_open" '"withheld_as_confidential": 1' \
+  "and the captain must be told one thing is being withheld"
+assert_contains "$denied_open" '"open_pull_requests": 1' \
+  "while the count of open pull requests stays honest"
+rm -f "$DONE_HOME/config/voice-read-deny"
+pass "a deny substring on an open title removes its pull request and says so"
 
 # --- refusals ---------------------------------------------------------------
 #
