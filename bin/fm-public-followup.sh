@@ -27,7 +27,8 @@
 # Usage:
 #   fm-public-followup.sh active
 #       Silent gate probe. Exit 0 when this home has live public-followup work
-#       worth looking at, 1 otherwise. Safe to call unconditionally.
+#       worth looking at, including a delivered open loop, 1 otherwise. Safe to
+#       call unconditionally.
 #
 #   fm-public-followup.sh register <obligation-id> --relation <relation-id>
 #         --work-home <main|secondmate:<id>> --work-id <task-id> --generation <n>
@@ -106,9 +107,9 @@
 #       --force is the explicit discard-approved escape hatch for an unresolved
 #       or missing obligation. --reason is required.
 #
-# Requires jq and a compatible tasks-axi for registration, reconciliation,
-# delivery, cleanup guards, and retirement; `active` and `brief` only inspect
-# local state.
+# Requires jq and a compatible tasks-axi for registration, briefs,
+# reconciliation, delivery, cleanup guards, and retirement; only `active`
+# inspects local state alone.
 # FM_PF_RETRY_BACKOFF_SECS (default 900) sets the next-attempt time recorded with
 # a retryable delivery error.
 set -u

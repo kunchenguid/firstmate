@@ -29,7 +29,8 @@
 #                                    no backlog scan happens.
 #
 # Private transport layout, all under <home>/state/public-followup (mode 0700,
-# created only by `fm-public-followup.sh register`):
+# initialized by `fm-public-followup.sh register` and extended only by these
+# public-followup commands):
 #   registry/<obligation-id>   registration record: the bounded public-safe
 #                              binding (obligation, relation, work ref,
 #                              generation, platform, request id) plus the loop
@@ -50,6 +51,10 @@
 #   surfaced                   last surfaced pending-event signature, so the
 #                              existing relay poll wakes once per new event set
 #                              instead of every cycle.
+#   retired/<obligation-id>    private retirement receipt containing the bounded
+#                              reason and timestamp recorded before the registry
+#                              entry is removed; its presence prevents replayed
+#                              registration from reopening the closed loop.
 #
 # Event identity is DERIVED, never random: fm_pf_event_id hashes the canonical
 # identity tuple, so re-emitting the same terminal result produces the same

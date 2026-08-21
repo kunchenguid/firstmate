@@ -58,11 +58,17 @@ ok - typed public-followup records carry only public-safe summaries and delivera
 ok - dropped-baton regression: delivery retains the loop and pending prints open-loop
 ok - CONTROL: the identical teardown REFUSES the moment a commitment is registered
 ok - rechain posts the shipped follow-on into the same thread
+ok - rechain resumes the same obligation after an interrupted bind
+ok - concurrent rechains cannot fork one delivered source
+ok - registration replay preserves delivered and retired loop states
+ok - redelivery does not report a retired loop as open
 ok - retire --reason closes the loop and drops the open-loop line
 ok - retention creates no false teardown refusal and pending no longer prunes
 ok - expiry escalation is pinned by FMX_NOW_OVERRIDE
+ok - brief fails explicitly when typed deliverable keys are unavailable
 ok - pre-change registrations are open loops and un-rechainable, never a crash
-ok - teardown warns when a legacy Relay link is torn down with its final unposted
+ok - teardown reports an unreconciled legacy Relay link
+ok - secondmate promotion matches teardown parent resolution
 ```
 
 The restart case is the end-to-end proof of guarantee 1.
@@ -71,7 +77,8 @@ It reproduces the stranded state first (work bound, no reconciled terminal resul
 The dropped-baton case is the end-to-end proof of guarantee 3.
 It delivers a `report-ready` promised-final, asserts the registration is retained and `pending` prints `open-loop`, then shows that an unbound follow-on ship is not teardown-refused (the one-variable control still refuses the moment a commitment is registered for that work).
 `rechain` then binds a fresh `pr-merged` obligation onto the same request/thread, and a second follow-up carries the shipped text.
-`retire --reason` is the only close.
+`retire --reason` records its private receipt before removal and is the only close; replayed registration cannot reopen that retired loop.
+The concurrency and interrupted-bind cases verify that one delivered source cannot fork and that retry converges on the same destination obligation.
 A pre-change on-disk record (no `state=`, no `request_context_b64`) is an open loop and un-rechainable rather than a crash.
 
 The existing Relay mention suite (`tests/fm-x-mode.test.sh`) is unchanged by this work.

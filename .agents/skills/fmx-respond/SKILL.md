@@ -255,7 +255,10 @@ So treat second-mate-routed Relay work as a promised final by construction: the 
    - "still waiting on its bound work" means the work has not reported a typed terminal result yet - do not post.
    - "recorded as retryable" means nothing was posted; retry on a later wake.
    - "held" means the thread's platform or budget is unresolvable right now; retry once it is recoverable.
-   - "mid-delivery" means a previous post started and its outcome was never recorded. Do NOT deliver again. Establish whether that post landed, then either close it with `record-posted <id> --attempt <n> --chunks <exact-count>` or escalate. Posting again would put a second reply in a public thread.
+   - "mid-delivery" means a previous post started and its outcome was never recorded.
+     Do NOT deliver again.
+     Establish whether that post landed, then either record its receipt with `record-posted <id> --attempt <n> --chunks <exact-count>` or escalate.
+     Posting again would put a second reply in a public thread.
    - "the relay no longer accepts a follow-up" is a captain decision, not a retry.
 4. After a successful deliver (or when the digest lists an `open-loop` line), decide the disposition in that same turn:
    - Follow-on work authorized from the same public thread: `bin/fm-public-followup.sh rechain <new-id> --from <delivered-id> --work-home <main|secondmate:<id>> --work-id <task-id> --expected <pr-merged|report-ready|local-main>`, then put the printed `brief` into that follow-on's instructions (and into the routed item's own note when the work is routed).
