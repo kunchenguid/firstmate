@@ -77,7 +77,7 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 
 - A Captain's Call decision key is the FULL hold identity from `decisions_open`; a merge card's key is `merge.<task-id>`; the Charted Next dispatch picker's key is `dispatch.charted`.
 - Decision cards carry agent-authored copy: a short noun-phrase title, one-line `about` and `decide` context rows, and option labels with hints, with the recommended option marked.
-- Every decision card must include at least one selectable option; freeform is a supplementary "something else" input, never the only control.
+- Every decision card must include at least one selectable option, and the board always renders freeform as a supplementary "something else" input, never the only control.
 - Do not use `__drop__` as an option value: that reserved answer is the card's Close / drop control, recognized by the keyed-answer intake as a decline.
 - Every Captain's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.
 

@@ -59,11 +59,12 @@
 # separate later call nobody is forced to make. It records the captain's answer
 # on an actively held hold, records `(none)` as the routed identities because no
 # follow-up work has been routed behind the hold yet, and closes it. It shares
-# every guard `decline` has, including the refusal while any task is still
-# blocked by the hold, so a decision whose follow-up work is already routed still
-# goes through `resolve` and the routed-vs-unrouted distinction survives. It says
-# only that the captain answered; `decline` still says the captain answered with
-# no follow-up work at all.
+# every guard the public `decline` path has, including the refusal while any task
+# is still blocked by the hold, so a substantive decision whose follow-up work is
+# already routed still goes through `resolve` and the routed-vs-unrouted
+# distinction survives. It says only that the captain answered; an ordinary
+# `decline` still says the captain answered with no follow-up work at all. The
+# reserved keyed-answer drop described below is the sole internal exception.
 #
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
 # "A keyed answer closes its matching hold" is a single capability, owned here
@@ -73,9 +74,9 @@
 # `answer` path above, except that the exact reserved answer `__drop__` closes
 # with a declined "dropped by captain" decision record rather than as a
 # substantive choice. Drop closes only the hold; existing dependent tasks remain
-# queued as independent work. Every other guard applies identically no matter which channel
-# the answer arrived on. With `--any-origin` in place of an origin id, each key
-# is instead a FULL hold identity `<origin>-decision-<key>`, split at its first
+# queued as independent work. Every other guard applies identically no matter
+# which channel the answer arrived on. With `--any-origin` in place of an origin
+# id, each key is instead a FULL hold identity `<origin>-decision-<key>`, split at its first
 # `-decision-`, so one source can carry answers for holds across origins - the
 # aggregation a bearings board needs. An origin id that itself contains
 # `-decision-` is outside any-origin resolution; bind such a source to its one
@@ -111,11 +112,12 @@
 # accepts it, so the process-event runner feeds an any-origin source through the
 # same seam with no runner change.
 #
-# `decline` is the unrouted path for a decision the captain answered with no
-# follow-up work. It takes no --routed-to task, records `(none)` as the routed
-# identities, and closes an actively held hold. It refuses while any task is still
-# blocked by the hold, because releasing routed work without recording it is
-# `resolve`'s job.
+# Public `decline` is the unrouted path for a decision the captain answered with
+# no follow-up work. It takes no --routed-to task, records `(none)` as the routed
+# identities, and closes an actively held hold. It refuses while any task is
+# still blocked by the hold, because releasing routed work without recording it
+# is `resolve`'s job. Only `answers` may invoke its private drop mode, which
+# closes the stale hold without closing or recording existing dependents.
 #
 # `repair` records the missing resolution block on a hold that was already closed
 # outside this script, so `verify` stops failing on an origin whose decision was

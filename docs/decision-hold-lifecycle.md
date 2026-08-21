@@ -31,10 +31,11 @@ The `resolve` subcommand is the routed path and additionally requires at least o
 It clears each dependency edge through tasks-axi and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, and a failed intermediate step leaves the hold open.
 
-The `answer` and `decline` subcommands share one unrouted close implementation and differ only in the `Resolution mode:` they record and the outcome word they print, so neither can drift into a weaker close than the other.
-Both record `(none)` as the routed identities and refuse while any task in the same backlog is still blocked by the hold, because releasing routed work without recording it is `resolve`'s job.
+The public `answer` and `decline` subcommands share one unrouted close implementation and differ only in the `Resolution mode:` they record and the outcome word they print, so neither can drift into a weaker ordinary close than the other.
+Both ordinarily record `(none)` as the routed identities and refuse while any task in the same backlog is still blocked by the hold, because releasing routed work without recording it is `resolve`'s job.
+The keyed-answer intake's reserved drop is the sole exception: its internal decline invocation closes only the stale hold and deliberately leaves existing dependents as independent queued work.
 Every candidate found in the listing prefilter is confirmed against its own structured record before the refusal is reported.
-`answer` exists so the act carrying a captain answer can also be the act that closes its hold; `decline` continues to mean the stronger claim that the answer routes no follow-up work at all.
+`answer` exists so the act carrying a captain answer can also be the act that closes its hold; an ordinary `decline` continues to mean the stronger claim that the answer routes no follow-up work at all.
 
 The `repair` subcommand records the resolution block on a hold that was already closed outside the script, such as by a direct `tasks-axi done`, so an origin whose decision was genuinely answered stops failing `verify`.
 It refuses a hold that is still actively held, never reopens a closed hold, and never clears a dependency edge, so an unanswered decision keeps blocking teardown until the captain's word closes it.
@@ -52,7 +53,8 @@ For a single-origin intake the key is the decision key mapped under that bound o
 A channel's only job is to turn whatever it received into those keyed lines and pipe them in; it never maps keys to holds, builds decision records, chooses between the close paths, or closes a hold itself.
 Emitting `__drop__` is how a channel reports that the captain dropped the decision; the intake, not the channel, chooses `decline`.
 The decision text is a pure function of source, key, answer, and label, which is what makes a replayed delivery an idempotent no-op rather than a rejected different decision.
-A key whose hold is absent or already closed is reported as skipped, as is a substantive answer whose hold still blocks routed work; a reserved drop instead closes only that hold while existing dependents remain independent queued work. The command exits nonzero when any key was skipped.
+A key whose hold is absent or already closed is reported as skipped, as is a substantive answer whose hold still blocks routed work; a reserved drop instead closes only that hold while existing dependents remain independent queued work.
+The command exits nonzero when any key was skipped.
 
 `bind`, `unbind`, and `binding` record whether a captured-answer source belongs to one origin or uses the cross-origin intake, for a channel whose answers arrive detached from the origin.
 The binding is a private record under `state/decision-bindings/`, and a source with no binding feeds nothing, so the path is opt-in per source.
@@ -137,6 +139,7 @@ ok - the chat channel feeds the same keyed-answer intake a captured review does
 $ bash tests/fm-bearings-board.test.sh
 ok - path prints the stable home-scoped board location
 ok - build refuses malformed payloads before touching the board
+ok - build keeps freeform-only credential cards valid
 ok - build injects the payload, binds any-origin, then arms the source
 ok - registration can consume answers only after any-origin binding exists
 ok - build establishes the Lavish session before binding and arming
