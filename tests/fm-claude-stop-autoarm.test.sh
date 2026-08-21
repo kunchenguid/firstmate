@@ -511,6 +511,87 @@ test_arms_for_x_mode_poll_need_without_inflight() {
   pass "auto-arm: X-mode poll need arms the cycle even with no tasks in flight"
 }
 
+# Construct the claim an owner killed mid-arm leaves behind: the owner lock in
+# the library's symlinked shape with role=autoarm, plus an "arming" epoch
+# record naming the same pid. $1 = fixture dir, $2 = claimant pid.
+write_stale_autoarm_claim() {
+  local dir=$1 pid=$2 owner
+  owner="$dir/state/.claude-autoarm.lock.owner.stale0"
+  mkdir -p "$owner"
+  printf '%s\n' "$pid" > "$owner/pid"
+  printf 'autoarm\n' > "$owner/role"
+  ln -s "$owner" "$dir/state/.claude-autoarm.lock"
+  printf 'epoch=43 owner_pid=%s outcome=arming updated_at=1787289915\n' "$pid" \
+    > "$dir/state/.claude-autoarm-epoch"
+}
+
+epoch_seq() {
+  sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$1/state/.claude-autoarm-epoch" 2>/dev/null || true
+}
+
+test_reclaims_dead_owner_claim_and_rearms() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/dead-owner-claim")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_stale_autoarm_claim "$dir" 9999999
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a claim whose recorded owner pid is dead must be reclaimed, not stood down on"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after reclaiming the dead-owner claim"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "dead-owner reclaim must advance the epoch to outcome=rewake, got: $(epoch_outcome "$dir")"
+  [ "$(epoch_seq "$dir")" -gt 43 ] || fail "dead-owner reclaim must advance the epoch sequence past 43, got: $(epoch_seq "$dir")"
+  [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "owner lock must be released after the reclaimed cycle"
+  pass "auto-arm: a dead-owner claim (killed mid-arm) is reclaimed and the home re-arms"
+}
+
+test_reclaims_pid_reused_stale_claim() {
+  local dir out status reused
+  dir=$(make_primary_dir "$TMP_ROOT/pid-reused-claim")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  # An unrelated live process now occupies the dead owner's recorded pid, so a
+  # bare liveness probe reads the stale claim as a live single-flight peer.
+  sleep 60 &
+  reused=$!
+  write_stale_autoarm_claim "$dir" "$reused"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a stale claim behind a reused pid must be reclaimed, not stood down on forever"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after reclaiming the pid-reused stale claim"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "pid-reuse reclaim must advance the epoch to outcome=rewake, got: $(epoch_outcome "$dir")"
+  [ "$(epoch_seq "$dir")" -gt 43 ] || fail "pid-reuse reclaim must advance the epoch sequence past 43, got: $(epoch_seq "$dir")"
+  kill -0 "$reused" 2>/dev/null || fail "reclaim must never signal the unrelated process reusing the pid"
+  kill "$reused" 2>/dev/null || true
+  wait "$reused" 2>/dev/null || true
+  pass "auto-arm: a stale claim whose pid was reused by an unrelated process is reclaimed"
+}
+
+test_stands_down_for_live_hook_owner_claim() {
+  local dir out status owner_pid
+  dir=$(make_primary_dir "$TMP_ROOT/live-hook-owner")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  # A live process genuinely running this hook's script name is the
+  # single-flight owner; the claim must never be reclaimed from under it.
+  cat > "$TMP_ROOT/fm-claude-stop-autoarm.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 60
+SH
+  chmod +x "$TMP_ROOT/fm-claude-stop-autoarm.sh"
+  bash "$TMP_ROOT/fm-claude-stop-autoarm.sh" &
+  owner_pid=$!
+  write_stale_autoarm_claim "$dir" "$owner_pid"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a live hook-shaped owner must keep the competing firing inert"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed while a live hook-shaped owner held the claim"
+  [ "$(epoch_outcome "$dir")" = arming ] || fail "a live owner's epoch record must not be advanced, got: $(epoch_outcome "$dir")"
+  [ "$(epoch_seq "$dir")" = 43 ] || fail "a live owner's epoch sequence must stay 43, got: $(epoch_seq "$dir")"
+  [ "$(cat "$dir/state/.claude-autoarm.lock/pid" 2>/dev/null)" = "$owner_pid" ] \
+    || fail "hook replaced a live hook-shaped owner's lock"
+  kill "$owner_pid" 2>/dev/null || true
+  wait "$owner_pid" 2>/dev/null || true
+  pass "auto-arm: a claim held by a live hook-shaped owner still stands the firing down"
+}
+
 test_single_flight_admits_exactly_one_owner() {
   local dir rc1 rc2 count
   dir=$(make_primary_dir "$TMP_ROOT/single-flight")
@@ -594,6 +675,9 @@ test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_arms_for_x_mode_poll_need_without_inflight
+test_reclaims_dead_owner_claim_and_rearms
+test_reclaims_pid_reused_stale_claim
+test_stands_down_for_live_hook_owner_claim
 test_single_flight_admits_exactly_one_owner
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake

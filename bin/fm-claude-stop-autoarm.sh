@@ -23,7 +23,12 @@
 #   - Single-flight: Claude does not dedupe async hooks, so a home-scoped owner
 #     lock (state/.claude-autoarm.lock) admits exactly one owner; every other
 #     concurrent firing exits 0 without translating, which keeps one event
-#     epoch on exactly one recovery turn.
+#     epoch on exactly one recovery turn. A recorded claimant counts as the
+#     live owner only while its pid still runs this hook (or the guard's
+#     terminal check): a claim left behind by an owner killed mid-arm is stale
+#     even when pid reuse makes a bare liveness probe look true, and is
+#     reclaimed under a serialized guard so the home never stands down forever
+#     behind a dead owner.
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
@@ -135,7 +140,68 @@ fi
 # Claude runs one background process per firing with no dedupe. Exactly one
 # owner foregrounds the arm and translates its close; every other firing exits
 # 0 so one watcher cycle maps to at most one exit-2 rewake.
-fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+#
+# An owner killed mid-arm (for example a service restart TERM/KILLing the
+# hook's whole process group) leaves its claim behind: an epoch record still
+# saying "arming", and possibly the owner lock itself, naming a pid that no
+# longer runs this hook. fm_lock_try_acquire already steals a lock whose
+# recorded pid is dead, but a bare liveness probe cannot see PID REUSE: when
+# an unrelated process now occupies the dead owner's pid, the stale claim
+# looks live and every later firing would stand down forever while the
+# turn-end guard blocks every Stop. Ownership evidence therefore mirrors the
+# session-lock gate's fm_harness_pid_alive idiom: liveness alone is not
+# ownership, the claimant must still run one of the two scripts that ever
+# hold this lock. Uncertainty (unreadable process table, changed holder, live
+# claimant) always stands down, never reclaims.
+
+# True while pid $1 plausibly still runs an owner of this claim: the auto-arm
+# hook itself, or the turn-end guard's terminal check. A pid that no longer
+# runs, or now runs an unrelated reused process, is a dead claimant.
+autoarm_claimant_alive() {  # <pid>
+  local pid=$1 args
+  fm_pid_alive "$pid" || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 0
+  [ -n "$args" ] || return 0
+  case "$args" in
+    *fm-claude-stop-autoarm.sh*|*fm-turnend-guard*) return 0 ;;
+  esac
+  return 1
+}
+
+# Reclaim a stale single-flight claim whose recorded lock holder and epoch
+# claimant are both provably dead. Serialized through its own guard lock and
+# re-verified under it, so two concurrent firings can never both treat the
+# same stale record as theirs; a racing fresh owner wins and this one stands
+# down.
+autoarm_reclaim_stale_claim() {
+  local held epoch_pid guard cur
+  held=${FM_LOCK_HELD_PID:-}
+  case "$held" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  autoarm_claimant_alive "$held" && return 1
+  epoch_pid=$(sed -n 's/^epoch=[0-9][0-9]* owner_pid=\([0-9][0-9]*\) .*/\1/p' "$EPOCH" 2>/dev/null || true)
+  if [ -n "$epoch_pid" ] && [ "$epoch_pid" != "$held" ]; then
+    autoarm_claimant_alive "$epoch_pid" && return 1
+  fi
+  guard="$OWNER_LOCK.reclaim"
+  fm_lock_try_acquire "$guard" || return 1
+  cur=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
+  if [ "$cur" != "$held" ]; then
+    fm_lock_release "$guard"
+    return 1
+  fi
+  if ! fm_lock_remove_path "$OWNER_LOCK" || ! fm_lock_try_acquire "$OWNER_LOCK"; then
+    fm_lock_release "$guard"
+    return 1
+  fi
+  fm_lock_release "$guard"
+  return 0
+}
+
+if ! fm_lock_try_acquire "$OWNER_LOCK"; then
+  autoarm_reclaim_stale_claim || exit 0
+fi
 if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
   fm_lock_release "$OWNER_LOCK"
   exit 0
