@@ -1042,12 +1042,303 @@ test_origin_slug_validation_precedes_path_construction() {
   pass "completion and verification validate origins before constructing paths"
 }
 
+# The store-board incident, reproduced end to end. tasks-axi retention prunes a
+# closed task out of the live backlog on every close once done_keep is full and
+# keeps it permanently in the archive, so from the first answered captain call
+# onward the origin could never complete or verify again and its calls had to be
+# recreated by hand.
+test_archived_answer_still_satisfies_the_completion_gate() {
+  local home id
+  home=$(make_home archived-answer)
+  id=sample-store-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample store" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the archived-answer origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample store review\n\nTwo captain calls remain.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-store-route --title "Choose the sample store route" \
+    --reason "captain store route choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the first store call"
+  run_captain "$home" hold sample-store-access --title "Choose the sample store access" \
+    --reason "captain store access choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the second store call"
+  run_captain "$home" complete "$id" sample-store-route sample-store-access >/dev/null \
+    || fail "completion failed while both store calls were open"
+
+  printf 'Use the northern sample store route.\n' > "$home/store-route.txt"
+  run_captain "$home" answer sample-store-route --decision-file "$home/store-route.txt" >/dev/null \
+    || fail "could not record the captain answer to the first store call"
+  tasks_in "$home" prune --keep 0 >/dev/null \
+    || fail "could not reproduce retention moving the answered call to the archive"
+  ! grep -F 'sample-store-route' "$home/data/backlog.md" >/dev/null \
+    || fail "the answered call was not moved out of the live backlog"
+  grep -F 'sample-store-route' "$home/data/done-archive.md" >/dev/null \
+    || fail "the answered call is not in the archive"
+
+  run_captain "$home" complete "$id" sample-store-route sample-store-access >/dev/null 2> "$home/archived-complete.err" \
+    || fail "completion refused an origin whose answered call was archived: $(cat "$home/archived-complete.err")"
+  run_captain "$home" verify "$id" >/dev/null 2> "$home/archived-verify.err" \
+    || fail "verification refused an origin whose answered call was archived: $(cat "$home/archived-verify.err")"
+  run_captain "$home" answer sample-store-route --decision-file "$home/store-route.txt" >/dev/null \
+    || fail "the identical retry of an archived answer was not idempotent"
+  printf 'Use the southern sample store route instead.\n' > "$home/drifted-store-route.txt"
+  if run_captain "$home" answer sample-store-route --decision-file "$home/drifted-store-route.txt" \
+    > "$home/drifted.out" 2> "$home/drifted.err"; then
+    fail "an archived answer accepted a different captain decision on retry"
+  fi
+  if run_captain "$home" hold sample-store-route --title "Choose the sample store route" \
+    --reason "captain store route choice pending" --repo sample --origin "$id" \
+    > "$home/reuse.out" 2> "$home/reuse.err"; then
+    fail "an archived captain call was silently recreated as a brand-new task"
+  fi
+
+  # The safe-erring direction survives the archive: a call closed with no
+  # recorded captain answer still refuses after retention moved it out of sight.
+  run_captain "$home" hold sample-store-stray --title "Choose the sample store stray" \
+    --reason "captain store stray choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the out-of-band store call"
+  run_captain "$home" complete "$id" sample-store-stray >/dev/null \
+    || fail "completion failed while the third store call was open"
+  tasks_in "$home" "done" sample-store-stray >/dev/null \
+    || fail "could not reproduce the direct out-of-band close"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "could not archive the out-of-band close"
+  if run_captain "$home" verify "$id" > "$home/stray-verify.out" 2> "$home/stray-verify.err"; then
+    fail "verification passed an archived captain call that carries no captain answer"
+  fi
+  if run_teardown "$home" "$id" > "$home/stray-teardown.out" 2> "$home/stray-teardown.err"; then
+    fail "teardown erased an origin whose archived captain call carries no answer"
+  fi
+  assert_present "$home/state/$id.meta" "refused teardown removed investigation metadata"
+  pass "an archived captain answer clears the completion gate and an archived unanswered call still refuses"
+}
+
+# The retroactive record is the gate's only escape hatch for a captain call
+# closed outside this script, and it stopped at the live backlog exactly like
+# the gate did. Once retention archived such a call the origin had no way
+# through at all. It must reach the archived record in place, with every guard
+# it already had applied to that record unchanged.
+test_answer_reaches_an_archived_captain_call() {
+  local home id
+  home=$(make_home archived-retro-answer)
+  id=sample-atlas-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample atlas" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the archived-answer origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample atlas review\n\nTwo captain calls remain.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-atlas-projection --title "Choose the sample atlas projection" \
+    --reason "captain projection choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the neighbouring call"
+  run_captain "$home" hold sample-atlas-legend --title "Choose the sample atlas legend" \
+    --reason "captain legend choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the recordable call"
+  run_captain "$home" complete "$id" sample-atlas-projection sample-atlas-legend >/dev/null \
+    || fail "completion failed while both atlas calls were open"
+
+  printf 'Use the compact sample atlas projection.\n' > "$home/atlas-projection.txt"
+  run_captain "$home" answer sample-atlas-projection --decision-file "$home/atlas-projection.txt" >/dev/null \
+    || fail "could not record the captain answer to the neighbouring call"
+  tasks_in "$home" "done" sample-atlas-legend >/dev/null \
+    || fail "could not reproduce the direct out-of-band close"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "could not archive both closed calls"
+  if run_captain "$home" verify "$id" > "$home/pre.out" 2> "$home/pre.err"; then
+    fail "verification passed an archived captain call that carries no answer"
+  fi
+
+  cp "$home/data/done-archive.md" "$home/archive-before.md"
+  printf 'Keep the sample atlas legend as it is.\n' > "$home/atlas-legend.txt"
+  run_captain "$home" answer sample-atlas-legend --decision-file "$home/atlas-legend.txt" >/dev/null 2> "$home/retro.err" \
+    || fail "the retroactive record could not reach an archived captain call: $(cat "$home/retro.err")"
+  grep -F 'Keep the sample atlas legend as it is.' "$home/data/done-archive.md" >/dev/null \
+    || fail "the recorded captain answer was not written into the archive"
+  grep -F 'Use the compact sample atlas projection.' "$home/data/done-archive.md" >/dev/null \
+    || fail "recording one archived answer rewrote a neighbouring archived call"
+  if diff "$home/archive-before.md" "$home/data/done-archive.md" | grep -E '^[<>] - \[x\] ' >/dev/null; then
+    fail "recording an archived answer rewrote an archived entry line"
+  fi
+  ! grep -F 'sample-atlas-legend' "$home/data/backlog.md" >/dev/null \
+    || fail "recording an archived answer resurrected the task in the live backlog"
+  run_captain "$home" verify "$id" >/dev/null 2> "$home/post.err" \
+    || fail "the recorded archived answer did not satisfy the completion gate: $(cat "$home/post.err")"
+  run_captain "$home" answer sample-atlas-legend --decision-file "$home/atlas-legend.txt" >/dev/null \
+    || fail "identical archived retry was not idempotent"
+  printf 'A different answer entirely.\n' > "$home/drifted-atlas.txt"
+  if run_captain "$home" answer sample-atlas-legend --decision-file "$home/drifted-atlas.txt" \
+    > "$home/drifted-atlas.out" 2> "$home/drifted-atlas.err"; then
+    fail "an archived retry overwrote the recorded captain decision"
+  fi
+  if run_captain "$home" answer sample-atlas-legend --decision-file "$home/atlas-legend.txt" --release \
+    > "$home/release-atlas.out" 2> "$home/release-atlas.err"; then
+    fail "an archived closed call accepted a release"
+  fi
+
+  # Provenance still gates the retroactive record: an archived task that was
+  # never the captain's cannot be turned into an answered captain call.
+  tasks_in "$home" add sample-atlas-plain "An ordinary archived task" --repo sample >/dev/null \
+    || fail "could not create the never-held fixture"
+  tasks_in "$home" "done" sample-atlas-plain >/dev/null || fail "could not close the never-held fixture"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "could not archive the never-held fixture"
+  if run_captain "$home" answer sample-atlas-plain --decision-file "$home/atlas-legend.txt" \
+    > "$home/plain.out" 2> "$home/plain.err"; then
+    fail "an archived task that was never held for the captain accepted a captain answer"
+  fi
+  assert_grep "never held for the captain" "$home/plain.err" \
+    "the refusal must say the archived identity carries no captain-hold provenance"
+  if run_captain "$home" answer sample-atlas-absent --decision-file "$home/atlas-legend.txt" \
+    > "$home/absent.out" 2> "$home/absent.err"; then
+    fail "an answer was recorded on a task that exists in neither the backlog nor the archive"
+  fi
+  # The retired command surface reaches the same archived record, so a brief
+  # written before the collapse still has its documented escape hatch.
+  run_shim "$home" hold "$id" scale --title "Choose the sample atlas scale" \
+    --reason "captain scale choice pending" --repo sample >/dev/null \
+    || fail "could not hold the pre-collapse call through the shim"
+  run_shim "$home" complete "$id" scale >/dev/null \
+    || fail "completion through the shim failed while the pre-collapse call was open"
+  tasks_in "$home" "done" "$id-decision-scale" >/dev/null \
+    || fail "could not close the pre-collapse call out of band"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "could not archive the pre-collapse call"
+  ! grep -F "$id-decision-scale" "$home/data/backlog.md" >/dev/null \
+    || fail "the pre-collapse call was not moved out of the live backlog"
+  if run_shim "$home" verify "$id" > "$home/shim-pre.out" 2> "$home/shim-pre.err"; then
+    fail "verification through the shim passed an archived call carrying no answer"
+  fi
+  printf 'Use the wide sample atlas scale.\n' > "$home/atlas-scale.txt"
+  run_shim "$home" repair "$id" scale --decision-file "$home/atlas-scale.txt" >/dev/null 2> "$home/shim-repair.err" \
+    || fail "the retired repair spelling could not reach an archived captain call: $(cat "$home/shim-repair.err")"
+  run_shim "$home" verify "$id" >/dev/null \
+    || fail "the shim-recorded archived answer did not satisfy the completion gate"
+
+  run_teardown "$home" "$id" >/dev/null 2> "$home/teardown.err" \
+    || fail "teardown still refused after the archived call was recorded: $(cat "$home/teardown.err")"
+  pass "a captain answer reaches an archived call in place and keeps every guard it already had"
+}
+
+# The background-series incident. The attested inventory was stored by the first
+# completion and never grew again, so a captain call held by a later review pass
+# was findable in the backlog and invisible to the gate that claims to check
+# every call of the origin.
+test_a_later_hold_extends_the_stored_inventory() {
+  local home id
+  home=$(make_home extended-inventory)
+  id=sample-series-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review the sample series" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the extended-inventory origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: first review pass complete\n' > "$home/state/$id.status"
+  printf '# Sample series review\n\nOne captain call was found in the first pass.\n' \
+    > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-series-cadence --title "Choose the sample series cadence" \
+    --reason "captain cadence choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the first-pass call"
+  assert_no_grep "decisions_reviewed=1" "$home/state/$id.meta" \
+    "holding a task for the captain manufactured a completion attestation"
+  if run_captain "$home" verify "$id" > "$home/premature.out" 2> "$home/premature.err"; then
+    fail "verification passed an origin that never completed a captain-call review"
+  fi
+  run_captain "$home" complete "$id" sample-series-cadence >/dev/null \
+    || fail "completion failed for the first-pass call"
+  assert_grep "decision_keys=sample-series-cadence" "$home/state/$id.meta" \
+    "the first-pass inventory was not stored"
+
+  run_captain "$home" hold sample-series-palette --title "Choose the sample series palette" \
+    --reason "captain palette choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the second-pass call"
+  assert_grep "decision_keys=sample-series-cadence,sample-series-palette" "$home/state/$id.meta" \
+    "a captain call held after the first completion never entered the stored inventory"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "verification refused an origin whose extended inventory is fully held"
+
+  tasks_in "$home" "done" sample-series-palette >/dev/null \
+    || fail "could not close the second-pass call out of band"
+  if run_captain "$home" verify "$id" > "$home/late.out" 2> "$home/late.err"; then
+    fail "the gate never checked a captain call held after the inventory was first stored"
+  fi
+  if run_teardown "$home" "$id" > "$home/late-teardown.out" 2> "$home/late-teardown.err"; then
+    fail "teardown erased an origin whose later captain call carries no answer"
+  fi
+  assert_present "$home/state/$id.meta" "refused teardown removed investigation metadata"
+  pass "a captain call held after the first completion extends the inventory the gate checks"
+}
+
+# The ten-call board, at the size the manual workaround actually broke. Each
+# answer creates a Done entry, so retention pushes the earliest answers past the
+# retained-Done window and into the archive file, where they persist. Neither
+# the keyed nor the --none attestation may fail on those entries, and --none
+# must keep unioning the stored inventory rather than replacing it, or an empty
+# attestation could wave through a call the origin already registered.
+test_answers_pruned_past_the_done_window_stay_verifiable() {
+  local home id key retained inventory
+  home=$(make_home pruned-answers)
+  id=sample-board-review
+  write_tasks_config "$home" 3
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review the sample board" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the pruned-answers origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: board review complete\n' > "$home/state/$id.status"
+  printf '# Sample board review\n\nTen captain calls remain.\n' > "$home/data/$id/report.md"
+  inventory=''
+  for key in one two three four five six seven eight nine ten; do
+    run_captain "$home" hold "sample-board-$key" --title "Choose the sample board $key" \
+      --reason "captain board $key choice pending" --repo sample --origin "$id" >/dev/null \
+      || fail "could not hold board call $key"
+    inventory="${inventory}${inventory:+ }sample-board-$key"
+  done
+  # shellcheck disable=SC2086  # inventory is a validated space-separated id list.
+  run_captain "$home" complete "$id" $inventory >/dev/null \
+    || fail "completion failed while all ten board calls were open"
+  for key in one two three four five six seven eight nine ten; do
+    printf 'Board answer for %s.\n' "$key" > "$home/board-$key.txt"
+    run_captain "$home" answer "sample-board-$key" --decision-file "$home/board-$key.txt" >/dev/null \
+      || fail "could not record the captain answer to board call $key"
+  done
+
+  ! grep -F 'sample-board-one' "$home/data/backlog.md" >/dev/null \
+    || fail "the retention window did not push the earliest answer out of the live backlog"
+  grep -F 'sample-board-one' "$home/data/done-archive.md" >/dev/null \
+    || fail "an answer pruned past the retained-Done window did not persist in the archive"
+  retained=$(grep -cE '^- \[x\] sample-board-' "$home/data/backlog.md")
+  [ "$retained" -le 3 ] || fail "the retained-Done window was not the reproduced size: $retained"
+
+  # shellcheck disable=SC2086  # inventory is a validated space-separated id list.
+  run_captain "$home" complete "$id" $inventory >/dev/null 2> "$home/pruned-complete.err" \
+    || fail "completion refused answers pruned past the retained-Done window: $(cat "$home/pruned-complete.err")"
+  run_captain "$home" complete "$id" --none >/dev/null 2> "$home/pruned-none.err" \
+    || fail "the --none attestation refused answers pruned past the retained-Done window: $(cat "$home/pruned-none.err")"
+  assert_grep "decision_keys=sample-board-eight,sample-board-five,sample-board-four,sample-board-nine,sample-board-one,sample-board-seven,sample-board-six,sample-board-ten,sample-board-three,sample-board-two" \
+    "$home/state/$id.meta" "the --none attestation replaced the stored inventory instead of unioning it"
+  run_captain "$home" verify "$id" >/dev/null 2> "$home/pruned-verify.err" \
+    || fail "verification refused answers pruned past the retained-Done window: $(cat "$home/pruned-verify.err")"
+
+  # --none must never become a way past a call that is genuinely unanswered.
+  run_captain "$home" hold sample-board-eleven --title "Choose the sample board eleven" \
+    --reason "captain board eleven choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the eleventh board call"
+  tasks_in "$home" "done" sample-board-eleven >/dev/null \
+    || fail "could not close the eleventh call out of band"
+  if run_captain "$home" complete "$id" --none > "$home/open-none.out" 2> "$home/open-none.err"; then
+    fail "the --none attestation waved through a captain call that carries no answer"
+  fi
+  if run_teardown "$home" "$id" > "$home/board-teardown.out" 2> "$home/board-teardown.err"; then
+    fail "teardown erased an origin whose eleventh call carries no answer"
+  fi
+  pass "answers pruned past the retained-Done window stay verifiable and --none still refuses an unanswered call"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
+test_archived_answer_still_satisfies_the_completion_gate
+test_answer_reaches_an_archived_captain_call
+test_a_later_hold_extends_the_stored_inventory
+test_answers_pruned_past_the_done_window_stay_verifiable
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
