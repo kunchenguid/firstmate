@@ -17,8 +17,9 @@
 #       (--prompt <text> | --prompt-file <path>) [--agent <name>] \
 #       [--status <status>] [--ref <backlog-ref>] [--reason <text>]
 #       --reason is REQUIRED when --status is needs-attention (same rule and
-#       same server-side guard as the `status` subcommand below); ignored
-#       for every other starting status.
+#       same server-side guard as the `status` subcommand below), and is
+#       REFUSED for every other starting status - use the `status`
+#       subcommand, which owns every other status's reason.
 #   fm-dashboard.sh list [--status <status>] [--captain <c>] [--starred] \
 #       [--sort updated|date|status|title] [--json]
 #   fm-dashboard.sh show <id> [--json]
@@ -219,6 +220,12 @@ cmd_add() {
   # here rather than spend a round-trip on the obvious case.
   if [ "$status" = needs_attention ] && [ -z "$reason" ]; then
     die "add: --status needs-attention requires --reason - say what he needs to decide, approve, or supply"
+  fi
+  # needs_attention is the only status whose reason `add` can write; every
+  # other one is owned by the `status` subcommand. Refuse rather than send a
+  # value the server will drop on the floor.
+  if [ "$status" != needs_attention ] && [ -n "$reason" ]; then
+    die "add: --reason is only accepted with --status needs-attention (got status '$status'); use 'fm-dashboard.sh status <id> $status --reason ...' instead"
   fi
   local body
   body=$(jq -n --arg t "$title" --arg c "$captain" --arg p "$prompt" --arg a "$agent" \

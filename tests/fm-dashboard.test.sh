@@ -177,6 +177,32 @@ test_needs_attention_requires_a_real_ask() {
   pass "needs-attention refuses a missing or report-shaped reason, on both status and add, and the server enforces both independently of the CLI"
 }
 
+# `add` can only write the needs_attention reason; every other status's reason
+# belongs to the `status` subcommand, which is the one path that persists it.
+# Passing --reason with any other starting status used to exit 0 and drop the
+# text on the floor, so refuse it outright rather than lose it silently.
+test_add_refuses_a_reason_for_a_status_that_cannot_carry_one() {
+  local out rc id
+  out=$("$DASH" add --title "Waiting with a reason" --captain firstmate --prompt "x" \
+    --status waiting --reason "waiting on the plumber" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "add --status waiting --reason was accepted, and the reason is silently dropped"
+  assert_contains "$out" "only accepted with --status needs-attention" \
+    "add's refusal did not explain that --reason belongs to needs-attention"
+  assert_contains "$out" "waiting" "add's refusal did not name the status that was given"
+
+  # The same starting status is still creatable without a reason, and the
+  # `status` subcommand still owns and persists the waiting reason.
+  id=$("$DASH" add --title "Waiting without a reason" --captain firstmate --prompt "x" \
+    --status waiting | awk '{print $1}')
+  [ -n "$id" ] || fail "add --status waiting without --reason should have succeeded"
+  "$DASH" status "$id" waiting --reason "waiting on the plumber" >/dev/null \
+    || fail "the status subcommand refused the waiting reason it owns"
+  assert_contains "$("$DASH" show "$id")" "waiting on the plumber" \
+    "the waiting reason set through the status subcommand did not persist"
+
+  pass "add refuses a --reason no status but needs-attention can carry, instead of dropping it"
+}
+
 # A genuine ask that merely mentions one of the report phrases mid-sentence
 # ("approve the $400 monitoring subscription renewal") must still reach the
 # board: refusing it leaves the card stuck in `working` and never asks him,
@@ -485,6 +511,7 @@ test_link_policy_rejects_github_and_localhost
 test_needs_attention_status_carries_reason_and_sorts_first
 test_needs_attention_requires_a_real_ask
 test_a_genuine_ask_mentioning_a_report_word_is_accepted
+test_add_refuses_a_reason_for_a_status_that_cannot_carry_one
 test_documented_guard_rates_still_hold
 test_audit_log_run_and_interval
 test_bad_input_fails_with_nonzero_exit
