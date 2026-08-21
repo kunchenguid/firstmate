@@ -482,6 +482,14 @@ class Client:
                         self.turn["interrupted"] = True
                     log(self.verbose, "the model treated this turn as an "
                                       "interruption of its own speech")
+                elif event == "turn-failed":
+                    # The relay is still there and the next talk key gets a new
+                    # session, so this ends the turn rather than the run.
+                    say("client: the relay could not finish that turn: {}".format(
+                        obj.get("error", "")))
+                    with self.lock:
+                        self.turn["failed"] = obj.get("error", "")
+                    self.reply_done.set()
                 elif event == "session-ended":
                     say("client: the relay ended the session")
                     self.reply_done.set()
@@ -549,6 +557,10 @@ class Client:
             "tool_calls": turn.get("tool_calls", 0),
             "queued_note": turn.get("queued"),
             "interrupted": bool(turn.get("interrupted")),
+            # Why a turn has no answer, when the relay knows. A results file
+            # that only says answered: false invites the reader to average an
+            # infrastructure failure into a latency figure.
+            "relay_error": turn.get("failed"),
             # The number this build exists to produce: the captain stopped
             # talking, and this many seconds later sound came out.
             "first_audio_s": since(played if played is not None else first_frame),

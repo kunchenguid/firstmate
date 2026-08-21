@@ -38,11 +38,15 @@ DENY LIST. config/voice-read-deny holds anything that must never leave this
 host even in full scope: one plain case-insensitive substring per line, `#`
 starts a comment, blank lines ignored. Substrings rather than regular
 expressions, because a confidentiality list is the wrong place for a pattern
-that can match more or less than it looks like it matches. A matching item is
-reduced to a withheld count, so the agent still says how much is waiting
-without saying what it is. The file is optional and an absent file means an
-empty list; it exists so that a future open task carrying a customer name can
-be excluded in one line rather than by turning the whole feature down.
+that can match more or less than it looks like it matches. Each open item is
+matched once, against its identifier, its title, its tag values and its pull
+request link together, and a match is then withheld from every list it could
+have appeared in and reduced to a withheld count. One decision per item rather
+than one per list, because an item named in any list is an item that left this
+host. The agent still says how much is waiting without saying what it is. The
+file is optional and an absent file means an empty list; it exists so that a
+future open task carrying a customer name can be excluded in one line rather
+than by turning the whole feature down.
 
 WORKER STATE. This module reports the last recorded event verb, which is
 history rather than a live check, and labels it that way in its own output so
@@ -307,22 +311,39 @@ def fleet_status(home=None, scope=None):
             "than guessing at it.")
         return answer
 
-    # Distinct denied items, not denial events. The lists below overlap by
-    # design: one task can be in flight, held for the captain and carrying a
-    # pull request at once, and counting each refusal would tell the captain
-    # three things are being withheld when it is one.
-    withheld_ids = set()
     by_id = {w["id"]: w for w in workers}
 
-    def keep(item_id, *fields):
-        if _denied(denies, item_id, *fields):
+    # ONE deny decision per item, taken over everything known about that item
+    # before any list is built, and then shared by every list it could appear
+    # in. The lists overlap by design: a task can be in flight, waiting on the
+    # captain and carrying a pull request at once. Deciding per list, from the
+    # fields that list happens to use, would withhold an item from one list and
+    # name it in another, which is not a narrower answer but a leak with a
+    # reassuring count beside it. It also makes the count what it says it is,
+    # distinct items rather than refusals.
+    listable = {}
+    for item in in_flight + held_for_captain:
+        listable.setdefault(item["id"], item)
+
+    withheld_ids = set()
+    for item_id in set(listable) | {w["id"] for w in with_pr}:
+        item = listable.get(item_id)
+        worker = by_id.get(item_id)
+        fields = [item_id]
+        if item is not None:
+            fields.append(item["title"])
+            fields.extend(item["tags"].values())
+        if worker is not None:
+            fields.append(worker["pr"])
+        if _denied(denies, *fields):
             withheld_ids.add(item_id)
-            return False
-        return True
+
+    def keep(item_id):
+        return item_id not in withheld_ids
 
     detail_in_flight = []
     for item in in_flight:
-        if not keep(item["id"], item["title"]):
+        if not keep(item["id"]):
             continue
         worker = by_id.get(item["id"])
         detail_in_flight.append({
@@ -335,13 +356,13 @@ def fleet_status(home=None, scope=None):
 
     detail_captain = []
     for item in held_for_captain:
-        if not keep(item["id"], item["title"], item["tags"].get("hold", "")):
+        if not keep(item["id"]):
             continue
         detail_captain.append({"id": item["id"], "title": item["title"]})
 
     detail_prs = []
     for worker in with_pr:
-        if not keep(worker["id"], worker["pr"]):
+        if not keep(worker["id"]):
             continue
         detail_prs.append({"id": worker["id"], "url": worker["pr"]})
 

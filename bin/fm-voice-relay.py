@@ -66,6 +66,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -194,20 +195,54 @@ def _expires_at(stamp):
     return when.timestamp()
 
 
-def resolve_credentials(profile, verbose=False):
+def ambient_credentials(verbose=False, margin=0):
+    """Return (credentials, expiry) from the environment, or None if it has none to give.
+
+    None means "ask the profile instead", and there are three ways to get it.
+    An environment with no key id at all is the ordinary ssh case. One carrying
+    a key id without a secret beside it is a half-set variable, which is a
+    mistake worth naming rather than a KeyError from inside a worker thread.
+    And one whose AWS_CREDENTIAL_EXPIRATION has passed, or passes within margin
+    seconds, is no longer usable: os.environ cannot get fresher values while
+    this process runs, so the only way forward is the profile.
+
+    Temporary credentials with no stated deadline are reported as
+    EXPIRY_UNKNOWN rather than as eternal, because a session token always has a
+    deadline whether or not the shell that exported it said so.
+    """
+    key = os.environ.get("AWS_ACCESS_KEY_ID")
+    if not key:
+        return None
+    secret = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    if not secret:
+        log(verbose, "AWS_ACCESS_KEY_ID is set with no AWS_SECRET_ACCESS_KEY "
+                     "beside it, so the environment is being ignored")
+        return None
+    token = os.environ.get("AWS_SESSION_TOKEN")
+    expires = _expires_at(os.environ.get("AWS_CREDENTIAL_EXPIRATION"))
+    if expires is None and token:
+        expires = EXPIRY_UNKNOWN
+    if expires not in (None, EXPIRY_UNKNOWN) and time.time() + margin >= expires:
+        log(verbose, "the credentials in the environment have expired")
+        return None
+    log(verbose, "using credentials already in the environment")
+    return {
+        "aws_access_key_id": key,
+        "aws_secret_access_key": secret,
+        "aws_session_token": token,
+    }, expires
+
+
+def resolve_credentials(profile, verbose=False, margin=0):
     """Return (credentials dict, expiry epoch or None), preferring the environment.
 
     The sandbox profile's credential_process costs about a second, so ambient
-    credentials win when they are present. It also blocks the caller for that
+    credentials win while they are usable. It also blocks the caller for that
     second, so Credentials below owns when this runs and keeps it out of a turn.
     """
-    if os.environ.get("AWS_ACCESS_KEY_ID"):
-        log(verbose, "using credentials already in the environment")
-        return {
-            "aws_access_key_id": os.environ["AWS_ACCESS_KEY_ID"],
-            "aws_secret_access_key": os.environ["AWS_SECRET_ACCESS_KEY"],
-            "aws_session_token": os.environ.get("AWS_SESSION_TOKEN"),
-        }, None
+    ambient = ambient_credentials(verbose, margin)
+    if ambient is not None:
+        return ambient
     log(verbose, "exporting credentials from profile {}".format(profile))
     widen_path()
     done = subprocess.run(
@@ -242,7 +277,10 @@ class Credentials:
     Credentials that carry an expiry are refreshed a few minutes ahead of it,
     because a relay left running outlives them. One whose expiry cannot be read
     is held for that same margin and no longer, so an unreadable deadline costs
-    an occasional resolution rather than every session after the deadline.
+    an occasional resolution rather than every session after the deadline. The
+    margin is handed to the resolver as well, because credentials taken from the
+    environment cannot be refreshed in place and have to be abandoned for the
+    profile once they are that close to the end.
     Every resolution, the first one included, runs in a worker thread, so the
     event loop keeps reading the captain's audio while it happens.
     """
@@ -270,7 +308,8 @@ class Credentials:
         async with self._lock:
             if not self._usable():
                 self._creds, self._expires = await asyncio.to_thread(
-                    resolve_credentials, self.profile, self.verbose)
+                    resolve_credentials, self.profile, self.verbose,
+                    self.REFRESH_MARGIN)
                 self._resolved = time.monotonic()
             return dict(self._creds)
 
@@ -345,6 +384,9 @@ class Session:
         # Replies this session has finished. One is the most it should ever
         # deliver; see serve() for why a second turn gets a new session.
         self.replies = 0
+        # Set when a call into the model raised, which makes this session spent
+        # whether or not it ever answered. handle_uplink_frame owns it.
+        self.failed = False
         # Which tools ran, in order. The handover boundary is the whole point of
         # this relay, so "it called hand_over_to_firstmate and did not answer
         # for firstmate" has to be evidence in the run record, not an inference
@@ -681,6 +723,42 @@ async def read_uplink_frame(reader):
     return kind, payload
 
 
+async def handle_uplink_frame(kind, payload, session, options, down):
+    """Act on one frame from the client. Returns (session to use next, keep serving).
+
+    Every branch below reaches the model, and the model side fails on its own:
+    a reconnect can be throttled, a token can expire between turns, a stream can
+    drop. Because the relay rebuilds the session on every turn by design, one
+    such failure would otherwise leave the loop, end the relay with a traceback
+    on the stderr the client inherits, and cost the captain a whole session for
+    a single bad reconnect. Instead it is named in a notice and the session is
+    marked spent, so the next press of the talk key builds a new one and tries
+    again. A failure the model cannot recover from repeats the notice per turn,
+    which is a captain who can hear what is wrong rather than a dead pipe.
+    """
+    if kind == frame.QUIT:
+        return session, False
+    try:
+        if kind == frame.TALK_START:
+            if session.failed or session.replies or session.ended.is_set():
+                session = await renew(session, options, down)
+            await session.talk_start()
+        elif kind == frame.AUDIO:
+            await session.audio(payload)
+        elif kind == frame.TALK_END:
+            await session.talk_end()
+        else:
+            log(options.verbose, "ignoring uplink kind {!r}".format(kind))
+    except Exception as exc:                       # noqa: BLE001
+        session.failed = True
+        log(options.verbose, "turn failed: {}: {}".format(
+            type(exc).__name__, exc))
+        down.send_json(frame.NOTICE, {
+            "event": "turn-failed",
+            "error": "{}: {}".format(type(exc).__name__, exc)})
+    return session, True
+
+
 async def serve(options):
     """Relay frames between the client on stdin/stdout and one Nova Sonic session."""
     loop = asyncio.get_running_loop()
@@ -703,19 +781,14 @@ async def serve(options):
     try:
         while True:
             kind, payload = await read_uplink_frame(reader)
-            if kind == frame.TALK_START:
-                if session.replies or session.ended.is_set():
-                    session = await renew(session, options, down)
-                await session.talk_start()
-            elif kind == frame.AUDIO:
-                await session.audio(payload)
-            elif kind == frame.TALK_END:
-                await session.talk_end()
-            elif kind == frame.QUIT:
+            session, serving = await handle_uplink_frame(
+                kind, payload, session, options, down)
+            if not serving:
                 break
-            else:
-                log(options.verbose, "ignoring downlink kind {!r}".format(kind))
-            if session.ended.is_set():
+            # A session already marked spent is about to be replaced on the next
+            # talk key, so its stream closing is expected rather than the end of
+            # the relay's usefulness.
+            if session.ended.is_set() and not session.failed:
                 down.send_json(frame.NOTICE, {"event": "session-ended"})
                 break
     except (asyncio.IncompleteReadError, ConnectionResetError):
@@ -882,6 +955,15 @@ def main(argv):
         return 2
     except KeyboardInterrupt:
         return 130
+    except Exception as exc:                       # noqa: BLE001
+        # The captain reads this stderr over SSH, so a failure that gets this
+        # far says what it was in one line. --verbose still gets the traceback,
+        # because whoever passed it is debugging rather than talking.
+        sys.stderr.write("fm-voice-relay: {}: {}\n".format(
+            type(exc).__name__, exc))
+        if options.verbose:
+            traceback.print_exc()
+        return 2
 
 
 if __name__ == "__main__":

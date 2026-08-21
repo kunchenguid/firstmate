@@ -15,8 +15,12 @@ Kinds the client sends up to the relay:
 Kinds the relay sends down to the client:
   A  reply audio, 24000 Hz mono signed 16-bit little-endian
   T  JSON {"role": ..., "text": ...}, one transcript line
-  V  JSON {"event": ..., ...}, a notice such as a queued request
-  M  JSON {"mark": ..., "t": ...}, a relay-side timing mark
+  V  JSON {"event": ..., ...}, a notice such as a queued request or a failed turn
+  M  JSON {"mark": ..., "since_talk_end": ..., "tool_calls": ...}, one relay-side
+     timing mark. since_talk_end is seconds from the moment the captain stopped
+     talking, which is the instant every figure in this build is measured from.
+     The marks the relay sends are tool_use, first_audio, first_audio_wire,
+     tool_answered and reply_end; bin/fm-voice-relay.py owns what each means.
   B  bye, empty payload
 
 Audio is raw PCM rather than base64 because base64 belongs to the Bedrock

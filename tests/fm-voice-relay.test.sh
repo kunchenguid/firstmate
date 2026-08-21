@@ -254,7 +254,7 @@ pass "the relay and the reader agree on the tool names and the handover argument
 # Nothing here talks to AWS; the resolver is replaced with a counter.
 
 python3 - "$ROOT/bin" <<'PY' || fail "credential reuse"
-import asyncio, datetime, sys, time
+import asyncio, datetime, os, sys, time
 sys.path.insert(0, sys.argv[1])
 import importlib.util, pathlib
 spec = importlib.util.spec_from_file_location(
@@ -266,14 +266,63 @@ def check(cond, label):
     if not cond:
         sys.exit("credentials: " + label)
 
-calls = []
-stamp = [""]
-delay = [0.0]
+AWS_VARS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+            "AWS_CREDENTIAL_EXPIRATION")
 
 def iso(at):
     return datetime.datetime.fromtimestamp(at, datetime.timezone.utc).isoformat()
 
-def fake(profile, verbose=False):
+# Credentials taken from the environment cannot be refreshed in place, because
+# os.environ never gets fresher values while this process runs. So they are only
+# preferred while they are usable, and what decides that is the deadline the
+# exporter states beside the keys. Treating one as eternal strands a long-lived
+# relay: every session after the real deadline is rejected for an expired token.
+for name in AWS_VARS:
+    os.environ.pop(name, None)
+
+check(relay.ambient_credentials() is None,
+      "an environment with no keys must send the relay to the profile")
+
+os.environ["AWS_ACCESS_KEY_ID"] = "AKIAEXAMPLE"
+check(relay.ambient_credentials() is None,
+      "a key id with no secret beside it must be refused, not indexed blindly")
+
+os.environ["AWS_SECRET_ACCESS_KEY"] = "s3cret"
+ambient = relay.ambient_credentials()
+check(ambient[0]["aws_access_key_id"] == "AKIAEXAMPLE",
+      "a complete environment should be used: %r" % (ambient,))
+check(ambient[1] is None,
+      "long-term keys, with no session token and no stated deadline, do not expire")
+
+os.environ["AWS_SESSION_TOKEN"] = "t0ken"
+check(relay.ambient_credentials()[1] is relay.EXPIRY_UNKNOWN,
+      "a session token has a deadline whether or not the shell stated it")
+
+os.environ["AWS_CREDENTIAL_EXPIRATION"] = iso(time.time() + 3600)
+check(isinstance(relay.ambient_credentials()[1], float),
+      "a stated deadline should be carried through as the expiry")
+# The environment wins while it is usable, so this never shells out to a profile.
+check(relay.resolve_credentials("no-such-profile")[0]["aws_session_token"] == "t0ken",
+      "the environment should be preferred over the profile while it is usable")
+
+os.environ["AWS_CREDENTIAL_EXPIRATION"] = iso(time.time() - 1)
+check(relay.ambient_credentials() is None,
+      "expired ambient credentials must send the relay to the profile instead")
+
+os.environ["AWS_CREDENTIAL_EXPIRATION"] = iso(time.time() + 60)
+check(relay.ambient_credentials(margin=300) is None,
+      "ambient credentials inside the refresh margin must not start a session")
+check(relay.ambient_credentials(margin=0) is not None,
+      "the same credentials are still usable when no margin is asked for")
+
+for name in AWS_VARS:
+    os.environ.pop(name, None)
+
+calls = []
+stamp = [""]
+delay = [0.0]
+
+def fake(profile, verbose=False, margin=0):
     # Whatever the profile says about expiry reaches the cache through the real
     # parser, so the fixture hands it a stamp rather than a decided answer.
     calls.append(profile)
@@ -360,6 +409,133 @@ check(during >= 2,
       "the event loop ran %d times during a 0.3s credential resolution" % during)
 PY
 pass "credentials are resolved once per relay, refreshed before expiry, off the event loop"
+
+# --- a turn the model refuses -----------------------------------------------
+#
+# The relay rebuilds the model session on every turn by design, so every turn
+# reaches the model and every turn can fail on its own: a throttle, a dropped
+# stream, a token that went stale between turns. That has to cost the captain one
+# turn rather than the whole session, because the alternative is a traceback on
+# the stderr the client inherits and a relay restarted by hand.
+
+python3 - "$ROOT/bin" <<'PY' || fail "failed turn"
+import asyncio, sys
+sys.path.insert(0, sys.argv[1])
+import importlib.util, pathlib
+spec = importlib.util.spec_from_file_location(
+    "relay", str(pathlib.Path(sys.argv[1]) / "fm-voice-relay.py"))
+relay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(relay)
+import fm_voice_frame as frame
+
+def check(cond, label):
+    if not cond:
+        sys.exit("failed turn: " + label)
+
+class Down:
+    def __init__(self):
+        self.notices = []
+
+    def send(self, kind, payload=b""):
+        pass
+
+    def send_json(self, kind, obj):
+        if kind == frame.NOTICE:
+            self.notices.append(obj)
+
+class Stub:
+    """A session that records what it was asked, or raises where the model would."""
+
+    def __init__(self, raises=None):
+        self.raises = raises
+        self.replies = 0
+        self.failed = False
+        self.ended = asyncio.Event()
+        self.calls = []
+
+    async def _step(self, name):
+        self.calls.append(name)
+        if self.raises is not None:
+            raise self.raises
+
+    async def talk_start(self):
+        await self._step("talk_start")
+
+    async def audio(self, pcm):
+        await self._step("audio:%d" % len(pcm))
+
+    async def talk_end(self):
+        await self._step("talk_end")
+
+options = relay.parse_args(["--serve"])
+
+async def drive(session, items):
+    down = Down()
+    serving = True
+    for kind, payload in items:
+        session, serving = await relay.handle_uplink_frame(
+            kind, payload, session, options, down)
+        if not serving:
+            break
+    return session, serving, down
+
+# The ordinary path is unchanged: the frames reach the session in order.
+good = Stub()
+session, serving, down = asyncio.run(drive(good, [
+    (frame.TALK_START, b""), (frame.AUDIO, b"1234"), (frame.TALK_END, b"")]))
+check(good.calls == ["talk_start", "audio:4", "talk_end"],
+      "a good turn should reach the session: %s" % good.calls)
+check(serving and not good.failed,
+      "a good turn must not mark the session spent")
+check(down.notices == [], "a good turn should not announce a failure")
+
+# A model failure mid-turn: the captain is told what happened, the relay stays
+# up, and the session is marked spent so nothing reuses a dead stream.
+broken = Stub(raises=RuntimeError("ThrottlingException"))
+session, serving, down = asyncio.run(drive(broken, [(frame.AUDIO, b"1234")]))
+check(serving, "a failed turn must not stop the relay")
+check(session is broken and broken.failed,
+      "a failed session must be marked spent")
+check([n["event"] for n in down.notices] == ["turn-failed"],
+      "a failed turn must be announced to the client: %s" % down.notices)
+check("ThrottlingException" in down.notices[0].get("error", ""),
+      "the notice should name the failure: %s" % down.notices[0])
+
+# And the next talk key rebuilds instead of reusing it, which is what marking it
+# spent is for.
+renewed = []
+fresh = Stub()
+
+async def fake_renew(session, options, down):
+    renewed.append(session)
+    return fresh
+
+relay.renew = fake_renew
+session, serving, down = asyncio.run(drive(broken, [(frame.TALK_START, b"")]))
+check(renewed == [broken], "a spent session must be replaced on the next turn")
+check(session is fresh and fresh.calls == ["talk_start"],
+      "the replacement session must take the turn: %s" % fresh.calls)
+
+# A reconnect that fails is itself just a failed turn: the captain presses the
+# key again rather than restarting the relay.
+async def failing_renew(session, options, down):
+    raise RuntimeError("EndpointConnectionError")
+
+relay.renew = failing_renew
+spent = Stub()
+spent.replies = 1
+session, serving, down = asyncio.run(drive(spent, [(frame.TALK_START, b"")]))
+check(serving, "a failed reconnect must not stop the relay")
+check(spent.failed, "a failed reconnect must leave the session spent")
+check([n["event"] for n in down.notices] == ["turn-failed"],
+      "a failed reconnect must be announced: %s" % down.notices)
+check(spent.calls == [], "a session whose reconnect failed must not be spoken to")
+
+# Quit still ends the loop, so the relay exits when the client says so.
+session, serving, down = asyncio.run(drive(Stub(), [(frame.QUIT, b"")]))
+check(not serving, "quit must end the loop")
+PY
+pass "a turn the model refuses is announced and costs one turn, not the relay"
 
 # --- the laptop end ---------------------------------------------------------
 #
@@ -612,6 +788,77 @@ assert_contains "$overlap" '"open_pull_requests": 1' \
 pass "an item denied in more than one list is counted as withheld once"
 
 rm -f "$HOME_FIXTURE/config/voice-read-deny"
+
+# THE CASE THE DENY LIST EXISTS FOR, and the one a per-list decision gets wrong.
+# The docstring says the list is for a future open task carrying a customer name,
+# and a name like that lives in the TITLE or in the HOLD text of an item that is
+# also in flight, also waiting on the captain, and also carrying a pull request.
+# A decision taken separately in each list, from whichever fields that list
+# happens to use, withholds such an item from one list and names it in another.
+# That is not a narrower answer, it is a leak with a reassuring count beside it.
+# Both items below sit in all three lists, and each is matched on a field only
+# one of those lists reads.
+LEAK_HOME="$TMP_ROOT/deny-every-list"
+TITLE_TOKEN=LEAKSBYTITLE
+HOLD_TOKEN=LEAKSBYHOLD
+mkdir -p "$LEAK_HOME/data" "$LEAK_HOME/state" "$LEAK_HOME/config"
+cat > "$LEAK_HOME/data/backlog.md" <<EOF
+# Backlog
+
+## In flight
+- [ ] omega-nine - Renew the $TITLE_TOKEN contract (repo: omega) (kind: captain)
+- [ ] sigma-ten - Move the account onto the new tier (repo: sigma) (kind: ship) (hold-kind: captain) (hold: waiting on the $HOLD_TOKEN owner)
+EOF
+fm_write_meta "$LEAK_HOME/state/omega-nine.meta" \
+  kind=captain pr=https://github.com/example/omega/pull/11
+fm_write_meta "$LEAK_HOME/state/sigma-ten.meta" \
+  kind=ship pr=https://github.com/example/sigma/pull/12
+
+leak_status() {
+  python3 "$ROOT/bin/fm_voice_records.py" status --home "$LEAK_HOME" --scope full
+}
+
+# Reachable in all three lists first, or the suppression below proves nothing.
+reachable=$(leak_status) || fail "the deny-every-list fixture failed"
+assert_contains "$reachable" "$TITLE_TOKEN" "fixture: the title marker should be reachable"
+assert_contains "$reachable" 'omega-nine' "fixture: the item should be named"
+assert_contains "$reachable" 'pull/11' "fixture: its pull request should be reachable"
+assert_contains "$reachable" 'sigma-ten' "fixture: the held item should be named"
+assert_contains "$reachable" 'pull/12' "fixture: its pull request should be reachable"
+assert_contains "$reachable" '"awaiting_captain": 2' \
+  "fixture: both items should be waiting on the captain"
+
+# Matched on its title, which only the in-flight list reads.
+printf '%s\n' "$TITLE_TOKEN" > "$LEAK_HOME/config/voice-read-deny"
+by_title=$(leak_status) || fail "deny by title failed"
+assert_not_contains "$by_title" "$TITLE_TOKEN" "a title match must be suppressed"
+assert_not_contains "$by_title" 'omega-nine' \
+  "a denied item must not be named in any list"
+assert_not_contains "$by_title" 'pull/11' \
+  "a denied item must not surface through its pull request link"
+assert_contains "$by_title" '"withheld_as_confidential": 1' \
+  "the denied item should be counted once"
+# The other item is untouched, so this is a substring list and not a switch.
+assert_contains "$by_title" 'sigma-ten' "the deny list must not suppress everything"
+assert_contains "$by_title" 'pull/12' "the other pull request should still be named"
+assert_contains "$by_title" '"open_pull_requests": 2' \
+  "denying an item must not change the count of open pull requests"
+
+# Matched on its hold text, which only the captain list reads. The mirror of the
+# case above: get one list right and this one still leaks.
+printf '%s\n' "$HOLD_TOKEN" > "$LEAK_HOME/config/voice-read-deny"
+by_hold=$(leak_status) || fail "deny by hold text failed"
+assert_not_contains "$by_hold" 'sigma-ten' \
+  "an item matched on its hold text must not be named in the in-flight list"
+assert_not_contains "$by_hold" 'pull/12' \
+  "an item matched on its hold text must not surface through its pull request"
+assert_contains "$by_hold" '"withheld_as_confidential": 1' \
+  "the denied item should be counted once"
+assert_contains "$by_hold" 'omega-nine' "the deny list must not suppress everything"
+assert_contains "$by_hold" 'pull/11' "the other pull request should still be named"
+assert_contains "$by_hold" '"in_flight": 2' \
+  "denying an item must not change the count of in-flight work"
+pass "one deny decision per item covers every list that item could appear in"
 
 # --- refusals ---------------------------------------------------------------
 #
