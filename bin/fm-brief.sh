@@ -406,7 +406,24 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`.
+
+**Wait for the check set to reach a verdict before reporting done.**
+After opening the PR, poll its check rollup until EVERY check has \`status: COMPLETED\`.
+A check set is a **verdict** only when ALL of these hold:
+- The rollup is non-empty (at least one check exists).
+- Every check has \`status: COMPLETED\`.
+- The PR's \`mergeable\` state is not \`CONFLICTING\`.
+
+A check set is **not a verdict** when any of these are true:
+- Any check has \`status: QUEUED\` or \`IN_PROGRESS\` - it is still running.
+- The rollup is empty - checks may not have been created yet, or the PR may be conflicting.
+- The PR's \`mergeable\` state is \`CONFLICTING\` - a conflicted branch often gets no check suite and reports "No CI checks configured", which is not a pass.
+
+Once you have a verdict, report the result:
+- All checks passed (\`conclusion\` is \`SUCCESS\`, \`NEUTRAL\`, or \`SKIPPED\` for every check): append \`done: PR {url} checks complete\` and stop.
+- Any check failed (\`conclusion\` is \`FAILURE\`, \`ERROR\`, \`TIMED_OUT\`, \`CANCELLED\`, or \`ACTION_REQUIRED\`): diagnose and fix. Push the fix commit and wait for the new check set to reach a verdict. Repeat until green, then append \`done: PR {url} checks complete\` and stop.
+  If you cannot fix the failure, append \`blocked: PR {url} checks failed - {summary}\` and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
