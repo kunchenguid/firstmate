@@ -372,12 +372,13 @@ classify_stale() {  # <window> <state>
   local win=$1 state=$2 task last seen
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
-  if [ -n "$last" ] && status_is_paused "$last"; then
-    # A DECLARED external-wait pause (fm-classify-lib.sh): an idle pane is EXPECTED,
-    # so this is not a wedge. The caller records a pause marker (long re-surface
-    # cadence in housekeeping) rather than a wedge stale marker. Cheap: reuses the
-    # status line already read, no fm-crew-state.sh call, mirroring the daemon's
-    # existing status-log classification.
+  if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
+    # A DECLARED external-wait pause or a verified captain-held transfer
+    # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
+    # EXPECTED, so this is not a wedge. The caller records a pause marker (long
+    # re-surface cadence in housekeeping) rather than a wedge stale marker. Cheap:
+    # reuses the status line already read, no fm-crew-state.sh call, mirroring the
+    # daemon's existing status-log classification.
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
     return
   fi
@@ -481,7 +482,7 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   key=$(_stale_key "$task")
   marker="$state/.subsuper-paused-$key"
   watcher_key=$(_stale_key "$win")
-  if status_is_paused "$last"; then
+  if status_is_paused_or_captain_held "$last"; then
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
@@ -499,7 +500,7 @@ migrate_watcher_pause_markers() {  # <state>
     key=$(_stale_key "$task")
     watcher_key=$(_stale_key "$win")
     last=$(last_status_line "$state/$task.status")
-    if status_is_paused "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
+    if status_is_paused_or_captain_held "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
       reconcile_pause_tracking "$win" "$state" "$last"
     fi
   done
@@ -1007,7 +1008,7 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
-    if [ -n "$last" ] && status_is_paused "$last"; then
+    if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
@@ -1022,12 +1023,13 @@ housekeeping() {  # <state>
     esac
   done
 
-  # (2b) pause re-surface recheck. A DECLARED external-wait pause idles by design,
-  # so it is rechecked on a much longer cadence than a wedge (PAUSE_RESURFACE_SECS)
-  # and never escalated as one - but it MUST re-surface, so a forgotten pause cannot
-  # rot invisibly. Past the window: busy (resumed) or gone -> drop; still idle and
-  # still declaring the pause -> escalate a recheck digest and reset the marker so
-  # the window repeats.
+  # (2b) pause re-surface recheck. A declared wait idles by design (fm-classify-lib.sh's
+  # status_is_paused_or_captain_held owns which declarations qualify), so it is
+  # rechecked on a much longer cadence than a wedge (PAUSE_RESURFACE_SECS) and never
+  # escalated as one - but it MUST re-surface, so neither a forgotten pause nor a
+  # forgotten captain hold can rot invisibly. Past the window: busy (resumed) or gone
+  # -> drop; still idle and still declaring the wait -> escalate a recheck digest and
+  # reset the marker so the window repeats.
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
@@ -1038,7 +1040,7 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
-    if [ -z "$last" ] || ! status_is_paused "$last"; then
+    if [ -z "$last" ] || ! status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
@@ -1050,7 +1052,7 @@ housekeeping() {  # <state>
       2) rm -f "$marker" ;;
       *)
         last=$(last_status_line "$state/$task.status")
-        if [ -n "$last" ] && status_is_paused "$last"; then
+        if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
           escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
           _now > "$marker"
         else

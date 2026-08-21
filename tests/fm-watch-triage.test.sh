@@ -1129,6 +1129,38 @@ test_secondmate_paused_resurfaces_in_normal_mode() {
   pass "a declared paused secondmate re-surfaces on the bounded normal-mode cadence"
 }
 
+# A captain hold is the other declared wait, but unlike paused: it has no
+# current-state mapping, so a held mate reports `unknown` rather than `paused`.
+# The bounded re-surface must still reach it, or a mate's hold rots invisibly:
+# nothing else re-reads a quiet mate's endpoint.
+test_secondmate_captain_held_resurfaces_in_normal_mode() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back
+  dir=$(make_case secondmate-held-resurface); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-hold.status"
+  window="test:fm-secondmate-hold"
+  printf 'idle awaiting the captain\n' > "$capture_file"
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-hold.meta"
+  printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-hold_status"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  pane_hash=$(hash_text "idle awaiting the captain")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not re-surface a captain-held secondmate"
+  grep -F "stale: $window" "$out" >/dev/null || fail "captain-held secondmate did not emit a stale recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "captain-held secondmate was mislabeled a wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "a captain-held secondmate re-surfaces on the bounded normal-mode cadence"
+}
+
 test_secondmate_nonpaused_stale_remains_suppressed() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid
   dir=$(make_case secondmate-stale-suppressed); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2590,6 +2622,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
+test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash

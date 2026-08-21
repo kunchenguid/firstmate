@@ -470,8 +470,9 @@ clear_pause_tracking() {  # <window-key>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# After fm-crew-state has fallen back to stopped or unknown, paused classification is
+# recovered only for a confidently dead ordinary crew, or for a secondmate, whose
+# endpoint liveness this function deliberately never reads.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=$(window_key "$win")
@@ -508,7 +509,17 @@ pause_state_class() {  # <window> <task>
       return
     fi
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
+  # Recover paused classification for a declared wait that authoritative crew state
+  # could not name. An ordinary crew needs agent death to confirm no live decision
+  # gate is being silenced. A mate's endpoint liveness is deliberately never read
+  # above, so that confirmation is unavailable by design and cannot be required:
+  # without this, a mate's captain hold - which has no current-state mapping and so
+  # arrives here as `none` - would be silenced by every caller rather than taking the
+  # bounded re-surface cadence, and a forgotten hold would rot invisibly.
+  if [ "$class" = none ] \
+    && { [ "${agent_alive:-unknown}" = dead ] || [ "$(window_kind "$win")" = secondmate ]; }; then
+    class=paused
+  fi
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
     *) rm -f "$recheck_file" ;;
@@ -1106,7 +1117,14 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
-    if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
+    # An idle secondmate endpoint is healthy by design, so a mate is admitted to
+    # the pane-stale path ONLY to serve a declared wait's bounded re-surface -
+    # the same declarations pause_state_class reconciles below, which is why this
+    # gate reads the shared predicate rather than the pause verb alone. Narrowing
+    # it to `paused` would leave a mate's captain hold rotting invisibly: the
+    # clear above already spares its pause tracking, but nothing would ever
+    # re-surface it.
+    if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
