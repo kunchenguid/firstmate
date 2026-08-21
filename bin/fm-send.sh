@@ -458,6 +458,11 @@ RESOLVE_STATUS_FILE=
 # never both at once. Checking the backlog only for keys the status log no
 # longer owns also keeps the common path free of any backlog read.
 RESOLVE_STATUS_KEYS=
+# Answered keys whose open record was a routing promotion, so the close can name
+# the re-staff obligation at the one moment someone is discharging it. Status-log
+# closures only: a decision already transferred to a captain-held task no longer
+# carries its opening verb here, so that route relies on captain-hold-lifecycle.
+RESOLVE_PROMOTION_KEYS=
 RESOLVE_HOLD_KEYS=
 
 # Resolve a --resolve-key key that the status log no longer owns to the
@@ -501,6 +506,11 @@ if [ -n "$RESOLVE_KEYS" ]; then
     case "$resolve_open_set" in
       "$k"$'\t'*|*$'\n'"$k"$'\t'*)
         RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
+        case "$resolve_open_set" in
+          "$k"$'\t'"$FM_CLASSIFY_PROMOTION_VERB"$'\t'*|*$'\n'"$k"$'\t'"$FM_CLASSIFY_PROMOTION_VERB"$'\t'*)
+            RESOLVE_PROMOTION_KEYS="${RESOLVE_PROMOTION_KEYS}${RESOLVE_PROMOTION_KEYS:+ }$k"
+            ;;
+        esac
         continue
         ;;
     esac
@@ -509,9 +519,13 @@ if [ -n "$RESOLVE_KEYS" ]; then
     # through the other ledger - so check there before refusing.
     if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
+      # No promotion reminder on this route: once a decision is transferred to a
+      # captain-held task the status log no longer says which verb opened it, and
+      # the key alone cannot tell a promotion from any other decision. The transfer
+      # route runs through captain-hold-lifecycle, which carries the obligation.
       continue
     fi
-    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+    echo "error: --resolve-key '$k': no open keyed status record with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
     exit 1
   done
 fi
@@ -536,6 +550,13 @@ fm_send_close_resolved_keys() {  # <answer-text>
       echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
       return 1
     fi
+  done
+  # Closing a routing promotion also unblocks landing, which makes this the one
+  # cheap path past a gate the design deliberately made expensive. Name the
+  # obligation here, at the moment it is being discharged, rather than relying on
+  # a skill having been loaded first.
+  for k in $RESOLVE_PROMOTION_KEYS; do
+    echo "note: key '$k' was a routing promotion, so closing it also unblocks landing for this task. Closing it asserts the task was re-staffed at its new tier; see the routing-promotion skill." >&2
   done
 }
 

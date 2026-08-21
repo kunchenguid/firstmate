@@ -27,7 +27,11 @@
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha on GitLab because the head comes only from the live read.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
+# Refuses while the task has an unanswered routing promotion, because landing is
+# the last point stale rigor can still be corrected. bin/fm-promotion-gate-lib.sh
+# owns that check, its refusal, and the --promotion-override last resort.
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--promotion-override <reason>]
+#          [-- <extra forge merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +41,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-promotion-gate-lib.sh
+. "$SCRIPT_DIR/fm-promotion-gate-lib.sh"
+# shellcheck source=bin/fm-promotion-gate-lib.sh
+. "$SCRIPT_DIR/fm-promotion-gate-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -57,7 +65,32 @@ PR_NUMBER=$FM_PR_NUMBER
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
-[ "${1:-}" = "--" ] && shift
+
+# --promotion-override is consumed here, ahead of the optional -- separator, so it can
+# never be mistaken for an argument destined for the forge CLI.
+PROMOTION_OVERRIDE=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --promotion-override)
+      [ "$#" -ge 2 ] || { echo "error: --promotion-override requires a reason" >&2; exit 2; }
+      PROMOTION_OVERRIDE=$2
+      shift 2
+      ;;
+    --promotion-override=*)
+      PROMOTION_OVERRIDE=${1#--promotion-override=}
+      [ -n "$PROMOTION_OVERRIDE" ] \
+        || { echo "error: --promotion-override requires a reason" >&2; exit 2; }
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 caller_has_merge_method() {
   local arg
@@ -131,6 +164,10 @@ RECORDED_HEAD=
 if [ "$PROVIDER" = gitlab ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
+
+# Before any durable recording or forge call: a promotion the fleet never answered
+# means this PR was reviewed and staffed at a tier its own diff already disproved.
+fm_promotion_gate "$STATE" "$ID" "$PROMOTION_OVERRIDE" || exit 1
 
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || {

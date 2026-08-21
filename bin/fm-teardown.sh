@@ -2807,6 +2807,10 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
 rm -rf "$STATE/$ID.inbox"
+# state/<id>.promotion-override is deliberately NOT removed here. It is the only
+# record of why a task was landed over an unanswered routing promotion, and the
+# status log that holds the unanswered promotion itself survives teardown too;
+# deleting the justification while keeping the finding would leave the worse half.
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

@@ -86,11 +86,38 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
-# status decision opened by needs-decision or blocked. See status_open_decisions
-# below for the status-fold contract. The transfer verb is written only after
-# fm-captain-hold.sh has verified the corresponding captain-held backlog item.
+# status decision opened by needs-decision, blocked, or promoted. See
+# status_open_decisions below for the status-fold contract. The transfer verb is
+# written only after fm-captain-hold.sh has verified the corresponding
+# captain-held backlog item.
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
+
+# The routing-promotion verb. Deliberately FIXED rather than configurable, unlike
+# the pause verb beside it. A rename would be a silent bypass: records already
+# written with the old spelling stop matching, the fold stops opening them, and
+# the landing gate that depends on this verb proceeds with an unhandled promotion
+# and no diagnostic at all. Nothing needs this verb renamed, and the whole point of
+# the mechanism is that a promotion can never be silently dropped, so it stays fixed.
+# A crewmate that re-resolves its own risk tier UPWARD mid-task appends
+#   promoted [key=<slug>]: <tier> <factor> - <what raised it>
+# because a task's effective tier is the higher of both resolution passes, and
+# the second pass can only run where the diff exists - inside the crewmate, AFTER
+# firstmate has already frozen every tier-dependent dispatch decision (harness,
+# effort, reviewer count and strength, delivery mode). Without this verb the
+# crewmate cannot report the promotion and firstmate has no trigger to re-staff,
+# so a task dispatched at a low tier keeps that rigor even after its own diff
+# proves it needs more.
+#
+# It opens a durable keyed record through the SAME fold as needs-decision and
+# blocked rather than a parallel mechanism, which is what makes the re-staff
+# obligation survive a restart and gives the "promotion handled" gate for free:
+# an open promoted record IS an unhandled promotion, and the matching keyed
+# `resolved` line is what closes it once firstmate has re-staffed. It is
+# deliberately NOT a terminal verb - the crewmate keeps working while firstmate
+# re-staffs around it - but it IS always surfaced, never absorbed as routine
+# progress, because the whole point is that firstmate must act on it.
+FM_CLASSIFY_PROMOTION_VERB='promoted'
 
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
@@ -126,6 +153,16 @@ status_is_captain_relevant() {
     working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
       ;;
+  esac
+  # The routing-promotion verb is surfaced UNCONDITIONALLY, ahead of the
+  # FM_CAPTAIN_RE override that every other verb defers to. A promotion is not a
+  # captain-taste question about what is worth reporting: it is an obligation on
+  # firstmate to re-staff, and the whole mechanism promises it can never be
+  # absorbed as routine progress. A home that tuned FM_CAPTAIN_RE without knowing
+  # about this verb would otherwise silence exactly the event it must act on, and
+  # would only discover it later as a landing refusal it has no context for.
+  case "$verb" in
+    "$FM_CLASSIFY_PROMOTION_VERB") return 0 ;;
   esac
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
     case "$verb" in
@@ -341,7 +378,7 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
     || { printf '%s' "$open"; return 0; }
   case "$verb" in
-    needs-decision|blocked)
+    needs-decision|blocked|"$FM_CLASSIFY_PROMOTION_VERB")
       note=$(status_line_note "$line")
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
