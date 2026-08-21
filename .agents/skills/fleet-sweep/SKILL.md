@@ -18,7 +18,9 @@ This sweep is a supplemental bounded reconciliation and never replaces, duplicat
 2. Read the latest durable `data/captain-shared.md` when present and preserve its routing rules throughout this sweep.
 3. Run `bin/fm-fleet-snapshot.sh --json` and treat its structured output as the initial fleet inventory.
 4. Treat every status-file line as an append-only wake event and use `bin/fm-crew-state.sh <id>` whenever an action depends on a worker's current state.
-5. Inventory every registered secondmate, child, pending reply, remote-reply route, open decision key, merge-ready or migration-ready item, blocked child, inactive or stale worker, and omitted or unavailable snapshot surface.
+5. Reconcile terminal and validation run-step evidence against newer live ownership before classifying or recovering a worker.
+6. When newer active ownership is proven, classify that worker as progressing and never call it failed, interrupt it, or relaunch it solely because an older run failed or was cancelled.
+7. Inventory every registered secondmate, child, pending reply, remote-reply route, open decision key, merge-ready or migration-ready item, blocked child, inactive or stale worker, and omitted or unavailable snapshot surface.
 
 ## Reconcile every home
 
@@ -26,9 +28,11 @@ This sweep is a supplemental bounded reconciliation and never replaces, duplicat
 2. Require each report to classify all recorded children, disclose omitted children, cover current-cycle Linear work, and name the evidence for blockers, capacity constraints, stale workers, ready work, and parent-bound updates.
 3. Keep the ordinary supervision cycle active while replies are outstanding, and drain wakes as they arrive so parent-home appends and pending-reply resolutions are durably ingested.
 4. Follow the pending-reply and remote-reply owners for their bounded recovery and failure handling rather than inventing a retry loop or timeout.
-5. If a secondmate aggregate report is unavailable, invalid, partial, or timed out, rerun `bin/fm-fleet-snapshot.sh --json` and use that lane's supported bounded direct-home record under `secondmate_current`.
-6. If the bounded direct-home record is also unavailable, invalid, partial, truncated where required, or missing the lane, classify the lane as unavailable and never infer that it is clear.
-7. Finish only after every requested reply is durably ingested or its named transport failure is surfaced, while ordinary supervision remains active throughout the wait.
+5. Prove each requested update reached the parent append-only status and pending-reply path and appeared in a wake drain under the existing process-event and pending-reply owners.
+6. Use targeted status reads only as delivery evidence and never as current-state truth.
+7. If a secondmate aggregate report is unavailable, invalid, partial, or timed out, run the supported targeted route `bin/fm-on.sh <secondmate> fm-fleet-snapshot.sh --secondmate-home-summary` and validate its bounded structured result.
+8. If the targeted direct-home result is also unavailable, invalid, partial, or truncated where required, classify the lane as unavailable and never infer that it is clear.
+9. Finish only after every requested reply is durably ingested and drained or its named transport failure is surfaced, while ordinary supervision remains active throughout the wait.
 
 ## Reconcile work and Linear
 
