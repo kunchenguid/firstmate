@@ -28,6 +28,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 MODE=
 YOLO=
@@ -128,37 +130,98 @@ HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
 echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
 
-# After a scout's promised-final has been delivered, the same task id is still
-# bound but the expected outcome was report-ready. Print the rechain line the
-# consent-holding home must run; a secondmate home cannot register or post.
 promote_print_rechain_hint() {
-  local consent_state=$1 work_home=$2 task_id=$3 id
+  local consent_home=$1 work_home=$2 task_id=$3 id prefix
+  prefix=
+  [ "$consent_home" = "$FM_HOME" ] || prefix="FM_HOME=$(printf '%q' "$consent_home") "
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    [ "$(fm_pf_registry_get "$consent_state" "$id" state)" = delivered ] || continue
-    echo "next: bin/fm-public-followup.sh rechain <new-obligation-id> --from $id --work-home $work_home --work-id $task_id --expected pr-merged"
+    [ "$(fm_pf_registry_get "$consent_home/state" "$id" state)" = delivered ] || continue
+    echo "next: ${prefix}bin/fm-public-followup.sh rechain <new-obligation-id> --from $id --work-home $work_home --work-id $task_id --expected pr-merged"
   done <<EOF
-$(fm_pf_registry_ids_for_work "$consent_state" "$work_home" "$task_id")
+$(fm_pf_registry_ids_for_work "$consent_home/state" "$work_home" "$task_id")
 EOF
 }
-if [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ]; then
+
+promote_canonical_home() {
+  local home=$1
+  case "$home" in /*) ;; *) return 1 ;; esac
+  CDPATH='' cd -- "$home" 2>/dev/null && pwd -P
+}
+
+promote_resolve_primary_home() {
+  local parent=$1 child=$2 mate_id=$3 parent_meta registry meta_home
+  fm_pf_home_id_valid "secondmate:$mate_id" || return 1
+  parent=$(promote_canonical_home "$parent") || return 1
+  child=$(promote_canonical_home "$child") || return 1
+  [ "$parent" != "$child" ] || return 1
+  parent_meta="$parent/state/$mate_id.meta"
+  [ -f "$parent_meta" ] && [ ! -L "$parent_meta" ] || return 1
+  [ "$(fmx_meta_get "$parent_meta" kind)" = secondmate ] || return 1
+  meta_home=$(fmx_meta_get "$parent_meta" home)
+  meta_home=$(CDPATH='' cd -- "$meta_home" 2>/dev/null && pwd -P) || return 1
+  [ "$meta_home" = "$child" ] || return 1
+  registry="$parent/data/secondmates.md"
+  secondmate_registry_validate_bindings "$registry" secondmate_registry_path_key \
+    "$mate_id" "$child" || return 1
+  printf '%s\n' "$parent"
+}
+
+promote_warn_parent_unresolved() {
+  echo "warning: could not resolve the consent-holding parent home for secondmate $1; promotion succeeded, but any open public loop must be inspected and rechained from the parent." >&2
+}
+
+if [ -f "$FM_HOME/.fm-secondmate-home" ]; then
   PROMOTE_MATE_ID=$(sed -n '1p' "$FM_HOME/.fm-secondmate-home" 2>/dev/null || true)
-  if fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" \
-      && [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] \
-      && [ -n "$FM_SECONDMATE_PARENT_HOME" ] \
-      && [ -d "$FM_SECONDMATE_PARENT_HOME/state" ] \
-      && fm_pf_relay_active "$FM_SECONDMATE_PARENT_HOME"; then
-    while IFS= read -r PROMOTE_LOOP_ID; do
-      [ -n "$PROMOTE_LOOP_ID" ] || continue
-      [ "$(fm_pf_registry_get "$FM_SECONDMATE_PARENT_HOME/state" "$PROMOTE_LOOP_ID" state)" = delivered ] || continue
-      echo "warning: the parent home holds an open public loop for this work; it must rechain (this home cannot register or post)."
-      echo "next: FM_HOME=$(printf '%q' "$FM_SECONDMATE_PARENT_HOME") bin/fm-public-followup.sh rechain <new-obligation-id> --from $PROMOTE_LOOP_ID --work-home secondmate:$PROMOTE_MATE_ID --work-id $ID --expected pr-merged"
-    done <<EOF
-$(fm_pf_registry_ids_for_work "$FM_SECONDMATE_PARENT_HOME/state" "secondmate:$PROMOTE_MATE_ID" "$ID")
-EOF
+  PROMOTE_PARENT_RECORD=absent
+  PROMOTE_PARENT_ROUTE=
+  PROMOTE_DURABLE_PARENT=
+  if [ -e "$FM_HOME/.fm-secondmate-parent" ] || [ -L "$FM_HOME/.fm-secondmate-parent" ]; then
+    PROMOTE_PARENT_RECORD=invalid
+    if fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent"; then
+      PROMOTE_PARENT_RECORD=valid
+      PROMOTE_PARENT_ROUTE=$FM_SECONDMATE_PARENT_ROUTE
+      PROMOTE_DURABLE_PARENT=$FM_SECONDMATE_PARENT_HOME
+    fi
   fi
-else
-  if fm_pf_relay_active "$FM_HOME"; then
-    promote_print_rechain_hint "$STATE" main "$ID"
+  if [ "$PROMOTE_PARENT_RECORD" = invalid ]; then
+    promote_warn_parent_unresolved "$PROMOTE_MATE_ID"
+  elif [ "$PROMOTE_PARENT_ROUTE" = local ]; then
+    PROMOTE_PARENT_CANDIDATE=${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-$PROMOTE_DURABLE_PARENT}
+    PROMOTE_PARENT_BINDINGS_MATCH=1
+    if [ -n "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}" ]; then
+      PROMOTE_LIVE_PARENT=$(promote_canonical_home "$FM_PUBLIC_FOLLOWUP_PRIMARY_HOME") \
+        || PROMOTE_PARENT_BINDINGS_MATCH=0
+      PROMOTE_RECORDED_PARENT=$(promote_canonical_home "$PROMOTE_DURABLE_PARENT") \
+        || PROMOTE_PARENT_BINDINGS_MATCH=0
+      if [ "$PROMOTE_PARENT_BINDINGS_MATCH" = 1 ] \
+          && [ "$PROMOTE_LIVE_PARENT" != "$PROMOTE_RECORDED_PARENT" ]; then
+        PROMOTE_PARENT_BINDINGS_MATCH=0
+      fi
+    fi
+    if [ "$PROMOTE_PARENT_BINDINGS_MATCH" = 1 ] \
+        && PROMOTE_PARENT=$(promote_resolve_primary_home \
+          "$PROMOTE_PARENT_CANDIDATE" "$FM_HOME" "$PROMOTE_MATE_ID"); then
+      if fm_pf_relay_active "$PROMOTE_PARENT"; then
+        promote_print_rechain_hint "$PROMOTE_PARENT" "secondmate:$PROMOTE_MATE_ID" "$ID"
+      fi
+    else
+      promote_warn_parent_unresolved "$PROMOTE_MATE_ID"
+    fi
+  elif [ "$PROMOTE_PARENT_ROUTE" = remote ]; then
+    :
+  elif [ -n "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}" ]; then
+    if fm_pf_relay_active "$FM_PUBLIC_FOLLOWUP_PRIMARY_HOME"; then
+      if PROMOTE_PARENT=$(promote_resolve_primary_home \
+          "$FM_PUBLIC_FOLLOWUP_PRIMARY_HOME" "$FM_HOME" "$PROMOTE_MATE_ID"); then
+        promote_print_rechain_hint "$PROMOTE_PARENT" "secondmate:$PROMOTE_MATE_ID" "$ID"
+      else
+        promote_warn_parent_unresolved "$PROMOTE_MATE_ID"
+      fi
+    fi
+  elif fm_pf_relay_active "$FM_HOME"; then
+    promote_warn_parent_unresolved "$PROMOTE_MATE_ID"
   fi
+elif fm_pf_relay_active "$FM_HOME"; then
+  promote_print_rechain_hint "$FM_HOME" main "$ID"
 fi

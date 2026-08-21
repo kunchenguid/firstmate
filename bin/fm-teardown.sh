@@ -2361,11 +2361,10 @@ if [ "$KIND" = ship ] && [ -n "$PR_URL" ] \
   echo "warning: an open public loop with nothing owed is still recorded in the consent-holding home while cleaning up ship task $ID. Hand it on with bin/fm-public-followup.sh rechain or close it with retire --reason." >&2
 fi
 
-# Non-blocking: the legacy Relay link is not guarded as a refusal, but tearing
-# down a task that still carries x_request= means its --final was never posted.
+# Non-blocking: the legacy Relay link is not guarded as a refusal.
 X_REQUEST=$(grep '^x_request=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
 if [ -n "$X_REQUEST" ]; then
-  echo "warning: task $ID still carries a Relay request link ($X_REQUEST) whose final public reply was never posted." >&2
+  echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then

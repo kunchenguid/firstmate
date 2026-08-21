@@ -20,6 +20,7 @@ PF="$ROOT/bin/fm-public-followup.sh"
 EMIT="$ROOT/bin/fm-public-followup-emit.sh"
 POLL="$ROOT/bin/fm-x-poll.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+PROMOTE="$ROOT/bin/fm-promote.sh"
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 TMP_ROOT=$(fm_test_tmproot fm-public-followup)
 
@@ -1475,7 +1476,7 @@ test_rechain_delivers_second_post_on_same_thread() {
 }
 
 test_retire_reason_closes_the_open_loop() {
-  local home log out registry_file
+  local home log out registry_file receipt_mode
   home=$(make_home retire-reason)
   log="$home/curl.log"; : > "$log"
   seed_commitment "$home" pf-retire req-retire discord main work-retire
@@ -1507,7 +1508,18 @@ EOF
   out=$(run_pf "$home" retire pf-retire --reason "the public loop is finished") \
     || fail "retire --reason failed"
   assert_contains "$out" "retired pf-retire reason=the public loop is finished" \
-    "retire must record the reason"
+    "retire must report the reason"
+  assert_present "$home/state/public-followup/retired/pf-retire" \
+    "retire must persist a private receipt before removing the registration"
+  assert_grep 'reason=the public loop is finished' \
+    "$home/state/public-followup/retired/pf-retire" \
+    "the retirement receipt must preserve the reason"
+  assert_grep 'retired_at=' "$home/state/public-followup/retired/pf-retire" \
+    "the retirement receipt must preserve its timestamp"
+  receipt_mode=$(stat -f %Lp "$home/state/public-followup/retired/pf-retire" 2>/dev/null \
+    || stat -c %a "$home/state/public-followup/retired/pf-retire" 2>/dev/null) \
+    || fail "could not inspect the retirement receipt mode"
+  [ "$receipt_mode" = 600 ] || fail "the retirement receipt must be private"
   assert_absent "$home/state/public-followup/registry/pf-retire" \
     "retire is the only removal"
   out=$(run_pf "$home" pending || true)
@@ -1623,9 +1635,57 @@ test_x_request_teardown_warns_when_final_unposted() {
     FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" linked-task \
     > "$home/td.out" 2> "$home/td.err" || rc=$?
   [ "$rc" -eq 0 ] || fail "legacy-link warning must not block teardown (rc=$rc)"
-  assert_grep "still carries a Relay request link (req-legacy-final)" "$home/td.err" \
-    "teardown must warn when x_request= is still present"
-  pass "teardown warns when a legacy Relay link is torn down with its final unposted"
+  assert_grep "still carries an unreconciled Relay request link (req-legacy-final) on its task record" "$home/td.err" \
+    "teardown must report the remaining link without claiming the post failed"
+  assert_no_grep "never posted" "$home/td.err" \
+    "a remaining legacy link must not be treated as proof that no post landed"
+  pass "teardown reports an unreconciled legacy Relay link"
+}
+
+test_secondmate_promotion_uses_teardown_parent_resolution() {
+  local parent stale child out
+  parent=$(make_home promote-parent)
+  stale=$(make_home promote-stale-parent)
+  child=$(make_home promote-child relay-off)
+  printf '%s\n' mate > "$child/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
+    "$stale" > "$child/.fm-secondmate-parent"
+  printf -- '- mate - synthetic (home: %s; scope: synthetic; projects: ; added 2026-08-21)\n' \
+    "$child" > "$parent/data/secondmates.md"
+  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  mkdir -p "$parent/state/public-followup/registry" "$stale/state/public-followup/registry"
+  printf 'obligation_id=pf-valid\nwork_home=secondmate:mate\nwork_id=promote-legacy\nstate=delivered\n' \
+    > "$parent/state/public-followup/registry/pf-valid"
+  printf 'obligation_id=pf-stale\nwork_home=secondmate:mate\nwork_id=promote-conflict\nstate=delivered\n' \
+    > "$stale/state/public-followup/registry/pf-stale"
+  chmod 600 "$parent/state/public-followup/registry/pf-valid" \
+    "$stale/state/public-followup/registry/pf-stale"
+
+  fm_write_meta "$child/state/promote-conflict.meta" \
+    "window=firstmate:fm-promote-conflict" "kind=scout"
+  out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+    FM_STATE_OVERRIDE="$child/state" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
+    "$PROMOTE" promote-conflict --mode local-only --yolo off 2>&1) \
+    || fail "promotion must not block on conflicting parent bindings: $out"
+  assert_contains "$out" "promoted promote-conflict to ship" \
+    "parent-resolution trouble must never refuse the kind flip"
+  assert_contains "$out" "could not resolve the consent-holding parent home" \
+    "conflicting live and durable bindings must warn"
+  assert_not_contains "$out" "--from pf-stale" \
+    "a stale durable parent must not produce a rechain hint"
+
+  rm -f "$child/.fm-secondmate-parent"
+  fm_write_meta "$child/state/promote-legacy.meta" \
+    "window=firstmate:fm-promote-legacy" "kind=scout"
+  out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+    FM_STATE_OVERRIDE="$child/state" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
+    "$PROMOTE" promote-legacy --mode local-only --yolo off 2>&1) \
+    || fail "legacy parent recovery must not block promotion: $out"
+  assert_contains "$out" "next: FM_HOME=" \
+    "a recovered legacy parent must identify the consent-holding home"
+  assert_contains "$out" "--from pf-valid --work-home secondmate:mate --work-id promote-legacy" \
+    "legacy parent recovery must print the rechain hint"
+  pass "secondmate promotion matches teardown parent resolution"
 }
 
 test_outcome_text_is_bounded_without_corrupting_characters
@@ -1668,3 +1728,4 @@ test_retention_creates_no_false_teardown_refusal
 test_expiry_escalation_uses_now_override
 test_prechange_registration_is_open_and_unrechainable
 test_x_request_teardown_warns_when_final_unposted
+test_secondmate_promotion_uses_teardown_parent_resolution
