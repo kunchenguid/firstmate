@@ -58,7 +58,8 @@
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
-#   --wayfinder-state with --wayfinder-child verifies a legacy named scout.
+#   --wayfinder-state verifies accept-child for a recorded named Wayfinder child.
+#   It pairs with --wayfinder-child only to classify a legacy named scout.
 #   --wayfinder-no-child classifies a legacy scout without a Wayfinder child.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
@@ -537,20 +538,18 @@ if [ -n "$RECORDED_WAYFINDER_CHILD" ] && [ "$RECORDED_WAYFINDER_NO_CHILD" = 1 ];
   exit 1
 fi
 WAYFINDER_CHILD=
-if [ "$FORCE" != "--force" ] && [ "$KIND" = scout ] \
-  && [ -n "$RECORDED_WAYFINDER_CHILD" ] \
-  && [ ! -f "$PROJ/bin/wayfinder-lifecycle-gate" ]; then
-  echo "REFUSED: scout task $ID records Wayfinder child '$RECORDED_WAYFINDER_CHILD' but its project has no bin/wayfinder-lifecycle-gate." >&2
-  exit 1
-fi
-if [ "$FORCE" != "--force" ] && [ "$KIND" = scout ] && [ -f "$PROJ/bin/wayfinder-lifecycle-gate" ]; then
-  if [ -n "$RECORDED_WAYFINDER_CHILD" ]; then
-    [ "$WAYFINDER_CHILD_ARG_SET" -eq 0 ] && [ "$WAYFINDER_NO_CHILD" -eq 0 ] || {
-      echo "error: task $ID already records a Wayfinder child; do not override its classification at teardown" >&2
-      exit 2
-    }
-    WAYFINDER_CHILD=$RECORDED_WAYFINDER_CHILD
-  elif [ "$RECORDED_WAYFINDER_NO_CHILD" = 1 ]; then
+if [ "$FORCE" != "--force" ] && [ -n "$RECORDED_WAYFINDER_CHILD" ]; then
+  if [ ! -f "$PROJ/bin/wayfinder-lifecycle-gate" ]; then
+    echo "REFUSED: task $ID records Wayfinder child '$RECORDED_WAYFINDER_CHILD' but its project has no bin/wayfinder-lifecycle-gate." >&2
+    exit 1
+  fi
+  [ "$WAYFINDER_CHILD_ARG_SET" -eq 0 ] && [ "$WAYFINDER_NO_CHILD" -eq 0 ] || {
+    echo "error: task $ID already records a Wayfinder child; do not override its classification at teardown" >&2
+    exit 2
+  }
+  WAYFINDER_CHILD=$RECORDED_WAYFINDER_CHILD
+elif [ "$FORCE" != "--force" ] && [ "$KIND" = scout ] && [ -f "$PROJ/bin/wayfinder-lifecycle-gate" ]; then
+  if [ "$RECORDED_WAYFINDER_NO_CHILD" = 1 ]; then
     [ "$WAYFINDER_CHILD_ARG_SET" -eq 0 ] && [ "$WAYFINDER_NO_CHILD" -eq 0 ] || {
       echo "error: task $ID already records no Wayfinder child; do not override its classification at teardown" >&2
       exit 2
@@ -563,12 +562,12 @@ if [ "$FORCE" != "--force" ] && [ "$KIND" = scout ] && [ -f "$PROJ/bin/wayfinder
     exit 1
   fi
 elif [ "$WAYFINDER_CHILD_ARG_SET" -eq 1 ] || [ "$WAYFINDER_NO_CHILD" -eq 1 ] || [ "$WAYFINDER_STATE_SET" -eq 1 ]; then
-  echo "error: Wayfinder teardown flags apply only to a non-forced scout against a project with bin/wayfinder-lifecycle-gate" >&2
+  echo "error: Wayfinder classification flags apply only to a non-forced scout against a project with bin/wayfinder-lifecycle-gate; --wayfinder-state requires a recorded named child" >&2
   exit 2
 fi
 if [ -n "$WAYFINDER_CHILD" ] && [ "$WAYFINDER_STATE_SET" -eq 0 ]; then
-  echo "REFUSED: scout task $ID records Wayfinder child '$WAYFINDER_CHILD' but has no --wayfinder-state snapshot." >&2
-  echo "Pass --wayfinder-state <snapshot> so Firstmate can verify accept-child before archiving the scout." >&2
+  echo "REFUSED: task $ID records Wayfinder child '$WAYFINDER_CHILD' but has no --wayfinder-state snapshot." >&2
+  echo "Pass --wayfinder-state <snapshot> so Firstmate can verify accept-child before archiving the task." >&2
   exit 1
 fi
 if [ -z "$WAYFINDER_CHILD" ] && [ "$WAYFINDER_STATE_SET" -eq 1 ]; then
@@ -2448,13 +2447,14 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
     echo "Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown." >&2
     exit 1
   fi
-  if [ -n "$WAYFINDER_CHILD" ]; then
-    if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-        "$SCRIPT_DIR/fm-wayfinder-parent.sh" accept-child --project "$PROJ" \
-        --state "$WAYFINDER_STATE" --child "$WAYFINDER_CHILD" --task "$ID"; then
-      echo "REFUSED: the project's Wayfinder accept-child check rejected scout task $ID; task state and report were preserved." >&2
-      exit 1
-    fi
+fi
+
+if [ "$FORCE" != "--force" ] && [ -n "$WAYFINDER_CHILD" ]; then
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-wayfinder-parent.sh" accept-child --project "$PROJ" \
+      --state "$WAYFINDER_STATE" --child "$WAYFINDER_CHILD" --task "$ID"; then
+    echo "REFUSED: the project's Wayfinder accept-child check rejected task $ID; task state and report were preserved." >&2
+    exit 1
   fi
 fi
 

@@ -16,6 +16,8 @@
 # Promoting a scout onto a project that publishes bin/wayfinder-lifecycle-gate
 # is map-dependent implementation dispatch: it requires that command's handoff
 # through bin/fm-wayfinder-parent.sh unless --wayfinder-independent is passed.
+# A recorded Wayfinder child remains attached through promotion for teardown's
+# accept-child check; a no-child scout classification is removed with the scout kind.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -134,7 +136,7 @@ fi
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^wayfinder_independent=' \
-  -e '^wayfinder_child=' -e '^wayfinder_no_child=' "$META" > "$TMP"
+  -e '^wayfinder_no_child=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"

@@ -56,6 +56,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+PROMOTE="$ROOT/bin/fm-promote.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
@@ -584,6 +585,16 @@ run_scout_spawn() {
     "$ROOT/bin/fm-spawn.sh" task-x1 "$case_dir/project" claude --scout "$@"
 }
 
+run_promote() {
+  local case_dir=$1
+  shift
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
+    PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$PROMOTE" task-x1 "$@"
+}
+
 install_teardown_wayfinder_gate() {
   local project=$1
   mkdir -p "$project/bin"
@@ -675,7 +686,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
 }
 
 test_wayfinder_scout_teardown_requires_accept_child() {
-  local case_dir untracked_case rejected resolved out rc
+  local case_dir promoted_case untracked_case rejected resolved out rc
   case_dir=$(make_case wayfinder-scout-archive)
   prepare_spawn_endpoint "$case_dir"
   mkdir -p "$case_dir/data/task-x1"
@@ -728,6 +739,46 @@ test_wayfinder_scout_teardown_requires_accept_child() {
     "teardown did not preserve the project lifecycle success"
   assert_absent "$case_dir/state/task-x1.meta" \
     "Wayfinder-resolved scout teardown did not archive task metadata"
+
+  promoted_case=$(make_case wayfinder-promoted-scout-archive)
+  prepare_spawn_endpoint "$promoted_case"
+  mkdir -p "$promoted_case/data/task-x1"
+  printf '%s\n' 'Research the Wayfinder child.' > "$promoted_case/data/task-x1/brief.md"
+  install_teardown_wayfinder_gate "$promoted_case/project"
+  out=$(run_scout_spawn "$promoted_case" --wayfinder-child 5 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "named Wayfinder scout should spawn before promotion"$'\n'"$out"
+  out=$(run_promote "$promoted_case" --mode no-mistakes --yolo off --wayfinder-independent 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "map-independent promotion should retain the Wayfinder child obligation"$'\n'"$out"
+  assert_grep 'kind=ship' "$promoted_case/state/task-x1.meta" \
+    "promotion did not convert the scout to a ship"
+  assert_grep 'wayfinder_child=5' "$promoted_case/state/task-x1.meta" \
+    "promotion lost the named Wayfinder child"
+  rejected="$promoted_case/rejected.json"
+  resolved="$promoted_case/resolved.json"
+  printf '%s\n' '{"children":[{"number":5,"state":"open"}]}' > "$rejected"
+  printf '%s\n' '{"children":[{"number":5,"state":"closed"}]}' > "$resolved"
+
+  set +e
+  out=$(FM_DATA_OVERRIDE="$promoted_case/data" run_teardown "$promoted_case" \
+    --wayfinder-state "$rejected" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "promoted Wayfinder scout must not archive while accept-child rejects"$'\n'"$out"
+  assert_contains "$out" "accept-child rejected" \
+    "promoted task teardown did not invoke the consuming project's accept-child command"
+  assert_present "$promoted_case/state/task-x1.meta" \
+    "Wayfinder-rejected promoted task teardown removed task metadata"
+
+  out=$(FM_DATA_OVERRIDE="$promoted_case/data" run_teardown "$promoted_case" \
+    --wayfinder-state "$resolved" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "promoted Wayfinder scout should archive after accept-child succeeds"$'\n'"$out"
+  assert_contains "$out" "accept-child accepted" \
+    "promoted task teardown did not preserve the project lifecycle success"
+  assert_absent "$promoted_case/state/task-x1.meta" \
+    "Wayfinder-resolved promoted task teardown did not archive task metadata"
 
   untracked_case=$(make_case wayfinder-untracked-scout)
   prepare_spawn_endpoint "$untracked_case"
