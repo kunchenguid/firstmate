@@ -150,6 +150,7 @@ CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
+WAYFINDER_STATE_TEMP=
 
 control_cleanup() {
   local status=$?
@@ -160,6 +161,9 @@ control_cleanup() {
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
     fm_lock_release "$CONTROL_LOCK" || true
+  fi
+  if [ -n "$WAYFINDER_STATE_TEMP" ]; then
+    rm -f -- "$WAYFINDER_STATE_TEMP" || true
   fi
   return "$status"
 }
@@ -804,6 +808,13 @@ do_relaunch() {
         ''|0)
           [ "$WAYFINDER_STATE_SET" = 1 ] \
             || die "task $ID relaunches against a project with bin/wayfinder-lifecycle-gate; pass --wayfinder-state <snapshot> so Firstmate can verify handoff"
+          if [ "$WAYFINDER_STATE" = - ]; then
+            WAYFINDER_STATE_TEMP=$(mktemp "$STATE/.wayfinder-state.XXXXXX") \
+              || die "could not materialize the Wayfinder snapshot for $ID's relaunch"
+            cat > "$WAYFINDER_STATE_TEMP" \
+              || die "could not read the Wayfinder snapshot for $ID's relaunch"
+            WAYFINDER_STATE=$WAYFINDER_STATE_TEMP
+          fi
           "$SCRIPT_DIR/fm-wayfinder-parent.sh" handoff --project "$project" --state "$WAYFINDER_STATE" \
             || die "the Wayfinder handoff for $ID was rejected before its agent was stopped"
           ;;

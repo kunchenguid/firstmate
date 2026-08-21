@@ -174,6 +174,12 @@ run_control() {  # <case-dir> <args...>
     "$CONTROL" "$@" 2>&1
 }
 
+run_control_stdin() {  # <case-dir> <snapshot> <args...>
+  local dir=$1 snapshot=$2
+  shift 2
+  printf '%s\n' "$snapshot" | run_control "$dir" "$@"
+}
+
 run_spawn() {  # <case-dir> <args...>
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
@@ -840,6 +846,12 @@ test_gated_ship_relaunch_rechecks_handoff_before_stopping() {
   expect_code 0 "$rc" "a passing handoff must allow a gated relaunch"$'\n'"$out"
   [ "$(cat "$dir/fake/command")" = claude ] \
     || fail "a passing handoff did not start the replacement agent"
+
+  out=$(run_control_stdin "$dir" '{"handoff":"allowed"}' rl36 relaunch --wayfinder-state - --note "resume from stdin")
+  rc=$?
+  expect_code 0 "$rc" "a passing stdin handoff must allow both gated relaunch checks"$'\n'"$out"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a passing stdin handoff did not start the replacement agent"
 
   printf 'zsh' > "$dir/fake/command"
   direct_before=$(cat "$dir/fake/literal")
