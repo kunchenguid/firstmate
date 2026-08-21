@@ -378,6 +378,12 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
     || { printf '%s' "$open"; return 0; }
   case "$verb" in
+    needs-decision|blocked)
+      [ "$( _fm_open_set_verb "$open" "$key")" = "$FM_CLASSIFY_PROMOTION_VERB" ] \
+        && { printf '%s' "$open"; return 0; }
+      ;;
+  esac
+  case "$verb" in
     needs-decision|blocked|"$FM_CLASSIFY_PROMOTION_VERB")
       note=$(status_line_note "$line")
       open=$(_fm_decision_drop "$open" "$key")
@@ -570,7 +576,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=4
+FM_OPEN_DECISIONS_FOLD_VERSION=5
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure

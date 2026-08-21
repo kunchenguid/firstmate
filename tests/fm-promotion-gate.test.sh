@@ -28,6 +28,9 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
+# shellcheck source=bin/fm-classify-lib.sh
+. "$ROOT/bin/fm-classify-lib.sh"
+
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 TMP_ROOT=$(fm_test_tmproot fm-promotion-gate-tests)
@@ -184,6 +187,51 @@ test_other_open_decisions_never_trip_the_gate() {
   grep -q 'pr merge 7 --repo example/repo' "$case_dir/gh-axi.log" \
     || fail "pr-other-decision: the merge did not reach the forge"
   pass "an unrelated open decision never trips the promotion gate"
+}
+
+test_promotion_survives_a_later_blocker_with_its_key() {
+  local case_dir rc
+  case_dir=$(make_pr_case pr-promotion-blocked)
+  {
+    printf 'promoted [key=tier]: tier-2 blast-radius - diff reaches the auth policy path\n'
+    printf 'blocked [key=tier]: waiting on a staging credential\n'
+  } > "$case_dir/state/task-p1.status"
+
+  set +e
+  run_pr_merge "$case_dir" task-p1 "$PR_URL" > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pr-promotion-blocked: a later blocker must not replace an open promotion"
+  assert_grep 'auth policy path' "$case_dir/err" \
+    "pr-promotion-blocked: the gate did not retain the promotion's record"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "pr-promotion-blocked: the forge was reached despite the open promotion"
+  pass "a later blocker cannot replace an open promotion"
+}
+
+test_ordinary_openers_still_replace_their_shared_key() {
+  local case_dir rc open expected
+  case_dir=$(make_pr_case pr-ordinary-replace)
+  {
+    printf 'needs-decision [key=shared]: choose the data shape\n'
+    printf 'blocked [key=shared]: waiting on staging credentials\n'
+  } > "$case_dir/state/task-p1.status"
+
+  open=$(status_open_decisions "$case_dir/state/task-p1.status")
+  expected=$(printf 'shared\tblocked\twaiting on staging credentials')
+  [ "$open" = "$expected" ] \
+    || fail "pr-ordinary-replace: ordinary opener replacement changed: got '$open' want '$expected'"
+
+  set +e
+  run_pr_merge "$case_dir" task-p1 "$PR_URL" > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "pr-ordinary-replace: an ordinary keyed blocker must not trip the promotion gate"
+  grep -q 'pr merge 7 --repo example/repo' "$case_dir/gh-axi.log" \
+    || fail "pr-ordinary-replace: the merge did not reach the forge"
+  pass "ordinary openers still replace their shared key"
 }
 
 # --- (d) ---------------------------------------------------------------------
@@ -403,7 +451,7 @@ test_the_promotion_verb_cannot_be_renamed_out_from_under_the_gate() {
 # validates becomes a path traversal, and a plain redirect follows a symlink, so
 # the override record could be written anywhere.
 test_local_path_refuses_unsafe_ids_and_diverted_records() {
-  local case_dir rc outside
+  local case_dir rc outside before after
   case_dir=$(make_local_case local-unsafe)
   printf 'promoted [key=tier]: tier-3 consequence - touches the billing path\n' \
     > "$case_dir/state/task-l1.status"
@@ -429,12 +477,32 @@ test_local_path_refuses_unsafe_ids_and_diverted_records() {
   set -e
   expect_code 1 "$rc" "local-unsafe: a symlinked override destination must be refused"
   assert_absent "$outside" "local-unsafe: the override write escaped through the symlink"
-  pass "the local path refuses an unsafe task id and a diverted override record"
+
+  rm "$case_dir/state/task-l1.promotion-override"
+  mkdir "$case_dir/state/task-l1.promotion-override"
+  before=$(local_default_head "$case_dir")
+  set +e
+  run_merge_local "$case_dir" task-l1 \
+    --promotion-override 'worker gone and the hold path is unavailable' \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "local-unsafe: a directory override destination must be refused"
+  assert_grep 'is a directory' "$case_dir/err" \
+    "local-unsafe: the directory refusal came from another check"
+  after=$(local_default_head "$case_dir")
+  [ "$before" = "$after" ] \
+    || fail "local-unsafe: a directory override destination moved the default branch"
+  [ -z "$(find "$case_dir/state/task-l1.promotion-override" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+    || fail "local-unsafe: a directory override destination received a hidden record"
+  pass "the local path refuses unsafe ids and diverted override records"
 }
 
 test_pr_path_refuses_an_unanswered_promotion
 test_pr_path_reopens_once_the_promotion_is_answered
 test_other_open_decisions_never_trip_the_gate
+test_promotion_survives_a_later_blocker_with_its_key
+test_ordinary_openers_still_replace_their_shared_key
 test_override_demands_a_reason_and_records_it
 test_local_path_refuses_an_unanswered_promotion
 test_local_path_override_lands_and_records

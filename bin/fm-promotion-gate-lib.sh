@@ -16,8 +16,10 @@
 # The gate deliberately reads the SAME fold as everything else rather than a private
 # marker: an open promoted record IS an unhandled promotion, so answering the crewmate
 # through bin/fm-send.sh --resolve-key, or transferring the promotion to a durable
-# captain hold through bin/fm-captain-hold.sh, both clear this gate as a side effect
-# of doing the real work. Neither route loses the promotion.
+# captain hold through bin/fm-captain-hold.sh, both clear this gate. A resolved close is
+# a supervisor assertion that a re-staff happened, deliberately not machine-verified;
+# a captain-held close asserts the durable human transfer. The protection is durable
+# visibility: the promotion, its answer text, and any override reason are all recorded.
 #
 # The override is an intentional last-resort escape hatch when neither proper closure
 # route serves: the crewmate is gone, so it cannot be answered, and this home's backlog
@@ -129,6 +131,10 @@ fm_promotion_override_record() {  # <state-dir> <task-id> <reason>
   path=$(fm_promotion_override_path "$state" "$id")
   if [ -L "$path" ]; then
     echo "error: refusing to record the override: $path is a symlink" >&2
+    return 1
+  fi
+  if [ -d "$path" ]; then
+    echo "error: refusing to record the override: $path is a directory" >&2
     return 1
   fi
   tmp=$(umask 077; mktemp "$state/.promotion-override.XXXXXX") || return 1

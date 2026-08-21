@@ -16,6 +16,8 @@ A worker reports an upward mid-task re-resolve of its own tier with the routing-
 The record staying open is the obligation.
 Firstmate owes it a re-staff, and both landing paths refuse until it is closed, so a promotion cannot quietly land at the rigor its own diff already disproved.
 `bin/fm-promotion-gate-lib.sh` owns that refusal and its last-resort override.
+Closing a promotion is a supervisor assertion that a re-staff happened, deliberately not machine-verified.
+Its protection is durable visibility: the promotion, answer text, and any override reason are all recorded.
 
 ## Handle it
 
@@ -45,7 +47,7 @@ Firstmate owes it a re-staff, and both landing paths refuse until it is closed, 
    Close the record only after an actual re-staff onto a stronger runtime, or after the captain has answered an escalation.
    Answer the worker with `bin/fm-send.sh <target> --resolve-key <key> '<the re-staff decision>'`, which closes the record as it delivers.
    When the worker is already gone, hold the promotion for the captain instead and load `captain-hold-lifecycle` for that procedure; the transfer closes the live record without losing the promotion.
-   Either way the answer must name the actual re-staff or the captain's escalation decision, because that text is the only durable account of how the promotion was discharged.
+   Either way the answer must name the actual re-staff or the captain's escalation decision, because that text is the durable account of how the promotion was discharged.
 
 ## Boundaries
 
