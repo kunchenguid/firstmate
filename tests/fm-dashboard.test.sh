@@ -501,6 +501,23 @@ test_missing_id_and_unreachable_board_have_distinct_exit_codes() {
   pass "a board-answered missing id and an unreachable board are distinguishable by exit code"
 }
 
+# --help renders the script's whole header comment block. The blocks asserted
+# here are the LAST ones in that header, so a future header edit that truncates
+# the rendering (as a fixed line range once did) fails here instead of silently
+# dropping the tail of the only syntax reference agents are pointed at.
+test_help_prints_the_whole_header_through_its_last_block() {
+  local out
+  out=$("$DASH" --help) || fail "--help should succeed"
+
+  assert_contains "$out" "statuses: needs-attention" "--help lost the statuses block"
+  assert_contains "$out" "Server URL resolution" "--help lost the server URL resolution block"
+  assert_contains "$out" "--connect-timeout 5s and --max-time 20s" \
+    "--help lost the call-bounding block"
+  assert_contains "$out" "FM_DASHBOARD_CONNECT_TIMEOUT" "--help lost the timeout override names"
+  assert_contains "$out" "Exit codes: 0 success" "--help lost the exit-code table"
+  pass "--help prints the header through its final exit-code block"
+}
+
 test_bad_input_fails_with_nonzero_exit() {
   if "$DASH" status nonexistent-id working >/dev/null 2>&1; then
     fail "status on a nonexistent task should have failed"
@@ -529,6 +546,7 @@ test_add_refuses_a_reason_for_a_status_that_cannot_carry_one
 test_documented_guard_rates_still_hold
 test_audit_log_run_and_interval
 test_bad_input_fails_with_nonzero_exit
+test_help_prints_the_whole_header_through_its_last_block
 test_calls_are_bounded_against_a_board_that_never_answers
 test_zero_timeout_override_is_refused_like_any_other_unusable_one
 test_missing_id_and_unreachable_board_have_distinct_exit_codes
