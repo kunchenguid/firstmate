@@ -950,8 +950,12 @@ families_for_changed_path() {
     bin/fm-teardown.sh)
       # Teardown owns the card's advance to testing (docs/dashboard.md "The
       # mechanical card link"), so it selects the board suites too.
+      # tests/fm-gotmp.test.sh (session-bootstrap) runs the real teardown
+      # against a hand-assembled bin/, so it is the suite most sensitive to
+      # teardown's sourced-sibling set and has to be selected with it.
       printf '%s\n' pr-forge
       printf '%s\n' dashboard
+      printf '%s\n' session-bootstrap
       ;;
     bin/fm-nm-run-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both
