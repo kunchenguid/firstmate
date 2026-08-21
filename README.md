@@ -90,7 +90,7 @@ On Windows, install Firstmate's required tools from PowerShell:
 .\bin\fm-install-windows.ps1
 ```
 
-The Windows installer also configures the AXI integration hooks and disables this repository's Claude project hooks by renaming `.claude/settings.json` to `.claude/settings.json.disabled`.
+The Windows installer also installs Git for Windows, configures the AXI integration hooks, and disables this repository's Claude project hooks by renaming `.claude/settings.json` to `.claude/settings.json.disabled`.
 
 Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
 

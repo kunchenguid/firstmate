@@ -347,6 +347,16 @@ jobs:
           path: ${{ runner.temp }}/fm-test/fm-test-timing-aggregate.json
           if-no-files-found: warn
 
+  windows-update:
+    name: Windows self-update entry point
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run Windows updater regression
+        shell: bash
+        run: bin/fm-test-run.sh tests/fm-update-windows.test.sh
+
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
     runs-on: macos-latest
