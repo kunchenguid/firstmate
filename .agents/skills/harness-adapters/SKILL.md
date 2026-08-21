@@ -581,6 +581,7 @@ The generated hook calls `bin/fm-agy-turnend-hook.sh` with an exact workspace, t
 The script requires the Stop payload's sole `workspacePaths` entry, the worktree `.fm-agy-turnend` pointer, the expected token, and the private registry target to agree before it touches `state/<id>.turn-ended`.
 An arbitrary Agy session outside that bound Firstmate worktree has no matching hook, pointer, and registry tuple and cannot write task state.
 Teardown removes the generated hook, empty customization directory, pointer, private auth entry, and state token.
+A relaunch retires that same wiring through the control plane's tables before the replacement arms, so a switch away from Agy leaves no live hook and an Agy re-arm never orphans the previous customization root.
 
 The primary Firstmate checkout carries `.agents/hooks.json`.
 Its Stop hook calls `bin/fm-turnend-guard-agy.sh`, which invokes the shared primary predicate only for `executionNum: 0`.

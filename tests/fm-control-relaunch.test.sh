@@ -582,7 +582,7 @@ test_wiring_removal_failure_refuses_before_replacement_arm() {
 }
 
 test_turnend_auth_paths_are_owned_by_the_control_adapter() {
-  local dir state grok_path kimi_path token_path
+  local dir state grok_path kimi_path agy_path token_path
   dir=$(fm_test_tmproot fm-control-auth)
   state="$dir/state"
   mkdir -p "$state"
@@ -599,6 +599,22 @@ test_turnend_auth_paths_are_owned_by_the_control_adapter() {
     || fail "kimi's registry path should resolve under the home store, got '$kimi_path'"
   grok_path=$(GROK_HOME="$dir/gh" fm_control_harness_turnend_auth_path grok 'not a token/../..')
   [ -z "$grok_path" ] || fail "a malformed token must resolve to no path, got '$grok_path'"
+  printf 'fm.333333333333\n.agents\n' > "$state/x.agy-turnend-token"
+  token_path=$(fm_control_harness_turnend_token_path agy "$state" x)
+  [ "$token_path" = "$state/x.agy-turnend-token" ] \
+    || fail "the agy token path should be computed without reading it"
+  agy_path=$(fm_control_harness_turnend_auth_path agy fm.333333333333 "$state")
+  [ "$agy_path" = "$state/agy-turn-end.d/fm.333333333333" ] \
+    || fail "agy's registry path should resolve under the private state store, got '$agy_path'"
+  fm_control_harness_turnend_auth_path agy fm.333333333333 \
+    && fail "agy's registry path must be refused without the state root it lives under"
+  agy_path=$(fm_control_harness_wiring_paths agy "$dir/wt" "$state" x .agents)
+  [ "$agy_path" = "$dir/wt/.fm-agy-turnend
+$state/x.agy-turnend-token
+$dir/wt/.agents/hooks.json" ] \
+    || fail "agy's wiring should cover pointer, token, and task-local hook, got '$agy_path'"
+  fm_control_harness_wiring_paths agy "$dir/wt" "$state" x ../../etc >/dev/null \
+    && fail "a hook root outside agy's customization roots must be refused, not deleted"
   pass "fm-control-lib: one owner resolves each harness's turn-end registry entry, and refuses a malformed token"
 }
 
@@ -828,6 +844,58 @@ test_muse_session_binding_is_retired_on_a_harness_switch() {
   [ ! -e "$dir/home/state/rl31.muse-session-current" ] \
     || fail "the retired muse incarnation's resolved session pin must not outlive it"
   pass "fm-spawn --relaunch: switching away from muse retires its session binding"
+}
+
+# agy arms four artifacts per task: a task-local hooks.json under whichever
+# customization root was free, the worktree token pointer, the state token that
+# records both the token and that chosen root, and a firstmate-private registry
+# entry. Relaunching AWAY from agy must retire all four, or the retired
+# incarnation's hook keeps firing into the worktree for the life of the task.
+arm_agy_wiring() {  # <case-dir> <id> <hook-root> <token>
+  local dir=$1 id=$2 root=$3 token=$4
+  mkdir -p "$dir/home/state/agy-turn-end.d" "$dir/wt/$root"
+  printf '%s\n' "$dir/home/state/$id.turn-ended" \
+    > "$dir/home/state/agy-turn-end.d/$token"
+  printf '%s\n%s\n' "$token" "$root" > "$dir/home/state/$id.agy-turnend-token"
+  printf 'token=%s\n' "$token" > "$dir/wt/.fm-agy-turnend"
+  printf '{"firstmate-task-turn-end-%s":{}}\n' "$token" > "$dir/wt/$root/hooks.json"
+}
+
+test_agy_wiring_is_retired_on_a_harness_switch() {
+  local dir
+  dir=$(new_case agywiring rl36)
+  add_ship_task "$dir" rl36 agy
+  arm_agy_wiring "$dir" rl36 .agents fm.abcdefabcdef
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl36 --relaunch --harness claude >/dev/null
+  [ ! -e "$dir/home/state/agy-turn-end.d/fm.abcdefabcdef" ] \
+    || fail "the retired agy incarnation's private registry entry must not outlive it"
+  [ ! -e "$dir/home/state/rl36.agy-turnend-token" ] \
+    || fail "the retired agy incarnation's state token must not outlive it"
+  [ ! -e "$dir/wt/.fm-agy-turnend" ] \
+    || fail "the retired agy incarnation's worktree pointer must not outlive it"
+  [ ! -e "$dir/wt/.agents/hooks.json" ] \
+    || fail "the retired agy incarnation's task-local hook must not outlive it"
+  [ ! -d "$dir/wt/.agents" ] \
+    || fail "the emptied customization root firstmate created must not be left behind"
+  pass "fm-spawn --relaunch: switching away from agy retires its whole hook wiring"
+}
+
+# A recorded hook root outside agy's four customization roots cannot be
+# retired safely, so the relaunch must refuse before arming a replacement
+# rather than leave the unknown hook live.
+test_agy_unknown_hook_root_refuses_the_relaunch() {
+  local dir out rc
+  dir=$(new_case agybadroot rl38)
+  add_ship_task "$dir" rl38 agy
+  arm_agy_wiring "$dir" rl38 .agents fm.abcdefabcdef
+  printf 'fm.abcdefabcdef\n../../etc\n' > "$dir/home/state/rl38.agy-turnend-token"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl38 --relaunch --harness claude); rc=$?
+  [ "$rc" -ne 0 ] || fail "an unrecognized recorded agy hook root must fail closed"$'\n'"$out"
+  assert_contains "$out" "could not retire agy wiring" \
+    "the refusal should name the wiring that could not be retired"
+  pass "fm-spawn --relaunch: an unrecognized agy hook root refuses instead of retiring blind"
 }
 
 test_cursor_session_binding_is_retired_on_a_harness_switch() {
@@ -1337,6 +1405,8 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
+test_agy_wiring_is_retired_on_a_harness_switch
+test_agy_unknown_hook_root_refuses_the_relaunch
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical

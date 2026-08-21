@@ -812,7 +812,8 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
+  local harness=$1 wt=$2 state=$3 id=$4
+  local token_path token hook_root auth_path paths path
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
   # adapter name. The retirement tables are keyed by the exact adapter, so the
@@ -823,19 +824,30 @@ clear_relaunch_harness_wiring() {
   harness=$(fm_control_harness_family "$harness") || harness=
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
   token=
+  hook_root=
   if [ -n "$token_path" ] && [ -f "$token_path" ]; then
     IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
+    # agy records the customization root it chose on the second line; every
+    # other adapter's token file has only the first, so this reads empty there.
+    hook_root=$(sed -n '2p' "$token_path" 2>/dev/null || true)
   fi
-  auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || return 1
+  auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token" "$state") || return 1
   if [ -n "$auth_path" ]; then
     rm -f -- "$auth_path" || return 1
   fi
+  # Computed before the loop so a table refusal (an unrecognized recorded hook
+  # root, say) fails the retirement instead of being swallowed by the heredoc's
+  # command substitution and read as "nothing to retire".
+  paths=$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id" "$hook_root") || return 1
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     rm -f -- "$path" || return 1
   done <<EOF
-$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
+$paths
 EOF
+  if [ "$harness" = agy ] && [ -n "$hook_root" ]; then
+    rmdir "$wt/$hook_root" 2>/dev/null || true
+  fi
 }
 
 spawn_herdr_presentation_order_lock_release() {
