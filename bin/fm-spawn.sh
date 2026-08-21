@@ -1729,18 +1729,26 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+git_common_dir_real() {  # <dir>
+  local dir=$1 common
+  common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  case $common in
+    /*) ;;
+    *) common="$dir/$common" ;;
+  esac
+  ( cd "$common" 2>/dev/null && pwd -P ) || return 1
+}
+
 # Resolve a local-only project's default branch when neither `main` nor `master`
 # exists: read the primary checkout's HEAD symref through the shared git common
 # dir, so `git init -b trunk` style projects still yield a real spawn base.
 primary_checkout_head_branch() {  # <worktree>
-  local worktree=$1 common primary branch
-  common=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || return 1
-  [ -n "$common" ] || return 1
-  case $common in
-    /*) ;;
-    *) common="$worktree/$common" ;;
-  esac
+  local worktree=$1 common primary primary_common branch
+  common=$(git_common_dir_real "$worktree") || return 1
   primary=$(cd "$common/.." 2>/dev/null && pwd -P) || return 1
+  primary_common=$(git_common_dir_real "$primary") || return 1
+  [ "$primary_common" = "$common" ] || return 1
   branch=$(git -C "$primary" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   [ -n "$branch" ] || return 1
   git -C "$worktree" show-ref --verify --quiet "refs/heads/$branch" || return 1
@@ -1781,7 +1789,7 @@ freshen_spawn_worktree_base() {  # <worktree>
       return 1
     fi
   else
-    echo "notice: project has no origin remote; using local default branch as spawn base" >&2
+    echo "notice: project has no origin remote; using local branch '$default' as spawn base" >&2
     target=$default
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {

@@ -295,6 +295,64 @@ test_no_origin_dirty_pool_still_refuses() {
   pass "a dirty pooled worktree with no origin is refused without discarding its local work"
 }
 
+test_no_origin_notice_names_the_resolved_branch() {
+  local rec id out status
+  id='pool-no-origin-notice-r9'
+  rec=$(make_case_no_origin no-origin-notice "$id" develop)
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should succeed for a no-origin project on a non-standard default branch"
+  assert_contains "$out" "using local branch 'develop' as spawn base" \
+    "the no-origin notice did not name the branch it resolved"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$PROJECT_DIR" rev-parse develop)" ] \
+    || fail "spawn did not base the no-origin pool on the branch named in its notice"
+  pass "the no-origin notice names the local branch used as the spawn base"
+}
+
+test_unrelated_common_dir_parent_refuses_pool() {
+  local case_dir home project gitdir pool fakebin id initial out status head_before
+  id='pool-no-origin-separate-gitdir-r10'
+  case_dir="$TMP_ROOT/no-origin-separate-gitdir"
+  home="$case_dir/home"
+  project="$case_dir/nest/project"
+  gitdir="$case_dir/nest/project.git"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$case_dir/nest"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b trunk "$case_dir/nest"
+  printf 'outer\n' > "$case_dir/nest/OUTER.md"
+  git -C "$case_dir/nest" add OUTER.md
+  git -C "$case_dir/nest" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm outer
+
+  git init --quiet -b trunk --separate-git-dir "$gitdir" "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  CASE_DIR=$case_dir HOME_DIR=$home PROJECT_DIR=$project POOL_DIR=$pool
+  FAKEBIN_DIR=$fakebin INITIAL_SHA=$initial DEFAULT_BRANCH=trunk
+  head_before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "spawn trusted an unrelated repository's HEAD as the local default branch"
+  assert_contains "$out" "no local default branch" \
+    "spawn did not refuse when the common-dir parent is not this repository's checkout"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$head_before" ] \
+    || fail "a refused spawn still moved the pooled worktree base"
+  pass "a common-dir parent that is not this repo's checkout refuses the pooled worktree"
+}
+
 test_origin_present_still_fetches() {
   local rec id out status current
   id='pool-origin-present-r8'
@@ -320,6 +378,8 @@ test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_no_origin_remote_uses_local_default_branch
 test_no_origin_dirty_pool_still_refuses
+test_no_origin_notice_names_the_resolved_branch
+test_unrelated_common_dir_parent_refuses_pool
 test_origin_present_still_fetches
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
