@@ -175,6 +175,24 @@ assert_absent "$H/state/procevent/$sid.source" "terminal collection retires the 
 assert_contains "$(wake_payloads "$H")" "procevent gpt-deep-research $sid 1" "collection reaches the durable Firstmate wake queue"
 pass "active waits and successful collection wake with only review-safe fields"
 
+# --- an in-place rewrite is retried, not falsely published as BLOCKED --------
+H="$TMP_ROOT/h-transient-read"; new_home "$H"
+WD="$TMP_ROOT/watches-transient-read"
+write_watch "$WD" watch-transient-read WATCHING "" "https://chatgpt.com/c/transient-read" "" "transient"
+sid=$(source_id "$WD" "$H" watch-transient-read)
+TEST_GDR_WATCHES="$WD" gdr "$H" arm watch-transient-read --interval-seconds 1 >/dev/null
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/$sid.claim" || fail "transient-read watch was not supervised"
+printf '{"schema":' > "$WD/watch-transient-read.json"
+sleep 1.2
+if first_result "$H" "$sid" >/dev/null 2>&1; then
+  fail "a partial in-place watch rewrite falsely published a terminal result"
+fi
+write_watch "$WD" watch-transient-read NEEDS_COLLECTION "" "https://chatgpt.com/c/transient-read" "" "transient"
+wait_for_result "$H" "$sid" || fail "watch did not recover after the in-place rewrite completed"
+RESULT=$(first_result "$H" "$sid")
+assert_grep '"status":"NEEDS_COLLECTION"' "$RESULT" "only the later valid terminal state is captured"
+pass "inconsistent watch reads retry without a false terminal wake"
+
 # --- a saved report with cleanup failure remains reviewable, never lost -------
 H="$TMP_ROOT/h-cleanup"; new_home "$H"
 WD="$TMP_ROOT/watches-cleanup"

@@ -23,8 +23,10 @@
 # The blocking child reads only its already-bound watch record and emits one
 # redacted result when that exact record reaches COLLECTED,
 # COLLECTED_CLEANUP_PENDING, NEEDS_COLLECTION, BLOCKED, or
-# COLLECTION_UNCERTAIN. It never starts, configures, or calls the standalone
-# report watcher, touches Chrome, opens a tab, or writes to skill state.
+# COLLECTION_UNCERTAIN. An unreadable or inconsistent in-place record rewrite
+# is retried silently and never synthesized into a terminal result. It never
+# starts, configures, or calls the standalone report watcher, touches Chrome,
+# opens a tab, or writes to skill state.
 #
 # A COLLECTED or COLLECTED_CLEANUP_PENDING result is successful only after its
 # report-watcher-verified archive path still names an existing regular archive.
@@ -402,23 +404,11 @@ try:
 except SystemExit:
     raise
 except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
-    conversation_url = ""
-    try:
-        with open(binding_path, encoding="utf-8") as handle:
-            candidate = json.load(handle).get("conversation_url")
-        parsed = urlsplit(candidate) if isinstance(candidate, str) else None
-        if parsed and parsed.scheme == "https" and parsed.hostname == "chatgpt.com" and parsed.port is None and parsed.username is None and parsed.password is None and parsed.path.startswith("/c/") and parsed.path[3:] and not parsed.query and not parsed.fragment:
-            conversation_url = candidate
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        pass
-    print(json.dumps({
-        "schema": result_schema,
-        "watch_id": expected_watch_id,
-        "status": "BLOCKED",
-        "archive_path": None,
-        "conversation_url": conversation_url,
-        "detail": "bound watch record changed or is unavailable",
-    }, separators=(",", ":"), sort_keys=True))
+    # report_watcher.py rewrites its JSON record in place. A concurrent read can
+    # therefore observe a partial document, which is not evidence that this
+    # research is blocked. Leave the blocking child alive and retry the same
+    # exact binding on its normal cadence.
+    raise SystemExit(3)
 PY
 ) || rc=$?
     rc=${rc:-0}
