@@ -334,6 +334,66 @@ The locked bootstrap inheritance pass uses the same placement-specific behavior;
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Watched tool updates (config/watched-tools.json)
+
+`config/watched-tools.json` is an optional local, gitignored list of the tools this home depends on.
+When it is present and the check is armed, [`bin/fm-tool-update-check.sh`](../bin/fm-tool-update-check.sh) reports two conditions, and keeps them deliberately distinct:
+
+- `<tool> update available` means a newer version exists at the tool's update source.
+- `<tool> update not in effect` means a newer copy is already installed on this host, but `PATH` still resolves an older one.
+
+The second condition is the reason the check exists.
+An update can install correctly and stay inert because an earlier `PATH` entry still holds an older copy, and a check that only asks whether a newer version is published reports that host as up to date.
+The script therefore runs every copy of a watched command found on `PATH` and asks it for its own version, rather than trusting one lookup or reading a version out of a directory name.
+It only reports; it never installs, updates, fetches, or changes `PATH`, a version manager, or any installed tool.
+
+This section is the single owner of the canonical schema.
+`bin/fm-tool-update-check.sh` owns probe mechanics, cadence, and the report record.
+
+```json
+{
+  "tools": [
+    {
+      "name": "<label used in the report>",
+      "command": "<optional bare executable name to find on PATH>",
+      "version_args": ["<optional args that make it print its version, default --version>"],
+      "announce_pattern": "<optional extended regex matching the tool's own update announcement>",
+      "announce_args": ["<optional args for the command that carries that announcement, default version_args>"],
+      "git": {
+        "repo": "<optional absolute path to a local clone>",
+        "remote": "<optional remote name, default origin>",
+        "branch": "<optional branch, default the remote's own default branch>"
+      }
+    }
+  ]
+}
+```
+
+Each entry needs a `name` and at least one of `command` or `git`; an entry may carry both.
+A `command` entry gives the `PATH` comparison above, and adding `announce_pattern` also reports the tool's own update announcement, which is how a tool that already reports its own updates is read rather than reimplemented.
+A tool does not always announce a new release on the command that prints its version: `no-mistakes --version` prints only the version, while its other commands carry the announcement.
+`announce_args` names the command to search for the announcement in that case, and it is asked only of the copy `PATH` resolves; without it the version probe's own output is searched.
+An `announce_pattern` that is not a usable extended regular expression stops `arm`, and during a sweep it is reported as that one tool's own check failure so one broken pattern never stops the other watched tools from being checked.
+A `git` entry reports how many commits the local clone is behind its remote branch, and stays silent when the clone is current or ahead.
+An omitted `branch` uses the remote's default branch, taken from the clone's own record of it and otherwise asked of the remote directly, so a `--single-branch` clone still resolves.
+Both probe kinds are read-only and bounded, and a probe that cannot answer is reported as a check failure rather than assumed current.
+See [`docs/examples/watched-tools.json`](examples/watched-tools.json) for a starting point to copy into local `config/watched-tools.json`.
+
+Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
+That writes `state/tool-updates.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal cadence and turns its one line into a `check:` wake; no separate schedule is involved.
+The armed check runs whenever that home has a watcher running, and arming alone does not make watcher supervision required, so a home with no in-flight work and no other reason to watch does not start a watcher just for this check.
+`bin/fm-tool-update-check.sh disarm` removes the shim, its trust binding, and the report record.
+The check prints nothing when everything is current, and `state/.tool-updates` records the findings the last report was made from so the same pending update is reported once instead of on every poll.
+A changed or returning condition is reported again.
+Adding, removing, or changing a watched tool is an edit to this file and needs no code change or re-arming.
+This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
+
+`FM_TOOL_UPDATE_INTERVAL` (default 900 seconds, `0` to probe on every run) sets how often probes actually run, `FM_TOOL_UPDATE_PROBE_SECS` (default 5) bounds one probe, and `FM_TOOL_UPDATE_BUDGET_SECS` (default 20) bounds a whole sweep.
+A sweep that runs out of budget says which tool it did not reach rather than reporting the rest as current.
+The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
+So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
+A budget that is not a whole number from 1 to 120 is still refused outright.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -549,6 +609,10 @@ FM_INACTIVE_RECONCILE_SECS=900  # 60..1800-second watcher cadence and inactivity
 FM_INACTIVE_RECONCILE_BUDGET_SECS=10  # 1..30-second scan deadline; wedged-scan kill backstop follows one second later
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or Relay dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 probes on every run, other values must be 60..86400
+FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
+FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
+FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
