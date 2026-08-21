@@ -3885,11 +3885,32 @@ def seed_home(path, marker_id):
     return path
 
 
+def pi_pool(root, profiles=8):
+    """The fixture Pi credential pool every placed task draws from.
+
+    Shaped exactly as bin/fm-pi-account-home.py requires of a projectable
+    profile, with one distinct upstream account per slot, because placement
+    leases the ACCOUNT and refuses anything it cannot identify.
+    """
+    home = root / "pi-pool"
+    home.mkdir(parents=True, exist_ok=True)
+    pool = {}
+    for index in range(1, profiles + 1):
+        name = "openai-codex" if index == 1 else "openai-codex-{}".format(index)
+        pool[name] = {
+            "type": "oauth", "access": "fixture-access-{}".format(index),
+            "refresh": "fixture-refresh-{}".format(index),
+            "accountId": "fixture-account-{}".format(index),
+            "expires": 4102444800000,
+        }
+    (home / "auth.json").write_text(json.dumps(pool, sort_keys=True, indent=2))
+    return home
+
+
 def task_meta(home, task, generation):
     """The ordinary local authorities authoritative_request_bindings reads."""
     worktree = make_repo(root / "worktrees" / task)
-    account = root / "accounts" / task
-    account.mkdir(parents=True, exist_ok=True)
+    account = pi_pool(root)
     git_dir = worktree / ".git"
     identity = "{}:{}".format(os.stat(git_dir).st_dev, os.stat(git_dir).st_ino)
     (home / "state" / (task + ".meta")).write_text(
@@ -3975,10 +3996,27 @@ assert item["home_binding"] == hashlib.sha256(
 assert state["home_binding"] == hashlib.sha256(
     str(primary.resolve()).encode()).hexdigest(), state["home_binding"]
 assert item["home_binding"] != state["home_binding"]
-# The bindings are real mints from the task home's own authorities.
-assert item["account_binding"] == hashlib.sha256(json.dumps(
-    {"account_home": str(account.resolve()), "task": "child-1"},
-    sort_keys=True, separators=(",", ":")).encode()).hexdigest(), item
+# The bindings are real mints from the task home's own authorities, and the
+# account lease is the CONTROLLER's placement decision over that home's pool:
+# the lowest free profile, bound to its upstream account and nothing else.
+assert item["account_profile"] == "openai-codex", item
+expected_binding = hashlib.sha256(json.dumps(
+    {"provider": "pi", "upstream_account": hashlib.sha256(
+        b"fixture-account-1").hexdigest()[:16]},
+    sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+assert item["account_binding"] == expected_binding, item
+# The projected home is keyed on the LEASE IDENTITY, not the slot name: the
+# projection key and the exclusion key have to be the same function of the pool
+# or a re-logged slot silently overwrites a live placement's credential.
+assert item["account_home"] == str(
+    primary / "state" / "azure-workers" / "accounts" / expected_binding), item
+# The leased home is a SINGLE-profile home, projected by the one projection
+# tool: a pooled home would put every signed-in account on the worker and let
+# the guest pick the first slot, which is the collision this requirement removes.
+leased = json.loads((Path(item["account_home"]) / "auth.json").read_text())
+assert list(leased) == ["openai-codex"], sorted(leased)
+assert leased["openai-codex"]["accountId"] == "fixture-account-1", item
+assert account.resolve() == (Path(str(root)) / "pi-pool").resolve(), account
 assert item["worktree_binding"] == hashlib.sha256(json.dumps(
     {"git_dir": str((worktree / ".git").resolve()), "worktree": str(worktree.resolve())},
     sort_keys=True, separators=(",", ":")).encode()).hexdigest(), item
@@ -4140,6 +4178,19 @@ subprocess.run(["git", "commit", "-q", "-m", "fixture", "--no-gpg-sign"],
                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 account = root / "account"
 account.mkdir(parents=True, exist_ok=True)
+# The task's provider-account POOL, with more than one profile so the golden
+# covers the R5 lane that actually selects and projects; a home with no pool
+# refuses, which is why the golden seeds a real one.
+(account / "auth.json").write_text(json.dumps({
+    "openai-codex": {
+        "type": "oauth", "access": "fixture-access-1", "refresh": "fixture-refresh-1",
+        "accountId": "fixture-account-1", "expires": 4102444800000,
+    },
+    "openai-codex-2": {
+        "type": "oauth", "access": "fixture-access-2", "refresh": "fixture-refresh-2",
+        "accountId": "fixture-account-2", "expires": 4102444800000,
+    },
+}, sort_keys=True, indent=2))
 git_dir = worktree / ".git"
 (home / "state" / "local-crew.meta").write_text(
     "generation_id=gen-local\nworktree={}\naccount_home={}\naccount_task=local-crew\n"
@@ -4174,7 +4225,19 @@ expected = {
     # IS FM_HOME. --task-home changes where that identity is read from, never
     # what it is here.
     "home_binding": hashlib.sha256(str(home.resolve()).encode("utf-8")).hexdigest(),
-    "account_binding": digest({"task": "local-crew", "account_home": str(account.resolve())}),
+    # The account lease is the CONTROLLER's placement over this task's pool:
+    # keyed on the upstream account, with the leased profile and its
+    # single-profile home recorded beside it.
+    "account_binding": digest({
+        "provider": "pi",
+        "upstream_account": hashlib.sha256(b"fixture-account-1").hexdigest()[:16],
+    }),
+    "account_profile": "openai-codex",
+    "account_home": str(home / "state" / "azure-workers" / "accounts" / digest({
+        "provider": "pi",
+        "upstream_account": hashlib.sha256(b"fixture-account-1").hexdigest()[:16],
+    })),
+    "account_pool_home": str(account.resolve()),
     "worktree_binding": digest(
         {"worktree": str(worktree.resolve()), "git_dir": str(git_dir.resolve())}),
     "repository_binding": hashlib.sha256(head.encode("ascii")).hexdigest(),
@@ -4378,6 +4441,15 @@ subprocess.run(["git", "clone", "-q", str(origin), str(worktree)], check=True,
 # The account directory the real account helper validates, and the completion
 # report the report authority requires - both in the SECONDMATE's home.
 account = Path(env["FM_ACCOUNT_DIRECTORY_ROOT"]) / "codex" / "1"
+# The same directory is this task's provider-account POOL, exactly as the real
+# cloud lane's account_home (the Pi coding-agent home) is: placement leases one
+# profile out of it and refuses a home it cannot identify an account in.
+(account / "auth.json").write_text(json.dumps({
+    "openai-codex": {
+        "type": "oauth", "access": "fixture-access-1", "refresh": "fixture-refresh-1",
+        "accountId": "fixture-account-1", "expires": 4102444800000,
+    },
+}, sort_keys=True, indent=2))
 (sub / "data" / "child-1").mkdir(parents=True, exist_ok=True)
 (sub / "data" / "child-1" / "completion.md").write_text(
     "# child-1\n\n## Summary\ns\n\n## What changed\nc\n\n## Verification\nv\n\n"
@@ -4556,10 +4628,31 @@ def make_repo(path):
     return path
 
 
+def pi_pool(root, profiles=8):
+    """The fixture Pi credential pool every placed task draws from.
+
+    Shaped exactly as bin/fm-pi-account-home.py requires of a projectable
+    profile, with one distinct upstream account per slot, because placement
+    leases the ACCOUNT and refuses anything it cannot identify.
+    """
+    home = root / "pi-pool"
+    home.mkdir(parents=True, exist_ok=True)
+    pool = {}
+    for index in range(1, profiles + 1):
+        name = "openai-codex" if index == 1 else "openai-codex-{}".format(index)
+        pool[name] = {
+            "type": "oauth", "access": "fixture-access-{}".format(index),
+            "refresh": "fixture-refresh-{}".format(index),
+            "accountId": "fixture-account-{}".format(index),
+            "expires": 4102444800000,
+        }
+    (home / "auth.json").write_text(json.dumps(pool, sort_keys=True, indent=2))
+    return home
+
+
 def task_meta(home, task, generation):
     worktree = make_repo(root / "worktrees" / task)
-    account = root / "accounts" / task
-    account.mkdir(parents=True, exist_ok=True)
+    account = pi_pool(root)
     git_dir = worktree / ".git"
     (home / "state" / (task + ".meta")).write_text(
         "generation_id={}\nworktree={}\naccount_home={}\naccount_task={}\n"
@@ -4722,6 +4815,28 @@ git_env.update({
 })
 
 
+def pi_pool(root, profiles=8):
+    """The fixture Pi credential pool every placed task draws from.
+
+    Shaped exactly as bin/fm-pi-account-home.py requires of a projectable
+    profile, with one distinct upstream account per slot, because placement
+    leases the ACCOUNT and refuses anything it cannot identify.
+    """
+    home = root / "pi-pool"
+    home.mkdir(parents=True, exist_ok=True)
+    pool = {}
+    for index in range(1, profiles + 1):
+        name = "openai-codex" if index == 1 else "openai-codex-{}".format(index)
+        pool[name] = {
+            "type": "oauth", "access": "fixture-access-{}".format(index),
+            "refresh": "fixture-refresh-{}".format(index),
+            "accountId": "fixture-account-{}".format(index),
+            "expires": 4102444800000,
+        }
+    (home / "auth.json").write_text(json.dumps(pool, sort_keys=True, indent=2))
+    return home
+
+
 def task_meta(home, task, generation):
     """A COMPLETE set of local authorities, so that when a home rule is deleted
     the request is genuinely ADMITTED rather than failing later on a missing
@@ -4735,8 +4850,7 @@ def task_meta(home, task, generation):
                 (worktree / "README.md").write_text("fixture\n")
             subprocess.run(argv, cwd=str(worktree), env=git_env, check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    account = root / "accounts" / task
-    account.mkdir(parents=True, exist_ok=True)
+    account = pi_pool(root)
     git_dir = worktree / ".git"
     (home / "state").mkdir(parents=True, exist_ok=True)
     (home / "state" / (task + ".meta")).write_text(

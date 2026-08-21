@@ -1995,12 +1995,48 @@ PY
   pass "a compartment child's queue item bindings equal the local authoritative mints, field by field"
 }
 
+# fm_secondmate_write_pi_pool <auth.json path> <profiles> - a fixture Pi
+# credential pool shaped as bin/fm-pi-account-home.py requires of a projectable
+# profile, with one distinct upstream account per slot.
+fm_secondmate_write_pi_pool() {  # <auth.json path> <profiles> [account-scope]
+  python3 - "$1" "$2" "${3:-shared}" <<'FMPIPOOL'
+import json
+import sys
+
+scope = sys.argv[3]
+pool = {}
+for index in range(1, int(sys.argv[2]) + 1):
+    name = "openai-codex" if index == 1 else "openai-codex-{}".format(index)
+    pool[name] = {
+        "type": "oauth", "access": "fixture-access-{}".format(index),
+        "refresh": "fixture-refresh-{}".format(index),
+        # Scoped so pools written for different tasks never name the same
+        # upstream account: placement leases the ACCOUNT, so colliding ids
+        # across fixtures would read as exhaustion rather than as a fixture bug.
+        "accountId": "fixture-account-{}-{}".format(scope, index),
+        "expires": 4102444800000,
+    }
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(pool, handle, sort_keys=True, indent=2)
+FMPIPOOL
+  chmod 600 "$1"
+}
+
 # make_lifecycle_task <world> <home> <task> <generation> - the ordinary local
 # authorities a real request derives its bindings from.
 make_lifecycle_task() {
   local world=$1 home=$2 task=$3 generation=$4
   fm_git_init_commit "$world/$task-wt"
   mkdir -p "$world/$task-account"
+  # The task's provider-account POOL. Placement leases one profile out of the
+  # pool named by this task's own metadata and refuses a directory it cannot
+  # identify an upstream account in, so an empty directory is not a usable
+  # account authority any more.
+  # Distinct accounts PER TASK, not a shared pair: every lifecycle task in this
+  # suite draws from its own pool, and identical accountId values across tasks
+  # would make a future third concurrent task hit exhaustion and look
+  # mysterious. The task name seeds the account ids so they cannot collide.
+  fm_secondmate_write_pi_pool "$world/$task-account/auth.json" 2 "$task"
   python3 - "$home/state/$task.meta" "$generation" "$world/$task-wt" "$world/$task-account" "$task" <<'PY'
 import os
 import pathlib
@@ -2744,8 +2780,12 @@ setup_spawn_world() {
   SP_PANE="$SP_DIR/pane.txt"
   mkdir -p "$SP_HOME/projects" "$SP_HOME/data" "$SP_HOME/state" "$SP_DIR/pi-agent-home"
   chmod 755 "$SP_DIR"
-  printf '{"openai-codex":{"accountId":"fixture-account"}}\n' > "$SP_DIR/pi-agent-home/auth.json"
-  chmod 600 "$SP_DIR/pi-agent-home/auth.json"
+  # MORE THAN ONE ACCOUNT, deliberately. This lane places a compartment AND a
+  # child of that compartment, and a placement now leases one upstream account
+  # exclusively. Against a single-account pool the child refuses as exhausted -
+  # which is the invariant working, not a regression - so a one-profile fixture
+  # here could only ever have passed while that invariant was unenforced.
+  fm_secondmate_write_pi_pool "$SP_DIR/pi-agent-home/auth.json" 3
   fm_git_init_commit "$SP_HOME/projects/alpha"
   fm_git_add_origin "$SP_HOME/projects/alpha" "$SP_DIR/remotes/alpha.git"
   # direct-PR mode: an untagged project defaults to no-mistakes mode, whose

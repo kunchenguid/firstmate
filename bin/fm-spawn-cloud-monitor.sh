@@ -110,11 +110,41 @@ reclaim_stale_dispatch() {
   rm -f "$DISPATCH_MARKER"
 }
 
+# account_directory_is_single_slot: the staged account directory holds exactly
+# one provider slot, which is the only shape that may ride to a worker.
+# A pooled directory would hand every signed-in account to the guest and let pi
+# resolve the first slot - a shared-account placement whatever the queue says.
+# The spawn writes this directory exactly once, from the single account the
+# controller leased; this monitor outlives the spawn and dispatches on its own,
+# so the shape is re-checked at the point of USE and not only where it is written.
+account_directory_is_single_slot() {
+  python3 - "$STATE/$ID.cloud-account/auth.json" <<'ACCOUNTSLOTS'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        parsed = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(parsed, dict) and len(parsed) == 1 else 1)
+ACCOUNTSLOTS
+}
 dispatch_converged_execute() {
+  local assignment
+  # BEFORE the claim, deliberately. The claim is the exactly-once marker shared
+  # with the spawn: standing down after taking it would leave both owners
+  # believing the other dispatched, and nothing ever would. An account
+  # directory that is not yet the leased single account means the spawn has not
+  # finished narrowing it, so this poll simply does not claim and the next one
+  # retries.
+  if [ -d "$STATE/$ID.cloud-account" ] && ! account_directory_is_single_slot; then
+    echo "cloud-crewmate $ID: staged account directory is not one leased provider slot yet; not dispatching this poll"
+    return 0
+  fi
   # Claim first (O_EXCL): if the spawn process already dispatched, or a prior
   # monitor iteration did, stand down. The whole dispatch runs in a subshell
   # so the sourced persisted environment never leaks into the monitor loop.
-  local assignment
   (set -C; : > "$DISPATCH_MARKER") 2>/dev/null || return 0
   assignment=$(assignment_generation) || assignment=
   if [ -z "$assignment" ]; then

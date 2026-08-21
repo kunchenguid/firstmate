@@ -159,11 +159,33 @@ upstream accounts, projected into single-profile account homes by `bin/fm-pi-acc
 with the roster repointed and read back through the real `bin/fm-crosscheck.py` reader and
 policy screen. Under the second 2026-08-19 amendment this roster is now the dormant crosscheck
 fallback; the pi fleet's primary duties are authors and no-mistakes.
-Crewmate placement is not wired: the cell image carries pi, but placement does not select across
-the eight profiles.
+Crewmate placement now selects across the pool. The controller chooses one free profile inside the
+same lock hold and the same durable write that creates the queue entry, so selection and the lease
+are one act and the queue entry IS the lease; the unit of exclusion is the UPSTREAM ACCOUNT rather
+than the profile name, because two profiles can be re-logged into one account and what a crewmate
+contends for belongs to the account. The chosen profile is projected with `bin/fm-pi-account-home.py`
+into a controller-owned account home, and `bin/fm-spawn.sh` narrows the staged provider credential
+to it, so the worker receives exactly one account rather than the pooled `auth.json`. An exhausted
+pool refuses by name, listing every leased profile and the task holding it. Mechanics are owned by
+`docs/azure-workers.md` ("Provider-account placement across the Pi fleet").
 
-Work: multi-profile account selection for crewmate and worker placement, reusing the projection
-tool and the account-lease identity already present in the worker request path.
+Proven locally against a fixture provider by `tests/fm-worker-placement.test.sh` (eight concurrent
+placements racing the controller lock take eight distinct upstream accounts, read back from
+`controller.json`; exhaustion refuses; a compartment child, its compartment and an ordinary crewmate
+hold three distinct accounts; killing placements between selection and the durable lease orphans no
+account) and end to end through the real `bin/fm-spawn.sh` by `tests/fm-spawn-cloud.test.sh`, which
+asserts the staged credential is the leased single profile.
+
+Operational consequence the owner must know: concurrent placements are now bounded by
+`min(FM_AZURE_WORKER_MAX, distinct upstream accounts in the pool)`. With eight Pi accounts the
+ninth concurrent placement refuses although MAX_WORKERS is 16, and compartments compete in the
+same pool. Sixteen crewmates never could run on eight accounts without sharing one; they used
+to do it silently. Raising the ceiling means adding profiles on distinct accounts.
+
+Still owed for DONE: the acceptance sentence on real compute. No leg of this has run against a live
+Azure worker, so "concurrent crewmates RUN on distinct pi profiles" is proven up to the credential
+the worker is handed and no further; what the guest agent does with that credential is unobserved
+here, and R9 (no crewmate has returned an outcome) still gates it.
 
 Acceptance: concurrent crewmates run on distinct pi profiles with no account collision.
 

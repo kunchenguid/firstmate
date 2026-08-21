@@ -111,6 +111,7 @@ fm-watcher-lock.test.sh	hermetic
 fm-worker-authority-secondmate.test.sh	hermetic
 fm-worker-lifecycle.test.sh	hermetic
 fm-worker-outcome-transport.test.sh	hermetic
+fm-worker-placement.test.sh	hermetic
 fm-worker-supervisor.test.sh	hermetic
 fm-x-mode.test.sh	hermetic
 lavish-repair.test.sh	hermetic

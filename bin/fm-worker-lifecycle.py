@@ -32,6 +32,12 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
 AZURE_PROVIDER = ROOT / "bin" / "fm-azure-worker-provider.py"
+# The ONE implementation of "what is a Pi profile", "which upstream account is
+# it", and "how is a single-profile account home written". Placement imports it
+# rather than re-deriving any of the three: a second implementation of an
+# account home is exactly how a credential stager and its remover once resolved
+# different directories and leaked a credential.
+PI_ACCOUNT_HOME_TOOL = ROOT / "bin" / "fm-pi-account-home.py"
 STATE_SCHEMA = "fm.worker-lifecycle/v1"
 # The scalar pending_action slot this schema carried is superseded by the
 # per-slot pending_actions map. The sentinel is deliberately a string an OLD
@@ -356,6 +362,16 @@ def environment():
         "daily_bound_override": daily_override,
         "idle_release_seconds": idle_release,
         "provider_argv": provider_argv,
+        # Where placement writes the single-profile account homes it leases.
+        # CONTROLLER-owned, under the same state directory as the document that
+        # records the lease, and deliberately NOT the shared crosscheck roster
+        # under ~/.local/share/agent-fleet/accounts/pi: those homes belong to
+        # the reviewer lane, and a placement rewriting one mid-review would
+        # swap a running reviewer's credential underneath it. It also makes the
+        # root follow FM_HOME, so a fixture home cannot write into a real one.
+        "pi_account_root": Path(os.environ.get(
+            "FM_PI_ACCOUNT_HOME_ROOT", str(state_dir / "accounts")
+        )).expanduser(),
     }
 
 
@@ -675,6 +691,25 @@ def verify_request(request):
                 "task home is owned by compartment child requests only")
         if not isinstance(task_home, str) or not task_home.startswith("/") or len(task_home) > 4096:
             raise LifecycleError("worker request task home must be one absolute path")
+    pool_home = request.get("account_pool_home")
+    if pool_home is not None and (
+        not isinstance(pool_home, str) or not pool_home.startswith("/")
+        or len(pool_home) > 4096
+    ):
+        raise LifecycleError("worker request account pool home must be one absolute path")
+    profile = request.get("account_profile")
+    account_home = request.get("account_home")
+    if (profile is None) != (account_home is None):
+        # The pair IS the lease record. Half of it would let a reader see a
+        # leased profile with no home to stage, or a staged home no exclusion
+        # covers; both read as "placed" while one of the two is missing.
+        raise LifecycleError(
+            "account_profile and account_home travel together or not at all")
+    if profile is not None:
+        require_id("account_profile", profile)
+        if not isinstance(account_home, str) or not account_home.startswith("/") \
+                or len(account_home) > 4096:
+            raise LifecycleError("worker request account home must be one absolute path")
     if request.get("eligible") is not True:
         raise LifecycleError("worker request must be explicitly eligible")
 
@@ -683,12 +718,223 @@ def active_queue_items(state):
     return [item for item in state["queue"].values() if item.get("status") != "complete"]
 
 
+_PI_PROJECTION = {}
+
+
+def pi_projection():
+    """The projection tool, loaded as a module, not re-implemented.
+
+    Placement needs three things from it and takes all three from the one
+    implementation: `read_pool` (what profiles exist and are they shaped like a
+    credential), `account_digest` (which upstream account is this, by digest
+    and never by token material), and `write_home`/`prepare_root` (how a
+    single-profile account home is written, owner-only, atomically).
+    """
+    module = _PI_PROJECTION.get("module")
+    if module is not None:
+        return module
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "fm_pi_account_home", str(PI_ACCOUNT_HOME_TOOL))
+    if spec is None or spec.loader is None:
+        raise LifecycleError(
+            "the Pi account-home projection tool is unavailable at {}".format(
+                PI_ACCOUNT_HOME_TOOL))
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 - any import failure is a refusal
+        raise LifecycleError(
+            "the Pi account-home projection tool could not be loaded from {}: {}".format(
+                PI_ACCOUNT_HOME_TOOL, type(exc).__name__))
+    _PI_PROJECTION["module"] = module
+    return module
+
+
+def placement_account_binding(account_digest):
+    """The lease identity, keyed on the UPSTREAM ACCOUNT.
+
+    Not the profile name and not the account-home path, both of which are
+    handles that can point at the same account. Eight profiles map to eight
+    accounts today; nothing enforces that, and a re-login can point two slots
+    at one account. The thing a concurrent crewmate actually contends for -
+    the rate limit, the ban, the session - belongs to the account, so the
+    account is the unit of exclusion. `account_digest` is already a truncated
+    SHA-256 of the upstream account id and never carries token material.
+    """
+    return digest_value({"provider": "pi", "upstream_account": account_digest})
+
+
+def leased_placement_accounts(state):
+    """Which upstream accounts non-complete queue work already holds.
+
+    Derived from the queue, never from a separate ledger: the queue entry IS
+    the lease, so there is no second document that a crash could leave holding
+    a profile nothing owns.
+    """
+    held = {}
+    for item in state["queue"].values():
+        if item.get("status") == "complete":
+            continue
+        binding = item.get("account_binding")
+        if isinstance(binding, str):
+            held.setdefault(binding, (item.get("account_profile"), item.get("task")))
+    return held
+
+
+def select_placement_account(env, state, pool_home, task):
+    """Lease one free Pi profile for this placement, under the controller lock.
+
+    Called from `command_request` inside the same lock hold and the same
+    `save_state` that writes the queue entry, so selection and the lease are
+    one atomic act: no window exists in which a profile is held by anything
+    that is not a queue entry.
+
+    Fails closed at every step. An unreadable pool, a pool of unusable
+    credentials, and an exhausted pool all raise by name; none of them falls
+    through to a shared or arbitrary profile, because a silent fallthrough
+    here is an account collision with extra steps.
+    """
+    projection = pi_projection()
+    pool_file = Path(pool_home) / "auth.json"
+    try:
+        pool = projection.read_pool(pool_file)
+    except projection.ProjectionError as exc:
+        raise LifecycleError(
+            "provider-account placement pool is unusable: {}; a worker is never "
+            "placed on an unidentified account".format(exc))
+    if not pool:
+        raise LifecycleError(
+            "provider-account placement pool at {} declares no profile".format(pool_file))
+    held = leased_placement_accounts(state)
+    if len(pool) == 1:
+        # Already a single-profile account home - the exact shape every Pi
+        # consumer reads, and what the projection tool produces. There is
+        # nothing to select and nothing to write: lease it in place. Its SHAPE
+        # is deliberately not screened here, because projecting is the only
+        # operation that needs a writable credential and "is this credential
+        # still good" has one owner, bin/fm-credential-expiry.py. What IS
+        # required is the one thing exclusion depends on: an upstream account
+        # this lease can name.
+        name, entry = next(iter(pool.items()))
+        digest = projection.account_digest(entry) if isinstance(entry, dict) else "none"
+        if digest == "none":
+            raise LifecycleError(
+                "provider-account home at {} names no upstream account, so a placement "
+                "on it could not be excluded from any other".format(pool_file))
+        binding = placement_account_binding(digest)
+        if binding in held:
+            raise LifecycleError(
+                "provider-account placement is exhausted: the single account home {} is "
+                "already leased ({} holds profile {}); refusing to place {} on a shared "
+                "upstream account. Sign in additional Pi profiles on distinct upstream "
+                "accounts to raise the ceiling, or release the placement above with "
+                "`bin/fm-worker-lifecycle.sh withdraw`".format(
+                    pool_file, held[binding][1] or "unknown-task",
+                    held[binding][0] or name, task))
+        return {
+            "account_profile": name,
+            "account_home": str(Path(pool_home)),
+            "account_binding": binding,
+        }
+    usable = []
+    faults = {}
+    for name in sorted(pool):
+        entry_faults = projection.entry_faults(pool[name])
+        if entry_faults:
+            faults[name] = "; ".join(entry_faults)
+            continue
+        usable.append(name)
+    if not usable:
+        raise LifecycleError(
+            "provider-account placement pool at {} holds no projectable profile ({})".format(
+                pool_file,
+                ", ".join("{}: {}".format(name, faults[name]) for name in sorted(faults))))
+    bindings = {}
+    for name in usable:
+        digest = projection.account_digest(pool[name])
+        if digest == "none":
+            # entry_faults already requires a non-blank accountId, so this is
+            # unreachable through the loop above; refuse rather than mint a
+            # lease identity that names no account.
+            raise LifecycleError(
+                "Pi profile {} exposes no upstream account identity".format(name))
+        # Deliberately setdefault, not assignment: two profiles that resolve to
+        # ONE upstream account are one lease, and the first name in sorted
+        # order owns it. That is the whole reason the unit is the account.
+        bindings.setdefault(placement_account_binding(digest), name)
+    for binding, name in sorted(bindings.items(), key=lambda pair: pair[1]):
+        if binding in held:
+            continue
+        root = Path(env["pi_account_root"]).resolve()
+        # The projected home is keyed on the LEASE IDENTITY, never on the
+        # profile's local slot name. The two must be the same function of the
+        # pool or the projection is not injective over live leases, and the
+        # slot name is not: an operator re-logging slot `openai-codex` from one
+        # upstream account to another gives two placements two distinct
+        # bindings (correctly, they ARE two accounts) that both project into
+        # `accounts/openai-codex`, so the second write silently replaces the
+        # credential the first placement's still-live lease points at. The
+        # queue then reports two accounts while the disk holds one. Keying on
+        # the binding makes the directory name and the exclusion key the same
+        # string, so that state is unrepresentable.
+        destination = root / binding
+        for entry in state["queue"].values():
+            if entry.get("status") == "complete":
+                continue
+            if entry.get("account_home") == str(destination):
+                # Unreachable while the two keys agree, because a binding that
+                # is free by definition is named by no live entry. Kept as the
+                # second line: if a future change re-keys the projection, this
+                # refuses instead of clobbering a live placement's credential.
+                raise LifecycleError(
+                    "refusing to project Pi profile {} over the account home a live "
+                    "placement already holds ({} holds {})".format(
+                        name, entry.get("task") or "an unnamed task", destination))
+        try:
+            projection.prepare_root(root)
+            credential = projection.write_home(destination, pool[name])
+        except projection.ProjectionError as exc:
+            raise LifecycleError(
+                "Pi profile {} could not be projected into its account home: {}".format(
+                    name, exc))
+        except OSError as exc:
+            raise LifecycleError(
+                "Pi profile {} could not be projected into its account home: {}".format(
+                    name, exc.strerror or exc))
+        return {
+            "account_profile": name,
+            "account_home": str(Path(credential).parent),
+            "account_binding": binding,
+        }
+    raise LifecycleError(
+        "provider-account placement is exhausted: all {} distinct upstream accounts in {} "
+        "are leased ({}); refusing to place {} on a shared upstream account. Sign in "
+        "additional Pi profiles on distinct upstream accounts to raise the ceiling, or "
+        "release a placement above with `bin/fm-worker-lifecycle.sh withdraw`".format(
+            len(bindings), pool_file,
+            ", ".join(
+                "{} -> {}".format(name, held[binding][1] or "unknown-task")
+                for binding, name in sorted(bindings.items(), key=lambda pair: pair[1])
+            ),
+            task))
+
+
 def ensure_unique_bindings(state, candidate, ignore_key=None):
     for key, item in state["queue"].items():
         if key == ignore_key or item.get("status") == "complete":
             continue
         if item.get("account_binding") == candidate["account_binding"]:
-            raise LifecycleError("provider-account lease binding is already owned by another queued or active task")
+            # The account-collision screen. It is the SAME screen selection
+            # already respected; keeping it means a hand-edited queue, a
+            # replayed old binary, or a broken selector still cannot seat two
+            # concurrent tasks on one upstream account.
+            raise LifecycleError(
+                "provider-account lease binding is already owned by another queued or "
+                "active task ({} holds profile {})".format(
+                    item.get("task") or "an unnamed task",
+                    item.get("account_profile") or "an unnamed profile"))
         if item.get("worktree_binding") == candidate["worktree_binding"]:
             raise LifecycleError("writable worktree binding is already owned by another queued or active task")
 
@@ -2273,6 +2519,23 @@ def status_projection(env, state, inventory=None):
         "family_observed_plus_reserved_vcpus": family_committed,
         "shared_headroom_vcpus": SHARED_HEADROOM_VCPUS,
         "compartments": compartment_projection(state),
+        # Who holds which provider account right now. Read straight off the
+        # queue, because the queue entry IS the lease: a profile that shows
+        # here and nowhere else does not exist.
+        "account_placements": sorted(
+            (
+                {
+                    "task": item.get("task"),
+                    "task_generation": item.get("task_generation"),
+                    "status": item.get("status"),
+                    "account_profile": item.get("account_profile"),
+                    "account_home": item.get("account_home"),
+                }
+                for item in state["queue"].values()
+                if item.get("status") != "complete" and item.get("account_profile")
+            ),
+            key=lambda entry: (entry["account_profile"], entry["task"] or ""),
+        ),
         "idle_cooldown_seconds": env["cooldown_seconds"],
         "warm_idle_target": env["warm_idle"],
         "retained_disks": retained_disks,
@@ -2324,6 +2587,12 @@ def print_status(status, json_output):
         if "session_legs" in compartment:
             line += " legs={}".format(compartment["session_legs"])
         print(line)
+    for placement in status.get("account_placements") or []:
+        print("account-placement: profile={} task={}@{} status={} home={}".format(
+            placement["account_profile"], placement["task"],
+            placement["task_generation"], placement["status"],
+            placement["account_home"],
+        ))
     if status["pending_mutations"]:
         print("pending-mutations: {}".format(json.dumps(
             status["pending_mutations"], sort_keys=True, separators=(",", ":"))))
@@ -2580,7 +2849,14 @@ def authoritative_request_bindings(env, task, generation, task_home=None):
         raise LifecycleError("ordinary worktree Git-directory identity differs")
     return {
         "home_binding": home_binding(origin),
-        "account_binding": digest_value({"task": task, "account_home": str(account_home)}),
+        # The POOL, not the lease. The task's own metadata proves which provider
+        # account source this task is entitled to draw from; WHICH profile of
+        # that pool it gets is decided by the controller under its lock, because
+        # that decision has to exclude every other concurrent placement and no
+        # task-local document can see them. The account lease identity
+        # (`account_binding`) is minted from the selected profile in
+        # `command_request`.
+        "account_pool_home": str(account_home),
         "worktree_binding": digest_value({"worktree": str(worktree), "git_dir": str(git_dir)}),
         "repository_binding": hashlib.sha256(head.encode("ascii")).hexdigest(),
         "repository_generation": head,
@@ -2822,6 +3098,11 @@ def command_request(env, args):
     else:
         bindings = authoritative_request_bindings(
             env, args.task, args.task_generation, task_home=task_home)
+    # DURABLE on the item, not consumed here: the queue entry should record
+    # which provider-account pool its lease was drawn from, so an audit of a
+    # placement never has to re-read a task metadata file that teardown may
+    # already have removed.
+    pool_home = bindings.get("account_pool_home")
     item = {
         "schema": REQUEST_SCHEMA,
         "task": args.task,
@@ -2842,22 +3123,45 @@ def command_request(env, args):
         # digest: authority_home reads it back to tell fm-worker-authority.py
         # where this task's own state/<task>.meta lives.
         item["task_home"] = str(task_home)
-    verify_request(item)
+    if pool_home is None:
+        # The asserted-bindings lane already carries an account_binding of its
+        # own, so there is nothing to select; it is reachable only with the
+        # test env var AND a fixture provider (checked above).
+        verify_request(item)
     key = request_key(item["task"], item["task_generation"])
     with controller_lock(env):
         state = load_state(env)
         existing = state["queue"].get(key)
         if existing is not None:
+            # Replay reuses the SAME profile, because the lease it took is this
+            # very entry. Selection happens only on the branch that creates a
+            # new entry, so a replayed request cannot consume a second account.
             identity_fields = (
-                "schema", "task", "task_generation", "home_binding", "account_binding",
+                "schema", "task", "task_generation", "home_binding",
                 "worktree_binding", "repository_binding", "repository_generation",
                 "owner_kind", "role", "eligible", "discretionary",
                 "parent_task", "parent_task_generation", "task_home",
+                "account_pool_home",
             )
+            if pool_home is None:
+                identity_fields += ("account_binding",)
             if any(existing.get(field) != item.get(field) for field in identity_fields):
                 raise LifecycleError("task generation already exists with different queue identity")
+            if existing.get("account_home"):
+                # The profile NAME is reported separately because the home is
+                # keyed on the lease identity, not on the name: the caller can
+                # no longer read the profile off the path's last component.
+                print("account-profile {}".format(existing.get("account_profile") or ""))
+                print("account-home {}".format(existing["account_home"]))
             print("request already exists with exact identity")
             return
+        if pool_home is not None:
+            # Selection and the lease are ONE act under ONE lock over ONE
+            # document: the queue entry written below IS the lease, so no
+            # window exists where a profile is held by something the queue does
+            # not show, and no concurrent request can read the same free set.
+            item.update(select_placement_account(env, state, pool_home, item["task"]))
+            verify_request(item)
         ensure_unique_bindings(state, item)
         if item.get("parent_task") is not None:
             if task_home is not None:
@@ -2880,6 +3184,14 @@ def command_request(env, args):
             parent_worker = state["workers"][str(state["queue"][parent_key].get("slot"))]
             parent_worker["children_total"] = int(parent_worker.get("children_total", 0)) + 1
         save_state(env, state)
+    if item.get("account_home"):
+        # The caller stages the provider credential from the home the
+        # controller leased, so the leased profile is the ONE credential that
+        # reaches the worker. Printed as a path and a slot name, never as
+        # contents; the home is keyed on the lease identity, so the slot name
+        # is not recoverable from the path.
+        print("account-profile {}".format(item.get("account_profile") or ""))
+        print("account-home {}".format(item["account_home"]))
     print("queued {} generation {} for one isolated author worker".format(item["task"], item["task_generation"]))
 
 

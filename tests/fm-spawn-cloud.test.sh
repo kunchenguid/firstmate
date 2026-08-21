@@ -14,6 +14,30 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-cloud)
+
+# The fixture Pi credential POOL. The cloud lane's account home is the pooled
+# pi agent home, and placement leases ONE profile out of it (R5), so the fixture
+# has to look like the real pool: several profiles, each a complete oauth
+# credential shape naming a distinct upstream account.
+fm_spawn_cloud_write_pi_pool() {  # <auth.json path>
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+pool = {}
+for index in range(1, 5):
+    name = "openai-codex" if index == 1 else "openai-codex-{}".format(index)
+    pool[name] = {
+        "type": "oauth", "access": "fixture-access-{}".format(index),
+        "refresh": "fixture-refresh-{}".format(index),
+        "accountId": "fixture-account-{}".format(index),
+        "expires": 4102444800000,
+    }
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(pool, handle, sort_keys=True, indent=2)
+PY
+  chmod 600 "$1"
+}
 SUB=11111111-1111-4111-8111-111111111111
 
 # --- fixtures ---------------------------------------------------------------
@@ -349,8 +373,7 @@ make_cloud_case() {
   # Cloud dispatch packages the pi provider-account material for the worker's
   # encrypted account disk; the hermetic account home carries a fixture
   # credential so the persist step has something real to digest.
-  printf '{"openai-codex":{"accountId":"fixture-account"}}\n' > "$case_dir/pi-agent-home/auth.json"
-  chmod 600 "$case_dir/pi-agent-home/auth.json"
+  fm_spawn_cloud_write_pi_pool "$case_dir/pi-agent-home/auth.json"
   printf '%s\n' codex > "$home/config/crew-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
   fm_git_init_commit "$project"
@@ -452,6 +475,40 @@ test_cloud_spawn_places_worker_and_runs_the_entrypoint() {
   assert_grep "account_home=$CASE_DIR/pi-agent-home" "$meta" "the cloud spawn did not record the pi coding-agent account home"
   assert_grep 'worktree_git_dir_identity=' "$meta" "the cloud spawn did not record the worktree Git-dir identity"
   assert_grep 'worktree_git_dir=' "$meta" "the cloud spawn did not record the worktree Git dir"
+  # R5: the controller leased ONE profile out of that pool, and the credential
+  # this worker actually receives is that profile's alone. Staging the pool
+  # would put four accounts on the guest and let pi pick the first slot, which
+  # is a shared-account placement no matter what the queue records.
+  assert_grep 'worker_account_profile=' "$meta" "the cloud spawn did not record its leased provider-account profile"
+  assert_grep "worker_account_home=$HOME_DIR/state/azure-workers/accounts/" "$meta" \
+    "the cloud spawn did not record the controller-projected account home it was placed on"
+  python3 - "$meta" "$HOME_DIR/state/$id.cloud-account/auth.json" \
+    "$HOME_DIR/state/azure-workers/controller.json" "$id" <<'PY' \
+    || fail "the staged provider credential is not the leased single profile"
+import json
+import sys
+
+meta_path, staged_path, controller_path, task = sys.argv[1:]
+meta = {}
+for line in open(meta_path, encoding="utf-8"):
+    if "=" in line:
+        key, value = line.rstrip("\n").split("=", 1)
+        meta[key] = value
+staged = json.load(open(staged_path, encoding="utf-8"))
+assert list(staged) == ["openai-codex"], sorted(staged)
+leased = json.load(open(meta["worker_account_home"] + "/auth.json", encoding="utf-8"))
+assert staged == leased, "the staged credential is not the leased profile's"
+state = json.load(open(controller_path, encoding="utf-8"))
+item = next(entry for entry in state["queue"].values() if entry["task"] == task)
+assert item["account_profile"] == meta["worker_account_profile"], (item, meta)
+assert item["account_home"] == meta["worker_account_home"], (item, meta)
+assert item["account_pool_home"] == meta["account_home"], (item, meta)
+# The pool it was drawn from really did hold more than one account, so this
+# proves a SELECTION happened rather than there being nothing to choose.
+pool = json.load(open(meta["account_home"] + "/auth.json", encoding="utf-8"))
+assert len(pool) > 1, sorted(pool)
+assert leased["openai-codex"]["accountId"] == pool[item["account_profile"]]["accountId"], item
+PY
   # Herdr tracking endpoint: every cloud crewmate registers a real Herdr
   # endpoint running the cloud monitor, with ZERO tmux involvement anywhere
   # in the cloud lane.
@@ -563,13 +620,111 @@ test_cloud_spawn_fails_closed_when_the_lifecycle_refuses_the_request() {
   # FM_SPAWN_CLOUD=azure without the FM_AZURE_* identity environment: the
   # lifecycle refuses the request, so the spawn must roll back rather than
   # leave a lane that exists nowhere.
-  out=$(FM_SPAWN_CLOUD=azure run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  #
+  # The identity variables are unset EXPLICITLY and the provider is pinned to
+  # the case fixture, rather than trusting the ambient environment not to carry
+  # them. An operator shell exports the real subscription, tenant, resource
+  # group and image; inherited here, this unit's request would be admitted and
+  # its reconcile would reach the real Azure adapter, which is how a test that
+  # believes it is exercising a fake creates a billable VM tagged with this
+  # unit's own hardcoded fixture id.
+  out=$(
+    unset FM_AZURE_SUBSCRIPTION_ID FM_AZURE_TENANT_ID \
+      FM_AZURE_DEPLOYMENT_GENERATION FM_AZURE_OWNER_TAG FM_AZURE_NAMING_PREFIX \
+      FM_AZURE_RESOURCE_GROUP FM_AZURE_STORAGE_NAME FM_AZURE_WORKER_STATE_DIR \
+      FM_AZURE_VM_IMAGE_ID FM_AZURE_WORKER_IMAGE_ID
+    FM_WORKER_PROVIDER_COMMAND="python3 $CASE_DIR/provider.py" \
+      FM_SPAWN_CLOUD=azure \
+      run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR"
+  )
   status=$?
   expect_code 1 "$status" "a cloud spawn whose worker request is refused should fail: $out"
   assert_contains "$out" "cloud worker request was refused" "the refusal did not surface the request failure: $out"
   assert_absent "$HOME_DIR/state/$id.meta" "a refused cloud spawn left task metadata behind"
   assert_no_grep 'LAUNCH' "$CASE_DIR/launch.log" "a refused cloud spawn launched a local lane anyway"
   pass "a refused worker request rolls the spawn back instead of stranding the task"
+}
+
+test_the_pool_is_never_staged_in_the_request_to_narrow_window() {
+  local record id out status
+  id=cloud-window-c15
+  record=$(make_cloud_case narrow-window "$id")
+  read_cloud_case "$record"
+  # THE WINDOW: the durable lease exists and the tracking monitor pane is
+  # already polling, but the spawn has not yet narrowed the account directory.
+  # The spawn is killed exactly there. If the pooled auth.json were staged
+  # before the lease (as it used to be), every signed-in account would be
+  # sitting in a directory the monitor is willing to dispatch as --account-dir.
+  # Written to a FILE, never captured through a command substitution. The spawn
+  # is SIGKILLed here, and a command substitution would keep blocking on the
+  # pipe until every surviving descendant (the tracking pane among them) closed
+  # its copy - a hang that reads as a silent suite death rather than a failure.
+  FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1 \
+    FM_TEST_CLOUD_ABORT_AFTER_REQUEST=1 \
+    run_cloud_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR" \
+    > "$CASE_DIR/window-spawn.log" 2>&1 </dev/null
+  status=$?
+  out=$(cat "$CASE_DIR/window-spawn.log" 2>/dev/null || true)
+  test "$status" -ne 0 || fail "the spawn was supposed to die inside the window: $out"
+  python3 - "$HOME_DIR/state/azure-workers/controller.json" "$HOME_DIR/state/$id.cloud-account" "$id" \
+    "$CASE_DIR/pi-agent-home/auth.json" <<'PY2' || fail "the pooled credential reached the window"
+import json
+import pathlib
+import sys
+
+controller, account_dir, task, pool_path = sys.argv[1:]
+state = json.load(open(controller, encoding="utf-8"))
+live = [item for item in state["queue"].values()
+        if item.get("task") == task and item.get("status") != "complete"]
+# The lease really is durable at this point, so the window is real and not
+# something the test skipped past.
+assert live, "no durable lease existed, so this never entered the window"
+pool = json.load(open(pool_path, encoding="utf-8"))
+assert len(pool) > 1, sorted(pool)
+staged = pathlib.Path(account_dir) / "auth.json"
+if staged.exists():
+    parsed = json.load(open(staged, encoding="utf-8"))
+    assert isinstance(parsed, dict) and len(parsed) == 1, (
+        "the pooled credential was staged inside the window", sorted(parsed))
+print("# window state: lease durable, staged slots = {}".format(
+    sorted(json.load(open(staged, encoding="utf-8"))) if staged.exists() else "no auth.json at all"))
+PY2
+  pass "the pooled credential is never staged in the window between the durable lease and the narrowing"
+}
+
+test_a_spawn_that_cannot_bind_its_leased_account_hands_it_back() {
+  local record id out status
+  id=cloud-bindfail-c14
+  record=$(make_cloud_case bind-failure "$id")
+  read_cloud_case "$record"
+  # The queue entry IS the provider-account lease. A spawn that gets past the
+  # request but cannot bind the account it was handed must give the lease back,
+  # or the pool loses one account every time this happens and eventually
+  # refuses every placement.
+  out=$(FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1 \
+    FM_TEST_CLOUD_ACCOUNT_BIND_FAIL=1 \
+    run_cloud_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "a spawn that cannot bind its leased account should fail: $out"
+  assert_contains "$out" "could not be bound to its leased provider account" \
+    "the failure did not name the account binding step: $out"
+  assert_contains "$out" "released the provider-account lease for $id" \
+    "the spawn did not hand the provider-account lease back: $out"
+  python3 - "$HOME_DIR/state/azure-workers/controller.json" "$id" <<'PY' \
+    || fail "the unbindable placement kept holding its provider account"
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+state = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"queue": {}}
+live = [item for item in state.get("queue", {}).values()
+        if item.get("status") != "complete"]
+assert not [item for item in live if item.get("task") == sys.argv[2]], live
+# Nothing else holds an account either, so the whole pool is free again.
+assert not [item for item in live if item.get("account_profile")], live
+PY
+  pass "a spawn that cannot bind its leased provider account hands the lease back instead of orphaning it"
 }
 
 test_cloud_switch_refuses_non_pi_harness() {
@@ -945,8 +1100,7 @@ make_child_case() {  # <name> <child-id> <parent-id> -> record
     "$sub/data" "$sub/projects" "$sub/state" "$sub/treehouse-pools" \
     "$case_dir/codex-home" "$case_dir/pi-agent-home"
   chmod 755 "$case_dir"
-  printf '{"openai-codex":{"accountId":"fixture-account"}}\n' > "$case_dir/pi-agent-home/auth.json"
-  chmod 600 "$case_dir/pi-agent-home/auth.json"
+  fm_spawn_cloud_write_pi_pool "$case_dir/pi-agent-home/auth.json"
   printf '%s\n' codex > "$primary/config/crew-harness"
   printf '%s\n' manual > "$primary/config/backlog-backend"
   fm_git_init_commit "$project"
@@ -1146,6 +1300,8 @@ test_monitor_stands_down_when_dispatch_already_claimed
 test_cloud_spawn_config_file_default_and_env_override
 test_cloud_spawn_refuses_unknown_switch_value
 test_cloud_spawn_fails_closed_when_the_lifecycle_refuses_the_request
+test_a_spawn_that_cannot_bind_its_leased_account_hands_it_back
+test_the_pool_is_never_staged_in_the_request_to_narrow_window
 test_cloud_switch_refuses_non_pi_harness
 test_cloud_switch_refuses_explicit_backend
 test_compartment_child_spawn_splits_the_task_home_from_the_money_document

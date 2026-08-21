@@ -33,6 +33,36 @@ The caller supplies only task, task generation, owner kind, and eligibility; the
 Caller-supplied bindings are unsupported outside the hermetic test backstop.
 Raw provider-account identity never appears in bounded status or Azure tags.
 The account binding must be a high-entropy digest produced by the account lease owner, not a digest of a guessable profile name.
+The lease owner is the controller: it derives the binding from the profile's upstream account identity (see the placement section below), never from the profile's local slot name.
+The local slot name (`openai-codex-2` and the like) DOES appear in bounded status, because an operator has to be able to see which profile a task holds; it is a local label for a pool slot, not the upstream account identity, and it never reaches an Azure tag.
+
+## Provider-account placement across the Pi fleet
+
+The task metadata names the provider-account POOL this task may draw from (the cloud lane's is the Pi coding-agent home); WHICH profile of that pool the placement gets is decided by the controller, because that decision has to exclude every other concurrent placement and no task-local document can see them.
+
+Selection happens inside `command_request`, in the same lock hold and the same `save_state` that writes the queue entry, so selection and the lease are one act.
+The queue entry IS the lease: the set of leased accounts is derived from the non-complete queue, never from a second ledger, so there is no state a crash can leave in which an account is held by something the queue does not show.
+Selection is deterministic - the first free profile in the pool's sorted (lexicographic) name order - and replaying the same task generation reuses the same profile, because the replay path short-circuits on the existing entry before selecting anything.
+
+The unit of exclusion is the UPSTREAM ACCOUNT, not the profile name and not the account-home path.
+Eight profiles map to eight accounts today, but nothing enforces that: a re-login can point two slots at one account, and what a concurrent crewmate actually contends for - the rate limit, the ban, the session - belongs to the account.
+So `account_binding` is a digest over the profile's upstream account identity (itself a SHA-256 digest of the account id, never token material), two profiles resolving to one account are ONE lease, and the duplicate-account screen below is the same screen selection already respected.
+
+A pool holding more than one profile is projected: the controller writes the chosen profile's single-profile account home with `bin/fm-pi-account-home.py`, under its OWN state directory (`$FM_HOME/state/azure-workers/accounts/<account-binding>`, overridable with `FM_PI_ACCOUNT_HOME_ROOT`) and deliberately not the shared crosscheck roster, which belongs to the reviewer lane and must not be rewritten under a running reviewer.
+The directory is keyed on the LEASE IDENTITY, never on the profile's local slot name, because the projection key and the exclusion key must be the same function of the pool. The slot name is not: re-logging one slot from one upstream account to another yields two placements with two correct, distinct bindings that would both project into one `accounts/<slot-name>` directory, and the second write would replace the credential the first placement's still-live lease points at, leaving the queue reporting two accounts while the disk held one. A second, defensive refusal also declines to project over an account home a live queue entry still names.
+A home already holding exactly one profile is that single-profile home already, and is leased in place with nothing written; its credential shape is not screened there, because "is this credential still good" has one owner, `bin/fm-credential-expiry.py`.
+`request` prints the leased profile and account home, and `bin/fm-spawn.sh` writes the staged account directory exactly once, from that home, after the lease exists.
+The pooled `auth.json` is never staged: the payload step deliberately does not copy it, because that step runs BEFORE the lease is created and while the tracking monitor pane is already polling, so a crash there would otherwise leave every signed-in account in a directory the monitor is willing to dispatch as `--account-dir`. The window is removed rather than guarded.
+As defence in depth at the point of USE, `bin/fm-spawn-cloud-monitor.sh` re-checks that the staged account directory holds exactly one provider slot before it dispatches, and does so BEFORE taking the shared exactly-once dispatch marker so a not-yet-narrowed directory simply retries on the next poll instead of wedging both owners.
+Staging the pool would put every signed-in account on the guest and let Pi resolve the first slot, which is a shared-account placement whatever the queue records.
+
+Every failure refuses by name and none of them falls through to a shared or arbitrary profile: an unreadable or empty pool, a pool whose profiles are all unprojectable, a home naming no upstream account, and an exhausted pool (which names each leased profile and the task holding it).
+Bounded status projects the live placements - profile, task generation, status, and account home - from `controller.json` alone.
+
+**The pool is now a concurrency ceiling, and it is lower than the worker ceiling.** Concurrent placements are bounded by `min(FM_AZURE_WORKER_MAX, distinct upstream accounts in the pool)`: with the fleet's eight Pi accounts, the ninth concurrent placement refuses even though `MAX_WORKERS` is 16 and quota, budget and capacity would all admit it.
+That is the requirement, not a regression - sixteen crewmates never could run on eight accounts without sharing one, they just used to do it silently - but it does halve the effective author parallelism, and compartments compete in the same pool: one compartment plus its four children consumes five of the eight before an ordinary crewmate is placed.
+Raising the ceiling means adding signed-in profiles on distinct upstream accounts to the pool, not raising a knob here.
+A compartment child contends in the same document as an ordinary crewmate, because `FM_HOME` still names the primary's controller for both, so the two can never be handed one account.
 
 The controller rejects duplicate active account or writable-worktree bindings.
 A general request has role `author`, is explicitly eligible, and is owned by either the primary or a secondmate; a secondmate-owned author request may carry a parent compartment pair, which marks it as a compartment child and arms the child bounds.
