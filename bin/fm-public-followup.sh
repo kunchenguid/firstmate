@@ -137,10 +137,38 @@ help() { sed -n '2,/^set -u$/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 die() { printf 'fm-public-followup: %s\n' "$1" >&2; exit "${2:-2}"; }
 
 PF_TEMP_FILES=()
-pf_cleanup_temp_files() {
+PF_REGISTRY_LOCK_IDS=()
+pf_registry_lock_held() {
+  local wanted=$1 held
+  for held in "${PF_REGISTRY_LOCK_IDS[@]}"; do
+    [ "$held" = "$wanted" ] && return 0
+  done
+  return 1
+}
+pf_registry_lock_acquire() {
+  local id=$1
+  pf_registry_lock_held "$id" && return 0
+  fm_pf_registry_lock_acquire "$STATE" "$id" || return 1
+  PF_REGISTRY_LOCK_IDS+=("$id")
+}
+pf_registry_lock_release() {
+  local id=$1 held
+  local -a remaining=()
+  pf_registry_lock_held "$id" || return 0
+  fm_pf_registry_lock_release "$STATE" "$id"
+  for held in "${PF_REGISTRY_LOCK_IDS[@]}"; do
+    [ "$held" = "$id" ] || remaining+=("$held")
+  done
+  PF_REGISTRY_LOCK_IDS=("${remaining[@]}")
+}
+pf_cleanup() {
+  local i
+  for ((i=${#PF_REGISTRY_LOCK_IDS[@]}-1; i>=0; i--)); do
+    fm_pf_registry_lock_release "$STATE" "${PF_REGISTRY_LOCK_IDS[$i]}" 2>/dev/null || true
+  done
   [ "${#PF_TEMP_FILES[@]}" -eq 0 ] || rm -f -- "${PF_TEMP_FILES[@]}"
 }
-trap pf_cleanup_temp_files EXIT
+trap pf_cleanup EXIT
 
 now_rfc3339() { fm_pf_now_rfc3339; }
 
@@ -259,18 +287,32 @@ cmd_register() {
     request_context_b64=$(printf '%s' "$request_json" | fm_pf_b64_encode)
   fi
 
-  local mkdir_target
+  local mkdir_target registry_state delivered_at retired_file
   for mkdir_target in "$(fm_pf_registry_dir "$STATE")" "$(fm_pf_events_dir "$STATE")" \
                       "$(fm_pf_consumed_dir "$STATE")" "$(fm_pf_rejected_dir "$STATE")"; do
     fmx_private_artifact_dir_prepare "$mkdir_target" >/dev/null \
       || die "could not prepare $mkdir_target" 1
   done
 
-  printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
-    "$id" "$relation" "$work_home" "$work_id" "$generation" "$platform" "$request" \
-    "$followup_expires_at" "$request_context_b64" \
-    | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$id" 600 \
+  pf_registry_lock_acquire "$id" \
+    || die "could not lock registration '$id'" 1
+  retired_file="$STATE/$FM_PF_DIRNAME/retired/$id"
+  if [ -e "$retired_file" ] || [ -L "$retired_file" ]; then
+    die "public loop '$id' has already been retired and cannot be registered again" 1
+  fi
+  registry_state=$(fm_pf_registry_loop_state "$STATE" "$id")
+  delivered_at=$(fm_pf_registry_get "$STATE" "$id" delivered_at)
+  if [ "$registry_state" = delivered ]; then
+    printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=delivered\ndelivered_at=%s\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
+      "$id" "$relation" "$work_home" "$work_id" "$generation" "$platform" "$request" \
+      "$delivered_at" "$followup_expires_at" "$request_context_b64"
+  else
+    printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
+      "$id" "$relation" "$work_home" "$work_id" "$generation" "$platform" "$request" \
+      "$followup_expires_at" "$request_context_b64"
+  fi | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$id" 600 \
     || die "could not write the registration record" 1
+  pf_registry_lock_release "$id"
 
   printf 'registered %s %s/%s generation=%s platform=%s\n' \
     "$id" "$work_home" "$work_id" "$generation" "${platform:-unknown}"
@@ -1005,6 +1047,8 @@ cmd_rechain() {
   esac
   [ "$new_id" != "$from" ] || die "the new obligation id must differ from --from" 2
 
+  pf_registry_lock_acquire "$from" \
+    || die "could not lock source registration '$from' for rechain" 1
   local src_file loop_state expires window ctx
   src_file="$(fm_pf_registry_dir "$STATE")/$from"
   [ -f "$src_file" ] && [ ! -L "$src_file" ] \
@@ -1148,6 +1192,8 @@ cmd_retire() {
   reason=$(printf '%s' "$reason" | fm_pf_clean_outcome_text)
   [ -n "$reason" ] || die "retire requires --reason \"<why the public loop is done>\"" 2
   require_tools
+  pf_registry_lock_acquire "$id" \
+    || die "could not lock registration '$id' for retirement" 1
 
   payload=$(obligation_json "$id") || die "could not read the backlog through tasks-axi" 1
   if [ -n "$payload" ]; then
@@ -1167,8 +1213,6 @@ cmd_retire() {
   retired_dir="$STATE/$FM_PF_DIRNAME/retired"
   retired_at=$(now_rfc3339)
   registry_file="$(fm_pf_registry_dir "$STATE")/$id"
-  fm_pf_registry_lock_acquire "$STATE" "$id" \
-    || die "could not lock registration '$id' for retirement" 1
   printf 'reason=%s\nretired_at=%s\n' "$reason" "$retired_at" \
     | fmx_private_artifact_publish_stdin "$retired_dir" "$id" 600 \
     || retirement_rc=1
@@ -1178,7 +1222,7 @@ cmd_retire() {
       retirement_rc=2
     fi
   fi
-  fm_pf_registry_lock_release "$STATE" "$id"
+  pf_registry_lock_release "$id"
   case "$retirement_rc" in
     1) die "could not record the retirement reason for '$id'; the public loop remains open" 1 ;;
     2) die "could not remove registration for '$id'; the public loop remains open" 1 ;;

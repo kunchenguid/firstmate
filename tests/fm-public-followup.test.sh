@@ -1531,6 +1531,68 @@ SH
   pass "rechain resumes the same obligation after an interrupted bind"
 }
 
+test_rechain_claims_delivered_source_once() {
+  local home log pid_b pid_c rc_b=0 rc_c=0 registry_count
+  home=$(make_home rechain-claim)
+  log="$home/curl.log"; : > "$log"
+  seed_repro_commitment "$home" public-final-claim-a req-claim main scout-claim
+  "$EMIT" --home "$home" --obligation public-final-claim-a --relation rel-code \
+    --source-home main --work-id scout-claim --generation 1 \
+    --outcome report-ready --deliverable report_path=data/scout-claim/report.md \
+    --outcome-text 'Reproduced. One follow-on may claim this thread.' >/dev/null || fail "emit failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" deliver public-final-claim-a >/dev/null || fail "deliver failed"
+
+  FMX_NOW_OVERRIDE=1787539200 run_pf "$home" rechain public-final-claim-b \
+    --from public-final-claim-a --work-home main --work-id ship-claim-b \
+    --expected pr-merged > "$home/rechain-b.out" 2>&1 &
+  pid_b=$!
+  FMX_NOW_OVERRIDE=1787539200 run_pf "$home" rechain public-final-claim-c \
+    --from public-final-claim-a --work-home main --work-id ship-claim-c \
+    --expected pr-merged > "$home/rechain-c.out" 2>&1 &
+  pid_c=$!
+  wait "$pid_b" || rc_b=$?
+  wait "$pid_c" || rc_c=$?
+
+  if [ "$rc_b" -eq 0 ]; then
+    [ "$rc_c" -ne 0 ] || fail "two concurrent rechains must not both claim one source"
+  else
+    [ "$rc_c" -eq 0 ] || fail "exactly one concurrent rechain must succeed"
+  fi
+  registry_count=$(find "$home/state/public-followup/registry" -type f \
+    \( -name 'public-final-claim-b' -o -name 'public-final-claim-c' \) | wc -l | tr -d ' ')
+  [ "$registry_count" = 1 ] || fail "one source must produce exactly one registered destination"
+  assert_absent "$home/state/public-followup/registry/public-final-claim-a" \
+    "the successfully claimed source must be retired"
+  pass "concurrent rechains cannot fork one delivered source"
+}
+
+test_registration_replay_preserves_delivery_and_retirement() {
+  local home log
+  home=$(make_home register-replay)
+  log="$home/curl.log"; : > "$log"
+  seed_commitment "$home" pf-register-replay req-register-replay discord main work-register-replay
+  emit_terminal "$home" "$home" pf-register-replay main work-register-replay >/dev/null || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-register-replay >/dev/null || fail "deliver failed"
+
+  run_pf "$home" register pf-register-replay --relation rel-code --work-home main \
+    --work-id work-register-replay --generation 1 >/dev/null || fail "registration replay failed"
+  grep -q '^state=delivered$' "$home/state/public-followup/registry/pf-register-replay" \
+    || fail "registration replay must not downgrade a delivered loop"
+
+  run_pf "$home" retire pf-register-replay --reason "finished after replay" >/dev/null \
+    || fail "retire after replay failed"
+  expect_failure "registration replay must not reopen a retired loop" \
+    run_pf "$home" register pf-register-replay --relation rel-code --work-home main \
+      --work-id work-register-replay --generation 1
+  assert_contains "$EXPECT_OUT" "already been retired" \
+    "a retirement receipt must make registration fail closed"
+  assert_absent "$home/state/public-followup/registry/pf-register-replay" \
+    "registration replay must not recreate a retired loop"
+  pass "registration replay preserves delivered and retired loop states"
+}
+
 test_retire_reason_closes_the_open_loop() {
   local home log out registry_file receipt_mode
   home=$(make_home retire-reason)
@@ -1815,6 +1877,8 @@ test_dropped_baton_now_surfaces_open_loop
 test_control_registered_followon_is_guarded
 test_rechain_delivers_second_post_on_same_thread
 test_rechain_resumes_after_partial_add
+test_rechain_claims_delivered_source_once
+test_registration_replay_preserves_delivery_and_retirement
 test_retire_reason_closes_the_open_loop
 test_retention_creates_no_false_teardown_refusal
 test_expiry_escalation_uses_now_override
