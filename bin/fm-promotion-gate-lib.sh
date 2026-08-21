@@ -19,11 +19,11 @@
 # captain hold through bin/fm-captain-hold.sh, both clear this gate as a side effect
 # of doing the real work. Neither route loses the promotion.
 #
-# The override exists for exactly one case the two routes cannot serve: the crewmate is
-# already gone, so it cannot be answered, AND this home's backlog is set to hand-editing,
-# so the hold route is unavailable. It requires a stated reason and records it beside the
-# task, so an override stays visible afterwards instead of being indistinguishable from a
-# task that never had a promotion.
+# The override is an intentional last-resort escape hatch when neither proper closure
+# route serves: the crewmate is gone, so it cannot be answered, and this home's backlog
+# is set to hand-editing, so the hold route is unavailable. That condition is not
+# mechanically enforced. Its protection is a stated reason durably recorded beside the
+# task, surviving teardown so use outside that last-resort case remains visible afterwards.
 #
 # Sourced, not executed. Callers get:
 #   fm_promotion_open_records <status-file>            -> key<TAB>note per open promotion
@@ -181,7 +181,9 @@ EOF
   echo "Re-staff first, then close the record by doing either of these:" >&2
   echo "  answer the worker:   bin/fm-send.sh <target> --resolve-key <key> '<the re-staff decision>'" >&2
   echo "  or hold it for the captain: bin/fm-captain-hold.sh (see its --help for the exact flags)" >&2
-  echo "Last resort, only when the worker is gone AND the hold path is unavailable:" >&2
+  echo "Last resort: use only when the worker is gone AND the hold path is unavailable." >&2
+  echo "This is not mechanically enforced; the stated reason is recorded beside the task" >&2
+  echo "and survives teardown so use outside that case remains visible afterwards:" >&2
   echo "  re-run with --promotion-override '<why landing at the dispatched tier is safe>'" >&2
   return 1
 }
