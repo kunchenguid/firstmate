@@ -447,7 +447,7 @@ MAP
 # AGENTS.md that no brief line claims fails here rather than silently never
 # reaching a worker.
 test_brief_guidelines_track_agents_md_section() {
-  local home ship scout section map fragment ship_line scout_line line claimed
+  local home ship scout section section_file map fragment ship_line scout_line line claimed
   home="$TMP_ROOT/guidelines-drift-home"
   mkdir -p "$home/data"
   map="$TMP_ROOT/general-guidelines-map.txt"
@@ -460,7 +460,9 @@ test_brief_guidelines_track_agents_md_section() {
     || fail "fm-brief.sh scout scaffold exited non-zero"
   scout="$home/data/brief-drift-s2/brief.md"
 
-  section=$(agents_general_guidelines_section)
+  section_file="$TMP_ROOT/general-guidelines-section.txt"
+  agents_general_guidelines_section > "$section_file"
+  section=$(cat "$section_file")
   [ -n "$section" ] \
     || fail "AGENTS.md has no \"General Guidelines for all crewmates, including firstmate\" section, but bin/fm-brief.sh mirrors it into every crewmate brief"
 
@@ -490,9 +492,7 @@ test_brief_guidelines_track_agents_md_section() {
     done < "$map"
     [ "$claimed" -eq 1 ] \
       || fail "drift: AGENTS.md's general-guidelines section states \"$line\", which no line of bin/fm-brief.sh's brief copy mirrors - add it to GENERAL_GUIDELINES_SHIP (and GENERAL_GUIDELINES_SCOUT if a report-only scout acts on it) and to this test's map"
-  done <<EOF
-$section
-EOF
+  done < "$section_file"
 
   pass "fm-brief.sh: ship and scout guideline copies track the AGENTS.md section they mirror"
 }
