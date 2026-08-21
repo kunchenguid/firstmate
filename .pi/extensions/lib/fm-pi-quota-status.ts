@@ -481,7 +481,7 @@ function parseCredits(value: unknown): QuotaCreditsView | null | undefined {
   let remaining: number | null = null;
   if (value.remaining !== undefined) {
     remaining = finiteNumber(value.remaining);
-    if (remaining === null || remaining < 0) return null;
+    if (remaining === null) return null;
   }
   let unlimited: boolean | null = null;
   if (value.unlimited !== undefined) {
@@ -1614,6 +1614,13 @@ function compactPositiveNumber(value: number): string {
   return value > 0 && Number(compact) === 0 ? "<0.1" : compact;
 }
 
+function compactSignedNumber(value: number): string {
+  const compact = compactNumber(value);
+  if (value > 0 && Number(compact) === 0) return "<0.1";
+  if (value < 0 && Number(compact) === 0) return "-<0.1";
+  return compact;
+}
+
 function compactPercentage(value: number): string {
   const compact = compactPositiveNumber(value);
   return value < 100 && Number(compact) === 100 ? ">99.9" : compact;
@@ -1640,7 +1647,7 @@ function formatCredits(credits: QuotaCreditsView): string {
   if (credits.unlimited === true) return "credits unlimited";
   if (credits.remaining !== null) {
     const unit = credits.unit && credits.unit !== "credits" ? ` ${credits.unit}` : "";
-    return `credits ${compactPositiveNumber(credits.remaining)}${unit}`;
+    return `credits ${compactSignedNumber(credits.remaining)}${unit}`;
   }
   return credits.unlimited === false ? "credits unavailable" : "credits unknown";
 }
