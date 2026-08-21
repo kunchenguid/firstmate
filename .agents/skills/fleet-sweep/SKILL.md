@@ -30,7 +30,7 @@ This sweep is a supplemental bounded reconciliation and never replaces, duplicat
 4. Follow the pending-reply and remote-reply owners for their bounded recovery and failure handling rather than inventing a retry loop or timeout.
 5. Prove each requested update reached the parent append-only status and pending-reply path and appeared in a wake drain under the existing process-event and pending-reply owners.
 6. Use targeted status reads only as delivery evidence and never as current-state truth.
-7. If a secondmate aggregate report is unavailable, invalid, partial, or timed out, use `bin/fm-on.sh <secondmate-id> fm-fleet-snapshot.sh --secondmate-home-summary`, then validate the bounded structured result.
+7. If a secondmate aggregate report is unavailable, invalid, partial, or timed out, resolve its registered placement, use `bin/fm-on.sh <secondmate> fm-fleet-snapshot.sh --secondmate-home-summary` for a remote home, or use the validated local-home execution path owned by `bin/fm-fleet-snapshot.sh` to run `fm-fleet-snapshot.sh --secondmate-home-summary` inside a local home, then validate the bounded structured result.
 8. If the targeted direct-home result is also unavailable, invalid, partial, or truncated where required, classify the lane as unavailable and never infer that it is clear.
 9. Finish only after every requested reply is durably ingested and drained or its named transport failure is surfaced, while ordinary supervision remains active throughout the wait.
 
