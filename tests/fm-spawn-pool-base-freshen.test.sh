@@ -258,29 +258,28 @@ test_unresolved_remote_default_refuses_pool() {
 }
 
 test_remoteless_pool_refreshes_to_local_default_tip() {
-  local rec id out status current branch_head default
-  # main goes through the shared default_branch convention; trunk has no
-  # main/master and so proves the primary-HEAD fallback keeps it spawnable.
-  for default in main trunk; do
-    id="pool-remoteless-$default-r6"
-    rec=$(make_remoteless_case "remoteless-$default" "$id" "$default")
-    read_case_record "$rec"
+  local rec id out status current branch_head
+  # The remoteless base comes from the shared default_branch convention
+  # (local main/master); a scout is one of the two shapes allowed to run
+  # without an origin.
+  id='pool-remoteless-main-r6'
+  rec=$(make_remoteless_case remoteless-main "$id")
+  read_case_record "$rec"
 
-    out=$(run_spawn "$id" --scout)
-    status=$?
-    expect_code 0 "$status" "a remoteless local-only project should still spawn (default=$default)"
-    assert_contains "$out" "spawned $id" "remoteless spawn did not report success (default=$default)"
-    current=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
-    branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
-    [ "$branch_head" = "$current" ] || fail "remoteless spawn did not refresh to the local $DEFAULT_BRANCH tip"
-    [ "$branch_head" != "$INITIAL_SHA" ] || fail "fixture did not prove the local default branch advanced past the pool base"
-    assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-local.txt" \
-      "remoteless spawn omitted content committed to the local default branch"
-    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-      printf '# observed remoteless %s spawn: %s\n' "$default" "$(printf '%s\n' "$out" | tail -n 1)"
-      printf '# observed remoteless base: HEAD=%s local %s=%s\n' "$branch_head" "$DEFAULT_BRANCH" "$current"
-    fi
-  done
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "a remoteless local-only project should still spawn a scout"
+  assert_contains "$out" "spawned $id" "remoteless scout spawn did not report success"
+  current=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$branch_head" = "$current" ] || fail "remoteless spawn did not refresh to the local $DEFAULT_BRANCH tip"
+  [ "$branch_head" != "$INITIAL_SHA" ] || fail "fixture did not prove the local default branch advanced past the pool base"
+  assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-local.txt" \
+    "remoteless spawn omitted content committed to the local default branch"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed remoteless scout spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed remoteless base: HEAD=%s local %s=%s\n' "$branch_head" "$DEFAULT_BRANCH" "$current"
+  fi
   pass "a remoteless pooled worktree refreshes to the local default branch tip before launch"
 }
 
@@ -299,9 +298,9 @@ test_remoteless_off_default_primary_bases_on_local_default() {
   git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm wip-work
   wip_tip=$(git -C "$PROJECT_DIR" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
-  expect_code 0 "$status" "a remoteless spawn should still launch while the primary sits on a feature branch"
+  expect_code 0 "$status" "a remoteless local-only ship should still launch while the primary sits on a feature branch"
   branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
   [ "$branch_head" = "$default_tip" ] \
     || fail "remoteless spawn did not base on the local $DEFAULT_BRANCH tip while the primary was on wip"
@@ -324,7 +323,7 @@ test_remoteless_dirty_pool_refuses_without_discarding_work() {
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "remoteless spawn succeeded despite a dirty pooled worktree"
   assert_contains "$out" "is not clean" "remoteless spawn did not clearly refuse a dirty pooled worktree"
@@ -335,24 +334,48 @@ test_remoteless_dirty_pool_refuses_without_discarding_work() {
   pass "a dirty remoteless pooled worktree is refused without discarding its local work"
 }
 
-# No main/master to fall back on AND a detached primary: neither resolver can
-# name a local default, so the spawn must refuse rather than guess.
-test_remoteless_unresolved_local_default_refuses_pool() {
+# A remoteless default under any name but main/master refuses: fm-review-diff
+# and fm-merge-local resolve only origin/HEAD, main, or master, so a spawnable
+# trunk task could never be reviewed or landed through the guarded helpers.
+test_remoteless_nonconvention_default_refuses_pool() {
   local rec id out status before
-  id='pool-remoteless-detached-r8'
-  rec=$(make_remoteless_case remoteless-detached "$id" trunk)
+  id='pool-remoteless-trunk-r8'
+  rec=$(make_remoteless_case remoteless-trunk "$id" trunk)
   read_case_record "$rec"
-  git -C "$PROJECT_DIR" checkout --quiet --detach
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --scout)
   status=$?
-  [ "$status" -ne 0 ] || fail "remoteless spawn succeeded despite an unresolvable local default branch"
+  [ "$status" -ne 0 ] || fail "remoteless spawn succeeded despite a non-main/master local default"
   assert_contains "$out" "no resolvable local default branch" \
-    "remoteless spawn did not clearly refuse an unresolvable local default branch"
+    "remoteless spawn did not clearly refuse a non-main/master local default"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "remoteless spawn moved HEAD after failing to resolve the local default branch"
-  pass "a remoteless pool with no resolvable local default branch refuses the spawn"
+    || fail "remoteless spawn moved HEAD after refusing a non-main/master local default"
+  pass "a remoteless default branch other than main/master refuses the spawn"
+}
+
+# A remoteless project cannot deliver through a push: a direct-PR or
+# no-mistakes ship refuses at spawn instead of launching work that cannot ship.
+test_remoteless_push_modes_refuse() {
+  local rec id out status before mode
+  for mode in no-mistakes direct-PR; do
+    id="pool-remoteless-$mode-r10"
+    rec=$(make_remoteless_case "remoteless-mode-$mode" "$id")
+    read_case_record "$rec"
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+    out=$(run_spawn "$id" --mode "$mode" --yolo off)
+    status=$?
+    [ "$status" -ne 0 ] || fail "a remoteless $mode ship spawned despite having no origin to deliver through"
+    assert_contains "$out" "only a scout or a local-only ship" \
+      "remoteless $mode spawn did not clearly refuse the push-delivery mode"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "remoteless $mode spawn moved HEAD while refusing"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# observed remoteless %s refusal: %s\n' "$mode" "$(printf '%s\n' "$out" | tail -n 1)"
+    fi
+  done
+  pass "remoteless direct-PR and no-mistakes ships refuse at spawn"
 }
 
 test_stale_pool_base_refreshes_before_branching
@@ -364,6 +387,7 @@ test_unreachable_origin_refuses_stale_pool_base
 test_remoteless_pool_refreshes_to_local_default_tip
 test_remoteless_off_default_primary_bases_on_local_default
 test_remoteless_dirty_pool_refuses_without_discarding_work
-test_remoteless_unresolved_local_default_refuses_pool
+test_remoteless_nonconvention_default_refuses_pool
+test_remoteless_push_modes_refuse
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

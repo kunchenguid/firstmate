@@ -137,10 +137,13 @@
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   A repository with no origin remote configured (a supported local-only
-#   project shape) skips the fetch and instead resets the clean worktree to the
-#   tip of the local default branch - local main or master, else the branch the
-#   primary checkout is on - which the shared object store keeps as the
-#   freshest base.
+#   project shape) skips the fetch and instead resets the clean worktree to
+#   the tip of the local default branch (local main or master), which the
+#   shared object store keeps as the freshest base. That remoteless path is
+#   allowed only for scouts and MODE=local-only ships; a direct-PR or
+#   no-mistakes ship needs a pushable origin to deliver and refuses. A
+#   remoteless default branch other than main/master also refuses, because
+#   the guarded review and landing helpers resolve only those.
 #   An unreachable origin, an unresolved remote or local default branch, or a
 #   non-clean worktree refuses the spawn rather than risking a PR based on
 #   stale history.
@@ -1734,23 +1737,16 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 # Resolve the LOCAL default branch for a task worktree whose repository has no
-# origin remote. Prefers default_branch (fm-ff-lib.sh), the repo-wide owner of
-# this question that fm-review-diff, fm-merge-local and fm-teardown also follow,
+# origin remote: default_branch (fm-ff-lib.sh), the repo-wide local main/master
+# convention that fm-review-diff, fm-merge-local and fm-teardown also resolve,
 # so a primary stranded on a feature branch still bases the task on the real
-# trunk instead of propagating that branch. Falls back to the primary
-# checkout's HEAD symref - read from the shared common dir - only when neither
-# main nor master exists, which keeps a repo on some other trunk spawnable.
+# trunk instead of propagating that branch. A remoteless default under any
+# other name returns 1 and refuses the spawn, because the guarded review and
+# landing helpers cannot resolve such a branch to land the work.
 # Echoes a branch name that has a local head, or returns 1.
 spawn_local_default_branch() {  # <worktree>
-  local worktree=$1 common ref
-  ref=$(default_branch "$worktree" 2>/dev/null) || ref=''
-  if [ -n "$ref" ] && git -C "$worktree" show-ref --verify --quiet "refs/heads/$ref"; then
-    printf '%s\n' "$ref"
-    return 0
-  fi
-  common=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
-  [ -n "$common" ] || return 1
-  ref=$(git --git-dir="$common" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  local worktree=$1 ref
+  ref=$(default_branch "$worktree" 2>/dev/null) || return 1
   [ -n "$ref" ] || return 1
   git -C "$worktree" show-ref --verify --quiet "refs/heads/$ref" || return 1
   printf '%s\n' "$ref"
@@ -1778,10 +1774,17 @@ freshen_spawn_worktree_base() {  # <worktree>
     fi
   else
     # No origin remote is a supported local-only project shape (fm-fleet-sync
-    # and fm-teardown handle it deliberately). The pooled worktree shares the
-    # primary checkout's object store, so the local default branch tip IS the
-    # freshest base; only "origin is absent" takes this path - a configured
-    # but unreachable origin still refuses above.
+    # and fm-teardown handle it deliberately), but only for work that never
+    # needs to push: a scout, or a ship whose delivery mode is local-only.
+    # A direct-PR or no-mistakes ship cannot push or open its PR without an
+    # origin, so it refuses here instead of launching work that cannot ship.
+    if [ "$KIND" != scout ] && [ "$MODE" != local-only ]; then
+      echo "error: project has no origin remote; mode ${MODE:-unset} needs a pushable origin to deliver - only a scout or a local-only ship can run on a remoteless project; refusing to launch" >&2
+      return 1
+    fi
+    # The pooled worktree shares the primary checkout's object store, so the
+    # local default branch tip IS the freshest base; only "origin is absent"
+    # takes this path - a configured but unreachable origin still refuses above.
     default=$(spawn_local_default_branch "$worktree") || {
       echo "error: no origin remote and no resolvable local default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
       return 1
