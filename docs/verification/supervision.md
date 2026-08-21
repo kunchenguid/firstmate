@@ -300,14 +300,14 @@ It also covers decision-only recovery, interrupted handling, handling-window gen
 A live Pi restart is still necessary after this fix lands: the already-enqueued Pi follow-up messages are outside Firstmate's durable wake queue, and the current Pi process has already loaded the old extension code.
 The restart should happen only after the landed extension fix is available, and this verification did not perform that restart.
 Validation limits are up front: one combined four-suite runner invocation had an intermittent `tests/fm-watch-arm.test.sh` failure that did not reproduce in immediate direct and single-runner reruns, and `tests/fm-pi-primary-types.test.sh` self-skipped because `tsc` is absent in this worktree.
-`tests/fm-pi-watch-extension.test.sh` verified that an empty Pi `check: rearm-resurface` continuity handoff produces zero follow-ups across repeated child-close cycles, while real `signal`, `stale`, `check`, `heartbeat`, and queued recovery reasons still deliver exactly once.
+`tests/fm-pi-watch-extension.test.sh` verified that a quiet Pi `check: rearm-resurface` continuity handoff — one where `bin/fm-wake-drain.sh --captain-work-pending` reports an empty durable wake queue, no open decisions, and no unread informational status lines — produces zero follow-ups across repeated child-close cycles, while real `signal`, `stale`, `check`, `heartbeat`, queued recovery, open-decision, and unread-note re-arm reasons still deliver exactly once through the real drain peek.
 `tests/fm-turnend-guard.test.sh` verified that repeated healthy Pi `agent_settled` turn boundaries remain silent while unhealthy boundaries still inject one bounded guard follow-up.
 Acceptance criteria for that regression were: stop Pi follow-up storms from empty `check: rearm-resurface` recovery handoffs, preserve exactly-one delivery for real durable wake rows and explicit failure or unhealthy repair conditions, keep session-generation and duplicate-owner behavior intact, and state whether a live Pi restart is still needed for already-enqueued messages.
 The focused command `tests/fm-pi-watch-extension.test.sh` exited 0 and included these new pass lines:
 
 ```text
 ok - Pi empty rearm-resurface cycles stay silent while a successor remains owned
-ok - Pi real signal, stale, check, heartbeat, and queued recovery reasons still deliver once
+ok - Pi real signal, stale, check, heartbeat, queued recovery, open-decision, and unread-note reasons still deliver once
 ok - Pi session transitions use a generation owner across /new /resume /fork, stale callbacks, and quit
 ```
 
@@ -317,6 +317,13 @@ The focused command `tests/fm-turnend-guard.test.sh` exited 0 and included these
 ok - .pi primary extension: no-tool and multi-tool runs each inject exactly one guard follow-up
 ok - .pi primary extension: healthy settled turns stay silent across repeated assistant turns
 ok - .pi primary extension: delivery failure resets the logical-run latch
+```
+
+The focused command `tests/fm-wake-drain-unread-status.test.sh` exited 0 and included these new pass lines covering the shared `--captain-work-pending` peek contract:
+
+```text
+ok - the captain-work peek reports queue rows, open decisions, and unread notes without consuming them
+ok - fresh-state peeks before the first drain leave the unread note presentable
 ```
 
 The focused command `tests/fm-watch-arm.test.sh` exited 0 directly and exited 0 through `bin/fm-test-run.sh tests/fm-watch-arm.test.sh`, preserving the shared durable recovery contract.
