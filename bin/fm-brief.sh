@@ -91,6 +91,18 @@
 # required section needs but the worker cannot produce (a demo video, a
 # benchmark, a human sign-off) is marked pending and names who provides it.
 # local-only ships no PR, so its brief carries no PR-body contract.
+# When this home has a private PR body template at data/pr-templates/<repo-name>.md,
+# a direct-PR brief additionally requires the worker to render it through
+# bin/fm-pr-body.sh as one `&&`-gated sequence immediately before `gh-axi pr
+# create`, so an unresolved placeholder structurally stops the PR from ever
+# opening rather than depending on the worker remembering a separate check.
+# Scoped to direct-PR only: that is the one ship mode where the worker itself
+# opens the PR. no-mistakes has no equivalent seam in this slice - it owns
+# the PR it opens and takes no body input - so it carries no such
+# requirement here; covering it is a follow-up. local-only ships no PR at
+# all. bin/fm-pr-body.sh's own header owns the render/check interface and
+# template-precedence rules; this script only decides whether the
+# requirement applies, from the template file's presence at scaffold time.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -138,6 +150,7 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 KIND=ship
 HERDR_LAB=0
 EVIDENCE_ARCHIVE=0
@@ -333,6 +346,29 @@ exit 0
 fi
 
 REPO=${POS[1]}
+
+# A private per-project PR body template, or a repository-owned .github PR
+# template, makes rendering it through bin/fm-pr-body.sh a hard requirement
+# of this brief rather than left to worker memory (AGENTS.md
+# pr-body-template-mechanism). Scoped to direct-PR only: that is the one
+# mode where the worker itself opens the PR, so the requirement has a real
+# seam. no-mistakes ships have no equivalent seam in this slice - no-mistakes
+# owns the PR it opens and `no-mistakes axi run --help` documents `--intent`
+# as the user's goal only, with no PR-body input - so covering it is a
+# follow-up, not claimed here. local-only ships no PR at all.
+# Detection reuses bin/fm-pr-body.sh's own `has-template` predicate (the same
+# template-resolution owner `render` uses) rather than a second hand-rolled
+# detector here that could drift from render's real behavior.
+HAS_PR_TEMPLATE=0
+case "$REPO" in
+  */*|.|..) ;;  # never a safe data/pr-templates/<name>.md path segment
+  *)
+    if [ "$KIND" = ship ] && [ "$MODE" = direct-PR ] \
+      && FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-pr-body.sh" has-template --project "$REPO" --repo-dir "$PROJECTS/$REPO" >/dev/null 2>&1; then
+      HAS_PR_TEMPLATE=1
+    fi
+    ;;
+esac
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -633,6 +669,21 @@ Never invent evidence you do not have.
 If a required section needs something you cannot produce (a demo video, a benchmark, a human review sign-off), mark it as pending and name who provides it (for example "Demo video: pending - recording from <person>") instead of fabricating a link, value, or sign-off.
 PR_BODY_EOF
     PR_BODY_SECTION_BODY=${PR_BODY_SECTION_BODY%$'\n'}
+    if [ "$HAS_PR_TEMPLATE" -eq 1 ]; then
+      PR_TEMPLATE_HELPER=$(shell_quote "$FM_ROOT/bin/fm-pr-body.sh")
+      if [ -f "$DATA/pr-templates/$REPO.md" ]; then
+        PR_TEMPLATE_SOURCE_LINE="This project has a private PR body template at \`data/pr-templates/$REPO.md\`; it is this task's PR-submission rule and takes priority over any repository-owned template."
+      else
+        PR_TEMPLATE_SOURCE_LINE="This project's repository provides its own \`.github\` PR body template; it is this task's PR-submission rule."
+      fi
+      IFS= read -r -d '' PR_TEMPLATE_ADDENDUM <<EOF || true
+$PR_TEMPLATE_SOURCE_LINE
+Render and open the PR as one gated sequence so an incomplete body can never reach \`gh-axi pr create\`: \`$PR_TEMPLATE_HELPER render --project $REPO --repo-dir . --set KEY=VALUE... --out <path> && gh-axi pr create --body-file <path>\`, supplying every placeholder value your task has.
+\`render\` itself refuses (nonzero exit, naming the unresolved keys or a local filesystem path) and writes nothing to \`--out\` on either refusal, so the \`&&\` never reaches \`gh-axi pr create\` on an incomplete or leaking body; fill the named values (never a local path - use an uploaded evidence URL, or a pending-upload marker plus description) and re-run rather than opening the PR anyway.
+EOF
+      PR_TEMPLATE_ADDENDUM=${PR_TEMPLATE_ADDENDUM%$'\n'}
+      PR_BODY_SECTION_BODY="$PR_BODY_SECTION_BODY"$'\n'"$PR_TEMPLATE_ADDENDUM"
+    fi
     PR_BODY_SECTION=$'\n'"$PR_BODY_SECTION_BODY"$'\n\n'
     ;;
   local-only)
