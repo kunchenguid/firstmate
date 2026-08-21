@@ -6,6 +6,7 @@
 # "session-not-found", while a harness with no verified durable usage-log
 # surface reports "no-verified-source".
 set -eu
+# shellcheck source=tests/lib.sh
 . "$(dirname "$0")/lib.sh"
 USAGE="$ROOT/bin/fm-model-usage.mjs"
 TMP_ROOT=$(fm_test_tmproot fm-model-usage)

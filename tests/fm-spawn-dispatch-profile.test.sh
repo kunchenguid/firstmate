@@ -370,7 +370,7 @@ test_recorded_default_axes_respawn_as_unset() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "recorded default axes did not launch identically to unset axes"$'\n'"expected: $expected"$'\n'"actual:   $launch"
 
   ledger="$HOME_DIR/data/routing-outcomes.jsonl"
@@ -392,7 +392,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -616,6 +616,7 @@ test_active_dispatch_profile_allows_positional_harness() {
 test_active_dispatch_profile_allows_raw_launch_command() {
   local rec id out status launch
   id=profile-raw-z15
+  rm -rf "/tmp/fm-$id"
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -628,7 +629,9 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   assert_grep "dispatch=resolved" "$HOME_DIR/state/$id.meta" "raw-command resolved attestation did not land in meta"
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"expected: custom-agent --flag"$'\n'"actual: $launch"
+  assert_absent "/tmp/fm-$id/git-hooks/commit-msg" \
+    "raw launch installed the ordinary-worker co-author sanitizer"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 

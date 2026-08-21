@@ -226,7 +226,7 @@ family_for_basename() {
     fm-tmux-agent-liveness.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
     fm-quota-cooldown.test.sh|fm-spawn-dispatch-profile.test.sh|\
-    fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
+    fm-agent-coauthor.test.sh|fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
@@ -1005,7 +1005,7 @@ families_for_changed_path() {
       # selects the opt-in guard that re-checks them against the installed CLI.
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-quota-cooldown.sh|bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
+    bin/fm-commit-msg-sanitize.sh|bin/fm-quota-cooldown.sh|bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-launch-axis-lib.sh|bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit

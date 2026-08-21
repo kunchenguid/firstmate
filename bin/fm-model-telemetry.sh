@@ -1197,6 +1197,7 @@ spawn_failures_json() {
 # predicate over the ledger's own UTC timestamps, where a bare date on --to
 # covers that whole day, so two projections can never report a different window
 # for the same flags.
+# shellcheck disable=SC2016
 WINDOW_JQ_DEF='
     def in_window($s):
       ($from=="" or $s>=$from) and

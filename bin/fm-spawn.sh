@@ -154,7 +154,9 @@
 #   (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor-agent)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. pi-signed launches that exact executable name from PATH and
+#   new adapters. That command is sent byte-for-byte, so the launch-scoped Git
+#   co-author sanitizer used by ordinary worker templates does not wrap it.
+#   pi-signed launches that exact executable name from PATH and
 #   refuses before endpoint creation when it is unavailable; it never falls back to pi.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
@@ -2379,6 +2381,83 @@ fi
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
 
+# Every supported worker harness inherits this launch-scoped Git configuration.
+# The relay lives under the task temp root, never in the project, composes every
+# pre-existing executable project hook, and Git reads it only in the worker
+# process tree.  An invalid inherited Git config or a relay-install failure is
+# mandatory: installation or runtime failure refuses the commit so a forbidden
+# agent trailer cannot enter permanent history.
+install_agent_coauthor_sanitizer() {
+  local hooks=$TASK_TMP/git-hooks original_hooks prior_count next_count hook original relay raw_count
+  raw_count=${GIT_CONFIG_COUNT:-0}
+  case "$raw_count" in
+    ''|*[!0-9]*)
+      echo "error: agent co-author sanitizer installation failed; refusing worker launch" >&2
+      return 1
+      ;;
+  esac
+  prior_count=$((10#$raw_count))
+  next_count=$((prior_count + 1))
+  hook=$hooks/commit-msg
+  original_hooks=$(git -C "$WT" config --path --get core.hooksPath 2>/dev/null || true)
+  if [ -z "$original_hooks" ]; then
+    original_hooks=$(git -C "$WT" rev-parse --path-format=absolute --git-path hooks 2>/dev/null) || {
+      echo "error: agent co-author sanitizer installation failed; refusing worker launch" >&2
+      return 1
+    }
+  else
+    case "$original_hooks" in
+      /*) ;;
+      *) original_hooks=$WT/$original_hooks ;;
+    esac
+  fi
+  if ! mkdir -p "$hooks"; then
+    echo "error: agent co-author sanitizer installation failed; refusing worker launch" >&2
+    return 1
+  fi
+  # Same-task recovery may reuse this directory. Remove only executable relay
+  # residue from its validated task-owned root before publishing this launch's
+  # current relays; never recurse or delete anything outside that root.
+  local stale
+  for stale in "$hooks"/*; do
+    [ -e "$stale" ] || continue
+    [ -f "$stale" ] && [ -x "$stale" ] || continue
+    if ! rm -f -- "$stale"; then
+      echo "error: agent co-author sanitizer installation failed; refusing worker launch" >&2
+      return 1
+    fi
+  done
+  for original in "$original_hooks"/*; do
+    [ -f "$original" ] && [ -x "$original" ] || continue
+    [ "${original##*/}" != commit-msg ] || continue
+    relay=$hooks/${original##*/}
+    if ! {
+      printf '%s\n' '#!/usr/bin/env bash'
+      printf 'exec %s "\$@"\n' "$(shell_quote "$original")"
+    } > "$relay" \
+      || ! chmod 700 "$relay"; then
+      echo "error: agent co-author sanitizer installation failed; refusing worker launch" >&2
+      return 1
+    fi
+  done
+  if ! {
+    printf '%s\n' '#!/usr/bin/env bash'
+    if [ -x "$original_hooks/commit-msg" ]; then
+      printf '%s\n' "$(shell_quote "$original_hooks/commit-msg") \"\$@\""
+      printf '%s\n' 'hook_status=$?'
+      printf '%s\n' "[ \"\$hook_status\" -eq 0 ] || exit \"\$hook_status\""
+    fi
+    printf '%s\n' "if ! $(shell_quote "$FM_ROOT/bin/fm-commit-msg-sanitize.sh") \"\$@\"; then"
+    printf '%s\n' '  echo "error: agent co-author sanitizer runtime failed; refusing commit" >&2'
+    printf '%s\n' '  exit 1' 'fi' 'exit 0'
+  } > "$hook" \
+    || ! chmod 700 "$hook"; then
+    echo "error: agent co-author sanitizer installation failed; refusing worker launch" >&2
+    return 1
+  fi
+  LAUNCH="GIT_CONFIG_COUNT=$(shell_quote "$next_count") GIT_CONFIG_KEY_${prior_count}=core.hooksPath GIT_CONFIG_VALUE_${prior_count}=$(shell_quote "$hooks") $LAUNCH"
+}
+
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
 # and token pointers stay out of git's view so they never block teardown's dirty
@@ -2849,6 +2928,11 @@ if [ "$KIND" = secondmate ]; then
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+fi
+# Ordinary worker templates inherit the launch-scoped sanitizer. A raw launch
+# command is the captain-supplied escape hatch and must stay byte-identical.
+if [ "$RAW_LAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  install_agent_coauthor_sanitizer
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
