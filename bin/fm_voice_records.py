@@ -23,6 +23,14 @@ nothing in a full status answer named a customer. tests/fm-voice-relay.test.sh
 holds that boundary as an executable check, so widening the reader later fails
 the test rather than quietly widening what is sent.
 
+Runtime records outlive the work they describe: a task keeps its state/<id>.meta
+until teardown removes it, which happens separately from marking the item done.
+So every reading here is filtered to ids that are still open, pull requests
+included. A finished task's pull request is therefore not counted and not named,
+and that lost count is a deliberate cost: the alternative names finished work and
+puts it out of reach of the deny list, which has no title to match without an
+open item to take it from.
+
 READ SCOPE. config/voice-read-scope selects what a status answer may contain:
 
   counts (the default, and the value used when the file is absent)
@@ -370,7 +378,16 @@ def fleet_status(home=None, scope=None):
         if i["tags"].get("hold-kind") == "captain"
         or i["tags"].get("kind") == "captain"
     ]
-    with_pr = [w for w in workers if w["pr"]]
+    # OPEN work only. _workers lists every state/*.meta in the home, and a task
+    # keeps its meta after it is marked done until teardown removes it, so taking
+    # every worker with a pull request would count and name finished tasks. That
+    # breaks the promise at the top of this file twice over: it reads finished
+    # work, and the deny decision below cannot reach those items, because their
+    # ids have no open item to supply a title, so a captain substring matching a
+    # title would silently fail for exactly them. Losing the count of a pull
+    # request on a task already marked done is the accepted cost.
+    open_ids = {i["id"] for i in open_items}
+    with_pr = [w for w in workers if w["pr"] and w["id"] in open_ids]
 
     inbox = os.path.join(state, "inbox")
     try:

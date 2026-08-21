@@ -55,10 +55,10 @@ An absent profile means the relay uses only credentials that are already in its
 environment. An empty FM_VOICE_PROFILE, or an empty `--profile ""`, forces that
 even when config/voice-profile exists.
 
-On the model: amazon.nova-sonic-v1:0 is marked legacy by AWS and measured 25
-percent slower on the tool-backed path, which is the path this interface actually
-uses, so amazon.nova-2-sonic-v1:0 is what the figures in docs/voice-relay.md were
-taken against.
+On choosing the model: the first-generation Nova Sonic model is marked legacy by
+AWS and measured 25 percent slower on the tool-backed path, which is the path this
+interface actually uses, so the figures in docs/voice-relay.md were taken against
+the second generation, which that document names.
 
 Usage:
   fm-voice-relay.py [--serve] [options]
@@ -335,7 +335,20 @@ def resolve_credentials(profile, verbose=False, margin=0, allow_ambient=True):
                              "there is no profile to fall back to")
         if ambient is not None:
             return ambient[0], ambient[1], FROM_ENVIRONMENT
-    creds, expires = profile_credentials(profile, verbose)
+    try:
+        creds, expires = profile_credentials(profile, verbose)
+    except CredentialError:
+        # The profile was the escalation and it refused. Whatever the environment
+        # still holds is older than we would like, which is why the profile was
+        # asked at all, but it is a real answer and AWS refuses it for itself if
+        # it is dead. Ending the conversation instead would spend the captain's
+        # session on a preference. An environment with nothing in it re-raises.
+        ambient = ambient_credentials(verbose, margin, only_source=True)
+        if ambient is None:
+            raise
+        log(verbose, "the profile refused, so falling back to the credentials "
+                     "still in the environment")
+        return ambient[0], ambient[1], FROM_ENVIRONMENT
     return creds, expires, FROM_PROFILE
 
 
@@ -396,13 +409,21 @@ class Credentials:
     async def get(self):
         async with self._lock:
             if not self._usable():
-                if self._source == FROM_ENVIRONMENT and self.profile:
+                spend = self._source == FROM_ENVIRONMENT and bool(self.profile)
+                creds, expires, source = await asyncio.to_thread(
+                    resolve_credentials, self.profile, self.verbose,
+                    self.REFRESH_MARGIN, not (self._ambient_spent or spend))
+                # Latched only now, and only if the profile is what answered. A
+                # profile that cannot answer raises out of the line above or is
+                # answered for by the environment, and latching either of those
+                # would abandon credentials this process is still holding on the
+                # strength of a source that just refused, turning one failed
+                # refresh into every later turn.
+                if spend and source == FROM_PROFILE:
                     log(self.verbose, "the credentials from the environment are "
                                       "spent; asking the profile from now on")
                     self._ambient_spent = True
-                self._creds, self._expires, self._source = await asyncio.to_thread(
-                    resolve_credentials, self.profile, self.verbose,
-                    self.REFRESH_MARGIN, not self._ambient_spent)
+                self._creds, self._expires, self._source = creds, expires, source
                 self._resolved = time.monotonic()
             return dict(self._creds)
 
@@ -589,9 +610,21 @@ class Session:
         log(self.verbose, "talk start")
 
     async def audio(self, pcm):
-        """Forward captured audio, chunked the way the measurements were taken."""
+        """Forward captured audio, chunked the way the measurements were taken.
+
+        Audio with no turn open is dropped rather than opening one. Both listen
+        modes send a talk start before any audio, so this never fires in ordinary
+        use, but the capture callback races the key release: a chunk already past
+        the gate check can reach the relay behind the talk end. Opening a block
+        for it would append the captain's stray tenth of a second to a session
+        that is already generating its reply, which is the unconditional barge-in
+        the per-turn reconnect exists to avoid, and it would leave that block open
+        so the next turn skipped its own reset and its first-audio mark.
+        """
         if self.audio_content is None:
-            await self.talk_start()
+            log(self.verbose, "dropping {} bytes of audio that arrived with no "
+                              "turn open".format(len(pcm)))
+            return
         for at in range(0, len(pcm), CHUNK):
             await self._send({"audioInput": {
                 "promptName": self.prompt, "contentName": self.audio_content,

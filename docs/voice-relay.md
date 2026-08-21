@@ -180,16 +180,17 @@ An unreadable or misspelled `voice-read-scope` refuses rather than falling back
 to the wider setting, because falling back would widen what is sent on the
 strength of a typo.
 
-## Push to talk, and how to flip it
+## Push to talk, and the setting that refuses
 
 Push to talk is the default: the microphone is closed until you ask for it. That
 is `$0.0101` per minute against `$0.0151` for an open microphone, and it is the
 setting nobody has decided yet, so this build does not choose the expensive one
 on the captain's behalf.
 
-One flag flips it: `--listen open-mic`. The model's own speech detector then ends
-each turn instead of your key release, and the relay clock follows it, so the
-timings above stay comparable.
+`--listen open-mic` exists as a setting and refuses at startup today.
+An open microphone needs something to decide when you stopped speaking, and the client has no end-of-speech detection, so the mode would open a turn, stream audio forever and never mark a boundary, which leaves the relay appending to a session that has already answered.
+That detection belongs with carrying context across turns, which is step three, so the flag refuses before it opens an SSH connection or spends anything rather than half working.
+The setting stays where it is so that turning it on later is a small change rather than a new flag.
 
 ## One turn per session, and what that gives up
 

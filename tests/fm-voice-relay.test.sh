@@ -335,8 +335,33 @@ pass "an unconfigured home can still read how to configure the relay"
 # The captain inbox is the same rule with a different consequence: note, status,
 # list and drain make no model call, so they must keep working unconfigured. The
 # voice handover depends on note, so that is not a nicety.
-inbox_env=(FM_HOME="$CONFIG_HOME" FM_STATE_OVERRIDE="$CONFIG_HOME/state"
-           FM_CONFIG_OVERRIDE="$CONFIG_HOME/config")
+#
+# EVERY FM_INBOX_ VARIABLE IS NEUTRALIZED HERE, at the harness rather than in each
+# case, and the list is read out of the environment rather than written down, so a
+# knob added later cannot quietly survive into a refusal case. A shell that
+# exports a region and a model id would otherwise walk these cases straight past
+# the refusal they assert and into a real model call: an offline suite that can
+# spend the operator's credentials is worse than a failing one.
+inbox_env=()
+while IFS= read -r inbox_knob; do
+  [ -n "$inbox_knob" ] || continue
+  inbox_env+=(-u "$inbox_knob")
+done < <(env | sed -n 's/^\(FM_INBOX_[A-Za-z0-9_]*\)=.*/\1/p' | sort -u)
+inbox_env+=(FM_HOME="$CONFIG_HOME" FM_STATE_OVERRIDE="$CONFIG_HOME/state"
+            FM_CONFIG_OVERRIDE="$CONFIG_HOME/config")
+
+# And a stub that records any attempt, so "no model call" is a checked fact rather
+# than a claim about control flow. The real aws would need credentials; this one
+# leaves evidence and exits non-zero.
+INBOX_FAKEBIN=$(fm_fakebin "$TMP_ROOT/inbox-fake")
+AWS_CALLED="$TMP_ROOT/aws-was-called"
+cat > "$INBOX_FAKEBIN/aws" <<SH
+#!/usr/bin/env bash
+printf 'aws %s\n' "\$*" >> "$AWS_CALLED"
+exit 9
+SH
+chmod +x "$INBOX_FAKEBIN/aws"
+inbox_env+=(PATH="$INBOX_FAKEBIN:$PATH")
 
 set +e
 ask_out=$(env "${inbox_env[@]}" "$ROOT/bin/fm-inbox.sh" ask "how is the fleet" 2>&1)
@@ -369,6 +394,8 @@ unconfigured_note=$(env "${inbox_env[@]}" \
   "$ROOT/bin/fm-inbox.sh" note "the handover must work with no configuration") \
   || fail "note should not need any configuration"
 assert_contains "$unconfigured_note" 'queued ' "note should still queue a record"
+assert_absent "$AWS_CALLED" \
+  "no case above may reach a model: the aws stub recorded an attempt"
 pass "the model-backed subcommands refuse by name while note keeps working"
 
 # --help prints the whole header block, and finds where that block ends rather
@@ -685,6 +712,37 @@ check(asyncio.run(cache.get())["aws_access_key_id"] == "FROM-PROFILE",
       "an expired ambient credential should be abandoned when a profile exists")
 os.environ.pop("AWS_CREDENTIAL_EXPIRATION", None)
 
+# A PROFILE THAT CANNOT ANSWER must not cost the environment. Abandoning ambient
+# credentials is justified by the profile answering, so it is only decided once the
+# profile has: otherwise one failed export strands a relay that is still holding
+# keys, and every later turn names a profile while the answer sits in os.environ.
+del exports[:]
+
+def refusing_profile(profile, verbose=False):
+    exports.append(profile)
+    raise relay.CredentialError(
+        "could not get credentials for profile {}".format(profile))
+
+relay.profile_credentials = refusing_profile
+os.environ["AWS_ACCESS_KEY_ID"] = "AKIAENVIRONMENT"
+os.environ["AWS_SECRET_ACCESS_KEY"] = "s3cret"
+os.environ["AWS_SESSION_TOKEN"] = "still-held-token"
+os.environ.pop("AWS_CREDENTIAL_EXPIRATION", None)
+
+cache = Bounded("a-profile")
+check(asyncio.run(cache.get())["aws_session_token"] == "still-held-token",
+      "usable ambient credentials should be preferred while they hold")
+kept = []
+for _ in range(3):
+    time.sleep(0.1)
+    try:
+        kept.append(asyncio.run(cache.get())["aws_session_token"])
+    except relay.CredentialError:
+        kept.append("CredentialError")
+check(kept == ["still-held-token"] * 3,
+      "a refusing profile must cost one attempt, not the conversation: %r" % kept)
+check(exports, "and the profile should have been tried at least once: %r" % exports)
+
 # An environment with nothing in it and no profile is still a named refusal, so
 # this restores the real resolver rather than asking the stub to pretend.
 for name in AWS_VARS:
@@ -884,6 +942,78 @@ check(built[0].closed == 1,
 PY
 pass "a turn the model refuses is announced and costs one turn, not the relay"
 
+# --- audio that arrives with no turn open ------------------------------------
+#
+# Both listen modes send a talk start before any audio, so audio outside a turn
+# means the capture callback raced the key release and a stray chunk landed behind
+# the talk end. Opening a block for it would append the captain's stray tenth of a
+# second to a session that is already answering, which is the unconditional
+# barge-in the per-turn reconnect exists to avoid, and would leave that block open
+# so the next turn skipped its own reset and its first-audio mark.
+
+python3 - "$ROOT/bin" "$TMP_ROOT/stray-home" <<'PY' || fail "stray audio"
+import asyncio, os, sys
+sys.path.insert(0, sys.argv[1])
+import importlib.util, pathlib
+spec = importlib.util.spec_from_file_location(
+    "relay", str(pathlib.Path(sys.argv[1]) / "fm-voice-relay.py"))
+relay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(relay)
+
+home = sys.argv[2]
+os.makedirs(home, exist_ok=True)
+
+def check(cond, label):
+    if not cond:
+        sys.exit("stray audio: " + label)
+
+class Down:
+    def send(self, kind, payload=b""):
+        pass
+
+    def send_json(self, kind, obj):
+        pass
+
+    def arm_turn(self):
+        pass
+
+    def first_audio(self):
+        return None
+
+sent = []
+
+async def record(event):
+    sent.append(event)
+
+session = relay.Session(relay.parse_args(["--serve", "--home", home]), Down(), None)
+session._send = record
+
+# No turn open: the stray chunk goes nowhere, and no block is left behind for the
+# next turn to trip over. This session has no model stream either, so anything
+# that did try to open a block would raise rather than pass quietly.
+asyncio.run(session.audio(b"\x01" * 3200))
+check(sent == [], "audio with no turn open must not be forwarded: %r" % sent)
+check(session.audio_content is None,
+      "and must not leave an audio block open: %r" % session.audio_content)
+
+# Inside a turn it flows, so the guard is about the boundary and not about audio.
+asyncio.run(session.talk_start())
+del sent[:]
+asyncio.run(session.audio(b"\x01" * 3200))
+check([next(iter(event)) for event in sent] == ["audioInput"],
+      "audio inside a turn must still be forwarded: %r" % sent)
+
+# And talk end still pads with its trailing silence before closing the block,
+# which is the whole reason a push-to-talk clip gets answered at all.
+del sent[:]
+asyncio.run(session.talk_end())
+kinds = [next(iter(event)) for event in sent]
+check(kinds.count("audioInput") > 0 and kinds[-1] == "contentEnd",
+      "talk end must pad with silence and then close the block: %r" % kinds)
+check(session.audio_content is None, "talk end must close the block")
+PY
+pass "audio that arrives with no turn open is dropped, not turned into a turn"
+
 # --- the laptop end ---------------------------------------------------------
 #
 # The microphone and speaker paths cannot be tested from a host with neither, and
@@ -925,11 +1055,24 @@ check(client.parse_args(["--host", "desk"]).relay
 check(client.parse_args(["--host", "desk", "--relay", "/other/relay.py"]).relay
       == "/other/relay.py", "an explicit --relay must win over the variable")
 
-# Push to talk is the default for this build, and open mic is the one flip.
+# Push to talk is the default for this build, and the only mode that runs.
 check(client.parse_args(["--host", "h"]).listen == client.PUSH_TO_TALK,
       "push to talk must be the default")
-check(client.parse_args(["--host", "h", "--listen", "open-mic"]).listen
-      == client.OPEN_MIC, "open mic must be selectable")
+
+# An open microphone needs to know when the captain stopped speaking, and this
+# client cannot: it would open a turn and stream forever without ever marking a
+# boundary. So the setting is accepted as a value and refuses at parse time,
+# before any ssh connection is opened or any model session is paid for. The value
+# stays in the accepted set so switching it on later is a small change.
+check(client.OPEN_MIC in client.LISTEN_MODES,
+      "open mic must stay a value the flag accepts")
+refusal = None
+try:
+    client.parse_args(["--host", "h", "--listen", "open-mic"])
+except SystemExit as exc:
+    refusal = exc.code
+check(refusal not in (None, 0),
+      "open mic must refuse rather than start: %r" % (refusal,))
 
 # The audio devices themselves cannot be reached from here, but their SELECTOR
 # can be, and it is typed: sounddevice reads an int as an index into its device
@@ -1071,6 +1214,43 @@ set -e
 assert_contains "$short_out" 'fm_voice_frame' \
   "the import failure should name the file the laptop is missing"
 pass "the client runs from a laptop holding only the two files the guide names"
+
+# --listen open-mic refuses, out loud and early. The mode has no way to tell when
+# the captain stopped speaking, so it would stream a turn that never ends; the
+# captain should be told that rather than watching it half work. Early matters as
+# much as loud: an ssh stub here records any attempt to reach the desktop, and the
+# refusal must come before it, so nothing is opened and nothing is spent.
+OPENMIC_FAKEBIN=$(fm_fakebin "$TMP_ROOT/openmic-fake")
+SSH_CALLED="$TMP_ROOT/ssh-was-called"
+cat > "$OPENMIC_FAKEBIN/ssh" <<SH
+#!/usr/bin/env bash
+printf 'ssh %s\n' "\$*" >> "$SSH_CALLED"
+exit 9
+SH
+chmod +x "$OPENMIC_FAKEBIN/ssh"
+
+set +e
+openmic_out=$(PATH="$OPENMIC_FAKEBIN:$PATH" python3 "$ROOT/bin/fm-voice-client.py" \
+  --host a-desktop --relay /desktop/bin/fm-voice-relay.py --listen open-mic 2>&1)
+openmic_code=$?
+set -e
+[ "$openmic_code" -ne 0 ] || fail "--listen open-mic started instead of refusing"
+assert_contains "$openmic_out" 'end-of-speech' \
+  "the refusal should name the missing piece: $openmic_out"
+assert_contains "$openmic_out" 'push-to-talk' \
+  "the refusal should name the mode that does work: $openmic_out"
+assert_absent "$SSH_CALLED" \
+  "the refusal must come before anything reaches the desktop"
+# The default still starts far enough to try the connection, so the case above is
+# a property of the setting rather than of the fixture refusing everything.
+set +e
+PATH="$OPENMIC_FAKEBIN:$PATH" python3 "$ROOT/bin/fm-voice-client.py" \
+  --host a-desktop --relay /desktop/bin/fm-voice-relay.py --talk-seconds 0 \
+  >/dev/null 2>&1
+set -e
+assert_present "$SSH_CALLED" \
+  "fixture is wrong: push to talk should have reached the ssh stub"
+pass "--listen open-mic refuses at startup, before it opens anything"
 
 # --- read scope -------------------------------------------------------------
 
@@ -1398,6 +1578,67 @@ inbox_moved=$(FM_HOME="$VERB_HOME" FM_STATE_OVERRIDE="$VERB_HOME/state" \
 assert_contains "$inbox_moved" 'moved-one' \
   "the human rendering of the same records must read the same backlog"
 pass "the backlog and the state directory always come from the same home"
+
+# --- pull requests on finished work -----------------------------------------
+#
+# A task keeps its state/<id>.meta after its backlog item is marked done, because
+# removing the record and moving the item are separate steps. So a reader that took
+# every worker carrying a pull request would count and name finished work, which
+# this module promises never to read. Worse, the deny list could not reach those
+# items: with no open item there is no title in the field set, so a captain
+# substring matching the title silently failed for exactly them while working
+# everywhere else. Losing the count of a pull request on a finished task is the
+# accepted cost of that control applying everywhere it appears to.
+DONE_HOME="$TMP_ROOT/finished-pull-requests"
+FINISHED_TOKEN=SHIPPEDLASTWEEK
+mkdir -p "$DONE_HOME/data" "$DONE_HOME/state" "$DONE_HOME/config"
+cat > "$DONE_HOME/data/backlog.md" <<EOF
+# Backlog
+
+## In flight
+- [ ] still-open - Fix the retry (repo: a) (kind: ship)
+- [x] ticked-two - Renew the $FINISHED_TOKEN contract (repo: b) (kind: ship)
+
+## Done
+- [x] older-three - Migrate the $FINISHED_TOKEN estate (repo: c) (kind: ship)
+EOF
+fm_write_meta "$DONE_HOME/state/still-open.meta" \
+  kind=ship pr=https://github.com/example/a/pull/1
+fm_write_meta "$DONE_HOME/state/ticked-two.meta" \
+  kind=ship pr=https://github.com/example/b/pull/2
+fm_write_meta "$DONE_HOME/state/older-three.meta" \
+  kind=ship pr=https://github.com/example/c/pull/3
+
+done_status() {
+  python3 "$ROOT/bin/fm_voice_records.py" status --home "$DONE_HOME" --scope full
+}
+
+open_only=$(done_status) || fail "the finished-pull-request fixture failed"
+assert_contains "$open_only" '"open_pull_requests": 1' \
+  "only open work has an open pull request"
+assert_contains "$open_only" 'pull/1' "the open task's pull request should be named"
+assert_not_contains "$open_only" 'ticked-two' \
+  "a ticked item must not be named through its pull request"
+assert_not_contains "$open_only" 'pull/2' \
+  "a ticked item's pull request must not be named"
+assert_not_contains "$open_only" 'older-three' \
+  "an item under Done must not be named through its pull request"
+assert_not_contains "$open_only" 'pull/3' \
+  "an item under Done must not have its pull request named"
+assert_not_contains "$open_only" "$FINISHED_TOKEN" \
+  "no finished title may reach the answer at any scope"
+
+# The deny list is the only control the guide offers for a customer name, and it
+# could not touch these items at all, because their titles were never in the field
+# set it matches against.
+printf '%s\n' "$FINISHED_TOKEN" > "$DONE_HOME/config/voice-read-deny"
+denied_done=$(done_status) || fail "deny by a finished title failed"
+assert_not_contains "$denied_done" 'pull/2' \
+  "a deny substring matching a finished title must not leave its link named"
+assert_not_contains "$denied_done" 'pull/3' \
+  "a deny substring matching a finished title must not leave its link named"
+assert_contains "$denied_done" 'pull/1' "the open task is unaffected"
+pass "a finished task's pull request is neither counted nor named"
 
 # --- refusals ---------------------------------------------------------------
 #

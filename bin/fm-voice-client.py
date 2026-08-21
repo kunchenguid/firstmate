@@ -20,13 +20,18 @@ WHAT IS VERIFIED AND WHAT IS NOT. Read this before trusting a number from it.
   sounddevice calls below are written from its documented interface and have
   never been run against a real device. Treat the first live run as the test.
 
-TWO KINDS OF LISTENING, one setting. --listen push-to-talk is the default: the
-captain says when they are talking, the model is only paid for that audio, and
-nothing is streamed while they are thinking. --listen open-mic streams
-continuously and lets the model decide when a turn ended, which is a nicer
-conversation and costs about half again as much per minute. The captain has not
-decided that question, so the cheaper one is the default and the flag is the
-whole difference.
+TWO KINDS OF LISTENING, one of them built. --listen push-to-talk is the default
+and the only mode that runs: the captain says when they are talking, the model is
+only paid for that audio, and nothing is streamed while they are thinking.
+
+--listen open-mic is accepted as a setting and REFUSES at startup. Streaming
+continuously needs something to decide when the captain stopped speaking, and
+this client has no end-of-speech detection: it would open a turn, stream audio
+forever and never mark a boundary, so the relay would keep appending to a session
+that had already answered. That detection belongs with session continuity across
+turns, which is step three of the design. The setting stays here so that turning
+it on later is a small change rather than a new flag, and refusing is honest
+where half a mode would not be.
 
 Copy this file and fm_voice_frame.py to the laptop; they are the only two files
 it needs and both are standard library only, apart from sounddevice for the
@@ -50,7 +55,8 @@ Options:
                          joined with an equals sign, --relay-arg=--scope
                          --relay-arg=counts, or the leading dashes are read as
                          options of this client instead.
-  --listen <mode>        push-to-talk (default) or open-mic.
+  --listen <mode>        push-to-talk, the default and the only mode that runs.
+                         open-mic is accepted and refuses; see above.
   --runs <n>             turns to take in one session.        default 1
   --talk-seconds <sec>   capture for this long instead of waiting on a keypress.
   --in-file <file.pcm>   raw 16 kHz mono 16-bit input instead of the microphone.
@@ -740,7 +746,10 @@ def parse_args(argv):
     parser.add_argument("--relay-python",
                         default=os.environ.get("FM_VOICE_PYTHON", "python3"))
     parser.add_argument("--relay-arg", action="append")
-    parser.add_argument("--listen", choices=LISTEN_MODES, default=PUSH_TO_TALK)
+    parser.add_argument("--listen", choices=LISTEN_MODES, default=PUSH_TO_TALK,
+                        help="push-to-talk is the default and the only mode that "
+                             "runs; open-mic is accepted and refuses until "
+                             "end-of-speech detection exists")
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--talk-seconds", type=float)
     parser.add_argument("--in-file")
@@ -771,6 +780,14 @@ def parse_args(argv):
         parser.error(
             "--listen open-mic with --in-file would end the turn when the file "
             "ran out, which is not what an open microphone does")
+    if options.listen == OPEN_MIC:
+        # Here rather than in open(), so nothing is spent: no ssh, no relay, no
+        # model session. See the module docstring on the two kinds of listening.
+        parser.error(
+            "--listen open-mic is not built yet: it needs end-of-speech "
+            "detection to know when a turn ended, which lands with session "
+            "continuity across turns, so it would stream forever and never end "
+            "a turn. Use the default --listen push-to-talk.")
     return options
 
 
