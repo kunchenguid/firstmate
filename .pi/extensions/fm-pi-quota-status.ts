@@ -1,0 +1,2354 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
+import { constants, watch, type FSWatcher } from "node:fs";
+import { open } from "node:fs/promises";
+import { homedir, uptime } from "node:os";
+import { basename, dirname, join } from "node:path";
+import { performance } from "node:perf_hooks";
+import { TextDecoder } from "node:util";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  createQuotaStatusFormatter,
+  DEFAULT_QUOTA_FRESHNESS_MS,
+  nextQuotaStatusTransitionMs,
+  parseQuotaAxiJson,
+  quotaFailureReasonFromReport,
+  quotaProviderForPiProvider,
+  quotaPublicationFreshView,
+  revalidateFreshQuotaView,
+  selectActiveProviderQuota,
+  type FreshQuotaView,
+  type ParsedQuotaAxiReport,
+  type QuotaFailureReason,
+  type QuotaRefreshIssue,
+  type QuotaUnsupportedReason,
+  type QuotaView,
+} from "./lib/fm-pi-quota-status.ts";
+
+const WIDGET_KEY = "firstmate-quota";
+const DEFAULT_REFRESH_MS = 5 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS = 20 * 1000;
+const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
+const DEFAULT_MAX_AUTH_BYTES = 1024 * 1024;
+const DEFAULT_REVISION_CHECK_MS = 1000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const WINDOWS_TREE_KILL_TIMEOUT_MS = 5000;
+const WINDOWS_JOB_SUPERVISOR = String.raw`
+$ErrorActionPreference = "Stop"
+$jobSource = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class FirstmateQuotaJob
+{
+    const uint CREATE_SUSPENDED = 0x00000004;
+    const uint CREATE_NO_WINDOW = 0x08000000;
+    const uint DUPLICATE_SAME_ACCESS = 0x00000002;
+    const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+    const uint STARTF_USESTDHANDLES = 0x00000100;
+    const uint WAIT_FAILED = 0xFFFFFFFF;
+    const int JobObjectExtendedLimitInformation = 9;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct STARTUPINFO
+    {
+        public int cb;
+        public string lpReserved;
+        public string lpDesktop;
+        public string lpTitle;
+        public uint dwX;
+        public uint dwY;
+        public uint dwXSize;
+        public uint dwYSize;
+        public uint dwXCountChars;
+        public uint dwYCountChars;
+        public uint dwFillAttribute;
+        public uint dwFlags;
+        public short wShowWindow;
+        public short cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public uint dwProcessId;
+        public uint dwThreadId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetInformationJobObject(IntPtr job, int informationClass, IntPtr information, uint length);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcessW(
+        string applicationName,
+        StringBuilder commandLine,
+        IntPtr processAttributes,
+        IntPtr threadAttributes,
+        bool inheritHandles,
+        uint creationFlags,
+        IntPtr environment,
+        string currentDirectory,
+        ref STARTUPINFO startupInfo,
+        out PROCESS_INFORMATION processInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint ResumeThread(IntPtr thread);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr GetStdHandle(int handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DuplicateHandle(
+        IntPtr sourceProcess,
+        IntPtr sourceHandle,
+        IntPtr targetProcess,
+        out IntPtr targetHandle,
+        uint desiredAccess,
+        bool inheritHandle,
+        uint options);
+
+    static void Require(bool value)
+    {
+        if (!value) throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+
+    static IntPtr InheritableStdHandle(int id)
+    {
+        IntPtr current = GetCurrentProcess();
+        IntPtr duplicate;
+        Require(DuplicateHandle(
+            current,
+            GetStdHandle(id),
+            current,
+            out duplicate,
+            0,
+            true,
+            DUPLICATE_SAME_ACCESS));
+        return duplicate;
+    }
+
+    public static int Run(string executable, string arguments)
+    {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        IntPtr input = IntPtr.Zero;
+        IntPtr output = IntPtr.Zero;
+        IntPtr error = IntPtr.Zero;
+        PROCESS_INFORMATION process = new PROCESS_INFORMATION();
+        try
+        {
+            var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            IntPtr limitsPointer = Marshal.AllocHGlobal(Marshal.SizeOf(limits));
+            try
+            {
+                Marshal.StructureToPtr(limits, limitsPointer, false);
+                Require(SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    limitsPointer,
+                    (uint)Marshal.SizeOf(limits)));
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(limitsPointer);
+            }
+
+            input = InheritableStdHandle(-10);
+            output = InheritableStdHandle(-11);
+            error = InheritableStdHandle(-12);
+            var startup = new STARTUPINFO();
+            startup.cb = Marshal.SizeOf(startup);
+            startup.dwFlags = STARTF_USESTDHANDLES;
+            startup.hStdInput = input;
+            startup.hStdOutput = output;
+            startup.hStdError = error;
+            var commandLine = new StringBuilder("\"" + executable + "\" " + arguments);
+            Require(CreateProcessW(
+                executable,
+                commandLine,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                true,
+                CREATE_SUSPENDED | CREATE_NO_WINDOW,
+                IntPtr.Zero,
+                null,
+                ref startup,
+                out process));
+            Require(AssignProcessToJobObject(job, process.hProcess));
+            if (ResumeThread(process.hThread) == UInt32.MaxValue)
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (WaitForSingleObject(process.hProcess, UInt32.MaxValue) == WAIT_FAILED)
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            uint exitCode;
+            Require(GetExitCodeProcess(process.hProcess, out exitCode));
+            return unchecked((int)exitCode);
+        }
+        catch
+        {
+            if (process.hProcess != IntPtr.Zero) TerminateProcess(process.hProcess, 70);
+            throw;
+        }
+        finally
+        {
+            if (process.hThread != IntPtr.Zero) CloseHandle(process.hThread);
+            if (process.hProcess != IntPtr.Zero) CloseHandle(process.hProcess);
+            if (input != IntPtr.Zero) CloseHandle(input);
+            if (output != IntPtr.Zero) CloseHandle(output);
+            if (error != IntPtr.Zero) CloseHandle(error);
+            CloseHandle(job);
+        }
+    }
+}
+'@
+Add-Type -TypeDefinition $jobSource -Language CSharp
+$childScript = @'
+$ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
+$payloadText = [System.Text.Encoding]::UTF8.GetString(
+  [Convert]::FromBase64String($env:FM_QUOTA_JOB_PAYLOAD)
+)
+$payload = ConvertFrom-Json $payloadText
+$command = [string]$payload.command
+[string[]]$arguments = @($payload.arguments | ForEach-Object { [string]$_ })
+Remove-Item Env:FM_QUOTA_JOB_PAYLOAD -ErrorAction SilentlyContinue
+try {
+  $resolved = Get-Command -Name $command -CommandType Application,ExternalScript -ErrorAction Stop
+} catch {
+  exit 127
+}
+try {
+  & $resolved.Source @arguments
+  if ($null -eq $LASTEXITCODE) { exit 0 }
+  exit [int]$LASTEXITCODE
+} catch {
+  [Console]::Error.WriteLine($_.Exception.Message)
+  exit 126
+}
+'@
+$childEncoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($childScript))
+$powershell = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+$arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $childEncoded"
+exit [FirstmateQuotaJob]::Run($powershell, $arguments)
+`;
+
+const OFFICIAL_PROVIDER_BASE_URLS: Readonly<Record<string, string>> = {
+  anthropic: "https://api.anthropic.com",
+  "kimi-coding": "https://api.kimi.com/coding",
+  "openai-codex": "https://chatgpt.com/backend-api",
+  xai: "https://api.x.ai/v1",
+};
+
+const OFFICIAL_PROVIDER_MODEL_APIS: Readonly<Record<string, readonly string[]>> = {
+  anthropic: ["anthropic-messages"],
+  "github-copilot": ["anthropic-messages", "openai-completions", "openai-responses"],
+  "kimi-coding": ["anthropic-messages"],
+  "openai-codex": ["openai-codex-responses"],
+  xai: ["openai-completions", "openai-responses"],
+};
+
+const NON_ROUTING_MODEL_OVERRIDE_FIELDS = new Set([
+  "name",
+  "reasoning",
+  "thinkingLevelMap",
+  "input",
+  "cost",
+  "contextWindow",
+  "maxTokens",
+  "samplingParams",
+]);
+const MODEL_DEFINITION_FIELDS = new Set([
+  "id",
+  ...NON_ROUTING_MODEL_OVERRIDE_FIELDS,
+  "api",
+  "baseUrl",
+  "headers",
+  "compat",
+]);
+const FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+
+type QuotaProcessResult =
+  | { kind: "ok"; stdout: string }
+  | { kind: "failed"; stdout: string; exitCode: number | null }
+  | { kind: "malformed" }
+  | { kind: Exclude<QuotaFailureReason, "failed"> };
+
+type QuotaProcess = {
+  promise: Promise<QuotaProcessResult>;
+  cancel: () => void;
+  child: ChildProcess;
+};
+
+export type QuotaTimerScheduler = {
+  setTimeout: (callback: () => void, delayMs: number) => unknown;
+  clearTimeout: (timer: unknown) => void;
+  setInterval: (callback: () => void, delayMs: number) => unknown;
+  clearInterval: (timer: unknown) => void;
+};
+
+type AuthDirectoryWatcher = (
+  path: string,
+  options: { persistent: false },
+  listener: (event: "rename" | "change", filename: string | Buffer | null) => void,
+) => FSWatcher;
+
+export type FirstmateQuotaStatusOptions = {
+  command?: string;
+  refreshMs?: number;
+  timeoutMs?: number;
+  freshnessMs?: number;
+  maxOutputBytes?: number;
+  maxAuthBytes?: number;
+  now?: () => number;
+  monotonicNow?: () => number;
+  continuousNow?: () => number;
+  width?: () => number;
+  timers?: QuotaTimerScheduler;
+  authFile?: string;
+  modelsFile?: string;
+  watchAuthDirectory?: AuthDirectoryWatcher;
+};
+
+type ActiveModel = NonNullable<ExtensionContext["model"]>;
+
+type QuotaVerification = { kind: "account"; accountId: string };
+
+type StoredOAuthCredential = {
+  type: "oauth";
+  access: string;
+  refresh: string;
+  expires: number;
+  [key: string]: unknown;
+};
+
+type ResolvedOAuthAuth = {
+  apiKey?: string;
+  baseUrl?: string;
+};
+
+type QuotaTarget =
+  | {
+      kind: "resolving";
+      piProvider: string;
+      modelRevision: string;
+      compositionRevision: string;
+    }
+  | {
+      kind: "supported";
+      piProvider: string;
+      verification: QuotaVerification;
+      credentialRevision: string;
+      modelRevision: string;
+      compositionRevision: string;
+      endpointRevision: string;
+    }
+  | {
+      kind: "unsupported";
+      view: Extract<QuotaView, { kind: "unsupported" }>;
+      modelRevision: string;
+      compositionRevision: string;
+      credentialRevision?: string;
+    };
+
+type CompatibleProvider = {
+  id?: unknown;
+  name?: unknown;
+  baseUrl?: unknown;
+  headers?: unknown;
+  auth?: {
+    apiKey?: {
+      login?: unknown;
+      check?: unknown;
+      resolve?: unknown;
+    };
+    oauth?: {
+      isSubscription?: boolean;
+      login?: unknown;
+      refresh?: unknown;
+      toAuth?: (credential: StoredOAuthCredential) => Promise<ResolvedOAuthAuth>;
+    };
+  };
+  getModels?: unknown;
+  refreshModels?: unknown;
+  filterModels?: unknown;
+  stream?: unknown;
+  streamSimple?: unknown;
+  fetchDeferred?: unknown;
+  cancelDeferred?: unknown;
+};
+
+type CompatibleModelRegistry = {
+  getProvider?: (provider: string) => CompatibleProvider | undefined;
+  find?: (provider: string, modelId: string) => ActiveModel | undefined;
+  getRegisteredProviderConfig?: (provider: string) => unknown;
+  getRegisteredNativeProvider?: (provider: string) => unknown;
+  isUsingOAuth?: (model: ActiveModel) => boolean;
+  getProviderAuthStatus?: (provider: string) => {
+    configured: boolean;
+    source?: "stored" | "runtime" | "environment" | "fallback" | "models_json_key" | "models_json_command";
+  };
+  runtime?: {
+    config?: {
+      getProvider?: (provider: string) => unknown;
+    };
+  };
+};
+
+type CachedQuota = {
+  view: QuotaView;
+  publication: FreshQuotaView | null;
+  wallFilter: {
+    source: FreshQuotaView;
+    view: FreshQuotaView;
+    validFromMs: number;
+    validUntilMs: number;
+  } | null;
+  publishedAtMonotonicMs: number;
+  publishedAtContinuousMs: number;
+  elapsedAtPublicationMs: number;
+  elapsedThroughMs: number;
+  timelineOriginMs: number;
+  piProvider: string;
+  credentialRevision: string;
+  modelRevision: string;
+  compositionRevision: string;
+  endpointRevision: string;
+};
+
+type ActiveSession = {
+  ctx: ExtensionContext;
+  generation: number;
+  target: QuotaTarget;
+  quota: CachedQuota | null;
+  lastFailure: QuotaRefreshIssue | null;
+  process: QuotaProcess | null;
+  operationAbort: AbortController | null;
+  credentialCheckAbort: AbortController | null;
+  credentialCheckPending: boolean;
+  credentialCheckQuarantined: boolean;
+  credentialCheckIssue: QuotaRefreshIssue | null;
+  credentialWatcher: FSWatcher | null;
+  credentialMonitoringAvailable: boolean;
+  refreshInFlight: boolean;
+  refreshPending: boolean;
+  refreshTimer: unknown | null;
+  expiryTimer: unknown | null;
+  statusTimer: unknown | null;
+  expiryTimerQuota: CachedQuota | null;
+  modelRefreshTimer: unknown | null;
+  recoveryTimer: unknown | null;
+  revisionTimer: unknown | null;
+  wallViewRevision: string;
+};
+
+function positiveNumber(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+const defaultTimers: QuotaTimerScheduler = {
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+  setInterval: (callback, delayMs) => setInterval(callback, delayMs),
+  clearInterval: (timer) => clearInterval(timer as ReturnType<typeof setInterval>),
+};
+
+function unrefTimer(timer: unknown): void {
+  if (typeof timer !== "object" || timer === null || !("unref" in timer)) return;
+  const unref = (timer as { unref?: unknown }).unref;
+  if (typeof unref === "function") unref.call(timer);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function defaultAuthFile(): string {
+  const configured = process.env.PI_CODING_AGENT_DIR;
+  let agentDir = configured && configured.trim() ? configured : join(homedir(), ".pi", "agent");
+  if (agentDir === "~") agentDir = homedir();
+  else if (agentDir.startsWith("~/")) agentDir = join(homedir(), agentDir.slice(2));
+  return join(agentDir, "auth.json");
+}
+
+function storedOAuthCredential(value: unknown): StoredOAuthCredential | null {
+  if (!isRecord(value)) return null;
+  if (
+    value.type !== "oauth" ||
+    typeof value.access !== "string" ||
+    value.access.length === 0 ||
+    typeof value.refresh !== "string" ||
+    value.refresh.length === 0 ||
+    typeof value.expires !== "number" ||
+    !Number.isFinite(value.expires)
+  ) return null;
+  return value as StoredOAuthCredential;
+}
+
+function credentialRevision(value: unknown): string {
+  try {
+    const serialized = value === undefined ? "missing" : JSON.stringify(value);
+    if (serialized === undefined) return "malformed";
+    return createHash("sha256").update(serialized).digest("hex");
+  } catch {
+    return "malformed";
+  }
+}
+
+function canonicalBaseUrl(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) return null;
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    return `${parsed.protocol}//${parsed.host}${pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+function isOfficialProviderBaseUrl(provider: string, value: string): boolean {
+  const canonical = canonicalBaseUrl(value);
+  if (!canonical) return false;
+  if (provider === "github-copilot") {
+    return /^https:\/\/api\.(?:individual|business|enterprise)\.githubcopilot\.com$/.test(canonical);
+  }
+  const expected = OFFICIAL_PROVIDER_BASE_URLS[provider];
+  return Boolean(expected && canonical === canonicalBaseUrl(expected));
+}
+
+function isOfficialProviderModelApi(provider: string, value: unknown): boolean {
+  return typeof value === "string" &&
+    Boolean(OFFICIAL_PROVIDER_MODEL_APIS[provider]?.includes(value));
+}
+
+function activeModelRevision(model: ActiveModel | undefined): string {
+  if (!model) return "no-model";
+  const endpoint = canonicalBaseUrl(model.baseUrl) ?? model.baseUrl;
+  return JSON.stringify([model.provider, model.id, model.api, endpoint]);
+}
+
+function effectiveEndpointRevision(provider: string, endpoint: string): string {
+  return JSON.stringify([provider, canonicalBaseUrl(endpoint) ?? endpoint]);
+}
+
+function modelsConfigPreservesQuotaProvenance(value: unknown, model: ActiveModel): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  const knownProviderFields = new Set([
+    "name",
+    "baseUrl",
+    "apiKey",
+    "api",
+    "oauth",
+    "headers",
+    "compat",
+    "authHeader",
+    "models",
+    "modelOverrides",
+  ]);
+  if (Object.keys(value).some((field) => !knownProviderFields.has(field))) return false;
+  if (
+    value.headers !== undefined ||
+    value.compat !== undefined ||
+    value.oauth !== undefined ||
+    value.authHeader === true
+  ) return false;
+  if (
+    value.baseUrl !== undefined &&
+    (typeof value.baseUrl !== "string" || !isOfficialProviderBaseUrl(model.provider, value.baseUrl))
+  ) return false;
+  if (value.models !== undefined) {
+    if (!Array.isArray(value.models)) return false;
+    for (const candidate of value.models) {
+      if (!isRecord(candidate) || typeof candidate.id !== "string") return false;
+      if (candidate.id !== model.id) continue;
+      if (Object.keys(candidate).some((field) => !MODEL_DEFINITION_FIELDS.has(field))) return false;
+      if (candidate.headers !== undefined || candidate.compat !== undefined) return false;
+      const configuredApi = candidate.api ?? value.api ?? model.api;
+      if (configuredApi !== model.api || !isOfficialProviderModelApi(model.provider, configuredApi)) {
+        return false;
+      }
+      const configuredBaseUrl = candidate.baseUrl ?? value.baseUrl ?? model.baseUrl;
+      if (
+        typeof configuredBaseUrl !== "string" ||
+        !isOfficialProviderBaseUrl(model.provider, configuredBaseUrl)
+      ) return false;
+    }
+  }
+  if (value.modelOverrides !== undefined) {
+    if (!isRecord(value.modelOverrides)) return false;
+    const override = value.modelOverrides[model.id];
+    if (override !== undefined) {
+      if (!isRecord(override)) return false;
+      if (Object.keys(override).some((field) => !NON_ROUTING_MODEL_OVERRIDE_FIELDS.has(field))) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function effectiveModelPreservesQuotaProvenance(
+  registry: CompatibleModelRegistry,
+  modelRegistry: ExtensionContext["modelRegistry"],
+  model: ActiveModel,
+): boolean {
+  const effectiveModel = registry.find?.call(modelRegistry, model.provider, model.id);
+  if (!effectiveModel || activeModelRevision(effectiveModel) !== activeModelRevision(model)) return false;
+  const configStore = registry.runtime?.config;
+  const getProviderConfig = configStore?.getProvider;
+  if (typeof getProviderConfig !== "function") return false;
+  try {
+    const config = getProviderConfig.call(configStore, model.provider);
+    return modelsConfigPreservesQuotaProvenance(config, model);
+  } catch {
+    return false;
+  }
+}
+
+type ClockSample = {
+  wallMs: number;
+  monotonicBeforeMs: number;
+  monotonicAfterMs: number;
+};
+
+function conservativePublicationAgeMs(
+  processStartedAt: ClockSample | null,
+  publishedAt: ClockSample | null,
+  processStartedAtContinuousMs: number,
+  publishedAtContinuousMs: number,
+): number | null {
+  if (
+    !processStartedAt ||
+    !publishedAt ||
+    publishedAt.monotonicBeforeMs < processStartedAt.monotonicAfterMs
+  ) return null;
+  const minimumProcessElapsedMs =
+    publishedAt.monotonicBeforeMs - processStartedAt.monotonicAfterMs;
+  const maximumProcessElapsedMs =
+    publishedAt.monotonicAfterMs - processStartedAt.monotonicBeforeMs;
+  const continuousProcessElapsedMs = publishedAtContinuousMs - processStartedAtContinuousMs;
+  if (
+    !Number.isFinite(minimumProcessElapsedMs) ||
+    !Number.isFinite(maximumProcessElapsedMs) ||
+    !Number.isFinite(continuousProcessElapsedMs) ||
+    minimumProcessElapsedMs < 0 ||
+    maximumProcessElapsedMs < minimumProcessElapsedMs ||
+    continuousProcessElapsedMs < 0
+  ) return null;
+  return Math.max(maximumProcessElapsedMs, continuousProcessElapsedMs);
+}
+
+function decodeUtf8(value: Uint8Array): string | null {
+  try {
+    return FATAL_UTF8_DECODER.decode(value);
+  } catch {
+    return null;
+  }
+}
+
+function exactAccountId(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > 200) return null;
+  if (value.trim() !== value || /[\u0000-\u001f\u007f-\u009f]/.test(value)) return null;
+  return value;
+}
+
+function jwtPayload(token: string | undefined): Record<string, unknown> | null {
+  if (!token) return null;
+  const parts = token.split(".");
+  if (parts.length !== 3 || !parts[1]) return null;
+  try {
+    const parsed: unknown = JSON.parse(atob(parts[1]));
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function activeAccountId(provider: string, apiKey: string | undefined): string | null {
+  if (provider !== "openai-codex") return null;
+  const payload = jwtPayload(apiKey);
+  if (!payload) return null;
+  const auth = typeof payload["https://api.openai.com/auth"] === "object" &&
+      payload["https://api.openai.com/auth"] !== null &&
+      !Array.isArray(payload["https://api.openai.com/auth"])
+    ? payload["https://api.openai.com/auth"] as Record<string, unknown>
+    : null;
+  const canonicalAccountId = exactAccountId(auth?.chatgpt_account_id);
+  if (!canonicalAccountId) return null;
+  for (const candidate of [
+    payload["https://api.openai.com/auth/account_id"],
+    payload.account_id,
+    auth?.account_id,
+  ]) {
+    const alternativeAccountId = exactAccountId(candidate);
+    if (alternativeAccountId && alternativeAccountId !== canonicalAccountId) return null;
+  }
+  return canonicalAccountId;
+}
+
+function quotaVerification(provider: string, apiKey: string | undefined): QuotaVerification | null {
+  if (provider !== "openai-codex") return null;
+  const accountId = activeAccountId(provider, apiKey);
+  return accountId ? { kind: "account", accountId } : null;
+}
+
+function forceKillChild(child: ChildProcess): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    child.kill("SIGKILL");
+  } catch {
+  }
+}
+
+function killWindowsProcessTree(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null || !child.pid) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    let killer: ChildProcess | null = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = setTimeout(() => {
+      forceKillChild(killer ?? child);
+      forceKillChild(child);
+      finish();
+    }, WINDOWS_TREE_KILL_TIMEOUT_MS);
+    timeout.unref();
+    try {
+      killer = spawn(
+        "taskkill",
+        ["/PID", String(child.pid), "/T", "/F"],
+        { stdio: "ignore", windowsHide: true },
+      );
+      killer.once("error", () => {
+        forceKillChild(child);
+        finish();
+      });
+      killer.once("close", (code) => {
+        if (code !== 0) forceKillChild(child);
+        finish();
+      });
+    } catch {
+      forceKillChild(child);
+      finish();
+    }
+  });
+}
+
+async function killProcess(child: ChildProcess, processGroupId: number | null): Promise<void> {
+  if (processGroupId !== null) {
+    try {
+      process.kill(-processGroupId, "SIGKILL");
+      return;
+    } catch {
+    }
+  }
+  if (process.platform === "win32") {
+    await killWindowsProcessTree(child);
+    return;
+  }
+  forceKillChild(child);
+}
+
+export function runQuotaAxiJson(options: {
+  command?: string;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+  full?: boolean;
+  provider?: string;
+} = {}): QuotaProcess {
+  const command = options.command ?? "quota-axi";
+  const timeoutMs = positiveNumber(options.timeoutMs, DEFAULT_TIMEOUT_MS);
+  const maxOutputBytes = positiveNumber(options.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
+  const args = [
+    "--json",
+    ...(options.full ? ["--full"] : []),
+    ...(options.provider ? ["--provider", options.provider] : []),
+  ];
+  const useWindowsSupervisor = process.platform === "win32";
+  const child = useWindowsSupervisor
+    ? spawn(
+        "powershell.exe",
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-EncodedCommand",
+          Buffer.from(WINDOWS_JOB_SUPERVISOR, "utf16le").toString("base64"),
+        ],
+        {
+          shell: false,
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+          env: {
+            ...process.env,
+            FM_QUOTA_JOB_PAYLOAD: Buffer.from(JSON.stringify({ command, arguments: args }), "utf8")
+              .toString("base64"),
+          },
+        },
+      )
+    : spawn(command, args, {
+        detached: true,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+  const processGroupId = !useWindowsSupervisor && child.pid ? child.pid : null;
+
+  let settled = false;
+  let finishing = false;
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  const stdoutChunks: Buffer[] = [];
+  let resolveResult: (result: QuotaProcessResult) => void = () => {};
+
+  const promise = new Promise<QuotaProcessResult>((resolve) => {
+    resolveResult = resolve;
+  });
+  const timeout = setTimeout(() => {
+    finish({ kind: "timeout" });
+  }, timeoutMs);
+  timeout.unref();
+
+  function finish(result: QuotaProcessResult): void {
+    if (settled || finishing) return;
+    finishing = true;
+    clearTimeout(timeout);
+    void killProcess(child, processGroupId).finally(() => {
+      settled = true;
+      resolveResult(result);
+    });
+  }
+
+  const receiveStdout = (chunk: Buffer) => {
+    if (finishing) return;
+    stdoutBytes += chunk.length;
+    if (stdoutBytes > maxOutputBytes) {
+      finish({ kind: "overflow" });
+      return;
+    }
+    stdoutChunks.push(chunk);
+  };
+  const receiveStderr = (chunk: Buffer) => {
+    if (finishing) return;
+    stderrBytes += chunk.length;
+    if (stderrBytes > maxOutputBytes) finish({ kind: "overflow" });
+  };
+
+  const receiveStreamError = () => {
+    const stdout = decodeUtf8(Buffer.concat(stdoutChunks));
+    finish(stdout === null
+      ? { kind: "malformed" }
+      : { kind: "failed", stdout, exitCode: null });
+  };
+
+  child.stdout?.on("data", receiveStdout);
+  child.stdout?.on("error", receiveStreamError);
+  child.stderr?.on("data", receiveStderr);
+  child.stderr?.on("error", receiveStreamError);
+  child.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") {
+      finish({ kind: "missing" });
+    } else {
+      const stdout = decodeUtf8(Buffer.concat(stdoutChunks));
+      finish(stdout === null
+        ? { kind: "malformed" }
+        : { kind: "failed", stdout, exitCode: null });
+    }
+  });
+  child.on("close", (code) => {
+    const stdout = decodeUtf8(Buffer.concat(stdoutChunks));
+    if (stdout === null) {
+      finish({ kind: "malformed" });
+    } else if (code === 0) {
+      finish({ kind: "ok", stdout });
+    } else if (useWindowsSupervisor && code === 127) {
+      finish({ kind: "missing" });
+    } else {
+      finish({ kind: "failed", stdout, exitCode: code });
+    }
+  });
+
+  return {
+    child,
+    promise,
+    cancel: () => finish({ kind: "cancelled" }),
+  };
+}
+
+function refreshIssueView(reason: QuotaRefreshIssue, provider: string): QuotaView {
+  if (reason === "malformed") return { kind: "malformed", provider };
+  if (reason === "unverified") return { kind: "unverified", provider };
+  if (
+    reason === "auth-timeout" ||
+    reason === "auth-cancelled" ||
+    reason === "auth-overflow" ||
+    reason === "auth-unavailable"
+  ) {
+    return { kind: "unsupported", provider, reason };
+  }
+  return { kind: "failure", provider, reason };
+}
+
+export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatusOptions = {}) {
+  const command = options.command ?? "quota-axi";
+  const refreshMs = positiveNumber(options.refreshMs, DEFAULT_REFRESH_MS);
+  const timeoutMs = positiveNumber(options.timeoutMs, DEFAULT_TIMEOUT_MS);
+  const freshnessMs = positiveNumber(options.freshnessMs, DEFAULT_QUOTA_FRESHNESS_MS);
+  const maxOutputBytes = positiveNumber(options.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
+  const maxAuthBytes = Math.floor(positiveNumber(options.maxAuthBytes, DEFAULT_MAX_AUTH_BYTES));
+  const now = options.now ?? Date.now;
+  const monotonicClock = options.monotonicNow ?? (options.now ? now : () => performance.now());
+  const continuousClock = options.continuousNow ?? (
+    options.monotonicNow
+      ? monotonicClock
+      : options.now
+        ? now
+        : () => uptime() * 1000
+  );
+  const monotonicNow = () => {
+    const value = monotonicClock();
+    return Number.isFinite(value) ? value : 0;
+  };
+  const continuousNow = () => {
+    const value = continuousClock();
+    return Number.isFinite(value) ? value : 0;
+  };
+  const width = options.width;
+  const timers = options.timers ?? defaultTimers;
+  const authFile = options.authFile ?? defaultAuthFile();
+  const watchAuthDirectory: AuthDirectoryWatcher = options.watchAuthDirectory ?? (
+    (path, watchOptions, listener) => watch(path, watchOptions, listener)
+  );
+  const formatStatus = createQuotaStatusFormatter();
+  const referenceRevisions = new WeakMap<object, number>();
+  let nextReferenceRevision = 1;
+
+  function clockSample(): ClockSample | null {
+    const monotonicBeforeMs = monotonicNow();
+    const wallMs = now();
+    const monotonicAfterMs = monotonicNow();
+    if (
+      !Number.isFinite(wallMs) ||
+      monotonicAfterMs < monotonicBeforeMs
+    ) return null;
+    return { wallMs, monotonicBeforeMs, monotonicAfterMs };
+  }
+
+  function referenceRevision(value: unknown): number {
+    if ((typeof value !== "object" || value === null) && typeof value !== "function") return 0;
+    const key = value as object;
+    const existing = referenceRevisions.get(key);
+    if (existing !== undefined) return existing;
+    const revision = nextReferenceRevision++;
+    referenceRevisions.set(key, revision);
+    return revision;
+  }
+
+  function providerCompositionRevision(
+    ctx: ExtensionContext,
+    model: ActiveModel | undefined,
+  ): string {
+    if (!model) return "no-provider";
+    const registry = ctx.modelRegistry as unknown as CompatibleModelRegistry;
+    if (typeof registry.getProvider !== "function") return "provider-inspection-unavailable";
+    try {
+      const provider = registry.getProvider.call(ctx.modelRegistry, model.provider);
+      if (!provider) return "provider-missing";
+      const registeredConfig = typeof registry.getRegisteredProviderConfig === "function"
+        ? registry.getRegisteredProviderConfig.call(ctx.modelRegistry, model.provider)
+        : "unavailable";
+      const registeredNative = typeof registry.getRegisteredNativeProvider === "function"
+        ? registry.getRegisteredNativeProvider.call(ctx.modelRegistry, model.provider)
+        : "unavailable";
+      const apiKey = provider.auth?.apiKey;
+      const oauth = provider.auth?.oauth;
+      const usingOAuth = typeof registry.isUsingOAuth === "function"
+        ? registry.isUsingOAuth.call(ctx.modelRegistry, model)
+        : "unavailable";
+      const authStatus = typeof registry.getProviderAuthStatus === "function"
+        ? registry.getProviderAuthStatus.call(ctx.modelRegistry, model.provider)
+        : undefined;
+      return JSON.stringify([
+        referenceRevision(provider),
+        referenceRevision(registry.getRegisteredProviderConfig),
+        referenceRevision(registeredConfig),
+        referenceRevision(registry.getRegisteredNativeProvider),
+        referenceRevision(registeredNative),
+        provider.id,
+        provider.name,
+        provider.baseUrl,
+        referenceRevision(provider.headers),
+        referenceRevision(provider.auth),
+        referenceRevision(apiKey),
+        referenceRevision(apiKey?.login),
+        referenceRevision(apiKey?.check),
+        referenceRevision(apiKey?.resolve),
+        referenceRevision(oauth),
+        oauth?.isSubscription,
+        referenceRevision(oauth?.login),
+        referenceRevision(oauth?.refresh),
+        referenceRevision(oauth?.toAuth),
+        referenceRevision(provider.getModels),
+        referenceRevision(provider.refreshModels),
+        referenceRevision(provider.filterModels),
+        referenceRevision(provider.stream),
+        referenceRevision(provider.streamSimple),
+        referenceRevision(provider.fetchDeferred),
+        referenceRevision(provider.cancelDeferred),
+        referenceRevision(registry.isUsingOAuth),
+        usingOAuth,
+        referenceRevision(registry.getProviderAuthStatus),
+        authStatus?.configured,
+        authStatus?.source,
+      ]);
+    } catch {
+      return "provider-inspection-failed";
+    }
+  }
+
+  type BoundedAuthResult =
+    | { kind: "ok"; auth: ResolvedOAuthAuth }
+    | { kind: "failed" | "timeout" | "cancelled" };
+
+  type BoundedCredentialResult =
+    | { kind: "ok"; credential: unknown; revision: string }
+    | { kind: "failed" | "timeout" | "cancelled" | "overflow" };
+
+  type BoundedJsonResult =
+    | { kind: "ok"; value: unknown }
+    | { kind: "missing" | "failed" | "timeout" | "cancelled" | "overflow" };
+
+  function readBoundedJson(
+    path: string,
+    signal: AbortSignal,
+  ): Promise<BoundedJsonResult> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer: unknown | null = null;
+      const finish = (result: BoundedJsonResult) => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) timers.clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      };
+      const onAbort = () => finish({ kind: "cancelled" });
+      if (signal.aborted) {
+        finish({ kind: "cancelled" });
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      timer = timers.setTimeout(() => finish({ kind: "timeout" }), timeoutMs);
+      unrefTimer(timer);
+
+      void (async (): Promise<BoundedJsonResult> => {
+        let handle: Awaited<ReturnType<typeof open>> | null = null;
+        try {
+          handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+          const stats = await handle.stat();
+          if (!stats.isFile() || !Number.isSafeInteger(stats.size) || stats.size < 0) {
+            return { kind: "failed" };
+          }
+          if (stats.size > maxAuthBytes) return { kind: "overflow" };
+          const buffer = Buffer.alloc(Math.min(maxAuthBytes + 1, stats.size + 1));
+          let bytesRead = 0;
+          while (bytesRead < buffer.length) {
+            const chunk = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+            if (chunk.bytesRead === 0) break;
+            bytesRead += chunk.bytesRead;
+          }
+          if (bytesRead > maxAuthBytes) return { kind: "overflow" };
+          if (bytesRead !== stats.size) return { kind: "failed" };
+          const input = decodeUtf8(buffer.subarray(0, bytesRead));
+          if (input === null) return { kind: "failed" };
+          return {
+            kind: "ok",
+            value: JSON.parse(input) as unknown,
+          };
+        } catch (error) {
+          return (error as NodeJS.ErrnoException).code === "ENOENT"
+            ? { kind: "missing" }
+            : { kind: "failed" };
+        } finally {
+          await handle?.close().catch(() => {});
+        }
+      })().then(finish, () => finish({ kind: "failed" }));
+    });
+  }
+
+  async function readStoredCredential(
+    provider: string,
+    signal: AbortSignal,
+  ): Promise<BoundedCredentialResult> {
+    const result = await readBoundedJson(authFile, signal);
+    if (result.kind !== "ok") {
+      return { kind: result.kind === "missing" ? "failed" : result.kind };
+    }
+    if (!isRecord(result.value)) return { kind: "failed" };
+    const credential = result.value[provider];
+    return { kind: "ok", credential, revision: credentialRevision(credential) };
+  }
+
+  function resolveOAuthAuth(
+    oauth: { toAuth?: (credential: StoredOAuthCredential) => Promise<ResolvedOAuthAuth> },
+    credential: StoredOAuthCredential,
+    signal: AbortSignal,
+  ): Promise<BoundedAuthResult> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer: unknown | null = null;
+      const finish = (result: BoundedAuthResult) => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) timers.clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      };
+      const onAbort = () => finish({ kind: "cancelled" });
+      if (signal.aborted) {
+        finish({ kind: "cancelled" });
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      timer = timers.setTimeout(() => finish({ kind: "timeout" }), timeoutMs);
+      unrefTimer(timer);
+      Promise.resolve()
+        .then(() => oauth.toAuth?.(credential))
+        .then((auth) => {
+          if (
+            !isRecord(auth) ||
+            (auth.apiKey !== undefined && typeof auth.apiKey !== "string") ||
+            (auth.baseUrl !== undefined && typeof auth.baseUrl !== "string")
+          ) {
+            finish({ kind: "failed" });
+            return;
+          }
+          finish({ kind: "ok", auth });
+        }, () => finish({ kind: "failed" }));
+    });
+  }
+
+  return function firstmateQuotaStatus(pi: ExtensionAPI): void {
+    let active: ActiveSession | null = null;
+
+    function unsupportedView(
+      piProvider: string,
+      reason: QuotaUnsupportedReason,
+    ): Extract<QuotaView, { kind: "unsupported" }> {
+      return { kind: "unsupported", provider: piProvider, reason };
+    }
+
+    function unsupportedProvider(piProvider: string): Extract<QuotaView, { kind: "unsupported" }> {
+      const view = selectActiveProviderQuota(
+        { generatedAtMs: now(), schemaVersion: 3, projection: "default", providers: [] },
+        piProvider,
+        { nowMs: now(), freshnessMs },
+      );
+      return view.kind === "unsupported" ? view : unsupportedView(piProvider, "provider");
+    }
+
+    function preflightTarget(ctx: ExtensionContext, model: ActiveModel | undefined): QuotaTarget {
+      const modelRevision = activeModelRevision(model);
+      const compositionRevision = providerCompositionRevision(ctx, model);
+      if (!model) {
+        return {
+          kind: "unsupported",
+          view: unsupportedView("no model", "no-model"),
+          modelRevision,
+          compositionRevision,
+        };
+      }
+      if (!quotaProviderForPiProvider(model.provider)) {
+        return {
+          kind: "unsupported",
+          view: unsupportedProvider(model.provider),
+          modelRevision,
+          compositionRevision,
+        };
+      }
+      if (!isOfficialProviderModelApi(model.provider, model.api)) {
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, "provider-override"),
+          modelRevision,
+          compositionRevision,
+        };
+      }
+      const registry = ctx.modelRegistry as unknown as CompatibleModelRegistry;
+      if (
+        typeof registry.getProvider !== "function" ||
+        typeof registry.find !== "function" ||
+        typeof registry.getRegisteredProviderConfig !== "function" ||
+        typeof registry.getRegisteredNativeProvider !== "function" ||
+        typeof registry.isUsingOAuth !== "function"
+      ) {
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, "auth-inspection"),
+          modelRevision,
+          compositionRevision,
+        };
+      }
+      let provider: CompatibleProvider | undefined;
+      try {
+        provider = registry.getProvider.call(ctx.modelRegistry, model.provider);
+        if (
+          !effectiveModelPreservesQuotaProvenance(registry, ctx.modelRegistry, model) ||
+          registry.getRegisteredProviderConfig.call(ctx.modelRegistry, model.provider) !== undefined ||
+          registry.getRegisteredNativeProvider.call(ctx.modelRegistry, model.provider) !== undefined
+        ) {
+          return {
+            kind: "unsupported",
+            view: unsupportedView(model.provider, "provider-override"),
+            modelRevision,
+            compositionRevision,
+          };
+        }
+      } catch {
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, "auth-inspection"),
+          modelRevision,
+          compositionRevision,
+        };
+      }
+      if (model.provider === "kimi-coding") {
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, "account-correlation"),
+          modelRevision,
+          compositionRevision,
+        };
+      }
+      if (registry.isUsingOAuth.call(ctx.modelRegistry, model)) {
+        if (provider?.auth?.oauth?.isSubscription !== true) {
+          return {
+            kind: "unsupported",
+            view: unsupportedView(model.provider, "non-subscription-auth"),
+            modelRevision,
+            compositionRevision,
+          };
+        }
+        return { kind: "resolving", piProvider: model.provider, modelRevision, compositionRevision };
+      }
+      return {
+        kind: "unsupported",
+        view: unsupportedView(model.provider, "non-subscription-auth"),
+        modelRevision,
+        compositionRevision,
+      };
+    }
+
+    async function resolveTarget(
+      ctx: ExtensionContext,
+      model: ActiveModel | undefined,
+      signal: AbortSignal,
+    ): Promise<QuotaTarget> {
+      const preflight = preflightTarget(ctx, model);
+      if (preflight.kind !== "resolving") return preflight;
+      if (!model) {
+        return {
+          kind: "unsupported",
+          view: unsupportedView("no model", "no-model"),
+          modelRevision: preflight.modelRevision,
+          compositionRevision: preflight.compositionRevision,
+        };
+      }
+
+      const registry = ctx.modelRegistry as unknown as CompatibleModelRegistry;
+      const credentialResult = await readStoredCredential(model.provider, signal);
+      if (credentialResult.kind !== "ok") {
+        const reason: QuotaUnsupportedReason = credentialResult.kind === "timeout"
+          ? "auth-timeout"
+          : credentialResult.kind === "cancelled"
+            ? "auth-cancelled"
+            : credentialResult.kind === "overflow"
+              ? "auth-overflow"
+              : "auth-unavailable";
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, reason),
+          modelRevision: preflight.modelRevision,
+          compositionRevision: preflight.compositionRevision,
+        };
+      }
+      const postCredentialPreflight = preflightTarget(ctx, model);
+      if (postCredentialPreflight.kind === "unsupported") {
+        return { ...postCredentialPreflight, credentialRevision: credentialResult.revision };
+      }
+      if (
+        postCredentialPreflight.modelRevision !== preflight.modelRevision ||
+        postCredentialPreflight.compositionRevision !== preflight.compositionRevision
+      ) {
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, "provider-override"),
+          modelRevision: postCredentialPreflight.modelRevision,
+          compositionRevision: postCredentialPreflight.compositionRevision,
+          credentialRevision: credentialResult.revision,
+        };
+      }
+      const provider = registry.getProvider?.call(ctx.modelRegistry, model.provider);
+      const oauth = provider?.auth?.oauth;
+      const finalCompositionRevision = providerCompositionRevision(ctx, model);
+      if (
+        finalCompositionRevision !== postCredentialPreflight.compositionRevision ||
+        !oauth ||
+        typeof oauth.toAuth !== "function"
+      ) {
+        return {
+          kind: "unsupported",
+          view: unsupportedView(
+            model.provider,
+            finalCompositionRevision === postCredentialPreflight.compositionRevision
+              ? "auth-inspection"
+              : "provider-override",
+          ),
+          modelRevision: postCredentialPreflight.modelRevision,
+          compositionRevision: finalCompositionRevision,
+          credentialRevision: credentialResult.revision,
+        };
+      }
+      const credential = storedOAuthCredential(credentialResult.credential);
+      if (!credential) {
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, "auth-unavailable"),
+          modelRevision: preflight.modelRevision,
+          compositionRevision: preflight.compositionRevision,
+          credentialRevision: credentialResult.revision,
+        };
+      }
+      const authResult = await resolveOAuthAuth(oauth, credential, signal);
+      if (authResult.kind !== "ok") {
+        const reason: QuotaUnsupportedReason = authResult.kind === "timeout"
+          ? "auth-timeout"
+          : authResult.kind === "cancelled"
+            ? "auth-cancelled"
+            : "auth-unavailable";
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, reason),
+          modelRevision: preflight.modelRevision,
+          compositionRevision: preflight.compositionRevision,
+          credentialRevision: credentialResult.revision,
+        };
+      }
+      const resolvedAuth = authResult.auth;
+
+      const effectiveBaseUrl = resolvedAuth.baseUrl ?? model.baseUrl;
+      if (!isOfficialProviderBaseUrl(model.provider, effectiveBaseUrl)) {
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, "custom-endpoint"),
+          modelRevision: preflight.modelRevision,
+          compositionRevision: preflight.compositionRevision,
+          credentialRevision: credentialResult.revision,
+        };
+      }
+      const verification = quotaVerification(model.provider, resolvedAuth.apiKey);
+      if (!verification) {
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, "account-correlation"),
+          modelRevision: preflight.modelRevision,
+          compositionRevision: preflight.compositionRevision,
+          credentialRevision: credentialResult.revision,
+        };
+      }
+      return {
+        kind: "supported",
+        piProvider: model.provider,
+        verification,
+        credentialRevision: credentialResult.revision,
+        modelRevision: preflight.modelRevision,
+        compositionRevision: preflight.compositionRevision,
+        endpointRevision: effectiveEndpointRevision(model.provider, effectiveBaseUrl),
+      };
+    }
+
+    function selectTargetReport(
+      report: ParsedQuotaAxiReport,
+      target: Extract<QuotaTarget, { kind: "supported" }>,
+      nowMs: number,
+    ): QuotaView {
+      return selectActiveProviderQuota(report, target.piProvider, {
+        nowMs,
+        freshnessMs,
+        expectedAccountId: target.verification.accountId,
+      });
+    }
+
+    function targetMatchesLiveModel(session: ActiveSession): boolean {
+      return session.target.modelRevision === activeModelRevision(session.ctx.model) &&
+        session.target.compositionRevision === providerCompositionRevision(session.ctx, session.ctx.model);
+    }
+
+    function supportedTargetsMatch(
+      left: Extract<QuotaTarget, { kind: "supported" }>,
+      right: Extract<QuotaTarget, { kind: "supported" }>,
+    ): boolean {
+      return left.piProvider === right.piProvider &&
+        left.credentialRevision === right.credentialRevision &&
+        left.modelRevision === right.modelRevision &&
+        left.compositionRevision === right.compositionRevision &&
+        left.endpointRevision === right.endpointRevision;
+    }
+
+    function cachedTargetRefreshIssue(
+      previous: QuotaTarget,
+      outcome: Extract<QuotaTarget, { kind: "unsupported" }>,
+    ): QuotaRefreshIssue | null {
+      if (
+        outcome.credentialRevision === undefined ||
+        previous.kind !== "supported" ||
+        previous.credentialRevision !== outcome.credentialRevision ||
+        previous.modelRevision !== outcome.modelRevision ||
+        previous.compositionRevision !== outcome.compositionRevision
+      ) return null;
+      switch (outcome.view.reason) {
+        case "auth-timeout":
+        case "auth-cancelled":
+        case "auth-overflow":
+        case "auth-unavailable":
+          return outcome.view.reason;
+        default:
+          return null;
+      }
+    }
+
+    function targetCredentialBinding(
+      target: QuotaTarget,
+    ): { piProvider: string; credentialRevision: string } | null {
+      if (target.kind === "supported") {
+        return {
+          piProvider: target.piProvider,
+          credentialRevision: target.credentialRevision,
+        };
+      }
+      if (target.kind === "unsupported" && target.credentialRevision !== undefined) {
+        return {
+          piProvider: target.view.provider,
+          credentialRevision: target.credentialRevision,
+        };
+      }
+      return null;
+    }
+
+    function viewForTarget(target: QuotaTarget): QuotaView {
+      return target.kind === "unsupported"
+        ? target.view
+        : { kind: "refreshing", provider: target.piProvider };
+    }
+
+    function credentialMonitoringView(session: ActiveSession): QuotaTarget {
+      const model = session.ctx.model;
+      return {
+        kind: "unsupported",
+        view: unsupportedView(model?.provider ?? "no model", "credential-monitoring"),
+        modelRevision: activeModelRevision(model),
+        compositionRevision: providerCompositionRevision(session.ctx, model),
+      };
+    }
+
+    function requiresCredentialMonitoring(target: QuotaTarget): boolean {
+      return target.kind === "resolving" ||
+        target.kind === "supported" ||
+        target.credentialRevision !== undefined;
+    }
+
+    function targetForCredentialMonitoring(
+      session: ActiveSession,
+      target: QuotaTarget,
+    ): QuotaTarget {
+      return session.credentialMonitoringAvailable || !requiresCredentialMonitoring(target)
+        ? target
+        : credentialMonitoringView(session);
+    }
+
+    function resetForLiveModel(session: ActiveSession): void {
+      session.generation += 1;
+      session.target = targetForCredentialMonitoring(
+        session,
+        preflightTarget(session.ctx, session.ctx.model),
+      );
+      session.credentialCheckPending = false;
+      session.credentialCheckQuarantined = false;
+      session.credentialCheckIssue = null;
+      session.quota = null;
+      session.lastFailure = null;
+      void cancelProcess(session);
+      render(session);
+    }
+
+    function scheduleLiveModelRefresh(session: ActiveSession): void {
+      if (session.modelRefreshTimer !== null || active !== session) return;
+      let timer: unknown;
+      timer = timers.setTimeout(() => {
+        if (active !== session || session.modelRefreshTimer !== timer) return;
+        session.modelRefreshTimer = null;
+        if (targetMatchesLiveModel(session)) return;
+        resetForLiveModel(session);
+        void refresh(session);
+      }, 0);
+      session.modelRefreshTimer = timer;
+      unrefTimer(timer);
+    }
+
+    function changedLiveModelView(session: ActiveSession): QuotaView | null {
+      if (targetMatchesLiveModel(session)) return null;
+      scheduleLiveModelRefresh(session);
+      const target = targetForCredentialMonitoring(
+        session,
+        preflightTarget(session.ctx, session.ctx.model),
+      );
+      return viewForTarget(target);
+    }
+
+    function recoverableFreshView(view: QuotaView | null): FreshQuotaView | null {
+      if (view?.kind === "fresh") return view;
+      return view?.kind === "stale" ? view.recoverable ?? null : null;
+    }
+
+    function authoritativeElapsedSincePublicationMs(quota: CachedQuota): number {
+      return Math.max(
+        quota.elapsedThroughMs,
+        monotonicNow() - quota.publishedAtMonotonicMs,
+        continuousNow() - quota.publishedAtContinuousMs,
+        0,
+      );
+    }
+
+    function authoritativeTimelineMs(quota: CachedQuota): number {
+      return quota.timelineOriginMs + quota.elapsedAtPublicationMs +
+        authoritativeElapsedSincePublicationMs(quota);
+    }
+
+    function advanceAuthoritativeQuota(session: ActiveSession, quota: CachedQuota): void {
+      if (session.quota !== quota || quota.publication === null) return;
+      quota.elapsedThroughMs = authoritativeElapsedSincePublicationMs(quota);
+      quota.view = revalidateFreshQuotaView(
+        quota.publication,
+        quota.timelineOriginMs + quota.elapsedAtPublicationMs + quota.elapsedThroughMs,
+      );
+    }
+
+    function wallFilteredQuotaView(
+      quota: CachedQuota,
+      cached: FreshQuotaView,
+      nowMs: number,
+    ): QuotaView {
+      const existing = quota.wallFilter;
+      if (
+        existing?.source === cached &&
+        nowMs >= existing.validFromMs &&
+        nowMs < existing.validUntilMs
+      ) return existing.view;
+
+      const source = cached.publicationWindows === undefined
+        ? cached
+        : { ...cached, publicationWindows: undefined };
+      const filtered = revalidateFreshQuotaView(source, nowMs);
+      if (filtered.kind !== "fresh") return filtered;
+      let validFromMs = Number.NEGATIVE_INFINITY;
+      for (const window of cached.windows) {
+        if (window.resetsAtMs !== null && window.resetsAtMs <= nowMs) {
+          validFromMs = Math.max(validFromMs, window.resetsAtMs);
+        }
+      }
+      quota.wallFilter = {
+        source: cached,
+        view: filtered,
+        validFromMs,
+        validUntilMs: filtered.freshUntilMs,
+      };
+      return filtered;
+    }
+
+    function cachedQuotaView(session: ActiveSession, nowMs: number): QuotaView | null {
+      if (changedLiveModelView(session) || session.target.kind !== "supported" || !session.quota) {
+        return null;
+      }
+      if (
+        session.quota.piProvider !== session.target.piProvider ||
+        session.quota.credentialRevision !== session.target.credentialRevision ||
+        session.quota.modelRevision !== session.target.modelRevision ||
+        session.quota.compositionRevision !== session.target.compositionRevision ||
+        session.quota.endpointRevision !== session.target.endpointRevision
+      ) return null;
+      const cached = session.quota.view;
+      if (cached.kind !== "fresh") return cached;
+      if (
+        cached.freshnessTimestampMs > nowMs + 60_000 ||
+        nowMs >= cached.reportFreshUntilMs ||
+        authoritativeTimelineMs(session.quota) >= cached.freshUntilMs
+      ) {
+        return { kind: "stale", provider: cached.provider, label: cached.label };
+      }
+      return nowMs < cached.freshUntilMs
+        ? cached
+        : wallFilteredQuotaView(session.quota, cached, nowMs);
+    }
+
+    function currentView(session: ActiveSession, nowMs = now()): QuotaView {
+      const changedModel = changedLiveModelView(session);
+      if (changedModel) return changedModel;
+      if (session.credentialCheckQuarantined) {
+        const provider = targetCredentialBinding(session.target)?.piProvider ??
+          session.ctx.model?.provider ??
+          "no model";
+        return session.credentialCheckIssue
+          ? refreshIssueView(session.credentialCheckIssue, provider)
+          : { kind: "refreshing", provider };
+      }
+      if (session.target.kind === "unsupported") return session.target.view;
+      if (session.target.kind === "resolving") {
+        return { kind: "refreshing", provider: session.target.piProvider };
+      }
+      const selected = cachedQuotaView(session, nowMs);
+      if (!selected) {
+        return session.lastFailure
+          ? refreshIssueView(session.lastFailure, session.target.piProvider)
+          : { kind: "refreshing", provider: session.target.piProvider };
+      }
+      if (!session.lastFailure) return selected;
+      if (selected.kind === "fresh") {
+        return selected.refreshFailure === session.lastFailure
+          ? selected
+          : { ...selected, refreshFailure: session.lastFailure };
+      }
+      return selected.kind === "stale"
+        ? refreshIssueView(session.lastFailure, session.target.piProvider)
+        : selected;
+    }
+
+    function quotaWallRevision(view: QuotaView): string {
+      if (view.kind !== "fresh") return view.kind;
+      return JSON.stringify([
+        view.kind,
+        referenceRevision(view.windows),
+        view.freshnessTimestampMs,
+        view.reportFreshUntilMs,
+        view.freshUntilMs,
+      ]);
+    }
+
+    function clearExpiry(session: ActiveSession): void {
+      if (session.expiryTimer !== null) timers.clearTimeout(session.expiryTimer);
+      if (session.statusTimer !== null) timers.clearTimeout(session.statusTimer);
+      session.expiryTimer = null;
+      session.statusTimer = null;
+      session.expiryTimerQuota = null;
+    }
+
+    function failCredentialMonitoring(session: ActiveSession): void {
+      session.credentialMonitoringAvailable = false;
+      const watcher = session.credentialWatcher;
+      session.credentialWatcher = null;
+      try {
+        watcher?.close();
+      } catch {
+      }
+      if (active !== session) return;
+      session.generation += 1;
+      session.target = targetForCredentialMonitoring(
+        session,
+        preflightTarget(session.ctx, session.ctx.model),
+      );
+      session.credentialCheckPending = false;
+      session.credentialCheckQuarantined = false;
+      session.credentialCheckIssue = null;
+      session.quota = null;
+      session.lastFailure = null;
+      void cancelProcess(session);
+      render(session);
+    }
+
+    function credentialsChanged(session: ActiveSession): void {
+      if (active !== session) return;
+      session.generation += 1;
+      session.target = preflightTarget(session.ctx, session.ctx.model);
+      session.quota = null;
+      session.lastFailure = null;
+      session.credentialCheckPending = false;
+      session.credentialCheckQuarantined = false;
+      session.credentialCheckIssue = null;
+      void cancelProcess(session);
+      render(session);
+      void refresh(session);
+    }
+
+    function quarantineCredentialCheck(session: ActiveSession): void {
+      const changed = !session.credentialCheckQuarantined || session.credentialCheckIssue !== null;
+      session.credentialCheckQuarantined = true;
+      session.credentialCheckIssue = null;
+      if (changed) render(session);
+    }
+
+    function releaseCredentialCheck(session: ActiveSession): void {
+      const changed = session.credentialCheckQuarantined || session.credentialCheckIssue !== null;
+      session.credentialCheckQuarantined = false;
+      session.credentialCheckIssue = null;
+      if (changed) render(session);
+    }
+
+    function credentialReadIssue(
+      result: Exclude<BoundedCredentialResult, { kind: "ok" | "cancelled" }>,
+    ): QuotaRefreshIssue {
+      if (result.kind === "timeout") return "auth-timeout";
+      if (result.kind === "overflow") return "auth-overflow";
+      return "auth-unavailable";
+    }
+
+    function credentialFileChanged(session: ActiveSession): void {
+      if (active !== session) return;
+      if (targetCredentialBinding(session.target)) {
+        quarantineCredentialCheck(session);
+        if (session.refreshInFlight || session.credentialCheckAbort !== null) {
+          session.credentialCheckPending = true;
+          return;
+        }
+        void checkCredentialRevision(session);
+        return;
+      }
+      if (session.refreshInFlight || session.credentialCheckAbort !== null) {
+        session.credentialCheckPending = true;
+        return;
+      }
+      if (
+        session.target.kind === "resolving" ||
+        session.target.view.reason === "non-subscription-auth" ||
+        session.target.view.reason === "auth-timeout" ||
+        session.target.view.reason === "auth-cancelled" ||
+        session.target.view.reason === "auth-overflow" ||
+        session.target.view.reason === "auth-unavailable"
+      ) void refresh(session);
+    }
+
+    async function checkCredentialRevision(session: ActiveSession): Promise<void> {
+      if (
+        active !== session ||
+        !session.credentialMonitoringAvailable ||
+        session.refreshInFlight ||
+        session.credentialCheckAbort !== null
+      ) return;
+      if (!targetMatchesLiveModel(session)) {
+        resetForLiveModel(session);
+        void refresh(session);
+        return;
+      }
+
+      const target = session.target;
+      const binding = targetCredentialBinding(target);
+      if (!binding) return;
+      const generation = session.generation;
+      const controller = new AbortController();
+      session.credentialCheckAbort = controller;
+      try {
+        const result = await readStoredCredential(binding.piProvider, controller.signal);
+        if (
+          active !== session ||
+          session.generation !== generation ||
+          session.credentialCheckAbort !== controller ||
+          session.target !== target ||
+          session.refreshInFlight ||
+          !targetMatchesLiveModel(session)
+        ) return;
+        if (result.kind === "cancelled") return;
+        session.credentialCheckAbort = null;
+        if (result.kind !== "ok") {
+          const issue = credentialReadIssue(result);
+          const changed = !session.credentialCheckQuarantined || session.credentialCheckIssue !== issue;
+          session.credentialCheckQuarantined = true;
+          session.credentialCheckIssue = issue;
+          if (changed) render(session);
+          return;
+        }
+        if (result.revision === binding.credentialRevision) {
+          if (!session.credentialCheckPending) releaseCredentialCheck(session);
+          return;
+        }
+        credentialsChanged(session);
+      } finally {
+        if (session.credentialCheckAbort === controller) session.credentialCheckAbort = null;
+        if (
+          session.credentialCheckPending &&
+          active === session &&
+          !session.refreshInFlight &&
+          session.credentialCheckAbort === null
+        ) {
+          session.credentialCheckPending = false;
+          void checkCredentialRevision(session);
+        }
+      }
+    }
+
+    function watchCredentials(session: ActiveSession): void {
+      try {
+        const watcher = watchAuthDirectory(dirname(authFile), { persistent: false }, (_event, filename) => {
+          if (filename !== null && String(filename) !== basename(authFile)) return;
+          credentialFileChanged(session);
+        });
+        session.credentialWatcher = watcher;
+        session.credentialMonitoringAvailable = true;
+        watcher.on("error", () => failCredentialMonitoring(session));
+        watcher.on("close", () => {
+          if (session.credentialWatcher === watcher) failCredentialMonitoring(session);
+        });
+      } catch {
+        failCredentialMonitoring(session);
+      }
+    }
+
+    function scheduleRecoveredView(session: ActiveSession): void {
+      if (active !== session || session.recoveryTimer !== null) return;
+      let timer: unknown;
+      timer = timers.setTimeout(() => {
+        if (active !== session || session.recoveryTimer !== timer) return;
+        session.recoveryTimer = null;
+        clearExpiry(session);
+        render(session);
+      }, 0);
+      session.recoveryTimer = timer;
+      unrefTimer(timer);
+    }
+
+    function render(session: ActiveSession, override?: QuotaView): void {
+      if (active !== session) return;
+      if (session.recoveryTimer !== null) timers.clearTimeout(session.recoveryTimer);
+      session.recoveryTimer = null;
+      const view = override ?? currentView(session);
+      const schedulingBaseMs = now();
+      session.wallViewRevision = quotaWallRevision(view);
+      if (session.expiryTimerQuota !== session.quota) {
+        clearExpiry(session);
+        session.expiryTimerQuota = session.quota;
+      }
+
+      const quota = session.quota;
+      const authoritativeView = quota?.view;
+      if (
+        quota?.publication &&
+        authoritativeView?.kind === "fresh" &&
+        session.expiryTimer === null
+      ) {
+        const delayMs = Math.min(
+          MAX_TIMER_DELAY_MS,
+          Math.max(0, authoritativeView.freshUntilMs - authoritativeTimelineMs(quota)),
+        );
+        let timer: unknown;
+        timer = timers.setTimeout(() => {
+          if (active !== session || session.expiryTimer !== timer || session.quota !== quota) return;
+          session.expiryTimer = null;
+          advanceAuthoritativeQuota(session, quota);
+          render(session);
+        }, delayMs);
+        session.expiryTimer = timer;
+        unrefTimer(timer);
+      }
+
+      const nextStatusMs = view.kind === "fresh"
+        ? nextQuotaStatusTransitionMs(view, schedulingBaseMs)
+        : authoritativeView?.kind === "fresh" &&
+            schedulingBaseMs < authoritativeView.freshnessTimestampMs - 60_000
+          ? authoritativeView.freshnessTimestampMs - 60_000
+          : Number.POSITIVE_INFINITY;
+      if (Number.isFinite(nextStatusMs) && session.statusTimer === null) {
+        const delayMs = Math.min(
+          MAX_TIMER_DELAY_MS,
+          Math.max(0, nextStatusMs - schedulingBaseMs),
+        );
+        let timer: unknown;
+        timer = timers.setTimeout(() => {
+          if (active !== session || session.statusTimer !== timer) return;
+          session.statusTimer = null;
+          render(session);
+        }, delayMs);
+        session.statusTimer = timer;
+        unrefTimer(timer);
+      }
+
+      session.ctx.ui.setWidget(WIDGET_KEY, (_tui, theme) => ({
+        render(componentWidth: number): string[] {
+          const boundedComponentWidth = Math.max(0, Math.floor(componentWidth));
+          const configuredWidth = width?.();
+          const availableWidth = typeof configuredWidth === "number" && Number.isFinite(configuredWidth) && configuredWidth > 0
+            ? Math.min(boundedComponentWidth, Math.floor(configuredWidth))
+            : boundedComponentWidth;
+          const renderNowMs = now();
+          const changedModel = changedLiveModelView(session);
+          const current = changedModel ?? currentView(session, renderNowMs);
+          const renderView = !changedModel && current.kind === "refreshing" && view.kind === "stale"
+            ? view
+            : current;
+          session.wallViewRevision = quotaWallRevision(renderView);
+          if ((renderView.kind === "fresh") !== (view.kind === "fresh")) {
+            scheduleRecoveredView(session);
+          }
+          const plain = formatStatus(renderView, availableWidth, renderNowMs);
+          return plain ? [theme.fg("dim", plain)] : [];
+        },
+        invalidate() {},
+      }), { placement: "belowEditor" });
+    }
+
+    function cancelCredentialCheck(session: ActiveSession): void {
+      session.credentialCheckAbort?.abort();
+      session.credentialCheckAbort = null;
+    }
+
+    async function cancelProcess(session: ActiveSession): Promise<void> {
+      cancelCredentialCheck(session);
+      session.operationAbort?.abort();
+      session.operationAbort = null;
+      const running = session.process;
+      session.process = null;
+      if (!running) return;
+      running.cancel();
+      await running.promise;
+    }
+
+    function publishRefreshIssue(
+      session: ActiveSession,
+      issue: QuotaRefreshIssue,
+      provider: string,
+    ): void {
+      const cached = cachedQuotaView(session, now());
+      const quota = session.quota;
+      session.lastFailure = issue;
+      if (quota?.view.kind === "fresh") {
+        quota.view = { ...quota.view, refreshFailure: issue };
+        if (quota.publication) {
+          quota.publication = { ...quota.publication, refreshFailure: issue };
+        }
+        render(session);
+      } else if (cached?.kind === "fresh") {
+        render(session);
+      } else {
+        session.quota = null;
+        render(session, refreshIssueView(issue, provider));
+      }
+    }
+
+    async function refresh(session: ActiveSession): Promise<void> {
+      if (active !== session) return;
+      if (!session.credentialMonitoringAvailable) {
+        session.target = targetForCredentialMonitoring(
+          session,
+          preflightTarget(session.ctx, session.ctx.model),
+        );
+        session.quota = null;
+        session.lastFailure = null;
+        render(session);
+        return;
+      }
+      if (session.refreshInFlight) {
+        session.refreshPending = true;
+        return;
+      }
+
+      if (!targetMatchesLiveModel(session)) resetForLiveModel(session);
+      session.refreshInFlight = true;
+      cancelCredentialCheck(session);
+      const generation = session.generation;
+      const operationAbort = new AbortController();
+      session.operationAbort = operationAbort;
+      const startingModel = session.ctx.model;
+      const startingModelRevision = activeModelRevision(startingModel);
+      const startingCompositionRevision = providerCompositionRevision(session.ctx, startingModel);
+      try {
+        const target = await resolveTarget(session.ctx, startingModel, operationAbort.signal);
+        if (active !== session || session.generation !== generation) return;
+        if (
+          activeModelRevision(session.ctx.model) !== startingModelRevision ||
+          providerCompositionRevision(session.ctx, session.ctx.model) !== startingCompositionRevision
+        ) {
+          resetForLiveModel(session);
+          session.refreshPending = true;
+          return;
+        }
+        const previousTarget = session.target;
+        if (target.kind === "unsupported") {
+          const cachedIssue = cachedTargetRefreshIssue(previousTarget, target);
+          if (cachedIssue && previousTarget.kind === "supported") {
+            publishRefreshIssue(session, cachedIssue, previousTarget.piProvider);
+            return;
+          }
+          session.target = target;
+          session.credentialCheckQuarantined = false;
+          session.credentialCheckIssue = null;
+          session.quota = null;
+          session.lastFailure = null;
+          render(session);
+          return;
+        }
+        session.target = target;
+        if (session.credentialCheckQuarantined && !session.credentialCheckPending) {
+          releaseCredentialCheck(session);
+        }
+        if (previousTarget.kind !== "supported" || !supportedTargetsMatch(previousTarget, target)) {
+          session.quota = null;
+          session.lastFailure = null;
+        }
+
+        const piProvider = target.piProvider;
+        if (currentView(session).kind !== "fresh") {
+          render(session, { kind: "refreshing", provider: piProvider });
+        }
+
+        const quotaProvider = quotaProviderForPiProvider(piProvider);
+        if (!quotaProvider) {
+          session.target = {
+            kind: "unsupported",
+            view: unsupportedProvider(piProvider),
+            modelRevision: target.modelRevision,
+            compositionRevision: target.compositionRevision,
+          };
+          render(session);
+          return;
+        }
+        const processStartedAtContinuousMs = continuousNow();
+        const processStartedAt = clockSample();
+        const running = runQuotaAxiJson({
+          command,
+          timeoutMs,
+          maxOutputBytes,
+          full: true,
+          provider: quotaProvider,
+        });
+        session.process = running;
+        const result = await running.promise;
+        if (
+          active !== session ||
+          session.generation !== generation ||
+          session.process !== running
+        ) return;
+        if (
+          activeModelRevision(session.ctx.model) !== startingModelRevision ||
+          providerCompositionRevision(session.ctx, session.ctx.model) !== startingCompositionRevision
+        ) {
+          resetForLiveModel(session);
+          session.refreshPending = true;
+          return;
+        }
+
+        const completedModel = session.ctx.model;
+        const completedModelRevision = activeModelRevision(completedModel);
+        const completedCompositionRevision = providerCompositionRevision(session.ctx, completedModel);
+        const completedTarget = await resolveTarget(session.ctx, completedModel, operationAbort.signal);
+        if (
+          active !== session ||
+          session.generation !== generation ||
+          session.process !== running
+        ) return;
+        if (
+          activeModelRevision(session.ctx.model) !== completedModelRevision ||
+          providerCompositionRevision(session.ctx, session.ctx.model) !== completedCompositionRevision
+        ) {
+          resetForLiveModel(session);
+          session.refreshPending = true;
+          return;
+        }
+        session.process = null;
+        if (completedTarget.kind === "unsupported") {
+          const cachedIssue = cachedTargetRefreshIssue(target, completedTarget);
+          if (cachedIssue) {
+            publishRefreshIssue(session, cachedIssue, target.piProvider);
+            return;
+          }
+          session.target = completedTarget;
+          session.credentialCheckQuarantined = false;
+          session.credentialCheckIssue = null;
+          session.quota = null;
+          session.lastFailure = null;
+          render(session);
+          return;
+        }
+        session.target = completedTarget;
+        if (session.credentialCheckQuarantined && !session.credentialCheckPending) {
+          releaseCredentialCheck(session);
+        }
+        if (!supportedTargetsMatch(completedTarget, target)) {
+          session.quota = null;
+          session.refreshPending = true;
+          render(session, { kind: "refreshing", provider: completedTarget.piProvider });
+          return;
+        }
+
+        const completedProvider = completedTarget.piProvider;
+        if (result.kind === "ok") {
+          const report = parseQuotaAxiJson(result.stdout, {
+            projection: "full",
+            expectedProvider: quotaProvider,
+          });
+          const selected = report
+            ? selectTargetReport(report, completedTarget, now())
+            : { kind: "malformed", provider: completedProvider } as const;
+          const staleFailure = selected.kind === "stale" && report
+            ? quotaFailureReasonFromReport(report, completedProvider)
+            : null;
+          if (staleFailure) {
+            publishRefreshIssue(session, staleFailure, completedProvider);
+          } else if (selected.kind === "malformed") {
+            publishRefreshIssue(session, "malformed", completedProvider);
+          } else if (selected.kind === "unverified") {
+            publishRefreshIssue(session, "unverified", completedProvider);
+          } else {
+            session.lastFailure = null;
+            const recoverable = recoverableFreshView(selected);
+            const publication = recoverable ? quotaPublicationFreshView(recoverable) : null;
+            const publishedAt = clockSample();
+            const publishedAtMonotonicMs = publishedAt?.monotonicAfterMs ?? monotonicNow();
+            const publishedAtContinuousMs = continuousNow();
+            const publishedAtWallMs = publishedAt?.wallMs ?? now();
+            const timelineOriginMs = publication?.generatedAtMs ?? report?.generatedAtMs ?? publishedAtWallMs;
+            const publicationAgeMs = conservativePublicationAgeMs(
+              processStartedAt,
+              publishedAt,
+              processStartedAtContinuousMs,
+              publishedAtContinuousMs,
+            );
+            const retainedPublication = publicationAgeMs === null ? null : publication;
+            const elapsedAtPublicationMs = publicationAgeMs ?? 0;
+            session.quota = {
+              view: retainedPublication
+                ? revalidateFreshQuotaView(
+                    retainedPublication,
+                    timelineOriginMs + elapsedAtPublicationMs,
+                  )
+                : publication
+                  ? { kind: "stale", provider: publication.provider, label: publication.label }
+                  : selected,
+              publication: retainedPublication,
+              wallFilter: null,
+              publishedAtMonotonicMs,
+              publishedAtContinuousMs,
+              elapsedAtPublicationMs,
+              elapsedThroughMs: 0,
+              timelineOriginMs,
+              piProvider: completedProvider,
+              credentialRevision: completedTarget.credentialRevision,
+              modelRevision: completedTarget.modelRevision,
+              compositionRevision: completedTarget.compositionRevision,
+              endpointRevision: completedTarget.endpointRevision,
+            };
+            render(session);
+          }
+        } else if (result.kind !== "cancelled") {
+          const failedReport = result.kind === "failed" && result.stdout
+            ? parseQuotaAxiJson(result.stdout, {
+                projection: "full",
+                expectedProvider: quotaProvider,
+              })
+            : null;
+          const failureReason = failedReport
+            ? quotaFailureReasonFromReport(failedReport, completedProvider) ?? result.kind
+            : result.kind;
+          publishRefreshIssue(session, failureReason, completedProvider);
+        }
+      } finally {
+        if (session.operationAbort === operationAbort) session.operationAbort = null;
+        session.refreshInFlight = false;
+        if (session.refreshPending && active === session) {
+          session.refreshPending = false;
+          session.credentialCheckPending = false;
+          void refresh(session);
+        } else if (session.credentialCheckPending && active === session) {
+          session.credentialCheckPending = false;
+          void checkCredentialRevision(session);
+        }
+      }
+    }
+
+    async function stop(session: ActiveSession): Promise<void> {
+      if (active === session) active = null;
+      if (session.refreshTimer !== null) timers.clearInterval(session.refreshTimer);
+      session.refreshTimer = null;
+      if (session.modelRefreshTimer !== null) timers.clearTimeout(session.modelRefreshTimer);
+      session.modelRefreshTimer = null;
+      if (session.revisionTimer !== null) timers.clearInterval(session.revisionTimer);
+      session.revisionTimer = null;
+      if (session.recoveryTimer !== null) timers.clearTimeout(session.recoveryTimer);
+      session.recoveryTimer = null;
+      clearExpiry(session);
+      session.refreshPending = false;
+      session.credentialCheckPending = false;
+      const watcher = session.credentialWatcher;
+      session.credentialWatcher = null;
+      session.credentialMonitoringAvailable = false;
+      watcher?.close();
+      session.ctx.ui.setWidget(WIDGET_KEY, undefined);
+      await cancelProcess(session);
+    }
+
+    async function start(ctx: ExtensionContext): Promise<void> {
+      if (active) await stop(active);
+      if (ctx.mode !== "tui") return;
+
+      const session: ActiveSession = {
+        ctx,
+        generation: 0,
+        target: preflightTarget(ctx, ctx.model),
+        quota: null,
+        lastFailure: null,
+        process: null,
+        operationAbort: null,
+        credentialCheckAbort: null,
+        credentialCheckPending: false,
+        credentialCheckQuarantined: false,
+        credentialCheckIssue: null,
+        credentialWatcher: null,
+        credentialMonitoringAvailable: false,
+        refreshInFlight: false,
+        refreshPending: false,
+        refreshTimer: null,
+        expiryTimer: null,
+        statusTimer: null,
+        expiryTimerQuota: null,
+        modelRefreshTimer: null,
+        recoveryTimer: null,
+        revisionTimer: null,
+        wallViewRevision: "refreshing",
+      };
+      active = session;
+      watchCredentials(session);
+      session.refreshTimer = timers.setInterval(() => {
+        void refresh(session);
+      }, refreshMs);
+      unrefTimer(session.refreshTimer);
+      session.revisionTimer = timers.setInterval(() => {
+        if (active !== session) return;
+        if (!targetMatchesLiveModel(session)) {
+          resetForLiveModel(session);
+          void refresh(session);
+          return;
+        }
+        const wallView = currentView(session);
+        if (quotaWallRevision(wallView) !== session.wallViewRevision) {
+          render(session, wallView);
+        }
+        if (refreshMs > DEFAULT_REVISION_CHECK_MS) {
+          if (
+            session.target.kind === "unsupported" &&
+            (
+              session.target.view.reason === "auth-timeout" ||
+              session.target.view.reason === "auth-cancelled" ||
+              session.target.view.reason === "auth-overflow" ||
+              session.target.view.reason === "auth-unavailable"
+            )
+          ) {
+            void refresh(session);
+          } else {
+            void checkCredentialRevision(session);
+          }
+        }
+      }, Math.min(refreshMs, DEFAULT_REVISION_CHECK_MS));
+      unrefTimer(session.revisionTimer);
+      render(session);
+      void refresh(session);
+    }
+
+    pi.on("session_start", async (_event, ctx) => {
+      await start(ctx);
+    });
+    pi.on("model_select", async (_event, ctx) => {
+      if (!active) {
+        await start(ctx);
+        return;
+      }
+      active.ctx = ctx;
+      active.generation += 1;
+      active.target = targetForCredentialMonitoring(
+        active,
+        preflightTarget(ctx, ctx.model),
+      );
+      active.credentialCheckQuarantined = false;
+      active.credentialCheckIssue = null;
+      active.quota = null;
+      active.lastFailure = null;
+      void cancelProcess(active);
+      render(active);
+      void refresh(active);
+    });
+    pi.on("session_shutdown", async () => {
+      if (active) await stop(active);
+    });
+  };
+}
+
+export default createFirstmateQuotaStatusExtension();

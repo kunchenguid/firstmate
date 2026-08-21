@@ -129,9 +129,8 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Measured whole remainder is ~19 min of serial work; the balanced shards
-    # are ~4.8 min each. Cap is a hang tripwire with roughly 3x margin, not the
-    # expected healthy end of the lane.
+    # The cap is a hang tripwire, not the expected healthy end of the lane;
+    # per-shard timing artifacts record current measured duration.
     timeout-minutes: 15
     strategy:
       # Every shard reports so one failure never hides another shard's result.
@@ -142,6 +141,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -160,11 +162,12 @@ jobs:
             exit 1
           }
           tmux -V
-      - name: Install tasks-axi for backlog-handoff delegation
+      - name: Install portable Node test dependencies
         run: |
           set -eu
-          npm install -g tasks-axi
+          npm install -g tasks-axi @earendil-works/pi-coding-agent@0.84.2
           tasks-axi --version
+          pi --version
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
           # job-total rather than a literal, so shrinking or growing the matrix

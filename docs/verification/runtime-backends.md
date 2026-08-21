@@ -6,6 +6,26 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Pi quota footer
+
+- Verified 2026-08-20 against Pi 0.84.2 through an isolated credential-free pseudo-terminal and fake provider-scoped `quota-axi --json --full` producer.
+- The live footer retained Pi's cwd, branch, context, model rows, and unrelated extension status while the auto-discovered Firstmate extension correlated the active fake Codex account and rendered all three windows, resets, plan, and credits in a separate width-aware row below the editor.
+- Portable credential-transition cases observed notification quarantine before bounded revalidation and a one-second revision-check fallback for missed filesystem notifications; [README](../../README.md#features) owns the user-facing no-zero-latency boundary.
+- Pi and `pi-signed` share this Pi extension surface; Claude, Grok, Codex, OpenCode, and Cursor do not discover `.pi/extensions`, so their primary UI paths remain unchanged.
+- tmux, Herdr, Zellij, Orca, and cmux only host the selected process and need no quota-specific branch, so the Pi-family behavior is backend-independent and non-Pi processes remain unchanged.
+
+```sh
+FM_PI_QUOTA_STATUS_LIVE=1 bin/fm-test-run.sh tests/fm-pi-quota-status-live-e2e.test.sh
+```
+
+```text
+ok - pi 0.84.2 auto-discovered complete quota in a width-aware row while preserving the built-in footer and unrelated status
+# harness absent, not verified here: pi-signed
+ok - live Pi quota guard verified 1 installed Pi-family harness(es)
+```
+
+The required portable `tests/fm-pi-quota-status.test.sh` regression owns schema-3 and schema-5 full-projection validation, official endpoint and subscription-auth provenance, active Codex account correlation, responsive widget composition, credential quarantine and revision polling, clock- and suspend-safe per-window expiry, explicit degraded outcomes, bounded stdin-closed subprocesses, lifecycle replacement, and cleanup without credentials; portable CI pins Pi 0.84.2 as its extension runtime.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
