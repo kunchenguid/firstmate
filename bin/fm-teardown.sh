@@ -54,6 +54,24 @@
 # the retired home. Removing a leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# Rerun tenant safety (teardown-rerun-reissue, observed 2026-08-08): a teardown
+# that returned this task's pool worktree and then failed on a later step (for
+# example a refused focus-unsafe pane close) is rerun by design - but by then
+# the pool may have reissued the SAME slot to a newer task, so re-running any
+# worktree-scoped step would reset the worktree under the live tenant and kill
+# its session. Ownership is decided from two provable signals: the durable
+# state/<id>.worktree-returned marker, touched immediately after this task's
+# own successful return, and the current fleet bindings - another task's meta
+# recording the same worktree path proves the slot was reissued even when the
+# marker is lost. A binding whose task carries its own worktree-returned
+# marker is ignored: that task provably gave the slot back already, so its
+# meta records a past tenancy, not a live claim. When either signal shows the
+# worktree is no longer this task's, the safety inspection, run-abort,
+# worktree process reap, branch delete, hook removal, and the return itself
+# are all skipped with one line, while tasktmp reaping, the pane close retry,
+# and durable-record cleanup continue unchanged.
+# The marker is removed with the rest of the volatile state once teardown
+# completes.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -2278,7 +2296,59 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
+# Rerun tenant-safety guard (see the script header). WORKTREE_OWNED_BY_TASK=0
+# means the recorded worktree is provably no longer this task's and every
+# worktree-scoped step below must be skipped.
+WORKTREE_RETURN_MARKER="$STATE/$ID.worktree-returned"
+WORKTREE_OWNED_BY_TASK=1
+WORKTREE_SKIP_REASON=
+
+# Echoes the id of another task whose meta records the same worktree path
+# without its own worktree-returned marker, proving the pool slot was
+# reissued; a marker-bearing binding is a stale record of an already-returned
+# tenancy and is skipped. Returns non-zero when no other task holds a live
+# binding.
+worktree_reissued_to_other_task() {
+  local meta other_id other_wt abs_wt abs_other other_marker
+  [ -n "$WT" ] || return 1
+  abs_wt=$(canonical_existing_dir "$WT") || abs_wt=$WT
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    other_id=$(basename "$meta" .meta)
+    [ "$other_id" != "$ID" ] || continue
+    other_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$other_wt" ] || continue
+    abs_other=$(canonical_existing_dir "$other_wt") || abs_other=$other_wt
+    [ "$abs_other" = "$abs_wt" ] || continue
+    other_marker="$STATE/$other_id.worktree-returned"
+    if [ -e "$other_marker" ] || [ -L "$other_marker" ]; then
+      continue
+    fi
+    printf '%s\n' "$other_id"
+    return 0
+  done
+  return 1
+}
+
+resolve_worktree_ownership() {
+  local tenant
+  [ "$KIND" != secondmate ] || return 0
+  [ -n "$WT" ] || return 0
+  if [ -e "$WORKTREE_RETURN_MARKER" ] || [ -L "$WORKTREE_RETURN_MARKER" ]; then
+    WORKTREE_OWNED_BY_TASK=0
+    WORKTREE_SKIP_REASON="this task's return already succeeded on a previous attempt"
+  elif tenant=$(worktree_reissued_to_other_task); then
+    WORKTREE_OWNED_BY_TASK=0
+    WORKTREE_SKIP_REASON="the pool slot is now recorded for task $tenant"
+  fi
+  if [ "$WORKTREE_OWNED_BY_TASK" -ne 1 ]; then
+    echo "teardown: skipping worktree return and every other worktree step for $ID: $WORKTREE_SKIP_REASON"
+  fi
+}
+
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
+
+resolve_worktree_ownership
 
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
@@ -2361,7 +2431,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ -d "$WT" ] && [ "$FORCE" != "--force" ] && [ "$WORKTREE_OWNED_BY_TASK" = 1 ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -2383,8 +2453,14 @@ fi
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
-  conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  if [ "$WORKTREE_OWNED_BY_TASK" = 1 ]; then
+    conclude_task_no_mistakes_run "$WT"
+    reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  else
+    # The worktree now belongs to another tenant, but the per-task tasktmp root
+    # is still uniquely this task's and is removed below, so still reap it.
+    reap_task_worktree_processes tasktmp "$TASK_TMP"
+  fi
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
@@ -2426,7 +2502,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$WORKTREE_OWNED_BY_TASK" = 1 ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -2448,6 +2524,10 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  # Record the completed return durably BEFORE any later step can fail, so a
+  # sanctioned rerun never re-returns a slot the pool may reissue meanwhile.
+  touch "$WORKTREE_RETURN_MARKER" 2>/dev/null \
+    || echo "warning: could not record the completed worktree return for $ID at $WORKTREE_RETURN_MARKER; a rerun will rely on live fleet bindings to skip the return" >&2
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
@@ -2542,6 +2622,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
+  "$STATE/$ID.worktree-returned" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
 fm_lock_release "$META_LOCK"
