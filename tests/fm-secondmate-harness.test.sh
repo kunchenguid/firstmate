@@ -51,13 +51,15 @@ set -u
 . "$ROOT/bin/fm-config-inherit-lib.sh"
 
 # The harness-detection cases below fake `ps` so process ancestry is fully
-# controlled, but bin/fm-harness.sh checks verified ENV markers before ancestry.
-# A suite run from inside one of those harnesses inherits its marker, and the
-# highest-precedence one wins over everything these cases set up: with an
-# ambient CLAUDECODE=1, the pi-signed ancestry case resolves "claude". Drop the
-# ambient markers so what this suite asserts does not depend on which harness it
-# was launched from; every case states the marker it means to test.
+# controlled, and the marker-pinned cases (CLAUDECODE=1 pins detect_own) rely
+# on the marker fallback. A suite run from inside a real harness inherits both
+# its markers and its real process ancestry, so neutralize each: drop the
+# ambient markers (every case states the marker it means to test), and stop
+# the real ancestry walk at this test shell so the hosting harness can never
+# outrank a pinned marker (ancestry outranks markers;
+# tests/fm-harness-detect.test.sh pins that precedence).
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+export FM_HARNESS_ANCESTRY_BOUNDARY=$$
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com

@@ -132,8 +132,8 @@ state: done ...
 Both launches executed a submitted tool instruction and touched the generated `turn_end` marker.
 The pi-signed launch retained `harness=pi-signed`, while the plain comparison retained `harness=pi`.
 The exact wrapper ancestry was `pi-signed` parent to Pi engine child, and the plain Pi Launcher path also traversed the signed wrapper on this installation.
-That shared plain-Pi path is retained as disconfirming evidence against using ancestry as runtime-selection authority.
-Firstmate therefore sets the exact `FM_PI_HARNESS` selection marker on both worker launch paths, while an unmarked Pi-family process remains `pi`.
+That shared plain-Pi path is retained as disconfirming evidence against using ancestry alone as runtime-selection authority.
+Firstmate therefore uses ancestry for the Pi-family verdict and the exact `FM_PI_HARNESS` marker to refine `pi-signed`, while an unmarked Pi-family process remains `pi`.
 Both recorded runtime identities now classify the exact `pi-launcher` foreground command as `alive`.
 
 Backend applicability was reviewed across every spawn adapter.
@@ -790,8 +790,10 @@ Read from the live agent process and from a tool subprocess it spawned:
 | `CURSOR_CONVERSATION_ID=<uuid>` | child/tool processes |
 | `AGENT_TRANSCRIPTS=<projects-root>/<slug>/agent-transcripts` | child/tool processes |
 
-Cursor does not clear an inherited `CLAUDECODE`, so ordering decides the verdict.
-With both markers set, `bin/fm-harness.sh` reports `cursor`; with `CLAUDECODE` alone it still reports `claude`.
+Process ancestry now outranks these markers in `bin/fm-harness.sh`; marker ordering applies only when no harness ancestor is visible.
+Cursor does not clear an inherited `CLAUDECODE`, so the fallback ordering keeps cursor ahead of claude when both markers are present.
+With both markers set in the fallback, `bin/fm-harness.sh` reports `cursor`; with `CLAUDECODE` alone it still reports `claude`.
+The portable precedence regression and its ancestry boundary seam are pinned by `tests/fm-harness-detect.test.sh`.
 
 ### Composer
 

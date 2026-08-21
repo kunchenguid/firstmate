@@ -154,9 +154,9 @@ run_muse_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
 # string, so each case launches an actual renamed executable and asks
 # fm-harness.sh from a child of it.
 #
-# The foreign env markers are cleared because muse is markerless and the marker
-# layer deliberately outranks ancestry: with one retained, these cases would
-# assert the marker's verdict instead of the ancestry match they exist to pin.
+# The foreign env markers are cleared for hygiene: ancestry now outranks
+# markers (tests/fm-harness-detect.test.sh pins that precedence), so these
+# cases assert the ancestry match on its own, without a marker as a crutch.
 # The command substitution around the probe is load-bearing: a bare `-c <cmd>`
 # lets the shell exec the probe in place, which REPLACES the muse-bin-* process
 # name the walk is supposed to find. Real muse keeps its TUI process alive and
