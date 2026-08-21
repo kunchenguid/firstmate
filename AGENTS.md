@@ -464,8 +464,8 @@ Reach the captain immediately for:
 - A needed credential or login.
 
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
-When an operational event carries no new captain-relevant information, stay silent and emit no captain-facing Assistant text; never substitute a routine acknowledgement such as a shipshape, processing, waiting, or no-new-result message for that silence.
-The Feishu channel still defends its exact fixed-response strings for historical and recovery entries, as owned by [`docs/feishu-channel.md`](docs/feishu-channel.md); that defense keeps such a string local and is not a license to emit one as a no-information reply.
+When an operational event carries no new captain-relevant information and neither the event nor its channel requires a response, stay silent and emit no captain-facing Assistant text.
+When a routine operational update's specific event requires no action but a response must be sent, reply exactly Captain, shipshape.
 Batch non-urgent updates into the next natural reply.
 Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
 Whenever a PR is mentioned, include its full `https://...` URL before any shorthand reference.
