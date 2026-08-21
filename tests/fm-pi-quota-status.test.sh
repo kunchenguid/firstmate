@@ -23,6 +23,7 @@ PID_LOG="$TMP_ROOT/quota.pids"
 DESCENDANT_PID_LOG="$TMP_ROOT/quota.descendant-pids"
 SURVIVOR_LOG="$TMP_ROOT/quota.survivors"
 TASKKILL_LOG="$TMP_ROOT/taskkill.calls"
+RELEASE_FILE="$TMP_ROOT/quota.release"
 PI_CONFIG="$TMP_ROOT/pi-config"
 AUTH_FILE="$PI_CONFIG/auth.json"
 mkdir -p "$FIXTURE/.pi/extensions/lib" "$FIXTURE/node_modules/@earendil-works" "$FAKEBIN" "$PI_CONFIG"
@@ -78,6 +79,14 @@ case "$mode" in
     printf '%s\n' "$$" >> "${FM_QUOTA_TEST_PIDS:?}"
     sleep 30
     exit 0
+    ;;
+  blocked_success)
+    printf '%s\n' "$$" >> "${FM_QUOTA_TEST_PIDS:?}"
+    while [ ! -f "${FM_QUOTA_TEST_RELEASE:?}" ]; do
+      sleep 0.01
+    done
+    FM_QUOTA_TEST_FULL=$full FM_QUOTA_TEST_PROVIDER=$provider \
+      exec node "${FM_QUOTA_TEST_FIXTURE:?}"
     ;;
   delayed_fail)
     printf '%s\n' "$$" >> "${FM_QUOTA_TEST_PIDS:?}"
@@ -580,6 +589,7 @@ export FM_QUOTA_TEST_PIDS="$PID_LOG"
 export FM_QUOTA_TEST_DESCENDANT_PIDS="$DESCENDANT_PID_LOG"
 export FM_QUOTA_TEST_SURVIVORS="$SURVIVOR_LOG"
 export FM_QUOTA_TEST_TASKKILL_CALLS="$TASKKILL_LOG"
+export FM_QUOTA_TEST_RELEASE="$RELEASE_FILE"
 export FM_QUOTA_TEST_FIXTURE="$TMP_ROOT/quota-fixture.mjs"
 export FM_QUOTA_TEST_WINDOWS_SUPERVISOR="$TMP_ROOT/windows-job-supervisor.mjs"
 export PI_CODING_AGENT_DIR="$PI_CONFIG"
@@ -592,6 +602,7 @@ printf '%s\n' success > "$MODE_FILE"
 : > "$DESCENDANT_PID_LOG"
 : > "$SURVIVOR_LOG"
 : > "$TASKKILL_LOG"
+rm -f "$RELEASE_FILE"
 
 out=$(cd "$FIXTURE" && \
   EXT="$FIXTURE/.pi/extensions/fm-pi-quota-status.ts" \
@@ -2249,6 +2260,15 @@ assert(
   invalidUtf8Result.kind === "malformed",
   `invalid UTF-8 quota output was accepted as ${invalidUtf8Result.kind}`,
 );
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "slow\n");
+const stdoutFailure = runQuotaAxiJson({ timeoutMs: 1000, maxOutputBytes: 1024 * 1024 });
+assert(stdoutFailure.child.stdout, "quota process did not expose a stdout pipe");
+stdoutFailure.child.stdout.destroy(new Error("fixture stdout failure"));
+assert((await stdoutFailure.promise).kind === "failed", "stdout pipe failure was not handled explicitly");
+const stderrFailure = runQuotaAxiJson({ timeoutMs: 1000, maxOutputBytes: 1024 * 1024 });
+assert(stderrFailure.child.stderr, "quota process did not expose a stderr pipe");
+stderrFailure.child.stderr.destroy(new Error("fixture stderr failure"));
+assert((await stderrFailure.promise).kind === "failed", "stderr pipe failure was not handled explicitly");
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 let windowsTimeoutResult;
@@ -2608,6 +2628,28 @@ const callsAtShutdown = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")
 await sleep(120);
 const callsAfterShutdown = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 assert(callsAfterShutdown === callsAtShutdown, "shutdown leaked a refresh timer");
+
+const outboundHook = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 500,
+}));
+await outboundHook.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => outboundHook.widgetText(400).includes("week 94% left"),
+  "outbound-auth fixture did not publish fresh Codex quota",
+);
+const outboundHeaders = {
+  Authorization: `Bearer ${fixtureAccessToken("fixture-codex-account")}`,
+  "chatgpt-account-id": "fixture-codex-account",
+};
+await outboundHook.emit("before_provider_headers", { headers: outboundHeaders });
+outboundHeaders.Authorization = `Bearer ${fixtureAccessToken("replacement-codex-account")}`;
+assert(
+  outboundHook.widgetText(240).includes("account correlation unavailable") &&
+    !outboundHook.widgetText(400).includes("94%"),
+  "a later outbound Authorization override left unrelated quota visible",
+);
+await outboundHook.emit("session_shutdown", { reason: "quit" });
 
 await setStoredApiKey("kimi-coding", "fixture-kimi-api-key");
 const kimiApiKey = makePi(
@@ -4028,6 +4070,51 @@ await suspendAware.emit("session_shutdown", { reason: "quit" });
 assert(suspendClock.tasks.size === 0, "suspend-aware expiry leaked a timer");
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
+const inflightSuspendStart = Date.now();
+let inflightSuspendContinuousMs = 0;
+process.env.FM_QUOTA_TEST_NOW_MS = String(inflightSuspendStart);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  inflightSuspendStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "blocked_success\n");
+fs.rmSync(process.env.FM_QUOTA_TEST_RELEASE, { force: true });
+const inflightCallsBefore = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+const inflightSuspend = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 1000,
+  now: () => inflightSuspendStart,
+  monotonicNow: () => 0,
+  continuousNow: () => inflightSuspendContinuousMs,
+}));
+await inflightSuspend.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+    .trim()
+    .split(/\n/)
+    .filter(Boolean).length > inflightCallsBefore,
+  "in-flight suspend fixture did not start quota-axi",
+);
+inflightSuspendContinuousMs = 7 * 60_000;
+await writeFile(process.env.FM_QUOTA_TEST_RELEASE, "release\n");
+await waitFor(
+  () => inflightSuspend.widgetText(400).includes("stale"),
+  "suspend during quota-axi work did not age the publication",
+);
+assert(
+  !inflightSuspend.widgetText(400).includes("94%"),
+  "quota generated before an in-flight suspend was published as fresh",
+);
+await inflightSuspend.emit("session_shutdown", { reason: "quit" });
+fs.rmSync(process.env.FM_QUOTA_TEST_RELEASE, { force: true });
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
 const delayedCountdownStart = Date.now();
 const delayedCountdownClock = new SplitClock(delayedCountdownStart);
 process.env.FM_QUOTA_TEST_NOW_MS = String(delayedCountdownStart);
@@ -4365,6 +4452,36 @@ const callsAfterMissingIdentity = (await readFile(process.env.FM_QUOTA_TEST_CALL
   .filter(Boolean).length;
 assert(callsAfterMissingIdentity === callsBeforeMissingIdentity, "missing Codex identity invoked quota-axi");
 await missingCodexIdentity.emit("session_shutdown", { reason: "quit" });
+
+const validCodexToken = fixtureAccessToken("fixture-codex-account");
+for (const malformedToken of [
+  validCodexToken.split(".").slice(0, 2).join("."),
+  `${validCodexToken}.extra`,
+]) {
+  await setStoredOAuth("openai-codex", malformedToken);
+  const callsBeforeMalformedToken = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+    .trim()
+    .split(/\n/)
+    .filter(Boolean).length;
+  const malformedCodexToken = makePi(
+    createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
+    "openai-codex",
+  );
+  await malformedCodexToken.emit("session_start", { reason: "startup" });
+  await waitFor(
+    () => malformedCodexToken.widgetText(240).includes("account correlation unavailable"),
+    `malformed Codex JWT was accepted: ${malformedCodexToken.widgetText(240)}`,
+  );
+  const callsAfterMalformedToken = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+    .trim()
+    .split(/\n/)
+    .filter(Boolean).length;
+  assert(
+    callsAfterMalformedToken === callsBeforeMalformedToken,
+    "malformed Codex JWT invoked quota-axi",
+  );
+  await malformedCodexToken.emit("session_shutdown", { reason: "quit" });
+}
 
 await setStoredOAuth("openai-codex", fixtureAccessToken("other-codex-account"));
 const differentCodexAccount = makePi(

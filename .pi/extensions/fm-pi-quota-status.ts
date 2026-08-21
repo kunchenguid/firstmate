@@ -495,6 +495,8 @@ type ActiveSession = {
   credentialCheckIssue: QuotaRefreshIssue | null;
   credentialWatcher: FSWatcher | null;
   credentialMonitoringAvailable: boolean;
+  outboundAuth: { provider: string; accountId: string } | null;
+  outboundAuthQuarantined: boolean;
   refreshInFlight: boolean;
   refreshPending: boolean;
   refreshTimer: unknown | null;
@@ -680,6 +682,8 @@ type ClockSample = {
 function conservativePublicationAgeMs(
   processStartedAt: ClockSample | null,
   publishedAt: ClockSample | null,
+  processStartedAtContinuousMs: number,
+  publishedAtContinuousMs: number,
 ): number | null {
   if (
     !processStartedAt ||
@@ -690,13 +694,16 @@ function conservativePublicationAgeMs(
     publishedAt.monotonicBeforeMs - processStartedAt.monotonicAfterMs;
   const maximumProcessElapsedMs =
     publishedAt.monotonicAfterMs - processStartedAt.monotonicBeforeMs;
+  const continuousProcessElapsedMs = publishedAtContinuousMs - processStartedAtContinuousMs;
   if (
     !Number.isFinite(minimumProcessElapsedMs) ||
     !Number.isFinite(maximumProcessElapsedMs) ||
+    !Number.isFinite(continuousProcessElapsedMs) ||
     minimumProcessElapsedMs < 0 ||
-    maximumProcessElapsedMs < minimumProcessElapsedMs
+    maximumProcessElapsedMs < minimumProcessElapsedMs ||
+    continuousProcessElapsedMs < 0
   ) return null;
-  return maximumProcessElapsedMs;
+  return Math.max(maximumProcessElapsedMs, continuousProcessElapsedMs);
 }
 
 function decodeUtf8(value: Uint8Array): string | null {
@@ -715,8 +722,9 @@ function exactAccountId(value: unknown): string | null {
 
 function jwtPayload(token: string | undefined): Record<string, unknown> | null {
   if (!token) return null;
-  const encoded = token.split(".")[1];
-  if (!encoded) return null;
+  const parts = token.split(".");
+  if (parts.length !== 3 || !parts[1]) return null;
+  const encoded = parts[1];
   try {
     const decoded = decodeUtf8(Buffer.from(encoded, "base64url"));
     if (decoded === null) return null;
@@ -755,6 +763,88 @@ function quotaVerification(provider: string, apiKey: string | undefined): QuotaV
   if (provider !== "openai-codex") return null;
   const accountId = activeAccountId(provider, apiKey);
   return accountId ? { kind: "account", accountId } : null;
+}
+
+const OUTBOUND_AUTH_HEADER_NAMES = new Set(["authorization", "chatgpt-account-id"]);
+
+function outboundAuthAccountId(
+  headers: Record<string, string | null>,
+): string | null | undefined {
+  try {
+    let observedAccountId: string | null = null;
+    let sawAuthHeader = false;
+    for (const [name, value] of Object.entries(headers)) {
+      const normalizedName = name.toLowerCase();
+      let accountId: string | null;
+      if (normalizedName === "authorization") {
+        sawAuthHeader = true;
+        if (typeof value !== "string" || !value.startsWith("Bearer ")) return null;
+        accountId = activeAccountId("openai-codex", value.slice("Bearer ".length));
+      } else if (normalizedName === "chatgpt-account-id") {
+        sawAuthHeader = true;
+        accountId = exactAccountId(value);
+      } else {
+        continue;
+      }
+      if (!accountId || (observedAccountId !== null && observedAccountId !== accountId)) return null;
+      observedAccountId = accountId;
+    }
+    return sawAuthHeader ? observedAccountId : undefined;
+  } catch {
+    return null;
+  }
+}
+
+function monitorOutboundAuthHeaders(
+  headers: Record<string, string | null>,
+  onChange: () => void,
+): boolean {
+  const monitorProperty = (name: string, initialValue: unknown): boolean => {
+    const existing = Object.getOwnPropertyDescriptor(headers, name);
+    if (existing && (!existing.configurable || !("value" in existing) || !existing.writable)) {
+      return false;
+    }
+    let value = initialValue;
+    try {
+      Object.defineProperty(headers, name, {
+        configurable: true,
+        enumerable: true,
+        get: () => value as string | null,
+        set: (next: unknown) => {
+          value = next;
+          onChange();
+        },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  try {
+    const originalPrototype = Object.getPrototypeOf(headers) ?? Object.create(null);
+    const monitoredPrototype = new Proxy(originalPrototype, {
+      set(target, property, value, receiver) {
+        if (
+          typeof property === "string" &&
+          OUTBOUND_AUTH_HEADER_NAMES.has(property.toLowerCase())
+        ) {
+          if (receiver !== headers || !monitorProperty(property, value)) return false;
+          onChange();
+          return true;
+        }
+        return Reflect.set(target, property, value, receiver);
+      },
+    });
+    Object.setPrototypeOf(headers, monitoredPrototype);
+    for (const name of Object.getOwnPropertyNames(headers)) {
+      if (!OUTBOUND_AUTH_HEADER_NAMES.has(name.toLowerCase())) continue;
+      if (!monitorProperty(name, Reflect.get(headers, name))) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function forceKillChild(child: ChildProcess): void {
@@ -906,8 +996,17 @@ export function runQuotaAxiJson(options: {
     if (stderrBytes > maxOutputBytes) finish({ kind: "overflow" });
   };
 
+  const receiveStreamError = () => {
+    const stdout = decodeUtf8(Buffer.concat(stdoutChunks));
+    finish(stdout === null
+      ? { kind: "malformed" }
+      : { kind: "failed", stdout, exitCode: null });
+  };
+
   child.stdout?.on("data", receiveStdout);
+  child.stdout?.on("error", receiveStreamError);
   child.stderr?.on("data", receiveStderr);
+  child.stderr?.on("error", receiveStreamError);
   child.on("error", (error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") {
       finish({ kind: "missing" });
@@ -1504,6 +1603,54 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         : { kind: "refreshing", provider: target.piProvider };
     }
 
+    function outboundAuthenticationPermitsTarget(
+      session: ActiveSession,
+      target: Extract<QuotaTarget, { kind: "supported" }>,
+    ): boolean {
+      return !session.outboundAuthQuarantined && (
+        session.outboundAuth === null ||
+        session.outboundAuth.provider !== target.piProvider ||
+        session.outboundAuth.accountId === target.verification.accountId
+      );
+    }
+
+    function quarantineOutboundAuthentication(session: ActiveSession): void {
+      if (active !== session || session.outboundAuthQuarantined) return;
+      session.outboundAuthQuarantined = true;
+      session.generation += 1;
+      session.refreshPending = false;
+      void cancelProcess(session);
+      render(session);
+    }
+
+    function observeOutboundAuthentication(
+      session: ActiveSession,
+      ctx: ExtensionContext,
+      headers: Record<string, string | null>,
+    ): void {
+      const model = ctx.model;
+      if (active !== session || model?.provider !== "openai-codex") return;
+      const evaluate = () => {
+        if (active !== session) return;
+        const accountId = outboundAuthAccountId(headers);
+        if (accountId === undefined) return;
+        if (accountId === null) {
+          quarantineOutboundAuthentication(session);
+          return;
+        }
+        session.outboundAuth = { provider: model.provider, accountId };
+        if (
+          session.target.kind === "supported" &&
+          !outboundAuthenticationPermitsTarget(session, session.target)
+        ) quarantineOutboundAuthentication(session);
+      };
+      if (!monitorOutboundAuthHeaders(headers, evaluate)) {
+        quarantineOutboundAuthentication(session);
+        return;
+      }
+      evaluate();
+    }
+
     function credentialMonitoringView(session: ActiveSession): QuotaTarget {
       const model = session.ctx.model;
       return {
@@ -1535,6 +1682,9 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         session,
         preflightTarget(session.ctx, session.ctx.model),
       );
+      if (session.outboundAuth?.provider !== session.ctx.model?.provider) {
+        session.outboundAuth = null;
+      }
       session.credentialCheckPending = false;
       session.credentialCheckQuarantined = false;
       session.credentialCheckIssue = null;
@@ -1668,6 +1818,9 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (session.target.kind === "resolving") {
         return { kind: "refreshing", provider: session.target.piProvider };
       }
+      if (session.outboundAuthQuarantined) {
+        return unsupportedView(session.target.piProvider, "account-correlation");
+      }
       const selected = cachedQuotaView(session, nowMs);
       if (!selected) {
         return session.lastFailure
@@ -1731,6 +1884,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (active !== session) return;
       session.generation += 1;
       session.target = preflightTarget(session.ctx, session.ctx.model);
+      session.outboundAuth = null;
       session.quota = null;
       session.lastFailure = null;
       session.credentialCheckPending = false;
@@ -2046,6 +2200,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           return;
         }
         session.target = target;
+        if (!outboundAuthenticationPermitsTarget(session, target)) {
+          quarantineOutboundAuthentication(session);
+          return;
+        }
         if (session.credentialCheckQuarantined && !session.credentialCheckPending) {
           releaseCredentialCheck(session);
         }
@@ -2070,6 +2228,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           render(session);
           return;
         }
+        const processStartedAtContinuousMs = continuousNow();
         const processStartedAt = clockSample();
         const running = runQuotaAxiJson({
           command,
@@ -2167,6 +2326,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             const publicationAgeMs = conservativePublicationAgeMs(
               processStartedAt,
               publishedAt,
+              processStartedAtContinuousMs,
+              publishedAtContinuousMs,
             );
             const retainedPublication = publicationAgeMs === null ? null : publication;
             const elapsedAtPublicationMs = publicationAgeMs ?? 0;
@@ -2259,6 +2420,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         credentialCheckIssue: null,
         credentialWatcher: null,
         credentialMonitoringAvailable: false,
+        outboundAuth: null,
+        outboundAuthQuarantined: false,
         refreshInFlight: false,
         refreshPending: false,
         refreshTimer: null,
@@ -2308,6 +2471,9 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       void refresh(session);
     }
 
+    pi.on("before_provider_headers", (event, ctx) => {
+      if (active) observeOutboundAuthentication(active, ctx, event.headers);
+    });
     pi.on("session_start", async (_event, ctx) => {
       await start(ctx);
     });
