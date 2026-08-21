@@ -1367,11 +1367,27 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       };
     }
 
+    function requiresCredentialMonitoring(target: QuotaTarget): boolean {
+      return target.kind === "resolving" ||
+        target.kind === "supported" ||
+        target.credentialRevision !== undefined;
+    }
+
+    function targetForCredentialMonitoring(
+      session: ActiveSession,
+      target: QuotaTarget,
+    ): QuotaTarget {
+      return session.credentialMonitoringAvailable || !requiresCredentialMonitoring(target)
+        ? target
+        : credentialMonitoringView(session);
+    }
+
     function resetForLiveModel(session: ActiveSession): void {
       session.generation += 1;
-      session.target = session.credentialMonitoringAvailable
-        ? preflightTarget(session.ctx, session.ctx.model)
-        : credentialMonitoringView(session);
+      session.target = targetForCredentialMonitoring(
+        session,
+        preflightTarget(session.ctx, session.ctx.model),
+      );
       session.credentialCheckPending = false;
       session.credentialCheckQuarantined = false;
       session.credentialCheckIssue = null;
@@ -1398,9 +1414,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     function changedLiveModelView(session: ActiveSession): QuotaView | null {
       if (targetMatchesLiveModel(session)) return null;
       scheduleLiveModelRefresh(session);
-      const target = session.credentialMonitoringAvailable
-        ? preflightTarget(session.ctx, session.ctx.model)
-        : credentialMonitoringView(session);
+      const target = targetForCredentialMonitoring(
+        session,
+        preflightTarget(session.ctx, session.ctx.model),
+      );
       return viewForTarget(target);
     }
 
@@ -1480,7 +1497,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       }
       if (active !== session) return;
       session.generation += 1;
-      session.target = credentialMonitoringView(session);
+      session.target = targetForCredentialMonitoring(
+        session,
+        preflightTarget(session.ctx, session.ctx.model),
+      );
       session.credentialCheckPending = false;
       session.credentialCheckQuarantined = false;
       session.credentialCheckIssue = null;
@@ -1736,7 +1756,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     async function refresh(session: ActiveSession): Promise<void> {
       if (active !== session) return;
       if (!session.credentialMonitoringAvailable) {
-        session.target = credentialMonitoringView(session);
+        session.target = targetForCredentialMonitoring(
+          session,
+          preflightTarget(session.ctx, session.ctx.model),
+        );
         session.quota = null;
         session.lastFailure = null;
         render(session);
@@ -2020,9 +2043,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       }
       active.ctx = ctx;
       active.generation += 1;
-      active.target = active.credentialMonitoringAvailable
-        ? preflightTarget(ctx, ctx.model)
-        : credentialMonitoringView(active);
+      active.target = targetForCredentialMonitoring(
+        active,
+        preflightTarget(ctx, ctx.model),
+      );
       active.credentialCheckQuarantined = false;
       active.credentialCheckIssue = null;
       active.quota = null;

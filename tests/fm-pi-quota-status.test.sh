@@ -975,9 +975,9 @@ for (const [description, mutate] of [
     `schema-5 full output with ${description} was accepted as fresh`,
   );
 }
-const oversizedTopology = structuredClone(schema5Full);
-const oversizedProvider = oversizedTopology.providers[1];
-const oversizedAccountWindows = Array.from({ length: 64 }, (_, index) => ({
+const largeTopology = structuredClone(schema5Full);
+const largeProvider = largeTopology.providers[1];
+const largeAccountWindows = Array.from({ length: 64 }, (_, index) => ({
   id: `weekly_${index + 1}`,
   label: `week ${index + 1}`,
   kind: "weekly",
@@ -985,7 +985,7 @@ const oversizedAccountWindows = Array.from({ length: 64 }, (_, index) => ({
   resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString(),
   pace: { status: "unknown", reason: "missing_cycle" },
 }));
-const oversizedModelWindows = Array.from({ length: 65 }, (_, index) => ({
+const largeModelWindows = Array.from({ length: 129 }, (_, index) => ({
   id: `m${index + 1}`,
   label: `model ${index + 1}`,
   kind: "model",
@@ -993,7 +993,7 @@ const oversizedModelWindows = Array.from({ length: 65 }, (_, index) => ({
   resetsAt: new Date(now + 5 * 60 * 60 * 1000).toISOString(),
   pace: { status: "unknown", reason: "missing_cycle" },
 }));
-const oversizedAvailability = (scope, windows) => {
+const largeAvailability = (scope, windows) => {
   const boundedBy = windows.map((window) => window.id);
   const effectivePercentRemaining = Math.min(...windows.map((window) => window.percentRemaining));
   return {
@@ -1009,24 +1009,32 @@ const oversizedAvailability = (scope, windows) => {
     selection: { status: "unknown", unmeasurableWindowIds: boundedBy },
   };
 };
-oversizedProvider.windows = [...oversizedAccountWindows, ...oversizedModelWindows];
-oversizedProvider.quotaSemantics = {
+largeProvider.windows = [...largeAccountWindows, ...largeModelWindows];
+largeProvider.quotaSemantics = {
   status: "known",
-  description: "Producer-impossible oversized topology.",
+  description: "Every account window and named model limit is represented.",
   effectiveAvailability: [
-    oversizedAvailability("all_models", oversizedAccountWindows),
-    ...oversizedModelWindows.map((window) => (
-      oversizedAvailability(window.id, [...oversizedAccountWindows, window])
+    largeAvailability("all_models", largeAccountWindows),
+    ...largeModelWindows.map((window) => (
+      largeAvailability(window.id, [...largeAccountWindows, window])
     )),
   ],
 };
-const oversizedTopologyJson = JSON.stringify(oversizedTopology);
-assert(Buffer.byteLength(oversizedTopologyJson) < 1024 * 1024, "oversized-topology fixture exceeded the process bound");
-const oversizedTopologyParsed = parseQuotaAxiJson(oversizedTopologyJson, { projection: "full" });
-assert(
-  selectActiveProviderQuota(oversizedTopologyParsed, "openai-codex", { nowMs: now }).kind === "malformed",
-  "implausibly large quota topology was expanded and accepted",
+const largeTopologyJson = JSON.stringify(largeTopology);
+assert(Buffer.byteLength(largeTopologyJson) < 1024 * 1024, "large-topology fixture exceeded the process bound");
+const largeTopologyParsed = parseQuotaAxiJson(largeTopologyJson, { projection: "full" });
+const largeTopologyView = selectActiveProviderQuota(
+  largeTopologyParsed,
+  "openai-codex",
+  { nowMs: now },
 );
+assert(largeTopologyView.kind === "fresh", "valid large quota topology was rejected");
+assert(
+  largeTopologyView.windows.length === largeProvider.windows.length,
+  "valid large quota topology dropped windows",
+);
+const largeTopologyText = formatQuotaStatus(largeTopologyView, 1_000_000, now);
+assert(largeTopologyText.includes("model 129 100% left"), "large quota footer omitted its final window");
 assert(quotaProviderForPiProvider("openai-codex") === "codex", "openai-codex provider mapping failed");
 assert(quotaProviderForPiProvider("anthropic") === "claude", "anthropic provider mapping failed");
 assert(quotaProviderForPiProvider("github-copilot") === "copilot", "GitHub Copilot provider mapping failed");
@@ -2973,6 +2981,31 @@ await sleep(120);
 const callsAfterWatcherSetupFailure = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 assert(callsAfterWatcherSetupFailure === callsBeforeWatcherSetupFailure, "missing credential monitoring invoked quota-axi");
 await watcherSetupFailure.emit("session_shutdown", { reason: "quit" });
+
+const callsBeforeIndependentWatcherFailures = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+for (const [provider, expected] of [
+  ["custom-provider", "Quota: unavailable for custom-provider"],
+  [null, "Quota: unavailable (no model)"],
+]) {
+  const independentWatcherFailure = makePi(createFirstmateQuotaStatusExtension({
+    refreshMs: 40,
+    timeoutMs: 100,
+    watchAuthDirectory() {
+      throw new Error("fixture watcher setup failure");
+    },
+  }), provider);
+  await independentWatcherFailure.emit("session_start", { reason: "startup" });
+  const independentText = independentWatcherFailure.widgetText(300);
+  assert(independentText.includes(expected), `watcher failure replaced independent state: ${independentText}`);
+  assert(!independentText.includes("credential monitoring"), `independent state blamed credential monitoring: ${independentText}`);
+  await sleep(120);
+  await independentWatcherFailure.emit("session_shutdown", { reason: "quit" });
+}
+const callsAfterIndependentWatcherFailures = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+assert(
+  callsAfterIndependentWatcherFailures === callsBeforeIndependentWatcherFailures,
+  "credential-independent targets invoked quota-axi after watcher failure",
+);
 
 for (const reason of ["reload", "new", "resume", "fork"]) {
   lifecycle.ctx.model = fixtureModel("openai-codex", "codex-fixture");
