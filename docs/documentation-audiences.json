@@ -373,6 +373,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/voice-relay.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/watcher-continuity.md",
       "audience": "operator-current"
     },
