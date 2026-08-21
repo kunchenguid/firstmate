@@ -148,6 +148,9 @@ process.exit(0);
 EOF
   )
   status=$?
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '%s\n' "$out"
+  fi
   lock_pid=$(sed -n 's/^T1_LOCK_PID=//p' <<<"$out" | tail -1)
   messages=$(sed -n 's/^T1_MESSAGES=//p' <<<"$out" | tail -1)
   if [ -n "$lock_pid" ]; then
@@ -206,6 +209,10 @@ test_handling_successor_does_not_go_blind() {
     || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not enqueue a durable row for the crew event"; }
   ! grep -F 'check: rearm-resurface' "$out" >/dev/null \
     || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor emitted synthetic recovery instead of supervising: $(cat "$out")"; }
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'T2_WATCH_OUTPUT=%s\n' "$(tr '\n' ' ' < "$out")"
+    printf 'T2_QUEUE_ROW=%s\n' "$(grep "$(printf '\tsignal\tcrew.status\t')" "$state/.wake-queue" | tail -1)"
+  fi
   kill -TERM "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"

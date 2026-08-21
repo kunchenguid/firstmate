@@ -701,7 +701,7 @@ _fm_recovery_marker_arm_check() {
 
 # A non-successor watcher start after an announced-but-unacked episode is a new
 # down stretch: mint a fresh pending generation so a still-open decision or
-# buried note: can be presented once more. Handling successors must not call
+# buried note can be presented once more. Handling successors must not call
 # this, because Option B re-arm is not a new down stretch.
 _fm_recovery_marker_reopen_announced() {
   local marker=$1 lock
