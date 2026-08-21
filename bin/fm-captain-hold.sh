@@ -491,14 +491,19 @@ command_answer() {
   if [ "$release" = 1 ]; then outcome=released; else outcome=answered; fi
 
   if [ "$state" = "done" ]; then
-    [ "$release" = 0 ] || fail "task $id is already closed; --release cannot reopen it"
     if body_has_resolution_record "$body"; then
-      # An exact retry is an idempotent no-op; a drifted decision is rejected.
+      # An exact compatible retry is an idempotent no-op; drift is rejected.
       [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
         || fail "captain-held task $id records a different captain decision"
+      recorded_mode=$(recorded_resolution_mode "$body" || true)
+      [ "$recorded_mode" != released ] \
+        || fail "task $id records this answer with mode released; a closed task cannot replay that release"
+      [ "$release" = 0 ] \
+        || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task"
       printf 'answered: %s\n' "$id"
       return 0
     fi
+    [ "$release" = 0 ] || fail "task $id is already closed; --release cannot reopen it"
     # Closed outside this script: record the captain's answer retroactively.
     # tasks-axi keeps hold_kind through a close, so it is the surviving proof
     # this really was the captain's item rather than ordinary finished work.

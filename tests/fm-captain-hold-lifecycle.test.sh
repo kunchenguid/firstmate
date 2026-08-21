@@ -342,6 +342,17 @@ test_release_frees_held_work() {
   show=$(tasks_in "$home" show sample-widget --full)
   assert_contains "$show" "Price it at nine dollars." "the new answer was not recorded"
   assert_contains "$show" "Go: ship it as planned." "the new answer erased the earlier record"
+
+  tasks_in "$home" done sample-widget >/dev/null \
+    || fail "could not complete the released work item normally"
+  if run_captain "$home" answer sample-widget --decision-file "$home/price.txt" \
+    > "$home/closed-wrong-mode.out" 2> "$home/closed-wrong-mode.err"; then
+    fail "a completed release replay without --release reported an answer"
+  fi
+  assert_grep "mode released" "$home/closed-wrong-mode.err" \
+    "the completed replay did not name the recorded release mode"
+  show=$(tasks_in "$home" show sample-widget --full)
+  assert_contains "$show" "state: done" "a refused completed replay changed task state"
   pass "release frees held work with the captain's words recorded and the body preserved"
 }
 
