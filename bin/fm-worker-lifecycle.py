@@ -48,6 +48,7 @@ LEGACY_PENDING_SENTINEL = "superseded-by-pending-actions"
 REQUEST_SCHEMA = "fm.worker-request/v1"
 EXECUTION_SCHEMA = "fm.worker-execution/v1"
 EXECUTION_RESULT_SCHEMA = "fm.worker-execution-result/v1"
+EXECUTION_TERMINAL_SCHEMA = "fm.worker-execution-terminal/v1"
 RELEASE_SCHEMA = "fm.worker-release/v2"
 AUTHORITY_SCHEMA = "fm.worker-authority/v1"
 CAPACITY_RESERVATION_SCHEMA = "fm.capacity-reservation/v1"
@@ -170,6 +171,14 @@ SKU_PLAN = {
 
 
 class LifecycleError(RuntimeError):
+    pass
+
+
+class ProviderIdentityRefused(LifecycleError):
+    pass
+
+
+class ProviderResultIdentityRefused(LifecycleError):
     pass
 
 
@@ -996,6 +1005,10 @@ def _provider_call_raw(env, operation, action=None):
         raise LifecycleError("provider response exceeded its bounded output allowance")
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", errors="replace").strip()[-1000:]
+        if result.returncode == 3 and detail.startswith(
+            "AZURE WORKER PROVIDER REFUSED-IDENTITY:"
+        ):
+            raise ProviderIdentityRefused(detail)
         raise LifecycleError("provider {} failed{}".format(operation, ": " + detail if detail else ""))
     try:
         response = json.loads(result.stdout.decode("utf-8"))
@@ -1159,13 +1172,13 @@ def resources_exact(worker, cloud, allow_missing_compute=False):
                 continue
             missing.append(kind)
             continue
-        # Staging request/result blobs are per-execution transport: every
-        # execute rewrites them and binds their content through the request
-        # and result digests, so their blob identity legitimately changes
-        # while every other kind stays immutable for the worker's lifetime.
+        # Task commands and staging request/result blobs are per-execution
+        # transport: every execute rewrites them and binds their content
+        # through the request and result digests, so their transport identity
+        # legitimately changes while every other kind stays immutable.
         if (
             prior is not None
-            and kind not in ("staging-request", "staging-result")
+            and kind not in ("task-command", "staging-request", "staging-result")
             and resource_identity(current) != resource_identity(prior)
         ):
             return False, "{} immutable identity changed".format(kind)
@@ -2037,6 +2050,29 @@ def apply_action_result(env, state, action, result):
         if worker is None:
             raise LifecycleError("execute result has no durable worker owner")
         execution = result.get("execution")
+        if isinstance(execution, dict) and execution.get("schema") == EXECUTION_TERMINAL_SCHEMA:
+            expected_task_command_id = (
+                ((action.get("resources") or {}).get("task-command") or {}).get("id")
+            )
+            if (
+                execution.get("request_digest") != action.get("request_digest")
+                or execution.get("idempotency_key") != action.get("idempotency_key")
+                or execution.get("disposition") != "provider-terminal"
+                or str(execution.get("provisioning_state", "")).lower()
+                not in ("failed", "canceled")
+                or not isinstance(execution.get("task_command_id"), str)
+                or not execution["task_command_id"]
+            ):
+                raise LifecycleError("provider terminal execution disposition is not exact")
+            if execution["task_command_id"] != expected_task_command_id:
+                raise ProviderResultIdentityRefused(
+                    "provider terminal execution task-command identity differs from the claimed action"
+                )
+            raise LifecycleError(
+                "provider-terminal {}: exact execution is {} and cannot be applied".format(
+                    execution["request_digest"], execution["provisioning_state"]
+                )
+            )
         if not isinstance(execution, dict) or execution.get("schema") != EXECUTION_RESULT_SCHEMA:
             raise LifecycleError("provider execution result schema is not supported")
         if execution.get("request_digest") != action.get("request_digest"):
@@ -4203,9 +4239,13 @@ def command_abandon_claim(env, args):
     because dropping a claim of unknown provider-side status could strand a
     resource that exists and is billing. An abandoned refused create leaves
     its cloud resources to the ordinary planner, which now sees the slot. An apply
-    that succeeds ends the claim normally. An apply that refuses is recorded
-    verbatim, with the result digest, in cleanup_refusals before the claim is
-    cleared, so the abandonment preserves the evidence it retires.
+    that succeeds ends the claim normally. A script-bound terminal execution
+    whose apply refuses is recorded with its result digest before clearing,
+    but only when it names the task-command resource in the claimed action; a
+    foreign terminal resource identity retains the claim.
+    An exact-key ProviderIdentityRefused replay is recorded verbatim before
+    clearing because that recorded resource identity can never bind again.
+    Every other provider failure leaves the claim untouched.
     """
     if not args.confirm_abandon:
         raise LifecycleError("--confirm-abandon is required")
@@ -4232,24 +4272,49 @@ def command_abandon_claim(env, args):
             current = (load_state(env).get("pending_actions") or {}).get(slot)
         if not isinstance(current, dict) or current.get("idempotency_key") != action["idempotency_key"]:
             raise LifecycleError("slot {} claim changed while abandoning; retry".format(slot))
-        result = provider_mutate(env, action, lease)
-        with controller_lock(env):
-            try:
-                apply_pending(env, action, result)
-                print("claim applied cleanly; nothing was abandoned")
-                return
-            except LifecycleError as exc:
-                refusal = exc
-            clean = load_state(env)
-            current = (clean.get("pending_actions") or {}).get(slot)
-            if not isinstance(current, dict) or current.get("idempotency_key") != action["idempotency_key"]:
-                raise LifecycleError("slot {} claim changed while abandoning; retry".format(slot))
-            worker = clean["workers"].get(slot)
-            record_refusal(clean, worker, LifecycleError(
-                "claim abandoned by operator: {} (result digest {})".format(
-                    str(refusal)[:400], result.get("result_digest") or digest_value(result))))
-            clean["pending_actions"].pop(slot, None)
-            save_state(env, clean)
+        identity_refusal = None
+        try:
+            result = provider_mutate(env, action, lease)
+        except ProviderIdentityRefused as exc:
+            identity_refusal = exc
+        if identity_refusal is not None:
+            with controller_lock(env):
+                clean = load_state(env)
+                current = (clean.get("pending_actions") or {}).get(slot)
+                if (
+                    not isinstance(current, dict)
+                    or current.get("idempotency_key") != action["idempotency_key"]
+                ):
+                    raise LifecycleError("slot {} claim changed while abandoning; retry".format(slot))
+                worker = clean["workers"].get(slot)
+                record_refusal(clean, worker, LifecycleError(
+                    "claim abandoned by operator: {}".format(identity_refusal)
+                ))
+                clean["pending_actions"].pop(slot, None)
+                save_state(env, clean)
+        else:
+            with controller_lock(env):
+                try:
+                    apply_pending(env, action, result)
+                    print("claim applied cleanly; nothing was abandoned")
+                    return
+                except ProviderResultIdentityRefused:
+                    raise
+                except LifecycleError as exc:
+                    refusal = exc
+                clean = load_state(env)
+                current = (clean.get("pending_actions") or {}).get(slot)
+                if (
+                    not isinstance(current, dict)
+                    or current.get("idempotency_key") != action["idempotency_key"]
+                ):
+                    raise LifecycleError("slot {} claim changed while abandoning; retry".format(slot))
+                worker = clean["workers"].get(slot)
+                record_refusal(clean, worker, LifecycleError(
+                    "claim abandoned by operator: {} (result digest {})".format(
+                        str(refusal)[:400], result.get("result_digest") or digest_value(result))))
+                clean["pending_actions"].pop(slot, None)
+                save_state(env, clean)
     print("FM-ABANDONED-CLAIM {} {}".format(slot, action["idempotency_key"]))
     print("abandoned claim recorded in cleanup refusals; the slot plans normally again")
 

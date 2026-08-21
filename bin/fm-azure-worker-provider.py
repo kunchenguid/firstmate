@@ -53,6 +53,10 @@ LANDED_FILES = (
 REQUEST_SCHEMA = "fm.worker-provider-request/v1"
 RESPONSE_SCHEMA = "fm.worker-provider-response/v1"
 INVENTORY_SCHEMA = "fm.worker-provider-inventory/v1"
+EXECUTION_TERMINAL_SCHEMA = "fm.worker-execution-terminal/v1"
+EXECUTE_DISPOSITION_SUBMIT = "submit"
+EXECUTE_DISPOSITION_TERMINAL = "terminal"
+EXECUTE_DISPOSITION_RECOVERED = "recovered"
 MAX_INPUT_BYTES = 2 * 1024 * 1024
 # The one blob name the guest may create, and the ceiling the supervisor
 # enforces before it uploads; both sides bound the same transfer. The name
@@ -247,6 +251,10 @@ REQUIRED_RESOURCE_KINDS = (
 
 
 class ProviderError(RuntimeError):
+    pass
+
+
+class ProviderIdentityRefusal(ProviderError):
     pass
 
 
@@ -1284,17 +1292,21 @@ def recorded_exact(
             raise ProviderError("exact {} resource is absent".format(kind))
         if prior is not None:
             if current.get("id") != prior.get("id"):
-                raise ProviderError("{} resource ID differs from the recorded assignment".format(kind))
-            # Staging request/result blobs are per-execution transport: every
-            # execute rewrites them under the same stable blob path and binds
-            # their content through the request and result digests, so only
-            # their path identity is fenced here.
+                raise ProviderIdentityRefusal(
+                    "{} resource ID differs from the recorded assignment".format(kind)
+                )
+            # Task commands and staging request/result blobs are per-execution
+            # transport: every execute rewrites them under the same stable
+            # resource path and binds their content through the request and
+            # result digests, so only their path identity is fenced here.
             if (
                 kind not in skip_immutable
-                and kind not in ("staging-request", "staging-result")
+                and kind not in ("task-command", "staging-request", "staging-result")
                 and current.get("immutable_id") != prior.get("immutable_id")
             ):
-                raise ProviderError("{} immutable identity differs from the recorded assignment".format(kind))
+                raise ProviderIdentityRefusal(
+                    "{} immutable identity differs from the recorded assignment".format(kind)
+                )
         for key, value in tags.items():
             if kind in (
                 "role-assignment", "state-container", "global-reservation",
@@ -1328,7 +1340,7 @@ def recorded_exact(
         str(ttl.get("status", "")).lower() != "enabled" or not ttl.get("deadline")
     ):
         raise ProviderError("worker TTL schedule is disabled or has no exact deadline")
-    for kind in ("bootstrap-command", "task-command", "monitor-extension"):
+    for kind in ("bootstrap-command", "monitor-extension"):
         child = resources.get(kind)
         if child is not None and str(child.get("provisioning_state", "")).lower() != "succeeded":
             raise ProviderError("{} provisioning state is not succeeded".format(kind))
@@ -2557,17 +2569,150 @@ def mutate_reset(controller, action):
     return None
 
 
+def execute_generation_line(action):
+    bindings = action["bindings"]
+    return "export FM_WORKER_ASSIGNMENT_GENERATION='{}' FM_WORKER_ACCOUNT_BINDING='{}'".format(
+        bindings["assignment_generation"], bindings["account_binding"]
+    )
+
+
+def build_execute_script(action):
+    request = action["request"]
+    request_json = json.dumps(request, sort_keys=True, separators=(",", ":"))
+    bindings = action["bindings"]
+    return """set -eu
+umask 077
+install -d -m 0700 /var/lib/firstmate-worker
+cat > /var/lib/firstmate-worker/request.json <<'JSON'
+{request}
+JSON
+export FM_WORKER_HOME_BINDING='{home}' FM_WORKER_TASK='{task}' FM_WORKER_TASK_GENERATION='{task_generation}'
+{generation_line}
+export FM_WORKER_WORKTREE_BINDING='{worktree}' FM_WORKER_REPOSITORY_BINDING='{repository}'
+export FM_WORKER_REPOSITORY_GENERATION='{repository_generation}' FM_WORKER_CLOUD_INSTANCE_ID='{cloud}'
+export FM_WORKER_WORKTREE=/mnt/task FM_WORKER_ACCOUNT_HOME=/mnt/account
+/usr/local/libexec/fm-worker-supervisor execute --request /var/lib/firstmate-worker/request.json --result /var/lib/firstmate-worker/result.json
+printf 'FM-WORKER-RESULT:%s\\n' "$(cat /var/lib/firstmate-worker/result.json)"
+""".format(
+        request=request_json, home=bindings["home_binding"], task=bindings["task"],
+        task_generation=bindings["task_generation"], generation_line=execute_generation_line(action),
+        worktree=bindings["worktree_binding"],
+        repository=bindings["repository_binding"], repository_generation=bindings["repository_generation"],
+        cloud=action["cloud_instance_id"],
+    )
+
+
+def execute_terminal_disposition(controller, action, task_command_resource):
+    if not isinstance(task_command_resource, dict) or not task_command_resource.get("id"):
+        return EXECUTE_DISPOSITION_SUBMIT, None
+    live = show_full(controller, task_command_resource["id"])
+    properties = live.get("properties") or {}
+    source = properties.get("source") or live.get("source") or {}
+    stored_script = source.get("script") if isinstance(source, dict) else None
+    if not isinstance(stored_script, str) or not stored_script.strip():
+        raise ProviderError("existing worker task Run Command source script is unreadable")
+    expected_script = build_execute_script(action)
+    request_digest = action.get("request_digest")
+    exact_script = stored_script == expected_script
+    fallback_bound = (
+        isinstance(request_digest, str)
+        and re.fullmatch(r"[0-9a-f]{64}", request_digest)
+        and request_digest in stored_script
+        and execute_generation_line(action) in stored_script.splitlines()
+    )
+    if not exact_script and not fallback_bound:
+        return EXECUTE_DISPOSITION_SUBMIT, None
+    provisioning_state = properties.get("provisioningState") or live.get("provisioningState")
+    if str(provisioning_state).lower() in ("failed", "canceled"):
+        return EXECUTE_DISPOSITION_TERMINAL, {
+            "schema": EXECUTION_TERMINAL_SCHEMA,
+            "request_digest": request_digest,
+            "idempotency_key": action.get("idempotency_key"),
+            "disposition": "provider-terminal",
+            "provisioning_state": provisioning_state,
+            "task_command_id": task_command_resource["id"],
+        }
+    if str(provisioning_state).lower() != "succeeded":
+        raise ProviderError(
+            "exact worker execution remains bound and nonterminal: state={}".format(
+                provisioning_state
+            )
+        )
+    names = expected_names(controller, action["slot"])
+    view = run_command_instance_view(controller, names["vm"], names["task-command"])
+    if view.get("executionState") != "Succeeded":
+        raise ProviderError(
+            "exact worker execution has no recoverable terminal result: state={}".format(
+                view.get("executionState")
+            )
+        )
+    execution = marker_payload(
+        "{}\n{}".format(view.get("output", ""), view.get("error", "")),
+        "FM-WORKER-RESULT:",
+    )
+    if not isinstance(execution, dict) or execution.get("request_digest") != request_digest:
+        raise ProviderError("exact worker execution has no request-bound result marker")
+    supplied = execution.get("result_digest")
+    unsigned = dict(execution)
+    unsigned.pop("result_digest", None)
+    if supplied != hashlib.sha256(canonical_bytes(unsigned)).hexdigest():
+        raise ProviderError("recovered private worker result digest is not exact")
+    return EXECUTE_DISPOSITION_RECOVERED, execution
+
+
+def persist_execute_result(controller, action, names, tags, execution):
+    request = action["request"]
+    if request.get("outcome_expected") and execution.get("outcome_present"):
+        outcome_target = action.get("outcome_dir")
+        if not outcome_target:
+            raise ProviderError("execution collected an outcome with no controller directory to land it in")
+        # The guest records where it actually put the bytes. Anything but the
+        # staging blob means the upload was diverted (a test sink, an injected
+        # unprotected FM_WORKER_OUTCOME_FILE), and the result must not be
+        # treated as a collectable outcome.
+        if execution.get("outcome_sink", "") != "blob":
+            raise ProviderError(
+                "execution claims an outcome written to {!r} rather than the staging blob".format(
+                    execution.get("outcome_sink")
+                )
+            )
+        digest_claim = execution.get("outcome_sha256")
+        bytes_claim = execution.get("outcome_bytes")
+        if not isinstance(digest_claim, str) or not re.fullmatch(r"[0-9a-f]{64}", digest_claim):
+            raise ProviderError("execution outcome digest is malformed")
+        if not isinstance(bytes_claim, int) or isinstance(bytes_claim, bool) or not 0 < bytes_claim <= MAX_OUTCOME_BYTES:
+            raise ProviderError("execution outcome size is malformed or unbounded")
+        download_outcome_bundle(
+            controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
+            outcome_blob_name(request["request_digest"]), digest_claim, bytes_claim,
+            Path(outcome_target) / "outcome.bundle",
+        )
+    upload_json_blob(
+        controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
+        names["staging-result"], execution, tags, overwrite=True,
+    )
+
+
 def mutate_execute(controller, action):
     snapshot = inventory(controller, include_metrics=False)
     worker = worker_by_slot(snapshot, action["slot"])
     resources = recorded_exact(action, worker)
-    if "deallocated" in str(resources["vm"].get("power_state", "")).lower():
-        raise ProviderError("execute refuses deallocated worker compute")
     request = action.get("request")
     if not isinstance(request, dict) or request.get("request_digest") != action.get("request_digest"):
         raise ProviderError("execution request identity is not exact")
     names = expected_names(controller, action["slot"])
     tags = action_tags(controller, action)
+    disposition, recovered = execute_terminal_disposition(
+        controller, action, resources.get("task-command")
+    )
+    if disposition in (EXECUTE_DISPOSITION_TERMINAL, EXECUTE_DISPOSITION_RECOVERED):
+        if disposition == EXECUTE_DISPOSITION_RECOVERED:
+            persist_execute_result(controller, action, names, tags, recovered)
+        return worker, recovered
+    if disposition != EXECUTE_DISPOSITION_SUBMIT:
+        raise ProviderError("worker execution disposition is unsupported")
+    if "deallocated" in str(resources["vm"].get("power_state", "")).lower():
+        raise ProviderError("execute refuses deallocated worker compute")
     upload_json_blob(
         controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
         names["staging-request"], request, tags, overwrite=True,
@@ -2620,28 +2765,7 @@ def mutate_execute(controller, action):
         if not re.fullmatch(r"https://[A-Za-z0-9.:/_?&=%+-]+", outcome_sas):
             raise ProviderError("outcome staging SAS carries unsupported characters")
         protected_parameters.append("FM_WORKER_OUTCOME_URL=" + outcome_sas)
-    request_json = json.dumps(request, sort_keys=True, separators=(",", ":"))
-    bindings = action["bindings"]
-    script = """set -eu
-umask 077
-install -d -m 0700 /var/lib/firstmate-worker
-cat > /var/lib/firstmate-worker/request.json <<'JSON'
-{request}
-JSON
-export FM_WORKER_HOME_BINDING='{home}' FM_WORKER_TASK='{task}' FM_WORKER_TASK_GENERATION='{task_generation}'
-export FM_WORKER_ASSIGNMENT_GENERATION='{assignment}' FM_WORKER_ACCOUNT_BINDING='{account}'
-export FM_WORKER_WORKTREE_BINDING='{worktree}' FM_WORKER_REPOSITORY_BINDING='{repository}'
-export FM_WORKER_REPOSITORY_GENERATION='{repository_generation}' FM_WORKER_CLOUD_INSTANCE_ID='{cloud}'
-export FM_WORKER_WORKTREE=/mnt/task FM_WORKER_ACCOUNT_HOME=/mnt/account
-/usr/local/libexec/fm-worker-supervisor execute --request /var/lib/firstmate-worker/request.json --result /var/lib/firstmate-worker/result.json
-printf 'FM-WORKER-RESULT:%s\\n' "$(cat /var/lib/firstmate-worker/result.json)"
-""".format(
-        request=request_json, home=bindings["home_binding"], task=bindings["task"],
-        task_generation=bindings["task_generation"], assignment=bindings["assignment_generation"],
-        account=bindings["account_binding"], worktree=bindings["worktree_binding"],
-        repository=bindings["repository_binding"], repository_generation=bindings["repository_generation"],
-        cloud=action["cloud_instance_id"],
-    )
+    script = build_execute_script(action)
     update_command = [
         "vm", "run-command", "update", "--resource-group", controller["resource_group"],
         "--vm-name", names["vm"], "--name", names["task-command"],
@@ -2681,35 +2805,7 @@ printf 'FM-WORKER-RESULT:%s\\n' "$(cat /var/lib/firstmate-worker/result.json)"
     unsigned.pop("result_digest", None)
     if supplied != hashlib.sha256(canonical_bytes(unsigned)).hexdigest():
         raise ProviderError("private worker result digest is not exact")
-    if request.get("outcome_expected") and execution.get("outcome_present"):
-        outcome_target = action.get("outcome_dir")
-        if not outcome_target:
-            raise ProviderError("execution collected an outcome with no controller directory to land it in")
-        # The guest records where it actually put the bytes. Anything but the
-        # staging blob means the upload was diverted (a test sink, an injected
-        # unprotected FM_WORKER_OUTCOME_FILE), and the result must not be
-        # treated as a collectable outcome.
-        if execution.get("outcome_sink", "") != "blob":
-            raise ProviderError(
-                "execution claims an outcome written to {!r} rather than the staging blob".format(
-                    execution.get("outcome_sink")
-                )
-            )
-        digest_claim = execution.get("outcome_sha256")
-        bytes_claim = execution.get("outcome_bytes")
-        if not isinstance(digest_claim, str) or not re.fullmatch(r"[0-9a-f]{64}", digest_claim):
-            raise ProviderError("execution outcome digest is malformed")
-        if not isinstance(bytes_claim, int) or isinstance(bytes_claim, bool) or not 0 < bytes_claim <= MAX_OUTCOME_BYTES:
-            raise ProviderError("execution outcome size is malformed or unbounded")
-        download_outcome_bundle(
-            controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
-            outcome_blob_name(request["request_digest"]), digest_claim, bytes_claim,
-            Path(outcome_target) / "outcome.bundle",
-        )
-    upload_json_blob(
-        controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
-        names["staging-result"], execution, tags, overwrite=True,
-    )
+    persist_execute_result(controller, action, names, tags, execution)
     return worker_by_slot(inventory(controller, include_metrics=False), action["slot"]), execution
 
 
@@ -2858,6 +2954,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except ProviderIdentityRefusal as exc:
+        print("AZURE WORKER PROVIDER REFUSED-IDENTITY: {}".format(exc), file=sys.stderr)
+        raise SystemExit(3)
     except ProviderError as exc:
         print("AZURE WORKER PROVIDER REFUSED: {}".format(exc), file=sys.stderr)
         raise SystemExit(2)

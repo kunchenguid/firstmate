@@ -61,6 +61,7 @@ for marker in (
     "pending_actions", "LEGACY_PENDING_SENTINEL", "superseded-by-pending-actions",
     "revision moved from", "FencedState", "slot_lease", "LOCK_NB", "provider_mutate",
     "drain_pending", "claim_pending", "apply_pending", "command_abandon_claim",
+    "ProviderIdentityRefused", "fm.worker-execution-terminal/v1",
     "capacity-reserve", "capacity-reserve-shape", "capacity-release", "merged_specialized_reservations",
     "command_withdraw", "command_surrender", "WORKER AUTHORITY REFUSED",
     "--confirm-discard-unlanded",
@@ -91,6 +92,8 @@ for marker in (
     "/dev/disk/azure/scsi1/lun", "/dev/disk/azure/data/by-lun/",
     '"bootstrap-command"', '"task-command"', '"ttl-schedule"', '"global-reservation"',
     '"staging-request"', '"staging-result"',
+    "ProviderIdentityRefusal", "fm.worker-execution-terminal/v1",
+    "build_execute_script", "REFUSED-IDENTITY",
     "worker NIC has a public IP relation", "VM cloud identity set is not exactly one slot identity",
 ):
     assert marker in azure, marker
@@ -231,13 +234,23 @@ foreign["resources"]["task-disk"]["immutable_id"] = "foreign"
 assert module.classify_worker(worker, foreign)[0] == "retained-for-investigation"
 assert module.classify_worker(worker, None)[0] == "retained-for-investigation"
 
-# Staging blobs are per-execution transport: their identity changes after an
-# execute and must not wedge classification, while every other kind still
-# fences on identity (the task-disk case above).
+# Run commands and staging blobs are per-execution transport: their identities
+# change after an execute and must not wedge classification, while every other
+# kind still fences on identity (the task-disk case above).
 executed = copy.deepcopy(cloud)
+executed["resources"]["task-command"]["immutable_id"] = "post-execute-state"
+executed["resources"]["task-command"]["provisioning_state"] = "Failed"
 executed["resources"]["staging-request"]["immutable_id"] = "post-execute-etag"
 executed["resources"]["staging-result"]["immutable_id"] = "post-execute-etag-2"
 assert module.classify_worker(worker, executed)[0] == "assigned"
+for kind in module.REQUIRED_RESOURCE_KINDS:
+    changed = copy.deepcopy(cloud)
+    changed["resources"][kind]["immutable_id"] = "foreign-" + kind
+    classification = module.classify_worker(worker, changed)[0]
+    if kind in ("task-command", "staging-request", "staging-result"):
+        assert classification == "assigned", (kind, classification)
+    else:
+        assert classification == "retained-for-investigation", (kind, classification)
 released_executed = copy.deepcopy(released)
 released_executed["phase"] = "assigned"
 executed_dark = copy.deepcopy(executed)
@@ -410,6 +423,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 
 spec = importlib.util.spec_from_file_location("azure_provider", sys.argv[1])
@@ -454,6 +468,16 @@ action["resources"] = {
 }
 worker = {"slot": 1, "resources": resources}
 module.recorded_exact(action, worker)
+# Ordinary provider failures stay on exit 2. If every ProviderError were
+# mislabeled as a permanent identity refusal, abandon-claim could clear a
+# transiently failed claim.
+plain_refusal = subprocess.run(
+    [sys.executable, sys.argv[1]], input=b"{}\n",
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+)
+assert plain_refusal.returncode == 2, plain_refusal
+assert b"AZURE WORKER PROVIDER REFUSED:" in plain_refusal.stderr, plain_refusal.stderr
+assert b"REFUSED-IDENTITY" not in plain_refusal.stderr, plain_refusal.stderr
 for child in ("monitor-extension", "bootstrap-command", "task-command", "ttl-schedule"):
     changed = copy.deepcopy(worker)
     changed["resources"][child]["attached_to"] = "/foreign-vm"
@@ -461,6 +485,7 @@ for child in ("monitor-extension", "bootstrap-command", "task-command", "ttl-sch
         module.recorded_exact(action, changed)
     except module.ProviderError as exc:
         assert "exact worker VM" in str(exc)
+        assert not isinstance(exc, module.ProviderIdentityRefusal), exc
     else:
         raise AssertionError("foreign {} target accepted".format(child))
 changed = copy.deepcopy(worker)
@@ -482,33 +507,187 @@ else:
 for kind in module.REQUIRED_RESOURCE_KINDS:
     changed = copy.deepcopy(worker)
     changed["resources"][kind]["immutable_id"] = "foreign"
-    if kind in ("staging-request", "staging-result"):
-        # Transport blobs rewrite on every execute; only their path is fenced.
+    if kind in ("task-command", "staging-request", "staging-result"):
+        # Execute transport rewrites on every run; only its path is fenced.
         module.recorded_exact(action, changed)
         moved = copy.deepcopy(worker)
         moved["resources"][kind]["id"] = "/slot/1/elsewhere"
         try:
             module.recorded_exact(action, moved)
-        except module.ProviderError:
+        except module.ProviderIdentityRefusal:
             pass
         else:
-            raise AssertionError("relocated {} blob path accepted".format(kind))
+            raise AssertionError("relocated {} transport path accepted".format(kind))
         continue
     try:
         module.recorded_exact(action, changed)
-    except module.ProviderError:
-        pass
+    except module.ProviderError as exc:
+        assert isinstance(exc, module.ProviderIdentityRefusal), exc
     else:
         raise AssertionError("foreign {} immutable identity accepted".format(kind))
+changed = copy.deepcopy(worker)
+changed["resources"]["task-command"]["immutable_id"] = "post-execute-state"
+changed["resources"]["task-command"]["provisioning_state"] = "Failed"
+module.recorded_exact(action, changed)
+for kind in ("bootstrap-command", "monitor-extension"):
+    changed = copy.deepcopy(worker)
+    changed["resources"][kind]["provisioning_state"] = "Failed"
+    try:
+        module.recorded_exact(action, changed)
+    except module.ProviderError as exc:
+        assert "provisioning state" in str(exc), exc
+    else:
+        raise AssertionError("failed {} provisioning state accepted".format(kind))
 for key in tags:
     changed = copy.deepcopy(worker)
     changed["resources"]["task-disk"]["tags"][key] = "foreign"
     try:
         module.recorded_exact(action, changed)
+    except module.ProviderError as exc:
+        assert not isinstance(exc, module.ProviderIdentityRefusal), exc
+    else:
+        raise AssertionError("foreign task-disk tag accepted: {}".format(key))
+
+# A terminal probe is bound to the exact execute script (or its exact request
+# digest plus assignment-generation line), recovers a completed real result,
+# and never converts an unrelated stale Failed Run Command into finality.
+execute_action = copy.deepcopy(action)
+execute_action["type"] = "execute"
+execute_action["request_digest"] = "5" * 64
+execute_action["idempotency_key"] = "6" * 64
+execute_action["request"] = dict(execute_action["bindings"], **{
+    "schema": "fm.worker-execution/v1",
+    "cloud_instance_id": execute_action["cloud_instance_id"],
+    "argv": ["/usr/bin/true"], "wall_seconds": 60,
+    "request_digest": execute_action["request_digest"],
+})
+script = module.build_execute_script(execute_action)
+task_command = worker["resources"]["task-command"]
+real_show_full = module.show_full
+real_run_command_instance_view = module.run_command_instance_view
+module.show_full = lambda *_args, **_kwargs: {
+    "properties": {"source": {"script": script}, "provisioningState": "Failed"}
+}
+terminal_kind, terminal = module.execute_terminal_disposition(
+    controller, execute_action, task_command
+)
+assert terminal_kind == module.EXECUTE_DISPOSITION_TERMINAL, terminal_kind
+assert terminal == {
+    "schema": "fm.worker-execution-terminal/v1",
+    "request_digest": execute_action["request_digest"],
+    "idempotency_key": execute_action["idempotency_key"],
+    "disposition": "provider-terminal",
+    "provisioning_state": "Failed",
+    "task_command_id": task_command["id"],
+}, terminal
+module.show_full = lambda *_args, **_kwargs: {
+    "properties": {"source": {"script": "# normalized by Azure\n" + script},
+                   "provisioningState": "Canceled"}
+}
+fallback_kind, fallback_terminal = module.execute_terminal_disposition(
+    controller, execute_action, task_command
+)
+assert fallback_kind == module.EXECUTE_DISPOSITION_TERMINAL, fallback_kind
+assert fallback_terminal["disposition"] == "provider-terminal", fallback_terminal
+stale_script = script.replace(execute_action["request_digest"], "9" * 64)
+module.show_full = lambda *_args, **_kwargs: {
+    "properties": {"source": {"script": stale_script}, "provisioningState": "Failed"}
+}
+assert module.execute_terminal_disposition(controller, execute_action, task_command) == (
+    module.EXECUTE_DISPOSITION_SUBMIT, None
+)
+module.show_full = lambda *_args, **_kwargs: {
+    "properties": {"source": {"script": "echo unrelated"}, "provisioningState": "Failed"}
+}
+assert module.execute_terminal_disposition(controller, execute_action, task_command) == (
+    module.EXECUTE_DISPOSITION_SUBMIT, None
+)
+execution = {
+    "schema": "fm.worker-execution-result/v1",
+    "request_digest": execute_action["request_digest"],
+    "task": "task", "task_generation": "task-gen",
+    "assignment_generation": "asg-00000001", "cloud_instance_id": "vm-instance",
+    "repository_binding": "4" * 64, "repository_generation": "repo-gen",
+    "exit_code": 0, "timed_out": False,
+    "stdout_sha256": "7" * 64, "stderr_sha256": "8" * 64,
+    "stdout_truncated": False, "stderr_truncated": False,
+}
+execution["result_digest"] = hashlib.sha256(module.canonical_bytes(execution)).hexdigest()
+module.show_full = lambda *_args, **_kwargs: {
+    "properties": {"source": {"script": script}, "provisioningState": "Succeeded"}
+}
+module.run_command_instance_view = lambda *_args, **_kwargs: {
+    "executionState": "Succeeded",
+    "output": "FM-WORKER-RESULT:" + json.dumps(execution, sort_keys=True, separators=(",", ":")),
+    "error": "",
+}
+recovered_kind, recovered_execution = module.execute_terminal_disposition(
+    controller, execute_action, task_command
+)
+assert recovered_kind == module.EXECUTE_DISPOSITION_RECOVERED, recovered_kind
+assert recovered_execution == execution, recovered_execution
+
+# Once the exact request owns the Run Command, a replay may only recover its
+# terminal disposition or exact result. Updating/Running and a Succeeded
+# command without a valid marker/digest are ordinary retryable refusals; they
+# must never fall through to the update that would execute the guest twice.
+real_inventory = module.inventory
+real_worker_by_slot = module.worker_by_slot
+real_recorded_exact = module.recorded_exact
+real_upload_json_blob = module.upload_json_blob
+real_az = module.az
+module.inventory = lambda *_args, **_kwargs: {"workers": [worker]}
+module.worker_by_slot = lambda _snapshot, _slot: worker
+module.recorded_exact = lambda _action, _worker: worker["resources"]
+updates = []
+def forbidden_update(*_args, **_kwargs):
+    updates.append("update")
+    raise AssertionError("exact-bound execution reached Run Command update")
+module.upload_json_blob = forbidden_update
+module.az = forbidden_update
+
+def retained_execute(properties, view=None):
+    module.show_full = lambda *_args, **_kwargs: {"properties": properties}
+    module.run_command_instance_view = lambda *_args, **_kwargs: dict(view or {})
+    try:
+        module.mutate_execute(controller, execute_action)
     except module.ProviderError:
         pass
     else:
-        raise AssertionError("foreign task-disk tag accepted: {}".format(key))
+        raise AssertionError("exact-bound incomplete execution was submitted again")
+    assert updates == [], updates
+
+retained_execute({"provisioningState": "Succeeded"})
+retained_execute({"source": {"script": None}, "provisioningState": "Succeeded"})
+retained_execute({"source": {"script": ""}, "provisioningState": "Succeeded"})
+retained_execute({"source": {"script": " \n\t"}, "provisioningState": "Succeeded"})
+retained_execute({"source": {"script": script}, "provisioningState": "Updating"})
+retained_execute(
+    {"source": {"script": script}, "provisioningState": "Succeeded"},
+    {"executionState": "Running", "output": "", "error": ""},
+)
+retained_execute(
+    {"source": {"script": script}, "provisioningState": "Succeeded"},
+    {"executionState": "Succeeded", "output": "", "error": ""},
+)
+bad_execution = dict(execution, result_digest="0" * 64)
+retained_execute(
+    {"source": {"script": script}, "provisioningState": "Succeeded"},
+    {
+        "executionState": "Succeeded",
+        "output": "FM-WORKER-RESULT:" + json.dumps(
+            bad_execution, sort_keys=True, separators=(",", ":")
+        ),
+        "error": "",
+    },
+)
+module.inventory = real_inventory
+module.worker_by_slot = real_worker_by_slot
+module.recorded_exact = real_recorded_exact
+module.upload_json_blob = real_upload_json_blob
+module.az = real_az
+module.show_full = real_show_full
+module.run_command_instance_view = real_run_command_instance_view
 
 # Specialized validation demand and its durable reservation are exact shared
 # capacity inputs; active-without-reservation and foreign reservation identities fail closed.
@@ -891,7 +1070,8 @@ if path.exists():
     state = json.loads(path.read_text())
 else:
     state = {
-        "workers": {}, "seen": {}, "calls": [],
+        "workers": {}, "seen": {}, "calls": [], "execute_updates": 0,
+        "execute_terminal_probes": 0,
         "metrics": {"actual_usd": 100.0, "forecast_usd": 150.0},
     }
 
@@ -979,19 +1159,87 @@ if request["operation"] == "mutate":
             )
         )
         raise SystemExit(1)
+    slot = str(action["slot"])
+    kind = action["type"]
+    if kind == "execute" and os.environ.get("FIXTURE_TRANSIENT_EXECUTE_REFUSAL"):
+        sys.stderr.write("FIXTURE PROVIDER REFUSED: transient execute refusal\n")
+        raise SystemExit(2)
+    live_worker = state["workers"].get(slot)
+    if live_worker is not None:
+        live_resources = live_worker.get("resources", {})
+        for resource_kind, recorded in (action.get("resources") or {}).items():
+            current = live_resources.get(resource_kind)
+            if not isinstance(current, dict) or not isinstance(recorded, dict):
+                continue
+            identity_changed = (
+                resource_kind not in ("task-command", "staging-request", "staging-result")
+                and current.get("immutable_id") != recorded.get("immutable_id")
+            )
+            if current.get("id") != recorded.get("id") or identity_changed:
+                sys.stderr.write(
+                    "AZURE WORKER PROVIDER REFUSED-IDENTITY: {} identity differs from "
+                    "the recorded assignment\n".format(resource_kind)
+                )
+                raise SystemExit(3)
+    task_command = (live_worker or {}).get("resources", {}).get("task-command", {})
+    if kind == "execute" and os.environ.get("FIXTURE_UNREADABLE_EXECUTE_SCRIPT"):
+        state["execute_terminal_probes"] = state.get("execute_terminal_probes", 0) + 1
+        save()
+        sys.stderr.write(
+            "FIXTURE PROVIDER REFUSED: existing worker task Run Command source "
+            "script is unreadable\n"
+        )
+        raise SystemExit(2)
+    bound_state = os.environ.get("FIXTURE_BOUND_EXECUTE_STATE")
+    if kind == "execute" and bound_state:
+        task_command["provisioning_state"] = bound_state
+        task_command["request_digest"] = action["request_digest"]
+        state["execute_terminal_probes"] = state.get("execute_terminal_probes", 0) + 1
+        save()
+        sys.stderr.write(
+            "FIXTURE PROVIDER REFUSED: exact worker execution remains bound and "
+            "nonterminal: state={}\n".format(bound_state)
+        )
+        raise SystemExit(2)
     state["calls"].append({
-        "type": action["type"], "slot": action["slot"], "key": key,
+        "type": kind, "slot": action["slot"], "key": key,
         "outcome_expected": bool((action.get("request") or {}).get("outcome_expected")),
         "outcome_dir": action.get("outcome_dir"),
         # Additive: the digest-bound staged manifest the provider actually
         # receives, so a caller can assert what a lane staged.
         "payload_files": (action.get("request") or {}).get("payload_files"),
     })
-    if key in state["seen"]:
+    if kind == "execute" and os.environ.get("FIXTURE_TERMINAL_EXECUTE"):
+        task_command["immutable_id"] = "task-command-terminal-{}".format(key[:8])
+        task_command["provisioning_state"] = "Failed"
+        task_command["request_digest"] = action["request_digest"]
+    task_state = str(task_command.get("provisioning_state", "")).lower()
+    if (
+        kind == "execute"
+        and task_state in ("failed", "canceled")
+        and task_command.get("request_digest") == action.get("request_digest")
+    ):
+        result = {
+            "idempotency_key": key,
+            "action": kind,
+            "worker": live_worker,
+            "execution": {
+                "schema": "fm.worker-execution-terminal/v1",
+                "request_digest": action["request_digest"],
+                "idempotency_key": key,
+                "disposition": "provider-terminal",
+                "provisioning_state": task_command["provisioning_state"],
+                "task_command_id": (
+                    "/fixture/foreign/task-command"
+                    if os.environ.get("FIXTURE_FOREIGN_TERMINAL_ID")
+                    else task_command["id"]
+                ),
+            },
+        }
+        state["seen"][key] = result
+    elif key in state["seen"]:
         result = state["seen"][key]
     else:
-        slot = str(action["slot"])
-        kind = action["type"]
         if kind == "create":
             assert slot not in state["workers"]
             worker = complete_worker(action)
@@ -1024,7 +1272,12 @@ if request["operation"] == "mutate":
             state["workers"].pop(slot)
             result = {"idempotency_key": key, "action": kind}
         elif kind == "execute":
+            state["execute_updates"] = state.get("execute_updates", 0) + 1
             request_value = action["request"]
+            task_command = state["workers"][slot]["resources"]["task-command"]
+            task_command["immutable_id"] = "task-command-execute-{}".format(key[:8])
+            task_command["provisioning_state"] = "Succeeded"
+            task_command["request_digest"] = action["request_digest"]
             execution = {
                 "schema": "fm.worker-execution-result/v1",
                 "request_digest": action["request_digest"],
@@ -1379,6 +1632,21 @@ refused_abandon = run("abandon-claim", "--slot", skew_slot, "--idempotency-key",
                       "--confirm-abandon", "--confirm-subscription",
                       env["FM_AZURE_SUBSCRIPTION_ID"], check=False)
 assert refused_abandon.returncode != 0 and "different claim" in refused_abandon.stderr, refused_abandon.stderr
+# THE negative safety pin: an ordinary transient provider failure is not the
+# structured permanent identity refusal, so abandonment must fail and retain
+# both the claim and the absence of any abandonment record.
+before_refusals = list(skew_state["cleanup_refusals"])
+transient_env = dict(env, FIXTURE_TRANSIENT_EXECUTE_REFUSAL="1")
+transient_abandon = subprocess.run(
+    [wrapper, "abandon-claim", "--slot", skew_slot,
+     "--idempotency-key", skew_claim["idempotency_key"], "--confirm-abandon",
+     "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]],
+    env=transient_env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+)
+assert transient_abandon.returncode != 0, transient_abandon
+after_transient = controller_state()
+assert after_transient["pending_actions"][skew_slot]["idempotency_key"] == skew_claim["idempotency_key"]
+assert after_transient["cleanup_refusals"] == before_refusals, after_transient["cleanup_refusals"]
 run("abandon-claim", "--slot", skew_slot, "--idempotency-key", skew_claim["idempotency_key"],
     "--confirm-abandon", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
 after_abandon = controller_state()
@@ -1398,6 +1666,153 @@ armed_action = [
 assert armed_action["outcome_expected"] is True, armed_action
 assert armed_action["outcome_dir"] == str(outcome_dir.resolve()), armed_action
 
+# An existing task-command whose live source script is unreadable cannot prove
+# that it is safe to submit, and an exact request still Updating is retained as
+# an ordinary provider failure. Neither the initial execute nor abandon-claim
+# may reach the fixture's Run Command update; removing the injected hostile
+# state lets the same durable claim make its one first submission and apply.
+before_bound = fixture_state()
+bound_updates = before_bound.get("execute_updates", 0)
+bound_probes = before_bound.get("execute_terminal_probes", 0)
+bound_execute = armed_execute(
+    "--payload-dir", str(payload_dir), "--account-dir", str(account_dir),
+    "--outcome-dir", str(outcome_dir),
+    overrides={"FIXTURE_UNREADABLE_EXECUTE_SCRIPT": "1"},
+    command="/usr/bin/false",
+)
+assert bound_execute.returncode != 0 and "source script is unreadable" in bound_execute.stderr, (
+    bound_execute.stderr
+)
+bound_state = controller_state()
+bound_slot = str(bound_state["queue"]["task-2@gen-2"]["slot"])
+bound_claim = bound_state["pending_actions"][bound_slot]
+after_bound_execute = fixture_state()
+assert after_bound_execute.get("execute_updates", 0) == bound_updates, after_bound_execute
+assert after_bound_execute.get("execute_terminal_probes", 0) == bound_probes + 1, after_bound_execute
+bound_abandon = subprocess.run(
+    [wrapper, "abandon-claim", "--slot", bound_slot,
+     "--idempotency-key", bound_claim["idempotency_key"], "--confirm-abandon",
+     "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]],
+    env=dict(env, FIXTURE_BOUND_EXECUTE_STATE="Running"), text=True,
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+)
+assert bound_abandon.returncode != 0 and "remains bound" in bound_abandon.stderr, bound_abandon.stderr
+after_bound_abandon = controller_state()
+assert after_bound_abandon["pending_actions"][bound_slot]["idempotency_key"] == bound_claim["idempotency_key"]
+bound_fixture = fixture_state()
+assert bound_fixture.get("execute_updates", 0) == bound_updates, bound_fixture
+assert bound_fixture.get("execute_terminal_probes", 0) == bound_probes + 2, bound_fixture
+run("abandon-claim", "--slot", bound_slot,
+    "--idempotency-key", bound_claim["idempotency_key"], "--confirm-abandon",
+    "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+assert bound_slot not in controller_state()["pending_actions"]
+assert fixture_state().get("execute_updates", 0) == bound_updates + 1
+
+# Reproduce the Azure wedge: the exact execute claim owns a Run Command whose
+# per-execution identity and provisioning state moved to Failed. Reconcile
+# records the terminal disposition but retains the claim; abandon replays that
+# same terminal result, records before clearing, and ordinary release still
+# traverses deallocate -> delete-compute -> reset cleanly.
+task3 = controller_state()["queue"]["task-3@gen-3"]
+task3_worker = controller_state()["workers"][str(task3["slot"])]
+terminal_env = dict(env, FIXTURE_TERMINAL_EXECUTE="1")
+terminal_execute = subprocess.run(
+    [wrapper, "execute", "--task", "task-3", "--task-generation", "gen-3",
+     "--assignment-generation", task3_worker["assignment_generation"],
+     "--wall-seconds", "60", "--confirm-execute", "--confirm-subscription",
+     env["FM_AZURE_SUBSCRIPTION_ID"], "--", "/usr/bin/true"],
+    env=terminal_env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+)
+assert terminal_execute.returncode != 0 and "provider-terminal" in terminal_execute.stderr, terminal_execute.stderr
+terminal_state = controller_state()
+terminal_slot = str(task3["slot"])
+terminal_claim = terminal_state["pending_actions"][terminal_slot]
+reconciled = json.loads(run(
+    "reconcile", "--apply", "--json", "--confirm-subscription",
+    env["FM_AZURE_SUBSCRIPTION_ID"],
+).stdout)
+assert any(item["type"] == "replay-refused" for item in reconciled["actions"]), reconciled
+retained = controller_state()
+assert terminal_slot in retained["pending_actions"], retained["pending_actions"]
+assert any("provider-terminal" in str(entry.get("note", ""))
+           for entry in retained["cleanup_refusals"]), retained["cleanup_refusals"]
+# The terminal result must identify the exact task-command path stored in the
+# claimed action. A foreign path is an untrusted provider result: ordinary
+# apply refuses it, and even explicit abandonment retains the claim.
+foreign_terminal_env = dict(
+    terminal_env, FIXTURE_FOREIGN_TERMINAL_ID="1"
+)
+foreign_abandon = subprocess.run(
+    [wrapper, "abandon-claim", "--slot", terminal_slot,
+     "--idempotency-key", terminal_claim["idempotency_key"],
+     "--confirm-abandon", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]],
+    env=foreign_terminal_env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+)
+assert foreign_abandon.returncode != 0 and "task-command identity differs" in foreign_abandon.stderr, (
+    foreign_abandon.stderr
+)
+after_foreign_terminal = controller_state()
+assert after_foreign_terminal["pending_actions"][terminal_slot]["idempotency_key"] == (
+    terminal_claim["idempotency_key"]
+), after_foreign_terminal["pending_actions"]
+run("abandon-claim", "--slot", terminal_slot,
+    "--idempotency-key", terminal_claim["idempotency_key"],
+    "--confirm-abandon", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+cleared = controller_state()
+assert terminal_slot not in cleared["pending_actions"], cleared["pending_actions"]
+assert any("claim abandoned by operator" in str(entry.get("note", ""))
+           and "provider-terminal" in str(entry.get("note", ""))
+           for entry in cleared["cleanup_refusals"]), cleared["cleanup_refusals"]
+status = json.loads(run("status", "--live", "--json").stdout)
+assert status["classification_counts"]["assigned"] == 4, status["classification_counts"]
+release(3)
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+released_state = controller_state()
+released_fixture = fixture_state()
+assert terminal_slot not in released_state["workers"], released_state["workers"]
+assert terminal_slot not in released_fixture["workers"], released_fixture["workers"]
+assert [entry["type"] for entry in released_fixture["calls"]][-3:] == [
+    "deallocate", "delete-compute", "reset",
+], released_fixture["calls"][-3:]
+
+# The other abandon-only disposition is an exact provider identity refusal.
+# A transient/plain ProviderError was retained above; exit 3 plus the explicit
+# marker alone permits the operator to record the refusal before clearing.
+task4 = controller_state()["queue"]["task-4@gen-4"]
+task4_slot = str(task4["slot"])
+task4_worker = controller_state()["workers"][task4_slot]
+identity_wedge = subprocess.run(
+    [wrapper, "execute", "--task", "task-4", "--task-generation", "gen-4",
+     "--assignment-generation", task4_worker["assignment_generation"],
+     "--wall-seconds", "60", "--payload-dir", str(payload_dir),
+     "--account-dir", str(account_dir), "--outcome-dir", str(outcome_dir),
+     "--confirm-execute", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"],
+     "--", "/usr/bin/true"],
+    env=dict(env, FIXTURE_OMIT_OUTCOME="1"), text=True,
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+)
+assert identity_wedge.returncode != 0 and "no outcome disposition" in identity_wedge.stderr
+identity_state = controller_state()
+identity_claim = identity_state["pending_actions"][task4_slot]
+identity_fixture = fixture_state()
+identity_fixture["workers"][task4_slot]["resources"]["task-disk"]["immutable_id"] = "foreign-task-disk"
+Path(fixture_path).write_text(json.dumps(identity_fixture, sort_keys=True, separators=(",", ":")) + "\n")
+run("abandon-claim", "--slot", task4_slot,
+    "--idempotency-key", identity_claim["idempotency_key"],
+    "--confirm-abandon", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+identity_cleared = controller_state()
+assert task4_slot not in identity_cleared["pending_actions"], identity_cleared["pending_actions"]
+assert any("claim abandoned by operator: AZURE WORKER PROVIDER REFUSED-IDENTITY:" in
+           str(entry.get("note", "")) for entry in identity_cleared["cleanup_refusals"]), (
+               identity_cleared["cleanup_refusals"])
+# Identity abandonment clears only the impossible claim. It never adopts or
+# clears the foreign resource itself; repair the fixture before the ordinary
+# release coverage later in this same scenario.
+identity_fixture = fixture_state()
+identity_fixture["workers"][task4_slot]["resources"]["task-disk"]["immutable_id"] = (
+    identity_cleared["workers"][task4_slot]["resources"]["task-disk"]["immutable_id"])
+Path(fixture_path).write_text(json.dumps(identity_fixture, sort_keys=True, separators=(",", ":")) + "\n")
+
 # A waiting task can use the slot only after deallocate, disposable deletion,
 # complete reset, and a new assignment generation.
 release(1)
@@ -1415,7 +1830,7 @@ sequence = actions[-4:]
 assert sequence == ["deallocate", "delete-compute", "reset", "create"], sequence
 
 # Drain every active task and prove queue/compute/disposable capacity reach zero.
-for number in (2, 3, 4, 5):
+for number in (2, 4, 5):
     release(number)
 run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
 state = controller_state()
