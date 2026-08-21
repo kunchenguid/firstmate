@@ -56,6 +56,12 @@ case "$mode" in
   fail)
     exit 1
     ;;
+  structured_timeout)
+    FM_QUOTA_TEST_FAILURE='Codex quota request timed out' \
+      FM_QUOTA_TEST_FULL=$full FM_QUOTA_TEST_PROVIDER=$provider \
+      node "${FM_QUOTA_TEST_FIXTURE:?}"
+    exit 1
+    ;;
   malformed)
     printf '%s\n' '{not-json'
     exit 0
@@ -468,6 +474,28 @@ const projectedProviders = full ? allProviders : allProviders.map(demoteProvider
 const providers = requestedProvider
   ? projectedProviders.filter((entry) => entry.provider === requestedProvider)
   : projectedProviders;
+if (process.env.FM_QUOTA_TEST_FAILURE) {
+  for (const entry of providers) {
+    entry.source = "unavailable";
+    entry.windows = [];
+    entry.quotaSemantics = {
+      status: "unknown",
+      description: "No quota windows are available.",
+      effectiveAvailability: [],
+    };
+    entry.attempts = entry.attempts.map((attempt) => ({
+      source: attempt.source,
+      status: "failed",
+      error: process.env.FM_QUOTA_TEST_FAILURE,
+    }));
+    entry.state = {
+      status: "error",
+      stale: false,
+      error: process.env.FM_QUOTA_TEST_FAILURE,
+      sourcesTried: entry.attempts.map(({ source }) => source),
+    };
+  }
+}
 process.stdout.write(JSON.stringify({ generatedAt, schemaVersion: 5, providers }));
 JS
 
@@ -698,6 +726,17 @@ assert(
   selectActiveProviderQuota(missingFullSourcesParsed, "openai-codex", { nowMs: now }).kind === "malformed",
   "schema-5 full output missing sourcesTried was accepted as fresh",
 );
+const missingFullRefreshedAt = structuredClone(schema5Full);
+delete missingFullRefreshedAt.providers[1].state.refreshedAt;
+const missingFullRefreshedAtParsed = parseQuotaAxiJson(
+  JSON.stringify(missingFullRefreshedAt),
+  { projection: "full" },
+);
+assert(missingFullRefreshedAtParsed, "schema-5 full fixture missing refreshedAt did not parse structurally");
+assert(
+  selectActiveProviderQuota(missingFullRefreshedAtParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "schema-5 full fresh output missing refreshedAt was accepted as fresh",
+);
 for (const field of ["error", "retryAfter", "remedyCommand"]) {
   const freshWithFailureDiagnostic = structuredClone(schema5Full);
   freshWithFailureDiagnostic.providers[1].state[field] = "unexpected diagnostic";
@@ -809,6 +848,19 @@ assert(futureRefreshView.kind === "fresh", "within-skew refreshed quota was reje
 assert(
   revalidateFreshQuotaView(futureRefreshView, now - 40_001).kind === "stale",
   "cached quota ignored a future refreshed-at timestamp after a backward clock shift",
+);
+const publicationSkewReport = parseQuotaAxiJson(JSON.stringify(report(now)));
+const publicationSkewView = selectActiveProviderQuota(
+  publicationSkewReport,
+  "openai-codex",
+  { nowMs: now - 120_000 },
+);
+assert(publicationSkewView.kind === "stale", "future-skewed publication was shown as fresh");
+assert(
+  publicationSkewView.kind === "stale" &&
+    publicationSkewView.recoverable &&
+    revalidateFreshQuotaView(publicationSkewView.recoverable, now).kind === "fresh",
+  "validated future-skewed publication could not recover within its freshness period",
 );
 const full = formatQuotaStatus(codex, 400, now);
 for (const expected of [
@@ -1643,6 +1695,21 @@ assert(
   directReport && selectActiveProviderQuota(directReport, "openai-codex").kind === "fresh",
   "fake default quota-axi projection was not consumable",
 );
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "structured_timeout\n");
+const structuredTimeout = runQuotaAxiJson({
+  timeoutMs: 1000,
+  maxOutputBytes: 1024 * 1024,
+  full: true,
+  provider: "codex",
+});
+const structuredTimeoutResult = await structuredTimeout.promise;
+assert(
+  structuredTimeoutResult.kind === "failed" &&
+    structuredTimeoutResult.exitCode === 1 &&
+    JSON.parse(structuredTimeoutResult.stdout).providers[0].state.error === "Codex quota request timed out",
+  "nonzero quota-axi JSON did not retain its bounded stdout and exit status",
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 let windowsTimeoutResult;
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "slow\n");
@@ -2499,6 +2566,44 @@ assert(backwardExpiryClock.tasks.size === 0, "backward-clock expiry leaked a tim
 delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
+const publicationSkewStart = Date.now();
+const publicationSkewClock = new SplitClock(publicationSkewStart);
+publicationSkewClock.wallNowMs -= 120_000;
+process.env.FM_QUOTA_TEST_NOW_MS = String(publicationSkewStart);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  publicationSkewStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const publicationSkew = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => publicationSkewClock.wallNowMs,
+  timers: publicationSkewClock.timers,
+}));
+await publicationSkew.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => publicationSkew.widgetText(400).includes("stale"),
+  "future-skewed initial report was not withheld",
+);
+assert(!publicationSkew.widgetText(400).includes("94%"), "future-skewed initial report exposed quota values");
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "fail\n");
+publicationSkewClock.advanceTimers(5 * 60 * 1000);
+await waitFor(
+  () => publicationSkew.widgetText(400).includes("quota-axi failed"),
+  "refresh failure during recoverable skew was not explicit",
+);
+publicationSkewClock.wallNowMs = publicationSkewStart;
+assert(
+  publicationSkew.widgetText(400).includes("week 94% left"),
+  "refresh failure discarded a recoverable initial report",
+);
+await publicationSkew.emit("session_shutdown", { reason: "quit" });
+assert(publicationSkewClock.tasks.size === 0, "recoverable publication skew leaked a timer");
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
 const overflowSkewStart = Date.now();
 const overflowSkewClock = new SplitClock(overflowSkewStart);
 process.env.FM_QUOTA_TEST_NOW_MS = String(overflowSkewStart);
@@ -2793,6 +2898,7 @@ async function statusCase(mode, expected, options = {}) {
 
 await statusCase("malformed", "malformed data");
 await statusCase("fail", "quota-axi failed");
+await statusCase("structured_timeout", "quota-axi timed out");
 await statusCase("stale", "stale");
 await statusCase("overflow", "quota-axi output too large", { maxOutputBytes: 128 });
 await statusCase("success", "quota-axi missing", { command: "quota-axi-definitely-missing" });

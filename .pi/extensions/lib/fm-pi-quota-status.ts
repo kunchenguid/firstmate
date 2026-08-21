@@ -56,7 +56,7 @@ export type QuotaView =
   | { kind: "unavailable"; provider: string; label: string | null }
   | { kind: "failure"; provider: string; reason: QuotaFailureReason }
   | { kind: "unverified"; provider: string }
-  | { kind: "stale"; provider: string; label: string | null }
+  | { kind: "stale"; provider: string; label: string | null; recoverable?: FreshQuotaView }
   | { kind: "malformed"; provider: string };
 
 export type QuotaAxiProjection = "default" | "full";
@@ -1310,12 +1310,13 @@ function validQuotaSemantics(
   return true;
 }
 
-function validProviderState(value: unknown, requireSourcesTried: boolean): boolean {
+function validProviderState(value: unknown, requireFullFields: boolean): boolean {
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_PROVIDER_STATUSES);
   if (!status || typeof value.stale !== "boolean") return false;
   if ((status === "stale") !== value.stale) return false;
   if (!validOptionalTimestamp(value.refreshedAt)) return false;
+  if (requireFullFields && status === "fresh" && value.refreshedAt === undefined) return false;
   for (const field of ["error", "retryAfter", "remedyCommand"] as const) {
     if (value[field] !== undefined && typeof value[field] !== "string") return false;
   }
@@ -1335,7 +1336,7 @@ function validProviderState(value: unknown, requireSourcesTried: boolean): boole
   if (status === "fresh" && reason !== null) return false;
   if (reason === "credentials_expired" && authStatus !== "expired_refreshable") return false;
   if (!validOptionalTextArray(value.untrustedWindowIds)) return false;
-  if (requireSourcesTried && !validTextArray(value.sourcesTried)) return false;
+  if (requireFullFields && !validTextArray(value.sourcesTried)) return false;
   return validOptionalTextArray(value.sourcesTried);
 }
 
@@ -1406,6 +1407,34 @@ function validProviderFields(
   return true;
 }
 
+export function quotaFailureReasonFromReport(
+  report: ParsedQuotaAxiReport,
+  piProvider: string,
+): Extract<QuotaFailureReason, "failed" | "timeout"> | null {
+  const provider = quotaProviderForPiProvider(piProvider);
+  if (!provider || report.providers.length !== 1) return null;
+  const rawProvider = report.providers[0];
+  if (
+    !isRecord(rawProvider) ||
+    rawProvider.provider !== provider ||
+    !validProviderFields(
+      rawProvider,
+      report.schemaVersion,
+      report.projection,
+      report.generatedAtMs,
+    ) ||
+    !isRecord(rawProvider.state)
+  ) return null;
+  const status = exactEnum(rawProvider.state.status, QUOTA_PROVIDER_STATUSES);
+  if (!status || status === "fresh" || status === "stale") return null;
+  const error = exactText(rawProvider.state.error);
+  if (
+    (provider === "kimi" && error === "request_timeout") ||
+    (provider === "codex" && error === "Codex quota request timed out")
+  ) return "timeout";
+  return "failed";
+}
+
 export function selectActiveProviderQuota(
   report: ParsedQuotaAxiReport,
   piProvider: string,
@@ -1428,7 +1457,7 @@ export function selectActiveProviderQuota(
     : DEFAULT_QUOTA_FRESHNESS_MS;
   let freshnessTimestampMs = report.generatedAtMs;
   let reportFreshUntilMs = report.generatedAtMs + freshnessMs;
-  if (!isFreshAt(report.generatedAtMs, reportFreshUntilMs, nowMs)) {
+  if (nowMs >= reportFreshUntilMs) {
     return { kind: "stale", provider, label: null };
   }
 
@@ -1483,9 +1512,6 @@ export function selectActiveProviderQuota(
     if (refreshedAtMs === null) return malformed(provider);
     freshnessTimestampMs = Math.max(freshnessTimestampMs, refreshedAtMs);
     reportFreshUntilMs = Math.min(reportFreshUntilMs, refreshedAtMs + freshnessMs);
-    if (!isFreshAt(freshnessTimestampMs, reportFreshUntilMs, nowMs)) {
-      return { kind: "stale", provider, label };
-    }
   }
 
   if (!Array.isArray(rawProvider.windows)) return malformed(provider);
@@ -1536,7 +1562,7 @@ export function selectActiveProviderQuota(
     if (options.expectedAccountId === undefined) return { kind: "unverified", provider };
   }
 
-  return revalidateFreshQuotaView({
+  const freshView: FreshQuotaView = {
     kind: "fresh",
     provider,
     label,
@@ -1547,7 +1573,14 @@ export function selectActiveProviderQuota(
     freshnessTimestampMs,
     reportFreshUntilMs,
     freshUntilMs,
-  }, nowMs);
+  };
+  const selected = revalidateFreshQuotaView(freshView, nowMs);
+  if (
+    selected.kind === "stale" &&
+    nowMs < freshnessTimestampMs - 60_000 &&
+    nowMs < reportFreshUntilMs
+  ) return { ...selected, recoverable: freshView };
+  return selected;
 }
 
 function compactNumber(value: number): string {

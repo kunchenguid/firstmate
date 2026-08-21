@@ -9,9 +9,11 @@ import {
   createQuotaStatusFormatter,
   DEFAULT_QUOTA_FRESHNESS_MS,
   parseQuotaAxiJson,
+  quotaFailureReasonFromReport,
   quotaProviderForPiProvider,
   revalidateFreshQuotaView,
   selectActiveProviderQuota,
+  type FreshQuotaView,
   type ParsedQuotaAxiReport,
   type QuotaFailureReason,
   type QuotaUnsupportedReason,
@@ -308,7 +310,8 @@ const OFFICIAL_PROVIDER_MODEL_APIS: Readonly<Record<string, readonly string[]>> 
 
 type QuotaProcessResult =
   | { kind: "ok"; stdout: string }
-  | { kind: QuotaFailureReason };
+  | { kind: "failed"; stdout: string; exitCode: number | null }
+  | { kind: Exclude<QuotaFailureReason, "failed"> };
 
 type QuotaProcess = {
   promise: Promise<QuotaProcessResult>;
@@ -722,13 +725,24 @@ export function runQuotaAxiJson(options: {
   child.stdout?.on("data", receiveStdout);
   child.stderr?.on("data", receiveStderr);
   child.on("error", (error: NodeJS.ErrnoException) => {
-    finish({ kind: error.code === "ENOENT" ? "missing" : "failed" });
+    if (error.code === "ENOENT") {
+      finish({ kind: "missing" });
+    } else {
+      finish({
+        kind: "failed",
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        exitCode: null,
+      });
+    }
   });
   child.on("close", (code) => {
+    const stdout = Buffer.concat(stdoutChunks).toString("utf8");
     if (code === 0) {
-      finish({ kind: "ok", stdout: Buffer.concat(stdoutChunks).toString("utf8") });
+      finish({ kind: "ok", stdout });
+    } else if (useWindowsSupervisor && code === 127) {
+      finish({ kind: "missing" });
     } else {
-      finish({ kind: useWindowsSupervisor && code === 127 ? "missing" : "failed" });
+      finish({ kind: "failed", stdout, exitCode: code });
     }
   });
 
@@ -1228,6 +1242,11 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       return viewForTarget(target);
     }
 
+    function recoverableFreshView(view: QuotaView | null): FreshQuotaView | null {
+      if (view?.kind === "fresh") return view;
+      return view?.kind === "stale" ? view.recoverable ?? null : null;
+    }
+
     function cachedQuotaView(session: ActiveSession, nowMs: number): QuotaView | null {
       if (changedLiveModelView(session) || session.target.kind !== "supported" || !session.quota) {
         return null;
@@ -1240,11 +1259,12 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         session.quota.endpointRevision !== session.target.endpointRevision
       ) return null;
       const cached = session.quota.view;
-      if (cached.kind !== "fresh") return cached;
-      const revalidated = revalidateFreshQuotaView(cached, nowMs);
+      const recoverable = recoverableFreshView(cached);
+      if (!recoverable) return cached;
+      const revalidated = revalidateFreshQuotaView(recoverable, nowMs);
       if (
         revalidated.kind === "fresh" ||
-        nowMs >= cached.reportFreshUntilMs
+        nowMs >= recoverable.reportFreshUntilMs
       ) {
         session.quota.view = revalidated;
       }
@@ -1377,9 +1397,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       const view = override ?? currentView(session);
       clearExpiry(session);
       const renderScheduledAtMs = now();
-      const recoverableSkewView = session.quota?.view.kind === "fresh" &&
-          renderScheduledAtMs < session.quota.view.freshnessTimestampMs - 60_000
-        ? session.quota.view
+      const cachedFreshView = recoverableFreshView(session.quota?.view ?? null);
+      const recoverableSkewView = cachedFreshView &&
+          renderScheduledAtMs < cachedFreshView.freshnessTimestampMs - 60_000
+        ? cachedFreshView
         : null;
       const nextRevalidationMs = view.kind === "fresh"
         ? view.freshUntilMs
@@ -1589,14 +1610,26 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           };
           render(session);
         } else if (result.kind !== "cancelled") {
+          const failedReport = result.kind === "failed" && result.stdout
+            ? parseQuotaAxiJson(result.stdout, {
+                projection: "full",
+                expectedProvider: quotaProvider,
+              })
+            : null;
+          const failureReason = failedReport
+            ? quotaFailureReasonFromReport(failedReport, completedProvider) ?? result.kind
+            : result.kind;
           const cached = cachedQuotaView(session, now());
-          session.lastFailure = result.kind;
+          const recoverable = recoverableFreshView(session.quota?.view ?? null);
+          session.lastFailure = failureReason;
           if (cached?.kind === "fresh" && session.quota) {
-            session.quota.view = { ...cached, refreshFailure: result.kind };
+            session.quota.view = { ...cached, refreshFailure: failureReason };
+            render(session);
+          } else if (recoverable) {
             render(session);
           } else {
             session.quota = null;
-            render(session, processFailureView(result.kind, completedProvider));
+            render(session, processFailureView(failureReason, completedProvider));
           }
         }
       } finally {
