@@ -177,6 +177,19 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   [ "$rc" -ne 0 ] || fail "a freeform-only captains_call item without options was accepted"
 
   write_valid_payload "$data"
+  jq '.captains_call[1].options = [] | .captains_call[1].allow_freeform = false' "$data" > "$data.tmp" \
+    && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "an optionless merge card with freeform disabled was accepted"
+
+  write_valid_payload "$data"
+  jq '.captains_call[0].type = "credential"
+    | .captains_call[0].options = []
+    | del(.captains_call[0].allow_freeform)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "an optionless credential card without freeform permission was accepted"
+
+  write_valid_payload "$data"
   jq '.captains_call[0].options[0].value = "__drop__"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a captains_call option reserved for close/drop was accepted"
