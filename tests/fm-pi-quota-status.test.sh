@@ -657,9 +657,9 @@ function report(now = Date.now()) {
         plan: "pro",
         account: { accountId: "fixture-codex-account" },
         windows: [
-          { id: "weekly", label: "week", kind: "weekly", percentRemaining: 94, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString(), pace: { status: "unknown", reason: "missing_cycle" } },
-          { id: "model:spark:5h", label: "GPT-5.3-Codex-Spark session", kind: "model", percentRemaining: 100, resetsAt: new Date(now + 5 * 60 * 60 * 1000).toISOString(), pace: { status: "unknown", reason: "missing_cycle" } },
-          { id: "model:spark:7d", label: "GPT-5.3-Codex-Spark week", kind: "model", percentRemaining: 100, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString(), pace: { status: "unknown", reason: "missing_cycle" } },
+          { id: "weekly", label: "week", kind: "weekly", percentUsed: 6, percentRemaining: 94, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString(), pace: { status: "unknown", reason: "missing_cycle" } },
+          { id: "model:spark:5h", label: "GPT-5.3-Codex-Spark session", kind: "model", percentUsed: 0, percentRemaining: 100, resetsAt: new Date(now + 5 * 60 * 60 * 1000).toISOString(), pace: { status: "unknown", reason: "missing_cycle" } },
+          { id: "model:spark:7d", label: "GPT-5.3-Codex-Spark week", kind: "model", percentUsed: 0, percentRemaining: 100, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString(), pace: { status: "unknown", reason: "missing_cycle" } },
         ],
         credits: { remaining: 0, unlimited: false, unit: "credits" },
         state: state(["oauth"]),
@@ -724,6 +724,7 @@ function schema5Default(value) {
     delete provider.attempts;
     delete provider.state.refreshedAt;
     delete provider.state.sourcesTried;
+    for (const window of provider.windows) delete window.percentUsed;
   }
   current.providers.find((provider) => provider.provider === "codex").quotaSemantics =
     schema5CodexSemantics(current, false);
@@ -946,6 +947,18 @@ assert(
   selectActiveProviderQuota(missingFullWindowPaceParsed, "openai-codex", { nowMs: now }).kind === "malformed",
   "schema-5 full output missing window pace was accepted as fresh",
 );
+for (const field of ["percentUsed", "percentRemaining"]) {
+  const missingPercentage = structuredClone(schema5Full);
+  delete missingPercentage.providers[1].windows[0][field];
+  const missingPercentageParsed = parseQuotaAxiJson(
+    JSON.stringify(missingPercentage),
+    { projection: "full" },
+  );
+  assert(
+    selectActiveProviderQuota(missingPercentageParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+    `schema-5 full Codex output missing ${field} was accepted as fresh`,
+  );
+}
 for (const field of ["pace", "runway", "selection"]) {
   const missingDerived = structuredClone(schema5Full);
   delete missingDerived.providers[1].quotaSemantics.effectiveAvailability[0][field];
@@ -981,6 +994,7 @@ const largeAccountWindows = [{
   id: "weekly",
   label: "week",
   kind: "weekly",
+  percentUsed: 50,
   percentRemaining: 50,
   resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString(),
   pace: { status: "unknown", reason: "missing_cycle" },
@@ -993,6 +1007,7 @@ const largeModelWindows = Array.from({ length: 65 }, (_, index) => {
       id: `model:${feature}:5h`,
       label: `${label} session`,
       kind: "model",
+      percentUsed: 0,
       percentRemaining: 100,
       resetsAt: new Date(now + 5 * 60 * 60 * 1000).toISOString(),
       pace: { status: "unknown", reason: "missing_cycle" },
@@ -1001,6 +1016,7 @@ const largeModelWindows = Array.from({ length: 65 }, (_, index) => {
       id: `model:${feature}:7d`,
       label: `${label} week`,
       kind: "model",
+      percentUsed: 0,
       percentRemaining: 100,
       resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString(),
       pace: { status: "unknown", reason: "missing_cycle" },
@@ -1053,6 +1069,31 @@ assert(
 );
 const largeTopologyText = formatQuotaStatus(largeTopologyView, 1_000_000, now);
 assert(largeTopologyText.includes("model 65 week 100% left"), "large quota footer omitted its final window");
+const linearAudit = structuredClone(schema5Full);
+const linearProvider = linearAudit.providers[1];
+const duplicateCount = 400;
+linearProvider.windows = Array.from({ length: duplicateCount }, (_, index) => ({
+  ...structuredClone(schema5Full.providers[1].windows[0]),
+  id: index === 0 ? "weekly" : `weekly_${index + 1}`,
+}));
+linearProvider.quotaSemantics = schema5CodexSemantics(linearAudit, true);
+const linearParsed = parseQuotaAxiJson(JSON.stringify(linearAudit), { projection: "full" });
+const linearAvailability = linearParsed.providers[1].quotaSemantics.effectiveAvailability[0];
+let boundedByReads = 0;
+linearAvailability.boundedBy = new Proxy(linearAvailability.boundedBy, {
+  get(target, property, receiver) {
+    if (typeof property === "string" && /^\d+$/.test(property)) boundedByReads += 1;
+    return Reflect.get(target, property, receiver);
+  },
+});
+assert(
+  selectActiveProviderQuota(linearParsed, "openai-codex", { nowMs: now }).kind === "fresh",
+  "large audited quota report was rejected",
+);
+assert(
+  boundedByReads < duplicateCount * 30,
+  `large audited quota validation was not linear: ${boundedByReads} bound reads`,
+);
 for (const [description, mutate] of [
   ["invalid first duplicate suffix", (provider) => { provider.windows[0].id = "weekly_1"; }],
   ["arbitrary model identity", (provider) => { provider.windows[1].id = "m1"; }],
@@ -1087,6 +1128,26 @@ const duplicateIdentityParsed = parseQuotaAxiJson(
 assert(
   selectActiveProviderQuota(duplicateIdentityParsed, "openai-codex", { nowMs: now }).kind === "fresh",
   "valid producer-ordered duplicate Codex identity was rejected",
+);
+const tenDuplicateIdentities = structuredClone(schema5Full);
+tenDuplicateIdentities.providers[1].windows = [
+  ...Array.from({ length: 10 }, (_, index) => ({
+    ...structuredClone(schema5Full.providers[1].windows[0]),
+    id: index === 0 ? "weekly" : `weekly_${index + 1}`,
+  })),
+  ...tenDuplicateIdentities.providers[1].windows.slice(1),
+];
+tenDuplicateIdentities.providers[1].quotaSemantics = schema5CodexSemantics(
+  tenDuplicateIdentities,
+  true,
+);
+const tenDuplicateIdentitiesParsed = parseQuotaAxiJson(
+  JSON.stringify(tenDuplicateIdentities),
+  { projection: "full" },
+);
+assert(
+  selectActiveProviderQuota(tenDuplicateIdentitiesParsed, "openai-codex", { nowMs: now }).kind === "fresh",
+  "valid double-digit Codex duplicate identity was rejected",
 );
 const longFeatureIdentity = structuredClone(schema5Full);
 const longFeature = "f".repeat(201);
@@ -1247,6 +1308,7 @@ const tinyNegativeCreditText = formatQuotaStatus(tinyNegativeCreditView, 400, no
 assert(tinyNegativeCreditText.includes("credits -<0.1"), `small negative credits lost their sign: ${tinyNegativeCreditText}`);
 assert(!tinyNegativeCreditText.includes("credits -0"), `negative credits were presented as zero: ${tinyNegativeCreditText}`);
 const tinyPercentReport = report(now);
+tinyPercentReport.providers[1].windows[0].percentUsed = 99.96;
 tinyPercentReport.providers[1].windows[0].percentRemaining = 0.04;
 const tinyPercentParsed = parseQuotaAxiJson(JSON.stringify(tinyPercentReport));
 assert(tinyPercentParsed, "small positive percentage fixture did not parse structurally");
@@ -1255,6 +1317,7 @@ const tinyPercentText = formatQuotaStatus(tinyPercentView, 400, now);
 assert(tinyPercentText.includes("week <0.1% left"), `small positive quota rounded to zero: ${tinyPercentText}`);
 assert(!tinyPercentText.includes("week 0% left"), `positive quota was presented as exhausted: ${tinyPercentText}`);
 const nearlyFullPercentReport = report(now);
+nearlyFullPercentReport.providers[1].windows[0].percentUsed = 0.04;
 nearlyFullPercentReport.providers[1].windows[0].percentRemaining = 99.96;
 const nearlyFullPercentParsed = parseQuotaAxiJson(JSON.stringify(nearlyFullPercentReport));
 assert(nearlyFullPercentParsed, "nearly-full percentage fixture did not parse structurally");
@@ -1868,6 +1931,7 @@ wrongLimitingWindow.providers[1].quotaSemantics.effectiveAvailability[0] = {
   limitingWindowIds: ["model:spark:5h"],
 };
 const missingTiedLimiter = structuredClone(fullyPopulated);
+missingTiedLimiter.providers[1].windows[1].percentUsed = 6;
 missingTiedLimiter.providers[1].windows[1].percentRemaining = 94;
 missingTiedLimiter.providers[1].quotaSemantics.effectiveAvailability[0] = {
   scope: "all_models",
@@ -2039,16 +2103,44 @@ assert(
   selectActiveProviderQuota(uppercaseProviderParsed, "openai-codex", { nowMs: now }).kind === "unavailable",
   "normalized quota provider ID was selected as fresh",
 );
-const emptyWindows = report(now);
+const emptyWindows = structuredClone(schema5Full);
 emptyWindows.providers[1].windows = [];
-const emptyWindowsParsed = parseQuotaAxiJson(JSON.stringify(emptyWindows));
+emptyWindows.providers[1].quotaSemantics = {
+  status: "unknown",
+  description: "No quota windows were returned.",
+  effectiveAvailability: [],
+};
+const emptyWindowsParsed = parseQuotaAxiJson(
+  JSON.stringify(emptyWindows),
+  { projection: "full" },
+);
 assert(emptyWindowsParsed, "empty-window fixture did not parse structurally");
-const emptyWindowsView = selectActiveProviderQuota(emptyWindowsParsed, "openai-codex", { nowMs: now });
-assert(emptyWindowsView.kind === "fresh", "valid fresh empty-window quota was discarded");
-const emptyWindowsText = formatQuotaStatus(emptyWindowsView, 400, now);
-assert(emptyWindowsText.includes("no quota windows"), `empty-window state was not explicit: ${emptyWindowsText}`);
-assert(emptyWindowsText.includes("plan pro"), `empty-window state omitted plan: ${emptyWindowsText}`);
-assert(emptyWindowsText.includes("credits 0"), `empty-window state omitted credits: ${emptyWindowsText}`);
+assert(
+  selectActiveProviderQuota(emptyWindowsParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "fresh full Codex output without quota windows was accepted",
+);
+const publicationForwardSkew = structuredClone(schema5Full);
+publicationForwardSkew.providers[1].windows[0].resetsAt = new Date(now + 3 * 60_000).toISOString();
+const publicationForwardParsed = parseQuotaAxiJson(
+  JSON.stringify(publicationForwardSkew),
+  { projection: "full" },
+);
+const publicationForwardView = selectActiveProviderQuota(
+  publicationForwardParsed,
+  "openai-codex",
+  { nowMs: now + 4 * 60_000 },
+);
+assert(publicationForwardView.kind === "fresh", "forward-skewed report was not transiently selectable");
+assert(
+  !formatQuotaStatus(publicationForwardView, 400, now + 4 * 60_000).includes("week 94% left"),
+  "forward-skewed report exposed an already-reset window",
+);
+const publicationRecoveredView = revalidateFreshQuotaView(publicationForwardView, now + 2 * 60_000);
+assert(
+  publicationRecoveredView.kind === "fresh" &&
+    formatQuotaStatus(publicationRecoveredView, 400, now + 2 * 60_000).includes("week 94% left"),
+  "temporary publication-time forward skew discarded a recoverable window",
+);
 assert(selectActiveProviderQuota(parsed, "custom-proxy", { nowMs: now }).kind === "unsupported", "unsupported provider was not isolated");
 const ansiReport = report(now);
 ansiReport.providers[1].label = "Co\x1b[31mdex";
@@ -3152,6 +3244,19 @@ class SplitClock {
     }
     this.timerNowMs = target;
   }
+  advanceTimersDelayed(milliseconds) {
+    const target = this.timerNowMs + milliseconds;
+    this.timerNowMs = target;
+    for (;;) {
+      const task = [...this.tasks.values()]
+        .filter((candidate) => candidate.at <= target)
+        .sort((a, b) => a.at - b.at || a.id - b.id)[0];
+      if (!task) break;
+      if (task.intervalMs === null) this.tasks.delete(task.id);
+      else task.at += task.intervalMs;
+      task.callback();
+    }
+  }
 }
 
 const backwardExpiryStart = Date.now();
@@ -3407,6 +3512,48 @@ assert(
 );
 await idleCountdown.emit("session_shutdown", { reason: "quit" });
 assert(countdownClock.tasks.size === 0, "idle reset countdown leaked a timer");
+delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
+const delayedCountdownStart = Date.now();
+const delayedCountdownClock = new SplitClock(delayedCountdownStart);
+process.env.FM_QUOTA_TEST_NOW_MS = String(delayedCountdownStart);
+process.env.FM_QUOTA_TEST_FIRST_RESET_MS = String(150_000);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  delayedCountdownStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const delayedCountdown = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => delayedCountdownClock.wallNowMs,
+  timers: delayedCountdownClock.timers,
+}));
+await delayedCountdown.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => delayedCountdown.widgetText(400).includes("week 94% left reset 3m"),
+  "delayed-countdown fixture did not publish its reset window",
+);
+delayedCountdownClock.wallNowMs = delayedCountdownStart + 180_000;
+delayedCountdownClock.advanceTimersDelayed(180_000);
+assert(
+  !delayedCountdown.widgetText(400).includes("week 94% left"),
+  "delayed countdown callback retained an expired quota window",
+);
+delayedCountdownClock.wallNowMs = delayedCountdownStart + 120_000;
+assert(
+  !delayedCountdown.widgetText(400).includes("week 94% left"),
+  "wall-clock rollback resurrected a monotonically expired quota window",
+);
+assert(
+  delayedCountdown.widgetText(400).includes("GPT-5.3-Codex-Spark session 100% left"),
+  "delayed countdown expiry hid a fresh sibling window",
+);
+await delayedCountdown.emit("session_shutdown", { reason: "quit" });
+assert(delayedCountdownClock.tasks.size === 0, "delayed-countdown expiry leaked a timer");
 delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 

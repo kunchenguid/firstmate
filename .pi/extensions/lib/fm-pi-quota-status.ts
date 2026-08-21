@@ -30,6 +30,7 @@ export type FreshQuotaView = {
   freshnessTimestampMs: number;
   reportFreshUntilMs: number;
   freshUntilMs: number;
+  publicationWindows?: QuotaWindowView[];
   refreshFailure?: QuotaRefreshIssue | null;
 };
 
@@ -216,10 +217,11 @@ export function revalidateFreshQuotaView(view: FreshQuotaView, nowMs = Date.now(
   if (!isFreshAt(view.freshnessTimestampMs, view.reportFreshUntilMs, nowMs)) {
     return { kind: "stale", provider: view.provider, label: view.label };
   }
-  if (nowMs < view.freshUntilMs) return view;
+  if (view.publicationWindows === undefined && nowMs < view.freshUntilMs) return view;
 
+  const publicationWindows = view.publicationWindows ?? view.windows;
   let freshUntilMs = view.reportFreshUntilMs;
-  const windows = view.windows.filter((window) => {
+  const windows = publicationWindows.filter((window) => {
     if (window.resetsAtMs === null) return true;
     if (window.resetsAtMs <= nowMs) return false;
     freshUntilMs = Math.min(freshUntilMs, window.resetsAtMs);
@@ -229,6 +231,23 @@ export function revalidateFreshQuotaView(view: FreshQuotaView, nowMs = Date.now(
     ...view,
     windows,
     freshUntilMs,
+    publicationWindows: windows.length === publicationWindows.length
+      ? undefined
+      : publicationWindows,
+  };
+}
+
+export function quotaPublicationFreshView(view: FreshQuotaView): FreshQuotaView {
+  if (view.publicationWindows === undefined) return view;
+  let freshUntilMs = view.reportFreshUntilMs;
+  for (const window of view.publicationWindows) {
+    if (window.resetsAtMs !== null) freshUntilMs = Math.min(freshUntilMs, window.resetsAtMs);
+  }
+  return {
+    ...view,
+    windows: view.publicationWindows,
+    freshUntilMs,
+    publicationWindows: undefined,
   };
 }
 
@@ -512,7 +531,7 @@ function matchesCodexModelWindowIdentity(
 function codexWindowBaseIdentity(window: Record<string, unknown>): string | null {
   const rawId = exactText(window.id);
   if (rawId === null) return null;
-  const id = rawId.replace(/_[2-9]\d*$/, "");
+  const id = rawId.replace(/_(?:[2-9]|[1-9]\d+)$/, "");
   const windowSeconds = window.windowSeconds === undefined
     ? null
     : finiteNumber(window.windowSeconds);
@@ -827,6 +846,7 @@ function validEffectivePace(
   requireAuditFields: boolean,
   requireDerivedFields: boolean,
   boundedBy: string[],
+  boundedBySet: ReadonlySet<string>,
   rawWindowsById: ReadonlyMap<string, Record<string, unknown>>,
 ): boolean {
   if (value === undefined) return !requireDerivedFields;
@@ -845,7 +865,7 @@ function validEffectivePace(
     if (entries === undefined) continue;
     if (!validNonemptyTextArray(entries)) return false;
     for (const entry of entries) {
-      if (seen.has(entry) || !boundedBy.includes(entry)) return false;
+      if (seen.has(entry) || !boundedBySet.has(entry)) return false;
       seen.add(entry);
     }
   }
@@ -854,7 +874,7 @@ function validEffectivePace(
     ? null
     : exactText(value.worstReserveWindowId);
   if (value.worstReserveWindowId !== undefined && worstId === null) return false;
-  if (worstId !== null && !boundedBy.includes(worstId)) return false;
+  if (worstId !== null && !boundedBySet.has(worstId)) return false;
   if ((value.worstReservePercentPoints !== undefined) !== (worstId !== null)) return false;
 
   if (requireAuditFields && seen.size !== boundedBy.length) return false;
@@ -1001,7 +1021,8 @@ function matchesExpectedRunway(
 function validRunway(
   value: unknown,
   boundedBy: string[],
-  allowedBlockers: string[],
+  boundedBySet: ReadonlySet<string>,
+  allowedBlockers: ReadonlySet<string>,
   unresolvedWindowIds: string[],
   windowsById: ReadonlyMap<string, QuotaWindowView>,
   rawWindowsById: ReadonlyMap<string, Record<string, unknown>>,
@@ -1020,7 +1041,7 @@ function validRunway(
     ? null
     : exactText(value.limitingWindowId);
   if (value.limitingWindowId !== undefined && limitingWindowId === null) return false;
-  if (limitingWindowId !== null && !boundedBy.includes(limitingWindowId)) return false;
+  if (limitingWindowId !== null && !boundedBySet.has(limitingWindowId)) return false;
   const projectionConfidence = value.projectionConfidence === undefined
     ? null
     : exactEnum(value.projectionConfidence, QUOTA_PROJECTION_CONFIDENCES);
@@ -1032,7 +1053,7 @@ function validRunway(
   ) return false;
   if (
     Array.isArray(value.unmeasurableWindowIds) &&
-    value.unmeasurableWindowIds.some((id) => !allowedBlockers.includes(id))
+    value.unmeasurableWindowIds.some((id) => !allowedBlockers.has(id))
   ) return false;
   if (requireAuditFields) {
     const expected = unresolvedWindowIds.length > 0
@@ -1153,7 +1174,7 @@ function expectedEffectiveSelection(
 
 function validSelection(
   value: unknown,
-  allowedBlockers: string[],
+  allowedBlockers: ReadonlySet<string>,
   forcedUnknownBlockers: string[] | null,
   boundedBy: string[],
   rawWindowsById: ReadonlyMap<string, Record<string, unknown>>,
@@ -1171,7 +1192,7 @@ function validSelection(
   ) return false;
   if (
     Array.isArray(value.unmeasurableWindowIds) &&
-    value.unmeasurableWindowIds.some((id) => !allowedBlockers.includes(id))
+    value.unmeasurableWindowIds.some((id) => !allowedBlockers.has(id))
   ) return false;
 
   if (requireAuditFields) {
@@ -1211,16 +1232,18 @@ function validEffectiveAvailability(
   if (exactText(value.scope) === null || !status) return false;
   if (!validOptionalNumber(value.effectivePercentRemaining, (number) => number >= 0 && number <= 100)) return false;
   if (!validNonemptyTextArray(value.boundedBy)) return false;
-  if (value.boundedBy.some((id) => !windowsById.has(id))) return false;
+  const boundedBy = value.boundedBy;
+  const boundedBySet = new Set(boundedBy);
+  if (boundedBy.some((id) => !windowsById.has(id))) return false;
   if (
     value.limitingWindowIds !== undefined &&
     !validNonemptyTextArray(value.limitingWindowIds)
   ) return false;
   if (
     Array.isArray(value.limitingWindowIds) &&
-    value.limitingWindowIds.some((id) => !value.boundedBy.includes(id))
+    value.limitingWindowIds.some((id) => !boundedBySet.has(id))
   ) return false;
-  const percentages = value.boundedBy.map((id) => windowsById.get(id)?.percentRemaining ?? null);
+  const percentages = boundedBy.map((id) => windowsById.get(id)?.percentRemaining ?? null);
   const forcedUnknown = provider === "kimi" && unresolvedWindowIds.length > 0;
   const expectedStatus = providerIsStale ||
     forcedUnknown ||
@@ -1234,7 +1257,7 @@ function validEffectiveAvailability(
       !validNonemptyTextArray(value.limitingWindowIds)
     ) return false;
     const effectivePercentRemaining = Math.min(...percentages as number[]);
-    const limitingWindowIds = value.boundedBy.filter(
+    const limitingWindowIds = boundedBy.filter(
       (id) => windowsById.get(id)?.percentRemaining === effectivePercentRemaining,
     );
     if (
@@ -1245,20 +1268,22 @@ function validEffectiveAvailability(
   } else if (value.effectivePercentRemaining !== undefined || value.limitingWindowIds !== undefined) {
     return false;
   }
-  const allowedBlockers = [...new Set([...value.boundedBy, ...unresolvedWindowIds])];
+  const allowedBlockers = new Set([...boundedBy, ...unresolvedWindowIds]);
   const forcedSelectionBlockers = forcedUnknown
-    ? [...value.boundedBy, ...unresolvedWindowIds]
+    ? [...boundedBy, ...unresolvedWindowIds]
     : null;
   return validEffectivePace(
     value.pace,
     requireAuditFields,
     requireDerivedFields,
-    value.boundedBy,
+    boundedBy,
+    boundedBySet,
     rawWindowsById,
   ) &&
     validRunway(
       value.runway,
-      value.boundedBy,
+      boundedBy,
+      boundedBySet,
       allowedBlockers,
       provider === "kimi" ? unresolvedWindowIds : [],
       windowsById,
@@ -1272,7 +1297,7 @@ function validEffectiveAvailability(
       value.selection,
       allowedBlockers,
       forcedSelectionBlockers,
-      value.boundedBy,
+      boundedBy,
       rawWindowsById,
       schemaVersion,
       requireAuditFields,
@@ -1592,6 +1617,14 @@ function validProviderFields(
     rawWindows.length !== value.windows.length ||
     (value.provider === "codex" && !validCodexWindowIdentities(rawWindows))
   ) return false;
+  if (
+    value.provider === "codex" &&
+    status === "fresh" &&
+    requireFullFields &&
+    (rawWindows.length === 0 || rawWindows.some((window) => (
+      finiteNumber(window.percentUsed) === null || finiteNumber(window.percentRemaining) === null
+    )))
+  ) return false;
   if ((schemaVersion === 5 || projection === "full") && value.quotaSemantics === undefined) return false;
   const untrustedWindowIds = isRecord(value.state) && Array.isArray(value.state.untrustedWindowIds)
     ? value.state.untrustedWindowIds as string[]
@@ -1803,6 +1836,9 @@ export function selectActiveProviderQuota(
     nowMs < freshnessTimestampMs - 60_000 &&
     nowMs < reportFreshUntilMs
   ) return { ...selected, recoverable: freshView };
+  if (selected.kind === "fresh" && selected.windows !== freshView.windows) {
+    return { ...selected, publicationWindows: freshView.windows };
+  }
   return selected;
 }
 

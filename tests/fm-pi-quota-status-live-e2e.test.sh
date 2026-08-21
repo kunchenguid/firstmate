@@ -38,9 +38,9 @@ const now = Date.now();
 const reset = (milliseconds) => new Date(now + milliseconds).toISOString();
 const generatedAt = new Date(now).toISOString();
 const windows = [
-  { id: "weekly", label: "week", kind: "weekly", percentRemaining: 94, resetsAt: reset(6 * 24 * 60 * 60 * 1000), pace: { status: "unknown", reason: "missing_cycle" } },
-  { id: "model:spark:5h", label: "GPT-5.3-Codex-Spark session", kind: "model", percentRemaining: 100, resetsAt: reset(5 * 60 * 60 * 1000), pace: { status: "unknown", reason: "missing_cycle" } },
-  { id: "model:spark:7d", label: "GPT-5.3-Codex-Spark week", kind: "model", percentRemaining: 100, resetsAt: reset(6 * 24 * 60 * 60 * 1000), pace: { status: "unknown", reason: "missing_cycle" } },
+  { id: "weekly", label: "week", kind: "weekly", percentUsed: 6, percentRemaining: 94, resetsAt: reset(6 * 24 * 60 * 60 * 1000), pace: { status: "unknown", reason: "missing_cycle" } },
+  { id: "model:spark:5h", label: "GPT-5.3-Codex-Spark session", kind: "model", percentUsed: 0, percentRemaining: 100, resetsAt: reset(5 * 60 * 60 * 1000), pace: { status: "unknown", reason: "missing_cycle" } },
+  { id: "model:spark:7d", label: "GPT-5.3-Codex-Spark week", kind: "model", percentUsed: 0, percentRemaining: 100, resetsAt: reset(6 * 24 * 60 * 60 * 1000), pace: { status: "unknown", reason: "missing_cycle" } },
 ];
 const availability = (scope, bounded) => {
   const boundedBy = bounded.map((window) => window.id);
