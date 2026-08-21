@@ -1667,10 +1667,22 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
-  STANDING_LINE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw --with-name --path "$PROJ_ABS_REAL") || exit 1
-  read -r PROJ_NAME STANDING_MODE _ <<EOF
+  STANDING_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-spawn-mode.XXXXXX") || STANDING_ERR=/dev/null
+  if STANDING_LINE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw --with-name --path "$PROJ_ABS_REAL" 2>"$STANDING_ERR"); then
+    read -r PROJ_NAME STANDING_MODE _ <<EOF
 $STANDING_LINE
 EOF
+    if [ -s "$STANDING_ERR" ]; then cat "$STANDING_ERR" >&2; fi
+  else
+    STANDING_REASON="registered mode lookup failed"
+    if [ -s "$STANDING_ERR" ]; then
+      STANDING_REASON="$STANDING_REASON: $(first_line "$(cat "$STANDING_ERR")")"
+    fi
+    PROJ_NAME=$(basename -- "$PROJ_ABS_REAL")
+    STANDING_MODE=no-mistakes
+    echo "warning: $STANDING_REASON; assuming the default standing posture ($STANDING_MODE) for $PROJ_NAME - this notice is advisory and does not block the spawn, but fix the registry so the standing posture is authoritative again" >&2
+  fi
+  [ "$STANDING_ERR" = /dev/null ] || rm -f "$STANDING_ERR"
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_MODE" ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2

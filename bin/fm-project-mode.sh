@@ -134,22 +134,29 @@ absolute_path_candidate() {  # <path>
   esac
 }
 
+strip_leading_space() {  # <text>
+  local text=$1
+  printf '%s' "${text#"${text%%[![:space:]]*}"}"
+}
+
 registry_line_name() {  # <line>
   local rest
-  case "$1" in
+  rest=$(strip_leading_space "$1")
+  case "$rest" in
     "- "*) ;;
     *) return 1 ;;
   esac
-  rest=${1#- }
-  case "$rest" in
-    *[[:space:]]*) printf '%s\n' "${rest%%[[:space:]]*}" ;;
-    *) return 1 ;;
-  esac
+  rest=$(strip_leading_space "${rest#- }")
+  rest=${rest%%[[:space:]]*}
+  [ -n "$rest" ] || return 1
+  printf '%s\n' "$rest"
 }
 
 registry_annotation() {  # <name> <line>
   local name=$1 line=$2 rest
-  rest=${line#"- $name "}
+  rest=$(strip_leading_space "$line")
+  rest=$(strip_leading_space "${rest#- }")
+  rest=$(strip_leading_space "${rest#"$name"}")
   case "$rest" in
     \[*)
       case "$rest" in
@@ -231,7 +238,7 @@ fi
 
 if [ -z "$PATH_ARG" ]; then
   parsed=
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     line_name=$(registry_line_name "$line" || true)
     [ "$line_name" = "$NAME" ] || continue
     ann=$(registry_annotation "$line_name" "$line") || exit 2
@@ -256,7 +263,7 @@ target=$(normalize_path "$PATH_ARG") || {
   exit 2
 }
 matches=
-while IFS= read -r line; do
+while IFS= read -r line || [ -n "$line" ]; do
   line_name=$(registry_line_name "$line" || true)
   [ -n "$line_name" ] || continue
   ann=$(registry_annotation "$line_name" "$line") || exit 2

@@ -183,6 +183,32 @@ ROWS
   pass "fm-spawn: a rigor downgrade against the registered posture is announced, never blocked"
 }
 
+# The standing-posture lookup is advisory: it feeds one deviation notice that
+# announces and never blocks. A malformed line for an UNRELATED project makes the
+# path scan refuse, so a fail-closed lookup would turn one registry typo into a
+# hard failure of every ship spawn for every project. The spawn must instead name
+# the reported reason and fall back to the protective default posture.
+test_spawn_degrades_when_the_registry_lookup_refuses() {
+  local rec home proj fakebin out
+  rec=$(make_home registry-typo \
+    "- other [no-mistakes - fixture with a missing closing bracket (added 2026-01-01)" \
+    "- proj [no-mistakes] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" delivery-typo-f1 local-only
+
+  out=$(run_spawn "$home" "$fakebin" delivery-typo-f1 "$proj" claude --mode local-only --yolo off)
+
+  assert_contains "$out" "registered mode lookup failed" \
+    "spawn did not report the advisory lookup refusal"
+  assert_contains "$out" "malformed registry annotation for other" \
+    "spawn did not name the reason the registry lookup gave"
+  assert_contains "$out" "less rigor than the captain's standing posture" \
+    "spawn did not fall back to the protective no-mistakes standing default"
+  pass "fm-spawn: an advisory registry lookup refusal degrades and warns instead of blocking the spawn"
+}
+
 test_spawn_resolves_standing_posture_by_registered_path() {
   local home external fakebin out
   home="$TMP_ROOT/external-spawn/home"
@@ -402,6 +428,7 @@ test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
+test_spawn_degrades_when_the_registry_lookup_refuses
 test_spawn_resolves_standing_posture_by_registered_path
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract

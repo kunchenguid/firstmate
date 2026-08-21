@@ -351,6 +351,7 @@ flush_paused_stale_rechecks() {
   [ "$PAUSED_STALE_RECHECK_COUNT" -gt 0 ] || return 0
   if [ "$PAUSED_STALE_RECHECK_COUNT" -eq 1 ]; then
     wake "$PAUSED_STALE_RECHECK_REASON"
+    return 0
   fi
   wake "stale: paused recheck batch (${PAUSED_STALE_RECHECK_COUNT}): $PAUSED_STALE_RECHECK_WINDOWS"
 }
@@ -520,6 +521,15 @@ clear_pause_tracking() {  # <window-key>
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
+# True while this key's declared-pause bounded cadence still holds - the pane was
+# already classified paused and its recheck is not yet due. Single definition of
+# that cadence so every reader of it (the class reconciler and the actionable
+# run-state probe) is throttled by the same marker and they cannot drift apart.
+paused_cadence_holds() {  # <window-key>
+  local key=$1
+  [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$STATE/.paused-rechecked-$key")" -lt "$STALE_ESCALATE_SECS" ]
+}
+
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # The latest explicit paused event remains authoritative while the endpoint idles,
 # but an active run overrides it as working and a later status event clears it.
@@ -532,7 +542,7 @@ pause_state_class() {  # <window> <task>
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
   if status_is_paused "$last"; then
-    if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+    if paused_cadence_holds "$key"; then
       printf 'paused'
       return
     fi
@@ -556,7 +566,7 @@ pause_state_class() {  # <window> <task>
   # so a mate's stale poll costs one metadata scan rather than one per gate, and the
   # far more common no-declaration path above still costs none.
   kind=$(window_kind "$win")
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+  if paused_cadence_holds "$key"; then
     if [ "$kind" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
@@ -1281,7 +1291,7 @@ EOF
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        if surface_paused_actionable_run_state_if_new "$w" "$task" "$h"; then
+        if ! paused_cadence_holds "$key" && surface_paused_actionable_run_state_if_new "$w" "$task" "$h"; then
           :
         elif [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
@@ -1435,7 +1445,7 @@ EOF
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
-        if surface_paused_actionable_run_state_if_new "$w" "$task" "$h"; then
+        if ! paused_cadence_holds "$key" && surface_paused_actionable_run_state_if_new "$w" "$task" "$h"; then
           :
         else
           case "$(pause_state_class "$w" "$task")" in
