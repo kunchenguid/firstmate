@@ -613,7 +613,8 @@ test_map_dependent_spawn_and_promote() {
     "worktree=$project" \
     "project=$project" \
     "harness=codex" \
-    "kind=scout"
+    "kind=scout" \
+    "wayfinder_no_child=1"
   set +e
   out=$(run_promote "$home" "$id" --mode no-mistakes --yolo off --wayfinder-state "$snap_bad")
   rc=$?
@@ -646,7 +647,8 @@ test_map_dependent_spawn_and_promote() {
     "worktree=$project" \
     "project=$project" \
     "harness=codex" \
-    "kind=scout"
+    "kind=scout" \
+    "wayfinder_no_child=1"
   out=$(run_promote "$home" "$id" --mode no-mistakes --yolo off --wayfinder-independent)
   rc=$?
   expect_code 0 "$rc" "map-independent promotion should succeed without a snapshot"$'\n'"$out"

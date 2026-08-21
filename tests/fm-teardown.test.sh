@@ -686,7 +686,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
 }
 
 test_wayfinder_scout_teardown_requires_accept_child() {
-  local case_dir promoted_case untracked_case rejected resolved out rc
+  local case_dir promoted_case legacy_case untracked_case rejected resolved out rc
   case_dir=$(make_case wayfinder-scout-archive)
   prepare_spawn_endpoint "$case_dir"
   mkdir -p "$case_dir/data/task-x1"
@@ -780,6 +780,59 @@ test_wayfinder_scout_teardown_requires_accept_child() {
   assert_absent "$promoted_case/state/task-x1.meta" \
     "Wayfinder-resolved promoted task teardown did not archive task metadata"
 
+  legacy_case=$(make_case wayfinder-legacy-promoted-scout)
+  prepare_spawn_endpoint "$legacy_case"
+  mkdir -p "$legacy_case/data/task-x1"
+  printf '%s\n' 'Research the Wayfinder child.' > "$legacy_case/data/task-x1/brief.md"
+  install_teardown_wayfinder_gate "$legacy_case/project"
+  out=$(run_scout_spawn "$legacy_case" --wayfinder-child 5 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "named Wayfinder scout should spawn before legacy migration"$'\n'"$out"
+  sed -i.bak '/^wayfinder_child=/d' "$legacy_case/state/task-x1.meta"
+  rm -f "$legacy_case/state/task-x1.meta.bak"
+
+  set +e
+  out=$(run_promote "$legacy_case" --mode no-mistakes --yolo off --wayfinder-independent 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unclassified legacy Wayfinder scout must not promote"$'\n'"$out"
+  assert_contains "$out" "has no Wayfinder classification" \
+    "legacy Wayfinder promotion did not require explicit classification"
+  assert_grep 'kind=scout' "$legacy_case/state/task-x1.meta" \
+    "rejected legacy Wayfinder promotion changed the scout kind"
+
+  out=$(run_promote "$legacy_case" --mode no-mistakes --yolo off --wayfinder-independent \
+    --wayfinder-child 5 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "classified legacy Wayfinder scout should promote"$'\n'"$out"
+  assert_grep 'wayfinder_child=5' "$legacy_case/state/task-x1.meta" \
+    "classified legacy promotion did not persist the named Wayfinder child"
+  add_compatible_tasks_axi "$legacy_case"
+  printf '%s\n' '# Research report' > "$legacy_case/data/task-x1/report.md"
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$legacy_case/state/task-x1.meta"
+  rejected="$legacy_case/rejected.json"
+  resolved="$legacy_case/resolved.json"
+  printf '%s\n' '{"children":[{"number":5,"state":"open"}]}' > "$rejected"
+  printf '%s\n' '{"children":[{"number":5,"state":"closed"}]}' > "$resolved"
+
+  set +e
+  out=$(FM_DATA_OVERRIDE="$legacy_case/data" run_teardown "$legacy_case" \
+    --wayfinder-state "$rejected" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "classified legacy Wayfinder ship must not archive while accept-child rejects"$'\n'"$out"
+  assert_contains "$out" "accept-child rejected" \
+    "classified legacy promotion did not retain the accept-child obligation"
+  assert_present "$legacy_case/state/task-x1.meta" \
+    "Wayfinder-rejected classified legacy teardown removed task metadata"
+
+  out=$(FM_DATA_OVERRIDE="$legacy_case/data" run_teardown "$legacy_case" \
+    --wayfinder-state "$resolved" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "classified legacy Wayfinder ship should archive after accept-child succeeds"$'\n'"$out"
+  assert_absent "$legacy_case/state/task-x1.meta" \
+    "Wayfinder-resolved classified legacy teardown did not archive task metadata"
+
   untracked_case=$(make_case wayfinder-untracked-scout)
   prepare_spawn_endpoint "$untracked_case"
   mkdir -p "$untracked_case/data/task-x1"
@@ -790,6 +843,11 @@ test_wayfinder_scout_teardown_requires_accept_child() {
   expect_code 0 "$rc" "unrelated gated scout should spawn with an explicit no-child classification"$'\n'"$out"
   assert_grep 'wayfinder_no_child=1' "$untracked_case/state/task-x1.meta" \
     "unrelated gated scout did not persist its no-child classification"
+  out=$(run_promote "$untracked_case" --mode no-mistakes --yolo off --wayfinder-independent 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "explicit non-Wayfinder scout should promote"$'\n'"$out"
+  assert_grep 'wayfinder_no_child=1' "$untracked_case/state/task-x1.meta" \
+    "promotion did not retain the explicit no-child classification"
   add_compatible_tasks_axi "$untracked_case"
   printf '%s\n' '# Unrelated research report' > "$untracked_case/data/task-x1/report.md"
   printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$untracked_case/state/task-x1.meta"
