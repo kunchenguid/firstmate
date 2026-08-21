@@ -8,6 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import {
   createQuotaStatusFormatter,
   DEFAULT_QUOTA_FRESHNESS_MS,
+  nextQuotaStatusTransitionMs,
   parseQuotaAxiJson,
   quotaFailureReasonFromReport,
   quotaProviderForPiProvider,
@@ -1650,7 +1651,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         ? cachedFreshView
         : null;
       const nextRevalidationMs = view.kind === "fresh"
-        ? view.freshUntilMs
+        ? Math.min(
+            view.freshUntilMs,
+            nextQuotaStatusTransitionMs(view, renderScheduledAtMs),
+          )
         : recoverableSkewView
           ? recoverableSkewView.freshnessTimestampMs - 60_000
           : null;

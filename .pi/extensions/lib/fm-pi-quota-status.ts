@@ -158,6 +158,8 @@ const QUOTA_AVAILABILITY_STATUSES = ["known", "unknown"] as const;
 const QUOTA_EFFECTIVE_PACE_STATUSES = ["ahead", "on_pace", "behind", "mixed", "unknown"] as const;
 const QUOTA_RUNWAY_STATUSES = ["exhausted_now", "projected_exhaustion", "through_reset", "unknown"] as const;
 const QUOTA_SELECTION_STATUSES = ["known", "unknown"] as const;
+const MAX_QUOTA_WINDOWS = 128;
+const MAX_QUOTA_AVAILABILITY_SCOPES = 128;
 
 export function quotaProviderForPiProvider(piProvider: string): string | null {
   return PI_PROVIDER_TO_QUOTA_PROVIDER[piProvider] ?? null;
@@ -388,7 +390,7 @@ function validPace(
   schemaVersion: number,
   providerIsStale: boolean,
 ): boolean {
-  if (value === undefined) return schemaVersion !== 5;
+  if (value === undefined) return schemaVersion !== 5 && !requireAuditFields;
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_PACE_STATUSES);
   const reason = value.reason === undefined ? null : exactEnum(value.reason, QUOTA_PACE_REASONS);
@@ -1314,7 +1316,11 @@ function validQuotaSemantics(
   untrustedWindowIds: string[],
 ): boolean {
   if (value === undefined) return true;
-  if (!isRecord(value)) return false;
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.effectiveAvailability) ||
+    value.effectiveAvailability.length > MAX_QUOTA_AVAILABILITY_SCOPES
+  ) return false;
   const status = exactEnum(value.status, QUOTA_SEMANTICS_STATUSES);
   if (!status) return false;
   if (requireDescription && typeof value.description !== "string") return false;
@@ -1438,7 +1444,7 @@ function validProviderFields(
         ? source !== "cache"
         : source !== "unavailable")
   ) return false;
-  if (!Array.isArray(value.windows)) return false;
+  if (!Array.isArray(value.windows) || value.windows.length > MAX_QUOTA_WINDOWS) return false;
   const providerIsStale = isRecord(value.state) && value.state.stale === true;
   const parsedWindows = value.windows.map((window) => (
     parseWindow(window, generatedAtMs, requireFullFields, schemaVersion, providerIsStale)
@@ -1452,13 +1458,17 @@ function validProviderFields(
     ? value.state.untrustedWindowIds as string[]
     : [];
   const parsedWindowIds = new Set((parsedWindows as QuotaWindowView[]).map((window) => window.id));
-  if (untrustedWindowIds.some((id) => parsedWindowIds.has(id))) return false;
+  const provider = exactText(value.provider) ?? "";
+  if (
+    untrustedWindowIds.some((id) => parsedWindowIds.has(id)) ||
+    (provider !== "kimi" && untrustedWindowIds.length > 0)
+  ) return false;
   if (!validQuotaSemantics(
     value.quotaSemantics,
     requireFullFields,
     requireFullFields && !providerIsStale,
     schemaVersion === 5 || projection === "full",
-    exactText(value.provider) ?? "",
+    provider,
     parsedWindows as QuotaWindowView[],
     rawWindows,
     generatedAtMs,
@@ -1854,7 +1864,7 @@ type FormattedQuotaCacheEntry = {
   validUntilMs: number;
 };
 
-function nextResetFormatTransitionMs(view: QuotaView, nowMs: number): number {
+export function nextQuotaStatusTransitionMs(view: QuotaView, nowMs: number): number {
   if (view.kind !== "fresh" || !Number.isFinite(nowMs)) return Number.POSITIVE_INFINITY;
   let nextTransitionMs = Number.POSITIVE_INFINITY;
   for (const window of view.windows) {
@@ -1893,7 +1903,7 @@ export function createQuotaStatusFormatter(maxEntriesPerView = 8) {
     entries.set(safeWidth, {
       formatted,
       computedAtMs: nowMs,
-      validUntilMs: nextResetFormatTransitionMs(view, nowMs),
+      validUntilMs: nextQuotaStatusTransitionMs(view, nowMs),
     });
     return formatted;
   };

@@ -641,7 +641,7 @@ function report(now = Date.now()) {
         source: "oauth",
         plan: "max",
         windows: [
-          { id: "session", label: "session", kind: "session", percentRemaining: 72.5, resetsAt: new Date(now + 2 * 60 * 60 * 1000).toISOString() },
+          { id: "session", label: "session", kind: "session", percentRemaining: 72.5, resetsAt: new Date(now + 2 * 60 * 60 * 1000).toISOString(), pace: { status: "unknown", reason: "missing_cycle" } },
         ],
         credits: { unlimited: true, unit: "credits" },
         state: state(["oauth-file", "oauth-profile"]),
@@ -657,9 +657,9 @@ function report(now = Date.now()) {
         plan: "pro",
         account: { accountId: "fixture-codex-account" },
         windows: [
-          { id: "weekly", label: "week", kind: "weekly", percentRemaining: 94, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString() },
-          { id: "spark-session", label: "GPT-5.3-Codex-Spark session", kind: "model", percentRemaining: 100, resetsAt: new Date(now + 5 * 60 * 60 * 1000).toISOString() },
-          { id: "spark-week", label: "GPT-5.3-Codex-Spark week", kind: "model", percentRemaining: 100, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString() },
+          { id: "weekly", label: "week", kind: "weekly", percentRemaining: 94, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString(), pace: { status: "unknown", reason: "missing_cycle" } },
+          { id: "spark-session", label: "GPT-5.3-Codex-Spark session", kind: "model", percentRemaining: 100, resetsAt: new Date(now + 5 * 60 * 60 * 1000).toISOString(), pace: { status: "unknown", reason: "missing_cycle" } },
+          { id: "spark-week", label: "GPT-5.3-Codex-Spark week", kind: "model", percentRemaining: 100, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString(), pace: { status: "unknown", reason: "missing_cycle" } },
         ],
         credits: { remaining: 0, unlimited: false, unit: "credits" },
         state: state(["oauth"]),
@@ -670,7 +670,7 @@ function report(now = Date.now()) {
         label: "Kimi",
         source: "api",
         windows: [
-          { id: "weekly", label: "week", kind: "weekly", percentRemaining: 83, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString() },
+          { id: "weekly", label: "week", kind: "weekly", percentRemaining: 83, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString(), pace: { status: "unknown", reason: "missing_cycle" } },
         ],
         state: state(["pi:kimi-coding"]),
         attempts: [{ source: "pi:kimi-coding", status: "success" }],
@@ -975,6 +975,58 @@ for (const [description, mutate] of [
     `schema-5 full output with ${description} was accepted as fresh`,
   );
 }
+const oversizedTopology = structuredClone(schema5Full);
+const oversizedProvider = oversizedTopology.providers[1];
+const oversizedAccountWindows = Array.from({ length: 64 }, (_, index) => ({
+  id: `weekly_${index + 1}`,
+  label: `week ${index + 1}`,
+  kind: "weekly",
+  percentRemaining: index === 0 ? 50 : 94,
+  resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString(),
+  pace: { status: "unknown", reason: "missing_cycle" },
+}));
+const oversizedModelWindows = Array.from({ length: 65 }, (_, index) => ({
+  id: `m${index + 1}`,
+  label: `model ${index + 1}`,
+  kind: "model",
+  percentRemaining: 100,
+  resetsAt: new Date(now + 5 * 60 * 60 * 1000).toISOString(),
+  pace: { status: "unknown", reason: "missing_cycle" },
+}));
+const oversizedAvailability = (scope, windows) => {
+  const boundedBy = windows.map((window) => window.id);
+  const effectivePercentRemaining = Math.min(...windows.map((window) => window.percentRemaining));
+  return {
+    scope,
+    status: "known",
+    effectivePercentRemaining,
+    boundedBy,
+    limitingWindowIds: windows
+      .filter((window) => window.percentRemaining === effectivePercentRemaining)
+      .map((window) => window.id),
+    pace: { status: "unknown", unknownWindowIds: boundedBy },
+    runway: { status: "unknown", unmeasurableWindowIds: boundedBy },
+    selection: { status: "unknown", unmeasurableWindowIds: boundedBy },
+  };
+};
+oversizedProvider.windows = [...oversizedAccountWindows, ...oversizedModelWindows];
+oversizedProvider.quotaSemantics = {
+  status: "known",
+  description: "Producer-impossible oversized topology.",
+  effectiveAvailability: [
+    oversizedAvailability("all_models", oversizedAccountWindows),
+    ...oversizedModelWindows.map((window) => (
+      oversizedAvailability(window.id, [...oversizedAccountWindows, window])
+    )),
+  ],
+};
+const oversizedTopologyJson = JSON.stringify(oversizedTopology);
+assert(Buffer.byteLength(oversizedTopologyJson) < 1024 * 1024, "oversized-topology fixture exceeded the process bound");
+const oversizedTopologyParsed = parseQuotaAxiJson(oversizedTopologyJson, { projection: "full" });
+assert(
+  selectActiveProviderQuota(oversizedTopologyParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "implausibly large quota topology was expanded and accepted",
+);
 assert(quotaProviderForPiProvider("openai-codex") === "codex", "openai-codex provider mapping failed");
 assert(quotaProviderForPiProvider("anthropic") === "claude", "anthropic provider mapping failed");
 assert(quotaProviderForPiProvider("github-copilot") === "copilot", "GitHub Copilot provider mapping failed");
@@ -1389,6 +1441,29 @@ assert(
   selectActiveProviderQuota(schema3FullParsed, "openai-codex", { nowMs: now }).kind === "fresh",
   "valid schema-3 full projection was rejected",
 );
+const schema3UnknownPace = structuredClone(schema5Full);
+schema3UnknownPace.schemaVersion = 3;
+for (const availability of schema3UnknownPace.providers[1].quotaSemantics.effectiveAvailability) {
+  delete availability.selection;
+}
+const schema3UnknownPaceParsed = parseQuotaAxiJson(
+  JSON.stringify(schema3UnknownPace),
+  { projection: "full" },
+);
+assert(
+  selectActiveProviderQuota(schema3UnknownPaceParsed, "openai-codex", { nowMs: now }).kind === "fresh",
+  "valid schema-3 unknown-pace projection was rejected",
+);
+const schema3MissingWindowPace = structuredClone(schema3UnknownPace);
+delete schema3MissingWindowPace.providers[1].windows[0].pace;
+const schema3MissingWindowPaceParsed = parseQuotaAxiJson(
+  JSON.stringify(schema3MissingWindowPace),
+  { projection: "full" },
+);
+assert(
+  selectActiveProviderQuota(schema3MissingWindowPaceParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "schema-3 full output missing window pace was accepted as fresh",
+);
 const schema3FullWithoutSemantics = structuredClone(schema3Full);
 delete schema3FullWithoutSemantics.providers[1].quotaSemantics;
 const schema3FullWithoutSemanticsParsed = parseQuotaAxiJson(
@@ -1747,6 +1822,8 @@ const inconsistentSourcesTried = structuredClone(fullyPopulated);
 inconsistentSourcesTried.providers[1].state.sourcesTried = ["cli-rpc"];
 const untrustedDisplayedWindow = structuredClone(fullyPopulated);
 untrustedDisplayedWindow.providers[1].state.untrustedWindowIds = ["weekly"];
+const foreignUntrustedWindow = structuredClone(fullyPopulated);
+foreignUntrustedWindow.providers[1].state.untrustedWindowIds = ["ghost"];
 const falseUnknownSelectionParsed = parseQuotaAxiJson(
   JSON.stringify(falseUnknownSelection),
   { projection: "full" },
@@ -1805,6 +1882,7 @@ for (const [malformedReport, description] of [
   [failedFreshSourceAttempt, "fresh source without a successful attempt"],
   [inconsistentSourcesTried, "state sources detached from ordered attempts"],
   [untrustedDisplayedWindow, "displayed window marked untrusted"],
+  [foreignUntrustedWindow, "foreign untrusted window diagnostic"],
 ]) {
   const structurallyParsed = parseQuotaAxiJson(JSON.stringify(malformedReport));
   assert(structurallyParsed, `${description} fixture should remain structurally parseable`);
@@ -3153,6 +3231,48 @@ assert(siblingText.includes("GPT-5.3-Codex-Spark session 100% left"), "reset quo
 assert(siblingText.includes("plan pro") && siblingText.includes("credits 0"), "window reset hid quota metadata");
 await independentlyExpiring.emit("session_shutdown", { reason: "quit" });
 assert(siblingClock.tasks.size === 0, "independent window expiry leaked a timer");
+delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
+const countdownStart = Date.now();
+const countdownClock = new FakeClock(countdownStart);
+process.env.FM_QUOTA_TEST_NOW_MS = String(countdownStart);
+process.env.FM_QUOTA_TEST_FIRST_RESET_MS = String(150_000);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  countdownStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const idleCountdown = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => countdownClock.nowMs,
+  timers: countdownClock.timers,
+}));
+await idleCountdown.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => idleCountdown.widgetText(400).includes("week 94% left reset 3m"),
+  `idle-countdown fixture did not publish its initial reset: ${idleCountdown.widgetText(400)}`,
+);
+const writesBeforeCountdownTransition = idleCountdown.widgetWriteCount;
+countdownClock.advance(29_999);
+assert(
+  idleCountdown.widgetWriteCount === writesBeforeCountdownTransition,
+  "reset countdown redrew before its display transition",
+);
+countdownClock.advance(1);
+assert(
+  idleCountdown.widgetWriteCount > writesBeforeCountdownTransition,
+  "idle reset countdown did not request a redraw at its display transition",
+);
+assert(
+  idleCountdown.widgetText(400).includes("week 94% left reset 2m"),
+  `idle reset countdown remained stale: ${idleCountdown.widgetText(400)}`,
+);
+await idleCountdown.emit("session_shutdown", { reason: "quit" });
+assert(countdownClock.tasks.size === 0, "idle reset countdown leaked a timer");
 delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
