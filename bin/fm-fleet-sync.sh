@@ -11,8 +11,8 @@
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
-# Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
-# and fetch failures.
+# Still skips (benignly) local-only/no-origin projects, Firstmate's own home directory,
+# missing remotes/branches, and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
@@ -302,6 +302,13 @@ sync_project() {
   fi
   if ! git -C "$PROJ" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "$label: skipped: not a git repo"
+    return 0
+  fi
+  proj_real=$(cd "$PROJ" 2>/dev/null && pwd -P || printf '%s\n' "$PROJ")
+  root_real=$(cd "$FM_ROOT" 2>/dev/null && pwd -P || printf '%s\n' "$FM_ROOT")
+  home_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P || printf '%s\n' "$FM_HOME")
+  if [ "$proj_real" = "$root_real" ] || [ "$proj_real" = "$home_real" ]; then
+    echo "$label: skipped: firstmate home (upstream sync is manual)"
     return 0
   fi
   mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")

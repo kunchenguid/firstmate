@@ -370,6 +370,17 @@ test_local_only_skipped() {
   pass "local-only clone is skipped (benign), not flagged STUCK"
 }
 
+test_firstmate_home_skipped() {
+  local home out
+  home=$(new_home)
+  git init -q "$home"
+  out=$(run_sync "$home" "$home")
+
+  assert_contains "$out" "skipped: firstmate home (upstream sync is manual)" "firstmate home is skipped"
+  assert_not_contains "$out" "STUCK" "firstmate home skip is not escalated to STUCK"
+  pass "firstmate home is skipped (manual sync), not flagged STUCK"
+}
+
 test_single_project_by_bare_name_resolves() {
   local home out
   home=$(new_home)
@@ -613,6 +624,7 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_firstmate_home_skipped
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves

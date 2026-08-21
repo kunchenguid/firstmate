@@ -692,6 +692,25 @@ test_no_mistakes_truly_unpushed_refuses() {
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
 }
 
+test_no_mistakes_merged_into_local_main_allows() {
+  local case_dir rc wt_head
+  case_dir=$(make_case nm-merged-local-main)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "firstmate local fix"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # Advance local main (as fm-merge-local.sh does), leaving origin/main untouched
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-merged-local-main: teardown should succeed when work is in local main"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "nm-merged-local-main: teardown printed a REFUSED line"
+  pass "no-mistakes worktree with work merged into local main is torn down"
+}
+
 test_squash_merged_branch_deleted_allows() {
   local case_dir rc pr_head
   case_dir=$(make_case squash-merged)
@@ -2597,6 +2616,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_no_mistakes_merged_into_local_main_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes

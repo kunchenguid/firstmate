@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Merge a task's PR after recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
+# For Firstmate's own repository, also fast-forwards local main via fm-merge-local.sh.
 # The full canonical GitHub PR URL is parsed by bin/fm-pr-lib.sh and the derived
 # owner/repository and PR number are passed to gh-axi as separate arguments.
 #
@@ -82,3 +83,13 @@ if ! caller_has_merge_method "$@"; then
 fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+
+PROJ=$(grep '^project=' "$META" | cut -d= -f2- || true)
+if [ -n "$PROJ" ] && [ -d "$PROJ" ]; then
+  proj_real=$(cd "$PROJ" 2>/dev/null && pwd -P || printf '%s\n' "$PROJ")
+  root_real=$(cd "$FM_ROOT" 2>/dev/null && pwd -P || printf '%s\n' "$FM_ROOT")
+  home_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P || printf '%s\n' "$FM_HOME")
+  if [ "$proj_real" = "$root_real" ] || [ "$proj_real" = "$home_real" ]; then
+    "$SCRIPT_DIR/fm-merge-local.sh" "$ID"
+  fi
+fi
