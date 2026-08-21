@@ -480,8 +480,8 @@ Announcement ordering is adapter-declared through `bin/fm-procevent-<adapter>.sh
 The remote-secondmate reply adapter declares itself self-announcing: a captured reply reaches its local status mirror and settles its correlated pending-reply expectation without any handler step, the mirrored status bytes are the single wake for one remote note through the same signal classification a local secondmate's append gets, a byte-identical replayed capture adds no bytes and stays quiet, and only a capture the adapter could not fully apply is published as a `check` wake, whose adapter handling remains idempotent.
 
 Keyed captain answers use one more seam of the same kind, and the runner still decides nothing about them.
-Some sources carry the captain's answer to a durable decision, and what such an answer means is owned once by `bin/fm-decision-hold.sh`'s keyed-answer intake rather than by any channel.
-A source bound with `bin/fm-decision-hold.sh bind` therefore has each captured result passed to `bin/fm-procevent-<adapter>.sh answers <result-file>`, and whatever that prints is piped straight into that intake.
+Some sources carry the captain's answer to a captain-held task, and what such an answer means is owned once by `bin/fm-captain-hold.sh`'s keyed-answer intake rather than by any channel.
+A source bound with `bin/fm-captain-hold.sh bind` therefore has each captured result passed to `bin/fm-procevent-<adapter>.sh answers <result-file>`, and whatever that prints is piped straight into that intake.
 A binding can select one decision origin or the script's cross-origin mode; the command header owns the exact forms and key interpretation.
 The adapter reports only what the captain chose; the intake owns every rule about what happens next, so the runner names no adapter, parses no result, and carries no decision rule, and a future source needs nothing here beyond an `answers` command and a binding.
 Feeding is independent of handling: it never acknowledges a result and never suppresses a wake, because recording the answer is transcription while acting on it is firstmate's judgement.

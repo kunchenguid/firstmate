@@ -73,7 +73,7 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
 # status decision opened by needs-decision or blocked. See status_open_decisions
 # below for the status-fold contract. The transfer verb is written only after
-# fm-decision-hold.sh has verified the corresponding captain-held backlog item.
+# fm-captain-hold.sh has verified the corresponding captain-held backlog item.
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
