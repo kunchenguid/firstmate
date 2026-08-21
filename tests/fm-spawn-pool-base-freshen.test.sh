@@ -228,7 +228,7 @@ test_unresolved_remote_default_refuses_pool() {
 }
 
 make_case_no_origin() {
-  local name=$1 id=$2 default=${3:-main} case_dir home project pool fakebin initial
+  local name=$1 id=$2 default=${3:-trunk} case_dir home project pool fakebin initial
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   project="$case_dir/project"
@@ -247,15 +247,24 @@ make_case_no_origin() {
   initial=$(git -C "$project" rev-parse HEAD)
   git -C "$project" worktree add --quiet --detach "$pool" "$initial"
 
+  printf 'must survive a newly spawned branch\n' > "$project/advanced-local.txt"
+  git -C "$project" add advanced-local.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local
+
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
 
 test_no_origin_remote_uses_local_default_branch() {
-  local rec id out status head_before head_after
+  local rec id out status head_before head_after advanced
   id='pool-no-origin-r6'
   rec=$(make_case_no_origin no-origin "$id")
   read_case_record "$rec"
   head_before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  advanced=$(git -C "$PROJECT_DIR" rev-parse "$DEFAULT_BRANCH")
+  [ "$head_before" = "$INITIAL_SHA" ] \
+    || fail "fixture did not leave the no-origin pool on its allocation base"
+  [ "$advanced" != "$INITIAL_SHA" ] \
+    || fail "fixture did not advance the local default branch past the pool base"
 
   out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
@@ -263,9 +272,11 @@ test_no_origin_remote_uses_local_default_branch() {
   assert_contains "$out" "spawned $id" "spawn did not report success"
   assert_contains "$out" "no origin remote" "spawn did not emit the no-origin notice"
   head_after=$(git -C "$POOL_DIR" rev-parse HEAD)
-  [ "$head_after" = "$head_before" ] \
-    || fail "spawn moved HEAD unexpectedly for a no-origin project already at the local default branch tip"
-  pass "a project with no origin remote spawns using the local default branch"
+  [ "$head_after" = "$advanced" ] \
+    || fail "spawn did not reset the no-origin pool to the local '$DEFAULT_BRANCH' tip"
+  assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-local.txt" \
+    "the refreshed no-origin pool omitted the advanced local default-branch content"
+  pass "a project with no origin remote spawns from the local default branch tip"
 }
 
 test_no_origin_dirty_pool_still_refuses() {

@@ -1729,6 +1729,24 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# Resolve a local-only project's default branch when neither `main` nor `master`
+# exists: read the primary checkout's HEAD symref through the shared git common
+# dir, so `git init -b trunk` style projects still yield a real spawn base.
+primary_checkout_head_branch() {  # <worktree>
+  local worktree=$1 common primary branch
+  common=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  case $common in
+    /*) ;;
+    *) common="$worktree/$common" ;;
+  esac
+  primary=$(cd "$common/.." 2>/dev/null && pwd -P) || return 1
+  branch=$(git -C "$primary" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  [ -n "$branch" ] || return 1
+  git -C "$worktree" show-ref --verify --quiet "refs/heads/$branch" || return 1
+  printf '%s\n' "$branch"
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status has_origin=1
   if ! git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
@@ -1744,14 +1762,18 @@ freshen_spawn_worktree_base() {  # <worktree>
       return 1
     fi
   fi
-  default=$(default_branch "$worktree") || {
+  default=$(default_branch "$worktree" 2>/dev/null || true)
+  if [ -z "$default" ] && [ "$has_origin" = 0 ]; then
+    default=$(primary_checkout_head_branch "$worktree" 2>/dev/null || true)
+  fi
+  if [ -z "$default" ]; then
     if [ "$has_origin" = 1 ]; then
       echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     else
-      echo "error: could not determine default branch for pooled worktree '$worktree'; no origin remote and no local main or master branch" >&2
+      echo "error: could not determine default branch for pooled worktree '$worktree'; no origin remote and no local default branch to base the spawn on" >&2
     fi
     return 1
-  }
+  fi
   if [ "$has_origin" = 1 ]; then
     target="origin/$default"
     if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
