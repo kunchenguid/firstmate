@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # Regression tests for fm-spawn's pooled-worktree base refresh.
 #
-# A treehouse pool can return a clean detached worktree whose origin/main was
-# advanced after the worktree was allocated.
+# A treehouse pool can return a clean detached worktree whose authoritative
+# base moved after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin/main tip or stops when origin is
-# unreachable.
+# selects the base from task mode and Git ancestry or stops when that base is
+# unsafe or cannot be resolved.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+REAL_GIT=$(command -v git)
 TMP_ROOT=$(fm_test_tmproot fm-spawn-pool-base-freshen)
 
 make_spawn_fakebin() {
@@ -30,12 +31,94 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${FM_FAKE_GIT_FAILURE:-}" in
+  merge-base)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_PROJECT_DIR:-}" ] \
+      && [ "${3:-}" = merge-base ] \
+      && [ "${4:-}" = --is-ancestor ]; then
+      exit 2
+    fi
+    ;;
+  origin-inspection)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_POOL_DIR:-}" ] \
+      && [ "${3:-}" = remote ] \
+      && [ "$#" -eq 3 ]; then
+      exit 2
+    fi
+    ;;
+  remote-head-absence)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_POOL_DIR:-}" ] \
+      && [ "${3:-}" = symbolic-ref ] \
+      && [ "${4:-}" = --quiet ] \
+      && [ "${5:-}" = --short ] \
+      && [ "${6:-}" = refs/remotes/origin/HEAD ]; then
+      exit 1
+    fi
+    ;;
+  remote-head-inspection)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_POOL_DIR:-}" ] \
+      && [ "${3:-}" = symbolic-ref ] \
+      && [ "${4:-}" = --quiet ] \
+      && [ "${5:-}" = --short ] \
+      && [ "${6:-}" = refs/remotes/origin/HEAD ]; then
+      exit 2
+    fi
+    ;;
+  local-config)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_PROJECT_DIR:-}" ] \
+      && [ "${3:-}" = config ] \
+      && [ "${4:-}" = --local ] \
+      && [ "${5:-}" = --get ] \
+      && [ "${6:-}" = init.defaultBranch ]; then
+      exit 2
+    fi
+    ;;
+  local-ref-probe)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_PROJECT_DIR:-}" ] \
+      && [ "${3:-}" = show-ref ] \
+      && [ "${4:-}" = --verify ] \
+      && [ "${5:-}" = --quiet ]; then
+      exit 2
+    fi
+    ;;
+  local-ref-resolution)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_PROJECT_DIR:-}" ] \
+      && [ "${3:-}" = rev-parse ] \
+      && [ "${4:-}" = --verify ] \
+      && [ "${5:-}" = --quiet ] \
+      && [ "${6:-}" = "refs/heads/${FM_FAKE_DEFAULT_BRANCH:-main}^{commit}" ]; then
+      exit 2
+    fi
+    ;;
+  move-local-before-reset)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_POOL_DIR:-}" ] \
+      && [ "${3:-}" = reset ] \
+      && [ "${4:-}" = --hard ]; then
+      "${FM_REAL_GIT:?}" -C "${FM_FAKE_PROJECT_DIR:?}" update-ref \
+        "refs/heads/${FM_FAKE_DEFAULT_BRANCH:?}" "${FM_FAKE_MOVE_TARGET:?}" || exit $?
+    fi
+    ;;
+esac
+exec "${FM_REAL_GIT:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
 
 make_case() {
-  local name=$1 id=$2 default=${3:-main} case_dir home project origin pool publisher fakebin initial
+  local name=$1 id=$2 default=${3:-main} relation=${4:-behind} case_dir home project origin pool publisher fakebin initial
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   project="$case_dir/project"
@@ -63,6 +146,15 @@ make_case() {
   git -C "$publisher" add advanced-main.txt
   git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
   git -C "$publisher" push --quiet origin "$default"
+  if [ "$relation" = ahead ]; then
+    git -C "$project" fetch --quiet origin
+    git -C "$project" merge --quiet --ff-only "origin/$default"
+  fi
+  if [ "$relation" = ahead ] || [ "$relation" = diverged ]; then
+    printf 'must survive a local-only spawn\n' > "$project/local-main.txt"
+    git -C "$project" add local-main.txt
+    git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local-main
+  fi
 
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
@@ -80,6 +172,8 @@ run_spawn() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    FM_REAL_GIT="$REAL_GIT" FM_FAKE_PROJECT_DIR="$PROJECT_DIR" \
+    FM_FAKE_POOL_DIR="$POOL_DIR" FM_FAKE_DEFAULT_BRANCH="$DEFAULT_BRANCH" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
 }
@@ -119,6 +213,284 @@ test_stale_pool_base_refreshes_before_branching() {
   assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-main.txt" \
     "the branch created after spawn omitted advanced-main content"
   pass "a stale pooled worktree refreshes to current origin/main before a crew branch is created"
+}
+
+test_local_only_prefers_ahead_local_base() {
+  local rec id out status local_head remote_head
+  id='pool-local-only-ahead-r1'
+  rec=$(make_case local-only-ahead "$id" main ahead)
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "local-only spawn should use the local branch when it is ahead"
+  local_head=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  remote_head=$(git -C "$POOL_DIR" rev-parse origin/main)
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_head" ] \
+    || fail "local-only spawn did not use the authoritative local branch"
+  [ "$local_head" != "$remote_head" ] || fail "fixture did not leave the local branch ahead of origin/main"
+  git -C "$PROJECT_DIR" merge-base --is-ancestor "$remote_head" "$local_head" \
+    || fail "fixture made the local branch diverge from origin/main instead of advancing it"
+  assert_grep 'must survive a local-only spawn' "$POOL_DIR/local-main.txt" \
+    "local-only spawn omitted the local-only commit"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed local-only ahead base: HEAD=%s local=%s origin/main=%s local-main=%s\n' \
+      "$(git -C "$POOL_DIR" rev-parse HEAD)" "$local_head" "$remote_head" "$(cat "$POOL_DIR/local-main.txt")"
+  fi
+  pass "a local-only spawn uses the local default branch when it is ahead of origin"
+}
+
+test_local_only_uses_remote_when_local_is_behind() {
+  local rec id out status remote_head
+  id='pool-local-only-behind-r1'
+  rec=$(make_case local-only-behind "$id" main behind)
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "local-only spawn should use origin when the local branch is behind"
+  remote_head=$(git -C "$POOL_DIR" rev-parse origin/main)
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$remote_head" ] \
+    || fail "local-only spawn did not use origin when the local branch was behind"
+  [ "$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)" != "$remote_head" ] \
+    || fail "fixture did not leave the local branch behind origin/main"
+  assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-main.txt" \
+    "local-only spawn omitted the newer remote commit"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed local-only behind base: HEAD=%s local=%s origin/main=%s advanced-main=%s\n' \
+      "$(git -C "$POOL_DIR" rev-parse HEAD)" \
+      "$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)" \
+      "$remote_head" "$(cat "$POOL_DIR/advanced-main.txt")"
+  fi
+  pass "a local-only spawn uses origin when the local default branch is behind it"
+}
+
+test_local_only_prefers_diverged_local_base() {
+  local rec id out status local_head remote_head
+  id='pool-local-only-diverged-r1'
+  rec=$(make_case local-only-diverged "$id" main diverged)
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "local-only spawn should use the local branch when it diverged"
+  local_head=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+  remote_head=$(git -C "$POOL_DIR" rev-parse origin/main)
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_head" ] \
+    || fail "local-only spawn did not use the diverged authoritative local branch"
+  if git -C "$PROJECT_DIR" merge-base --is-ancestor "$local_head" "$remote_head" \
+    || git -C "$PROJECT_DIR" merge-base --is-ancestor "$remote_head" "$local_head"; then
+    fail "fixture did not diverge the local branch from origin/main"
+  fi
+  assert_grep 'must survive a local-only spawn' "$POOL_DIR/local-main.txt" \
+    "local-only spawn omitted the diverged local commit"
+  [ ! -e "$POOL_DIR/advanced-main.txt" ] \
+    || fail "local-only spawn used the diverged remote branch instead of the local branch"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed local-only diverged base: HEAD=%s local=%s origin/main=%s local-main=%s advanced-main=absent\n' \
+      "$(git -C "$POOL_DIR" rev-parse HEAD)" "$local_head" "$remote_head" "$(cat "$POOL_DIR/local-main.txt")"
+  fi
+  pass "a local-only spawn uses the local default branch when it diverged from origin"
+}
+
+test_local_only_refuses_failed_ancestry_inspection() {
+  local rec id out status before after
+  id='pool-local-only-ancestry-failure-r1'
+  rec=$(make_case local-only-ancestry-failure "$id" main ahead)
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(FM_FAKE_GIT_FAILURE=merge-base run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only spawn continued after ancestry inspection failed"
+  assert_contains "$out" "could not compare local default 'refs/heads/main'" \
+    "spawn did not identify the failed local ancestry comparison"
+  assert_contains "$out" "inspect the repository object graph and retry" \
+    "spawn did not provide remediation for a failed ancestry comparison"
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn moved the pool after ancestry inspection failed"
+  pass "a failed local-only ancestry inspection refuses the pooled worktree"
+}
+
+test_local_only_refuses_failed_local_ref_resolution() {
+  local rec id out status before after
+  id='pool-local-only-local-ref-resolution-r1'
+  rec=$(make_case local-only-local-ref-resolution "$id" main ahead)
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(FM_FAKE_GIT_FAILURE=local-ref-resolution run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only spawn continued after local ref resolution failed"
+  assert_contains "$out" "does not resolve to a readable commit" \
+    "spawn did not identify the unreadable local default commit"
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn moved the pool after local ref resolution failed"
+  pass "an unreadable existing local default refuses the pooled worktree"
+}
+
+test_local_only_refuses_failed_repository_inspection() {
+  local failure rec id out status before after
+  for failure in origin-inspection local-config local-ref-probe; do
+    id="pool-local-only-${failure}-r1"
+    rec=$(make_case "local-only-${failure}" "$id" trunk behind)
+    read_case_record "$rec"
+    if [ "$failure" != origin-inspection ]; then
+      git -C "$PROJECT_DIR" remote remove origin
+      git -C "$PROJECT_DIR" config --local init.defaultBranch trunk
+    fi
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+    out=$(FM_FAKE_GIT_FAILURE="$failure" run_spawn "$id" --mode local-only --yolo off)
+    status=$?
+    [ "$status" -ne 0 ] || fail "local-only spawn continued after $failure failed"
+    assert_contains "$out" "could not inspect" \
+      "spawn did not identify the failed $failure probe"
+    after=$(git -C "$POOL_DIR" rev-parse HEAD)
+    [ "$after" = "$before" ] || fail "spawn moved the pool after $failure failed"
+  done
+  pass "failed remote, config, and ref probes refuse the pooled worktree"
+}
+
+test_origin_head_absence_refuses_remote_fallback() {
+  local rec id out status before after
+  id='pool-origin-head-absence-r1'
+  rec=$(make_case origin-head-absence "$id" main behind)
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(FM_FAKE_GIT_FAILURE=remote-head-absence run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only spawn fell back to a local branch when origin/HEAD was absent"
+  assert_contains "$out" "origin/HEAD is absent" \
+    "spawn did not distinguish an absent origin/HEAD"
+  assert_contains "$out" "verify origin advertises an existing default branch and retry" \
+    "spawn did not provide remediation for an absent origin/HEAD"
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn moved the pool after origin/HEAD was absent"
+  pass "an absent origin/HEAD refuses fallback to a local branch"
+}
+
+test_origin_head_inspection_failure_refuses_remote_fallback() {
+  local rec id out status before after
+  id='pool-origin-head-inspection-r1'
+  rec=$(make_case origin-head-inspection "$id" main behind)
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(FM_FAKE_GIT_FAILURE=remote-head-inspection run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only spawn fell back to a local branch after origin/HEAD inspection failed"
+  assert_contains "$out" "could not inspect origin/HEAD" \
+    "spawn did not distinguish a failed origin/HEAD inspection"
+  assert_contains "$out" "remote default could not be determined" \
+    "spawn did not identify the unresolved remote default"
+  assert_contains "$out" "repair the repository remote references and retry" \
+    "spawn did not provide remediation for failed origin/HEAD inspection"
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn moved the pool after origin/HEAD inspection failed"
+  pass "a failed origin/HEAD inspection refuses fallback to a local branch"
+}
+
+test_local_only_resets_to_frozen_selected_commit() {
+  local rec id out status selected remote_head
+  id='pool-local-only-frozen-base-r1'
+  rec=$(make_case local-only-frozen-base "$id" main ahead)
+  read_case_record "$rec"
+  selected=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+  remote_head=$(git -C "$POOL_DIR" rev-parse origin/main)
+
+  out=$(FM_FAKE_GIT_FAILURE=move-local-before-reset FM_FAKE_MOVE_TARGET="$remote_head" \
+    run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "local-only spawn should reset to the validated commit"
+  [ "$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)" = "$remote_head" ] \
+    || fail "fixture did not move the local ref before reset"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$selected" ] \
+    || fail "spawn followed a local ref that moved after ancestry validation"
+  pass "a local-only spawn resets to the frozen validated commit"
+}
+
+test_remote_backed_mode_uses_origin_when_local_is_ahead() {
+  local rec id out status local_head remote_head
+  id='pool-remote-mode-local-ahead-r1'
+  rec=$(make_case remote-mode-local-ahead "$id" main ahead)
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "remote-backed spawn should use origin when the local branch is ahead"
+  local_head=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+  remote_head=$(git -C "$POOL_DIR" rev-parse origin/main)
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$remote_head" ] \
+    || fail "remote-backed spawn did not use origin when the local branch was ahead"
+  [ "$local_head" != "$remote_head" ] || fail "fixture did not leave the local branch ahead of origin/main"
+  [ ! -e "$POOL_DIR/local-main.txt" ] \
+    || fail "remote-backed spawn used the ahead local branch instead of origin"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed remote-backed local-ahead base: HEAD=%s local=%s origin/main=%s local-main=absent\n' \
+      "$(git -C "$POOL_DIR" rev-parse HEAD)" "$local_head" "$remote_head"
+  fi
+  pass "a remote-backed spawn uses origin when the local default branch is ahead"
+}
+
+test_local_only_without_origin_uses_local_base() {
+  local rec id out status local_head feature_head
+  id='pool-local-only-no-origin-r1'
+  rec=$(make_case local-only-no-origin "$id" trunk behind)
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" remote remove origin
+  git -C "$PROJECT_DIR" config --local init.defaultBranch "$DEFAULT_BRANCH"
+  printf 'must survive without an origin\n' > "$PROJECT_DIR/local-trunk.txt"
+  git -C "$PROJECT_DIR" add local-trunk.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local-trunk
+  local_head=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  git -C "$PROJECT_DIR" checkout --quiet -b fixture-current
+  printf 'must not become the pooled base\n' > "$PROJECT_DIR/feature-only.txt"
+  git -C "$PROJECT_DIR" add feature-only.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-feature
+  feature_head=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "local-only spawn should work without an origin"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_head" ] \
+    || fail "local-only spawn without origin did not use repository-local init.defaultBranch"
+  [ "$local_head" != "$feature_head" ] \
+    || fail "fixture did not distinguish the configured default from the current branch"
+  assert_grep 'must survive without an origin' "$POOL_DIR/local-trunk.txt" \
+    "local-only spawn without origin omitted the local default branch commit"
+  [ ! -e "$POOL_DIR/feature-only.txt" ] \
+    || fail "local-only spawn without origin treated the current feature branch as default"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed local-only no-origin base: HEAD=%s local-default=%s current-feature=%s local-trunk=%s feature-only=absent\n' \
+      "$(git -C "$POOL_DIR" rev-parse HEAD)" "$local_head" "$feature_head" "$(cat "$POOL_DIR/local-trunk.txt")"
+  fi
+  pass "a local-only spawn without origin uses repository-local init.defaultBranch"
+}
+
+test_local_only_without_resolvable_default_refuses_detached_checkout() {
+  local rec id out status before after
+  id='pool-local-only-no-default-r1'
+  rec=$(make_case local-only-no-default "$id" topic behind)
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" remote remove origin
+  git -C "$PROJECT_DIR" config --local init.defaultBranch trunk
+  git -C "$PROJECT_DIR" checkout --quiet --detach
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only spawn used detached HEAD as the default branch"
+  assert_contains "$out" "repository-local init.defaultBranch 'trunk'" \
+    "spawn did not identify the configured local default"
+  assert_contains "$out" "refs/heads/trunk" \
+    "spawn did not name the missing configured local reference"
+  assert_contains "$out" "refs/heads/main and refs/heads/master are also missing" \
+    "spawn did not name the missing fallback references"
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn moved the pool after rejecting an unresolved local default"
+  pass "a detached local-only checkout without a resolvable default is refused"
 }
 
 test_non_main_default_branch_refreshes_before_branching() {
@@ -228,6 +600,18 @@ test_unresolved_remote_default_refuses_pool() {
 }
 
 test_stale_pool_base_refreshes_before_branching
+test_local_only_prefers_ahead_local_base
+test_local_only_uses_remote_when_local_is_behind
+test_local_only_prefers_diverged_local_base
+test_local_only_refuses_failed_ancestry_inspection
+test_local_only_refuses_failed_local_ref_resolution
+test_local_only_refuses_failed_repository_inspection
+test_origin_head_absence_refuses_remote_fallback
+test_origin_head_inspection_failure_refuses_remote_fallback
+test_local_only_resets_to_frozen_selected_commit
+test_remote_backed_mode_uses_origin_when_local_is_ahead
+test_local_only_without_origin_uses_local_base
+test_local_only_without_resolvable_default_refuses_detached_checkout
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work

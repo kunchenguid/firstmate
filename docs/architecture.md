@@ -163,8 +163,8 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
-`fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
-Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
+`fm-spawn.sh` also stops every fresh ship and scout until the base-freshness contract under [Delivery modes are explicit per task](#delivery-modes-are-explicit-per-task) succeeds.
+Its header owns the exact selection and refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
@@ -245,6 +245,13 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 ## Delivery modes are explicit per task
 
 `no-mistakes` tasks run the full validation pipeline, `direct-PR` tasks open PRs without that pipeline, and `local-only` tasks stay local until firstmate performs an approved fast-forward merge.
+Before a fresh ship or scout launch, `bin/fm-spawn.sh` refreshes the pooled worktree from the authoritative base instead of assuming that base is always remote.
+The explicit per-task mode is the only authority signal for this selection; the project name is never consulted.
+Remote-backed tasks use the current `origin` default branch, while a `local-only` task uses the local default branch when it is ahead of or diverged from `origin`, uses `origin` when the local branch is behind it, and uses the local branch when no origin exists.
+When `origin` exists, its `origin/HEAD` names the default branch.
+Without `origin`, Firstmate resolves the default only from the repository-local `init.defaultBranch` when it names an existing local branch, then from `main`, then from `master`, without consulting the current branch or detached HEAD, and refuses with remediation when none resolves.
+Global and system `init.defaultBranch` values are intentionally outside this contract, so a project without `origin` should declare its default in repository-local `init.defaultBranch` for Firstmate to identify a non-`main`, non-`master` default.
+The selected commit is frozen before reset and the resulting `HEAD` is verified, so a concurrent ref move cannot silently change the validated target.
 Each task's mode and `yolo` posture are firstmate's decision at intake and are passed explicitly to `bin/fm-brief.sh`, `bin/fm-spawn.sh`, and `bin/fm-promote.sh`, which refuse a ship task that does not carry them.
 A ship brief records its mode as a fixed machine-readable line and the spawn refuses to launch on a different one, so the worker's instructions and the recorded task delivery cannot diverge.
 `data/projects.md` records each project's standing posture and optional `+yolo` flag as the captain's default and as context for that decision, including the conditional `no-mistakes-prod-only` policy; a ship spawn that drops below the registered rigor prints a deviation notice and continues.
