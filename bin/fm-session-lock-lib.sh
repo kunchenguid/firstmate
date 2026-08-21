@@ -17,13 +17,13 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 
 # Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -73,9 +73,17 @@ fm_harness_process_matches() {  # <comm> <args>
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
-    *node*|*python*)
+    *node*|*python*|*bun*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+        return 0
+      fi
+      # omp runs as: bun /path/to/omp -e ... The anchored regex misses it
+      # because the args line starts with "bun". Extract the script path
+      # (first word after the interpreter) and check it as a path component.
+      local script_path=${args#* }
+      script_path=${script_path%% *}
+      if name=$(fm_harness_path_name "$script_path"); then
         return 0
       fi
       ;;

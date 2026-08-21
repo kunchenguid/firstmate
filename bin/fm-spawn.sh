@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|omp|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -439,7 +439,7 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    claude|codex|opencode|omp|pi|pi-signed|grok|kimi|cursor) ;;
     *)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1046,7 +1046,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|omp|pi|pi-signed|grok|kimi|cursor|muse)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1127,6 +1127,14 @@ launch_template() {
       else
         printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
+      ;;
+    omp)
+      # omp (Oh My Pi): Pi-family extension-owned supervision. omp does NOT
+      # auto-discover project .pi/extensions, so both primary extensions are
+      # passed explicitly via -e alongside the per-task sidecar. --auto-approve
+      # is the crewmate viability flag (equivalent to claude's
+      # --dangerously-skip-permissions and grok's --always-approve).
+      printf '%s' '__OMPBIN__ --auto-approve __MODELFLAG____EFFORTFLAG__-e __OMPTURNEND__ -e __OMPWATCH__ -e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
     # session. --always-approve auto-approves every tool execution (verified: the
@@ -1239,6 +1247,12 @@ case "$HARNESS" in
     fi
     LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
     LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
+    ;;
+  omp)
+    OMP_BIN=$(resolve_pi_executable "omp") || {
+      echo "error: omp executable not found on PATH; install it or select a different verified harness" >&2
+      exit 1
+    }
     ;;
   cursor)
     # `cursor` is not the CLI name, and the legacy alias `agent` is far too
@@ -1361,7 +1375,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|omp|pi|pi-signed|grok|kimi|cursor|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -2446,6 +2460,34 @@ export default function (pi: any) {
 }
 EOF
       ;;
+    omp)
+      # Same contract as pi-ext.ts but using omp event names: agent_start/agent_end
+      # (with willContinue guard) instead of pi's agent_start/agent_settled+isIdle.
+      cat > "$STATE/$ID.omp-ext.ts" <<EOF
+// Firstmate semantic busy-state events + turn-end notification; written by
+// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// omp event mapping: agent_start -> busy; agent_end (willContinue=false) ->
+// idle; turn_end -> touch turn-end marker. omp has no agent_settled+isIdle;
+// agent_end.willContinue is the settled guard (auto-retry/compaction keep it
+// true, so only a genuine terminal settle marks idle).
+import { execFile } from "node:child_process";
+const busyEvent = (state: string, event: string) =>
+  new Promise<void>((resolve) => {
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "apply", "$STATE_REAL", "$ID", state,
+      "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
+    ], () => resolve());
+  });
+export default function (omp: any) {
+  omp.on("agent_start", () => busyEvent("busy", "agent-start"));
+  omp.on("agent_end", (event: any) => {
+    if (event && event.willContinue) return;
+    return busyEvent("idle", "agent-end");
+  });
+  omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+}
+EOF
+      ;;
     codex*)
       # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
       # probes and the evidence). Neither Codex path is usable on the
@@ -2710,6 +2752,9 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
+sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
+sq_ompturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-omp-turnend-guard.ts")
+sq_ompwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-omp-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
@@ -2721,21 +2766,24 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
+LAUNCH=${LAUNCH//__OMPTURNEND__/$sq_ompturnend}
+LAUNCH=${LAUNCH//__OMPWATCH__/$sq_ompwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+  omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+  claude|codex|opencode|omp|pi|pi-signed|grok|kimi|muse)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
 # Forward firstmate's own resolved store onto the claude launch so the crewmate
 # uses the same credential/config firstmate is authenticated with. Only when set;
 # an unset value is the single-store default and needs no prefix.

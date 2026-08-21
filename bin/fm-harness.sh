@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|omp|pi|pi-signed|grok|kimi|cursor|muse|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -50,11 +50,6 @@ detect_own() {
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
-  [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
-  if [ "${PI_CODING_AGENT:-}" = "true" ]; then
-    if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
-    return
-  fi
   # grok set GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so the marker
   # is unambiguous WHEN PRESENT - but it is not guaranteed present. A grok 1.0.0
@@ -64,7 +59,24 @@ detect_own() {
   # a fast path only; the ancestry walk below is what actually guarantees grok is
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
+  # GROK_AGENT is checked before OMPCODE and CLAUDECODE because grok's own marker
+  # is unambiguous when present, and a stale OMPCODE or CLAUDECODE retained in a
+  # multiplexer's stored environment must not override it (same precedence logic
+  # as cursor before claude).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # omp (Oh My Pi) sets OMPCODE=1 alongside CLAUDECODE=1 on its child/tool
+  # processes (verified omp 17.3.3). It is a Pi-family harness (extension-owned
+  # supervision, not Claude settings.json hooks), so misreading it as claude
+  # aims the wrong command surface at every downstream branch. Test OMPCODE
+  # before CLAUDECODE so omp is identified correctly; bin/fm-spawn.sh clears
+  # foreign markers at its launch boundary, and this ordering also covers an
+  # omp session a human started by hand.
+  [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
+  [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
+  if [ "${PI_CODING_AGENT:-}" = "true" ]; then
+    if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
+    return
+  fi
   # muse (Muse Code) publishes no harness-identity marker of its own. The only
   # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
   # a per-session log PATH rather than an identity, and its export to tool
@@ -95,6 +107,7 @@ detect_own() {
       muse|muse-bin-*) echo muse; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
+      omp) echo omp; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -104,6 +117,7 @@ detect_own() {
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
           *" pi "*|*/pi) echo pi; return ;;
+          *" omp "*|*/omp) echo omp; return ;;
         esac ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')

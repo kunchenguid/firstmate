@@ -38,6 +38,7 @@ export FM_GATE_REFUSE_BYPASS=1
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+unset OMPCODE  # No test should inherit the parent omp process's marker; tests that test omp detection set it explicitly.
 
 # --- reporters --------------------------------------------------------------
 
