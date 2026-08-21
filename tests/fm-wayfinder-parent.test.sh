@@ -588,7 +588,7 @@ test_map_dependent_spawn_and_promote() {
   id=wf-research-scout
   write_scout_brief "$home" "$id"
   set +e
-  out=$(run_spawn "$home" "$fakebin" "$id" "$project" claude --scout)
+  out=$(run_spawn "$home" "$fakebin" "$id" "$project" claude --scout --wayfinder-no-child)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "scout spawn should still stop before creating an endpoint in this fixture"

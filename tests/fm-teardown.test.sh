@@ -553,6 +553,62 @@ run_teardown() {
     "$TEARDOWN" task-x1 "$@"
 }
 
+prepare_spawn_endpoint() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf '%s\n' firstmate ;;
+  list-windows|set-window-option|send-keys|kill-window) ;;
+  new-window)
+    [ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' new-window >> "$FM_FAKE_TMUX_LOG"
+    printf '%s\n' '@42'
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+}
+
+run_scout_spawn() {
+  local case_dir=$1
+  shift
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux \
+    FM_FAKE_PANE_PATH="$case_dir/wt" TMUX='fake,1,0' \
+    PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$ROOT/bin/fm-spawn.sh" task-x1 "$case_dir/project" claude --scout "$@"
+}
+
+install_teardown_wayfinder_gate() {
+  local project=$1
+  mkdir -p "$project/bin"
+  cat > "$project/bin/wayfinder-lifecycle-gate" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" != --state ] || [ "${3:-}" != accept-child ]; then
+  echo 'unexpected Wayfinder lifecycle command' >&2
+  exit 1
+fi
+python3 - "$2" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    snapshot = json.load(source)
+if (snapshot.get("children") or [{}])[0].get("state") == "closed":
+    print("accept-child accepted")
+    raise SystemExit(0)
+print("accept-child rejected", file=sys.stderr)
+raise SystemExit(2)
+PY
+SH
+  chmod +x "$project/bin/wayfinder-lifecycle-gate"
+}
+
 # Build the teardown test's executable search path without lsof, regardless of
 # whether the host installs it in /usr/bin, /usr/sbin, or a package-manager bin.
 make_path_without_lsof() {  # <case-dir>
@@ -619,36 +675,33 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
 }
 
 test_wayfinder_scout_teardown_requires_accept_child() {
-  local case_dir rejected resolved out rc
+  local case_dir untracked_case rejected resolved out rc
   case_dir=$(make_case wayfinder-scout-archive)
-  write_meta "$case_dir" no-mistakes scout
-  printf '%s\n' \
-    'decisions_reviewed=1' \
-    'decision_keys=' \
-    'wayfinder_child=5' >> "$case_dir/state/task-x1.meta"
-  add_compatible_tasks_axi "$case_dir"
-  mkdir -p "$case_dir/data/task-x1" "$case_dir/project/bin"
-  printf '%s\n' '# Research report' > "$case_dir/data/task-x1/report.md"
-  cat > "$case_dir/project/bin/wayfinder-lifecycle-gate" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" != --state ] || [ "${3:-}" != accept-child ]; then
-  echo 'unexpected Wayfinder lifecycle command' >&2
-  exit 1
-fi
-python3 - "$2" <<'PY'
-import json
-import sys
+  prepare_spawn_endpoint "$case_dir"
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' 'Research the Wayfinder child.' > "$case_dir/data/task-x1/brief.md"
+  install_teardown_wayfinder_gate "$case_dir/project"
 
-with open(sys.argv[1], encoding="utf-8") as source:
-    snapshot = json.load(source)
-if (snapshot.get("children") or [{}])[0].get("state") == "closed":
-    print("accept-child accepted")
-    raise SystemExit(0)
-print("accept-child rejected", file=sys.stderr)
-raise SystemExit(2)
-PY
-SH
-  chmod +x "$case_dir/project/bin/wayfinder-lifecycle-gate"
+  set +e
+  out=$(FM_FAKE_TMUX_LOG="$case_dir/spawn.log" run_scout_spawn "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gated scout must declare its Wayfinder classification"$'\n'"$out"
+  assert_contains "$out" "--wayfinder-child <number-or-title> or --wayfinder-no-child" \
+    "gated scout spawn did not require a Wayfinder classification"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "unclassified gated scout spawn published task metadata"
+  assert_absent "$case_dir/spawn.log" \
+    "unclassified gated scout spawn created an endpoint"
+
+  out=$(run_scout_spawn "$case_dir" --wayfinder-child 5 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "named Wayfinder scout should spawn with a child identity"$'\n'"$out"
+  assert_grep 'wayfinder_child=5' "$case_dir/state/task-x1.meta" \
+    "named Wayfinder scout did not persist its child identity"
+  add_compatible_tasks_axi "$case_dir"
+  printf '%s\n' '# Research report' > "$case_dir/data/task-x1/report.md"
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
   rejected="$case_dir/rejected.json"
   resolved="$case_dir/resolved.json"
   printf '%s\n' '{"children":[{"number":5,"state":"open"}]}' > "$rejected"
@@ -675,6 +728,25 @@ SH
     "teardown did not preserve the project lifecycle success"
   assert_absent "$case_dir/state/task-x1.meta" \
     "Wayfinder-resolved scout teardown did not archive task metadata"
+
+  untracked_case=$(make_case wayfinder-untracked-scout)
+  prepare_spawn_endpoint "$untracked_case"
+  mkdir -p "$untracked_case/data/task-x1"
+  printf '%s\n' 'Research an unrelated question.' > "$untracked_case/data/task-x1/brief.md"
+  install_teardown_wayfinder_gate "$untracked_case/project"
+  out=$(run_scout_spawn "$untracked_case" --wayfinder-no-child 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "unrelated gated scout should spawn with an explicit no-child classification"$'\n'"$out"
+  assert_grep 'wayfinder_no_child=1' "$untracked_case/state/task-x1.meta" \
+    "unrelated gated scout did not persist its no-child classification"
+  add_compatible_tasks_axi "$untracked_case"
+  printf '%s\n' '# Unrelated research report' > "$untracked_case/data/task-x1/report.md"
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$untracked_case/state/task-x1.meta"
+  out=$(FM_DATA_OVERRIDE="$untracked_case/data" run_teardown "$untracked_case" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "explicit non-Wayfinder scout should tear down without a snapshot"$'\n'"$out"
+  assert_absent "$untracked_case/state/task-x1.meta" \
+    "explicit non-Wayfinder scout teardown did not archive task metadata"
   pass "Wayfinder scout teardown requires the project's accept-child check"
 }
 

@@ -54,12 +54,12 @@
 # the retired home. Removing a leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--wayfinder-state <file>]
+# Usage: fm-teardown.sh <task-id> [--force] [--wayfinder-state <file> --wayfinder-child <number-or-title>|--wayfinder-no-child]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
-#   --wayfinder-state supplies the project snapshot required to archive a scout
-#   that recorded a Wayfinder child.
+#   --wayfinder-state with --wayfinder-child verifies a legacy named scout.
+#   --wayfinder-no-child classifies a legacy scout without a Wayfinder child.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -179,6 +179,9 @@ shift
 FORCE=
 WAYFINDER_STATE=
 WAYFINDER_STATE_SET=0
+WAYFINDER_CHILD_ARG=
+WAYFINDER_CHILD_ARG_SET=0
+WAYFINDER_NO_CHILD=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force)
@@ -196,6 +199,20 @@ while [ "$#" -gt 0 ]; do
       WAYFINDER_STATE=${1#--wayfinder-state=}
       WAYFINDER_STATE_SET=1
       ;;
+    --wayfinder-child)
+      shift
+      [ "$#" -gt 0 ] || { echo "error: --wayfinder-child requires a value" >&2; exit 2; }
+      case "$1" in --*) echo "error: --wayfinder-child requires a value" >&2; exit 2 ;; esac
+      WAYFINDER_CHILD_ARG=$1
+      WAYFINDER_CHILD_ARG_SET=1
+      ;;
+    --wayfinder-child=*)
+      WAYFINDER_CHILD_ARG=${1#--wayfinder-child=}
+      WAYFINDER_CHILD_ARG_SET=1
+      ;;
+    --wayfinder-no-child)
+      WAYFINDER_NO_CHILD=1
+      ;;
     *)
       echo "error: unknown teardown argument $1" >&2
       exit 2
@@ -205,6 +222,19 @@ while [ "$#" -gt 0 ]; do
 done
 [ "$WAYFINDER_STATE_SET" -eq 0 ] || [ -n "$WAYFINDER_STATE" ] || {
   echo "error: --wayfinder-state requires a non-empty value" >&2
+  exit 2
+}
+[ "$WAYFINDER_CHILD_ARG_SET" -eq 0 ] || [ -n "$WAYFINDER_CHILD_ARG" ] || {
+  echo "error: --wayfinder-child requires a non-empty value" >&2
+  exit 2
+}
+if [ "$WAYFINDER_CHILD_ARG_SET" -eq 1 ]; then
+  case "$WAYFINDER_CHILD_ARG" in
+    *$'\n'*|*$'\r'*) echo "error: --wayfinder-child must be one line" >&2; exit 2 ;;
+  esac
+fi
+[ "$WAYFINDER_CHILD_ARG_SET" -eq 0 ] || [ "$WAYFINDER_NO_CHILD" -eq 0 ] || {
+  echo "error: --wayfinder-child and --wayfinder-no-child cannot be combined" >&2
   exit 2
 }
 # shellcheck source=bin/fm-wake-lib.sh
@@ -487,21 +517,63 @@ ORCA_PATH_MATCH_VERIFIED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
-WAYFINDER_CHILD=$(fm_meta_get "$META" wayfinder_child)
-case "$WAYFINDER_CHILD" in
+RECORDED_WAYFINDER_CHILD=$(fm_meta_get "$META" wayfinder_child)
+case "$RECORDED_WAYFINDER_CHILD" in
   *$'\n'*|*$'\r'*)
     echo "error: task $ID has an invalid Wayfinder child record" >&2
     exit 1
     ;;
 esac
-if [ "$WAYFINDER_STATE_SET" -eq 1 ] && { [ "$KIND" != scout ] || [ -z "$WAYFINDER_CHILD" ]; }; then
-  echo "error: --wayfinder-state applies only to scouts with a recorded Wayfinder child" >&2
+RECORDED_WAYFINDER_NO_CHILD=$(fm_meta_get "$META" wayfinder_no_child)
+case "$RECORDED_WAYFINDER_NO_CHILD" in
+  ''|1) ;;
+  *)
+    echo "error: task $ID has an invalid Wayfinder classification record" >&2
+    exit 1
+    ;;
+esac
+if [ -n "$RECORDED_WAYFINDER_CHILD" ] && [ "$RECORDED_WAYFINDER_NO_CHILD" = 1 ]; then
+  echo "error: task $ID has contradictory Wayfinder classification records" >&2
+  exit 1
+fi
+WAYFINDER_CHILD=
+if [ "$FORCE" != "--force" ] && [ "$KIND" = scout ] \
+  && [ -n "$RECORDED_WAYFINDER_CHILD" ] \
+  && [ ! -f "$PROJ/bin/wayfinder-lifecycle-gate" ]; then
+  echo "REFUSED: scout task $ID records Wayfinder child '$RECORDED_WAYFINDER_CHILD' but its project has no bin/wayfinder-lifecycle-gate." >&2
+  exit 1
+fi
+if [ "$FORCE" != "--force" ] && [ "$KIND" = scout ] && [ -f "$PROJ/bin/wayfinder-lifecycle-gate" ]; then
+  if [ -n "$RECORDED_WAYFINDER_CHILD" ]; then
+    [ "$WAYFINDER_CHILD_ARG_SET" -eq 0 ] && [ "$WAYFINDER_NO_CHILD" -eq 0 ] || {
+      echo "error: task $ID already records a Wayfinder child; do not override its classification at teardown" >&2
+      exit 2
+    }
+    WAYFINDER_CHILD=$RECORDED_WAYFINDER_CHILD
+  elif [ "$RECORDED_WAYFINDER_NO_CHILD" = 1 ]; then
+    [ "$WAYFINDER_CHILD_ARG_SET" -eq 0 ] && [ "$WAYFINDER_NO_CHILD" -eq 0 ] || {
+      echo "error: task $ID already records no Wayfinder child; do not override its classification at teardown" >&2
+      exit 2
+    }
+  elif [ "$WAYFINDER_CHILD_ARG_SET" -eq 1 ]; then
+    WAYFINDER_CHILD=$WAYFINDER_CHILD_ARG
+  elif [ "$WAYFINDER_NO_CHILD" -eq 0 ]; then
+    echo "REFUSED: scout task $ID has no Wayfinder classification." >&2
+    echo "Pass --wayfinder-child <number-or-title> with --wayfinder-state <snapshot>, or --wayfinder-no-child before teardown." >&2
+    exit 1
+  fi
+elif [ "$WAYFINDER_CHILD_ARG_SET" -eq 1 ] || [ "$WAYFINDER_NO_CHILD" -eq 1 ] || [ "$WAYFINDER_STATE_SET" -eq 1 ]; then
+  echo "error: Wayfinder teardown flags apply only to a non-forced scout against a project with bin/wayfinder-lifecycle-gate" >&2
   exit 2
 fi
-if [ "$KIND" = scout ] && [ -n "$WAYFINDER_CHILD" ] && [ "$FORCE" != "--force" ] && [ "$WAYFINDER_STATE_SET" -eq 0 ]; then
+if [ -n "$WAYFINDER_CHILD" ] && [ "$WAYFINDER_STATE_SET" -eq 0 ]; then
   echo "REFUSED: scout task $ID records Wayfinder child '$WAYFINDER_CHILD' but has no --wayfinder-state snapshot." >&2
   echo "Pass --wayfinder-state <snapshot> so Firstmate can verify accept-child before archiving the scout." >&2
   exit 1
+fi
+if [ -z "$WAYFINDER_CHILD" ] && [ "$WAYFINDER_STATE_SET" -eq 1 ]; then
+  echo "error: --wayfinder-state requires a Wayfinder child" >&2
+  exit 2
 fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes

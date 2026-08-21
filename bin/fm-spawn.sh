@@ -2,7 +2,7 @@
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--wayfinder-state <file>|--wayfinder-independent]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--wayfinder-child <number-or-title>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--wayfinder-child <number-or-title>|--wayfinder-no-child]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -64,8 +64,8 @@
 #   --wayfinder-state <snapshot> with the GitHub snapshot that command
 #   consumes. Pass --wayfinder-independent only when this ship does not
 #   depend on the Wayfinder map. Scout and secondmate spawns skip that check.
-#   --wayfinder-child records the named Wayfinder child for a scout. Teardown
-#   requires its fresh accept-child verification before archiving that scout.
+#   A scout against a project that publishes bin/wayfinder-lifecycle-gate must
+#   record --wayfinder-child or --wayfinder-no-child for teardown.
 #   The project command owns the resolution policy;
 #   Firstmate only invokes it.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
@@ -153,7 +153,7 @@
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
 #   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
 #   and the ship-only --wayfinder-state/--wayfinder-independent flags
-#   apply to every pair. A ship batch therefore carries one delivery contract, and each
+#   plus scout-only --wayfinder-no-child apply to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
@@ -298,6 +298,7 @@ YOLO_SET=0
 TRACEPARENT_SET=0
 WAYFINDER_STATE_SET=0
 WAYFINDER_CHILD_SET=0
+WAYFINDER_NO_CHILD=0
 WAYFINDER_INDEPENDENT=0
 WAYFINDER_MAP_INDEPENDENT=0
 RELAUNCH=0
@@ -345,6 +346,7 @@ for a in "$@"; do
     --wayfinder-state=*) WAYFINDER_STATE=${a#--wayfinder-state=}; WAYFINDER_STATE_SET=1 ;;
     --wayfinder-child) want_value=wayfinder-child ;;
     --wayfinder-child=*) WAYFINDER_CHILD=${a#--wayfinder-child=}; WAYFINDER_CHILD_SET=1 ;;
+    --wayfinder-no-child) WAYFINDER_NO_CHILD=1 ;;
     --wayfinder-independent) WAYFINDER_INDEPENDENT=1 ;;
     *) POS+=("$a") ;;
   esac
@@ -364,6 +366,10 @@ if [ "$WAYFINDER_CHILD_SET" -eq 1 ]; then
     *$'\n'*|*$'\r'*) echo "error: --wayfinder-child must be one line" >&2; exit 1 ;;
   esac
 fi
+[ "$WAYFINDER_CHILD_SET" -eq 0 ] || [ "$WAYFINDER_NO_CHILD" -eq 0 ] || {
+  echo "error: --wayfinder-child and --wayfinder-no-child cannot be combined" >&2
+  exit 1
+}
 [ "$WAYFINDER_STATE_SET" -eq 0 ] || [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || { echo "error: --wayfinder-state and --wayfinder-independent cannot be combined" >&2; exit 1; }
 resolve_project_dir_arg() {
   local path=$1
@@ -401,6 +407,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
   [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded Wayfinder dependency; --wayfinder-independent cannot override it" >&2; exit 1; }
   [ "$WAYFINDER_CHILD_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded Wayfinder child; --wayfinder-child cannot override it" >&2; exit 1; }
+  [ "$WAYFINDER_NO_CHILD" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded Wayfinder classification; --wayfinder-no-child cannot override it" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -409,6 +416,10 @@ else
   if [ "$KIND" = ship ]; then
     [ "$WAYFINDER_CHILD_SET" -eq 0 ] || {
       echo "error: --wayfinder-child applies only to scout spawns" >&2
+      exit 1
+    }
+    [ "$WAYFINDER_NO_CHILD" -eq 0 ] || {
+      echo "error: --wayfinder-no-child applies only to scout spawns" >&2
       exit 1
     }
     [ "$MODE_SET" -eq 1 ] || {
@@ -447,8 +458,8 @@ else
       echo "error: --wayfinder-independent applies only to ship spawns; a scout stays off the map-dependent handoff path" >&2
       exit 1
     }
-    if [ "$KIND" != scout ] && [ "$WAYFINDER_CHILD_SET" -eq 1 ]; then
-      echo "error: --wayfinder-child applies only to scout spawns" >&2
+    if [ "$KIND" != scout ] && { [ "$WAYFINDER_CHILD_SET" -eq 1 ] || [ "$WAYFINDER_NO_CHILD" -eq 1 ]; }; then
+      echo "error: --wayfinder-child and --wayfinder-no-child apply only to scout spawns" >&2
       exit 1
     fi
   fi
@@ -968,6 +979,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
     shared_args+=(--wayfinder-state "$WAYFINDER_STATE")
   fi
   [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || shared_args+=(--wayfinder-independent)
+  [ "$WAYFINDER_NO_CHILD" -eq 0 ] || shared_args+=(--wayfinder-no-child)
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -1739,6 +1751,18 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = scout ]; then
+  if [ -f "$PROJ_ABS/bin/wayfinder-lifecycle-gate" ]; then
+    if [ "$WAYFINDER_CHILD_SET" -eq "$WAYFINDER_NO_CHILD" ]; then
+      echo "error: $ID scouts against a project with bin/wayfinder-lifecycle-gate; pass --wayfinder-child <number-or-title> or --wayfinder-no-child before the endpoint is created" >&2
+      exit 1
+    fi
+  elif [ "$WAYFINDER_CHILD_SET" -eq 1 ] || [ "$WAYFINDER_NO_CHILD" -eq 1 ]; then
+    echo "error: --wayfinder-child and --wayfinder-no-child require a project that publishes bin/wayfinder-lifecycle-gate" >&2
+    exit 1
+  fi
+fi
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
@@ -2766,6 +2790,7 @@ preserve_relaunch_meta() {
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   [ "$WAYFINDER_MAP_INDEPENDENT" -eq 0 ] || echo "wayfinder_independent=1"
   [ "$WAYFINDER_CHILD_SET" -eq 0 ] || echo "wayfinder_child=$WAYFINDER_CHILD"
+  [ "$WAYFINDER_NO_CHILD" -eq 0 ] || echo "wayfinder_no_child=1"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
