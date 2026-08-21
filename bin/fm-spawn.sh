@@ -745,6 +745,7 @@ spawn_abort_cleanup() {
         if [ -d "$STATE" ]; then
           {
             echo "window=$W"
+            echo "endpoint_task_id=$ID"
             echo "worktree=${WT:-}"
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
@@ -2638,7 +2639,10 @@ preserve_relaunch_meta() {
     !($1 in owned)
   ' "$RELAUNCH_META"
 }
-{
+# Built in memory first, then written once, so a failed open AND a failed write
+# of the record are both caught. Bash disables set -e inside this command
+# substitution, so any command added to the builder must check its own status.
+META_RECORD=$(
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
@@ -2686,7 +2690,8 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
-} > "$SPAWN_META_PATH"
+)
+printf '%s\n' "$META_RECORD" > "$SPAWN_META_PATH" || exit 1
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"

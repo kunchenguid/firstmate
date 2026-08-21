@@ -156,6 +156,7 @@ tests/fm-backend-herdr.test.sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend-cmux.test.sh
+tests/fm-endpoint-binding-migrate.test.sh
 ```
 
 Bounded output from the incident regression:
@@ -171,6 +172,8 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
+The bounded cleanup-time recovery that can precede it for a record written by the immediately preceding spawn schema was validated on 2026-07-30 with `tests/fm-endpoint-binding-migrate.test.sh`, which replays the old-spawn, self-update, current-cleanup sequence for Herdr flat and projected topology, Zellij, and cmux.
+Its refusal side is validated in the same run: Orca, secondmate, malformed, duplicated, copied, cross-home, mismatched, and unauthorized out-of-home records stay unmodified and refused, and the ordinary validator still authorizes every cleanup.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Composer classification matrix

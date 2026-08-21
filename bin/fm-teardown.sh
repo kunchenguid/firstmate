@@ -427,9 +427,21 @@ else
 fi
 [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 
-# This is the first cleanup authorization check. It is metadata-only and must
-# complete before fm-guard, a backend command, file removal, branch deletion,
-# worktree return, registry change, or process termination can run.
+# A task written by the immediately preceding spawn schema can lack the opaque
+# endpoint binding. Before cleanup authorization, the bounded compatibility
+# helper may add only that binding after read-only live backend proof agrees
+# with the complete legacy record. Every ambiguous record stays untouched.
+if [ "$(grep -c '^endpoint_task_id=' "$META" 2>/dev/null || true)" -eq 0 ]; then
+  LEGACY_BACKEND=$(fm_backend_meta_exact_value "$META" backend 2>/dev/null || true)
+  case "$LEGACY_BACKEND" in
+    herdr|zellij|orca|cmux)
+      "$SCRIPT_DIR/fm-endpoint-binding-migrate.sh" "$ID" || exit 1
+      ;;
+  esac
+fi
+# This is the cleanup authorization check. It is metadata-only and must
+# complete before fm-guard, a backend cleanup command, file removal, branch
+# deletion, worktree return, registry change, or process termination can run.
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
@@ -2006,6 +2018,38 @@ preflight_descendant_task_locks() {
   done
 }
 
+# Retiring a secondmate home authorizes its children through the same
+# metadata-only validator, so the same cross-version gap reaches it. This
+# preflight runs the bounded compatibility proof scoped to the home that owns
+# each record, before any child authorization or cleanup, and refuses the whole
+# retirement whenever a record cannot be bound safely.
+migrate_firstmate_home_children_endpoint_bindings() {  # <home>
+  local home=$1 sub_state child_meta child_id child_kind child_home child_backend
+  sub_state="$home/state"
+  [ -d "$sub_state" ] || return 0
+  for child_meta in "$sub_state"/*.meta; do
+    [ -e "$child_meta" ] || continue
+    child_id=$(basename "$child_meta" .meta)
+    child_kind=$(meta_value "$child_meta" kind)
+    if [ "$child_kind" = secondmate ]; then
+      child_home=$(meta_value "$child_meta" home)
+      [ -n "$child_home" ] || child_home=$(meta_value "$child_meta" worktree)
+      [ -n "$child_home" ] || continue
+      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
+      migrate_firstmate_home_children_endpoint_bindings "$child_home" || return 1
+      continue
+    fi
+    [ "$(grep -c '^endpoint_task_id=' "$child_meta" 2>/dev/null || true)" -eq 0 ] || continue
+    child_backend=$(fm_backend_meta_exact_value "$child_meta" backend 2>/dev/null || true)
+    case "$child_backend" in
+      herdr|zellij|orca|cmux)
+        FM_HOME="$home" FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+          "$SCRIPT_DIR/fm-endpoint-binding-migrate.sh" "$child_id" || return 1
+        ;;
+    esac
+  done
+}
+
 validate_firstmate_home_children_removal() {
   local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
   sub_state="$home/state"
@@ -2284,6 +2328,7 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
   if [ "$FORCE" = "--force" ]; then
+    migrate_firstmate_home_children_endpoint_bindings "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1

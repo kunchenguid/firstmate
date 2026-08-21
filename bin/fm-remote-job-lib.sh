@@ -700,7 +700,8 @@ fm_remote_job_process_start() {
 fm_remote_job_process_command() {
   local pid=$1 ps_bin value
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
-  value=$("$ps_bin" -p "$pid" -o command= 2>/dev/null) || return 1
+  # The worker script name can sit beyond ps's display-width cutoff on long CI paths.
+  value=$("$ps_bin" -ww -p "$pid" -o command= 2>/dev/null) || return 1
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
   printf '%s\n' "$value"

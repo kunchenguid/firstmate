@@ -2,6 +2,9 @@
 
 The first mate drives these; interactive entrypoints work by hand too, while `*-lib.sh` files are sourced helpers.
 Each row is one purpose clause only: the script's own header comment is the authoritative description of its behavior, flags, and contracts, so read the header before first use.
+The table is a curated operating index rather than a generated inventory of `bin/`: it lists the entrypoints a firstmate session drives to run the fleet, plus the shared libraries that own a fleet-wide contract across several of those entrypoints.
+It deliberately omits the contributor tooling that only matters when changing firstmate itself, which [CONTRIBUTING.md](../CONTRIBUTING.md) owns, and the subsystem internals that a listed entrypoint invokes or sources on your behalf, whose contract that entrypoint's own document and header already own.
+So a file absent from this table is not a missing or unowned script: `bin/` plus each file's header comment stays the complete inventory, and adding a row is worthwhile only when an operator or first mate invokes that file directly.
 If you have changed away from the firstmate home in an interactive shell, invoke these scripts by absolute path through the repo's `bin/` directory; the scripts self-locate internally after they start.
 The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarized in [architecture.md](architecture.md#no-mistakes-gate-authority-boundary), while `docs/sessionstart-nudge.md` covers the silent session-open hook use; `fm-gate-refuse-lib.sh`'s header owns its exact contract.
 
@@ -109,6 +112,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
+| `fm-endpoint-binding-migrate.sh` | Bounded cleanup-time recovery of one legacy non-tmux task's missing `endpoint_task_id=` binding after read-only live identity proof |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared Relay config, relay, and reply-threading helpers                              |
