@@ -11,6 +11,9 @@
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   When the canonical global `$HOME/.agents/skills/deepapi/SKILL.md` exists,
+#   scout briefs also include concise DeepAPI retrieval guidance; ship and
+#   secondmate briefs do not. The deepapi skill owns its usage details.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
