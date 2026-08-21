@@ -180,17 +180,16 @@ EOF
 # Print the RECORD DIVERGENCE section: every captain call whose two records
 # contradict each other - the status log says a key was resolved outright while
 # the task held for the captain is still open. Nothing here closes anything; the
-# section exists because posting the resolution alone reads as complete
-# everywhere firstmate looks, so the durable record can keep saying the captain
-# owes an answer with no warning at all. bin/fm-captain-hold.sh's `diverged`
-# owns which pairs count and why (including the two legitimate shapes it must
-# never flag); this prints what it reports.
+# section exists because posting the resolution alone reads as complete on the
+# status side, so the durable record can keep saying the captain owes an answer
+# with no warning at all. bin/fm-captain-hold.sh's `diverged` owns which pairs
+# count and why; this prints what it reports.
 #
 # Bounded and silent like OPEN DECISIONS above: nothing prints when the two
-# records agree, which is the common case, and a home with no tasks-axi has no
-# structured record to compare against. A guard failure never
-# changes the drain's exit status - a supervision turn must still present its
-# wakes when the backlog tool is having a bad day.
+# records agree, which is the common case. If tasks-axi is unavailable, the
+# guard cannot read the structured record and stays silent. A guard failure
+# never changes the drain's exit status - a supervision turn must still present
+# its wakes when the backlog tool is having a bad day.
 print_record_divergence_section() {
   local diverged task origin key title line shown=0 omitted=0 bound
   local output='' used=0 bytes item_bytes=220 global_bytes=2000

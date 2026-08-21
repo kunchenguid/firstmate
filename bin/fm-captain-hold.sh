@@ -869,14 +869,12 @@ EOF
 
 # --- record divergence ------------------------------------------------------
 #
-# One captain call is written down twice, and until now nothing said when the
-# two copies disagreed. A `resolved [key=...]` line closes the status-log fold
-# outright; the structured captain-held task is closed by a SEPARATE act
-# (`answer` above). Answering only on the status side therefore LOOKS complete
-# everywhere firstmate looks while the durable record still says the captain
-# owes an answer - the shape that kept nine already-settled calls resurfacing in
-# one day's captain briefing on 2026-08-06. The defect was never the separation;
-# it was the silence.
+# A captain call can be written down twice, and until now nothing said when
+# those two records disagreed. A `resolved [key=...]` line closes the status-log
+# fold outright; the structured captain-held task is closed by a SEPARATE act
+# (`answer` above). Answering only on the status side therefore looks complete
+# there while the durable record still says the captain owes an answer and
+# keeps resurfacing it. The defect was never the separation; it was the silence.
 #
 # `diverged` is a read-only report of that contradiction and nothing else. It
 # closes NOTHING. A captain call closed wrongly disappears without review, which
@@ -893,20 +891,18 @@ EOF
 # correct state. Neither is a still-open status decision - the OPEN DECISIONS
 # fold already owns that one.
 #
-# Two shapes it deliberately does NOT flag, both legitimate:
-#   - A captain call with no routed work item. When the decision IS the
-#     deliverable there is nothing to route, so routed work is never required
-#     here; the test is only whether the status side already declared this key
-#     resolved.
-#   - A call that turned out not to be a captain arbitration at all - a premise
-#     that dissolved, or a question of fact whose first reading was wrong. This
-#     reports that the two records disagree, never that the captain owes an
-#     answer, which is why both reconciliation directions are named above.
+# Routed work is deliberately irrelevant. When the decision IS the deliverable
+# there is nothing to route, so the test is only whether the status side already
+# declared this task's key resolved.
+# Nor does the report interpret why that resolution exists. A call can turn out
+# not to be a captain arbitration at all - a premise can dissolve, or a question
+# of fact can prove its first reading wrong - so the report says only that the
+# two records disagree and names both reconciliation directions above.
 #
 # Cost stays flat on a healthy home: one `tasks-axi list`, one key scan per
 # status log, and the precise per-key fold only for a key that already names a
-# still-open task. A home with no compatible tasks-axi keeps no structured
-# record to diverge from and prints nothing.
+# still-open task. If tasks-axi is unavailable or its listing cannot be parsed,
+# the guard cannot read the structured record and prints nothing.
 #
 # Output: one `<task-id>\t<origin>\t<key>\t<title>` line per divergence, in
 # status-log then key order; nothing when the two records agree.
