@@ -260,6 +260,17 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# hash_text <text> - the pane-hash digest bin/fm-watch.sh writes to .hash-<key>,
+# so a fixture can seed that marker. BSD md5 on macOS, coreutils md5sum on the
+# Linux runners; both lanes must agree with hash_pane() in bin/fm-watch.sh.
+hash_text() {
+  if command -v md5 >/dev/null 2>&1; then
+    printf '%s' "$1" | md5 -q
+  else
+    printf '%s' "$1" | md5sum | cut -d' ' -f1
+  fi
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>
