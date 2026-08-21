@@ -28,6 +28,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
+#   fm-captain-hold.sh diverged
 #
 # `hold` places an existing task under an active captain hold, or creates the
 # task first when no work item exists to hold (--title required to create; the
@@ -113,6 +114,9 @@
 # names no existing task resolves through the legacy `<origin>-decision-<entry>`
 # identity, so pre-collapse metadata written by fm-decision-hold.sh verifies
 # unchanged. An entry that exists as a task id is always that task.
+#
+# `diverged` is the read-only guard over the seam between the two records of
+# one captain call. See "record divergence" beside command_diverged below.
 #
 # Resolution records: the block written into the body names this script, the
 # decision digest, and a `Resolution mode:` of answered, released, or repaired.
@@ -863,6 +867,125 @@ EOF
   printf 'verified: %s captain-call inventory\n' "$origin"
 }
 
+# --- record divergence ------------------------------------------------------
+#
+# A captain call can be written down twice, and until now nothing said when
+# those two records disagreed. A `resolved [key=...]` line closes the status-log
+# fold outright; the structured captain-held task is closed by a SEPARATE act
+# (`answer` above). Closing only on the status side therefore looks complete
+# there while the durable record still says the captain owes an answer and
+# keeps resurfacing it. The defect was never the separation; it was the silence.
+#
+# `diverged` is a read-only report of that contradiction and nothing else. It
+# closes NOTHING. A captain call closed wrongly disappears without review, which
+# is strictly worse than the noise this prints, so reconciling a divergence stays
+# a human-owned act - and it runs in either direction: record what the captain
+# actually said with `answer`, or re-open the status decision when that
+# resolution was not the captain's word.
+#
+# What it flags, and only this: a task that is still open and still carries the
+# captain-hold annotations, whose key was closed on the status side by the
+# RESOLVE verb. The other closing verb is not a divergence: a `captain-held`
+# close is the VERIFIED transfer to that very task, written by command_complete
+# only after verifying it, so the structured row staying open behind it is the
+# correct state. Neither is a still-open status decision - the OPEN DECISIONS
+# fold already owns that one.
+#
+# Routed work is deliberately irrelevant. When the decision IS the deliverable
+# there is nothing to route, so the test is only whether the status side already
+# declared this task's key resolved.
+# Nor does the report interpret why that resolution exists. A call can turn out
+# not to be a captain arbitration at all - a premise can dissolve, or a question
+# of fact can prove its first reading wrong - so the report says only that the
+# two records disagree and names both reconciliation directions above.
+#
+# Cost stays flat on a healthy home: one `tasks-axi list`, one key scan per
+# status log, and the precise per-key fold only for a key that already names a
+# still-open task. If tasks-axi is unavailable or its listing cannot be parsed,
+# the guard cannot read the structured record and prints nothing.
+#
+# Output: one `<task-id>\t<origin>\t<key>\t<title>` line per divergence, in
+# status-log then key order; nothing when the two records agree.
+
+# Every still-open task id in this home's backlog, one per line. Only the first
+# two comma-separated listing fields are read - both are slugs that precede any
+# quoted title - so a title containing commas or quotes cannot shift them.
+open_task_ids() {
+  tasks_axi list 2>/dev/null | awk -F, '
+    /^  [A-Za-z0-9._-]+,/ {
+      id = $1
+      sub(/^ +/, "", id)
+      if ($2 != "done") print id
+    }
+  '
+}
+
+# Every key token stated anywhere in a status log. A cheap candidate scan: it
+# over-includes tokens that are only prose, and status_key_closing_verb below is
+# what actually decides what the stream says about a key.
+status_log_key_tokens() {  # <status-file>
+  grep -o '\[key=[A-Za-z0-9._-]*\]' "$1" 2>/dev/null |
+    sed 's/^\[key=//; s/\]$//' | LC_ALL=C sort -u
+}
+
+list_has_line() {  # <newline-separated-list> <value>
+  case $'\n'"$1"$'\n' in
+    *$'\n'"$2"$'\n'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+command_diverged() {
+  local ids resolve f origin tokens id keys key show title
+  [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+  # Both records must belong to the SAME home or the comparison is meaningless:
+  # tasks-axi reads $FM_HOME's backlog, so a state dir pointed somewhere else
+  # would report one home's status logs against another home's tasks. Every
+  # production caller pairs the two; a mismatch stays silent rather than
+  # inventing a cross-home divergence.
+  [ "$STATE" = "$FM_HOME/state" ] || return 0
+  # A read-only listing on a per-wake path, so it skips the mutation-oriented
+  # compatibility floor and its extra probes: a listing this parser cannot read
+  # simply yields no candidates and the report stays silent.
+  command -v tasks-axi >/dev/null 2>&1 || return 0
+  ids=$(open_task_ids) || return 0
+  [ -n "$ids" ] || return 0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  for f in "$STATE"/*.status; do
+    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
+    origin=$(basename "$f"); origin=${origin%.status}
+    tokens=$(status_log_key_tokens "$f")
+    [ -n "$tokens" ] || continue
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      # The keys that could name this task in THIS log: the collapsed identity
+      # (the key IS the task id) and, for a pre-collapse row, the legacy derived
+      # one this origin would have minted.
+      keys=$id
+      case "$id" in
+        "$origin-decision-"?*) keys="$keys"$'\n'"${id#"$origin-decision-"}" ;;
+      esac
+      while IFS= read -r key; do
+        list_has_line "$tokens" "$key" || continue
+        [ "$(status_key_closing_verb "$f" "$key")" = "$resolve" ] || continue
+        show=$(task_show "$id") || continue
+        [ "$(show_field "$show" state)" != "done" ] || continue
+        [ "$(show_field_value "$show" hold_kind)" = captain ] || continue
+        # The title is the only free-text field here, and the report is
+        # TAB-separated, so it goes through the same sanitizer every other
+        # emitted field uses rather than being trusted to stay one clean line.
+        title=$(sanitize_field "$(show_field_value "$show" title)")
+        printf '%s\t%s\t%s\t%s\n' "$id" "$origin" "$key" "$title"
+        break
+      done <<INNER
+$keys
+INNER
+    done <<EOF
+$ids
+EOF
+  done
+}
+
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   answer) shift; command_answer "$@" ;;
@@ -872,6 +995,7 @@ case "${1:-}" in
   binding) shift; command_binding "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
+  diverged) shift; command_diverged "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
