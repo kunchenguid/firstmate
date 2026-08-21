@@ -456,6 +456,9 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [ ] parenthetical-title - Refresh sidebar (mobile) (repo: beta) (kind: ship)
 - [ ] blocked-reason - Blocked Reason (repo: beta) (kind: ship) blocked-by: queued-comma - waits on queued-comma
 - [ ] sample-decision-route - Choose sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: captain route choice pending) (hold-kind: captain)
+- [ ] dated-route - Deferred sample route (repo: sample) (kind: ship) (hold: captain sent this to later) (hold-kind: captain) (hold-until: 2026-09-01)
+- [ ] captain-gated-work - Captain-gated ship work (repo: sample) (kind: ship) (hold: captain go pending) (hold-kind: captain)
+- [ ] parked-prose - Parked captain call (repo: sample) (kind: ship) (hold: DEFERRED by captain) (hold-kind: captain)
 
 ## Done
 - [x] done-comma - Done Comma Task https://github.com/kunchenguid/firstmate/pull/42 (repo: gamma, merged 2026-07-09) (kind: ship)
@@ -474,7 +477,8 @@ EOF
   record_claude_idle "$home/state" bold-task
   printf 'done: report ready\n' > "$home/state/bold-task.status"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" \
+    FM_SNAPSHOT_NOW=2026-07-14T00:00:00Z "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e --arg data "$data" --arg projects "$projects" '
     .roots.data == $data
       and .roots.projects == $projects
@@ -514,7 +518,23 @@ EOF
       and .kind == "captain"
       and .hold_reason == "captain route choice pending"
       and .hold_kind == "captain"
+      and .captain_actionable == true
   ' >/dev/null || fail "tasks-axi captain-hold metadata did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "dated-route")
+    | .title == "Deferred sample route"
+      and .hold_until == "2026-09-01"
+      and .captain_actionable == false
+      and .deferred_marker == false
+  ' >/dev/null || fail "a dated captain hold did not defer or strip its hold-until from the title"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-gated-work")
+    | .kind == "ship" and .captain_actionable == true and .deferred_marker == false
+  ' >/dev/null || fail "captain actionability must not depend on the row kind"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "parked-prose")
+    | .captain_actionable == true and .deferred_marker == true
+  ' >/dev/null || fail "a prose-deferred captain hold did not carry the presentation marker"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-comma")
     | .repo == "gamma"

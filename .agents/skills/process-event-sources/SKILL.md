@@ -31,15 +31,15 @@ For a Lavish review artifact firstmate owns (a live investigating scout should h
 bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
 
-When a source carries captain answers to decisions that already have durable holds, bind it to their origin BEFORE arming it, so it can never produce an answer that has nowhere to go:
+When a source carries captain answers to captain-held tasks, bind it BEFORE arming it, so it can never produce an answer that has nowhere to go:
 
 ```sh
-bin/fm-decision-hold.sh bind <source-id> <origin-id>
+bin/fm-captain-hold.sh bind <source-id>
 ```
 
-The runner then passes each captured result to that source's own adapter `answers` command and pipes the keyed answers it prints into the one keyed-answer intake, which owns every rule about what they mean.
+The runner then passes each captured result to that source's own adapter `answers` command and pipes the keyed answers it prints into the one keyed-answer intake, which owns every rule about what they mean; the keys are captain-held task ids.
 This is generic: any adapter with an `answers` command works, and the runner still wakes you to act on the result.
-`decision-hold-lifecycle` owns when a binding is required and what the keys must be.
+`captain-hold-lifecycle` owns when a binding is required and what the keys must be.
 
 A configured remote secondmate reply source is armed and handled through `bin/fm-procevent-remote-reply.sh`.
 Its header owns exact commands, while the adapter owns cursor continuity, validated deduplicated status ingest, path-confined document fetch, acknowledgement, and re-arming after a good delta.
