@@ -1588,10 +1588,15 @@ test_unopenable_archive_refuses_instead_of_reading_as_absent() {
 }
 
 # The archive is only found through this home's own `[markdown]` table, so every
-# spelling of that table header TOML accepts has to be recognized. Each home here
-# configures a NON-default archive, so a header form this read failed to match
-# would fall back to the tracked default, find no archive there, and report the
-# answered record as absent all over again.
+# spelling of that table header tasks-axi itself honors has to be recognized. Each
+# home here configures a NON-default archive, so a header form this read failed to
+# match would fall back to the tracked default, find no archive there, and report
+# the answered record as absent all over again.
+# tasks-axi is the file's real reader, so it decides which spellings are in scope:
+# a quoted `["markdown"]` key is NOT one of them (checked against 0.2.4, the
+# FM_TASKS_AXI_MIN floor, and 0.2.5 - retention writes the tracked default archive
+# under that header instead of the configured one), so a home spelling it that way
+# has no configured-archive fixture to build and is out of scope here.
 test_markdown_table_header_forms_all_locate_the_archive() {
   local home form archive=data/retired-rows.md out index=0
   while IFS= read -r form; do
@@ -1634,11 +1639,10 @@ test_markdown_table_header_forms_all_locate_the_archive() {
 [markdown]
 [markdown] # the markdown backend
 [ markdown ]
-["markdown"]
 CRLF
 EOF
-  [ "$index" = 5 ] || fail "not every header form was exercised: $index"
-  pass "every [markdown] table header form TOML accepts still locates the configured archive"
+  [ "$index" = 4 ] || fail "not every header form was exercised: $index"
+  pass "every [markdown] table header form tasks-axi honors still locates the configured archive"
 }
 
 test_uninventoried_report_decision_refuses_completion
