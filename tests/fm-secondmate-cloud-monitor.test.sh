@@ -2898,6 +2898,42 @@ PY
   assert_present "$SP_HOME/state/helm.cloud-payload/brief.md" "payload lacks the brief"
   assert_present "$SP_HOME/state/helm.cloud-payload/fm-secondmate-session.py" "payload lacks the session runner"
   assert_present "$SP_HOME/state/helm.cloud-payload/fm-secondmate-spawn.pi-ext.ts" "payload lacks the pi extension"
+  # EFFECT-shaped, not syntax-shaped: run the REAL lifecycle validator over the
+  # REAL directory the REAL fm-spawn.sh just produced. The assertions above name
+  # files they expect to be present; this one bounds what may be present at all,
+  # so a producer that stages an unadmitted file goes red here no matter HOW the
+  # staging was spelled (literal name, shell variable, trailing-slash cp). That
+  # distinction matters: the defect this closes was a producer and a validator
+  # drifting apart, and a guard that recognizes only today's syntax is the same
+  # class of weakness as the defect.
+  python3 - "$SP_HOME/state/helm.cloud-payload" "$ROOT/bin/fm-worker-lifecycle.py" \
+    <<'PY' || fail "the staged compartment payload is not admitted by the reviewed set"
+import importlib.util
+import sys
+from pathlib import Path
+
+payload = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("lifecycle", sys.argv[2])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+bounds, required = module.payload_contract("secondmate")
+
+# Deliberately NOT filtering dotfiles, though staged_directory_manifest skips
+# them: nothing should ever put a dotfile here, so this is stricter than the
+# validator on purpose and a stray one goes red instead of travelling unseen.
+staged = sorted(entry.name for entry in payload.iterdir())
+unadmitted = [name for name in staged if name not in bounds]
+assert not unadmitted, (
+    "fm-spawn.sh staged {} into the compartment payload, which the reviewed set "
+    "does not admit; every leg dispatch would refuse. Staged: {}".format(
+        unadmitted, staged))
+
+# The validator itself is the authority, so this cannot drift from what the
+# controller enforces at dispatch: it bounds bytes and requires the pair too.
+manifest = module.staged_directory_manifest(
+    "payload", payload, bounds=bounds, required=required)
+assert sorted(manifest) == staged, (sorted(manifest), staged)
+PY
   assert_present "$SP_HOME/state/helm.cloud-account/auth.json" "account staging lacks the auth projection"
   # Durable leg config rode into the persisted compartment environment.
   assert_grep 'FM_SECONDMATE_LEG_SECONDS=7200' "$SP_HOME/state/helm.cloud-env" "leg config was not persisted for the monitor"

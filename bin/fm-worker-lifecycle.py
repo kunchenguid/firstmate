@@ -3558,11 +3558,47 @@ def command_capacity_release(env, args):
     print("specialized capacity reservation released after exact zero-compute proof")
 
 
+# What an ORDINARY crewmate payload may contain: the repository as a
+# credential-free bundle, plus the one task file its entrypoint reads. This set
+# is deliberately NOT widened for the compartment lane; see below.
 PAYLOAD_FILE_BOUNDS = {
     "repo.bundle": 512 * 1024 * 1024,
     "brief.md": 256 * 1024,
 }
+PAYLOAD_REQUIRED = ("repo.bundle", "brief.md")
+# What a SECONDMATE COMPARTMENT payload may contain: the ordinary set plus the
+# two files bin/fm-spawn.sh stages only for KIND=secondmate - the session runner
+# and the spawn-intent pi extension, which the compartment monitor's leg argv
+# names by path at /mnt/task/.fm-task/. Bounds are the smallest round numbers
+# leaving real headroom over the measured sizes (45142 B and 3867 B on the
+# azaccept compartment): a bound is a security control, so headroom buys against
+# ordinary source growth, not against a file becoming a different KIND of thing.
+COMPARTMENT_PAYLOAD_FILE_BOUNDS = {
+    **PAYLOAD_FILE_BOUNDS,
+    "fm-secondmate-session.py": 256 * 1024,
+    "fm-secondmate-spawn.pi-ext.ts": 64 * 1024,
+}
+# Both are REQUIRED, not merely admitted: the leg argv runs the runner and
+# passes --pi-ext, so a compartment whose staging silently lost either file
+# would dispatch a leg that cannot work. Refuse at the controller instead.
+COMPARTMENT_PAYLOAD_REQUIRED = PAYLOAD_REQUIRED + (
+    "fm-secondmate-session.py",
+    "fm-secondmate-spawn.pi-ext.ts",
+)
 ACCOUNT_TOTAL_BOUND = 1024 * 1024
+
+
+def payload_contract(role):
+    """The one owner of "what may a payload for this lane contain".
+
+    Returns (bounds, required) for the worker's durable role. Splitting by lane
+    rather than flattening one set keeps the ordinary crewmate lane exactly as
+    narrow as it is today: an author worker that somehow staged a session
+    runner is still refused.
+    """
+    if role == "secondmate":
+        return COMPARTMENT_PAYLOAD_FILE_BOUNDS, COMPARTMENT_PAYLOAD_REQUIRED
+    return PAYLOAD_FILE_BOUNDS, PAYLOAD_REQUIRED
 
 
 def staged_directory_manifest(label, directory, bounds=None, total_bound=None, required=()):
@@ -3626,14 +3662,6 @@ def command_execute(env, args):
         if outcome_root.is_symlink() or not outcome_root.is_dir():
             raise LifecycleError("outcome directory is unavailable: {}".format(args.outcome_dir))
     payload_manifest = account_manifest = None
-    if args.payload_dir is not None:
-        payload_manifest = staged_directory_manifest(
-            "payload", args.payload_dir, bounds=PAYLOAD_FILE_BOUNDS,
-            required=("repo.bundle", "brief.md"),
-        )
-        account_manifest = staged_directory_manifest(
-            "account", args.account_dir, total_bound=ACCOUNT_TOTAL_BOUND,
-        )
     inventory = provider_call(env, "inventory")["inventory"]
     with contextlib.ExitStack() as stack:
       with controller_lock(env):
@@ -3651,6 +3679,24 @@ def command_execute(env, args):
         classification, reason = classify_worker(worker, cloud)
         if classification != "assigned":
             raise LifecycleError("execute refuses a non-assigned or ambiguous worker: {}".format(reason))
+        if args.payload_dir is not None:
+            # The staging contract is chosen by the worker's DURABLE role, so it
+            # is resolved here (under the one controller lock, with the queue
+            # item and worker record in hand) rather than from the payload's own
+            # contents - a payload must never select the rules it is judged by.
+            # create_worker_record copies the item's role onto the worker, so a
+            # disagreement means the two records have drifted: fail closed.
+            worker_role = worker.get("role", "author")
+            if worker_role != item.get("role", "author"):
+                raise LifecycleError(
+                    "execute refuses a worker whose role disagrees with its queue item")
+            bounds, required = payload_contract(worker_role)
+            payload_manifest = staged_directory_manifest(
+                "payload", args.payload_dir, bounds=bounds, required=required,
+            )
+            account_manifest = staged_directory_manifest(
+                "account", args.account_dir, total_bound=ACCOUNT_TOTAL_BOUND,
+            )
         request = {
             "schema": EXECUTION_SCHEMA,
             **worker["bindings"],
