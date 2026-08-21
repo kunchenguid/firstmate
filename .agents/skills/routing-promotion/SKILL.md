@@ -29,6 +29,7 @@ Firstmate owes it a re-staff, and both landing paths refuse until it is closed, 
    Its `--note` is required and is the whole handover: the replacement inherits the work on disk but none of the conversation, so state the new tier, what raised it, and what to carry forward.
    Load `harness-adapters` before the relaunch, and see [`docs/agent-control.md`](../../../docs/agent-control.md) for the transaction's own guarantees.
    Relaunching is not a teardown and never discards unlanded work; if a relaunch would cost more than the promotion is worth, say so and keep the current worker rather than relaunching reflexively.
+   That judgment does not re-staff the task or discharge the promotion: leave its keyed record OPEN, escalate the decision to the captain, and keep landing refused until the captain answers.
 
 3. **Add review as its own task where it helps.**
    A higher tier often wants another lens rather than a stronger implementer.
@@ -40,10 +41,11 @@ Firstmate owes it a re-staff, and both landing paths refuse until it is closed, 
    When the promotion genuinely implies a stronger delivery path, escalate to the captain with the evidence, the consequence, and your recommendation.
    Standing routine authority does not cover it; load `ask-user-authority` when the promotion also surfaces a gate finding.
 
-5. **Close the record, and say what changed.**
+5. **Close only after a re-staff or captain answer.**
+   Close the record only after an actual re-staff onto a stronger runtime, or after the captain has answered an escalation.
    Answer the worker with `bin/fm-send.sh <target> --resolve-key <key> '<the re-staff decision>'`, which closes the record as it delivers.
    When the worker is already gone, hold the promotion for the captain instead and load `captain-hold-lifecycle` for that procedure; the transfer closes the live record without losing the promotion.
-   Either way the answer must name what was actually re-staffed, because that text is the only durable account of how the promotion was discharged.
+   Either way the answer must name the actual re-staff or the captain's escalation decision, because that text is the only durable account of how the promotion was discharged.
 
 ## Boundaries
 
