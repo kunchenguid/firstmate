@@ -15,10 +15,10 @@
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
 #      config/backlog-backend, config/backend, config/herdr-presentation-spaces,
-#      config/startup-memory-budget, and config/trace-context -
-#      down into each secondmate home's config/, so the secondmate's OWN crewmates,
-#      dispatch profiles, backlog backend, runtime-backend default, Herdr
-#      presentation choice, startup-memory budget, and trace context inherit the
+#      config/startup-memory-budget, config/context-restart-budget, and
+#      config/trace-context - down into each secondmate home's config/, so the
+#      secondmate's OWN crewmates, dispatch profiles, backlog backend,
+#      runtime-backend default, Herdr presentation choice, both budgets, and trace context inherit the
 #      primary's settings. For config/herdr-presentation-spaces, an absent
 #      primary file and an absent destination file both mean the same
 #      unconfigured default, so the generic absence mirror converges that item
@@ -438,6 +438,9 @@ make_seeded_home() {
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter\n' > "$home/data/charter.md"
+  cp "$ROOT/bin/fm-primary.sh" "$ROOT/bin/fm-context-restart-lib.sh" \
+    "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/bin/"
 }
 
 # spawn_secondmate <world> <id> <home> [explicit-harness]
@@ -767,7 +770,9 @@ test_spawn_secondmate_harness_model_token() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-token: meta model not opus (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "model-token: meta effort not default (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus'" \
+  assert_contains "$launch" "fm-primary.sh --firstmate-initial-prompt" \
+    "model-token: Claude secondmate did not use the context-refresh wrapper"
+  assert_contains "$launch" "-- --dangerously-skip-permissions --model 'opus'" \
     "model-token: launch did not carry --model opus"
   assert_not_contains "$launch" "--effort" "model-token: launch must not carry an --effort flag"
   pass "C3 spawn: config/secondmate-harness's model token threads --model into the launch and meta"
@@ -789,9 +794,37 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-effort-tokens: meta model not opus"
   [ "$(meta_field "$meta" effort)" = high ] || fail "model-effort-tokens: meta effort not high (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus' --effort 'high'" \
+  assert_contains "$launch" "-- --dangerously-skip-permissions --model 'opus' --effort 'high'" \
     "model-effort-tokens: launch did not carry both --model opus and --effort high"
   pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
+}
+
+# An older Claude secondmate home whose guarded sync could not fast-forward has
+# no bin/fm-primary.sh yet. Spawn must preserve the longstanding recovery
+# boundary: warn once and launch its existing plain Claude path instead of
+# turning an already-reported sync skip into a command-not-found failure.
+test_spawn_unsynced_claude_home_falls_back_to_plain_launch() {
+  local w sm launchlog launch out status
+  w="$TMP_ROOT/spawn-unsynced-fallback"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  rm -f "$sm/bin/fm-primary.sh"
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "unsynced-home fallback spawn should succeed"$'\n'"$out"
+  assert_contains "$out" "lacks bin/fm-primary.sh after guarded sync" \
+    "fallback spawn did not report the missing context-refresh wrapper"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "claude --dangerously-skip-permissions" \
+    "unsynced home did not launch its existing plain Claude path"
+  assert_contains "$launch" "encode launch-brief" \
+    "plain-Claude fallback lost the initial launch charter"
+  assert_not_contains "$launch" "fm-primary.sh" \
+    "unsynced home was launched through a wrapper it does not have"
+  pass "C4b spawn: an unsynced Claude home lacking fm-primary.sh keeps its plain launch with one warning"
 }
 
 # Precedence: an explicit per-spawn --model overrides the file's model token.
@@ -997,7 +1030,7 @@ new_world() {
     printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
     printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
-    printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
+    printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\nconfig/context-restart-budget\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
@@ -1334,9 +1367,9 @@ test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home() {
   pass "B9 bootstrap sweep defers new inherited config until the home ignores it"
 }
 
-# The primary bootstrap always materializes the startup-memory default, so an
-# otherwise empty inherited surface converges that one visible value while
-# ordinary tracked-file fast-forward behavior remains unchanged.
+# The primary bootstrap always materializes the startup-memory and context-restart
+# defaults, so an otherwise empty inherited surface converges those visible values
+# while ordinary tracked-file fast-forward behavior remains unchanged.
 test_bootstrap_sweep_materializes_and_inherits_memory_default() {
   local w c1
   w=$(new_world boot-noop)
@@ -1358,9 +1391,13 @@ test_bootstrap_sweep_materializes_and_inherits_memory_default() {
     || fail "primary bootstrap did not materialize the startup-memory default"
   [ "$(cat "$w/sm/config/startup-memory-budget")" = 7500 ] \
     || fail "default-only sweep did not converge startup-memory-budget"
+  [ "$(cat "$w/home/config/context-restart-budget")" = 400000 ] \
+    || fail "primary bootstrap did not materialize the context-restart default"
+  [ "$(cat "$w/sm/config/context-restart-budget")" = 400000 ] \
+    || fail "default-only sweep did not converge context-restart-budget"
   [ "$(git -C "$w/sm" rev-parse HEAD)" = "$head" ] \
     || fail "default-only sweep did not still fast-forward the tracked files"
-  pass "B10 bootstrap sweep materializes and inherits the startup-memory default while fast-forwarding"
+  pass "B10 bootstrap sweep materializes and inherits both budget defaults while fast-forwarding"
 }
 
 # config/backend: present and absent primary state converges exactly.
@@ -2419,6 +2456,7 @@ cat > "$w/main/bin/fm-spawn.sh" <<SH
 printf '%s' spawn >> '$log'
 printf '%s' codex > '$w/sm/config/crew-harness'
 printf '%s\n' 7500 > '$w/sm/config/startup-memory-budget'
+printf '%s\n' 400000 > '$w/sm/config/context-restart-budget'
 SH
   chmod +x "$w/main/bin/fm-spawn.sh"
   fakebin=$(make_fake_toolchain "$w")
@@ -2537,6 +2575,7 @@ test_spawn_explicit_backend_precedence_over_env_and_inherited_config
 test_spawn_bare_harness_no_model_effort_flag
 test_spawn_secondmate_harness_model_token
 test_spawn_secondmate_harness_model_and_effort_tokens
+test_spawn_unsynced_claude_home_falls_back_to_plain_launch
 test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens

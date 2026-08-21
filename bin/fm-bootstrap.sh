@@ -9,6 +9,7 @@
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
+#                 "CONTEXT_RESTART_BUDGET: invalid config/context-restart-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
@@ -63,10 +64,10 @@
 #          procedure in AGENTS.md section 4 and
 #          .agents/skills/quota-array-dispatch/SKILL.md.
 #          On a primary home, the locked mutable path materializes the visible
-#          default config/startup-memory-budget=7500 when absent. It never
-#          guesses at malformed or unsafe existing files, and secondmate homes
-#          await the primary-authoritative inherited value instead of creating
-#          their own.
+#          defaults config/startup-memory-budget=7500 and
+#          config/context-restart-budget=400000 when absent. It never guesses at
+#          malformed or unsafe existing files, and secondmate homes await the
+#          primary-authoritative inherited values instead of creating their own.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -146,6 +147,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-context-restart-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-context-restart-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
@@ -1097,6 +1100,15 @@ startup_memory_budget_setup() {
   fi
 }
 
+context_restart_budget_setup() {
+  if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+    return 0
+  fi
+  if ! fm_context_restart_budget_materialize "$CONFIG"; then
+    echo "CONTEXT_RESTART_BUDGET: invalid config/$FM_CONTEXT_RESTART_BUDGET_FILE - $FM_CONTEXT_RESTART_BUDGET_ERROR"
+  fi
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -1121,6 +1133,7 @@ fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
   startup_memory_budget_setup
+  context_restart_budget_setup
 fi
 
 # Local detection: presence, version floors, and configuration. Nothing here

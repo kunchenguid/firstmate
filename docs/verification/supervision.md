@@ -296,6 +296,26 @@ Harness identity is read from the executable path and `argv[0]` as well as the c
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
 
+### Claude context refresh
+
+Claude context accounting was verified end to end against Claude Code 2.1.235 on 2026-08-18.
+The live guard used the tracked Stop registration with a deliberately high threshold, captured Claude's own payload and transcript, matched the latest assistant usage to the CLI result, and confirmed that the under-budget turn published no crossing.
+The deterministic suite separately proves one directive per crossing, concurrent Stop deduplication, reset-safe exact lock release, one fresh successor, no replay of the old launch instruction, and one typed successor turn whose only recovery source is the new session-start digest.
+
+```sh
+claude --version
+FM_CONTEXT_RESTART_CLAUDE_LIVE_E2E=1 tests/fm-context-restart-claude-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+2.1.235 (Claude Code)
+ok - Claude 2.1.235 (Claude Code) live Stop payload session=87fd9305-3726-4d11-a1fc-2b3e309c21a6 exposed transcript usage=58128 and stayed inert below budget
+```
+
+### Claude watcher continuity
+
 The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
 
 ```sh
