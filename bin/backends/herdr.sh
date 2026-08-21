@@ -738,8 +738,11 @@ fm_backend_herdr_presentation_lock_namespace_ours() {  # <dir>
 # then refuses permanently, with no remedy short of a privileged removal. That
 # refusal blocks teardown, so a task whose work has already landed stays
 # recorded as in flight and its cleanup runs late against a stale target.
-# Per-uid naming removes the collision by construction rather than relaxing the
-# assertions, which remain correct on a name no other account can claim.
+# Per-uid naming removes the ACCIDENTAL collision rather than relaxing the
+# assertions: /tmp is world-writable with the sticky bit, so a second local
+# account can still deliberately create this account's name first, and the
+# ownership and mode assertions below are exactly what catches that and names
+# its remedy instead of blocking every teardown with no explanation.
 # The directory holds only lock files, so an older unsuffixed directory is left
 # untouched and nothing is migrated out of it.
 fm_backend_herdr_presentation_lock_namespace() {
@@ -789,15 +792,21 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 # at every real refusal site the lock path resolution created the namespace
 # before this probe ever saw it, so self-creation is read off the filesystem
 # rather than tracked through a flag that only one of those orderings can set.
+# The account id is resolved once here, in this frame, and the namespace name is
+# derived from that same resolved value: an id read for the message while the
+# path came from a second independent probe could disagree with it, and the one
+# way it disagrees is the worst one - a probe that fails here and succeeds there
+# names an owner mismatch against an id that is empty. A probe that cannot read
+# the id back names no directory at all, so it is reported as the unnamable
+# namespace it is rather than as an ownership fault of some other account.
 fm_backend_herdr_presentation_lock_namespace_fault() {
   local dir expected_uid owner mode
-  fm_backend_herdr_presentation_lock_self_uid_resolve || true
-  expected_uid=$FM_BACKEND_HERDR_PRESENTATION_LOCK_SELF_UID
-  dir=$(fm_backend_herdr_presentation_lock_namespace) || dir=
-  if [ -z "$dir" ]; then
+  if ! fm_backend_herdr_presentation_lock_self_uid_resolve; then
     printf 'the numeric user id of this account could not be read back from an entry created under /tmp, so the presentation lock namespace cannot be named, and no later attempt will clear it on its own; restore a writable /tmp that reports the owner of the entries this account creates there and rerun'
     return 0
   fi
+  expected_uid=$FM_BACKEND_HERDR_PRESENTATION_LOCK_SELF_UID
+  dir=$(fm_backend_herdr_presentation_lock_namespace)
   if [ -L "$dir" ]; then
     printf 'the presentation lock namespace %s is a symlink, which is never accepted, and no later attempt will clear it; remove that link (the namespace holds only lock files) and rerun' "$dir"
     return 0
