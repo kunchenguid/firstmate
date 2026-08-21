@@ -576,7 +576,7 @@ assert contract(guest_source) == contract(core_source), (
 # EXECUTE the exact verdict heredoc shipped to the paid VM. Testing a helper
 # that merely resembles this block would not catch the live json.loads(final)
 # failure that prompted this regression.
-marker = 'python3 - "$BASE/pi-events.jsonl" "$RESULT" <<\'PY\'\n'
+marker = 'python3 - "$@" <<\'PY\'\n'
 start = guest_source.index(marker) + len(marker)
 end = guest_source.index("\nPY\n", start)
 guest_block = guest_source[start:end]
@@ -603,20 +603,24 @@ def run_guest(stream):
         root = Path(temporary)
         source = root / "pi-events.jsonl"
         result = root / "result.json"
+        diagnostic = root / "diagnostic.txt"
         script = root / "guest-verdict.py"
         source.write_text(stream, encoding="utf-8")
         script.write_text(guest_block, encoding="utf-8")
         completed = subprocess.run(
-            [sys.executable, str(script), str(source), str(result)],
+            [sys.executable, str(script), str(source), str(result), str(diagnostic)],
             capture_output=True,
             text=True,
             timeout=30,
         )
+        if diagnostic.is_file():
+            completed.stderr += diagnostic.read_text(encoding="utf-8")
         value = json.loads(result.read_text(encoding="utf-8")) if result.is_file() else None
         return completed, value
 
 
-verdict = json.dumps({"verdict": "clear"})
+verdict_value = {"verdict": {"status": "clear"}, "evidence_files": {}}
+verdict = json.dumps(verdict_value)
 for label, text in (
     ("bare object", verdict),
     ("json fence", f"```json\n{verdict}\n```"),
@@ -624,7 +628,7 @@ for label, text in (
 ):
     completed, value = run_guest(events(assistant(text), {"type": "agent_end"}))
     assert completed.returncode == 0, (label, completed.stdout, completed.stderr)
-    assert value == {"verdict": "clear"}, (label, value)
+    assert value == verdict_value, (label, value)
 
 for label, text in (
     ("unterminated fence", f"```json\n{verdict}"),
@@ -719,10 +723,285 @@ completed, value = run_guest(events(
     {"type": "agent_end"},
 ))
 assert completed.returncode == 0, (completed.stdout, completed.stderr)
-assert value == {"verdict": "clear"}, value
+assert value == verdict_value, value
 print("GUEST Pi verdict parser is byte-bound to the host and fails closed")
 PY
   pass "the exact model guest accepts one fenced verdict and preserves terminal-turn safety"
+}
+
+model_guest_pi_protocol_retry_unit() {
+  python3 - "$MODEL_GUEST" <<'PY' \
+    || fail "model guest Pi protocol-correction contract failed"
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+guest_path = Path(sys.argv[1])
+guest_source = guest_path.read_text(encoding="utf-8")
+begin_marker = "    # BEGIN PI_PROTOCOL_ATTEMPTS\n"
+end_marker = "    # END PI_PROTOCOL_ATTEMPTS"
+start = guest_source.index(begin_marker) + len(begin_marker)
+end = guest_source.index(end_marker, start)
+pi_branch = guest_source[start:end]
+assert (
+    'rm -f "$RESULT" "$PI_EVENTS" "$PI_DIAGNOSTIC" "$PI_STDERR_2"\n'
+    '      if pi --mode json' in pi_branch
+), (
+    "the retry no longer deletes first-attempt result and event bytes"
+)
+assert '2>"$PI_STDERR_1"' in pi_branch
+assert '2>"$PI_STDERR_2"' in pi_branch
+
+wrapper = """#!/usr/bin/env bash
+set -euo pipefail
+BASE=$1
+PROMPT=$BASE/prompt.txt
+RESULT=$BASE/reviewer-result.json
+ACCOUNT=$BASE/account
+MODEL=accounts/fireworks/models/glm-5p2
+EFFORT=xhigh
+PI_PROVIDER=fireworks-glm
+REVIEW_GENERATION=0123456789abcdef01234567
+export PI_CODING_AGENT_DIR=$ACCOUNT
+export FM_CROSSCHECK_REVIEW_GENERATION=$REVIEW_GENERATION
+""" + pi_branch
+
+fake_pi = r'''#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+count_path = Path(os.environ["FAKE_PI_COUNT"])
+count = int(count_path.read_text() or "0") + 1 if count_path.exists() else 1
+count_path.write_text(str(count))
+capture = Path(os.environ["FAKE_PI_CAPTURE"])
+capture.mkdir(exist_ok=True)
+(capture / f"prompt-{count}.txt").write_text(sys.argv[-1])
+(capture / f"argv-{count}.json").write_text(json.dumps(sys.argv[1:]))
+(capture / f"meta-{count}.json").write_text(json.dumps({
+    "account": os.environ.get("PI_CODING_AGENT_DIR"),
+    "generation": os.environ.get("FM_CROSSCHECK_REVIEW_GENERATION"),
+}))
+
+scenario = os.environ["FAKE_PI_SCENARIO"]
+valid = json.dumps({"verdict": {"summary": "clear"}, "evidence_files": {}})
+if scenario == "nonzero-first":
+    sys.stderr.buffer.write(
+        b"HOSTILE_FIRST_STDERR" + b"\n\r\t\x00\x1b" * 1500 + b"Z" * 5000
+    )
+    raise SystemExit(17)
+if scenario == "terminal-error":
+    message = {
+        "role": "assistant", "stopReason": "error", "content": [],
+        "errorMessage": "provider failed before an artifact",
+    }
+    print(json.dumps({"type": "turn_end", "message": message}))
+    print(json.dumps({"type": "agent_end", "messages": []}))
+    raise SystemExit(0)
+if scenario == "valid-first":
+    artifact = valid
+elif scenario == "prose-valid":
+    artifact = "Looking at this PR... UNIQUE_PRIOR_PROSE" if count == 1 else valid
+elif scenario == "missing-valid":
+    artifact = (
+        json.dumps({"verdict": {"summary": "UNIQUE_MISSING_EVIDENCE"}})
+        if count == 1 else valid
+    )
+elif scenario == "nonobject-valid":
+    artifact = '["UNIQUE_NONOBJECT_ARTIFACT"]' if count == 1 else valid
+elif scenario == "nondict-verdict-valid":
+    artifact = (
+        json.dumps({"verdict": "UNIQUE_NONDICT_VERDICT", "evidence_files": {}})
+        if count == 1 else valid
+    )
+elif scenario == "prose-nonzero":
+    if count == 1:
+        artifact = "UNIQUE_FIRST_ARTIFACT " + "A" * 6000 + "\n\t\x00\x1b"
+    else:
+        sys.stderr.buffer.write(
+            b"HOSTILE_SECOND_STDERR" + b"\n\r\t\x00\x1b" * 1500 + b"Y" * 5000
+        )
+        raise SystemExit(19)
+elif scenario == "twice-malformed":
+    if count == 1:
+        # A hostile/stale first-attempt result makes the retry-side rm
+        # behavior observable rather than a substring-only assertion.
+        Path(os.environ["FAKE_RESULT_PATH"]).write_text(valid)
+        artifact = (
+            "UNIQUE_STALE_FIRST\n\t\x00\x1b " + "B" * 6000
+        )
+    else:
+        if Path(os.environ["FAKE_RESULT_PATH"]).exists():
+            print("STALE_RESULT_REACHED_RETRY", file=sys.stderr)
+            raise SystemExit(91)
+        artifact = (
+            "UNIQUE_SECOND_FAILURE\r\n\t\x00\x1b " + "C" * 6000
+        )
+else:
+    raise SystemExit("unknown fake scenario")
+
+message = {
+    "role": "assistant",
+    "stopReason": "stop",
+    "content": [{"type": "text", "text": artifact}],
+}
+print(json.dumps({"type": "turn_end", "message": message}))
+print(json.dumps({"type": "agent_end", "messages": []}))
+'''
+
+schema = json.dumps({
+    "type": "object",
+    "required": ["verdict", "evidence_files"],
+    "properties": {
+        "verdict": {"type": "object"},
+        "evidence_files": {"type": "object"},
+    },
+}, sort_keys=True, separators=(",", ":"))
+original_prompt = "ORIGINAL TRUSTED REVIEW REQUEST\n" + schema
+valid_value = {"verdict": {"summary": "clear"}, "evidence_files": {}}
+
+
+def run_scenario(scenario):
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        base = root / "base"
+        base.mkdir()
+        (base / "account").mkdir()
+        (base / "prompt.txt").write_text(original_prompt, encoding="utf-8")
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        pi = fake_bin / "pi"
+        pi.write_text(fake_pi, encoding="utf-8")
+        pi.chmod(0o755)
+        script = root / "run-branch.sh"
+        script.write_text(wrapper, encoding="utf-8")
+        script.chmod(0o755)
+        capture = root / "capture"
+        env = dict(os.environ)
+        env.update({
+            "PATH": str(fake_bin) + os.pathsep + env["PATH"],
+            "FAKE_PI_COUNT": str(root / "count"),
+            "FAKE_PI_CAPTURE": str(capture),
+            "FAKE_PI_SCENARIO": scenario,
+            "FAKE_RESULT_PATH": str(base / "reviewer-result.json"),
+        })
+        completed = subprocess.run(
+            [str(script), str(base)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+        count = int((root / "count").read_text()) if (root / "count").exists() else 0
+        prompts = [
+            (capture / f"prompt-{index}.txt").read_text(encoding="utf-8")
+            for index in range(1, count + 1)
+        ]
+        argvs = [
+            json.loads((capture / f"argv-{index}.json").read_text(encoding="utf-8"))
+            for index in range(1, count + 1)
+        ]
+        metas = [
+            json.loads((capture / f"meta-{index}.json").read_text(encoding="utf-8"))
+            for index in range(1, count + 1)
+        ]
+        result_path = base / "reviewer-result.json"
+        value = json.loads(result_path.read_text()) if result_path.is_file() else None
+        return completed, count, prompts, argvs, metas, value
+
+
+def assert_protocol(argvs, metas):
+    expected = [
+        "--mode", "json", "--provider", "fireworks-glm", "--model",
+        "accounts/fireworks/models/glm-5p2", "--thinking", "xhigh",
+        "--no-tools", "--no-session", "--no-extensions", "--no-skills",
+        "--no-prompt-templates", "--no-themes", "--no-context-files",
+        "--no-approve",
+    ]
+    for argv in argvs:
+        assert argv[:-1] == expected, argv
+    if len(argvs) == 2:
+        assert argvs[0][:-1] == argvs[1][:-1], argvs
+        assert metas[0] == metas[1], metas
+    for meta in metas:
+        assert meta["account"].endswith("/base/account"), meta
+        assert meta["generation"] == "0123456789abcdef01234567", meta
+
+
+completed, count, prompts, argvs, metas, value = run_scenario("valid-first")
+assert completed.returncode == 0, (completed.stdout, completed.stderr)
+assert count == 1 and prompts == [original_prompt], (count, prompts)
+assert value == valid_value, value
+assert_protocol(argvs, metas)
+
+for scenario, forbidden in (
+    ("prose-valid", "UNIQUE_PRIOR_PROSE"),
+    ("missing-valid", "UNIQUE_MISSING_EVIDENCE"),
+    ("nonobject-valid", "UNIQUE_NONOBJECT_ARTIFACT"),
+    ("nondict-verdict-valid", "UNIQUE_NONDICT_VERDICT"),
+):
+    completed, count, prompts, argvs, metas, value = run_scenario(scenario)
+    assert completed.returncode == 0, (scenario, completed.stdout, completed.stderr)
+    assert count == 2 and prompts[0] == original_prompt, (scenario, count, prompts)
+    assert prompts[1].startswith("TRUSTED PI OUTPUT-PROTOCOL CORRECTION:"), prompts[1]
+    assert "Reason silently" in prompts[1]
+    assert "first output byte MUST be {" in prompts[1]
+    assert prompts[1].endswith(original_prompt), prompts[1][-len(original_prompt):]
+    assert forbidden not in prompts[1], (scenario, prompts[1])
+    assert value == valid_value, (scenario, value)
+    assert_protocol(argvs, metas)
+
+for scenario in ("nonzero-first", "terminal-error"):
+    completed, count, prompts, argvs, metas, value = run_scenario(scenario)
+    assert completed.returncode != 0, (scenario, completed.stdout, completed.stderr)
+    assert count == 1, (scenario, count)
+    assert value is None, (scenario, value)
+    assert_protocol(argvs, metas)
+
+completed, count, prompts, argvs, metas, value = run_scenario("nonzero-first")
+assert completed.returncode == 17, completed.returncode
+assert count == 1 and value is None
+assert len(completed.stderr.encode("utf-8")) <= 1150, len(completed.stderr)
+assert "HOSTILE_FIRST_STDERR\\n\\r\\t\\x00\\x1b" in completed.stderr
+assert completed.stderr.count("\n") == 1, repr(completed.stderr)
+assert not any(control in completed.stderr for control in ("\r", "\t", "\x00", "\x1b"))
+assert completed.stdout == "", repr(completed.stdout)
+
+completed, count, prompts, argvs, metas, value = run_scenario("prose-nonzero")
+assert completed.returncode == 125, (completed.returncode, completed.stdout, completed.stderr)
+assert count == 2 and value is None, (count, value)
+assert "UNIQUE_FIRST_ARTIFACT" in completed.stderr
+assert "HOSTILE_SECOND_STDERR\\n\\r\\t\\x00\\x1b" in completed.stderr
+assert len(completed.stderr.encode("utf-8")) <= 2300, len(completed.stderr)
+assert completed.stderr.count("\n") == 1, repr(completed.stderr)
+assert not any(control in completed.stderr for control in ("\r", "\t", "\x00", "\x1b"))
+assert "UNIQUE_FIRST_ARTIFACT" not in prompts[1], prompts[1]
+assert prompts[1].endswith(original_prompt), prompts[1]
+assert completed.stdout == "", repr(completed.stdout)
+assert_protocol(argvs, metas)
+
+completed, count, prompts, argvs, metas, value = run_scenario("twice-malformed")
+assert completed.returncode == 125, (completed.returncode, completed.stdout, completed.stderr)
+assert count == 2, count
+assert value is None, value
+assert "attempt-1=" in completed.stderr and "attempt-2=" in completed.stderr
+assert "UNIQUE_STALE_FIRST" in completed.stderr
+assert "UNIQUE_SECOND_FAILURE" in completed.stderr
+assert "UNIQUE_STALE_FIRST\\n\\t\\x00\\x1b" in completed.stderr
+assert "UNIQUE_SECOND_FAILURE\\r\\n\\t\\x00\\x1b" in completed.stderr
+assert len(completed.stderr.encode("utf-8")) <= 2300, len(completed.stderr.encode("utf-8"))
+assert completed.stderr.count("\n") == 1, repr(completed.stderr)
+assert not any(control in completed.stderr for control in ("\r", "\t", "\x00", "\x1b"))
+assert "UNIQUE_STALE_FIRST" not in prompts[1], prompts[1]
+assert prompts[1].endswith(original_prompt), prompts[1]
+assert_protocol(argvs, metas)
+print("GUEST Pi protocol correction is one-shot, clean, and output-blind")
+PY
+  pass "the exact Pi branch performs at most one clean protocol-correction attempt"
 }
 
 cross_family_provider_host_unit() {
@@ -2288,6 +2567,7 @@ cross_family_provider_host_unit
 cross_family_credential_lane_unit
 model_guest_executing_account_unit
 model_guest_pi_verdict_unit
+model_guest_pi_protocol_retry_unit
 identity_outcome_unit
 account_and_cleanup_identity_unit
 bridge_security_unit

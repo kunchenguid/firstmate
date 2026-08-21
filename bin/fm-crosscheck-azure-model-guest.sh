@@ -231,10 +231,15 @@ case "$HARNESS" in
       gpt-5.6-sol) PI_PROVIDER=openai-codex ;;
       *) echo "model guest: no Pi provider mapping for model $MODEL" >&2; exit 125 ;;
     esac
-    pi --mode json --provider "$PI_PROVIDER" --model "$MODEL" --thinking "$EFFORT" \
-      --no-tools --no-session --no-extensions --no-skills --no-prompt-templates \
-      --no-themes --no-context-files --no-approve "$(<"$PROMPT")" >"$BASE/pi-events.jsonl"
-    python3 - "$BASE/pi-events.jsonl" "$RESULT" <<'PY'
+    # BEGIN PI_PROTOCOL_ATTEMPTS
+    PI_EVENTS=$BASE/pi-events.jsonl
+    PI_DIAGNOSTIC=$BASE/pi-artifact.diagnostic
+    PI_STDERR_1=$BASE/pi-attempt-1.stderr
+    PI_STDERR_2=$BASE/pi-attempt-2.stderr
+    PI_RETRYABLE_ARTIFACT_STATUS=42
+
+    parse_pi_artifact() {
+      python3 - "$@" <<'PY'
 import json
 import pathlib
 import re
@@ -242,6 +247,47 @@ import sys
 
 source = pathlib.Path(sys.argv[1])
 destination = pathlib.Path(sys.argv[2])
+diagnostic = pathlib.Path(sys.argv[3])
+RETRYABLE_ARTIFACT_STATUS = 42
+DIAGNOSTIC_LIMIT = 1024
+
+
+def bounded_escaped(value) -> bytes:
+    raw = value if isinstance(value, bytes) else value.encode(
+        "utf-8", errors="backslashreplace"
+    )
+    escaped = bytearray()
+    for byte in raw:
+        if byte == 0x5C:
+            chunk = b"\\\\"
+        elif byte == 0x0A:
+            chunk = b"\\n"
+        elif byte == 0x0D:
+            chunk = b"\\r"
+        elif byte == 0x09:
+            chunk = b"\\t"
+        elif 0x20 <= byte <= 0x7E:
+            chunk = bytes((byte,))
+        else:
+            chunk = f"\\x{byte:02x}".encode("ascii")
+        if len(escaped) + len(chunk) > DIAGNOSTIC_LIMIT:
+            break
+        escaped.extend(chunk)
+    return bytes(escaped)
+
+
+def fail(message: str, status: int = 125) -> None:
+    # Reviewer/provider text is untrusted. Keep one escaped, byte-bounded line
+    # for the shell to combine across the two deterministic attempts.
+    diagnostic.write_bytes(bounded_escaped(message) + b"\n")
+    raise SystemExit(status)
+
+
+if len(sys.argv) == 5 and sys.argv[4] == "stderr-summary":
+    with source.open("rb") as stderr_stream:
+        stderr_prefix = stderr_stream.read(DIAGNOSTIC_LIMIT)
+    sys.stdout.buffer.write(bounded_escaped(stderr_prefix or b"(empty)") + b"\n")
+    raise SystemExit(0)
 
 # BEGIN PI_VERDICT_BODY_CONTRACT
 PI_FENCED_BLOCK_RE = re.compile(
@@ -301,17 +347,17 @@ for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines
     try:
         event = json.loads(line)
     except (json.JSONDecodeError, ValueError, RecursionError) as exc:
-        raise SystemExit(
+        fail(
             f"model guest: Pi returned malformed JSON events at line {line_number}: {exc}"
         )
     if not isinstance(event, dict):
-        raise SystemExit(
+        fail(
             f"model guest: Pi returned a non-object event at line {line_number}"
         )
     event_type = event.get("type")
     if event_type == "turn_end":
         if agent_ended:
-            raise SystemExit("model guest: Pi emitted a turn after agent completion")
+            fail("model guest: Pi emitted a turn after agent completion")
         turn_count += 1
         attempt_turn_count += 1
         final_text = None
@@ -340,19 +386,19 @@ for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines
                     final_text = "".join(text_parts)
     elif event_type == "agent_end":
         if agent_ended:
-            raise SystemExit("model guest: Pi emitted duplicate agent completion")
+            fail("model guest: Pi emitted duplicate agent completion")
         agent_ended = True
     elif event_type == "auto_retry_start":
         if not agent_ended:
-            raise SystemExit(
+            fail(
                 "model guest: Pi announced a retry while its agent was still running"
             )
         if attempt_turn_count == 0:
-            raise SystemExit(
+            fail(
                 "model guest: Pi announced a retry after an attempt that executed no turn"
             )
         if final_stop_reason == "stop":
-            raise SystemExit(
+            fail(
                 "model guest: Pi announced a retry after a successful assistant turn"
             )
         agent_ended = False
@@ -361,31 +407,121 @@ for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines
         final_stop_reason = None
         final_error = None
 if turn_count == 0:
-    raise SystemExit("model guest: Pi completed without executing a turn")
+    fail("model guest: Pi completed without executing a turn")
 if not agent_ended:
-    raise SystemExit("model guest: Pi stopped before agent completion")
+    fail("model guest: Pi stopped before agent completion")
 if attempt_turn_count == 0:
-    raise SystemExit("model guest: Pi final attempt completed without executing a turn")
+    fail("model guest: Pi final attempt completed without executing a turn")
 if final_stop_reason != "stop":
-    raise SystemExit(
+    fail(
         "model guest: Pi final assistant turn did not stop successfully: "
         f"stopReason={final_stop_reason!r}"
-        + (f": {final_error[:500]}" if final_error else "")
+        + (f": {final_error[:500]!r}" if final_error else "")
     )
 if final_text is None or not final_text.strip():
-    raise SystemExit("model guest: Pi completed without a verdict artifact")
+    fail(
+        "model guest: Pi completed without a verdict artifact",
+        RETRYABLE_ARTIFACT_STATUS,
+    )
 body = pi_verdict_body(final_text)
 try:
     value = json.loads(body)
 except (json.JSONDecodeError, ValueError, RecursionError) as exc:
-    raise SystemExit(
+    fail(
         f"model guest: Pi returned a malformed verdict artifact: {exc}; "
-        f"final assistant text began {body[:240]!r}"
+        f"final assistant text began {body[:4096]}",
+        RETRYABLE_ARTIFACT_STATUS,
     )
 if not isinstance(value, dict):
-    raise SystemExit("model guest: Pi verdict artifact must be an object")
+    fail(
+        "model guest: Pi verdict artifact must be an object",
+        RETRYABLE_ARTIFACT_STATUS,
+    )
+if not isinstance(value.get("verdict"), dict):
+    fail(
+        "model guest: reviewer omitted its verdict",
+        RETRYABLE_ARTIFACT_STATUS,
+    )
+if not isinstance(value.get("evidence_files"), dict):
+    fail(
+        "model guest: reviewer omitted its evidence manifest",
+        RETRYABLE_ARTIFACT_STATUS,
+    )
 destination.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
 PY
+    }
+
+    pi_stderr_summary() {
+      parse_pi_artifact "$1" /dev/null /dev/null stderr-summary
+    }
+
+    rm -f "$RESULT" "$PI_EVENTS" "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"
+    if pi --mode json --provider "$PI_PROVIDER" --model "$MODEL" --thinking "$EFFORT" \
+      --no-tools --no-session --no-extensions --no-skills --no-prompt-templates \
+      --no-themes --no-context-files --no-approve \
+      "$(<"$PROMPT")" >"$BASE/pi-events.jsonl" 2>"$PI_STDERR_1"; then
+      PI_FIRST_COMMAND_STATUS=0
+    else
+      PI_FIRST_COMMAND_STATUS=$?
+    fi
+    if [ "$PI_FIRST_COMMAND_STATUS" -ne 0 ]; then
+      PI_FIRST_STDERR=$(pi_stderr_summary "$PI_STDERR_1")
+      rm -f "$RESULT" "$PI_EVENTS" "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"
+      printf 'model guest: Pi failed: pi-exit-%s; stderr=%s\n' \
+        "$PI_FIRST_COMMAND_STATUS" "$PI_FIRST_STDERR" >&2
+      exit "$PI_FIRST_COMMAND_STATUS"
+    fi
+    PI_PARSE_STATUS=0
+    parse_pi_artifact "$PI_EVENTS" "$RESULT" "$PI_DIAGNOSTIC" || PI_PARSE_STATUS=$?
+    if [ "$PI_PARSE_STATUS" -eq 0 ]; then
+      rm -f "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"
+    elif [ "$PI_PARSE_STATUS" -ne "$PI_RETRYABLE_ARTIFACT_STATUS" ]; then
+      head -c 1024 "$PI_DIAGNOSTIC" >&2
+      rm -f "$RESULT" "$PI_STDERR_1" "$PI_STDERR_2"
+      exit 125
+    else
+      PI_FIRST_DIAGNOSTIC=$(head -c 1024 "$PI_DIAGNOSTIC")
+      # The correction is a fixed trusted prefix. It carries no byte from the
+      # first reviewer response, and the untouched original prompt follows it,
+      # leaving that prompt's exact compact outer schema as the final bytes.
+      PI_PROTOCOL_CORRECTION_PREFIX='TRUSTED PI OUTPUT-PROTOCOL CORRECTION:
+The previous response failed only the required output protocol. Do not repeat or discuss it.
+Reason silently and emit no analysis, preface, or Markdown fence.
+The first output byte MUST be {.
+Return exactly one JSON object satisfying the complete outer schema at the end of the original request.
+
+'
+      # Both files are deliberately reused, so deletion is load-bearing: the
+      # correction may never accept a first-attempt result or event byte.
+      rm -f "$RESULT" "$PI_EVENTS" "$PI_DIAGNOSTIC" "$PI_STDERR_2"
+      if pi --mode json --provider "$PI_PROVIDER" --model "$MODEL" --thinking "$EFFORT" \
+        --no-tools --no-session --no-extensions --no-skills --no-prompt-templates \
+        --no-themes --no-context-files --no-approve \
+        "$PI_PROTOCOL_CORRECTION_PREFIX$(<"$PROMPT")" \
+        >"$PI_EVENTS" 2>"$PI_STDERR_2"; then
+        PI_SECOND_COMMAND_STATUS=0
+      else
+        PI_SECOND_COMMAND_STATUS=$?
+      fi
+      if [ "$PI_SECOND_COMMAND_STATUS" -ne 0 ]; then
+        PI_SECOND_STDERR=$(pi_stderr_summary "$PI_STDERR_2")
+        rm -f "$RESULT" "$PI_EVENTS" "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"
+        printf 'model guest: Pi protocol correction failed: attempt-1=%s; attempt-2=pi-exit-%s stderr=%s\n' \
+          "$PI_FIRST_DIAGNOSTIC" "$PI_SECOND_COMMAND_STATUS" "$PI_SECOND_STDERR" >&2
+        exit 125
+      fi
+      PI_PARSE_STATUS=0
+      parse_pi_artifact "$PI_EVENTS" "$RESULT" "$PI_DIAGNOSTIC" || PI_PARSE_STATUS=$?
+      if [ "$PI_PARSE_STATUS" -ne 0 ]; then
+        PI_SECOND_DIAGNOSTIC=$(head -c 1024 "$PI_DIAGNOSTIC")
+        rm -f "$RESULT" "$PI_EVENTS" "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"
+        printf 'model guest: Pi protocol correction failed: attempt-1=%s; attempt-2=%s\n' \
+          "$PI_FIRST_DIAGNOSTIC" "$PI_SECOND_DIAGNOSTIC" >&2
+        exit 125
+      fi
+      rm -f "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"
+    fi
+    # END PI_PROTOCOL_ATTEMPTS
     ;;
   *)
     echo "model guest: unsupported reviewer harness" >&2
