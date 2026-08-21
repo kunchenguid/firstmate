@@ -19,6 +19,7 @@ REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
 REPEAT_WORKER_PID=
+LIVE_RECLAIM_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -27,6 +28,7 @@ cleanup_remote_job_fixture() {
   [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
   [ -z "$REPEAT_WORKER_PID" ] || kill "$REPEAT_WORKER_PID" 2>/dev/null || true
+  [ -z "$LIVE_RECLAIM_PID" ] || kill "$LIVE_RECLAIM_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -303,6 +305,9 @@ fm_remote_job_stop_worker_tree "$RESIDUE_WORKER_PID" \
 mkdir -p "$STATE_ROOT/worker.lock"
 LOCK_RESIDUE="$STATE_ROOT/worker.lock/.pid.aB3xY9"
 printf '%s\n' "$RESIDUE_WORKER_PID" > "$LOCK_RESIDUE"
+# Creating that entry is what last moved the lock's own mtime, so an abandoned
+# lock old enough to be proven stale can only hold entries at least as old.
+touch -t 200001010000 "$LOCK_RESIDUE"
 touch -t 200001010000 "$STATE_ROOT/worker.lock"
 fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
 NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
@@ -311,6 +316,36 @@ assert_absent "$LOCK_RESIDUE" "reclaim left a dead owner's private lock residue 
 fm_remote_job_worker_identity_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
   || fail "the reclaiming worker did not publish the current code identity"
 pass "a lock left with a dead owner's private residue is still reclaimed"
+
+# A live owner publishes ownership through the same private temp names a dead
+# owner leaves behind, so a reclaimer that raced a replacement's fresh
+# publication would delete a running worker's ownership and let two workers
+# serve the same queue. An entry inside the recency window is never residue, and
+# a stale directory mtime alone does not license removing it.
+LIVE_RESIDUE_WORKER_PID=$NEW_WORKER_PID
+fm_remote_job_stop_worker_tree "$LIVE_RESIDUE_WORKER_PID" \
+  || fail "the live publication fixture could not stop the worker"
+mkdir -p "$STATE_ROOT/worker.lock"
+LIVE_LOCK_RESIDUE="$STATE_ROOT/worker.lock/.pid.zQ7wV2"
+printf '%s\n' "$LIVE_RESIDUE_WORKER_PID" > "$LIVE_LOCK_RESIDUE"
+touch -t 200001010000 "$STATE_ROOT/worker.lock"
+HOME="$ACCOUNT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_TIMEOUT=1 \
+  "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  >> "$TMP_ROOT/worker.out" 2>> "$TMP_ROOT/worker.err" &
+LIVE_RECLAIM_PID=$!
+sleep 1
+kill -0 "$LIVE_RECLAIM_PID" 2>/dev/null \
+  || fail "the reclaiming worker stopped before its reclaim decision could be observed"
+assert_present "$LIVE_LOCK_RESIDUE" "reclaim deleted a publication still inside the recency window"
+assert_present "$STATE_ROOT/worker.lock" "reclaim destroyed a lock it could not prove abandoned"
+kill -TERM "$LIVE_RECLAIM_PID" 2>/dev/null || true
+wait "$LIVE_RECLAIM_PID" 2>/dev/null || true
+LIVE_RECLAIM_PID=
+rm -rf -- "$STATE_ROOT/worker.lock"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+pass "reclaim never removes a lock entry a live owner could still be publishing"
 
 CRASHED_WORKER_PID=$NEW_WORKER_PID
 kill -KILL "$CRASHED_WORKER_PID"

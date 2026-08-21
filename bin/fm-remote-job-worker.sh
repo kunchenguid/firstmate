@@ -111,13 +111,17 @@ worker_publish_lock_owner() {
   mv -f -- "$pid_tmp" "$WORKER_LOCK/pid" || { rm -f -- "$pid_tmp" "$WORKER_LOCK/start" "$WORKER_LOCK/command"; return 1; }
 }
 
-worker_lock_recent() {
+# An unreadable mtime counts as recent, because reclaim may only destroy
+# ownership it can positively prove abandoned.
+worker_path_recent() { # <path>
   local mtime now
-  mtime=$(fm_remote_job_path_mtime "$WORKER_LOCK" 2>/dev/null || true)
+  mtime=$(fm_remote_job_path_mtime "$1" 2>/dev/null || true)
   case "$mtime" in ''|*[!0-9]*) return 0 ;; esac
   now=$(date +%s)
   [ $((now - mtime)) -le 10 ]
 }
+
+worker_lock_recent() { worker_path_recent "$WORKER_LOCK"; }
 
 worker_quarantined_execution_stopped() { # <account-home>
   local account_home=$1 job state kind file pid
@@ -143,23 +147,45 @@ worker_recover_quarantine() { # <account-home>
   rm -f -- "$WORKER_LOCK/quarantine"
 }
 
-# An owner that died between mktemp and mv leaves one of its own private temp
-# entries inside the lock directory, and rmdir can never reclaim a lock that
-# still holds one. Only this worker's own temp shapes are removable, and only as
-# plain files, so a proven-stale lock stays reclaimable after any unclean death
-# without widening what reclaim may delete.
-worker_clear_lock_residue() {
-  local entry
-  for entry in "$WORKER_LOCK"/.pid.* "$WORKER_LOCK"/.start.* \
+worker_lock_instance() { fm_remote_job_path_instance "$WORKER_LOCK"; }
+
+# Reclaim removes an abandoned owner's canonical files and any private temp entry
+# left behind by an owner that died between mktemp and mv, since rmdir can never
+# reclaim a lock that still holds one. Those temp names are the ones a live owner
+# publishes through, so every removal is bound to the exact lock the staleness
+# proof observed. Ownership is only ever taken by creating the lock directory, so
+# a replacement that recreated it after that proof holds a different directory
+# instance, and a changed instance is contention to wait out rather than residue
+# to delete. Each entry must additionally be older than the recency window the
+# proof already applied to the directory, which a live owner's just-published
+# canonical and temporary files never are, and which an abandoned lock's entries
+# always are because creating them is what last moved that directory's mtime.
+worker_remove_stale_lock_entry() { # <entry> <instance>; 0 removed or absent, 2 contention, 1 refused
+  local entry=$1 instance=$2
+  [ -e "$entry" ] || [ -L "$entry" ] || return 0
+  [ ! -L "$entry" ] && [ -f "$entry" ] || return 1
+  ! worker_path_recent "$entry" || return 2
+  [ "$(worker_lock_instance)" = "$instance" ] || return 2
+  rm -f -- "$entry" || return 1
+}
+
+worker_reclaim_stale_lock() { # <instance>; 0 reclaimed, 2 contention, 1 refused
+  local instance=$1 entry status
+  [ -n "$instance" ] || return 2
+  [ "$(worker_lock_instance)" = "$instance" ] || return 2
+  for entry in "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" \
+    "$WORKER_LOCK"/.pid.* "$WORKER_LOCK"/.start.* \
     "$WORKER_LOCK"/.command.* "$WORKER_LOCK"/.quarantine.*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    [ ! -L "$entry" ] && [ -f "$entry" ] || return 1
-    rm -f -- "$entry" || return 1
+    worker_remove_stale_lock_entry "$entry" "$instance"
+    status=$?
+    [ "$status" -eq 0 ] || return "$status"
   done
+  [ "$(worker_lock_instance)" = "$instance" ] || return 2
+  rmdir "$WORKER_LOCK" || return 1
 }
 
 worker_acquire_lock() {
-  local account_home=$1 attempt=0
+  local account_home=$1 attempt=0 instance status
   while [ "$attempt" -lt 150 ]; do
     if (umask 077; mkdir "$WORKER_LOCK") 2>/dev/null; then
       WORKER_LOCK_HELD=1
@@ -167,6 +193,7 @@ worker_acquire_lock() {
       return 0
     fi
     [ -d "$WORKER_LOCK" ] && [ ! -L "$WORKER_LOCK" ] || return 1
+    instance=$(worker_lock_instance)
     if [ -e "$WORKER_LOCK/quarantine" ] || [ -L "$WORKER_LOCK/quarantine" ]; then
       worker_recover_quarantine "$account_home" || return 3
       continue
@@ -177,10 +204,13 @@ worker_acquire_lock() {
       sleep 0.1
       continue
     fi
-    [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] || return 1
-    rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" || return 1
-    worker_clear_lock_residue || return 1
-    rmdir "$WORKER_LOCK" || return 1
+    worker_reclaim_stale_lock "$instance"
+    status=$?
+    [ "$status" -ne 1 ] || return 1
+    if [ "$status" -eq 2 ]; then
+      attempt=$((attempt + 1))
+      sleep 0.1
+    fi
   done
   return 1
 }

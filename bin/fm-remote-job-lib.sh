@@ -590,6 +590,14 @@ fm_remote_job_path_mtime() { # <path>
   if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
 }
 
+# Device and inode name one filesystem entry for as long as it exists, so a
+# directory that was removed and recreated under the same path reads as a
+# different instance. That is what lets ownership reclaim tell the lock it
+# proved stale apart from a replacement's freshly created lock.
+fm_remote_job_path_instance() { # <path>
+  if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then stat -f %d:%i "$1" 2>/dev/null; else stat -c %d:%i "$1" 2>/dev/null; fi
+}
+
 fm_remote_job_reap_stale() { # <account-home>
   local account_home=$1 job id state mtime now
   fm_remote_job_prepare_state "$account_home" || return 1
