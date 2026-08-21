@@ -371,6 +371,56 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The fleet-wide engineering guidelines in AGENTS.md's "General Guidelines for
+# all crewmates, including firstmate" section reach an ordinary crewmate only
+# through the brief: its worktree belongs to some other project, so it never
+# loads firstmate's own AGENTS.md. Ship and scout scaffolds must both carry
+# them, without any captain-personal material. A secondmate charter must not:
+# that home has its own AGENTS.md, which would make the block a second copy.
+test_briefs_carry_fleet_general_guidelines() {
+  local home ship scout charter brief
+  home="$TMP_ROOT/general-guidelines-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-guides-s1 some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  ship="$home/data/brief-guides-s1/brief.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-guides-s2 some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  scout="$home/data/brief-guides-s2/brief.md"
+
+  for brief in "$ship" "$scout"; do
+    assert_present "$brief" "brief was not scaffolded"
+    assert_grep "# General guidelines" "$brief" \
+      "$brief: brief lost the fleet-wide general guidelines section"
+    assert_grep "Never use the em dash character" "$brief" \
+      "$brief: general guidelines lost the em-dash rule"
+    assert_grep "Never add an agent name as a commit co-author." "$brief" \
+      "$brief: general guidelines lost the absolute commit co-author rule"
+    assert_grep "Put each full sentence on its own line in long Markdown or TeX files." "$brief" \
+      "$brief: general guidelines lost the sentence-per-line rule"
+    assert_grep "long-term maintainability far above development cost" "$brief" \
+      "$brief: general guidelines lost the quality-over-development-cost weighting"
+    assert_grep "Reproduce a bug end to end the way a user would hit it before fixing it" "$brief" \
+      "$brief: general guidelines lost the reproduce-first rule"
+    assert_grep "Be picky about the UI you see while testing" "$brief" \
+      "$brief: general guidelines lost the UI pickiness rule"
+    assert_grep "lint failures, test failures, and flaky tests" "$brief" \
+      "$brief: general guidelines lost the engineering-excellence rule"
+    assert_no_grep "VOICE.md" "$brief" \
+      "$brief: brief leaked the captain-personal voice-profile instruction"
+  done
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" brief-guides-s3 --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero"
+  charter="$home/data/brief-guides-s3/brief.md"
+  assert_present "$charter" "secondmate charter was not scaffolded"
+  assert_no_grep "# General guidelines" "$charter" \
+    "secondmate charter must inherit the guidelines from its own AGENTS.md, not carry a second copy"
+  pass "fm-brief.sh: crewmate briefs carry the fleet-wide general guidelines"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -722,6 +772,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_briefs_carry_fleet_general_guidelines
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
