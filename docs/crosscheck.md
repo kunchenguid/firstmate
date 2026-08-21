@@ -84,6 +84,12 @@ The accepted profiles are Pi at xhigh on every registered cross-family model (to
 Reviewer independence is compared on the model FAMILY, not the exact id, so a `gpt-5.5` author is not admitted a `gpt-5.6-sol` reviewer (finding cc-4dcd7873f71a); an unrecognized model remains its own family.
 Absent reviewer configuration, unavailable reviewer credentials, or model-policy mismatch produces `CROSSCHECK TOOL-FAILURE` and a nonzero exit before reviewer launch.
 
+The lock-free status read reports whether the roster's first serving family is the cross-family primary or the Codex fallback, the current `crosscheck-same-model` setting, and the latest durable run's `review_family_mode` when a run exists.
+
+```sh
+bin/fm-crosscheck.sh status
+```
+
 Crosscheck requires Python 3.11 or newer and refuses to run on anything older.
 This is a safety floor rather than a style preference: the bounded-read layer rejects hostile JSON integers by relying on CPython's integer/string conversion limit, which first exists in 3.11, and on an older interpreter that rejection silently stops happening while every banner the gate prints reads exactly the same.
 Stock macOS `python3` is 3.9, so `bin/fm-crosscheck.sh` resolves a supported sibling interpreter instead of assuming `python3` qualifies, and `bin/fm-crosscheck.py` enforces the same minimum itself so a direct invocation cannot bypass it.

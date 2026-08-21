@@ -3291,6 +3291,32 @@ def reviewer_candidates(
     """
 
     allow_same_model = same_model_review_enabled(home)
+    validated = reviewer_roster(home)
+    # Independence is compared on the model FAMILY, not the exact id: a
+    # `gpt-5.5` author admitting a `gpt-5.6-sol` reviewer is the same-family
+    # review this requirement exists to prevent (cc-4dcd7873f71a). The durable
+    # ledger marker keeps its `same-model` spelling, which older records
+    # already carry; it now means "shares the author's model family".
+    author_family = model_family(meta["model"])
+    eligible: list[dict[str, str]] = []
+    for roster_entry in validated:
+        reviewer = dict(roster_entry)
+        model_is_separate = model_family(reviewer["model"]) != author_family
+        if model_is_separate or allow_same_model:
+            if not model_is_separate:
+                reviewer["model_independence"] = "same-model"
+            eligible.append(reviewer)
+    if eligible:
+        return eligible
+    fail(
+        "reviewer model policy found no configured reviewer outside the model "
+        f"family of {meta['model']!r}"
+    )
+
+
+def reviewer_roster(home: Path) -> list[dict[str, str]]:
+    """Return the validated reviewer roster in configured serving order."""
+
     config_path = Path(
         environment_value(
             "FM_CROSSCHECK_REVIEWER_CONFIG",
@@ -3362,25 +3388,7 @@ def reviewer_candidates(
                 ),
             }
         )
-    # Independence is compared on the model FAMILY, not the exact id: a
-    # `gpt-5.5` author admitting a `gpt-5.6-sol` reviewer is the same-family
-    # review this requirement exists to prevent (cc-4dcd7873f71a). The durable
-    # ledger marker keeps its `same-model` spelling, which older records
-    # already carry; it now means "shares the author's model family".
-    author_family = model_family(meta["model"])
-    eligible: list[dict[str, str]] = []
-    for reviewer in validated:
-        model_is_separate = model_family(reviewer["model"]) != author_family
-        if model_is_separate or allow_same_model:
-            if not model_is_separate:
-                reviewer["model_independence"] = "same-model"
-            eligible.append(reviewer)
-    if eligible:
-        return eligible
-    fail(
-        "reviewer model policy found no configured reviewer outside the model "
-        f"family of {meta['model']!r}"
-    )
+    return validated
 
 
 def review_output_schema(
@@ -3594,7 +3602,7 @@ SAME-MODEL REVIEW - REDUCED MODEL INDEPENDENCE:
 You are using the same model as the author and may share the author's blind spots and priors.
 Compensate explicitly: attack the change adversarially, try to falsify the author's claims rather than confirm them, and default to reporting a finding when uncertain.
 """
-    return f"""You are the independent merge-gate reviewer for a pull request.
+    prompt = f"""You are the independent merge-gate reviewer for a pull request.
 {same_model_warning}Review exact head {snapshot_value['head_sha']} against exact base {snapshot_value['base_sha']}.
 Perform a rigorous release-readiness review of the full diff and the PR's own claims.
 Do not trust the PR description or a previous clean run.
@@ -3645,6 +3653,20 @@ Inspect the full diff, then execute focused reproductions and positive controls 
 Bounded durable-finding lifecycle metadata and proof digests:
 {json.dumps(projection, indent=2, sort_keys=True)}
 """
+    # The shared prompt is intentionally byte-identical for every Codex-family
+    # reviewer. Cross-family models receive only this appended clarification:
+    # the exact-SHA verdict check below remains the authority and is not
+    # weakened to accommodate a reviewer that omitted its required literals.
+    if model_family(config["model"]) != "openai":
+        prompt += f"""
+REPRODUCTION COMMAND FORMAT - EXACT REQUIREMENT:
+The literal string you place in `executed_reproduction.command` MUST contain, verbatim, both
+full 40-character SHAs: exact base {snapshot_value['base_sha']} and exact head {snapshot_value['head_sha']}.
+Example: bash .crosscheck/reproductions/repro.sh {snapshot_value['base_sha']} {snapshot_value['head_sha']}
+A command that omits either SHA, abbreviates it, or references it through a shell variable is
+refused and the entire review is discarded as UNREVIEWED.
+"""
+    return prompt
 
 
 def reviewer_timeout() -> int:
@@ -5298,6 +5320,94 @@ def timings_crosscheck(home: Path, task_id: str) -> int:
     return 0
 
 
+def latest_review_family(
+    data: Path,
+) -> tuple[str, str, str] | None:
+    """Return the latest recorded run's time, task id, and review family."""
+
+    if not data.exists() and not data.is_symlink():
+        return None
+    require(
+        data.is_dir() and not data.is_symlink(),
+        f"crosscheck data root is not a directory: {data}",
+    )
+    try:
+        task_dirs = sorted(data.iterdir(), key=lambda path: path.name)
+    except OSError as exc:
+        fail(f"crosscheck data root inspection failed at {data}: {exc}")
+    latest: tuple[str, str, str] | None = None
+    for task_dir in task_dirs:
+        try:
+            is_task_dir = task_dir.is_dir() and not task_dir.is_symlink()
+        except OSError as exc:
+            fail(f"crosscheck task data inspection failed at {task_dir}: {exc}")
+        if not is_task_dir:
+            continue
+        ledger_path = task_dir / "crosscheck-ledger.json"
+        if not ledger_path.exists() and not ledger_path.is_symlink():
+            continue
+        raw = read_json(
+            ledger_path,
+            "findings ledger",
+            maximum_bytes=MAX_LEDGER_BYTES,
+            maximum_items=262_144,
+        )
+        require(isinstance(raw, dict), "existing findings ledger must be an object")
+        task_id = require_string(raw.get("task_id"), "ledger.task_id")
+        require(
+            ID_RE.fullmatch(task_id) is not None,
+            f"ledger task_id is invalid at {ledger_path}",
+        )
+        url = require_string(raw.get("pull_request"), "ledger.pull_request")
+        ledger = validate_ledger(raw, task_id, url)
+        if not ledger["runs"]:
+            continue
+        run = ledger["runs"][-1]
+        reviewer = run.get("reviewer")
+        family = (
+            reviewer.get("review_family_mode") or "none"
+            if isinstance(reviewer, dict)
+            else "none"
+        )
+        candidate = (run["at"], task_id, family)
+        if latest is None or candidate[:2] > latest[:2]:
+            latest = candidate
+    return latest
+
+
+def status_crosscheck(home: Path) -> int:
+    """Print the configured serving family and latest durable run family.
+
+    This is a read-only operator view. It deliberately takes no task lock and
+    creates no state, so checking whether the primary lane or fallback is at
+    the front of the roster cannot interfere with an in-flight review.
+    """
+
+    try:
+        roster = reviewer_roster(home)
+        relaxation = "on" if same_model_review_enabled(home) else "off"
+        data = Path(environment_value("FM_DATA_OVERRIDE", str(home / "data")))
+        latest = latest_review_family(data)
+    except CrosscheckError as exc:
+        tool_fail(f"status preflight failed: {exc}")
+    serving = roster[0]
+    if cross_family_lane_for_model(serving["model"]) is not None:
+        lane = "cross-family serving"
+    else:
+        lane = "codex fallback active"
+    print(
+        f"crosscheck lane: {lane} "
+        f"({serving['harness']} {serving['model']}, roster entry 1)"
+    )
+    print(f"crosscheck same-model relaxation: {relaxation}")
+    if latest is None:
+        print("crosscheck last review family: none")
+    else:
+        at, task_id, family = latest
+        print(f"crosscheck last review family: {family} ({task_id} at {at})")
+    return 0
+
+
 def load_azure_crosscheck_adapter(root: Path) -> Any:
     """Load the dedicated Azure review/ledger adapter without weakening local review."""
 
@@ -5379,6 +5489,7 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("pr_url")
     timings = subparsers.add_parser("timings")
     timings.add_argument("task_id")
+    subparsers.add_parser("status")
     merge = subparsers.add_parser("merge")
     merge.add_argument("task_id")
     merge.add_argument("pr_url")
@@ -5414,9 +5525,10 @@ def assert_supported_interpreter() -> None:
 
 def main() -> int:
     args = build_parser().parse_args()
-    if ID_RE.fullmatch(args.task_id) is None:
+    task_id = getattr(args, "task_id", None)
+    if task_id is not None and ID_RE.fullmatch(task_id) is None:
         print(
-            f"CROSSCHECK TOOL-FAILURE: task id validation rejected {args.task_id!r}",
+            f"CROSSCHECK TOOL-FAILURE: task id validation rejected {task_id!r}",
             file=sys.stderr,
         )
         return 1
@@ -5433,6 +5545,10 @@ def main() -> int:
     home = Path(environment_value("FM_HOME", str(root))).resolve()
     state = Path(environment_value("FM_STATE_OVERRIDE", str(home / "state")))
     try:
+        if args.command == "status":
+            # Read-only, so it takes no run lock and creates no state: asking
+            # which review family is serving must never interfere with a run.
+            return status_crosscheck(home)
         if args.command == "timings":
             # Read-only, so it takes no run lock and creates no state: asking
             # where the time went must never block or be blocked by a review.

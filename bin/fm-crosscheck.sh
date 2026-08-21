@@ -4,6 +4,7 @@
 # Usage:
 #   fm-crosscheck.sh run <task-id> <full GitHub PR URL>
 #   fm-crosscheck.sh verify <task-id> <full GitHub PR URL>
+#   fm-crosscheck.sh status
 #   fm-crosscheck.sh timings <task-id>
 #   fm-crosscheck.sh merge <task-id> <full GitHub PR URL> <reviewed SHA> <method> [--allow-queue]
 #
@@ -13,6 +14,8 @@
 # and claims document to be clear, and prints only the reviewed SHA.
 # `timings` is the read-only C1 breakdown: it prints the per-phase duration
 # table every recorded run carries, takes no lock, and changes nothing.
+# `status` is the read-only R6 family view: it prints the serving roster family,
+# same-model relaxation, and latest durable review family without taking a lock.
 # `merge` repeats that verification and is the sole entrypoint to the private
 # exact-SHA GitHub merge or merge-queue primitive.
 #

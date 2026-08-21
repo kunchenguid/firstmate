@@ -1054,6 +1054,233 @@ select_cross_family_reviewer() {
 EOF
 }
 
+test_non_codex_prompt_addendum_preserves_codex_prompt_bytes() {
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" <<'PY' \
+    || fail "the lane-specific exact-SHA prompt addendum regressed"
+import hashlib
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+base_sha = "b" * 40
+head_sha = "a" * 40
+snapshot = {
+    "base_sha": base_sha,
+    "head_sha": head_sha,
+    "claims_document": "fixture claims",
+}
+ledger = {"findings": []}
+codex_prompt = module.make_prompt(
+    snapshot,
+    ledger,
+    {"account_selector": "CODEX_HOME", "model": "gpt-5.6-sol"},
+)
+# Golden bytes captured immediately before the lane addendum landed. This
+# makes an accidental edit to the shared Codex prompt observable even when a
+# refactor leaves the cross-family assertions below green.
+assert len(codex_prompt.encode("utf-8")) == 5404, len(codex_prompt.encode("utf-8"))
+assert hashlib.sha256(codex_prompt.encode("utf-8")).hexdigest() == (
+    "1fd424d1d16c7d09f3b0da232591559e4ebc33786a1fb5ae861aaaa7fe951bbe"
+)
+
+addendum = f"""
+REPRODUCTION COMMAND FORMAT - EXACT REQUIREMENT:
+The literal string you place in `executed_reproduction.command` MUST contain, verbatim, both
+full 40-character SHAs: exact base {base_sha} and exact head {head_sha}.
+Example: bash .crosscheck/reproductions/repro.sh {base_sha} {head_sha}
+A command that omits either SHA, abbreviates it, or references it through a shell variable is
+refused and the entire review is discarded as UNREVIEWED.
+"""
+pi_codex_prompt = module.make_prompt(
+    snapshot,
+    ledger,
+    {"account_selector": "PI_CODING_AGENT_DIR", "model": "gpt-5.6-sol"},
+)
+cross_family_prompt = module.make_prompt(
+    snapshot,
+    ledger,
+    {
+        "account_selector": "PI_CODING_AGENT_DIR",
+        "model": "accounts/fireworks/models/glm-5p2",
+    },
+)
+assert cross_family_prompt == pi_codex_prompt + addendum
+assert base_sha in addendum and head_sha in addendum
+print("PROMPT ADDENDUM OK")
+PY
+  pass "the non-Codex addendum names both full SHAs without changing Codex prompt bytes"
+}
+
+test_full_sha_verdict_gate_is_not_relaxed_by_the_prompt_addendum() {
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
+    || fail "the full-SHA verdict gate was weakened or lost its mutation pin"
+import importlib.util
+from pathlib import Path
+import subprocess
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+review_dir = Path(sys.argv[2]) / "full-sha-gate-pin"
+review_dir.mkdir()
+(review_dir / "app.txt").write_text("reviewed\n", encoding="utf-8")
+subprocess.run(["git", "-C", str(review_dir), "init", "-q", "-b", "main"], check=True)
+subprocess.run(["git", "-C", str(review_dir), "add", "app.txt"], check=True)
+
+
+class EvidenceExecutor:
+    def validate_declared_paths(self, paths, *, receipt_path):
+        assert paths == {".crosscheck/reproductions/repro.sh"}, paths
+        assert receipt_path == ".crosscheck/reproductions/repro.receipt"
+
+
+base_sha = "b" * 40
+head_sha = "a" * 40
+verdict = {
+    "schema": module.REVIEW_SCHEMA,
+    "head_sha": head_sha,
+    "executing_account_home": "/reviewer/account",
+    "execution_home": "/reviewer/home",
+    "executed_reproduction": {
+        "test_path": ".crosscheck/reproductions/repro.sh",
+        # Otherwise-valid shape, but neither required literal SHA is present.
+        # Deleting the implementation's full-SHA check makes this validation
+        # return successfully and therefore makes this mutation pin fail.
+        "command": "bash .crosscheck/reproductions/repro.sh BASE HEAD",
+        "expected_exit": 0,
+        "output_contains": "REPRODUCED",
+        "receipt_path": ".crosscheck/reproductions/repro.receipt",
+        "receipt_contains": "REPRODUCED",
+    },
+    "summary": "review complete",
+    "citations": [{"path": "app.txt", "line": 1}],
+    "finding_updates": [],
+    "new_findings": [],
+    "suspicions": [],
+}
+try:
+    module.validate_review_shape(
+        verdict,
+        {"base_sha": base_sha, "head_sha": head_sha},
+        review_dir,
+        {
+            "executing_account_home": "/reviewer/account",
+            "execution_home": "/reviewer/home",
+        },
+        evidence_executor=EvidenceExecutor(),
+    )
+except module.CrosscheckError as exc:
+    assert str(exc) == (
+        "reviewer verdict executed reproduction command must name the exact "
+        "base and head SHAs"
+    ), str(exc)
+else:
+    raise AssertionError("a verdict command omitting both full SHAs was accepted")
+print("FULL SHA GATE PINNED")
+PY
+  pass "the full-SHA verdict gate remains independently mutation-pinned"
+}
+
+test_status_reports_serving_family_relaxation_and_latest_run() {
+  local primary fallback primary_out fallback_out flipped_out state_path
+  primary="$TMP_ROOT/status-primary"
+  fallback="$TMP_ROOT/status-fallback"
+  # Durable task ids survive historical directory renames. Status reads the
+  # validated ledger id and must not reinterpret the containing directory as
+  # part of the ledger schema.
+  mkdir -p "$primary/home/config" "$primary/lane-home" "$primary/codex-home" \
+    "$primary/data/historical-directory-name" "$fallback/home/config" "$fallback/lane-home" \
+    "$fallback/codex-home" "$fallback/data/task-fallback"
+  cat > "$primary/home/config/crosscheck-reviewer.json" <<EOF
+{"reviewers":[
+  {"harness":"pi","model":"accounts/fireworks/models/glm-5p2","effort":"xhigh","account_home":"$primary/lane-home"},
+  {"harness":"codex","model":"gpt-5.6-sol","effort":"xhigh","account_home":"$primary/codex-home"}
+]}
+EOF
+  cat > "$fallback/home/config/crosscheck-reviewer.json" <<EOF
+{"reviewers":[
+  {"harness":"codex","model":"gpt-5.6-sol","effort":"xhigh","account_home":"$fallback/codex-home"},
+  {"harness":"pi","model":"accounts/fireworks/models/glm-5p2","effort":"xhigh","account_home":"$fallback/lane-home"}
+]}
+EOF
+  printf 'off\n' > "$primary/home/config/crosscheck-same-model"
+  printf 'on\n' > "$fallback/home/config/crosscheck-same-model"
+  "$CROSSCHECK_PYTHON" - \
+    "$primary/data/historical-directory-name/crosscheck-ledger.json" task-primary \
+    2026-08-21T10:00:00Z accounts/fireworks/models/glm-5p2 cross-family-primary \
+    "$fallback/data/task-fallback/crosscheck-ledger.json" task-fallback \
+    2026-08-21T11:00:00Z gpt-5.6-sol codex-fallback <<'PY'
+import json
+from pathlib import Path
+import sys
+
+for offset in (0, 5):
+    path, task_id, at, model, family = sys.argv[1 + offset:6 + offset]
+    sha = "a" * 40
+    value = {
+        "schema": "firstmate.crosscheck-ledger.v2",
+        "task_id": task_id,
+        "pull_request": "https://github.com/ruby-dlee/firstmate/pull/72",
+        "findings": [],
+        "runs": [{
+            "at": at,
+            "head_sha": sha,
+            "base_sha": sha,
+            "base_branch_sha": sha,
+            "claims_sha256": "0" * 64,
+            "reviewer": {"model": model, "review_family_mode": family},
+            "state": "tool-failure",
+            "summary": "status fixture",
+            "citations": [],
+            "updated_findings": [],
+            "new_findings": [],
+            "active_blockers": [],
+            "suspicions": [],
+        }],
+    }
+    Path(path).write_text(json.dumps(value), encoding="utf-8")
+PY
+
+  state_path="$primary/read-only-state"
+  primary_out=$(FM_HOME="$primary/home" FM_DATA_OVERRIDE="$primary/data" \
+    FM_STATE_OVERRIDE="$state_path" \
+    "$CROSSCHECK_PYTHON" "$CROSSCHECK_PY" status) \
+    || fail "status refused the cross-family-serving fixture"
+  [ "$primary_out" = "crosscheck lane: cross-family serving (pi accounts/fireworks/models/glm-5p2, roster entry 1)
+crosscheck same-model relaxation: off
+crosscheck last review family: cross-family-primary (task-primary at 2026-08-21T10:00:00Z)" ] \
+    || fail "cross-family-serving status was unexpected: $primary_out"
+  assert_absent "$state_path" "the read-only status command created its state root"
+
+  fallback_out=$(FM_HOME="$fallback/home" FM_DATA_OVERRIDE="$fallback/data" \
+    FM_STATE_OVERRIDE="$fallback/read-only-state" \
+    "$CROSSCHECK_PYTHON" "$CROSSCHECK_PY" status) \
+    || fail "status refused the fallback-active fixture"
+  [ "$fallback_out" = "crosscheck lane: codex fallback active (codex gpt-5.6-sol, roster entry 1)
+crosscheck same-model relaxation: on
+crosscheck last review family: codex-fallback (task-fallback at 2026-08-21T11:00:00Z)" ] \
+    || fail "fallback-active status was unexpected: $fallback_out"
+  assert_absent "$fallback/read-only-state" \
+    "the fallback status read created its state root"
+
+  printf 'on\n' > "$primary/home/config/crosscheck-same-model"
+  flipped_out=$(FM_HOME="$primary/home" FM_DATA_OVERRIDE="$primary/data" \
+    "$CROSSCHECK_PYTHON" "$CROSSCHECK_PY" status) \
+    || fail "status refused the flipped same-model setting"
+  assert_contains "$flipped_out" 'crosscheck same-model relaxation: on' \
+    "flipping same-model did not flip the status read"
+  [ "${flipped_out/crosscheck same-model relaxation: on/crosscheck same-model relaxation: off}" = "$primary_out" ] \
+    || fail "flipping same-model changed more than the status policy line"
+  pass "status reads the roster family, same-model policy, and latest durable run without a lock"
+}
+
 test_reviewer_policy_profiles_and_independence() {
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
     || fail "reviewer policy profiles or independence validation regressed"
@@ -5213,6 +5440,9 @@ PY
 
 if [ -n "${FM_TEST_CASE:-}" ]; then
   case "$FM_TEST_CASE" in
+    test_non_codex_prompt_addendum_preserves_codex_prompt_bytes|\
+    test_full_sha_verdict_gate_is_not_relaxed_by_the_prompt_addendum|\
+    test_status_reports_serving_family_relaxation_and_latest_run|\
     test_reviewer_policy_profiles_and_independence|\
     test_same_model_relaxation_does_not_require_author_identity|\
     test_reviewer_binary_never_resolves_from_working_directory|\
@@ -5331,6 +5561,9 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-3 ]; then
 fi
 
 test_launcher_requires_supported_python
+test_non_codex_prompt_addendum_preserves_codex_prompt_bytes
+test_full_sha_verdict_gate_is_not_relaxed_by_the_prompt_addendum
+test_status_reports_serving_family_relaxation_and_latest_run
 test_reviewer_policy_profiles_and_independence
 test_same_model_relaxation_does_not_require_author_identity
 test_reviewer_binary_never_resolves_from_working_directory
