@@ -933,8 +933,10 @@ function makePi() {
 }
 
 function pidAlive(pid) {
+  const parsed = Number(pid);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return false;
   try {
-    process.kill(Number(pid), 0);
+    process.kill(parsed, 0);
     return true;
   } catch {
     return false;
@@ -973,7 +975,10 @@ const first = await startup.getTool().execute("startup", {}, undefined, undefine
 if (!first.details?.ok || !String(first.details.message).includes("started Pi extension arm child")) {
   throw new Error(`startup arm failed: ${JSON.stringify(first.details)}`);
 }
-await waitFor(() => existsSync(process.env.FM_CHILD_PID_FILE), "startup child");
+await waitFor(() => {
+  if (!existsSync(process.env.FM_CHILD_PID_FILE)) return false;
+  return pidAlive(readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim());
+}, "startup child");
 const startupChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
 if (!pidAlive(startupChild)) throw new Error("startup child was not alive");
 const staleTool = startup.getTool();
@@ -1069,7 +1074,7 @@ if (liveArmPids().length !== 0) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi session transitions must rearm through an explicit generation owner"
+  [ "$status" -eq 0 ] || fail "Pi session transitions must rearm through an explicit generation owner: $out"
   [ -z "$out" ] || fail "Pi session-transition generation owner test printed output: $out"
   pass "Pi session transitions use a generation owner across /new /resume /fork, stale callbacks, and quit"
 }

@@ -167,7 +167,9 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once.
+# bounded cadence, while a live or ambiguously read agent still surfaces once
+# and then joins that same cadence - once per declared pause, not once per pane
+# hash, so redraws of an idle paused pane never re-open that first sighting.
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -329,11 +331,14 @@ busy_turn_over_age() {  # <task>
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
-# stale poll once pause_state_class permits the bounded cadence, so it must be
-# cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
-# status file mtime, not a per-hash marker, so a churny idle pane (a ticking
-# clock, a token counter) cannot keep resetting the cadence the way a hash-tied
-# timer would. A .paused-resurfaced-<key> throttle marker records the last
+# stale poll once pause_state_class permits the bounded cadence, and on every
+# later poll while the .paused-<key> flag records that this key is already on
+# it, so it must be cheap: it NEVER re-reads crew state. The cadence itself is
+# not tied to a pane hash: the re-surface age is anchored on the status file
+# mtime, so a churny idle pane (a ticking clock, a token counter) cannot keep
+# resetting the cadence the way a hash-tied timer would, and its redraws cannot
+# be re-classified as fresh first sightings either. A .paused-resurfaced-<key>
+# throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
@@ -1125,11 +1130,13 @@ EOF
           #   - paused: the crew declared an external wait, or a declared pause or
           #     captain hold is paired with a confidently dead agent, so absorb on
           #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
-          #   - none: no running pipeline, no exact busy verdict, no declared pause.
-          #     Surface immediately so firstmate inspects the inconclusive state
-          #     (it may be done via an interactive menu that wrote no done: status,
-          #     waiting on a decision, or wedged) instead of leaving the finish to
-          #     wait out the timer.
+          #   - none: no running pipeline, no exact busy verdict, and no pause
+          #     that a dead agent confirms - which also covers a DECLARED pause
+          #     whose agent is still live. Surface immediately so firstmate
+          #     inspects the inconclusive state (it may be done via an
+          #     interactive menu that wrote no done: status, waiting on a
+          #     decision, or wedged) instead of leaving the finish to wait out
+          #     the timer - unless this key is already on the pause cadence.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
@@ -1143,7 +1150,18 @@ EOF
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
               *)
-                surface_nonterminal_stale "$w" "$h"
+                # A live (or ambiguously read) agent under a declared pause
+                # returns none, so this is also the pause path once its bounded
+                # cadence is established. .paused-<key> is that record, and it
+                # outlives any single pane hash: a redraw (or a watcher restart
+                # between recording a hash and classifying it) must not reopen a
+                # first sighting and surface another bare stale. Only a pause
+                # with no cadence yet gets its one immediate surface.
+                if [ -e "$pf" ]; then
+                  handle_paused_stale "$w" "$task" "$h"
+                else
+                  surface_nonterminal_stale "$w" "$h"
+                fi
                 ;;
             esac
           else
@@ -1193,8 +1211,19 @@ EOF
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
-          paused) handle_paused_stale "$w" "$task" "$h" ;;
-          *)      clear_pause_tracking "$w" ;;
+          paused)  handle_paused_stale "$w" "$task" "$h" ;;
+          working) clear_pause_tracking "$w" ;;
+          # Same anchoring rule as the stale path above: a still-declared pause
+          # already on the bounded cadence keeps it across a hash change, and
+          # the suppressor advances to the new hash so the redraw cannot be
+          # re-classified as a fresh stale. Only working (the crew resumed)
+          # ends the cadence here; the loop head owns ending it when the status
+          # line itself stops declaring a pause.
+          *)       if [ -e "$pf" ]; then
+                     handle_paused_stale "$w" "$task" "$h"
+                   else
+                     clear_pause_tracking "$w"
+                   fi ;;
         esac
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
         # Same rule as the stable-hash branch: never clear pause bookkeeping the
