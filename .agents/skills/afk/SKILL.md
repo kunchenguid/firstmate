@@ -51,6 +51,9 @@ batched digest rather than per-wake injections.
 
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.
+   On Pi and pi-signed, the loaded watcher extension observes the durable flag,
+   yields its exact attached arm cycle, and resumes one ordinary cycle after
+   return; no watcher command or Pi restart belongs in this lifecycle.
 
 4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
 
@@ -139,6 +142,8 @@ It self-handles the routine majority without consuming a firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
 The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
 While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
+The daemon classifies unseen logical wakes from durable queue state without consuming them, closing the Pi handoff interval while preserving `bin/fm-wake-drain.sh` as the sole queue consumer.
+`docs/watcher-continuity.md` owns the exact transfer and deduplication contract.
 
 Classify each wake this way:
 
@@ -217,7 +222,8 @@ the operational prefix lets firstmate distinguish it from a real captain message
 
 ## Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Treat the daemon's buffered escalation, queue-classification cursor, crash-pending record, check-wake deduplication ledger, and wedge marker as session-scoped delivery artifacts, not as the durable work record.
+Their exact paths and cleanup mechanics remain owned by the producing scripts.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
