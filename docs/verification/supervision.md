@@ -58,14 +58,14 @@ The third is recorded below.
 | Harness | Version verified | Cold open | Context reset | Context-preserving reopen |
 | --- | --- | --- | --- | --- |
 | Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
-| Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
+| Codex | codex-cli 0.146.0 and 0.147.0 | Under 0.146.0, `source=startup` under `codex exec` reached model context; under 0.147.0, the tracked project `SessionStart` hook also fired in the interactive TUI, but model-context delivery was not measured there | No interactive context-reset source is verified; see the limit below | `codex exec resume --last` reports `source=resume` under 0.146.0 |
 | Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
 
 Two harness-specific consequences are load-bearing rather than incidental.
 
-Codex's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
-Codex's run tier is therefore verified only for `codex exec` startup and context-preserving resume.
-The interactive TUI is a known uncovered gap: Firstmate has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
+Codex 0.146.0's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
+The 2026-08-15 codex-cli 0.147.0 lifecycle probe recorded the tracked project `SessionStart` hook in an interactive TUI, so hook reachability is no longer the observed limit on that version.
+Codex's run tier remains verified only for `codex exec` startup and context-preserving resume because the 0.147.0 probe did not measure whether interactive hook stdout reached model context, and no interactive compaction or re-emit source is verified.
 
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
@@ -181,11 +181,11 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
 | OpenCode | 1.17.18 | Plugin `session.status` | In a real TUI pane: seed, then `busy source=opencode-plugin event=session-busy`, then `idle source=opencode-plugin event=session-status-idle`. |
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
-| Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
+| Codex | codex-cli 0.147.0 | Per-launch inline `UserPromptSubmit`, `Stop`, and `SessionEnd` hooks plus an absolute deadline | The spawn seed and `UserPromptSubmit` classify busy only while their deadline is live; `Stop` classifies idle; API error and manual interruption omit `Stop`, so they surface as unknown when `SessionEnd` fires or the deadline expires. Strict older or unexpected versions remain `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
 
-Codex was probed two ways, both refused:
+Codex 0.145.0 was probed two ways, both refused:
 
 ```sh
 codex app-server daemon start
@@ -194,8 +194,28 @@ codex exec --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-
 
 The daemon refused with `managed standalone Codex install not found`, and an interactive TUI worker neither starts nor attaches to the app-server control socket, so no client can observe its turns.
 In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycle project hooks under `<worktree>/.codex/hooks.json` fired for neither an interactive pane whose directory trust was granted nor `codex exec`, in both cases with `--dangerously-bypass-hook-trust`, while an untracked global probe fired in the same runs; Firstmate does not ship, install, recommend, or depend on that global path.
-Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
+Codex also exposes no `StopFailure` hook.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
+
+The hook probe was repeated on 2026-08-15 with `codex-cli 0.147.0` in an isolated repository carrying project hooks for `SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd`.
+
+```sh
+codex exec --ephemeral --dangerously-bypass-hook-trust \
+  --dangerously-bypass-approvals-and-sandbox --json \
+  'Reply exactly REMEASURE_DONE and do nothing else.'
+codex exec --ephemeral --dangerously-bypass-hook-trust \
+  --dangerously-bypass-approvals-and-sandbox --json \
+  -m definitely-not-a-real-model-0815 'Reply SHOULD_NOT_SUCCEED.'
+codex --no-alt-screen --dangerously-bypass-hook-trust \
+  --dangerously-bypass-approvals-and-sandbox \
+  'Use the shell tool to run sleep 30, then reply exactly INTERRUPT_SHOULD_NOT_COMPLETE.'
+```
+
+The successful exec returned exit 0 and emitted `SessionStart -> UserPromptSubmit -> Stop -> SessionEnd` plus `turn.completed`.
+The invalid-model exec returned exit 1 and emitted `SessionStart -> UserPromptSubmit -> SessionEnd`, `error`, and `turn.failed`, with no `Stop` or `StopFailure`.
+The interactive turn was interrupted with the adapter-owned single Escape and emitted only `SessionStart -> UserPromptSubmit`; it returned to the prompt with no `Stop`, and `/quit` later added `SessionEnd`.
+The repair therefore enables hooks only for strict installed versions from 0.147.0 onward, embeds an eight-hour absolute deadline in every open record, accepts `Stop` as the only successful close, and turns an unclosed expired turn into `unknown codex-deadline-expired`.
+The hook configuration rides per-launch `-c hooks.<event>=...` overrides with the automation-only `--dangerously-bypass-hook-trust` acknowledgement, so it composes with and never rewrites project hook files; the official hook contract confirms that matching hooks from multiple sources all run: `https://learn.chatgpt.com/docs/hooks`.
 
 Deterministic entry points:
 
@@ -203,6 +223,7 @@ Deterministic entry points:
 tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
+FM_CODEX_LIVENESS_LIVE_E2E=1 tests/fm-codex-liveness-live-e2e.test.sh
 ```
 
 ## Turn-end guard

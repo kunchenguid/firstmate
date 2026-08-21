@@ -14,7 +14,7 @@
 # Record file: state/<id>.busy-state - exactly one line, atomically replaced
 # by bin/fm-busy-event.sh (the only writer):
 #
-#   v1 gen=<token> seq=<uint> state=<busy|idle|unknown> source=<token> event=<token> ts=<epoch>
+#   v1 gen=<token> seq=<uint> state=<busy|idle|unknown> source=<token> event=<token> ts=<epoch> deadline=<epoch|none>
 #
 # Gen sidecar: state/<id>.busy-gen - one token minted when the task's busy
 # wiring is armed (fm-spawn, or a documented recovery re-arm). Every event
@@ -79,14 +79,17 @@
 # Codex negotiation (fm_busy_codex_appserver_observable,
 # fm_busy_codex_hooks_verified): the approved contract prefers Codex's
 # app-server turn lifecycle with capability negotiation, and sanctions its
-# stable lifecycle hooks as the intermediate. Neither is usable on the
-# installed binary, so Codex classifies unknown codex-unverified rather than
-# falling back to idle, and fm-spawn installs no Codex busy wiring.
+# stable lifecycle hooks as the intermediate. Project hooks are verified from
+# codex-cli 0.147.0 onward, but Codex exposes no negative turn-close hook.
+# Every Codex turn-open record therefore carries an absolute deadline. A Stop
+# proves idle; a missing Stop stays busy only until that deadline, then becomes
+# unknown codex-deadline-expired so supervision cannot absorb it forever.
 # docs/verification/supervision.md owns the evidence for both probes.
 #
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
 
 FM_BUSY_LIB_VERSION=v1
+FM_BUSY_CODEX_TURN_DEADLINE_SECS=${FM_BUSY_CODEX_TURN_DEADLINE_SECS:-28800}
 
 # Standalone-Kimi verification gate. Empty means no installed Kimi version
 # has passed live verification, so every standalone Kimi task classifies
@@ -126,17 +129,30 @@ fm_busy_codex_appserver_observable() {
 }
 
 # fm_busy_codex_hooks_verified: the sanctioned intermediate - Codex's stable
-# hooks engine (UserPromptSubmit to open a turn, Stop and SessionEnd to close
-# it). Returns 0 only once those hooks are live-verified to fire for a
-# firstmate-launched worker. codex-cli 0.145.0 verdict (live, 2026-07-28):
-# NOT verified. Firstmate-written project hooks under <worktree>/.codex/
-# never fired in an interactive pane whose directory trust was granted, nor
-# under `codex exec`, in either case with --dangerously-bypass-hook-trust,
-# while global hooks fired in the same runs. Codex additionally exposes no
-# StopFailure hook, so an API-error turn end would need separate coverage
-# even after the discovery problem is solved.
+# hooks engine (UserPromptSubmit opens a deadline-bound turn and Stop proves a
+# successful close). Returns 0 only for a strict installed `codex-cli X.Y.Z`
+# version at or above the first live-verified release. codex-cli 0.145.0 did
+# not fire project hooks; 0.147.0 does in exec and interactive workers.
+# Unreadable, unexpected, prerelease, or older version output stays
+# conservative. Codex exposes no StopFailure, and API error or interruption
+# emits no Stop, which is why this gate is usable only with the deadline fold.
 fm_busy_codex_hooks_verified() {
-  return 1
+  local version major minor patch
+  version=$(codex --version 2>/dev/null) || return 1
+  if [[ ! "$version" =~ ^codex-cli[[:space:]]+(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+    return 1
+  fi
+  major=${BASH_REMATCH[1]}
+  minor=${BASH_REMATCH[2]}
+  patch=${BASH_REMATCH[3]}
+  if [ "$major" -gt 0 ]; then
+    return 0
+  fi
+  [ "$major" -eq 0 ] || return 1
+  if [ "$minor" -gt 147 ]; then
+    return 0
+  fi
+  [ "$minor" -eq 147 ] && [ "$patch" -ge 0 ]
 }
 
 # fm_busy_codex_semantic_source: 0 when ANY verified Codex semantic source
@@ -219,7 +235,7 @@ fm_busy_source_trusted() {  # <harness> <source>
 #   gen-mismatch a record from a stale incarnation
 fm_busy_record_read() {  # <state-dir> <id>
   local state=$1 id=$2 rec gen line extra ver f
-  local r_gen='' r_seq='' r_state='' r_source='' r_event='' r_ts=''
+  local r_gen='' r_seq='' r_state='' r_source='' r_event='' r_ts='' r_deadline=none
   rec=$(fm_busy_record_path "$state" "$id")
   if [ ! -f "$rec" ]; then
     printf 'missing'
@@ -249,6 +265,7 @@ fm_busy_record_read() {  # <state-dir> <id>
       source=*) r_source=${f#source=} ;;
       event=*) r_event=${f#event=} ;;
       ts=*) r_ts=${f#ts=} ;;
+      deadline=*) r_deadline=${f#deadline=} ;;
       *) printf 'malformed'; return 1 ;;
     esac
   done
@@ -257,12 +274,13 @@ fm_busy_record_read() {  # <state-dir> <id>
   fm_busy_token_valid "$r_event" || { printf 'malformed'; return 1; }
   case "$r_seq" in ''|*[!0-9]*) printf 'malformed'; return 1 ;; esac
   case "$r_ts" in ''|*[!0-9]*) printf 'malformed'; return 1 ;; esac
+  case "$r_deadline" in none) : ;; ''|*[!0-9]*) printf 'malformed'; return 1 ;; esac
   case "$r_state" in busy|idle|unknown) : ;; *) printf 'malformed'; return 1 ;; esac
   if [ "$r_gen" != "$gen" ]; then
     printf 'gen-mismatch'
     return 1
   fi
-  printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
+  printf '%s %s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq" "$r_deadline"
 }
 
 # ---------------------------------------------------------------------------
@@ -839,7 +857,7 @@ fm_busy_grok_tail_busy() {
 # if available, else reports unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
-  local out rc r_state r_source native log
+  local out rc r_state r_source r_deadline native log now
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then
@@ -878,6 +896,23 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     out=${out#* }
     r_source=${out%% *}
     if fm_busy_source_trusted "$harness" "$r_source"; then
+      case "$harness:$r_state" in
+        codex*:busy)
+          r_deadline=${out##* }
+          if [ "$r_deadline" = none ]; then
+            printf 'unknown codex-deadline-missing'
+            return 0
+          fi
+          now=$(date +%s 2>/dev/null) || {
+            printf 'unknown codex-deadline-unreadable'
+            return 0
+          }
+          if [ "$now" -ge "$r_deadline" ]; then
+            printf 'unknown codex-deadline-expired'
+            return 0
+          fi
+          ;;
+      esac
       printf '%s %s' "$r_state" "$r_source"
     else
       printf 'unknown source-mismatch'
