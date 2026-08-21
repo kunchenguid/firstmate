@@ -995,9 +995,7 @@ fm_failure_episode_reset() {
 # released the lock turns the courtesy into indefinite silence: every later
 # async firing exits at the lock, the epoch ledger freezes at its last outcome,
 # and each following turn end allows a blind stop while nothing re-arms the
-# watcher. Observed 2026-08-14: one delivered rewake, then a beacon that went
-# 40 minutes without a beat, no watcher lock at all, two workers in flight, and
-# both of their reports unread until an operator drained the queue by hand.
+# watcher.
 #
 # One abandonment proof is the ledger, not pid liveness, because both ways a
 # finished claim keeps a live pid - reuse of the recorded pid, and a hook still

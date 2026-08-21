@@ -1855,10 +1855,9 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
 }
 
 # --- quiet pane, worktree still being written: deferred, never wedge-escalated -
-# The live 2026-08-14 case: one crew produced eight consecutive possible-wedge
-# escalations in an afternoon, three of them demanding deep inspection, while it
-# was demonstrably writing source, then tests, then documentation. The detector's
-# two inputs (pane quietness, run step) cannot see that, so the pane looks frozen.
+# A crew can be writing source, then tests, then documentation while its pane
+# stays quiet. The detector's two prior inputs (pane quietness and run step)
+# cannot see that, so the pane looks frozen.
 # Both halves of the contract are asserted on the SAME fixture, because the whole
 # point is that only the worktree evidence differs: writing defers, silent
 # escalates on the unchanged schedule.

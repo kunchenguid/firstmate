@@ -1263,8 +1263,7 @@ FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 # rendered pane has gone quiet. This is the third liveness input the wedge detector
 # has, after pane quietness and the run step, and it exists because neither of
 # those can see a crew that is writing source, then tests, then documentation
-# behind a static pane - the 2026-08-14 case of eight consecutive possible-wedge
-# escalations against a crew that was demonstrably working the whole time.
+# behind a static pane.
 #
 # 1 for every other outcome, including an id with no recorded worktree, a worktree
 # that is gone, a missing anchor, and a walk that fails or finds nothing. Absence of

@@ -1382,11 +1382,10 @@ test_hook_claude_mode_allows_on_fresh_rewake_epoch() {
   pass "fm-turnend-guard --claude: fresh rewake epoch prevents a duplicate continuation for the same event"
 }
 
-# The 2026-08-14 lapse: a cycle armed, delivered one rewake, exited, and left its
-# owner lock behind holding a live pid. Both Stop participants read that lock as
-# "recovery is already under way", so with work in flight and a beacon 40 minutes
-# cold every turn ended blind and nothing re-armed. A stale ledger outcome for
-# the lock's own pid is the proof that no decision is in flight any more.
+# A cycle can arm, deliver one rewake, and exit while leaving its owner lock
+# behind with a live pid. Both Stop participants would otherwise read that lock
+# as recovery still under way and allow blind turns indefinitely. A stale ledger
+# outcome for the lock's own pid proves that no decision remains in flight.
 test_hook_claude_mode_blocks_on_abandoned_autoarm_claim() {
   local dir out status pid
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-abandoned-claim")

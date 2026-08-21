@@ -582,12 +582,10 @@ test_single_flight_admits_exactly_one_owner() {
 }
 
 # --- abandoned single-flight claim recovery -----------------------------------
-# The 2026-08-14 lapse: one cycle armed, beat its beacon, delivered a single
-# rewake, and exited, leaving its owner lock behind with a live pid. The single
-# flight gate then turned every later firing into exit 0, so with two tasks in
-# flight and a beacon 40 minutes cold nothing re-armed and both workers' reports
-# sat unread until an operator drained the queue by hand. The lock alone is not
-# enough to prove that: the ledger naming that same pid with a finished outcome,
+# A cycle can arm, deliver a rewake, and exit while leaving its owner lock behind
+# with a live pid, causing the single-flight gate to suppress every later firing.
+# The lock alone is not enough to prove abandonment: the ledger naming that same
+# pid with a finished outcome,
 # or a recorded pid-identity the live pid no longer matches, is what distinguishes
 # an abandoned claim from one still deciding.
 

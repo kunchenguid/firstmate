@@ -1039,7 +1039,7 @@ run_drain() {  # <home>
     "$ROOT/bin/fm-wake-drain.sh" 2>/dev/null
 }
 
-# Reconstructs the 2026-08-06 loss with synthetic names: the answer was posted
+# Reconstructs the silent-divergence loss with synthetic names: the answer was posted
 # as a `resolved [key=...]` line and nothing else, so the status fold went quiet
 # while the durable captain-held task stayed open and kept reading as if the
 # captain had never spoken. Both identities that can carry a captain call must
