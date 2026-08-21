@@ -75,6 +75,8 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-branch-prefix-lib.sh
+. "$SCRIPT_DIR/fm-branch-prefix-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -110,12 +112,11 @@ fi
 # use for the task branch, so a shared repo where another fleet already owns
 # `fm/*` can be pointed at a distinct prefix (e.g. `ryan-fm/`) instead of the
 # scaffold's stock language silently overriding per-task instructions.
+# fm_branch_prefix_resolve (bin/fm-branch-prefix-lib.sh) is the one owner of
+# this resolution; bin/fm-merge-local.sh and bin/fm-review-diff.sh share it so
+# a configured prefix stays consistent everywhere a task branch is named.
 # Absent or empty resolves to the default `fm/`. See docs/configuration.md.
-BRANCH_PREFIX=fm/
-if [ -f "$CONFIG/branch-prefix" ]; then
-  BRANCH_PREFIX=$(tr -d '[:space:]' < "$CONFIG/branch-prefix")
-  [ -n "$BRANCH_PREFIX" ] || BRANCH_PREFIX=fm/
-fi
+BRANCH_PREFIX=$(fm_branch_prefix_resolve "$CONFIG")
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0

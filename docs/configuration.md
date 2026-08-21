@@ -122,8 +122,8 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`veri
 Every generated ship brief's task-branch language - the branch-creation step, the push rule, and every mode's `<prefix><task-id>` mention in its definition of done - uses the prefix from the local, gitignored `config/branch-prefix` file, trimmed of surrounding whitespace.
 An absent file, or one that is empty or whitespace-only, resolves to the historical default `fm/`.
 This exists for a shared repo where another fleet already owns the `fm/*` namespace: per-task instructions can name a distinct prefix (e.g. `ryan-fm/`) and the scaffold now carries it consistently instead of the stock `fm/` language silently overriding it.
-`bin/fm-brief.sh` reads the file once per scaffold from the resolved `FM_HOME/config`, so it is not inherited: a secondmate home wanting a non-default prefix sets its own `config/branch-prefix` file.
-`bin/fm-merge-local.sh` and `bin/fm-review-diff.sh` do not yet read this file and still look up `fm/<task-id>` unconditionally, so a configured non-default prefix breaks the local-only merge path and diff review for that task.
+`bin/fm-branch-prefix-lib.sh`'s `fm_branch_prefix_resolve` is the one owner of this resolution; `bin/fm-brief.sh`, `bin/fm-merge-local.sh`, and `bin/fm-review-diff.sh` all source it so the branch a brief creates, the branch a local-only merge fast-forwards, and the branch a review diff compares against always agree on the same name.
+Each script reads the file once per invocation from its own resolved `FM_HOME/config` (or `FM_CONFIG_OVERRIDE`), so it is not inherited: a secondmate home wanting a non-default prefix sets its own `config/branch-prefix` file.
 
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
