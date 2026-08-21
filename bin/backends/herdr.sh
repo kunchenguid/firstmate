@@ -846,14 +846,18 @@ fm_backend_herdr_presentation_lock_namespace_fault() {
   return 1
 }
 
-# fm_backend_herdr_presentation_lock_refusal_suffix: the single tail that every
-# refusal mentioning the presentation lock appends to its own message.
+# fm_backend_herdr_presentation_lock_refusal_suffix: the single tail that a
+# refusal appends to its own message when the namespace it just tried to
+# resolve may be the reason it is refusing.
+# A refusal reached only after the namespace already resolved and the lock was
+# acquired - a lost, changed, contended, or unheld lock - is a different case
+# and deliberately does not call this.
 # Prints " - <permanent fault>" when one exists, otherwise " - <retryable
 # tail>" when the caller supplies one, otherwise nothing, and always returns 0
 # so a refusal stays one statement at every site. Keeping the shape here keeps
 # the two-fault vocabulary in the adapter that owns it, so no caller can drift
 # into naming an unreachable session when the truth is an unusable namespace.
-# shellcheck disable=SC2120 # The retryable tail is optional by contract: the one refusal site that has no retryable wording deliberately calls this with no argument.
+# shellcheck disable=SC2120 # The retryable tail is optional by contract: most call sites have no retryable wording to add and deliberately pass no argument, and the one that does lives in another file.
 fm_backend_herdr_presentation_lock_refusal_suffix() {  # [retryable-tail]
   local fault
   if fault=$(fm_backend_herdr_presentation_lock_namespace_fault); then
