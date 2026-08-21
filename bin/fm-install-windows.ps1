@@ -3,16 +3,18 @@
 # Run from PowerShell:
 #   .\bin\fm-install-windows.ps1
 #
-# Installs the native tools with winget, installs Treehouse and no-mistakes
-# through their official PowerShell installers, installs the required AXI
-# packages globally with npm, configures their hooks, and disables this
-# repository's Claude project hooks by renaming .claude/settings.json to
-# .claude/settings.json.disabled.
+# Installs Git for Windows and the other native tools with winget, installs
+# Treehouse and no-mistakes through their official PowerShell installers,
+# installs the required AXI packages globally with npm, configures their hooks,
+# and disables this repository's Claude project hooks by renaming
+# .claude/settings.json to .claude/settings.json.disabled.
 [CmdletBinding()]
 param()
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+. (Join-Path $PSScriptRoot "fm-windows-git-bash.ps1")
 
 function Invoke-Native {
     param(
@@ -217,6 +219,9 @@ if ($env:OS -ne "Windows_NT") {
 
 Assert-Command "winget"
 
+Install-WingetCommand "Git.Git" "git"
+$gitBashPath = Resolve-FirstmateGitBash
+Write-Host "Git Bash is available at $gitBashPath."
 Install-WingetCommand "jqlang.jq" "jq"
 Install-WingetCommand "koalaman.shellcheck" "shellcheck" "0.11.0"
 Install-WingetCommand "rhysd.actionlint" "actionlint" "1.7.12"

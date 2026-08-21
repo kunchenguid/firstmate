@@ -24,7 +24,12 @@ This touches only the firstmate repo and its own worktrees, never anything under
 
 ## What it does
 
-1. **Run the updater:**
+1. **Run the updater.**
+   On Windows from PowerShell, use the wrapper that resolves Git Bash from Git for Windows rather than invoking the ambient `bash`, which may resolve to an unconfigured WSL launcher:
+   ```powershell
+   .\bin\fm-update.ps1
+   ```
+   On macOS, Linux, or from Git Bash, run the Bash entry point:
    ```sh
    bin/fm-update.sh
    ```
