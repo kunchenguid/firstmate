@@ -308,6 +308,65 @@ test_routine_working_lines_stay_silent_on_the_empty_queue() {
   pass "routine working/done lines still print nothing on an empty-queue drain"
 }
 
+test_captain_work_pending_peek_reports_without_consuming() {
+  local dir state out peek status
+  dir=$(make_case peek-contract)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task9.status"
+  prime_cursor "$state" "$status"
+
+  peek=$(FM_STATE_OVERRIDE="$state" "$DRAIN" --captain-work-pending) \
+    || fail "quiet peek exited non-zero"
+  [ "$peek" = quiet ] || fail "peek reported '$peek' with nothing captain-relevant pending"
+
+  printf 'note: captain said use REST not RPC\n' >> "$status"
+  peek=$(FM_STATE_OVERRIDE="$state" "$DRAIN" --captain-work-pending) \
+    || fail "unread-note peek exited non-zero"
+  [ "$peek" = pending ] || fail "peek reported '$peek' while a note: line was unread"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain after the peek failed"
+  grep -F 'task9 note: captain said use REST not RPC' "$out" >/dev/null \
+    || fail "the peek consumed the unread note before the drain presented it: $(cat "$out")"
+
+  peek=$(FM_STATE_OVERRIDE="$state" "$DRAIN" --captain-work-pending) \
+    || fail "post-presentation peek exited non-zero"
+  [ "$peek" = quiet ] || fail "peek reported '$peek' after the drain presented everything"
+
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain presenting the open decision failed"
+  peek=$(FM_STATE_OVERRIDE="$state" "$DRAIN" --captain-work-pending) \
+    || fail "open-decision peek exited non-zero"
+  [ "$peek" = pending ] || fail "peek reported '$peek' while a decision stays open after presentation"
+
+  printf '1700000000\t1\tcheck\tstartup-network\tcheck: startup-network\n' > "$state/.wake-queue"
+  peek=$(FM_STATE_OVERRIDE="$state" "$DRAIN" --captain-work-pending) \
+    || fail "queued-row peek exited non-zero"
+  [ "$peek" = pending ] || fail "peek reported '$peek' while a durable queue row was pending"
+  pass "the captain-work peek reports queue rows, open decisions, and unread notes without consuming them"
+}
+
+test_captain_work_pending_peek_on_fresh_state_does_not_consume() {
+  local dir state out peek status
+  dir=$(make_case peek-fresh-state)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task10.status"
+  printf 'note: captain said use REST not RPC\n' > "$status"
+
+  peek=$(FM_STATE_OVERRIDE="$state" "$DRAIN" --captain-work-pending) \
+    || fail "fresh-state peek exited non-zero"
+  [ "$peek" = pending ] || fail "fresh-state peek reported '$peek' with an unread note"
+  peek=$(FM_STATE_OVERRIDE="$state" "$DRAIN" --captain-work-pending) \
+    || fail "repeated fresh-state peek exited non-zero"
+  [ "$peek" = pending ] || fail "a repeated peek consumed the fresh-state unread note"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "first drain after fresh-state peeks failed"
+  grep -F 'task10 note: captain said use REST not RPC' "$out" >/dev/null \
+    || fail "fresh-state peeks swallowed the note before its first presentation: $(cat "$out")"
+  pass "fresh-state peeks before the first drain leave the unread note presentable"
+}
+
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
@@ -319,3 +378,5 @@ test_retired_task_id_starts_new_status_unread
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
 test_routine_working_lines_stay_silent_on_the_empty_queue
+test_captain_work_pending_peek_reports_without_consuming
+test_captain_work_pending_peek_on_fresh_state_does_not_consume

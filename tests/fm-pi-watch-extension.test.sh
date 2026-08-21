@@ -24,7 +24,11 @@ install_pi_watch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
-  chmod +x "$repo/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-wake-drain.sh" "$repo/bin/fm-wake-drain.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-classify-lib.sh" "$repo/bin/fm-classify-lib.sh"
+  cp "$ROOT/bin/fm-line-cap-lib.sh" "$repo/bin/fm-line-cap-lib.sh"
+  chmod +x "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-wake-drain.sh"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
 JSON
@@ -482,7 +486,7 @@ EOF
 
 test_pi_real_wake_reasons_still_deliver_once() {
   local reason label repo home plugin log stop out status queue_row
-  for label in signal stale check heartbeat queued-rearm; do
+  for label in signal stale check heartbeat queued-rearm decision-rearm note-rearm; do
     repo="$TMP_ROOT/pi-real-$label-root"
     home="$TMP_ROOT/pi-real-$label-home"
     log="$TMP_ROOT/pi-real-$label.log"
@@ -499,6 +503,14 @@ test_pi_real_wake_reasons_still_deliver_once() {
         reason='check: rearm-resurface'
         queue_row=$(printf '1700000000\t1\tcheck\tstartup-network\tcheck: startup-network')
         printf '%s\n' "$queue_row" > "$home/state/.wake-queue"
+        ;;
+      decision-rearm)
+        reason='check: rearm-resurface'
+        printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$home/state/task1.status"
+        ;;
+      note-rearm)
+        reason='check: rearm-resurface'
+        printf 'note: captain said use REST not RPC\n' > "$home/state/task1.status"
         ;;
     esac
     cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -558,7 +570,7 @@ EOF
     expect_code 0 "$status" "Pi real $label wake reason must deliver exactly once"
     [ -z "$out" ] || fail "Pi real-$label wake test printed output: $out"
   done
-  pass "Pi real signal, stale, check, heartbeat, and queued recovery reasons still deliver once"
+  pass "Pi real signal, stale, check, heartbeat, queued recovery, open-decision, and unread-note reasons still deliver once"
 }
 
 test_pi_hung_successor_falls_back_to_typed_wake() {

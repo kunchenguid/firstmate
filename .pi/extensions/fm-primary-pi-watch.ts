@@ -83,6 +83,7 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const drainScript = `${fmRoot}/bin/fm-wake-drain.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
@@ -154,23 +155,21 @@ function actionableLine(output: string): string {
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
 }
 
-function wakeQueueHasRows(): boolean {
-  try {
-    return readFileSync(`${state}/.wake-queue`, "utf8").split(/\r?\n/).some((line) => {
-      if (!line) return false;
-      const fields = line.split("\t");
-      return fields.length >= 5 && /^(signal|stale|check|heartbeat)$/.test(fields[2] ?? "");
-    });
-  } catch {
-    return false;
-  }
+function captainWorkPending(): boolean {
+  const result = spawnSync("bash", [drainScript, "--captain-work-pending"], {
+    cwd: fmRoot,
+    encoding: "utf8",
+    env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
+  });
+  if (result.status !== 0) return true;
+  return result.stdout.trim() !== "quiet";
 }
 
 function classifyClose(stdout: string, stderr: string, code: number | null, signal: NodeJS.Signals | null): CloseClassification {
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
   if (reason) {
-    if (reason === "check: rearm-resurface" && !wakeQueueHasRows()) {
+    if (reason === "check: rearm-resurface" && !captainWorkPending()) {
       return { kind: "empty-rearm", message: reason };
     }
     return { kind: "actionable", message: reason };
@@ -492,7 +491,7 @@ export default function (pi: ExtensionAPI) {
             await sendWake(owner, `${classification.message}\n\n${restoration.failure}`);
             return;
           }
-          if (wakeQueueHasRows()) {
+          if (captainWorkPending()) {
             await sendWake(owner, classification.message, restoration.recovery);
             return;
           }
@@ -501,6 +500,10 @@ export default function (pi: ExtensionAPI) {
               owner,
               `watcher: FAILED - Pi extension could not silently confirm empty re-arm handling\n${classification.message}`,
             );
+            return;
+          }
+          if (captainWorkPending()) {
+            await sendWake(owner, classification.message);
           }
         })().catch(() => {
         });

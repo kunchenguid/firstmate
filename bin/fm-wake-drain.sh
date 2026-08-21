@@ -38,7 +38,29 @@ case "${1:-}" in
     case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
     [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
     ;;
-  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+  --captain-work-pending)
+    # Read-only peek for adapters deciding whether a recovery presentation can
+    # be skipped: prints "quiet" only when a drain right now would surface
+    # nothing captain-relevant (no durable queue rows, no open decisions, no
+    # unread informational status lines). Uses the pure whole-file decisions
+    # fold, not the cursor-backed incremental one, because a peek must leave
+    # every cursor untouched: on a manifest-less fresh state the incremental
+    # fold's legacy cursor write would mark unread lines as read. The peek is
+    # per-recovery, not per-drain, so the whole-file cost stays acceptable.
+    # Any scan failure reports "pending" so callers can only ever over-deliver,
+    # never suppress.
+    [ "$#" -eq 1 ] || { echo "wake drain: --captain-work-pending takes no other arguments" >&2; exit 2; }
+    if [ -s "$FM_WAKE_QUEUE" ]; then printf 'pending\n'; exit 0; fi
+    if ! PEEK_OPEN=$(scan_open_decisions "$STATE") || [ -n "$PEEK_OPEN" ]; then
+      printf 'pending\n'; exit 0
+    fi
+    if ! PEEK_UNREAD=$(scan_unread_surface_lines "$STATE") || [ -n "$PEEK_UNREAD" ]; then
+      printf 'pending\n'; exit 0
+    fi
+    printf 'quiet\n'
+    exit 0
+    ;;
+  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION | --captain-work-pending]" >&2; exit 2 ;;
 esac
 
 # Defense in depth for the supervision chain: this script runs at the top of
