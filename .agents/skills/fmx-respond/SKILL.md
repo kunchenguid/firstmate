@@ -142,6 +142,12 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
       `in_reply_to_chain` is the optional surrounding-conversation transcript; [the Relay configuration reference](../../../docs/configuration.md#relay-env) owns its exact wire shape and compatibility semantics.
       Read every entry in its documented oldest-first order, including `history` entries and unavailable gaps, but treat the chain as optional context because it is often absent today: use it when present and proceed normally without it.
       Ignore `tweet_id` entirely - you never name a platform message id; the relay binds the reply for you.
+      When a Discord mention uses the explicit Grokbots room grammar, resolve it with `bin/fm-discord-rooms.sh route state/x-inbox/<request_id>.json` before classification.
+      The [Grokbots Discord rooms guide](../../../docs/discord-grokbots-rooms.md) owns the room purposes and activation boundary, while the helper's `--help` owns the address grammar.
+      Treat the returned body as the request and the returned seat as its recipient.
+      Deliver it through the active Grokbot runtime's existing message-to-seat action, never by spawning, cloning, or substituting a seat.
+      A mailbox is only a notice or question surface; if its body becomes job work, move that work into the single matching `#projects` job thread rather than making the mailbox its job home.
+      If this runtime has no live message-to-Grokbot action, reply truthfully that seat delivery is unavailable and preserve `UNKNOWN_LIVE_MESSAGE_TO_GROKBOT_SURFACE`; never start Rakazo or synthesize the named seat's answer.
    b. **Classify the mention into one of three cases** (see "A request to act on: acknowledge first, act, then follow up on completion"):
       - **Actionable instruction / request** ("add this to the backlog", "look into X", "fix Y", "ship Z") - go to step 2c and do the work first.
       - **Question** - nothing to do; skip step 2c and answer from live fleet state in step 2d.

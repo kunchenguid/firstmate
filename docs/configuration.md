@@ -355,6 +355,7 @@ To turn it on:
 4. Start a new firstmate session so bootstrap picks the token up, then mention `@myfirstmate` on X or mention the bot in a server where it is installed.
 
 The dashboard owns account creation, identity linking, bot installation, and token issuance; this document owns only what the local firstmate home does with the token once it is in `.env`.
+For the eight-seat Grokbots room layer, follow the [Grokbots Discord rooms guide](discord-grokbots-rooms.md) before any server, room, installation, permission, pairing-token, or live-canary action.
 
 The locked session-start bootstrap step turns the token into local generated state.
 It writes `state/x-watch.check.sh`, a byte-static identity shim for `bin/fm-x-poll.sh`, and `config/x-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.

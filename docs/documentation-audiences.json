@@ -25,6 +25,7 @@
   ],
   "readmeSetupTargets": [
     "docs/configuration.md",
+    "docs/discord-grokbots-rooms.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
@@ -249,6 +250,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/discord-grokbots-rooms.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/documentation-audiences.md",
       "audience": "maintainer-architecture"
     },
@@ -335,6 +340,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/discord-grokbots-rooms.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",
