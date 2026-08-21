@@ -1475,7 +1475,7 @@ test_rechain_delivers_second_post_on_same_thread() {
 }
 
 test_retire_reason_closes_the_open_loop() {
-  local home log out
+  local home log out registry_file
   home=$(make_home retire-reason)
   log="$home/curl.log"; : > "$log"
   seed_commitment "$home" pf-retire req-retire discord main work-retire
@@ -1488,6 +1488,22 @@ test_retire_reason_closes_the_open_loop() {
   assert_contains "$EXPECT_OUT" "--reason" "the refusal must name the required reason"
   assert_present "$home/state/public-followup/registry/pf-retire" \
     "a reason-less retire must keep the registration"
+  registry_file="$home/state/public-followup/registry/pf-retire"
+  cat > "$home/fakebin/rm" <<EOF
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  [ "\$arg" != '$registry_file' ] || exit 1
+done
+exec /bin/rm "\$@"
+EOF
+  chmod +x "$home/fakebin/rm"
+  expect_failure "retire must report registration removal failure" \
+    run_pf "$home" retire pf-retire --reason "the public loop is finished"
+  assert_contains "$EXPECT_OUT" "public loop remains open" \
+    "retire removal failure must report the truthful loop state"
+  assert_present "$registry_file" \
+    "retire removal failure must retain the registration"
+  /bin/rm "$home/fakebin/rm"
   out=$(run_pf "$home" retire pf-retire --reason "the public loop is finished") \
     || fail "retire --reason failed"
   assert_contains "$out" "retired pf-retire reason=the public loop is finished" \

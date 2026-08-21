@@ -1077,7 +1077,7 @@ cmd_rechain() {
 # --- subcommand: retire -----------------------------------------------------
 
 cmd_retire() {
-  local id=${1:-} force=0 reason='' payload delivery task_state
+  local id=${1:-} force=0 reason='' payload delivery task_state registry_file
   [ -n "$id" ] || { usage; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1110,7 +1110,11 @@ cmd_retire() {
   if ! clear_public_followup_link "$id"; then
     die "could not clear the legacy X link for '$id'; its registration was retained for reconciliation" 1
   fi
-  rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
+  registry_file="$(fm_pf_registry_dir "$STATE")/$id"
+  if ! rm -f -- "$registry_file" 2>/dev/null \
+      || [ -e "$registry_file" ] || [ -L "$registry_file" ]; then
+    die "could not remove registration for '$id'; the public loop remains open" 1
+  fi
   printf 'retired %s reason=%s\n' "$id" "$reason"
 }
 
