@@ -6,7 +6,9 @@
 # ordinary commands.
 # A legacy bare numeric record remains valid and keeps the ancestry-only path.
 # A record whose bytes are readable but do not parse claims no owner, so it is
-# reclaimed like a dead one rather than leaving the home permanently read-only.
+# reclaimed like a dead one rather than leaving the home permanently read-only,
+# unless its first line still names a live harness process outside this session's
+# ancestry - that is a competing owner and keeps the existing refusal.
 # An identity-matched reparented session refreshes the PID under the same
 # acquisition lock used here; any other case falls back to the ancestry test, so
 # a live PID outside this session's ancestry keeps the existing competing-session
@@ -124,11 +126,11 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   fi
-  # Readable bytes that are not a valid record name no owner at all: no pid can
-  # be recovered from them, so no live session can be refused on their behalf and
-  # nothing is preserved by keeping them. A truncated or externally mangled
-  # record is therefore reclaimed by the fresh write below, under this same
-  # claim lock, exactly like a dead recorded owner.
+  # Readable bytes that are not a valid record are reclaimed by the fresh write
+  # below, under this same claim lock, exactly like a dead recorded owner - but
+  # only once they name no owner at all. A mangled record whose first line still
+  # names a live harness process outside this session's ancestry names a
+  # genuinely competing owner, so it keeps the existing refusal instead.
   if fm_session_lock_read "$STATE"; then
     old=$FM_SESSION_LOCK_PID
     if fm_session_lock_owned_by_self "$STATE"; then
@@ -149,6 +151,9 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
       echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
       exit 1
     fi
+  elif old=$(fm_session_lock_foreign_live_pid "$STATE"); then
+    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
+    exit 1
   fi
 fi
 if ! fm_session_lock_write "$STATE" "$me" "$me_harness" "$me_identity"; then

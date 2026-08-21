@@ -261,6 +261,29 @@ fm_session_lock_pid() {  # <state-dir>
   printf '%s\n' "$FM_SESSION_LOCK_PID"
 }
 
+# Print the pid a record names when that pid is a live harness process outside
+# this session's own harness ancestry, EVEN IF the rest of the record does not
+# parse.
+# A first line that still names a usable pid names a candidate owner, so a
+# reclaim decision can never treat such a record as ownerless; only a record that
+# names no live foreign harness is genuinely unowned.
+fm_session_lock_foreign_live_pid() {  # <state-dir>
+  local state=$1 lock line='' pid pids ancestor
+  lock="$state/.lock"
+  [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
+  IFS= read -r line < "$lock" || true
+  case "$line" in ''|*[!0-9]*|1) return 1 ;; esac
+  pid=$line
+  fm_harness_pid_alive "$pid" || return 1
+  pids=$(fm_harness_ancestry_pids 2>/dev/null || true)
+  while IFS= read -r ancestor; do
+    [ "$ancestor" = "$pid" ] && return 1
+  done <<EOF
+$pids
+EOF
+  printf '%s\n' "$pid"
+}
+
 # True when <publisher-pid> - the harness process that published the ambient
 # session identity - HOSTS this process from outside its own contiguous harness
 # run.

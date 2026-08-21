@@ -718,18 +718,83 @@ test_fm_lock_refuses_different_live_identity_with_existing_wording() {
   pass "fm-lock: a genuinely different live identity is refused with the existing wording"
 }
 
+# A pid this host has already reaped, so a record naming it names a dead owner.
+dead_pid() {
+  local pid
+  sleep 0 &
+  pid=$!
+  wait "$pid" 2>/dev/null || true
+  printf '%s\n' "$pid"
+}
+
+# A first line that still names a live foreign harness names a competing owner,
+# whatever the rest of the record looks like. Reclaiming it would hand a home a
+# live session still believes it owns to a second session.
+test_fm_lock_refuses_an_unparseable_record_naming_a_live_owner() {
+  local dir out status shape content old owner_after record_after
+  dir=$(make_primary_dir "$TMP_ROOT/lock-unparseable-live")
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  old=$!
+  for shape in unknown-field duplicate-harness invalid-harness; do
+    case "$shape" in
+      unknown-field) content="$old"$'\nharness=claude\nsession=owner-session\nmode=x\n' ;;
+      duplicate-harness) content="$old"$'\nharness=claude\nharness=claude\n' ;;
+      invalid-harness) content="$old"$'\nharness=not-a-harness\n' ;;
+    esac
+    printf '%s' "$content" > "$dir/state/.lock"
+    out=$(FM_HOME="$dir" FM_SESSION_HARNESS=claude FM_SESSION_ID=other-session \
+      "$FAKE_CLAUDE" -c '
+        export FM_SESSION_PUBLISHER_PID=$$
+        "$FM_HOME/bin/fm-lock.sh"
+      ' 2>&1); status=$?
+    owner_after=$(sed -n '1p' "$dir/state/.lock")
+    record_after=$(cat "$dir/state/.lock")
+    expect_code 1 "$status" "$shape: a mangled record naming a live owner must be refused"
+    [ "$out" = "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" ] \
+      || fail "$shape: competing-session refusal wording changed: $out"
+    [ "$owner_after" = "$old" ] || fail "$shape: the live owner $old was replaced by $owner_after"
+    [ "$record_after" = "${content%$'\n'}" ] || fail "$shape: the live owner's record was mutated: $record_after"
+  done
+  kill "$old" 2>/dev/null || true
+  wait "$old" 2>/dev/null || true
+  pass "fm-lock: a mangled record still naming a live foreign owner keeps the competing-session refusal"
+}
+
+# The refusal above must not strand a session whose OWN record was mangled: its
+# harness pid is in this process's ancestry, so the home is still reclaimable.
+test_fm_lock_reclaims_its_own_mangled_record() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/lock-unparseable-self")
+  out=$(FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/expected-owner"
+      printf "%s\nharness=claude\nmode=x\n" "$$" > "$FM_HOME/state/.lock"
+      "$FM_HOME/bin/fm-lock.sh"
+    ' 2>&1); status=$?
+  expect_code 0 "$status" "a session must reclaim its own mangled record"
+  [ "$out" = "lock acquired: harness pid $(cat "$dir/state/expected-owner")" ] \
+    || fail "reclaiming an own mangled record did not report ownership: $out"
+  [ "$(sed -n '1p' "$dir/state/.lock")" = "$(cat "$dir/state/expected-owner")" ] \
+    || fail "the reclaimed record does not name the acquiring session: $(cat "$dir/state/.lock")"
+  [ "$(sed -n '2p' "$dir/state/.lock")" = harness=claude ] \
+    || fail "the reclaimed record lost the verified harness: $(cat "$dir/state/.lock")"
+  pass "fm-lock: a session whose own record was mangled still reclaims its home"
+}
+
 test_fm_lock_reclaims_an_unparseable_record() {
   local dir out status shape content
   dir=$(make_primary_dir "$TMP_ROOT/lock-unparseable")
   # state/.lock is a persisted record this fleet owns. A truncated write or an
   # external mangling leaves bytes that name no owner; acquisition must reclaim
   # them like a dead owner instead of stranding the home read-only forever.
-  for shape in empty truncated junk pid-one; do
+  local dead
+  dead=$(dead_pid)
+  for shape in empty truncated junk pid-one dead-structured; do
     case "$shape" in
       empty) content='' ;;
       truncated) content=$'\n' ;;
       junk) content=$'not-a-pid\nharness=claude\n' ;;
       pid-one) content=$'1\nharness=claude\n' ;;
+      dead-structured) content="$dead"$'\nharness=claude\nmode=x\n' ;;
     esac
     printf '%s' "$content" > "$dir/state/.lock"
     out=$(FM_HOME="$dir" "$FAKE_CLAUDE" -c '
@@ -782,4 +847,6 @@ test_active_in_marked_secondmate_home
 test_fm_lock_status_agrees_with_identity_reparent_and_refreshes_pid
 test_fm_lock_refuses_different_live_identity_with_existing_wording
 test_fm_lock_reclaims_an_unparseable_record
+test_fm_lock_refuses_an_unparseable_record_naming_a_live_owner
+test_fm_lock_reclaims_its_own_mangled_record
 test_fm_lock_status_still_works_with_shared_lib
