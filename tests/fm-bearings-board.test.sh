@@ -200,7 +200,7 @@ test_build_injects_binds_then_arms() {
   out=$(run_board "$home" build "$data") || fail "a valid payload did not build"
   assert_contains "$out" "board: $board" "build did not report the board path: $out"
   assert_contains "$out" "served: $board" "build did not establish the Lavish session: $out"
-  assert_contains "$out" "(any-origin)" "build did not report the any-origin binding: $out"
+  assert_contains "$out" "bound: " "build did not report the answer binding: $out"
   assert_contains "$out" "armed: " "the first build did not arm the board source: $out"
   assert_present "$board" "build reported success without a board"
 
