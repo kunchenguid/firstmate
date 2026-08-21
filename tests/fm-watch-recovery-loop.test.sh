@@ -162,7 +162,7 @@ EOF
 # real crew event instead of sitting in a pre-loop wait that refreshes the
 # liveness beacon and then exits with a synthetic rearm-resurface.
 test_handling_successor_does_not_go_blind() {
-  local dir home state fakebin child start now out
+  local dir home state fakebin child event_start now out
   dir=$(make_case recovery-gap-successor)
   home="$dir/home"
   state="$dir/state"
@@ -172,7 +172,6 @@ test_handling_successor_does_not_go_blind() {
   printf 'pending:downtime:gap.1.aaa\n' > "$state/.watcher-down"
   chmod 600 "$state/.watcher-down"
   out="$dir/watch.out"
-  start=$(date +%s)
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
     FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
@@ -187,8 +186,9 @@ test_handling_successor_does_not_go_blind() {
     || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not take the watcher lock"; }
   sleep 0.4
   printf 'done: crew finished its task\n' >> "$state/crew.status"
+  event_start=$(date +%s)
   now=0
-  while [ "$now" -lt 24 ]; do
+  while [ "$now" -lt 5 ]; do
     if grep -q '^signal:' "$out" 2>/dev/null; then
       break
     fi
@@ -198,7 +198,7 @@ test_handling_successor_does_not_go_blind() {
   if ! grep -q '^signal:' "$out" 2>/dev/null; then
     kill -TERM "$child" 2>/dev/null || true
     wait "$child" 2>/dev/null || true
-    fail "handling successor did not surface the crew event within a poll interval or two (reacted after $(( $(date +%s) - start ))s): $(cat "$out")"
+    fail "handling successor did not surface the crew event within a poll interval or two (waited $(( $(date +%s) - event_start ))s): $(cat "$out")"
   fi
   grep -F 'crew.status' "$out" >/dev/null \
     || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not name the crew status file: $(cat "$out")"; }
