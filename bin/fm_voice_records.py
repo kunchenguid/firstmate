@@ -107,6 +107,22 @@ def default_home():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def state_dir(home):
+    """Return the runtime state directory, resolved as bin/fm-inbox.sh resolves it.
+
+    fm-inbox.sh reads ${FM_STATE_OVERRIDE:-$FM_HOME/state}, and the handover
+    below queues through fm-inbox.sh with the ambient environment. A reader that
+    ignored the override would count notes in one directory while the queue wrote
+    them to another, so the agent would tell the captain their request was queued
+    and then, asked what is waiting, report nothing. Only state moves with the
+    override; data stays under the home, again as fm-inbox.sh has it.
+    """
+    override = os.environ.get("FM_STATE_OVERRIDE")
+    if override:
+        return override
+    return os.path.join(home, "state")
+
+
 def _read_config(home, name):
     path = os.path.join(home, "config", name)
     try:
@@ -246,8 +262,8 @@ def fleet_status(home=None, scope=None):
         raise RecordError("unknown read scope: {!r}".format(scope))
     denies = deny_list(home)
 
-    state_dir = os.path.join(home, "state")
-    workers = _workers(state_dir)
+    state = state_dir(home)
+    workers = _workers(state)
     items = _parse_backlog(os.path.join(home, "data", "backlog.md"))
 
     open_items = [i for i in items if not i["done"]]
@@ -263,7 +279,7 @@ def fleet_status(home=None, scope=None):
     ]
     with_pr = [w for w in workers if w["pr"]]
 
-    inbox = os.path.join(state_dir, "inbox")
+    inbox = os.path.join(state, "inbox")
     try:
         waiting = len([n for n in os.listdir(inbox) if n.endswith(".note")])
     except OSError:

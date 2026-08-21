@@ -167,14 +167,28 @@ def widen_path():
         os.environ["PATH"] = os.pathsep.join(added + parts)
 
 
+# A credential that states an expiry this interpreter cannot read. The
+# credential itself is fine; only its deadline is unknown, and that is not the
+# same thing as not having one.
+EXPIRY_UNKNOWN = object()
+
+
 def _expires_at(stamp):
-    """Return an ISO 8601 expiry as epoch seconds, or None when there is none."""
+    """Return the expiry as epoch seconds, None when there is none, or EXPIRY_UNKNOWN.
+
+    The two failure shapes mean opposite things and must not collapse into one.
+    No Expiration at all is a credential that does not expire. An Expiration
+    that will not parse, such as an offset written +0000 on an interpreter older
+    than 3.11, is a credential that does expire at a moment this process cannot
+    read, and treating that as "never" would cache it past its real deadline and
+    fail every session from then on.
+    """
     if not stamp:
         return None
     try:
         when = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
     except ValueError:
-        return None
+        return EXPIRY_UNKNOWN
     if when.tzinfo is None:
         when = when.replace(tzinfo=datetime.timezone.utc)
     return when.timestamp()
@@ -226,9 +240,11 @@ class Credentials:
     and not a credential fetch.
 
     Credentials that carry an expiry are refreshed a few minutes ahead of it,
-    because a relay left running outlives them. Every resolution, the first one
-    included, runs in a worker thread, so the event loop keeps reading the
-    captain's audio while it happens.
+    because a relay left running outlives them. One whose expiry cannot be read
+    is held for that same margin and no longer, so an unreadable deadline costs
+    an occasional resolution rather than every session after the deadline.
+    Every resolution, the first one included, runs in a worker thread, so the
+    event loop keeps reading the captain's audio while it happens.
     """
 
     REFRESH_MARGIN = 300
@@ -238,11 +254,14 @@ class Credentials:
         self.verbose = verbose
         self._creds = None
         self._expires = None
+        self._resolved = None
         self._lock = asyncio.Lock()
 
     def _usable(self):
         if self._creds is None:
             return False
+        if self._expires is EXPIRY_UNKNOWN:
+            return time.monotonic() - self._resolved < self.REFRESH_MARGIN
         if self._expires is None:
             return True
         return time.time() + self.REFRESH_MARGIN < self._expires
@@ -252,6 +271,7 @@ class Credentials:
             if not self._usable():
                 self._creds, self._expires = await asyncio.to_thread(
                     resolve_credentials, self.profile, self.verbose)
+                self._resolved = time.monotonic()
             return dict(self._creds)
 
 
@@ -646,6 +666,21 @@ async def renew(session, options, down):
     return fresh
 
 
+async def read_uplink_frame(reader):
+    """Return the next (kind, payload) the client sent, or raise on a bad header.
+
+    The header is checked before the payload is read, not after. A
+    desynchronised uplink offers a length of up to 4 GiB, and waiting for that
+    many bytes is a hang where the wire format promises a loud error, with the
+    captain sitting in front of a client that will never answer.
+    """
+    head = await reader.readexactly(frame.HEADER.size)
+    kind, length = frame.HEADER.unpack(head)
+    frame.check_header(kind, length)
+    payload = await reader.readexactly(length) if length else b""
+    return kind, payload
+
+
 async def serve(options):
     """Relay frames between the client on stdin/stdout and one Nova Sonic session."""
     loop = asyncio.get_running_loop()
@@ -667,13 +702,7 @@ async def serve(options):
     status = 0
     try:
         while True:
-            head = await reader.readexactly(frame.HEADER.size)
-            kind, length = frame.HEADER.unpack(head)
-            # Before the payload read, not after: a desynchronised uplink offers
-            # a length of up to 4 GiB, and waiting for that many bytes is a hang
-            # rather than the loud error this format promises.
-            frame.check_header(kind, length)
-            payload = await reader.readexactly(length) if length else b""
+            kind, payload = await read_uplink_frame(reader)
             if kind == frame.TALK_START:
                 if session.replies or session.ended.is_set():
                     session = await renew(session, options, down)
@@ -709,7 +738,15 @@ async def self_test(options):
         pcm = handle.read()
 
     class Sink:
-        """Stands in for the client, counting reply audio and timing its arrival."""
+        """Stands in for the client, counting reply audio and timing its arrival.
+
+        There is no connection here and no writer thread: this stamps its arrival
+        inline, in the same coroutine that decoded the model event. So the wire
+        hand-off Downlink times on the --serve path does not exist in this mode,
+        and the record below reports no figure for it rather than reporting one
+        that would be zero because of how this stub is built. The first_audio
+        figure it does report is the model event, which is real in both modes.
+        """
 
         def __init__(self):
             self.first = None
@@ -800,7 +837,6 @@ async def self_test(options):
         "tool_names": session.tool_names,
         "tool_use_s": since("tool_use"),
         "first_audio_s": since("first_audio"),
-        "first_audio_wire_s": since("first_audio_wire"),
         "reply_end_s": since("reply_end"),
         "reply_audio_seconds": round(sink.bytes / float(OUT_RATE * 2), 3),
         "answered": sink.bytes > 0,

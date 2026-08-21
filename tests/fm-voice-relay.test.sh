@@ -161,6 +161,55 @@ frame.check_header(frame.AUDIO, frame.MAX_PAYLOAD)
 PY
 pass "wire format round trips and rejects a desynchronised stream"
 
+# --- the relay's uplink ------------------------------------------------------
+#
+# The relay decodes the captain's frames on an asyncio stream, which frame.Reader
+# cannot drive, so the rule above has to be exercised on that path as well. The
+# failure mode it prevents is not a wrong answer, it is no answer: a relay that
+# reads the payload before it checks the length waits inside readexactly for up
+# to four gigabytes that will never arrive, while the captain sits in front of a
+# client that never replies. The timeout below is what tells those two apart.
+
+python3 - "$ROOT/bin" <<'PY' || fail "relay uplink"
+import asyncio, sys
+sys.path.insert(0, sys.argv[1])
+import importlib.util, pathlib
+spec = importlib.util.spec_from_file_location(
+    "relay", str(pathlib.Path(sys.argv[1]) / "fm-voice-relay.py"))
+relay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(relay)
+import fm_voice_frame as frame
+
+def check(cond, label):
+    if not cond:
+        sys.exit("uplink: " + label)
+
+async def read(raw):
+    reader = asyncio.StreamReader()
+    reader.feed_data(raw)
+    return await asyncio.wait_for(relay.read_uplink_frame(reader), timeout=5)
+
+audio = b"\x01\x02" * 8
+check(asyncio.run(read(frame.encode(frame.AUDIO, audio))) == (frame.AUDIO, audio),
+      "a frame carrying audio did not survive the uplink")
+check(asyncio.run(read(frame.encode(frame.TALK_END))) == (frame.TALK_END, b""),
+      "an empty control frame did not survive the uplink")
+
+# A header with nothing behind it. Refused on the header, this raises at once;
+# read first and checked later, it hangs, so a timeout here is the regression.
+for bad in (frame.HEADER.pack(frame.AUDIO, frame.MAX_PAYLOAD + 1),
+            b"\xff\x00\x00\x10\x00"):
+    try:
+        asyncio.run(read(bad))
+        sys.exit("uplink: accepted a bad header: %r" % bad)
+    except frame.FrameError:
+        pass
+    except (asyncio.TimeoutError, TimeoutError):
+        sys.exit("uplink: waited for the payload of a bad header instead of "
+                 "refusing it: %r" % bad)
+PY
+pass "the relay refuses a desynchronised uplink header instead of waiting for its payload"
+
 # --- the tool surface the two sides share -----------------------------------
 #
 # The relay declares the tools and fm_voice_records implements them. Renaming one
@@ -205,7 +254,7 @@ pass "the relay and the reader agree on the tool names and the handover argument
 # Nothing here talks to AWS; the resolver is replaced with a counter.
 
 python3 - "$ROOT/bin" <<'PY' || fail "credential reuse"
-import asyncio, sys, time
+import asyncio, datetime, sys, time
 sys.path.insert(0, sys.argv[1])
 import importlib.util, pathlib
 spec = importlib.util.spec_from_file_location(
@@ -218,13 +267,19 @@ def check(cond, label):
         sys.exit("credentials: " + label)
 
 calls = []
-expiry = [None]
+stamp = [""]
 delay = [0.0]
 
+def iso(at):
+    return datetime.datetime.fromtimestamp(at, datetime.timezone.utc).isoformat()
+
 def fake(profile, verbose=False):
+    # Whatever the profile says about expiry reaches the cache through the real
+    # parser, so the fixture hands it a stamp rather than a decided answer.
     calls.append(profile)
     time.sleep(delay[0])
-    return {"aws_access_key_id": "AK%d" % len(calls)}, expiry[0]
+    return ({"aws_access_key_id": "AK%d" % len(calls)},
+            relay._expires_at(stamp[0]))
 
 relay.resolve_credentials = fake
 
@@ -246,16 +301,44 @@ check(asyncio.run(take(cache, 1))[0]["aws_access_key_id"] == "AK1",
 # Credentials with an expiry are refreshed ahead of it, because a relay left
 # running outlives them and a dead credential is a dead session.
 del calls[:]
-expiry[0] = time.time() + relay.Credentials.REFRESH_MARGIN - 1
+stamp[0] = iso(time.time() + relay.Credentials.REFRESH_MARGIN - 1)
 cache = relay.Credentials("a-profile")
 asyncio.run(take(cache, 2))
 check(len(calls) == 2,
       "credentials near expiry should be refreshed, resolved %d times" % len(calls))
 
+# An expiry this interpreter cannot read is NOT an expiry that never comes. The
+# credential works, its deadline does not, so it is held for the same margin and
+# no longer. Read as "never expires" it would be cached past the real deadline
+# and every session from then on would fail to start with no way back.
+class Bounded(relay.Credentials):
+    REFRESH_MARGIN = 0.05
+
+del calls[:]
+stamp[0] = "expires some time on Tuesday"
+cache = Bounded("a-profile")
+asyncio.run(take(cache, 2))
+check(len(calls) == 1,
+      "an unreadable expiry should still be reused within the margin: %d" % len(calls))
+time.sleep(0.1)
+asyncio.run(take(cache, 1))
+check(len(calls) == 2,
+      "an unreadable expiry must not be cached for the life of the relay")
+
+# An absent expiry keeps meaning what it says: this credential does not expire.
+del calls[:]
+stamp[0] = ""
+cache = Bounded("a-profile")
+asyncio.run(take(cache, 1))
+time.sleep(0.1)
+asyncio.run(take(cache, 1))
+check(len(calls) == 1,
+      "a credential with no expiry should not be resolved again: %d" % len(calls))
+
 # Whenever a resolution does happen it must stay off the event loop, or the
 # relay stops reading the captain's audio for as long as it takes.
 del calls[:]
-expiry[0] = None
+stamp[0] = ""
 delay[0] = 0.3
 
 async def resolve_while_the_loop_runs():
@@ -306,6 +389,23 @@ check(client.parse_args(["--host", "h"]).listen == client.PUSH_TO_TALK,
       "push to talk must be the default")
 check(client.parse_args(["--host", "h", "--listen", "open-mic"]).listen
       == client.OPEN_MIC, "open mic must be selectable")
+
+# The audio devices themselves cannot be reached from here, but their SELECTOR
+# can be, and it is typed: sounddevice reads an int as an index into its device
+# list and a str as a name to match, so an index left as text is looked up as a
+# device literally called "3" and raises on the captain's first live run.
+picked = client.parse_args(["--host", "h", "--input-device", "3",
+                            "--output-device", "External Headphones"])
+check(picked.input_device == 3 and not isinstance(picked.input_device, str),
+      "a numeric device must arrive as an index: %r" % picked.input_device)
+check(picked.output_device == "External Headphones",
+      "a named device must stay a name: %r" % picked.output_device)
+check(client.parse_args(
+          ["--host", "h", "--input-device", "2 - Built-in Microphone"]
+      ).input_device == "2 - Built-in Microphone",
+      "a device name that begins with a digit must stay a name")
+check(client.parse_args(["--host", "h"]).input_device is None,
+      "no device flag must stay unset, so sounddevice picks the default")
 
 # Over SSH: no pty, or the audio stream is silently rewritten.
 argv = client.relay_command(client.parse_args(["--host", "desk"]))
@@ -560,7 +660,37 @@ assert_present "$HOME_FIXTURE/state/.wake-queue" \
   "handover should wake firstmate"
 wakes=$(grep -c 'inbox:' "$HOME_FIXTURE/state/.wake-queue")
 [ "$wakes" = 1 ] || fail "handover should append exactly one wake, found $wakes"
+
+# The reading half must see what the queueing half just wrote, or the agent says
+# the request is queued and then, asked what is waiting, says nothing is.
+paired=$(records_status --scope counts) || fail "status after a handover failed"
+assert_contains "$paired" '"captain_notes_waiting": 1' \
+  "the reader should count the note the handover just queued"
 pass "handover queues the request for firstmate and wakes it exactly once"
+
+# The same pairing when the state directory is moved. bin/fm-inbox.sh resolves
+# ${FM_STATE_OVERRIDE:-$FM_HOME/state} and the handover queues through it with
+# the ambient environment, so a reader that ignored the override would count
+# notes in a directory nothing writes to.
+alt_state="$TMP_ROOT/state-elsewhere"
+alt_home="$TMP_ROOT/override-home"
+mkdir -p "$alt_state" "$alt_home/data" "$alt_home/state"
+FM_STATE_OVERRIDE="$alt_state" python3 "$ROOT/bin/fm_voice_records.py" queue \
+  "Chase the flaky retry test" --home "$alt_home" >/dev/null \
+  || fail "handover with an overridden state directory failed"
+
+moved=$(find "$alt_state/inbox" -maxdepth 1 -name '*.note' | wc -l)
+[ "$moved" = 1 ] || \
+  fail "the queue should write into the overridden state directory, found $moved"
+[ ! -e "$alt_home/state/inbox" ] || \
+  fail "the queue should not have written under the home when the state is moved"
+
+overridden=$(FM_STATE_OVERRIDE="$alt_state" python3 \
+  "$ROOT/bin/fm_voice_records.py" status --home "$alt_home") \
+  || fail "status with an overridden state directory failed"
+assert_contains "$overridden" '"captain_notes_waiting": 1' \
+  "the reader must count notes where the queue actually wrote them"
+pass "the reader and the queue resolve the state directory the same way"
 
 set +e
 empty_out=$(python3 "$ROOT/bin/fm_voice_records.py" queue "   " \

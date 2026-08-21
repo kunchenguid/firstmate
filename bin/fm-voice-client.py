@@ -686,6 +686,17 @@ class Client:
         return rc
 
 
+def device_selector(value):
+    """Return a sounddevice device: an index when the value is digits, a name otherwise.
+
+    sounddevice reads an int as an index into its device list and a str as a
+    substring to match against device names, so an index left as text is looked
+    up as a device literally called "3" and raises. docs/voice-relay.md tells the
+    captain these flags take a name or an index, so both have to arrive typed.
+    """
+    return int(value) if value.strip().isdigit() else value
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(
         prog="fm-voice-client.py", add_help=True,
@@ -702,8 +713,8 @@ def parse_args(argv):
     parser.add_argument("--talk-seconds", type=float)
     parser.add_argument("--in-file")
     parser.add_argument("--out-file")
-    parser.add_argument("--input-device")
-    parser.add_argument("--output-device")
+    parser.add_argument("--input-device", type=device_selector)
+    parser.add_argument("--output-device", type=device_selector)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--wait-for-reply", action=argparse.BooleanOptionalAction,
                         default=True,
