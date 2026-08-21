@@ -982,6 +982,141 @@ fm_failure_episode_reset() {
   return 0
 }
 
+# --- Claude Stop auto-arm claim abandonment ----------------------------------
+# Both Stop-event participants (bin/fm-claude-stop-autoarm.sh and
+# bin/fm-turnend-guard.sh --claude) stand down for whoever holds the auto-arm's
+# single-flight owner lock, on the premise that a live holder is still deciding
+# supervision. A holder that has already FINISHED that decision but never
+# released the lock turns the courtesy into indefinite silence: every later
+# async firing exits at the lock, the epoch ledger freezes at its last outcome,
+# and each following turn end allows a blind stop while nothing re-arms the
+# watcher. Observed 2026-08-14: one delivered rewake, then a beacon that went
+# 40 minutes without a beat, no watcher lock at all, two workers in flight, and
+# both of their reports unread until an operator drained the queue by hand.
+#
+# One abandonment proof is the ledger, not pid liveness, because both ways a
+# finished claim keeps a live pid - reuse of the recorded pid, and a hook still
+# blocked writing its rewake banner - look alive:
+#
+#   1. the owner lock exists and carries the auto-arm role,
+#   2. its recorded pid is numeric,
+#   3. the ledger's owner_pid is exactly that pid, and
+#   4. the ledger's outcome is present and is not "arming".
+#
+# Condition 3 is what makes reclaiming race-free. A fresh claimant creates the
+# lock BEFORE it writes "arming", so until it does the ledger still names the
+# PREVIOUS owner and the two pids cannot match; a just-started claim is never
+# mistaken for an abandoned one. Condition 4 treats "arming" as in progress no
+# matter how old, because the owner foregrounds fm-watch-arm.sh for the whole
+# watcher cycle, which legitimately runs for hours.
+#
+# The ledger alone cannot prove every abandonment, though: an entry still reading
+# "arming", or no entry at all, says nothing about a recorded pid the operating
+# system has since handed to an unrelated live process - the same lapse, reached
+# when a session teardown kills a claim's whole process group before it can record
+# any outcome or run its release trap. So the claim also records the pid-identity
+# every other supervision lock in this repo records (fm_pid_identity above, used by
+# state/.watch.lock, the supervise-daemon lock, and the AFK launch lock), and a
+# recorded identity that no longer matches the live pid is abandonment on its own,
+# whatever the ledger says. That identity is written BEFORE the auto-arm role is
+# published, and every participant requires that role first, so a claim that is
+# genuinely mid-flight is never read as identity-less. A claim carrying no recorded
+# identity at all (an older build, a hand-edited lock) keeps exactly the
+# ledger-only reasoning above, and an identity that cannot be recomputed for the
+# live pid proves nothing either way, so it falls through to the ledger too.
+_fm_autoarm_epoch_field() {  # <epoch-file> <field>
+  local file=$1 field=$2 tok
+  local -a toks=()
+  [ -r "$file" ] || return 1
+  # 2> before <: a failed input redirection reports through whatever stderr is
+  # current when it runs, so the suppression has to be established first.
+  IFS=' ' read -r -a toks 2>/dev/null < "$file" || return 1
+  for tok in ${toks[@]+"${toks[@]}"}; do
+    case "$tok" in
+      "$field="?*) printf '%s\n' "${tok#*=}"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Record the claiming process's pid-identity inside the auto-arm owner lock, the
+# way every other supervision lock in this repo records it. Best effort by design:
+# a platform where fm_pid_identity cannot answer keeps the ledger-only reasoning
+# rather than losing the claim, and a record that cannot be completed leaves NO
+# identity file behind, so a partial write can never read as a mismatch against
+# its own live owner. Call it before publishing the auto-arm role.
+fm_autoarm_claim_record_identity() {  # <state-dir>
+  local state=$1 lock pid held identity back
+  lock="$state/.claude-autoarm.lock"
+  # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside the
+  # command substitution below would resolve it in that subshell, recording the
+  # identity of a process that exits immediately and leaving every later reader
+  # with a permanent mismatch against the real owner.
+  pid=${BASHPID:-$$}
+  # The identity must describe the pid the lock publishes, so record it only for a
+  # lock this process actually holds (the same ownership test as fm_lock_set_role).
+  held=$(cat "$lock/pid" 2>/dev/null || true)
+  [ "$held" = "$pid" ] || return 1
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$identity" ] || return 1
+  if ! printf '%s\n' "$identity" > "$lock/pid-identity" 2>/dev/null; then
+    rm -f "$lock/pid-identity" 2>/dev/null || true
+    return 1
+  fi
+  back=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  if [ "$back" != "$identity" ]; then
+    rm -f "$lock/pid-identity" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+fm_autoarm_claim_abandoned() {  # <state-dir>
+  local state=$1 epoch lock role pid owner outcome recorded current
+  lock="$state/.claude-autoarm.lock"
+  epoch="$state/.claude-autoarm-epoch"
+  [ -e "$lock" ] || [ -L "$lock" ] || return 1
+  role=$(fm_lock_role "$lock")
+  [ "$role" = autoarm ] || return 1
+  pid=$(cat "$lock/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  recorded=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  if [ -n "$recorded" ] && current=$(fm_pid_identity "$pid" 2>/dev/null) \
+    && [ -n "$current" ] && [ "$current" != "$recorded" ]; then
+    return 0
+  fi
+  owner=$(_fm_autoarm_epoch_field "$epoch" owner_pid) || return 1
+  [ "$owner" = "$pid" ] || return 1
+  outcome=$(_fm_autoarm_epoch_field "$epoch" outcome) || return 1
+  case "$outcome" in
+    ''|arming) return 1 ;;
+  esac
+  return 0
+}
+
+# Remove a proven-abandoned auto-arm claim so the next claimant can arm.
+# The proof is re-verified while holding the lock's steal mutex, which is the
+# same serialization fm_lock_try_acquire uses for stale-owner reclaim: while it
+# is held no other process can publish the primary lock, so the window between
+# proving abandonment and removing the lock cannot swallow a genuine new claim.
+fm_autoarm_release_abandoned() {  # <state-dir>
+  local state=$1 lock steal
+  lock="$state/.claude-autoarm.lock"
+  steal="$lock.steal"
+  fm_autoarm_claim_abandoned "$state" || return 1
+  fm_lock_try_acquire "$steal" || return 1
+  if ! fm_autoarm_claim_abandoned "$state"; then
+    fm_lock_release "$steal"
+    return 1
+  fi
+  fm_lock_remove_path "$lock" || true
+  fm_lock_release "$steal"
+  [ -e "$lock" ] || [ -L "$lock" ] || return 0
+  return 1
+}
+
 fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
