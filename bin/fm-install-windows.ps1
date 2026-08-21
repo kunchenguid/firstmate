@@ -46,39 +46,106 @@ function Assert-Command {
     }
 }
 
+function Get-CommandVersion {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Command
+    )
+
+    switch ($Command) {
+        "shellcheck" {
+            $versionOutput = & $Command "--version"
+            if ($LASTEXITCODE -ne 0) {
+                throw "$Command --version failed with exit code $LASTEXITCODE."
+            }
+
+            $versionLine = $versionOutput |
+                Where-Object { $_ -match "^version:\s*" } |
+                Select-Object -First 1
+            if (-not $versionLine) {
+                throw "Could not determine the installed $Command version."
+            }
+
+            return ($versionLine -replace "^version:\s*", "").Trim()
+        }
+        "actionlint" {
+            $versionOutput = & $Command "-version"
+            if ($LASTEXITCODE -ne 0) {
+                throw "$Command -version failed with exit code $LASTEXITCODE."
+            }
+
+            return ($versionOutput | Select-Object -First 1).Trim()
+        }
+        default {
+            throw "No version probe is defined for $Command."
+        }
+    }
+}
+
 function Install-WingetCommand {
     param(
         [Parameter(Mandatory)]
         [string]$PackageId,
 
         [Parameter(Mandatory)]
-        [string]$Command
+        [string]$Command,
+
+        [string]$Version
     )
 
     Refresh-ProcessPath
+    $forceVersionInstall = $false
     if (Get-Command $Command -ErrorAction SilentlyContinue) {
-        Write-Host "$Command is already installed."
-        return
+        if (-not $Version) {
+            Write-Host "$Command is already installed."
+            return
+        }
+
+        $installedVersion = Get-CommandVersion $Command
+        if ($installedVersion -eq $Version) {
+            Write-Host "$Command $Version is already installed."
+            return
+        }
+
+        Write-Host "Replacing $Command $installedVersion with required version $Version."
+        $forceVersionInstall = $true
     }
 
-    & winget `
-        "install" `
-        "--id" $PackageId `
-        "--exact" `
-        "--accept-package-agreements" `
+    $wingetArguments = @(
+        "install"
+        "--id"
+        $PackageId
+        "--exact"
+    )
+    if ($Version) {
+        $wingetArguments += @("--version", $Version)
+    }
+    if ($forceVersionInstall) {
+        $wingetArguments += "--force"
+    }
+    $wingetArguments += @(
+        "--accept-package-agreements"
         "--accept-source-agreements"
+    )
+
+    & winget @wingetArguments
     $wingetExitCode = $LASTEXITCODE
 
     Refresh-ProcessPath
-    if (Get-Command $Command -ErrorAction SilentlyContinue) {
-        return
+    if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
+        if ($wingetExitCode -ne 0) {
+            throw "winget failed to make $Command available on PATH (exit code $wingetExitCode)."
+        }
+
+        Assert-Command $Command
     }
 
-    if ($wingetExitCode -ne 0) {
-        throw "winget failed to make $Command available on PATH (exit code $wingetExitCode)."
+    if ($Version) {
+        $installedVersion = Get-CommandVersion $Command
+        if ($installedVersion -ne $Version) {
+            throw "$Command $Version is required, but version $installedVersion is first on PATH."
+        }
     }
-
-    Assert-Command $Command
 }
 
 function Install-RemoteScriptCommand {
@@ -151,6 +218,8 @@ if ($env:OS -ne "Windows_NT") {
 Assert-Command "winget"
 
 Install-WingetCommand "jqlang.jq" "jq"
+Install-WingetCommand "koalaman.shellcheck" "shellcheck" "0.11.0"
+Install-WingetCommand "rhysd.actionlint" "actionlint" "1.7.12"
 Install-WingetCommand "OpenJS.NodeJS.LTS" "node"
 Assert-Command "npm"
 
