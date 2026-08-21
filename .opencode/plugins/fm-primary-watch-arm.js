@@ -184,7 +184,7 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
   }
 }
 
-async function sendPrompt(paths, client, sessionID, text, recovery) {
+async function sendPrompt(paths, client, sessionID, text) {
   const encoded = await encodeFirstmateOperationalInput(paths.root, "watcher", text);
   await client.session.promptAsync({
     path: { id: sessionID },
@@ -192,17 +192,56 @@ async function sendPrompt(paths, client, sessionID, text, recovery) {
       parts: [{ type: "text", text: encoded }],
     },
   });
-  if (recovery) {
+}
+
+function confirmHandlingDelivery(paths, recovery) {
+  try {
     const result = spawnSync(
       "bash",
       [`${paths.root}/bin/fm-watch-arm.sh`, "--handling-delivered", recovery.generation, "--watcher-pid", recovery.watcherPid],
       {
         cwd: paths.root,
+        encoding: "utf8",
         env: { ...process.env, FM_HOME: paths.home, FM_STATE_OVERRIDE: paths.state, FM_ROOT_OVERRIDE: paths.root },
       },
     );
-    if (result.status !== 0) throw new Error("watcher recovery delivery could not be confirmed");
+    if (result.status === 0) return { ok: true, detail: "" };
+    const stderr = String(result.stderr || "").trim();
+    return {
+      ok: false,
+      detail: `watcher: FAILED - handling delivery confirmation was rejected (status=${result.status ?? "none"} generation=${recovery.generation} watcherPid=${recovery.watcherPid})${stderr ? `\n${stderr}` : ""}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: `watcher: FAILED - handling delivery confirmation could not be executed (generation=${recovery.generation} watcherPid=${recovery.watcherPid})\n${String(error?.message ?? error)}`,
+    };
   }
+}
+
+function confirmHandlingDeliveryWithRetry(paths, recovery) {
+  const snapshot = () => armRecovery.get(child) ?? recovery;
+  const first = confirmHandlingDelivery(paths, snapshot());
+  if (first.ok) return first;
+  return confirmHandlingDelivery(paths, snapshot());
+}
+
+async function deliverActionableWake(paths, client, sessionID, message, recovery) {
+  if (recovery) {
+    const confirmed = confirmHandlingDeliveryWithRetry(paths, recovery);
+    if (!confirmed.ok) {
+      if (recovery.watcherPid) {
+        try {
+          process.kill(Number(recovery.watcherPid), 0);
+        } catch {
+          await retireArm(child);
+        }
+      }
+      await sendPrompt(paths, client, sessionID, wakePrompt(`${message}\n\n${confirmed.detail}`));
+      return;
+    }
+  }
+  await sendPrompt(paths, client, sessionID, wakePrompt(message));
 }
 
 function wakePrompt(reason) {
@@ -211,6 +250,7 @@ function wakePrompt(reason) {
 
 function surfaceFailure(paths, client, sessionID, reason) {
   void sendPrompt(paths, client, sessionID, wakePrompt(reason)).catch(() => {
+    // OpenCode owns delivery errors; continuity restoration never waits on prompting.
   });
 }
 
@@ -353,18 +393,26 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
     const predecessor = String(armChild.pid ?? "");
     if (classification.kind === "actionable") {
+      if (restorationInFlight) return;
       retryFailures = 0;
       setArmStatus("wake");
-      const previousRestoration = restorationInFlight;
-      const restoration = previousRestoration
-        ? previousRestoration.catch(() => "").then(() => restoreAfterActionableClose(paths, sessionID, client, predecessor))
-        : restoreAfterActionableClose(paths, sessionID, client, predecessor);
+      const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
       restorationInFlight = restoration;
-      void restoration.then((result) => {
+      void restoration.then(async (result) => {
+        try {
+          const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
+          await deliverActionableWake(paths, client, sessionID, message, result.recovery);
+        } finally {
+          if (restorationInFlight === restoration) restorationInFlight = null;
+        }
+      }).catch((error) => {
         if (restorationInFlight === restoration) restorationInFlight = null;
-        const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
-        return sendPrompt(paths, client, sessionID, wakePrompt(message), result.recovery);
-      }).catch(() => {
+        surfaceFailure(
+          paths,
+          client,
+          sessionID,
+          `watcher: FAILED - OpenCode could not deliver an actionable wake\n${String(error?.message ?? error)}`,
+        );
       });
       return;
     }

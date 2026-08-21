@@ -129,6 +129,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/captain-hold-lifecycle/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -197,6 +201,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "GROK_BOT.md",
+      "audience": "public-product"
+    },
+    {
       "path": "README.md",
       "audience": "public-product"
     },
@@ -241,7 +249,7 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/decision-hold-lifecycle.md",
+      "path": "docs/captain-hold-lifecycle.md",
       "audience": "maintainer-architecture"
     },
     {
