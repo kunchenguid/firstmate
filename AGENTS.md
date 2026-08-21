@@ -394,12 +394,19 @@ After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD S
 A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
 A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed.
 
+Routine fleet pickup and `heartbeat:` handling begin with `bin/fm-fleet-snapshot.sh --json` for structured fleet truth; use `bin/fm-bearings-snapshot.sh` only for its existing compact projection use cases.
+After that bounded view, reconcile live current state only for tasks named by an actionable notification or made suspicious by the view; never bulk reread every task's status, metadata, report, or chat.
+Historical status events are hints only and never override `bin/fm-crew-state.sh <id>` when current state matters.
+Omitted, truncated, unavailable, contradictory, or malformed bounded data requires targeted expansion for the affected task; it never authorizes completion, merge, cleanup, discard, decision closure, or silencing a decision.
+Durable acknowledgement and presentation contracts make duplicate notifications idempotent; when they have already handled a notification, do not repeat captain-facing updates or task actions.
+Report-open behavior remains unchanged; pointer-first report handling belongs to Phase 3b.
+
 Handle actionable wakes as follows:
 
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
 3. For `check:`, act on the named poll result, including merges, Relay events, and process-to-event source results.
-4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
+4. For `heartbeat:`, apply the bounded fleet-handling contract, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
 When Relay-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, use its promised-final reconciliation when a typed public commitment exists, otherwise post the final completion follow-up so the link clears even if earlier follow-ups were spent.
