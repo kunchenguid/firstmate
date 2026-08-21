@@ -258,7 +258,7 @@ cmd_update() {
     'firstmate: updated '*|'firstmate: already current'*) ;;
     *)
       [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
-      die "remote code root did not complete a safe origin update"
+      die "remote code root did not complete a safe update"
       ;;
   esac
   cmd_sync "$id"

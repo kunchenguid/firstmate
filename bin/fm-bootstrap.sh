@@ -22,7 +22,7 @@
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
-#          purely local fast-forward and never an origin fetch. Remote routes
+#          purely local fast-forward and never a remote fetch. Remote routes
 #          instead converge the persistent home to their configured remote code
 #          root. If either placement changes its loaded instruction surface
 #          (AGENTS.md, bin/, or .agents/skills/), bootstrap immediately nudges it
@@ -274,7 +274,7 @@ secondmate_sync() {
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   # Placement-specific secondmate sync: local homes fast-forward to the primary
   # checkout's current default-branch commit. That path is purely LOCAL - no
-  # fetch, no origin dependency: a linked-worktree home already holds the primary's
+  # fetch, no remote dependency: a linked-worktree home already holds the primary's
   # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
   # /updatefirstmate refreshes it from its configured upstream. Startup sends
   # reread nudges only for RUNNING secondmates whose instruction surface
