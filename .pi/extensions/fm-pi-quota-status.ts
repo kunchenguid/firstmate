@@ -1460,6 +1460,25 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.process = null;
     }
 
+    function publishRefreshFailure(
+      session: ActiveSession,
+      failureReason: QuotaFailureReason,
+      provider: string,
+    ): void {
+      const cached = cachedQuotaView(session, now());
+      const recoverable = recoverableFreshView(session.quota?.view ?? null);
+      session.lastFailure = failureReason;
+      if (cached?.kind === "fresh" && session.quota) {
+        session.quota.view = { ...cached, refreshFailure: failureReason };
+        render(session);
+      } else if (recoverable) {
+        render(session);
+      } else {
+        session.quota = null;
+        render(session, processFailureView(failureReason, provider));
+      }
+    }
+
     async function refresh(session: ActiveSession): Promise<void> {
       if (active !== session) return;
       if (!session.credentialMonitoringAvailable) {
@@ -1592,7 +1611,6 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
 
         const completedProvider = completedTarget.piProvider;
         if (result.kind === "ok") {
-          session.lastFailure = null;
           const report = parseQuotaAxiJson(result.stdout, {
             projection: "full",
             expectedProvider: quotaProvider,
@@ -1600,15 +1618,23 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           const selected = report
             ? selectTargetReport(report, completedTarget, now())
             : { kind: "malformed", provider: completedProvider } as const;
-          session.quota = {
-            view: selected,
-            piProvider: completedProvider,
-            credentialRevision: completedTarget.credentialRevision,
-            modelRevision: completedTarget.modelRevision,
-            compositionRevision: completedTarget.compositionRevision,
-            endpointRevision: completedTarget.endpointRevision,
-          };
-          render(session);
+          const staleFailure = selected.kind === "stale" && report
+            ? quotaFailureReasonFromReport(report, completedProvider)
+            : null;
+          if (staleFailure) {
+            publishRefreshFailure(session, staleFailure, completedProvider);
+          } else {
+            session.lastFailure = null;
+            session.quota = {
+              view: selected,
+              piProvider: completedProvider,
+              credentialRevision: completedTarget.credentialRevision,
+              modelRevision: completedTarget.modelRevision,
+              compositionRevision: completedTarget.compositionRevision,
+              endpointRevision: completedTarget.endpointRevision,
+            };
+            render(session);
+          }
         } else if (result.kind !== "cancelled") {
           const failedReport = result.kind === "failed" && result.stdout
             ? parseQuotaAxiJson(result.stdout, {
@@ -1619,18 +1645,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           const failureReason = failedReport
             ? quotaFailureReasonFromReport(failedReport, completedProvider) ?? result.kind
             : result.kind;
-          const cached = cachedQuotaView(session, now());
-          const recoverable = recoverableFreshView(session.quota?.view ?? null);
-          session.lastFailure = failureReason;
-          if (cached?.kind === "fresh" && session.quota) {
-            session.quota.view = { ...cached, refreshFailure: failureReason };
-            render(session);
-          } else if (recoverable) {
-            render(session);
-          } else {
-            session.quota = null;
-            render(session, processFailureView(failureReason, completedProvider));
-          }
+          publishRefreshFailure(session, failureReason, completedProvider);
         }
       } finally {
         if (session.operationAbort === operationAbort) session.operationAbort = null;

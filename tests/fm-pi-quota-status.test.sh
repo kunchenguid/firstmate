@@ -112,6 +112,11 @@ case "$mode" in
     FM_QUOTA_TEST_STALE=1 FM_QUOTA_TEST_FULL=$full FM_QUOTA_TEST_PROVIDER=$provider \
       exec node "${FM_QUOTA_TEST_FIXTURE:?}"
     ;;
+  stale_timeout)
+    FM_QUOTA_TEST_STALE_FAILURE='Codex quota request timed out' \
+      FM_QUOTA_TEST_FULL=$full FM_QUOTA_TEST_PROVIDER=$provider \
+      exec node "${FM_QUOTA_TEST_FIXTURE:?}"
+    ;;
   success)
     FM_QUOTA_TEST_FULL=$full FM_QUOTA_TEST_PROVIDER=$provider \
       exec node "${FM_QUOTA_TEST_FIXTURE:?}"
@@ -493,6 +498,44 @@ if (process.env.FM_QUOTA_TEST_FAILURE) {
       stale: false,
       error: process.env.FM_QUOTA_TEST_FAILURE,
       sourcesTried: entry.attempts.map(({ source }) => source),
+    };
+  }
+}
+if (process.env.FM_QUOTA_TEST_STALE_FAILURE) {
+  for (const entry of providers) {
+    const staleFailure = process.env.FM_QUOTA_TEST_STALE_FAILURE;
+    const semantics = entry.quotaSemantics;
+    entry.source = "cache";
+    entry.windows = entry.windows.map((window) => ({
+      ...window,
+      pace: { status: "unknown", reason: "stale" },
+    }));
+    entry.quotaSemantics = {
+      status: semantics.status === "partial" ? "partial" : "unknown",
+      description: "Cached quota windows are stale diagnostics.",
+      effectiveAvailability: semantics.effectiveAvailability.map(({ scope, boundedBy }) => ({
+        scope,
+        status: "unknown",
+        boundedBy,
+        pace: { status: "unknown", unknownWindowIds: boundedBy },
+        runway: { status: "unknown", unmeasurableWindowIds: boundedBy },
+        selection: { status: "unknown", unmeasurableWindowIds: boundedBy },
+      })),
+      ...(semantics.unresolvedWindowIds
+        ? { unresolvedWindowIds: semantics.unresolvedWindowIds }
+        : {}),
+    };
+    entry.attempts = entry.attempts.map((attempt) => ({
+      source: attempt.source,
+      status: "failed",
+      error: staleFailure,
+    }));
+    entry.state = {
+      status: "stale",
+      stale: true,
+      refreshedAt: process.env.FM_QUOTA_TEST_STALE_REFRESHED_AT || entry.state.refreshedAt,
+      error: staleFailure,
+      sourcesTried: [...new Set([...entry.attempts.map(({ source }) => source), "cache"])],
     };
   }
 }
@@ -1526,6 +1569,8 @@ const failedFreshSourceAttempt = structuredClone(fullyPopulated);
 failedFreshSourceAttempt.providers[1].attempts[0].status = "failed";
 const inconsistentSourcesTried = structuredClone(fullyPopulated);
 inconsistentSourcesTried.providers[1].state.sourcesTried = ["cli-rpc"];
+const untrustedDisplayedWindow = structuredClone(fullyPopulated);
+untrustedDisplayedWindow.providers[1].state.untrustedWindowIds = ["weekly"];
 const falseUnknownSelectionParsed = parseQuotaAxiJson(
   JSON.stringify(falseUnknownSelection),
   { projection: "full" },
@@ -1583,6 +1628,7 @@ for (const [malformedReport, description] of [
   [missingFullAttempts, "full provider without source attempts"],
   [failedFreshSourceAttempt, "fresh source without a successful attempt"],
   [inconsistentSourcesTried, "state sources detached from ordered attempts"],
+  [untrustedDisplayedWindow, "displayed window marked untrusted"],
 ]) {
   const structurallyParsed = parseQuotaAxiJson(JSON.stringify(malformedReport));
   assert(structurallyParsed, `${description} fixture should remain structurally parseable`);
@@ -2694,6 +2740,48 @@ await independentlyExpiring.emit("session_shutdown", { reason: "quit" });
 assert(siblingClock.tasks.size === 0, "independent window expiry leaked a timer");
 delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
 delete process.env.FM_QUOTA_TEST_NOW_MS;
+
+const staleFallbackStart = Date.now();
+const staleFallbackClock = new FakeClock(staleFallbackStart);
+process.env.FM_QUOTA_TEST_NOW_MS = String(staleFallbackStart);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  staleFallbackStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const staleFallback = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => staleFallbackClock.nowMs,
+  timers: staleFallbackClock.timers,
+}));
+await staleFallback.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => staleFallback.widgetText(400).includes("week 94% left"),
+  "stale-fallback fixture did not publish fresh quota",
+);
+process.env.FM_QUOTA_TEST_STALE_REFRESHED_AT = new Date(staleFallbackStart).toISOString();
+process.env.FM_QUOTA_TEST_NOW_MS = String(staleFallbackStart + 5 * 60 * 1000);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "stale_timeout\n");
+staleFallbackClock.advance(5 * 60 * 1000);
+await waitFor(
+  () => staleFallback.widgetText(400).includes("quota-axi timed out"),
+  `stale fallback did not expose its timeout: ${staleFallback.widgetText(400)}`,
+);
+assert(
+  staleFallback.widgetText(400).includes("week 94% left"),
+  "stale fallback discarded independently fresh cached quota",
+);
+staleFallbackClock.advance(60 * 1000);
+assert(staleFallback.widgetText(400).includes("quota-axi timed out"), "cached expiry hid the stale-fallback timeout");
+assert(!staleFallback.widgetText(400).includes("94%"), "cached quota survived its independent freshness deadline");
+await staleFallback.emit("session_shutdown", { reason: "quit" });
+assert(staleFallbackClock.tasks.size === 0, "stale-fallback shutdown leaked a timer");
+delete process.env.FM_QUOTA_TEST_STALE_REFRESHED_AT;
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
 
 const fakeStart = Date.now();
 const fakeClock = new FakeClock(fakeStart);

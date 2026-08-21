@@ -1380,6 +1380,8 @@ function validProviderFields(
   const untrustedWindowIds = isRecord(value.state) && Array.isArray(value.state.untrustedWindowIds)
     ? value.state.untrustedWindowIds as string[]
     : [];
+  const parsedWindowIds = new Set((parsedWindows as QuotaWindowView[]).map((window) => window.id));
+  if (untrustedWindowIds.some((id) => parsedWindowIds.has(id))) return false;
   if (!validQuotaSemantics(
     value.quotaSemantics,
     requireFullFields,
@@ -1426,10 +1428,10 @@ export function quotaFailureReasonFromReport(
     !isRecord(rawProvider.state)
   ) return null;
   const status = exactEnum(rawProvider.state.status, QUOTA_PROVIDER_STATUSES);
-  if (!status || status === "fresh" || status === "stale") return null;
+  if (!status || status === "fresh") return null;
   const error = exactText(rawProvider.state.error);
   if (
-    (provider === "kimi" && error === "request_timeout") ||
+    (provider === "kimi" && (error === "request_timeout" || error === "provider_timeout")) ||
     (provider === "codex" && error === "Codex quota request timed out")
   ) return "timeout";
   return "failed";
