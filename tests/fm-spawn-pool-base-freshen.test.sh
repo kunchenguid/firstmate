@@ -6,6 +6,9 @@
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin/main tip or stops when origin is
 # unreachable.
+# A local-only project's clone can have no origin at all, so they also prove
+# such a clone freshens from its own default-branch tip and launches, without
+# weakening either the unreachable-origin or the dirty-worktree refusal.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -63,6 +66,35 @@ make_case() {
   git -C "$publisher" add advanced-main.txt
   git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
   git -C "$publisher" push --quiet origin "$default"
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
+}
+
+# A local-only project: one clone on this machine with no origin at all, whose
+# default branch advanced after the pooled worktree was allocated.
+make_local_only_case() {
+  local name=$1 id=$2 default=${3:-main} case_dir home project pool fakebin initial
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b "$default" "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  printf 'must survive a newly spawned branch\n' > "$project/advanced-main.txt"
+  git -C "$project" add advanced-main.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
 
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
@@ -227,11 +259,65 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+test_origin_less_pool_refreshes_from_its_own_default_branch() {
+  local rec id out status tip branch_head
+  id='pool-origin-less-r6'
+  rec=$(make_local_only_case origin-less "$id")
+  read_case_record "$rec"
+  [ -z "$(git -C "$POOL_DIR" remote)" ] || fail "fixture did not prove the clone has no origin"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should launch into a clone that has no origin"
+  assert_contains "$out" "spawned $id" "spawn did not report success without an origin"
+  tip=$(git -C "$POOL_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$branch_head" = "$tip" ] \
+    || fail "spawn did not start the worker at the origin-less clone's own default-branch tip"
+  [ "$branch_head" != "$INITIAL_SHA" ] \
+    || fail "fixture did not prove the clone's default branch advanced past the pool base"
+  assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-main.txt" \
+    "the origin-less spawn omitted the content committed after the pool was allocated"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed origin-less spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed origin-less base: HEAD=%s local-%s=%s remotes=[%s]\n' \
+      "$branch_head" "$DEFAULT_BRANCH" "$tip" "$(git -C "$POOL_DIR" remote | tr '\n' ' ')"
+  fi
+  pass "a clone with no origin freshens to its own default-branch tip and launches"
+}
+
+test_origin_less_dirty_pool_refuses_without_discarding_work() {
+  local rec id out status before
+  id='pool-origin-less-dirty-r6'
+  rec=$(make_local_only_case origin-less-dirty "$id")
+  read_case_record "$rec"
+  [ -z "$(git -C "$POOL_DIR" remote)" ] || fail "fixture did not prove the clone has no origin"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a dirty pooled worktree on the no-origin path"
+  assert_contains "$out" "is not clean" \
+    "spawn did not clearly refuse a dirty pooled worktree on the no-origin path"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a dirty origin-less pooled worktree"
+  assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
+    "spawn discarded uncommitted work while refusing an origin-less pool"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed origin-less dirty refusal: %s; preserved=%s\n' \
+      "$(printf '%s\n' "$out" | tail -n 1)" "$(cat "$POOL_DIR/uncommitted.txt")"
+  fi
+  pass "an origin-less pooled worktree with uncommitted work is refused without discarding it"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_origin_less_pool_refreshes_from_its_own_default_branch
+test_origin_less_dirty_pool_refuses_without_discarding_work
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
