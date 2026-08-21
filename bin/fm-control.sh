@@ -50,6 +50,9 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#              A map-dependent ship relaunch for a project that publishes
+#              bin/wayfinder-lifecycle-gate requires --wayfinder-state so
+#              fm-spawn can check handoff; a recorded map-independent task is exempt.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
