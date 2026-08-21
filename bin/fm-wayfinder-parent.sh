@@ -260,4 +260,4 @@ else
   rc=$?
 fi
 set -e
-exit "$rc"
+[ "$rc" -eq 0 ] || exit 2

@@ -29,18 +29,16 @@ When a Firstmate child names a Wayfinder ticket, Firstmate is the parent map own
 1. Keep a research scout read-only when its task requires that isolation.
    The scout's report plus captain-call completion is local input, not tracker resolution.
 2. Record tracker resolution yourself, using the consuming project's tracker contract.
-3. Before treating that child as Wayfinder-resolved or archiving it as such, run `bin/fm-wayfinder-parent.sh accept-child` against a GitHub snapshot that includes the child's local completion records.
-4. Before spawning or promoting map-dependent implementation, run `bin/fm-wayfinder-parent.sh handoff` the same way.
+3. Before treating that child as Wayfinder-resolved or archiving it as such, require `accept-child` to pass through Firstmate's public parent check.
+4. Before spawning or promoting map-dependent implementation, require `handoff` to pass through the same check.
 
-`bin/fm-wayfinder-parent.sh --help` owns flags, snapshot merging, and exit codes.
-Build the GitHub snapshot as that help describes; include local reports, captain-call completions, archives, and backlog rows so the project command can reject them as resolution.
+`bin/fm-wayfinder-parent.sh --help` owns commands, flags, snapshot merging, and exit codes.
 
 ## Dispatch enforcement
 
 A ship spawn, scout promotion, or map-dependent ship relaunch against a project that publishes `bin/wayfinder-lifecycle-gate` requires a passing `handoff` check.
-Pass `--wayfinder-state <snapshot>` to `bin/fm-spawn.sh` or `bin/fm-promote.sh`.
-Pass `--wayfinder-independent` only when the work does not depend on the Wayfinder map.
-A relaunch takes its fresh snapshot through `bin/fm-control.sh <task-id> relaunch --wayfinder-state <snapshot>`.
+Use the relevant public command's `--help` for Wayfinder invocation and snapshot mechanics.
+A map-independent exemption is appropriate only when the work does not depend on the Wayfinder map.
 A map-independent spawn or promotion records that exemption for later relaunches.
 A scout spawn stays off that handoff path so read-only research can still run.
 

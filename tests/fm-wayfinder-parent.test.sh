@@ -176,6 +176,16 @@ PY
   chmod +x "$project/bin/wayfinder-lifecycle-gate"
 }
 
+install_exit_one_gate() {
+  mkdir -p "$1/bin"
+  cat > "$1/bin/wayfinder-lifecycle-gate" <<'SH'
+#!/usr/bin/env bash
+echo "project gate rejected" >&2
+exit 1
+SH
+  chmod +x "$1/bin/wayfinder-lifecycle-gate"
+}
+
 empty_decisions() {
   cat <<'EOF'
 ## Destination
@@ -666,6 +676,24 @@ test_batch_reuses_stdin_wayfinder_snapshot() {
   pass "batch dispatch reuses a stdin Wayfinder snapshot for every same-project child"
 }
 
+test_parent_normalizes_project_gate_failure() {
+  local home project snap out rc
+  home=$(make_home gate-exit-one)
+  project=$(make_gated_project "$home" shop)
+  install_exit_one_gate "$project"
+  snap="$TMP_ROOT/gate-exit-one.json"
+  write_snapshot "$snap" resolved
+
+  set +e
+  out=$(run_parent "$home" handoff --project "$project" --state "$snap" 2>&1)
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "a project gate rejection must use the parent failure status"$'\n'"$out"
+  assert_contains "$out" "project gate rejected" \
+    "the parent check did not preserve project-gate rejection output"
+  pass "parent check normalizes a project gate rejection"
+}
+
 test_missing_project_command_is_loud() {
   local home project snap out rc
   home=$(make_home missing-gate)
@@ -689,4 +717,5 @@ test_complete_none_alone_remains_insufficient
 test_map_dependent_spawn_and_promote
 test_batch_refuses_foreign_wayfinder_snapshot
 test_batch_reuses_stdin_wayfinder_snapshot
+test_parent_normalizes_project_gate_failure
 test_missing_project_command_is_loud
