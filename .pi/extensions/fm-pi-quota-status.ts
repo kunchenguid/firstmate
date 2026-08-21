@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, watch, type FSWatcher } from "node:fs";
 import { open } from "node:fs/promises";
@@ -344,12 +344,13 @@ export type FirstmateQuotaStatusOptions = {
   width?: () => number;
   timers?: QuotaTimerScheduler;
   authFile?: string;
+  modelsFile?: string;
   watchAuthDirectory?: AuthDirectoryWatcher;
 };
 
 type ActiveModel = NonNullable<ExtensionContext["model"]>;
 
-type QuotaVerification = { kind: "account"; accountId: string | null };
+type QuotaVerification = { kind: "account"; accountId: string };
 
 type StoredOAuthCredential = {
   type: "oauth";
@@ -588,13 +589,60 @@ function activeAccountId(provider: string, apiKey: string | undefined): string |
 }
 
 function quotaVerification(provider: string, apiKey: string | undefined): QuotaVerification | null {
-  if (provider === "openai-codex") {
-    return { kind: "account", accountId: activeAccountId(provider, apiKey) };
-  }
-  return null;
+  if (provider !== "openai-codex") return null;
+  const accountId = activeAccountId(provider, apiKey);
+  return accountId ? { kind: "account", accountId } : null;
 }
 
-function killProcess(child: ChildProcess, processGroupId: number | null): void {
+function forceKillChild(child: ChildProcess): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    child.kill("SIGKILL");
+  } catch {
+  }
+}
+
+function killWindowsProcessTree(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null || !child.pid) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    let killer: ChildProcess | null = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = setTimeout(() => {
+      forceKillChild(killer ?? child);
+      forceKillChild(child);
+      finish();
+    }, WINDOWS_TREE_KILL_TIMEOUT_MS);
+    timeout.unref();
+    try {
+      killer = spawn(
+        "taskkill",
+        ["/PID", String(child.pid), "/T", "/F"],
+        { stdio: "ignore", windowsHide: true },
+      );
+      killer.once("error", () => {
+        forceKillChild(child);
+        finish();
+      });
+      killer.once("close", (code) => {
+        if (code !== 0) forceKillChild(child);
+        finish();
+      });
+    } catch {
+      forceKillChild(child);
+      finish();
+    }
+  });
+}
+
+async function killProcess(child: ChildProcess, processGroupId: number | null): Promise<void> {
   if (processGroupId !== null) {
     try {
       process.kill(-processGroupId, "SIGKILL");
@@ -603,25 +651,10 @@ function killProcess(child: ChildProcess, processGroupId: number | null): void {
     }
   }
   if (process.platform === "win32") {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    if (child.pid) {
-      const result = spawnSync(
-        "taskkill",
-        ["/PID", String(child.pid), "/T", "/F"],
-        {
-          stdio: "ignore",
-          windowsHide: true,
-          timeout: WINDOWS_TREE_KILL_TIMEOUT_MS,
-        },
-      );
-      if (!result.error && result.status === 0) return;
-    }
+    await killWindowsProcessTree(child);
+    return;
   }
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  try {
-    child.kill("SIGKILL");
-  } catch {
-  }
+  forceKillChild(child);
 }
 
 export function runQuotaAxiJson(options: {
@@ -671,6 +704,7 @@ export function runQuotaAxiJson(options: {
   const processGroupId = !useWindowsSupervisor && child.pid ? child.pid : null;
 
   let settled = false;
+  let finishing = false;
   let stdoutBytes = 0;
   let stderrBytes = 0;
   const stdoutChunks: Buffer[] = [];
@@ -685,14 +719,17 @@ export function runQuotaAxiJson(options: {
   timeout.unref();
 
   function finish(result: QuotaProcessResult): void {
-    if (settled) return;
-    settled = true;
+    if (settled || finishing) return;
+    finishing = true;
     clearTimeout(timeout);
-    killProcess(child, processGroupId);
-    resolveResult(result);
+    void killProcess(child, processGroupId).finally(() => {
+      settled = true;
+      resolveResult(result);
+    });
   }
 
   const receiveStdout = (chunk: Buffer) => {
+    if (finishing) return;
     stdoutBytes += chunk.length;
     if (stdoutBytes > maxOutputBytes) {
       finish({ kind: "overflow" });
@@ -701,6 +738,7 @@ export function runQuotaAxiJson(options: {
     stdoutChunks.push(chunk);
   };
   const receiveStderr = (chunk: Buffer) => {
+    if (finishing) return;
     stderrBytes += chunk.length;
     if (stderrBytes > maxOutputBytes) finish({ kind: "overflow" });
   };
@@ -738,6 +776,7 @@ export function runQuotaAxiJson(options: {
 
 function refreshIssueView(reason: QuotaRefreshIssue, provider: string): QuotaView {
   if (reason === "malformed") return { kind: "malformed", provider };
+  if (reason === "unverified") return { kind: "unverified", provider };
   if (reason === "auth-timeout") {
     return { kind: "unsupported", provider, reason: "auth-timeout" };
   }
@@ -755,6 +794,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
   const width = options.width;
   const timers = options.timers ?? defaultTimers;
   const authFile = options.authFile ?? defaultAuthFile();
+  const modelsFile = options.modelsFile ?? join(dirname(authFile), "models.json");
   const watchAuthDirectory: AuthDirectoryWatcher = options.watchAuthDirectory ?? (
     (path, watchOptions, listener) => watch(path, watchOptions, listener)
   );
@@ -842,11 +882,15 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     | { kind: "ok"; credential: unknown; revision: string }
     | { kind: "failed" | "timeout" | "cancelled" | "overflow" };
 
-  function readStoredCredential(provider: string, signal: AbortSignal): Promise<BoundedCredentialResult> {
+  type BoundedJsonResult =
+    | { kind: "ok"; value: unknown }
+    | { kind: "missing" | "failed" | "timeout" | "cancelled" | "overflow" };
+
+  function readBoundedJson(path: string, signal: AbortSignal): Promise<BoundedJsonResult> {
     return new Promise((resolve) => {
       let settled = false;
       let timer: unknown | null = null;
-      const finish = (result: BoundedCredentialResult) => {
+      const finish = (result: BoundedJsonResult) => {
         if (settled) return;
         settled = true;
         if (timer !== null) timers.clearTimeout(timer);
@@ -862,10 +906,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       timer = timers.setTimeout(() => finish({ kind: "timeout" }), timeoutMs);
       unrefTimer(timer);
 
-      void (async (): Promise<BoundedCredentialResult> => {
+      void (async (): Promise<BoundedJsonResult> => {
         let handle: Awaited<ReturnType<typeof open>> | null = null;
         try {
-          handle = await open(authFile, constants.O_RDONLY | constants.O_NONBLOCK);
+          handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
           const stats = await handle.stat();
           if (!stats.isFile() || !Number.isSafeInteger(stats.size) || stats.size < 0) {
             return { kind: "failed" };
@@ -874,28 +918,59 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           const buffer = Buffer.alloc(Math.min(maxAuthBytes + 1, stats.size + 1));
           let bytesRead = 0;
           while (bytesRead < buffer.length) {
-            const chunk = await handle.read(
-              buffer,
-              bytesRead,
-              buffer.length - bytesRead,
-              bytesRead,
-            );
+            const chunk = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
             if (chunk.bytesRead === 0) break;
             bytesRead += chunk.bytesRead;
           }
           if (bytesRead > maxAuthBytes) return { kind: "overflow" };
           if (bytesRead !== stats.size) return { kind: "failed" };
-          const parsed: unknown = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8"));
-          if (!isRecord(parsed)) return { kind: "failed" };
-          const credential = parsed[provider];
-          return { kind: "ok", credential, revision: credentialRevision(credential) };
-        } catch {
-          return { kind: "failed" };
+          return {
+            kind: "ok",
+            value: JSON.parse(buffer.subarray(0, bytesRead).toString("utf8")) as unknown,
+          };
+        } catch (error) {
+          return (error as NodeJS.ErrnoException).code === "ENOENT"
+            ? { kind: "missing" }
+            : { kind: "failed" };
         } finally {
           await handle?.close().catch(() => {});
         }
       })().then(finish, () => finish({ kind: "failed" }));
     });
+  }
+
+  async function readStoredCredential(
+    provider: string,
+    signal: AbortSignal,
+  ): Promise<BoundedCredentialResult> {
+    const result = await readBoundedJson(authFile, signal);
+    if (result.kind !== "ok") {
+      return { kind: result.kind === "missing" ? "failed" : result.kind };
+    }
+    if (!isRecord(result.value)) return { kind: "failed" };
+    const credential = result.value[provider];
+    return { kind: "ok", credential, revision: credentialRevision(credential) };
+  }
+
+  function modelsProviderHasAuthOverride(value: unknown, provider: string, modelId: string): boolean {
+    if (!isRecord(value)) return true;
+    if (value.providers === undefined) return false;
+    if (!isRecord(value.providers)) return true;
+    const rawProvider = value.providers[provider];
+    if (rawProvider === undefined) return false;
+    if (!isRecord(rawProvider)) return true;
+    if (rawProvider.headers !== undefined) return true;
+    if (rawProvider.models !== undefined) {
+      if (!Array.isArray(rawProvider.models)) return true;
+      const model = rawProvider.models.find((entry) => isRecord(entry) && entry.id === modelId);
+      if (isRecord(model) && model.headers !== undefined) return true;
+    }
+    if (rawProvider.modelOverrides !== undefined) {
+      if (!isRecord(rawProvider.modelOverrides)) return true;
+      const override = rawProvider.modelOverrides[modelId];
+      if (isRecord(override) && override.headers !== undefined) return true;
+    }
+    return false;
   }
 
   function resolveOAuthAuth(
@@ -1106,6 +1181,36 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           compositionRevision: preflight.compositionRevision,
         };
       }
+      const modelsResult = await readBoundedJson(modelsFile, signal);
+      if (modelsResult.kind === "ok" && modelsProviderHasAuthOverride(
+        modelsResult.value,
+        model.provider,
+        model.id,
+      )) {
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, "provider-override"),
+          modelRevision: preflight.modelRevision,
+          compositionRevision: preflight.compositionRevision,
+          credentialRevision: credentialResult.revision,
+        };
+      }
+      if (modelsResult.kind !== "ok" && modelsResult.kind !== "missing") {
+        const reason: QuotaUnsupportedReason = modelsResult.kind === "timeout"
+          ? "auth-timeout"
+          : modelsResult.kind === "cancelled"
+            ? "auth-cancelled"
+            : modelsResult.kind === "overflow"
+              ? "auth-overflow"
+              : "auth-unavailable";
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, reason),
+          modelRevision: preflight.modelRevision,
+          compositionRevision: preflight.compositionRevision,
+          credentialRevision: credentialResult.revision,
+        };
+      }
       const authResult = await resolveOAuthAuth(oauth, credential, signal);
       if (authResult.kind !== "ok") {
         const reason: QuotaUnsupportedReason = authResult.kind === "timeout"
@@ -1216,7 +1321,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.credentialCheckPending = false;
       session.quota = null;
       session.lastFailure = null;
-      cancelProcess(session);
+      void cancelProcess(session);
       render(session);
     }
 
@@ -1311,7 +1416,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.credentialCheckPending = false;
       session.quota = null;
       session.lastFailure = null;
-      cancelProcess(session);
+      void cancelProcess(session);
       render(session);
     }
 
@@ -1322,7 +1427,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.quota = null;
       session.lastFailure = null;
       session.credentialCheckPending = false;
-      cancelProcess(session);
+      void cancelProcess(session);
       render(session);
       void refresh(session);
     }
@@ -1488,12 +1593,15 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.credentialCheckAbort = null;
     }
 
-    function cancelProcess(session: ActiveSession): void {
+    async function cancelProcess(session: ActiveSession): Promise<void> {
       cancelCredentialCheck(session);
       session.operationAbort?.abort();
       session.operationAbort = null;
-      if (session.process) session.process.cancel();
+      const running = session.process;
       session.process = null;
+      if (!running) return;
+      running.cancel();
+      await running.promise;
     }
 
     function publishRefreshIssue(
@@ -1659,6 +1767,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             publishRefreshIssue(session, staleFailure, completedProvider);
           } else if (selected.kind === "malformed") {
             publishRefreshIssue(session, "malformed", completedProvider);
+          } else if (selected.kind === "unverified") {
+            publishRefreshIssue(session, "unverified", completedProvider);
           } else {
             session.lastFailure = null;
             session.quota = {
@@ -1697,7 +1807,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       }
     }
 
-    function stop(session: ActiveSession): void {
+    async function stop(session: ActiveSession): Promise<void> {
+      if (active === session) active = null;
       if (session.refreshTimer !== null) timers.clearInterval(session.refreshTimer);
       session.refreshTimer = null;
       if (session.modelRefreshTimer !== null) timers.clearTimeout(session.modelRefreshTimer);
@@ -1713,13 +1824,12 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.credentialWatcher = null;
       session.credentialMonitoringAvailable = false;
       watcher?.close();
-      cancelProcess(session);
       session.ctx.ui.setWidget(WIDGET_KEY, undefined);
-      if (active === session) active = null;
+      await cancelProcess(session);
     }
 
-    function start(ctx: ExtensionContext): void {
-      if (active) stop(active);
+    async function start(ctx: ExtensionContext): Promise<void> {
+      if (active) await stop(active);
       if (ctx.mode !== "tui") return;
 
       const session: ActiveSession = {
@@ -1762,12 +1872,12 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       void refresh(session);
     }
 
-    pi.on("session_start", (_event, ctx) => {
-      start(ctx);
+    pi.on("session_start", async (_event, ctx) => {
+      await start(ctx);
     });
-    pi.on("model_select", (_event, ctx) => {
+    pi.on("model_select", async (_event, ctx) => {
       if (!active) {
-        start(ctx);
+        await start(ctx);
         return;
       }
       active.ctx = ctx;
@@ -1777,12 +1887,12 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         : credentialMonitoringView(active);
       active.quota = null;
       active.lastFailure = null;
-      cancelProcess(active);
+      void cancelProcess(active);
       render(active);
       void refresh(active);
     });
-    pi.on("session_shutdown", () => {
-      if (active) stop(active);
+    pi.on("session_shutdown", async () => {
+      if (active) await stop(active);
     });
   };
 }

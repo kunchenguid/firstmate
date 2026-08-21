@@ -141,6 +141,8 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$pid" ] || exit 2
 kill -0 "$pid" 2>/dev/null || exit 3
+delay=${FM_QUOTA_TEST_TASKKILL_DELAY_SECONDS:-0}
+[ "$delay" = 0 ] || sleep "$delay"
 kill -TERM "$pid" 2>/dev/null || exit 3
 attempt=0
 while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 100 ]; do
@@ -398,7 +400,9 @@ const allProviders = [
       ],
     },
     credits: { remaining: 0, unlimited: false, unit: "credits" },
-    account: { accountId: "fixture-codex-account" },
+    account: {
+      accountId: process.env.FM_QUOTA_TEST_CODEX_ACCOUNT_ID || "fixture-codex-account",
+    },
     attempts: [{ source: "oauth", status: "success" }],
   }),
   provider("copilot", "GitHub Copilot", "api", {
@@ -1758,16 +1762,23 @@ assert(
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 let windowsTimeoutResult;
+let windowsKillHeartbeat = false;
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "slow\n");
+process.env.FM_QUOTA_TEST_TASKKILL_DELAY_SECONDS = "0.15";
 try {
   Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
   const windowsTimeout = runQuotaAxiJson({ timeoutMs: 40, maxOutputBytes: 1024 * 1024 });
+  setTimeout(() => {
+    windowsKillHeartbeat = true;
+  }, 80);
   windowsTimeoutResult = await windowsTimeout.promise;
 } finally {
   Object.defineProperty(process, "platform", platformDescriptor);
+  delete process.env.FM_QUOTA_TEST_TASKKILL_DELAY_SECONDS;
   await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
 }
 assert(windowsTimeoutResult?.kind === "timeout", "Windows quota process did not time out");
+assert(windowsKillHeartbeat, "Windows process-tree termination blocked the event loop");
 const taskkillCalls = (await readFile(process.env.FM_QUOTA_TEST_TASKKILL_CALLS, "utf8"))
   .trim()
   .split(/\n/)
@@ -1907,6 +1918,7 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
         oauth: {
           isSubscription: providerOptions.subscription !== false,
           async toAuth(credential) {
+            providerOptions.authCalls = (providerOptions.authCalls ?? 0) + 1;
             if (providerOptions.authNever) return new Promise(() => {});
             if (providerOptions.authDelayMs) await sleep(providerOptions.authDelayMs);
             if (providerOptions.authError || providerOptions.authUnavailable) {
@@ -2297,6 +2309,38 @@ assert(
   "models.json API overlay invoked quota-axi",
 );
 await modelsJsonOverlay.emit("session_shutdown", { reason: "quit" });
+
+const commandHeaderOptions = {};
+await writeFile(`${process.env.PI_CODING_AGENT_DIR}/models.json`, JSON.stringify({
+  providers: {
+    "openai-codex": {
+      headers: { Authorization: "!sleep 30" },
+    },
+  },
+}));
+const callsBeforeCommandHeader = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+const commandHeaderOverlay = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
+  "openai-codex",
+  "tui",
+  commandHeaderOptions,
+);
+await commandHeaderOverlay.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => commandHeaderOverlay.widgetText(240).includes("provider override"),
+  `command-backed provider headers were not rejected before auth resolution: ${commandHeaderOverlay.widgetText(240)}`,
+);
+const callsAfterCommandHeader = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+assert(commandHeaderOptions.authCalls === undefined, "command-backed headers reached the effective auth resolver");
+assert(callsAfterCommandHeader === callsBeforeCommandHeader, "command-backed headers invoked quota-axi");
+await commandHeaderOverlay.emit("session_shutdown", { reason: "quit" });
+await fs.promises.rm(`${process.env.PI_CODING_AGENT_DIR}/models.json`);
 
 const delayedAuthWatcher = new EventEmitter();
 delayedAuthWatcher.close = () => {};
@@ -2882,6 +2926,45 @@ assert(malformedRefreshClock.tasks.size === 0, "malformed-refresh shutdown leake
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
 
+const unverifiedRefreshStart = Date.now();
+const unverifiedRefreshClock = new FakeClock(unverifiedRefreshStart);
+process.env.FM_QUOTA_TEST_NOW_MS = String(unverifiedRefreshStart);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  unverifiedRefreshStart + 24 * 60 * 60 * 1000,
+);
+const unverifiedRefresh = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => unverifiedRefreshClock.nowMs,
+  timers: unverifiedRefreshClock.timers,
+}));
+await unverifiedRefresh.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => unverifiedRefresh.widgetText(400).includes("week 94% left"),
+  "unverified-refresh fixture did not publish initial account quota",
+);
+process.env.FM_QUOTA_TEST_CODEX_ACCOUNT_ID = "independent-codex-account";
+process.env.FM_QUOTA_TEST_NOW_MS = String(unverifiedRefreshStart + 5 * 60 * 1000);
+unverifiedRefreshClock.advance(5 * 60 * 1000);
+await waitFor(
+  () => unverifiedRefresh.widgetText(400).includes("account unverified"),
+  `unverified refresh was not exposed beside cached quota: ${unverifiedRefresh.widgetText(400)}`,
+);
+assert(
+  unverifiedRefresh.widgetText(400).includes("week 94% left"),
+  "unverified refresh discarded independently fresh account quota",
+);
+unverifiedRefreshClock.advance(60 * 1000);
+assert(!unverifiedRefresh.widgetText(400).includes("94%"), "unverified refresh kept quota beyond cache expiry");
+assert(unverifiedRefresh.widgetText(400).includes("account unverified"), "cache expiry hid unverified refresh outcome");
+await unverifiedRefresh.emit("session_shutdown", { reason: "quit" });
+assert(unverifiedRefreshClock.tasks.size === 0, "unverified-refresh shutdown leaked a timer");
+delete process.env.FM_QUOTA_TEST_CODEX_ACCOUNT_ID;
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
 const fakeStart = Date.now();
 const fakeClock = new FakeClock(fakeStart);
 process.env.FM_QUOTA_TEST_NOW_MS = String(fakeStart);
@@ -3030,38 +3113,64 @@ const callsAfterEnterpriseProxy = (await readFile(process.env.FM_QUOTA_TEST_CALL
 assert(callsAfterEnterpriseProxy === callsBeforeEnterpriseProxy, "custom Copilot proxy invoked quota-axi");
 await enterpriseProxy.emit("session_shutdown", { reason: "quit" });
 
-for (const [description, accountId] of [
-  ["missing active account identity", null],
-  ["different active account", "other-codex-account"],
-]) {
-  await setStoredOAuth("openai-codex", fixtureAccessToken(accountId));
-  const instance = makePi(
-    createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
-    "openai-codex",
-  );
-  await instance.emit("session_start", { reason: "startup" });
-  await waitFor(
-    () => instance.widgetText(240).includes("account unverified"),
-    `${description} was not refused: ${instance.widgetText(240)}`,
-  );
-  assert(!instance.widgetText(400).includes("94%"), `${description} exposed unrelated fresh quota`);
-  await instance.emit("session_shutdown", { reason: "quit" });
-}
+await setStoredOAuth("openai-codex", fixtureAccessToken(null));
+const callsBeforeMissingIdentity = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+const missingCodexIdentity = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
+  "openai-codex",
+);
+await missingCodexIdentity.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => missingCodexIdentity.widgetText(240).includes("account correlation unavailable"),
+  `missing active account identity was not classified before refresh: ${missingCodexIdentity.widgetText(240)}`,
+);
+await sleep(30);
+const callsAfterMissingIdentity = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+assert(callsAfterMissingIdentity === callsBeforeMissingIdentity, "missing Codex identity invoked quota-axi");
+await missingCodexIdentity.emit("session_shutdown", { reason: "quit" });
+
+await setStoredOAuth("openai-codex", fixtureAccessToken("other-codex-account"));
+const differentCodexAccount = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
+  "openai-codex",
+);
+await differentCodexAccount.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => differentCodexAccount.widgetText(240).includes("account unverified"),
+  `different active account was not refused: ${differentCodexAccount.widgetText(240)}`,
+);
+assert(!differentCodexAccount.widgetText(400).includes("94%"), "different active account exposed unrelated fresh quota");
+await differentCodexAccount.emit("session_shutdown", { reason: "quit" });
 await setStoredOAuth("openai-codex", fixtureAccessToken("fixture-codex-account"));
 
 await setStoredOAuth("openai-codex", fixtureAccessToken("replacement-codex-account", {
   "https://api.openai.com/auth/account_id": "fixture-codex-account",
 }));
+const callsBeforeConflictingClaims = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
 const conflictingCodexClaims = makePi(
   createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
   "openai-codex",
 );
 await conflictingCodexClaims.emit("session_start", { reason: "startup" });
 await waitFor(
-  () => conflictingCodexClaims.widgetText(240).includes("account unverified"),
+  () => conflictingCodexClaims.widgetText(240).includes("account correlation unavailable"),
   `conflicting Codex account claims were accepted: ${conflictingCodexClaims.widgetText(240)}`,
 );
 assert(!conflictingCodexClaims.widgetText(400).includes("94%"), "legacy Codex claim overrode Pi's active account");
+const callsAfterConflictingClaims = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+assert(callsAfterConflictingClaims === callsBeforeConflictingClaims, "conflicting Codex identity invoked quota-axi");
 await conflictingCodexClaims.emit("session_shutdown", { reason: "quit" });
 await setStoredOAuth("openai-codex", fixtureAccessToken("fixture-codex-account"));
 

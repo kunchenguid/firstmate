@@ -34,7 +34,7 @@ export type FreshQuotaView = {
 };
 
 export type QuotaFailureReason = "missing" | "failed" | "timeout" | "overflow" | "cancelled";
-export type QuotaRefreshIssue = QuotaFailureReason | "malformed" | "auth-timeout";
+export type QuotaRefreshIssue = QuotaFailureReason | "malformed" | "unverified" | "auth-timeout";
 
 export type QuotaUnsupportedReason =
   | "provider"
@@ -1656,6 +1656,7 @@ const FAILURE_TEXT: Readonly<Record<QuotaFailureReason, { long: string; compact:
 const REFRESH_ISSUE_TEXT: Readonly<Record<QuotaRefreshIssue, { long: string; compact: string }>> = {
   ...FAILURE_TEXT,
   malformed: { long: "malformed data", compact: "malformed" },
+  unverified: { long: "account unverified", compact: "unverified" },
   "auth-timeout": { long: "auth timed out", compact: "auth timeout" },
 };
 
