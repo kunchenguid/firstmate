@@ -1,6 +1,6 @@
 # shellcheck shell=bash
-# Shared tasks-axi backend selection and compatibility probe for bootstrap,
-# teardown, and secondmate backlog handoff.
+# Shared tasks-axi backend selection, compatibility probe, and archive reads for
+# bootstrap, teardown, secondmate backlog handoff, and captain holds.
 # Usage: . bin/fm-tasks-axi-lib.sh
 #
 # Compatible means tasks-axi --version reports FM_TASKS_AXI_MIN or newer,
@@ -120,4 +120,82 @@ fm_tasks_axi_backend_available() {
   local config_dir=$1
   fm_backlog_backend_manual "$config_dir" && return 1
   fm_tasks_axi_compatible
+}
+
+# ARCHIVE READS.
+#
+# Retention does not delete a closed task, it MOVES it: `tasks-axi prune` and the
+# `done_keep` trim carry a Done row out of the active backlog and into the
+# configured archive. Both files therefore hold real records, and any check that
+# asks "does this record still exist?" has to look in both or it will report
+# safely archived work as missing.
+#
+# These helpers are that second lookup and they are strictly read-only. Every
+# tasks-axi mutation targets the active backlog alone, so a caller that found a
+# record here must not try to write to it.
+#
+# tasks-axi exposes no archive-aware read, and `--file <archive>` is refused
+# while that same path is the configured archive, so an archived row is read from
+# a private copy whose `## Archived <date>` headings are rewritten to the
+# `## Done` heading the parser accepts. tasks-axi stays the single owner of the
+# backlog format; the copy only makes the archive's own section headings legible
+# to it, and fm_tasks_axi_archive_show reports a copy it cannot parse as a
+# distinct failure rather than as an absent record.
+
+# One `[markdown]` file path from <home>'s own tasks-axi config, resolved the way
+# tasks-axi resolves it: the configured value when present, else the default the
+# tracked .tasks.toml pins. A relative value resolves against <home>, because
+# that is the directory tasks-axi runs in.
+fm_tasks_axi_markdown_path() {  # <home> <key> <default-relative>
+  local home=$1 key=$2 default=$3 config="$1/.tasks.toml" value=''
+  if [ -f "$config" ] && [ ! -L "$config" ]; then
+    value=$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+      "$config" 2>/dev/null | head -1)
+  fi
+  [ -n "$value" ] || value=$default
+  case "$value" in
+    /*) printf '%s\n' "$value" ;;
+    *) printf '%s/%s\n' "$home" "$value" ;;
+  esac
+}
+
+fm_tasks_axi_backlog_file() {  # <home>
+  fm_tasks_axi_markdown_path "$1" path data/backlog.md
+}
+
+fm_tasks_axi_archive_file() {  # <home>
+  fm_tasks_axi_markdown_path "$1" archive data/done-archive.md
+}
+
+# Does the archive carry a task ENTRY for this id? Two jobs: it keeps the common
+# "no such record anywhere" answer from paying for a copy and a parse, and it is
+# the signal that separates an unreadable archive from an absent record below.
+# Deliberately over-inclusive is fine and under-inclusive is not, so it matches
+# the canonical entry line and lets tasks-axi give the real answer.
+fm_tasks_axi_archive_has_entry() {  # <archive-file> <id>
+  local file=$1 id=$2 pattern
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
+  pattern=$(printf '%s' "$id" | sed 's/[][\\.*^$+?(){}|/]/\\&/g')
+  grep -Eq "^- \[[ x]\] $pattern - " "$file" 2>/dev/null
+}
+
+# One archived task, printed as `tasks-axi show --full` output.
+#   0 - the record is printed on stdout
+#   1 - the archive carries no entry for this id
+#   2 - the archive carries the entry but it could not be read back through
+#       tasks-axi; the archive layout moved, and a caller must say so loudly
+#       rather than treat a record that exists as absent
+fm_tasks_axi_archive_show() {  # <home> <id>
+  local home=$1 id=$2 archive view out rc=0
+  archive=$(fm_tasks_axi_archive_file "$home")
+  fm_tasks_axi_archive_has_entry "$archive" "$id" || return 1
+  view=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-archive-view.XXXXXX") || return 2
+  if ! sed 's/^## Archived .*/## Done/' "$archive" > "$view" 2>/dev/null; then
+    rm -f -- "$view"
+    return 2
+  fi
+  out=$( (cd "$home" && tasks-axi show "$id" --full --file "$view") 2>/dev/null ) || rc=$?
+  rm -f -- "$view"
+  { [ "$rc" -eq 0 ] && [ -n "$out" ]; } || return 2
+  printf '%s\n' "$out"
 }

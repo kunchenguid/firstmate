@@ -18,6 +18,21 @@
 # All backlog mutations run in the active FM_HOME, which keeps main-home and
 # secondmate-home ownership aligned with the work that discovered the call.
 #
+# WHERE A RECORD LIVES: TWO FILES TO READ, ONE TO WRITE.
+# Backlog retention does not delete a closed task, it MOVES it out of the active
+# backlog and into the configured archive. An answered captain call therefore
+# lives in `data/backlog.md` until retention trims it and in
+# `data/done-archive.md` afterwards, and both are equally valid homes for a real
+# record: archived means the answer was recorded and the row was later trimmed,
+# never that the record is missing. Every read that asks whether a captain call's
+# record exists consults both files, so a completed investigation whose calls
+# were all answered stays completable no matter how much work has closed since.
+# Every mutation still targets the active backlog alone, the only file tasks-axi
+# writes, so a caller that found a record in the archive may report on it but
+# must not try to change it. `diverged` is the one deliberate exception, for the
+# reason stated beside open_task_ids below.
+# bin/fm-tasks-axi-lib.sh owns the archive read itself.
+#
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
@@ -141,6 +156,11 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
+# The two files a durable captain-call record can live in, resolved from this
+# home's own tasks-axi config so diagnostics name the files actually searched.
+BACKLOG_FILE=$(fm_tasks_axi_backlog_file "$FM_HOME")
+ARCHIVE_FILE=$(fm_tasks_axi_archive_file "$FM_HOME")
+
 CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
 captain_hold_cleanup() {
@@ -257,10 +277,62 @@ show_field_value() {  # <show-output> <field>
   printf '%s' "$value"
 }
 
+# The two-file read scope from this script's header, in one place every read
+# below goes through. Following load_decision's convention above, this sets
+# globals instead of printing, so a caller can also name WHERE the record was
+# found without paying for a second lookup.
+#   0 - found; DURABLE_SHOW is the record and DURABLE_SOURCE the file it came from
+#   1 - no record in either file
+#   2 - the archive carries the entry but it could not be read back
+DURABLE_SHOW=''
+DURABLE_SOURCE=''
+load_durable_record() {  # <task-id>
+  local id=$1 rc=0
+  DURABLE_SHOW=''
+  DURABLE_SOURCE=''
+  if DURABLE_SHOW=$(task_show "$id"); then
+    DURABLE_SOURCE=$BACKLOG_FILE
+    return 0
+  fi
+  DURABLE_SHOW=$(fm_tasks_axi_archive_show "$FM_HOME" "$id") || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    DURABLE_SOURCE=$ARCHIVE_FILE
+    return 0
+  fi
+  DURABLE_SHOW=''
+  return "$rc"
+}
+
+unreadable_archive() {  # <task-id>
+  fail "captain call $1 is archived in $ARCHIVE_FILE but tasks-axi could not read that record; the archive layout changed, so this cannot confirm what the captain answered"
+}
+
+# The single "no record in either file" message. It names both files on purpose:
+# the wording it replaced said only "absent", which reads as a lost captain
+# answer and sends the reader hunting for one instead of at the inventory entry
+# that never named a real task.
+no_durable_record() {  # <task-id>
+  fail "captain call $1 has no record: no task $1 in $BACKLOG_FILE and none in $ARCHIVE_FILE; hold the task its question gates, then answer it"
+}
+
+# load_durable_record for a caller that must not proceed on a guess: an archive
+# it cannot read is a hard stop, never reported as an absent record.
+#   0 - found, 1 - no record in either file
+require_durable_record() {  # <task-id>
+  local rc=0
+  load_durable_record "$1" || rc=$?
+  [ "$rc" -ne 2 ] || unreadable_archive "$1"
+  return "$rc"
+}
+
+# Does this home own the origin? A task row retention already archived is still
+# this home's own record of it, so a long-finished investigation can complete a
+# later review pass instead of being disowned.
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
-  task_show "$1" >/dev/null 2>&1
+  task_show "$1" >/dev/null 2>&1 && return 0
+  fm_tasks_axi_archive_has_entry "$ARCHIVE_FILE" "$1"
 }
 
 list_has_key() {  # <comma-list> <key>
@@ -341,39 +413,83 @@ resolution_block() {  # <mode>
 }
 
 # Durable state of one captain call: an active captain hold (annotations
-# surviving even when a date gate has expired) or a recorded captain answer.
+# surviving even when a date gate has expired) or a recorded captain answer, in
+# the active backlog or in the archive retention moved it to.
+#
+# The three failing shapes get three different messages on purpose, because they
+# need opposite repairs and a reader must be able to tell them apart without
+# opening this script: a key with NO record anywhere is an inventory that names
+# something that was never held, a recorded key that is closed with no answer is
+# a call closed outside `answer`, and a recorded key that is open without the
+# captain hold is not the captain's item at all. An answered record passes from
+# either file, and DURABLE_ARCHIVED counts the archived ones so the caller can
+# report the reason it passed.
+DURABLE_ARCHIVED=0
 verify_hold_durable() {  # <task-id>
-  local id=$1 show state hold_kind body
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
-  state=$(show_field "$show" state)
-  hold_kind=$(show_field_value "$show" hold_kind)
-  body=$(show_field "$show" body)
+  local id=$1 state hold_kind body
+  require_durable_record "$id" || no_durable_record "$id"
+  state=$(show_field "$DURABLE_SHOW" state)
+  hold_kind=$(show_field_value "$DURABLE_SHOW" hold_kind)
+  body=$(show_field "$DURABLE_SHOW" body)
   if body_has_resolution_record "$body"; then
+    [ "$DURABLE_SOURCE" != "$ARCHIVE_FILE" ] || DURABLE_ARCHIVED=$((DURABLE_ARCHIVED + 1))
     return 0
   fi
   if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
     return 0
   fi
-  fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
+  if [ "$state" = "done" ]; then
+    fail "captain call $id is recorded in $DURABLE_SOURCE but closed with no recorded captain answer; record what the captain said with: fm-captain-hold.sh answer $id --decision-file <path>"
+  fi
+  fail "captain call $id is recorded in $DURABLE_SOURCE but is not held for the captain; hold it for the captain or drop it from the inventory"
 }
 
-# Resolve one inventory entry or channel key to the task that carries it: the
-# exact task id when it exists, else the legacy derived identity.
+# Resolve one inventory entry or channel key to the task that carries it and
+# load that task's record in the same pass: the exact task id when a record for
+# it exists in either file, else the legacy derived identity. An archived record
+# resolves like any other, so an inventory whose calls were all answered long ago
+# still names real tasks.
+#
+# This one never exits, so the keyed intake can skip a single unusable row
+# instead of aborting a batch of answers, and reports which of the three things
+# happened.
+#   0 - resolved; RESOLVED_ID names the task and DURABLE_SHOW/DURABLE_SOURCE
+#       carry its record
+#   1 - no record for the entry or its legacy identity in either file
+#   2 - the archive carries the entry but it could not be read back; RESOLVED_ID
+#       names the id that was probed
+RESOLVED_ID=''
+resolve_and_load() {  # <origin-or-empty> <entry>
+  local origin=$1 entry=$2 legacy rc=0
+  RESOLVED_ID=$entry
+  load_durable_record "$entry" || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  [ "$rc" -ne 2 ] || return 2
+  [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] || return 1
+  legacy=$(legacy_hold_id "$origin" "$entry")
+  RESOLVED_ID=$legacy
+  rc=0
+  load_durable_record "$legacy" || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  return "$rc"
+}
+
+# resolve_and_load for a caller that must stop rather than proceed on a guess.
+# `fail` here exits only this function's command substitution, so every caller
+# assigns the result and propagates the status instead of calling through `$( )`.
 resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
-  local origin=$1 entry=$2 legacy
-  if task_show "$entry" >/dev/null 2>&1; then
-    printf '%s' "$entry"
+  local origin=$1 entry=$2 legacy rc=0
+  resolve_and_load "$origin" "$entry" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s' "$RESOLVED_ID"
     return 0
   fi
+  [ "$rc" -ne 2 ] || unreadable_archive "$RESOLVED_ID"
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    if task_show "$legacy" >/dev/null 2>&1; then
-      printf '%s' "$legacy"
-      return 0
-    fi
-    fail "no captain-held task $entry and no legacy identity $legacy in $FM_HOME/data/backlog.md"
+    fail "captain call $entry has no record: neither $entry nor its legacy identity $legacy is in $BACKLOG_FILE or $ARCHIVE_FILE"
   fi
-  fail "no captain-held task $entry in $FM_HOME/data/backlog.md"
+  no_durable_record "$entry"
 }
 
 command_hold() {
@@ -413,6 +529,14 @@ command_hold() {
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
     fi
   else
+    # Retention must not defeat the refusal above. A closed task the archive
+    # already holds is refused for the same reason a closed task still in the
+    # backlog is: minting the id again would create a second row for a call the
+    # captain already answered and split one identity across the two files. The
+    # cheap entry match is deliberate, so even an archive tasks-axi can no longer
+    # parse blocks the duplicate instead of waving it through.
+    ! fm_tasks_axi_archive_has_entry "$ARCHIVE_FILE" "$id" \
+      || fail "task $id is already closed and archived in $ARCHIVE_FILE; a new captain call needs its own task"
     [ -n "$title" ] || fail "--title is required to create task $id"
     validate_one_line title "$title"
     if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
@@ -475,6 +599,28 @@ close_answered() {  # <task-id> <release-0-or-1>
   fi
 }
 
+# `answer` on a record retention has already archived. Everything here is
+# read-only, because tasks-axi writes the active backlog and nothing else, so an
+# archived record can be reported on but never changed. A replay of the exact
+# answer already recorded is the one call that still means anything, and it
+# returns exactly what it returned before retention trimmed the row; every other
+# shape says the archive is where the record is and that it cannot be written,
+# rather than claiming the task is absent.
+answer_archived() {  # <task-id> <release-flag> <show-output>
+  local id=$1 release=$2 show=$3 body recorded_mode
+  body=$(show_field "$show" body)
+  body_has_resolution_record "$body" \
+    || fail "captain call $id is archived in $ARCHIVE_FILE with no recorded captain answer; the archive is not writable, so move that row back into $BACKLOG_FILE under its Done heading and answer it there"
+  [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
+    || fail "captain call $id is archived in $ARCHIVE_FILE recording a different captain decision; the archive is not writable, so this answer cannot replace it"
+  recorded_mode=$(recorded_resolution_mode "$body" || true)
+  [ "$recorded_mode" != released ] \
+    || fail "captain call $id is archived in $ARCHIVE_FILE with mode released; an archived task cannot replay that release"
+  [ "$release" = 0 ] \
+    || fail "captain call $id is archived in $ARCHIVE_FILE with mode ${recorded_mode:-unknown}; --release cannot reopen an archived task"
+  printf 'answered: %s\n' "$id"
+}
+
 command_answer() {
   local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
@@ -490,7 +636,12 @@ command_answer() {
   validate_slug task-id "$id"
   load_decision "$decision_file"
   require_tasks_axi
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  require_durable_record "$id" || no_durable_record "$id"
+  if [ "$DURABLE_SOURCE" = "$ARCHIVE_FILE" ]; then
+    answer_archived "$id" "$release" "$DURABLE_SHOW"
+    return 0
+  fi
+  show=$DURABLE_SHOW
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -657,7 +808,7 @@ sanitize_field() {  # <text>
 
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
-  local recorded_digest recorded_mode tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
+  local recorded_digest recorded_mode tmp err closed=0 skipped=0 reason release_flag resolve_rc tab=$'\t'
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
@@ -703,11 +854,25 @@ command_answers() {
         continue
         ;;
     esac
-    if ! id=$(resolve_entry "$origin" "$key" 2>/dev/null); then
-      printf 'skipped: %s (no captain-held task with that id)\n' "$key"
+    # One resolution, one record, three distinguishable skips: a key that names
+    # nothing, an archive whose layout moved, and (below) a record that exists
+    # but cannot take this answer. A key whose answer was recorded and later
+    # trimmed out of the backlog resolves here like any other.
+    resolve_rc=0
+    resolve_and_load "$origin" "$key" || resolve_rc=$?
+    if [ "$resolve_rc" -eq 2 ]; then
+      printf 'skipped: %s (archived in %s but that record could not be read)\n' "$key" "$ARCHIVE_FILE"
       skipped=$((skipped + 1))
       continue
     fi
+    if [ "$resolve_rc" -ne 0 ]; then
+      printf 'skipped: %s (no captain-held task with that id in %s or %s)\n' \
+        "$key" "$BACKLOG_FILE" "$ARCHIVE_FILE"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    id=$RESOLVED_ID
+    show=$DURABLE_SHOW
     keyed_decision_text "$source" "$id" "$answer" "$label" > "$tmp" \
       || fail "cannot stage the captain decision for $id"
     digest=$(sha256_text "$(cat "$tmp")")
@@ -723,7 +888,6 @@ command_answers() {
     if [ -n "$legacy_key" ]; then
       legacy_digest=$(sha256_text "$(legacy_keyed_decision_text "$source" "$legacy_key" "$answer" "$label")")
     fi
-    show=$(task_show "$id") || { printf 'skipped: %s (absent)\n' "$id"; skipped=$((skipped + 1)); continue; }
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
@@ -742,7 +906,11 @@ command_answers() {
       fi
     fi
     if [ "$state" = "done" ]; then
-      printf 'skipped: %s (already closed)\n' "$id"
+      if [ "$DURABLE_SOURCE" = "$ARCHIVE_FILE" ]; then
+        printf 'skipped: %s (already closed and archived in %s)\n' "$id" "$ARCHIVE_FILE"
+      else
+        printf 'skipped: %s (already closed)\n' "$id"
+      fi
       skipped=$((skipped + 1))
       continue
     fi
@@ -767,7 +935,7 @@ command_answers() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc
+  local origin=${1:-} meta previous='' supplied='' keys='' entry entry_id key status_file open raw_open has_meta=0 transfer_rc
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -798,7 +966,11 @@ command_complete() {
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      verify_hold_durable "$(resolve_entry "$origin" "$entry")"
+      # Assigned first: resolve_entry's own `fail` cannot stop the parent from
+      # inside a command substitution, and passing its empty output straight
+      # through printed a second diagnostic naming no task at all.
+      entry_id=$(resolve_entry "$origin" "$entry") || exit 1
+      verify_hold_durable "$entry_id"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -840,7 +1012,7 @@ EOF
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys entry key open
+  local origin=${1:-} meta reviewed keys entry entry_id key open
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
@@ -852,7 +1024,9 @@ command_verify() {
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      verify_hold_durable "$(resolve_entry "$origin" "$entry")"
+      # See command_complete: assigned first so one failure prints one message.
+      entry_id=$(resolve_entry "$origin" "$entry") || exit 1
+      verify_hold_durable "$entry_id"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -864,7 +1038,11 @@ EOF
   done <<EOF
 $open
 EOF
-  printf 'verified: %s captain-call inventory\n' "$origin"
+  # Naming the archived count makes a pass legible: it says the gate confirmed
+  # recorded answers that retention has already trimmed out of the backlog,
+  # rather than leaving a reader to wonder whether the check simply got looser.
+  printf 'verified: %s captain-call inventory%s\n' "$origin" \
+    "$([ "$DURABLE_ARCHIVED" -eq 0 ] || printf ' (%s answered and archived)' "$DURABLE_ARCHIVED")"
 }
 
 # --- record divergence ------------------------------------------------------
@@ -907,9 +1085,13 @@ EOF
 # Output: one `<task-id>\t<origin>\t<key>\t<title>` line per divergence, in
 # status-log then key order; nothing when the two records agree.
 
-# Every still-open task id in this home's backlog, one per line. Only the first
-# two comma-separated listing fields are read - both are slugs that precede any
-# quoted title - so a title containing commas or quotes cannot shift them.
+# Every still-open task id in this home's backlog, one per line. The archive is
+# deliberately out of scope, and not by omission: retention only ever moves a
+# CLOSED row, and a divergence is by definition a task that is still open, so
+# nothing the archive holds can be a candidate here.
+# Only the first two comma-separated listing fields are read - both are slugs
+# that precede any quoted title - so a title containing commas or quotes cannot
+# shift them.
 open_task_ids() {
   tasks_axi list 2>/dev/null | awk -F, '
     /^  [A-Za-z0-9._-]+,/ {

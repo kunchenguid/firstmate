@@ -26,12 +26,25 @@
 #                                             task ids first and legacy identities second)
 #   bind <source> (<origin> | --any-origin) -> bind <source> [<origin>]
 #   unbind | binding <source>              -> unchanged
+#
+# Every mapped command above reaches bin/fm-captain-hold.sh and inherits its read
+# scope, including the archive retention moves a closed row into; that script's
+# header owns why both files hold real records. `resolve` is the one command with
+# lookups of its own, so it reads both files here too. Its edge clearing stays
+# live-only on purpose: see the second routed loop below.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CAPTAIN_HOLD="$SCRIPT_DIR/fm-captain-hold.sh"
+
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+
+BACKLOG_FILE=$(fm_tasks_axi_backlog_file "$FM_HOME")
+ARCHIVE_FILE=$(fm_tasks_axi_archive_file "$FM_HOME")
 
 usage() {
   awk '
@@ -60,6 +73,38 @@ compose() {  # <origin> <key>
 
 task_show() {
   (cd "$FM_HOME" && tasks-axi show "$1" --full) 2>/dev/null
+}
+
+# One record from either file, set as globals so the caller can also tell WHERE
+# it came from; a command substitution could not carry that back out.
+#   0 - found, 1 - no record in either file, 2 - unreadable archive
+RECORD_SHOW=''
+RECORD_ARCHIVED=0
+load_record() {  # <task-id>
+  local id=$1 rc=0
+  RECORD_SHOW=''
+  RECORD_ARCHIVED=0
+  if RECORD_SHOW=$(task_show "$id"); then
+    return 0
+  fi
+  RECORD_SHOW=$(fm_tasks_axi_archive_show "$FM_HOME" "$id") || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    RECORD_ARCHIVED=1
+    return 0
+  fi
+  RECORD_SHOW=''
+  return "$rc"
+}
+
+# load_record, turning both failures into one plain diagnostic that names what
+# was searched instead of reporting an archived record as missing.
+require_record() {  # <label> <task-id>
+  local label=$1 id=$2 rc=0
+  load_record "$id" || rc=$?
+  [ "$rc" -ne 2 ] \
+    || fail "$label $id is archived in $ARCHIVE_FILE but tasks-axi could not read that record; the archive layout changed"
+  [ "$rc" -eq 0 ] \
+    || fail "$label $id has no record: no task $id in $BACKLOG_FILE and none in $ARCHIVE_FILE"
 }
 
 show_field() {
@@ -126,7 +171,8 @@ command_resolve() {
   decision_text=$(cat "$decision_file")
   [ -n "$decision_text" ] || fail "decision file must not be empty"
   decision_digest=$(sha256_text "$decision_text")
-  hold_show=$(task_show "$id") || fail "captain decision $id does not exist in the active home"
+  require_record "captain decision" "$id"
+  hold_show=$RECORD_SHOW
   hold_body=$(show_field "$hold_show" body)
   case "$hold_body" in
     *"Resolution recorded by fm-decision-hold."*"Routed identities: "*)
@@ -144,7 +190,8 @@ command_resolve() {
       ;;
   esac
   for dep in $routed; do
-    show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"
+    require_record "routed task" "$dep"
+    show=$RECORD_SHOW
     state=$(show_field "$show" state)
     [ "$state" != "done" ] || [ "$resolution_recorded" = 1 ] \
       || fail "routed task $dep is already done"
@@ -167,8 +214,14 @@ command_resolve() {
   fi
   rm -f -- "$tmp"
   for dep in $routed; do
-    show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
-    if list_has_key "$(normalized_blocked_by "$show")" "$id"; then
+    require_record "routed task" "$dep"
+    # Clearing a blocked-by edge is a live mutation and tasks-axi writes only the
+    # active backlog, so this half deliberately does NOT extend to the archive: a
+    # routed task retention already moved there is closed and has no live edge
+    # left to clear. Skipping it is the whole correct action, and attempting the
+    # write would either fail or resurrect the row.
+    [ "$RECORD_ARCHIVED" = 0 ] || continue
+    if list_has_key "$(normalized_blocked_by "$RECORD_SHOW")" "$id"; then
       (cd "$FM_HOME" && tasks-axi unblock "$dep" --by "$id" >/dev/null) \
         || fail "could not route the recorded decision to $dep"
     fi

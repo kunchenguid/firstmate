@@ -1165,6 +1165,251 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
+# Backlog retention MOVES a closed row rather than deleting it, so an answered
+# captain call lives in the archive once enough work has closed behind it. The
+# completion gate has to treat that as the recorded answer it is, or a finished
+# investigation whose calls were all properly answered can never be cleaned up.
+# Nothing here rescues a lost answer, because nothing was lost: this asserts the
+# captain's exact words survive the move and that the gate reads where they went.
+test_archived_captain_answer_still_completes_the_investigation() {
+  local home id out
+  home=$(make_home retention-archive)
+  id=sample-retention-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample retention" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the retention-review origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample retention review\n\nOne captain choice was needed and has been answered.\n' \
+    > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-retention-call \
+    --title "Choose the retention window" --reason "captain retention choice pending" \
+    --repo sample >/dev/null || fail "could not register the captain-held task"
+  printf 'Keep the sample retention window at thirty days.\n' > "$home/answer.txt"
+  run_captain "$home" answer sample-retention-call --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  run_captain "$home" complete "$id" sample-retention-call >/dev/null \
+    || fail "completion failed on the answered inventory"
+  out=$(run_captain "$home" verify "$id") || fail "verification failed before retention ran"
+  case "$out" in
+    *archived*) fail "nothing was archived yet, so the pass must not claim it was: $out" ;;
+  esac
+
+  # Retention, exactly as the backlog contract runs it: the answered row moves
+  # out of the active backlog and into the archive, answer text and all.
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  assert_no_grep "sample-retention-call" "$home/data/backlog.md" \
+    "setup error: retention should have moved the answered call out of the active backlog"
+  assert_grep "sample-retention-call" "$home/data/done-archive.md" \
+    "retention lost the answered captain call instead of archiving it"
+  assert_grep "Keep the sample retention window at thirty days." "$home/data/done-archive.md" \
+    "the captain's exact words did not survive the move into the archive"
+
+  out=$(run_captain "$home" verify "$id" 2> "$home/verify.err") \
+    || fail "the completion gate refused an answered captain call the archive still holds: $(cat "$home/verify.err")"
+  assert_contains "$out" "1 answered and archived" \
+    "a pass on an archived answer must say so, not read like a looser check"
+
+  # The retired command spelling delegates to the same gate, so pre-collapse
+  # briefs reach the fix without being rewritten.
+  run_shim "$home" verify "$id" >/dev/null 2> "$home/shim-verify.err" \
+    || fail "the shim's verify still refused the archived answer: $(cat "$home/shim-verify.err")"
+
+  # The gate's real consumer: cleanup of the finished investigation.
+  run_teardown "$home" "$id" >/dev/null 2> "$home/teardown.err" \
+    || fail "cleanup refused a finished investigation whose only captain call was answered: $(cat "$home/teardown.err")"
+  assert_present "$home/data/$id/report.md" "cleanup must keep the investigation deliverable"
+  pass "an answered captain call retention moved to the archive still completes and cleans up"
+}
+
+# The gate must not get looser in exchange. Reading the archive adds one place a
+# record can legitimately live; it changes nothing about what counts as answered.
+# All three failing shapes must still fail, and each must say which one it is:
+# the wording that said only "absent" is what sent a reader hunting for a lost
+# captain answer instead of at the record right in front of them.
+test_unanswered_and_absent_captain_calls_still_fail_distinguishably() {
+  local home id absent_err closed_err archived_err out
+  home=$(make_home retention-gate-guard)
+  id=sample-guarded-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Guard the retention gate" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the guarded-review origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Guarded review\n\nThe captain calls below are deliberately unfinished.\n' \
+    > "$home/data/$id/report.md"
+
+  # (1) An inventory entry with no record in either file. Written straight into
+  # the durable attestation, because `complete` refuses to attest one - which is
+  # the point: an entry can only get here by outliving the task it named.
+  printf 'decisions_reviewed=1\ndecision_keys=sample-vanished-call\n' >> "$home/state/$id.meta"
+  if run_captain "$home" verify "$id" > "$home/absent.out" 2> "$home/absent.err"; then
+    fail "verification passed an inventory entry with no record in either file"
+  fi
+  absent_err=$(cat "$home/absent.err")
+  assert_contains "$absent_err" "has no record" \
+    "a never-recorded call must be named as having no record at all"
+  assert_contains "$absent_err" "$home/data/backlog.md" \
+    "the no-record message must name the active backlog it searched"
+  assert_contains "$absent_err" "$home/data/done-archive.md" \
+    "the no-record message must name the archive it searched, so a reader stops hunting"
+
+  # (2) A recorded call closed outside `answer`: the captain's word was never
+  # written down, and the gate must still refuse it.
+  tasks_in "$home" add sample-unanswered-call "Choose the guarded option" --repo sample >/dev/null \
+    || fail "could not create the unanswered call"
+  run_captain "$home" hold sample-unanswered-call --reason "captain guarded choice pending" >/dev/null \
+    || fail "could not hold the unanswered call"
+  printf 'decision_keys=sample-unanswered-call\n' >> "$home/state/$id.meta"
+  tasks_in "$home" "done" sample-unanswered-call >/dev/null \
+    || fail "could not close the call outside the answer path"
+  if run_captain "$home" verify "$id" > "$home/closed.out" 2> "$home/closed.err"; then
+    fail "verification passed a call closed with no recorded captain answer"
+  fi
+  closed_err=$(cat "$home/closed.err")
+  assert_contains "$closed_err" "closed with no recorded captain answer" \
+    "a recorded-but-unanswered call must be named as recorded and unanswered"
+  assert_contains "$closed_err" "$home/data/backlog.md" \
+    "the unanswered message must name the file the record was found in"
+
+  # (3) The same unanswered call after retention archives it. Being in the
+  # archive is not evidence of an answer, so this must fail exactly as (2) did
+  # while naming the archive as where the record now is.
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  assert_grep "sample-unanswered-call" "$home/data/done-archive.md" \
+    "setup error: retention should have moved the unanswered call into the archive"
+  if run_captain "$home" verify "$id" > "$home/archived.out" 2> "$home/archived.err"; then
+    fail "verification passed an archived call that carries no captain answer"
+  fi
+  archived_err=$(cat "$home/archived.err")
+  assert_contains "$archived_err" "closed with no recorded captain answer" \
+    "an archived call with no answer must still be refused for the same reason"
+  assert_contains "$archived_err" "$home/data/done-archive.md" \
+    "the archived-and-unanswered message must name the archive as where the record is"
+
+  # Cleanup is still refused while that call is unanswered, in either file, and
+  # refused by the gate itself rather than incidentally.
+  if run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err"; then
+    fail "cleanup erased an investigation whose captain call was never answered"
+  fi
+  assert_grep "has not passed the captain-call completion gate" "$home/teardown.err" \
+    "cleanup was refused for some other reason, so this proves nothing about the gate"
+  assert_present "$home/state/$id.meta" "a refused cleanup must preserve the investigation record"
+
+  # The three messages must be tellable apart, which is the whole repair here.
+  [ "$absent_err" != "$closed_err" ] || fail "no record and unanswered read identically: $absent_err"
+  [ "$closed_err" != "$archived_err" ] \
+    || fail "the unanswered message does not distinguish which file holds the record"
+
+  # Recording the answer, once, is what actually clears the gate - and it clears
+  # it for the backlog copy, so the pass is earned rather than assumed.
+  tasks_in "$home" add sample-answered-call "Choose the guarded option" --repo sample >/dev/null \
+    || fail "could not create the answerable call"
+  run_captain "$home" hold sample-answered-call --reason "captain guarded choice pending" >/dev/null \
+    || fail "could not hold the answerable call"
+  printf 'decision_keys=sample-answered-call\n' >> "$home/state/$id.meta"
+  printf 'Take the guarded option.\n' > "$home/answer.txt"
+  run_captain "$home" answer sample-answered-call --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  out=$(run_captain "$home" verify "$id") \
+    || fail "verification refused a properly answered call"
+  case "$out" in
+    *archived*) fail "the answered call is in the active backlog; the pass must not claim otherwise: $out" ;;
+  esac
+  pass "no-record, recorded-but-unanswered, and archived-but-unanswered captain calls all still fail, distinguishably"
+}
+
+# The siblings that share the same lookup. Reading the archive is not permission
+# to write it: tasks-axi writes the active backlog and nothing else, so an
+# archived record can be reported on and replayed, never changed or duplicated.
+test_archived_records_are_readable_but_never_written() {
+  local home out err
+  home=$(make_home retention-archive-writes)
+  tasks_in "$home" add sample-archived-call "Choose the archived option" --repo sample >/dev/null \
+    || fail "could not create the call"
+  run_captain "$home" hold sample-archived-call --reason "captain archived choice pending" >/dev/null \
+    || fail "could not hold the call"
+  printf 'Take the archived option.\n' > "$home/answer.txt"
+  run_captain "$home" answer sample-archived-call --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null || fail "could not run backlog retention"
+  cp "$home/data/done-archive.md" "$home/archive-before.md"
+  cp "$home/data/backlog.md" "$home/backlog-before.md"
+
+  # An exact replay is the same idempotent no-op it was before retention ran.
+  out=$(run_captain "$home" answer sample-archived-call --decision-file "$home/answer.txt") \
+    || fail "an exact answer replay failed once the record was archived"
+  assert_contains "$out" "answered: sample-archived-call" \
+    "the replay must report the same recorded answer it did before retention"
+  cmp -s "$home/data/done-archive.md" "$home/archive-before.md" \
+    || fail "the replay wrote to the archive"
+  cmp -s "$home/data/backlog.md" "$home/backlog-before.md" \
+    || fail "the replay resurrected the archived row in the active backlog"
+
+  # A different answer, or a release, has nowhere to go and must say so.
+  printf 'Take a different option after all.\n' > "$home/other.txt"
+  if run_captain "$home" answer sample-archived-call --decision-file "$home/other.txt" \
+    > "$home/drift.out" 2> "$home/drift.err"; then
+    fail "a drifted answer was accepted against an archived record"
+  fi
+  err=$(cat "$home/drift.err")
+  assert_contains "$err" "$home/data/done-archive.md" \
+    "the refusal must name the archive as where the record is"
+  assert_contains "$err" "not writable" \
+    "the refusal must say the archive cannot take the change, not that the task is absent"
+  cmp -s "$home/data/done-archive.md" "$home/archive-before.md" \
+    || fail "a refused answer still wrote to the archive"
+
+  # Holding the same id again would mint a second row for a call the captain has
+  # already answered, splitting one identity across the two files.
+  if run_captain "$home" hold sample-archived-call --title "Choose again" \
+    --reason "captain archived choice pending" > "$home/hold.out" 2> "$home/hold.err"; then
+    fail "hold created a duplicate row for a call the archive already closed"
+  fi
+  assert_grep "already closed and archived" "$home/hold.err" \
+    "the refusal must name retention as the reason, not a missing task"
+  assert_no_grep "sample-archived-call" "$home/data/backlog.md" \
+    "the refused hold left a duplicate row in the active backlog"
+
+  # The keyed intake reaches the same record. A delivery whose answer it recorded
+  # itself replays as closed after retention moves the row, so a channel that
+  # redelivers an old answer does not read it as a new unrecorded one.
+  tasks_in "$home" add sample-keyed-call "Choose the keyed option" --repo sample >/dev/null \
+    || fail "could not create the keyed call"
+  run_captain "$home" hold sample-keyed-call --reason "captain keyed choice pending" >/dev/null \
+    || fail "could not hold the keyed call"
+  out=$(printf 'sample-keyed-call\tTake the keyed option.\tcaptain reply\n' \
+    | run_captain "$home" answers --source "test channel") \
+    || fail "the keyed intake could not record the answer: $out"
+  assert_contains "$out" "closed: sample-keyed-call" "the keyed intake did not record the answer"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null || fail "could not run backlog retention"
+  assert_grep "sample-keyed-call" "$home/data/done-archive.md" \
+    "setup error: retention should have moved the keyed answer into the archive"
+  cp "$home/data/done-archive.md" "$home/archive-before-keyed.md"
+  cp "$home/data/backlog.md" "$home/backlog-before-keyed.md"
+  out=$(printf 'sample-keyed-call\tTake the keyed option.\tcaptain reply\n' \
+    | run_captain "$home" answers --source "test channel") \
+    || fail "the keyed intake failed on a replayed archived answer: $out"
+  assert_contains "$out" "closed: sample-keyed-call" \
+    "a replayed delivery for an archived answer must report it closed, not absent"
+  cmp -s "$home/data/done-archive.md" "$home/archive-before-keyed.md" \
+    || fail "the replayed keyed delivery wrote to the archive"
+  cmp -s "$home/data/backlog.md" "$home/backlog-before-keyed.md" \
+    || fail "the replayed keyed delivery resurrected the archived row in the active backlog"
+
+  # A key that names nothing is skipped, naming both files it searched so it is
+  # not mistaken for a captain answer that went missing.
+  out=$(printf 'sample-nowhere-call\tSome answer.\tcaptain reply\n' \
+    | run_captain "$home" answers --source "test channel" 2>&1) || true
+  assert_contains "$out" "skipped: sample-nowhere-call" \
+    "a key naming no task must be skipped"
+  assert_contains "$out" "$home/data/done-archive.md" \
+    "the skip must name the archive it searched so the key is not mistaken for a lost answer"
+  pass "archived captain-call records are readable, replayable, and never written or duplicated"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
@@ -1182,3 +1427,6 @@ test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
+test_archived_captain_answer_still_completes_the_investigation
+test_unanswered_and_absent_captain_calls_still_fail_distinguishably
+test_archived_records_are_readable_but_never_written
