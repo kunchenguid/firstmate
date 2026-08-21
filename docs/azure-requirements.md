@@ -86,7 +86,11 @@ creates it, the crewmate completes a task, and both release cleanly.
 
 ## R4. no-mistakes runs on Azure
 
-Status: PARTIAL. Both lanes are code-complete pending their live acceptance runs.
+Status: PARTIAL.
+The validation-cell lane, which is what the amended acceptance below turns on, is code-complete
+pending its one live acceptance run.
+The runner-offload lane is code-complete too, and it is an optimisation rather than a second
+required leg, so its own live run is not owed against this requirement.
 
 Two lanes exist.
 The validation-cell lane (`docs/azure-validation.md`) has never closed a cell.
@@ -118,9 +122,11 @@ exact error naming what is missing and the command runs nowhere; the `docs/azure
 exports remain an operator override, and `FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES` remains the
 only explicit local opt-out.
 
-Work remaining: the two live acceptance runs, operator-driven after merge - one no-mistakes run
-offloading a selected test class to Azure end to end, and one validation cell driven from
-dispatch through `close`.
+Work remaining for the acceptance below: one live run, operator-driven after merge, in which a
+validation cell is driven from dispatch through `close` and its worktree disk is released.
+The other live run this section used to owe, a no-mistakes run offloading a selected test class to
+Azure end to end, is worth taking on the optimisation lane's own merits and no longer gates this
+requirement.
 
 First live cell attempt, 2026-08-20 (`azv-36b2726cbcf3`, task `r4-cell-acceptance`, head
 `c094cc38`, `validation-standard`): submit, dispatch, boot, review, and the full four-shard
@@ -285,8 +291,16 @@ in-attempt response path the guest already has does not need it.
 So the receipts fix is exercised live up to the gate, which is exactly what used to be
 impossible, and `close` stays unproven: the acceptance sentence below is not yet met.
 
-Acceptance: a no-mistakes run offloads a test class to Azure and returns a real verdict; and,
-separately, one validation cell reaches `close` with its worktree disk released.
+Acceptance (amended by the owner 2026-08-21): one validation cell reaches `close` with its
+worktree disk released.
+That is no-mistakes running on Azure: the cell executes the whole pipeline in-cell.
+The runner-offload lane - a hybrid that keeps the pipeline on the local daemon and ships one test
+class to a cell - is an OPTIMISATION, not an acceptance criterion; its per-run routing-file
+mechanism is implemented on branch `fm/azure-runner-routing-file`.
+
+The superseded sentence, kept here so the change of bar is visible, read: "a no-mistakes run
+offloads a test class to Azure and returns a real verdict; and, separately, one validation cell
+reaches `close` with its worktree disk released".
 
 ## R5. All of it runs on the pi multi-profile fleet
 
@@ -329,17 +343,17 @@ Acceptance: concurrent crewmates run on distinct pi profiles with no account col
 
 ## R6. Crosscheck reviews outside the author's model family
 
-Status: NOT DONE. **No cross-family review has ever completed, and none completed for this change
-either.** The acceptance is two completed reviews, not correct wiring: a codex-authored change AND
-a claude-authored change each reviewed by a GLM-backed reviewer, with bound reviewer identity and
-the same evidence discipline as the codex lane. Zero of those two exist. What landed is the lane
-being executable at all, which it previously was not, plus the fixes below. Read "Where the lane
-actually stands" before treating any of it as finished.
+Status: PARTIAL. The codex-model leg is complete: accepted Azure review
+`azure-r4-respond-285` recorded a `cross-family-primary` verdict against the codex-declared PR
+#285 head. The non-codex-model leg is still owed, so R6 is not DONE. The acceptance is two
+completed reviews under the evidenceable amendment below, not correct wiring or one successful
+family-screen case. Read "Where the lane actually stands" before treating any of it as finished.
 
 Context: see "The Azure Foundry Fireworks lane is unusable on this subscription" and "The lane is a
-named registry, now serving GLM-5.2 direct from Fireworks" below, both 2026-08-20. GLM never
-completed a review through Azure and on this subscription never can; it now serves through a direct
-Fireworks account instead.
+named registry, now serving GLM-5.2 direct from Fireworks" below, both 2026-08-20. The retired
+Azure Foundry deployment never completed a review and cannot on this subscription. Direct
+Fireworks is a different provider path, and it has now produced an accepted GLM review from an
+Azure model compartment.
 
 The earlier record stands as history: the lane was built and merged (#264), the `FW-GLM-5.2`
 deployment is live, and the primary reviewer went 0 for 6 against PR #220 plus a seventh failed
@@ -584,7 +598,8 @@ What landed, 2026-08-20 (#264, plus #268 for a defect the live runs exposed):
   `review_family_mode: codex-fallback` and `model_independence: same-model`, and the review reached
   a real clear verdict with citations and an execution proof. The roster was flipped back
   afterwards; the operator has since restored the fallback entries again, as the status above
-  records. This run is still the only verdict this requirement's lane has produced.
+  records. This was the only verdict this requirement's lane had produced before accepted Azure
+  review `azure-r4-respond-285`; it is no longer the only verdict.
 
 ### The acceptance sentence is not evidenceable as written, and is amended (2026-08-21)
 
@@ -644,9 +659,13 @@ Later probe runs declare a codex author instead, per the asymmetry.
 
 Stated plainly, because wiring being right is not the acceptance.
 
-**Has a cross-family review run end to end and produced a verdict? NO.** Not once, on any lane,
-ever. Three attempts against PR #281 on the direct Fireworks lane, each failing FURTHER along than
-the last:
+**Has a cross-family review run end to end and produced an accepted verdict? YES.** Azure review
+`azure-r4-respond-285` completed against the codex-declared PR #285 head and recorded
+`review_family_mode: cross-family-primary`. That completes the codex-model leg only. No accepted
+non-codex-model leg is recorded, so the requirement remains PARTIAL.
+
+The earlier local attempts against PR #281 on the direct Fireworks lane remain useful failure
+history:
 
 | # | outcome |
 |---|---|
@@ -717,12 +736,14 @@ the end of a long session.
 
 **What #281 does NOT close, and must not be read as closing:**
 
-- The acceptance itself. Zero completed cross-family reviews; the requirement needs two, over two
-  different author families.
-- The status command answering whether the cross-family lane is serving or the fallback is active.
-  It still does not exist; `bin/fm-crosscheck.py` exposes `run`, `verify`, `merge` and `timings`.
-  This one is substantive rather than cosmetic, and it bites right now: the fallback IS active, and
-  the only thing that says so is a stderr line at run time.
+- The acceptance itself was not closed by #281. The later accepted Azure review
+  `azure-r4-respond-285` completes the codex-model leg, but the evidenceable amendment requires a
+  second accepted review against a non-codex-model declaration, which is still owed.
+- The status item was not closed by #281, but it was closed by #287.
+  `bin/fm-crosscheck.sh status` is a lock-free, state-free read that reports the roster's first
+  serving family, the current `crosscheck-same-model` policy, and the latest durable ledger run's
+  `review_family_mode`. It reports configuration and durable history, not proof that R6's
+  cross-family acceptance has completed.
 - Review guards sized to the model's context window. Two of the three the Work list names DO
   exist and are stronger than asked: the findings schema is strict (`additionalProperties: false`,
   enum'd severities, `maxItems` caps), and citations are validated before filing by escape check,
@@ -737,9 +758,11 @@ the end of a long session.
 
 Still owed, and honestly so:
 
-- CLOSED as far as GLM is concerned, and the earlier reading of it was wrong. This item asked for
-  a live end-to-end GLM review; no such review is obtainable on this subscription, for the
-  Marketplace reason root-caused above. The historical detail stands: attempts 0 and 1 (05:54Z)
+- CLOSED as far as the retired Azure Foundry GLM deployment is concerned, and the earlier reading
+  of it was wrong. No live end-to-end review is obtainable through that deployment, for the
+  Marketplace reason root-caused above. The accepted Azure compartment review
+  `azure-r4-respond-285` uses the direct Fireworks path instead. The historical detail stands:
+  attempts 0 and 1 (05:54Z)
   died before reaching the provider at all, on a local harness fault in an operator-authored
   instrumentation shim whose `/dev/fd` redirect was refused under the reviewer sandbox; attempts
   2, 3 and 4 (05:55Z to 05:59Z) each recorded only `Pi reviewer emitted a turn after agent
@@ -759,14 +782,16 @@ Still owed, and honestly so:
   04:00Z hour alone). That resource now has ZERO deployments, verified 2026-08-21, so it can serve
   nothing. If a spend signal is still wanted it is a Fireworks-side number, and the meter it would
   need does not exist here either: see the spend bullet below.
-- The Azure-compartment lane. "Switched off rather than unbuildable" was TOO KIND, and this is the
+- The Azure-compartment lane was not merely switched off. "Switched off rather than unbuildable"
+  was TOO KIND, and this is the
   second time this requirement has had to retract a merely-disabled claim without anyone reaching
   the code (the first was the stale `pi`-binary reason). `enabled: false` was MASKING an
   independent in-code blocker: the compartment archive gate derived the executing-account identity
   separately from `account_identity` and compared a bare account id against a prefixed one, so the
   codex-family path refused ITSELF and no codex-family compartment review has ever run. Fixed
-  2026-08-21 with a single shared derivation and a test that is red on the old code; the switch is
-  still off, so the lane still does not run. Recorded because the first fix was itself incomplete:
+  2026-08-21 with a single shared derivation and a test that is red on the old code; the default
+  switch is still off, but explicit Azure execution has now produced accepted review
+  `azure-r4-respond-285`. Recorded because the first fix was itself incomplete:
   it unified the two HOST derivations while the model guest kept a third, moving the refusal from
   staging into a booted, paid VM. The guest is covered by an executing test now rather than
   substring assertions, which is why that was invisible. The serving lane
@@ -782,22 +807,19 @@ Still owed, and honestly so:
   cost field says. R10 must stop describing that as a control it has. C3's daily bound remains the
   only guard over this lane's spend, and C3's own caveat is that the bound is a backstop on
   Cost-Management-recorded spend rather than a real-time meter.
-- Three items from the Work list above that neither landed nor were separately tracked. The status
-  command that answers whether a cross-family lane is serving or the fallback is active does not
-  exist:
-  `bin/fm-crosscheck.py` exposes `run`, `verify` and `merge` and nothing else. This one is
-  substantive rather than cosmetic, because the stated reason for it was that a silent fallback
-  must be impossible, and the fallback is active right now. Second, that pi tolerates
-  `reasoning_content` in streamed deltas was never verified; the string appears nowhere in the
-  repository outside this document. Third, review guards sized to the model's context window at
-  deploy time: the generic guards pre-exist, and the one size that exists, `MAX_PROMPT_BYTES` in
+- Of three formerly untracked Work-list items, two are now closed. #287 added the lock-free,
+  state-free `bin/fm-crosscheck.sh status` read of serving family, same-model policy, and latest
+  durable ledger family. Pi's handling of `reasoning_content` was verified live as recorded above.
+  The remaining item is review guards sized to the model's context window at deploy time: the
+  generic guards pre-exist, and the one size that exists, `MAX_PROMPT_BYTES` in
   `bin/fm-crosscheck-azure.py`, was set in #130 on 2026-08-13 and was not revisited for a
   1M-token model.
 
 Correcting the Azure-compartment blocker, 2026-08-20: the current `fm-ccm` image does carry `pi`,
-and the lane is off because it was switched off. `$FM_HOME/config/crosscheck-azure.json` has
-`"enabled": false`, set by an operator on 2026-08-20; that switch, not the image, is why no
-compartment review runs today. The image claim was already stale when it was written: it entered
+and the lane defaults off because it was switched off. `$FM_HOME/config/crosscheck-azure.json` has
+`"enabled": false`, set by an operator on 2026-08-20; explicit Azure execution can override that
+default and has now completed accepted review `azure-r4-respond-285`. The image claim was already
+stale when it was written: it entered
 `docs/azure-crosscheck.md` in #264 on 2026-08-20, citing a diagnostic boot taken on 2026-08-16
 against an image the config had stopped naming two days earlier. That measurement was correct
 about gallery version `1.0.1786915905`, whose source managed image `img-fm7c799d-ccm-1.0.0` was
@@ -811,16 +833,17 @@ asserts that `/usr/local/bin/pi --version` equals the tracked version twice, onc
 after the credential purge, so a build that reached distribution could not have omitted `pi`. That
 Image Builder run succeeded between 22:26:20Z and 22:36:46Z on 2026-08-18, after #246 landed on
 main at 20:51:35Z, and `bin/fm-crosscheck-azure-image.sh` builds only from the tracked declaration
-at a HEAD already landed on public main. What remains genuinely unproven is a pi review completing
-on this image, which is what R9 records; the binary's presence and a working lane are separate
-claims. `docs/azure-crosscheck.md`, where the sentence originated, is corrected in the same change,
-as are the claims C1 had built on it.
+at a HEAD already landed on public main. A Pi-harness review completing on this image is now proven
+by accepted Azure review `azure-r4-respond-285`; it completes R6's codex-model leg but not its
+non-codex-model leg.
 
-Acceptance: a codex-authored change and a claude-authored change are each reviewed by a
-GLM-backed reviewer with bound reviewer identity and the same evidence discipline as the codex
-lane; the fallback flip to pi-codex is demonstrated once, its activation is visible in the review
-evidence and the status read, and the demonstration records the degraded same-family mode it
-accepts for codex-authored work.
+Acceptance (the evidenceable amendment above): the cross-family lane completes a review end to
+end, and the family screen admits it against both a codex-model declaration and a non-codex-model
+declaration, with the ledger recording reviewer model, review family mode, and whether the
+same-model relaxation was required. The fallback flip to pi-codex is demonstrated once, its
+activation is visible in the review evidence and status read, and the demonstration records its
+degraded same-family mode. The codex-model leg is complete through `azure-r4-respond-285`; the
+non-codex-model leg is still owed.
 
 ## R7. Everything is logged in
 
@@ -894,8 +917,9 @@ they will cross is 2026-08-29. The mechanism is proven; the calendar is not.
 
 Status: NOT DONE.
 
-Unproven today: the worker landing path; any validation cell closing; any pi review on the current
-model image; and secondmate-in-Azure, which is blocked on R2/R3.
+Unproven today: the worker landing path; any validation cell closing; and secondmate-in-Azure,
+which is blocked on R2/R3. An accepted Pi-harness review on the current model image is now proven
+by Azure review `azure-r4-respond-285`.
 
 The landing path is not synthetically exercisable, and that is correct behavior rather than a gap
 to route around.
@@ -908,16 +932,21 @@ Proving it requires a real spawned crewmate task that commits.
 
 ## R10. Crosscheck is exposed to team engineers through Slack
 
-Status: BUILT, ready-to-flip; awaiting the three owner inputs (the Slack app's
-two tokens, the GitHub read credential, and the metering numbers). Directed
-by the owner 2026-08-19; builds after R6. The lane is
-`bin/fm-crosscheck-slack.sh` and its owning document is
-`docs/crosscheck-slack.md`; a missing token environment variable refuses
-startup naming the exact variable, so flipping it on is supplying tokens, not
-changing code. Live acceptance still requires those inputs and an engineer
-other than the owner.
+Status: DROPPED by the owner, 2026-08-21.
+The build (the Slack lane, `bin/fm-crosscheck-slack.sh`) remains in-tree, inert without its
+tokens; no acceptance is owed.
+Everything below is retained as history of what was built and what turning it on would have
+taken, and none of it is outstanding work.
 
-What DK must click: create a Slack app in the workspace with Socket Mode on;
+Where the lane stood before it was dropped: BUILT, ready-to-flip; awaiting the three owner inputs
+(the Slack app's two tokens, the GitHub read credential, and the metering numbers).
+Directed by the owner 2026-08-19; builds after R6.
+The lane is `bin/fm-crosscheck-slack.sh` and its owning document is `docs/crosscheck-slack.md`; a
+missing token environment variable refuses startup naming the exact variable, so flipping it on is
+supplying tokens, not changing code.
+Live acceptance would still have required those inputs and an engineer other than the owner.
+
+What DK would have had to click: create a Slack app in the workspace with Socket Mode on;
 mint the app-level token with `connections:write` and the bot token with
 `app_mentions:read`, `chat:write`, `channels:history`, and `reactions:write`;
 subscribe it to the `app_mention` event, install it, and invite the bot to the
@@ -931,13 +960,13 @@ ledger records per-review cost; today it does not). Null for either stays
 unmetered pass-through, still ledgered. Details and the run recipe:
 `docs/crosscheck-slack.md`.
 
-The owner's v1 shape: an engineer tags the crosscheck bot in a Slack channel with a pull request
-link; the GLM lane reviews it; the bot posts the findings as a thread reply on the engineer's
-own message. No engineer wires up a harness or touches an endpoint, and the same path works for
-deliberate on-demand use. Cursor Bugbot continues to run for engineers' pull requests (it stays
-disabled on the owner's), so this lane complements rather than replaces it.
+The owner's former v1 shape: an engineer tags the crosscheck bot in a Slack channel with a pull
+request link; the GLM lane reviews it; the bot posts the findings as a thread reply on the
+engineer's own message. No engineer wires up a harness or touches an endpoint, and the same path
+works for deliberate on-demand use. Cursor Bugbot continues to run for engineers' pull requests
+(it stays disabled on the owner's), so this lane complements rather than replaces it.
 
-Constraints the build must honor:
+Constraints the built lane was intended to honor:
 
 - The listener uses Slack Socket Mode, so no public inbound endpoint is added to the private
   lane posture. It is a resident process; where it runs is decided at build time and its
@@ -947,18 +976,23 @@ Constraints the build must honor:
   allowlist, because a review pulls untrusted content into a credentialed context.
 - Every thread reply names the lane that produced it (GLM, or the pi-codex fallback), the same
   visibility R6 requires, so engineers and the owner can always see what is serving.
-- Team usage is metered per submitter under a daily cost bound (C3); when the bound is reached
-  the bot says so in the thread instead of silently dropping the request.
+- The intended design called for per-submitter metering under a daily cost bound (C3), with a
+  refusal in the thread instead of a silently dropped request. The in-tree build binds the daily
+  request cap, but its USD bound never became effective because the crosscheck ledger records no
+  per-review cost. That unfinished control is retained as history, not work still owed after the
+  drop.
 
-Acceptance: an engineer other than the owner tags the bot with a pull request link and receives
-threaded findings produced by the GLM lane, with the lane named in the reply, the request
-metered, and an out-of-allowlist link refused with a clear message.
+Acceptance, as it stood before the drop and no longer owed: an engineer other than the owner tags
+the bot with a pull request link and receives threaded findings produced by the GLM lane, with the
+lane named in the reply, the request metered, and an out-of-allowlist link refused with a clear
+message.
 
 ## C1. Crosscheck completes in 20 to 30 minutes
 
-Status: INSTRUMENTED 2026-08-20; the one measured serving-lane review is FASTER than the band, not
-inside it, and the compartment lane's phase numbers remain unmeasured because that lane is switched
-off.
+Status: INSTRUMENTED 2026-08-20; NOT MET.
+The instrumented local-lane readings are 35m33s and 44m25s, which sit ABOVE the 20-to-30-minute
+band rather than inside it. Accepted Azure review `azure-r4-respond-285` proves the compartment can
+complete, but this section does not record that run's compartment phase breakdown.
 
 What was measured, and what is inference.
 
@@ -972,31 +1006,51 @@ run on or after 2026-08-16, on the grounds that `docs/azure-crosscheck.md` recor
 non-executable for want of a `pi` binary. That premise was false and has been corrected in that
 document: the current `fm-ccm` image does carry `pi`, and the lane is off because
 `$FM_HOME/config/crosscheck-azure.json` carries `"enabled": false`. The date argument is therefore
-withdrawn rather than restated; what stands is that no compartment timing is recorded anywhere.
+withdrawn rather than restated. An accepted compartment run now exists, but its timing breakdown is
+not supplied in this section.
 
 Inference, clearly labeled as such: the compartment lane is the only plausible owner of a duration
 that large, because it is the only lane that creates a model VM, stages a credential archive and
 request into blob storage, boots a Managed Run Command, and collects a digest-bound result. That
-reasoning is from the shape of the code, not from a timing. It is not proof, and this build has not
-turned it into proof, because the lane it would have to measure is switched off rather than run.
-Unlike the earlier reading, that is a reversible condition: switching the lane on and taking one
-compartment review would settle it. Four parallel lanes
+reasoning is from the shape of the code, not from a timing. It is not proof. An explicit Azure run
+has now completed, but its phase breakdown is not supplied here; settling the 75-minute premise
+requires an accepted timing record rather than another inference from lane shape. Four parallel
+lanes
 (`FM_AZURE_CROSSCHECK_LANES`, default 4) always bounded concurrency, never one review's clock.
 
-What is fact rather than inference is that the serving lane changed: R6 made GLM-5.2 the sole
-primary reviewer running through the LOCAL pi lane, so today's serving path performs no create,
-boot, stage, or collect at all, and the compartment lane is disabled in the operator home. It is
-disabled by `"enabled": false` in `$FM_HOME/config/crosscheck-azure.json`, which does exist and
-also names a current `model_image_id`; it is neither absent nor waiting on an image. Whether
-that change is what moved the duration is again inference; none of the three candidate levers this
-requirement listed (warm reviewer VMs, a faster SKU, more lanes) was tried, so none of them was
-ruled out by measurement either.
+What is fact rather than inference is that the configured route changed: R6 registered GLM-5.2 as
+the primary reviewer through the LOCAL pi lane, whose execution path performs no create, boot,
+stage, or collect, while the compartment lane is disabled by default in the operator home. That
+routing fact alone did not establish that GLM completed; `azure-r4-respond-285` now does through the
+separate compartment path, without identifying the reviewer behind either local timing below.
+The compartment lane is disabled by `"enabled": false` in
+`$FM_HOME/config/crosscheck-azure.json`, which does exist and also names a current
+`model_image_id`; it is neither absent nor waiting on an image. Whether the route change is what
+moved the duration is again inference; none of the three candidate levers this requirement listed
+(warm reviewer VMs, a faster SKU, more lanes) was tried, so none of them was ruled out by
+measurement either.
 
-One local-lane review has been measured end to end: 6m13s on 2026-08-20, pi-codex fallback family,
-PR #220, verdict clear. That was an external wall-clock observation of the invocation taken before
-this instrumentation landed, so it carries no recorded phase breakdown of its own. It is one run,
-not a distribution, and a GLM-5.2 primary review is a different reviewer from the pi-codex fallback
-that served it. It is the only crosscheck duration this repository can point to.
+Two local-lane runs have since been measured through this instrumentation, and they sit ABOVE the
+band rather than below it.
+Two runs recorded totals of 35m33s and 44m25s, with 99.7% and 99.6% of those totals respectively
+inside the `reviewer` phase, as recorded by the owner on 2026-08-21.
+That puts those two recorded reviews in the 35-to-45-minute range, with effectively their whole
+duration inside the reviewer call itself rather than in snapshot, proofs, or ledger work.
+
+An earlier reading of this section said the opposite, and it must not be relied on.
+It rested on one local-lane observation of 6m13s on 2026-08-20, pi-codex fallback family, PR #220,
+verdict clear, and concluded that the lane was faster than the band.
+That observation was an external wall-clock reading of the invocation taken before this
+instrumentation landed, so it carried no phase breakdown of its own, and it was one run rather than
+a distribution.
+The instrumented totals above supersede it.
+
+One operational consequence, because it bites on the first long review rather than later: the
+default reviewer timeout is 1800 seconds (`FM_CROSSCHECK_REVIEWER_TIMEOUT_SECONDS`, defaulted in
+`bin/fm-crosscheck.py` and in `bin/fm-crosscheck-azure.py`), which is shorter than either measured
+review and would kill such a review outright.
+Operators run these reviews with `FM_CROSSCHECK_REVIEWER_TIMEOUT_SECONDS=5400`, which is inside the
+30-to-7200-second range the setting accepts.
 
 What is now instrumented.
 
@@ -1013,25 +1067,40 @@ rather than a fabricated zero. Contracts live in `docs/crosscheck.md` and `docs/
 
 Acceptance: a measured review completes in 20 to 30 minutes, with the breakdown recorded.
 
-Honest reading against that acceptance. Taken literally, the acceptance is not met: 6m13s is
-FASTER than the 20-to-30-minute band, not inside it, and no live review has yet been recorded
-through the instrumentation, because the one measured review predates it. Read as the outcome the
-band was standing in for - a review that is not about 75 minutes - the duration side is satisfied
-by that single run, and the breakdown side is landed and proven hermetically, with the next live
-crosscheck run recording its own. Both readings are stated because the difference decides whether
-this is DONE, and that call belongs to the owner rather than to this section.
+Honest reading against that acceptance.
+The acceptance is not met, and the miss runs in the opposite direction to the one this section used
+to record: 35m33s and 44m25s are ABOVE the band, not below it.
+The breakdown side is met, because both readings carry their own `durations_ms` split and they
+attribute 99.7% and 99.6% of their totals to `reviewer`.
+Read as the outcome the band was standing in for, a review that is not about 75 minutes, the
+duration side is arguable rather than satisfied, since 44m25s is well under the owner's stated
+premise but is not the 20-to-30-minute result the requirement asks for.
+Closing the remaining gap means attacking the reviewer phase itself, because that is where
+essentially all of these two runs' time sits; the three levers this requirement originally listed
+(warm reviewer VMs, a faster SKU, more lanes) act on create, boot, and concurrency, none of which
+was on their measured critical path.
 
-The compartment lane's create, boot, stage, and collect numbers are unmeasured, because that lane
-is switched off; they are not unmeasurable, and the earlier claim that they were, pending an image
-rebake, rested on a premise that has since been refuted. This section does not claim that lane is
-fixed. If the compartment lane is ever restored to serving,
-C1 has to be re-measured against it, and the three original candidate levers become live again at
-that point.
+The accepted compartment run's create, boot, stage, and collect numbers are not recorded in this
+section; they are not unmeasurable, and the earlier claim that they were, pending an image rebake,
+rested on a premise that has since been refuted. If the compartment lane becomes the serving
+default, C1 has to be measured against it, and the three original candidate levers become live
+again at that point.
 
-The contradiction this section previously flagged is resolved: R6's status line no longer reads
-NOT DONE. Note the correction that came with it, since this section leans on R6's serving lane:
-GLM is the primary reviewer on paper but has never completed a review, so the lane that actually
-served the one measured run, and that serves reviews today, is the pi-codex fallback.
+The contradiction this section previously flagged is partly resolved: R6 now reads PARTIAL.
+Note the correction that comes with it, since this section discusses R6's reviewer routing.
+GLM-5.2 is the primary reviewer on the registered Fireworks lane, and at the point this section
+describes, the 6m13s reading of 2026-08-20, it had not produced an accepted cross-family review.
+The verdict behind that superseded reading came from the pi-codex fallback (2026-08-20, PR #220).
+The later accepted Azure GLM verdict `azure-r4-respond-285` completes R6's codex-model leg but does
+not identify the reviewer behind either instrumented timing above.
+That fallback is not a general serving lane: `config/crosscheck-same-model` is off, so it is
+eligible only for authors outside the codex family, and a codex-authored PR whose primary is
+unavailable fails closed rather than being reviewed by it. Eligibility does not establish that the
+fallback serves reviews today or that it served either instrumented reading above.
+Which lane and which family served the two instrumented readings above, 35m33s and 44m25s, is not
+established by anything R6 records, and this section does not assert it.
+The accepted Azure verdict satisfies the codex-model leg only. R6 remains open because no accepted
+non-codex-model leg is recorded, and nothing here should be read as closing that remaining leg.
 
 ## C2. Many crewmates, no-mistakes, and crosschecks run in parallel without contention
 
@@ -1106,10 +1175,11 @@ The adjacent cooldown gap is also closed: a release-proved worker whose VM was d
 operator-side (surrender's dark-compute gate) now gets `cooldown_started_at` stamped on first
 observation, so `delete-compute` becomes due instead of waiting forever.
 
-R10 metering and standing-cost booking: the Slack listener runs on the operator mac in v1, so
-its standing Azure cost is approximately zero; its per-submitter daily request ledger lives
-under `$FM_HOME/state/crosscheck-slack`, with `daily_request_cap` binding today and
-`daily_budget_usd` binding once that ledger records per-review cost.
+Dropped R10's intended metering and standing-cost booking: the inert Slack lane was designed to
+run its listener on the operator Mac, with approximately zero standing Azure cost. Its
+per-submitter daily request ledger remains in-tree under `$FM_HOME/state/crosscheck-slack`;
+`daily_request_cap` is implemented, while `daily_budget_usd` would bind only if that ledger ever
+recorded per-review cost, which it does not. No listener or acceptance is owed after the drop.
 
 Acceptance: a day cannot cross the bound without an explicit operator override, and a worker
 whose task ended deallocates unattended.
@@ -1123,13 +1193,13 @@ billable capacity has not run yet.
 3. R2/R3, the largest architectural gap and the requirement most misread by the current build.
 4. R6, whose direction is decided (GLM-5.2 on the Fireworks Foundry lane) and which no longer
    needs an owner login.
-5. R4, which needs the runner caller built and one validation cell closed.
+5. R4, which needs one validation cell closed; the runner caller is built, and the offload lane is
+   an optimisation rather than part of the acceptance.
 6. R5.
-7. C1, instrumented 2026-08-20; the one measured serving-lane review is faster than the band rather
-   than inside it, and the compartment lane's phases wait on that lane being switched back on.
+7. C1, instrumented 2026-08-20; the measured local-lane runs are above the band rather than
+   inside it, and the compartment lane's phases wait on that lane being switched back on.
 8. R9, which is the proof of the rest.
-9. R10, the Slack team exposure, which needs R6's lane and can be pulled forward right after R6
-   if the owner wants engineers on it sooner.
+9. R10, the Slack team exposure, dropped by the owner on 2026-08-21 and no longer ordered work.
 
 ## Standing constraints
 
