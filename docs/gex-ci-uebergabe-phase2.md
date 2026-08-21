@@ -85,3 +85,24 @@ Beide haben ohnehin keine Workflows. Die Positivliste auf gex sperrt sie zusaetz
 Wenn nach der Umstellung etwas klemmt: `runs-on` zurueck auf `ubuntu-latest`, fertig.
 Der Laeufer bleibt stehen und stoert nicht; der naechste Lauf geht wieder gehostet.
 Ein ergaenzter `setup-node`-Schritt darf und soll dabei stehen bleiben - er ist auch gehostet richtig.
+
+## Nachtrag 21.08.2026: Plaetze fuer GEX_GATEWAY und LensclashDB
+
+`GEX_GATEWAY` und `LensclashDB` stehen in `/etc/gh-runner/repos` auf gex44, je ein Platz
+(`gh-runner@GEX_GATEWAY-1`, `gh-runner@LensclashDB-1`), aktiviert und gestartet.
+Ein Platz reicht - beide liegen unter 50 Minuten in 30 Tagen (siehe Tabelle oben).
+Beleg (`gh api repos/swippipp/<repo>/actions/runners`): beide online, `busy: false`, Label `gex`.
+Kein neues Unit-File und kein Bild-Rebuild noetig - beide nutzen das bestehende
+`gh-runner@.service`-Template und `localhost/gh-runner:base`.
+Das Laptop-Relais (`gh-runner-token-relay.sh`) liest die Positivliste bei jedem Lauf neu ein;
+es brauchte keine Aenderung, nur ein einmaliger manueller Lauf, damit sofort ein Token lag.
+
+Dabei zusaetzlich `gh-runner@testlab-1` wieder aktiviert (nach der Rauchprobe in Phase 1
+manuell gestoppt und deregistriert stehen geblieben) - die lensclash-Bahn hatte einen PR
+auf `testlab`, der auf einen erreichbaren Laeufer wartete. Lief sofort an, Beleg ebenso ueber
+`gh api repos/swippipp/testlab/actions/runners`.
+
+Aggregierter Deckel (`gh-runner.slice`) unveraendert; Caddy, DNS, Docker-Daemon-Konfiguration,
+Produktionscontainer und GPU-Stack nicht angefasst - `docker ps` zeigt weiterhin 25 Container
+vor und nach der Aenderung.
+`runs-on` in den beiden Repos umzustellen bleibt Sache der jeweiligen Bahn, wie oben beschrieben.
