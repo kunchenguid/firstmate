@@ -15,8 +15,10 @@
 #   verify <origin>                        -> verify <origin>
 #   resolve <origin> <key> --decision-file <f> --routed-to <id>...
 #                                          -> answer <origin>-decision-<key> with the routed ids
-#                                             appended to the decision text, then the recorded
-#                                             blocked-by edges cleared through tasks-axi
+#                                             appended to the decision text, then clear the
+#                                             recorded blocked-by edges through tasks-axi; an
+#                                             exact replay of a pre-collapse routed record reuses
+#                                             its historical digest and text before clearing edges
 #   answer|decline|repair <origin> <key> --decision-file <f>
 #                                          -> answer <origin>-decision-<key> --decision-file <f>
 #   answers (<origin> | --any-origin) --source <p>

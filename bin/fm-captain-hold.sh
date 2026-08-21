@@ -44,8 +44,9 @@
 # preserved below the block and archived through tasks-axi --archive-body),
 # then closes the task with `tasks-axi done` - or, with `--release`, lifts the
 # hold with `tasks-axi unhold` so a captain-gated WORK item resumes instead of
-# closing. An exact retry is idempotent through the recorded decision digest; a
-# changed decision is rejected. On a task already closed outside this script,
+# closing. An exact retry is idempotent only when its requested close mode
+# matches the newest record; a changed decision or a mode mismatch is rejected.
+# A re-held task may record a new answer on top. On a task already closed outside this script,
 # `answer` records the missing resolution block (the old `repair` path) only
 # when the task still carries the captain-hold provenance tasks-axi preserves
 # through a close, so an ordinary finished task cannot be dressed up as an
@@ -63,9 +64,10 @@
 # empty or `done` completes the task, `release` lifts the hold so held work
 # resumes; anything else is skipped. A key that names no task, a task that is
 # not held for the captain, or a task already closed is reported as `skipped:`
-# and feeds nothing (a replayed delivery of an already-recorded identical
-# answer is reported `closed:` and is a no-op), and the command exits nonzero
-# when any key was skipped. `--source` is provenance text recorded in the
+# and feeds nothing. A replayed delivery whose answer digest and requested
+# close mode both match the newest record is reported `closed:` and is a no-op;
+# a mode mismatch is skipped. The command exits nonzero when any key was
+# skipped. `--source` is provenance text recorded in the
 # durable decision, never a behavior switch: this command has no per-channel
 # branch and no knowledge of chat, review decks, or any transport.
 # Legacy input: an optional positional origin (or a stored concrete-origin
