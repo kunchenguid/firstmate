@@ -271,7 +271,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true
   RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
   case "$RECOVERY_MARKER_TOKEN" in
-    pending:downtime:*)
+    pending:downtime:*|announced:downtime:*)
       fm_recovery_marker_begin_handling "$RECOVERY_MARKER" || {
         echo "wake drain: decision recovery could not begin handling safely" >&2
         exit 1
@@ -279,7 +279,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
       RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
       RECOVERY_ACK_REQUIRED=true
       ;;
-    pending:handling:*) RECOVERY_ACK_REQUIRED=true ;;
+    pending:handling:*|announced:handling:*) RECOVERY_ACK_REQUIRED=true ;;
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
@@ -327,7 +327,7 @@ fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
 case "$RECOVERY_MARKER_TOKEN" in
-  pending:*|acked:*) ;;
+  pending:*|announced:*|acked:*) ;;
   *) echo "wake drain: durable wakes have no recovery generation" >&2; exit 1 ;;
 esac
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
