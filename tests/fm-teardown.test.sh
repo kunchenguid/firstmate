@@ -193,6 +193,10 @@ if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
   exit 0
 fi
+if [ "${1:-}" = hold ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi hold <id> --kind captain'
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
@@ -612,6 +616,66 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
   printf '%s\n' "$out" | grep -F 'tasks-axi done' >/dev/null \
     && fail "teardown prompted tasks-axi despite manual backend opt-out: $out"
   pass "teardown honors config/backlog-backend=manual even when tasks-axi is compatible"
+}
+
+test_wayfinder_scout_teardown_requires_accept_child() {
+  local case_dir rejected resolved out rc
+  case_dir=$(make_case wayfinder-scout-archive)
+  write_meta "$case_dir" no-mistakes scout
+  printf '%s\n' \
+    'decisions_reviewed=1' \
+    'decision_keys=' \
+    'wayfinder_child=5' >> "$case_dir/state/task-x1.meta"
+  add_compatible_tasks_axi "$case_dir"
+  mkdir -p "$case_dir/data/task-x1" "$case_dir/project/bin"
+  printf '%s\n' '# Research report' > "$case_dir/data/task-x1/report.md"
+  cat > "$case_dir/project/bin/wayfinder-lifecycle-gate" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" != --state ] || [ "${3:-}" != accept-child ]; then
+  echo 'unexpected Wayfinder lifecycle command' >&2
+  exit 1
+fi
+python3 - "$2" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    snapshot = json.load(source)
+if (snapshot.get("children") or [{}])[0].get("state") == "closed":
+    print("accept-child accepted")
+    raise SystemExit(0)
+print("accept-child rejected", file=sys.stderr)
+raise SystemExit(2)
+PY
+SH
+  chmod +x "$case_dir/project/bin/wayfinder-lifecycle-gate"
+  rejected="$case_dir/rejected.json"
+  resolved="$case_dir/resolved.json"
+  printf '%s\n' '{"children":[{"number":5,"state":"open"}]}' > "$rejected"
+  printf '%s\n' '{"children":[{"number":5,"state":"closed"}]}' > "$resolved"
+
+  set +e
+  out=$(FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" \
+    --wayfinder-state "$rejected" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "Wayfinder-rejected scout must not archive"$'\n'"$out"
+  assert_contains "$out" "accept-child rejected" \
+    "teardown did not invoke the consuming project's accept-child command"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "Wayfinder-rejected scout teardown removed task metadata"
+  assert_present "$case_dir/data/task-x1/report.md" \
+    "Wayfinder-rejected scout teardown removed the report"
+
+  out=$(FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" \
+    --wayfinder-state "$resolved" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "Wayfinder-resolved scout should archive"$'\n'"$out"
+  assert_contains "$out" "accept-child accepted" \
+    "teardown did not preserve the project lifecycle success"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "Wayfinder-resolved scout teardown did not archive task metadata"
+  pass "Wayfinder scout teardown requires the project's accept-child check"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -2594,6 +2658,7 @@ EOF
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
+test_wayfinder_scout_teardown_requires_accept_child
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows

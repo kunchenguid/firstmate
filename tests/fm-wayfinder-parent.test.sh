@@ -326,7 +326,8 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux FM_FAKE_PANE_PATH="${FM_FAKE_PANE_PATH:-}" \
+    TMUX="${FM_TEST_TMUX:-}" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -363,6 +364,34 @@ fakebin_for() {  # <home>
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/treehouse"
   chmod +x "$fakebin/tmux" "$fakebin/treehouse"
+  printf '%s\n' "$fakebin"
+}
+
+successful_fakebin_for() {  # <home>
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf '%s\n' firstmate ;;
+  list-windows|set-window-option|send-keys|kill-window) ;;
+  new-window) printf '%s\n' '@42' ;;
+  *) exit 1 ;;
+esac
+SH
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+shift
+exec "$@"
+SH
+  chmod +x "$fakebin/tmux" "$fakebin/treehouse" "$fakebin/timeout"
   printf '%s\n' "$fakebin"
 }
 
@@ -488,7 +517,7 @@ test_complete_none_alone_remains_insufficient() {
 }
 
 test_map_dependent_spawn_and_promote() {
-  local home project fakebin snap_bad snap_good out rc id
+  local home project fakebin successful_fakebin snap_bad snap_good out rc id worktree
   home=$(make_home dispatch)
   project=$(make_gated_project "$home" shop)
   fakebin=$(fakebin_for "$home")
@@ -527,16 +556,23 @@ test_map_dependent_spawn_and_promote() {
     "missing snapshot did not name the project lifecycle command"
   assert_absent "$home/state/$id.meta" "state-less gated spawn wrote task metadata"
 
-  set +e
-  out=$(run_spawn "$home" "$fakebin" "$id" "$project" claude --mode no-mistakes --yolo off \
-    --wayfinder-state "$snap_good")
+  fm_git_add_origin "$project" "$project.origin.git"
+  worktree="$home/worktrees/$id"
+  git -C "$project" worktree add -q -b "fm/$id" "$worktree"
+  successful_fakebin=$(successful_fakebin_for "$home/success-fixture")
+  out=$(FM_FAKE_PANE_PATH="$worktree" FM_TEST_TMUX='fake,1,0' \
+    run_spawn "$home" "$successful_fakebin" "$id" "$project" claude --mode no-mistakes --yolo off \
+      --wayfinder-state "$snap_good")
   rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "handoff-passing spawn should still stop before creating an endpoint in this fixture"
+  expect_code 0 "$rc" "handoff-passing spawn should launch an isolated worker"$'\n'"$out"
   assert_not_contains "$out" "gate failed" "passing handoff still refused the project command"
   assert_not_contains "$out" "local-completion-is-not-resolution" \
     "passing handoff still treated the child as unresolved"
-  assert_absent "$home/state/$id.meta" "fixture spawn that passed handoff should still fail before metadata"
+  assert_contains "$out" "spawned $id harness=claude kind=ship" \
+    "passing handoff did not launch the ship"
+  assert_present "$home/state/$id.meta" "passing handoff did not publish task metadata"
+  assert_grep "worktree=$worktree" "$home/state/$id.meta" \
+    "passing handoff recorded the wrong isolated worktree"
 
   id=wf-independent-docs
   write_ship_brief "$home" "$id"

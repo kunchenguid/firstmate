@@ -2,7 +2,7 @@
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--wayfinder-state <file>|--wayfinder-independent]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--wayfinder-child <number-or-title>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -64,6 +64,8 @@
 #   --wayfinder-state <snapshot> with the GitHub snapshot that command
 #   consumes. Pass --wayfinder-independent only when this ship does not
 #   depend on the Wayfinder map. Scout and secondmate spawns skip that check.
+#   --wayfinder-child records the named Wayfinder child for a scout. Teardown
+#   requires its fresh accept-child verification before archiving that scout.
 #   The project command owns the resolution policy;
 #   Firstmate only invokes it.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
@@ -286,6 +288,7 @@ YOLO=
 TRACEPARENT_ARG=
 WAYFINDER_STATE=
 WAYFINDER_STATE_TEMP=
+WAYFINDER_CHILD=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -294,6 +297,7 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 WAYFINDER_STATE_SET=0
+WAYFINDER_CHILD_SET=0
 WAYFINDER_INDEPENDENT=0
 WAYFINDER_MAP_INDEPENDENT=0
 RELAUNCH=0
@@ -313,6 +317,7 @@ for a in "$@"; do
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
       wayfinder-state) WAYFINDER_STATE=$a; WAYFINDER_STATE_SET=1 ;;
+      wayfinder-child) WAYFINDER_CHILD=$a; WAYFINDER_CHILD_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -338,6 +343,8 @@ for a in "$@"; do
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
     --wayfinder-state) want_value=wayfinder-state ;;
     --wayfinder-state=*) WAYFINDER_STATE=${a#--wayfinder-state=}; WAYFINDER_STATE_SET=1 ;;
+    --wayfinder-child) want_value=wayfinder-child ;;
+    --wayfinder-child=*) WAYFINDER_CHILD=${a#--wayfinder-child=}; WAYFINDER_CHILD_SET=1 ;;
     --wayfinder-independent) WAYFINDER_INDEPENDENT=1 ;;
     *) POS+=("$a") ;;
   esac
@@ -351,6 +358,12 @@ done
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
 [ "$WAYFINDER_STATE_SET" -eq 0 ] || [ -n "$WAYFINDER_STATE" ] || { echo "error: --wayfinder-state requires a non-empty value" >&2; exit 1; }
+[ "$WAYFINDER_CHILD_SET" -eq 0 ] || [ -n "$WAYFINDER_CHILD" ] || { echo "error: --wayfinder-child requires a non-empty value" >&2; exit 1; }
+if [ "$WAYFINDER_CHILD_SET" -eq 1 ]; then
+  case "$WAYFINDER_CHILD" in
+    *$'\n'*|*$'\r'*) echo "error: --wayfinder-child must be one line" >&2; exit 1 ;;
+  esac
+fi
 [ "$WAYFINDER_STATE_SET" -eq 0 ] || [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || { echo "error: --wayfinder-state and --wayfinder-independent cannot be combined" >&2; exit 1; }
 resolve_project_dir_arg() {
   local path=$1
@@ -387,12 +400,17 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
   [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded Wayfinder dependency; --wayfinder-independent cannot override it" >&2; exit 1; }
+  [ "$WAYFINDER_CHILD_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded Wayfinder child; --wayfinder-child cannot override it" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
   # here rather than resolved from the project registry. Scouts deliver a report
   # and record no delivery posture; secondmate spawns hardcode theirs.
   if [ "$KIND" = ship ]; then
+    [ "$WAYFINDER_CHILD_SET" -eq 0 ] || {
+      echo "error: --wayfinder-child applies only to scout spawns" >&2
+      exit 1
+    }
     [ "$MODE_SET" -eq 1 ] || {
       echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
       exit 1
@@ -429,6 +447,10 @@ else
       echo "error: --wayfinder-independent applies only to ship spawns; a scout stays off the map-dependent handoff path" >&2
       exit 1
     }
+    if [ "$KIND" != scout ] && [ "$WAYFINDER_CHILD_SET" -eq 1 ]; then
+      echo "error: --wayfinder-child applies only to scout spawns" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -890,6 +912,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  [ "$WAYFINDER_CHILD_SET" -eq 0 ] || {
+    echo "error: --wayfinder-child is single-scout only; spawn each named Wayfinder scout separately" >&2
+    exit 1
+  }
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -2739,6 +2765,7 @@ preserve_relaunch_meta() {
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   [ "$WAYFINDER_MAP_INDEPENDENT" -eq 0 ] || echo "wayfinder_independent=1"
+  [ "$WAYFINDER_CHILD_SET" -eq 0 ] || echo "wayfinder_child=$WAYFINDER_CHILD"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

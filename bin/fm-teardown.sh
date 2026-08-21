@@ -54,10 +54,12 @@
 # the retired home. Removing a leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--force] [--wayfinder-state <file>]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --wayfinder-state supplies the project snapshot required to archive a scout
+#   that recorded a Wayfinder child.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -173,7 +175,38 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   exit 2
 fi
 ID=$1
-FORCE=${2:-}
+shift
+FORCE=
+WAYFINDER_STATE=
+WAYFINDER_STATE_SET=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --force)
+      [ -z "$FORCE" ] || { echo "error: --force may be passed once" >&2; exit 2; }
+      FORCE=--force
+      ;;
+    --wayfinder-state)
+      shift
+      [ "$#" -gt 0 ] || { echo "error: --wayfinder-state requires a value" >&2; exit 2; }
+      case "$1" in --*) echo "error: --wayfinder-state requires a value" >&2; exit 2 ;; esac
+      WAYFINDER_STATE=$1
+      WAYFINDER_STATE_SET=1
+      ;;
+    --wayfinder-state=*)
+      WAYFINDER_STATE=${1#--wayfinder-state=}
+      WAYFINDER_STATE_SET=1
+      ;;
+    *)
+      echo "error: unknown teardown argument $1" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+[ "$WAYFINDER_STATE_SET" -eq 0 ] || [ -n "$WAYFINDER_STATE" ] || {
+  echo "error: --wayfinder-state requires a non-empty value" >&2
+  exit 2
+}
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
@@ -454,6 +487,22 @@ ORCA_PATH_MATCH_VERIFIED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
+WAYFINDER_CHILD=$(fm_meta_get "$META" wayfinder_child)
+case "$WAYFINDER_CHILD" in
+  *$'\n'*|*$'\r'*)
+    echo "error: task $ID has an invalid Wayfinder child record" >&2
+    exit 1
+    ;;
+esac
+if [ "$WAYFINDER_STATE_SET" -eq 1 ] && { [ "$KIND" != scout ] || [ -z "$WAYFINDER_CHILD" ]; }; then
+  echo "error: --wayfinder-state applies only to scouts with a recorded Wayfinder child" >&2
+  exit 2
+fi
+if [ "$KIND" = scout ] && [ -n "$WAYFINDER_CHILD" ] && [ "$FORCE" != "--force" ] && [ "$WAYFINDER_STATE_SET" -eq 0 ]; then
+  echo "REFUSED: scout task $ID records Wayfinder child '$WAYFINDER_CHILD' but has no --wayfinder-state snapshot." >&2
+  echo "Pass --wayfinder-state <snapshot> so Firstmate can verify accept-child before archiving the scout." >&2
+  exit 1
+fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
@@ -2326,6 +2375,14 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
     echo "REFUSED: scout task $ID has not passed the captain-call completion gate." >&2
     echo "Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown." >&2
     exit 1
+  fi
+  if [ -n "$WAYFINDER_CHILD" ]; then
+    if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+        "$SCRIPT_DIR/fm-wayfinder-parent.sh" accept-child --project "$PROJ" \
+        --state "$WAYFINDER_STATE" --child "$WAYFINDER_CHILD" --task "$ID"; then
+      echo "REFUSED: the project's Wayfinder accept-child check rejected scout task $ID; task state and report were preserved." >&2
+      exit 1
+    fi
   fi
 fi
 
