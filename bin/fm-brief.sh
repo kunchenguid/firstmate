@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Scaffold a crewmate brief or persistent secondmate charter at
 # data/<task-id>/brief.md under the active firstmate home.
-# For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
-# filled in. Ship and scout `# Task` sections have two subsections Firstmate
+# For ordinary tasks, the standard Setup/Rules/General-guidelines/Definition-of-done
+# contract is filled in. Every crewmate and scout brief carries the fleet-wide
+# engineering guidelines, since a worker in another project's worktree never
+# loads firstmate's own AGENTS.md.
+# Ship and scout `# Task` sections have two subsections Firstmate
 # fills before dispatch: `{TASK}` under `## Captain's intent` (the captain's
 # own ask plus the context needed to read it, including the substance of any
 # report, decision, or PR the ask refers to) and `{FIRSTMATE_SPEC}`
@@ -353,6 +356,23 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+# Fleet-wide engineering guidelines, mirroring AGENTS.md's "General Guidelines
+# for all crewmates, including firstmate" section. A crewmate works in a
+# worktree of some other project and never loads firstmate's AGENTS.md, so the
+# brief is the only place these rules reach it. Secondmates are excluded: their
+# home carries its own AGENTS.md. Keep this block short; every brief pays for it.
+IFS= read -r -d '' GENERAL_GUIDELINES <<'EOF' || true
+# General guidelines
+- Never use the em dash character; write a plain dash "-" instead.
+- Never add an agent name as a commit co-author.
+- Put each full sentence on its own line in long Markdown or TeX files.
+- Weigh quality, simplicity, robustness, and long-term maintainability far above development cost.
+- Reproduce a bug end to end the way a user would hit it before fixing it, so the fix lands on the real cause.
+- Be picky about the UI you see while testing, down to the pixel; if something looks off, get it fixed along the way.
+- Hold that same bar for lint failures, test failures, and flaky tests you run into, even ones your task did not cause.
+EOF
+GENERAL_GUIDELINES=${GENERAL_GUIDELINES%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -405,6 +425,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    timed-out call was only waiting for a read while the run kept working.
 
 $INBOX_SECTION
+
+$GENERAL_GUIDELINES
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -496,6 +518,8 @@ $ASK_USER_BLOCK
    timed-out call was only waiting for a read while the run kept working.
 
 $INBOX_SECTION
+
+$GENERAL_GUIDELINES
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
