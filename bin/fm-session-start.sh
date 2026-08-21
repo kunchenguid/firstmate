@@ -329,6 +329,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
+# shellcheck source=bin/fm-linear-lib.sh
+. "$SCRIPT_DIR/fm-linear-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -865,6 +867,23 @@ if fm_pf_relay_active "$FM_HOME" \
     printf 'Reconcile terminal results with %s/bin/fm-public-followup.sh consume, then deliver a ready one with\n' "$FM_ROOT"
     printf '%s/bin/fm-public-followup.sh deliver <id>. Hand a delivered loop on with rechain, or close it with\n' "$FM_ROOT"
     printf '%s/bin/fm-public-followup.sh retire <id> --reason "...". Load fmx-respond for the procedure.\n' "$FM_ROOT"
+  fi
+fi
+
+# Work bound to a Linear issue is not complete until that issue is current, so a
+# still-owed handback is surfaced from disk here rather than from conversation
+# memory. bin/fm-linear-lib.sh owns the gate: a home that never bound a Linear
+# issue runs one [ -d ] test, prints no subsection, and never reaches
+# bin/fm-linear-sync.sh.
+if fm_linear_present "$STATE" && fm_linear_has_pending "$STATE"; then
+  LINEAR_PENDING=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-linear-sync.sh" pending 2>/dev/null) || LINEAR_PENDING=
+  if [ -n "$LINEAR_PENDING" ]; then
+    subsection "Linear issues awaiting synchronization"
+    printf '%s\n' "$LINEAR_PENDING"
+    printf '\nEach line is a handback a bound task still owes its Linear issue, and that task\n'
+    printf 'is not complete until it lands. Deliver them with\n'
+    printf '%s/bin/fm-linear-sync.sh deliver --all.\n' "$FM_ROOT"
   fi
 fi
 

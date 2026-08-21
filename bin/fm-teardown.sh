@@ -164,6 +164,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
+# shellcheck source=bin/fm-linear-lib.sh
+. "$SCRIPT_DIR/fm-linear-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
@@ -2613,6 +2615,21 @@ fi
 X_REQUEST=$(grep '^x_request=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
 if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
+fi
+
+# The captain's rule: work bound to a Linear issue is not complete until that
+# issue is current. This cleanup removes the records that make the handback
+# deliverable, so it refuses while exactly this task still owes one. The gate is
+# bin/fm-linear-lib.sh's, so a home that never bound an issue runs one [ -d ]
+# test here and nothing else.
+if [ "$FORCE" != "--force" ] && fm_linear_present "$STATE"; then
+  if ! LINEAR_BLOCKING=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-linear-sync.sh" guard-work "$ID" 2>/dev/null); then
+    echo "REFUSED: task $ID still owes its bound Linear issue a handback." >&2
+    printf '%s\n' "$LINEAR_BLOCKING" >&2
+    echo "Deliver it with bin/fm-linear-sync.sh deliver --task $ID, drop it with bin/fm-linear-sync.sh discard <delivery-id> --reason <why> --yes, or use --force after explicit discard approval." >&2
+    exit 1
+  fi
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then

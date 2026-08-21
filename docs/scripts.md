@@ -133,3 +133,6 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-voice-client.py`     | The laptop end of the spoken interface: capture, playback, and turn timing over SSH; audio devices unverified |
 | `fm_voice_frame.py`      | The wire format both machines share, copied to the laptop beside the client          |
 | `fm_voice_records.py`    | What a spoken answer may read, and the handover that queues real work                |
+| `fm-linear-lib.sh`       | Shared Linear activation gates, private transport paths, and derived delivery identity |
+| `fm-linear-sync.sh`      | Bind a task to its Linear issues, queue a typed handback, and deliver it idempotently |
+| `fm-linear-transport.sh` | Perform one Linear GraphQL exchange, passing the credential only by private file     |

@@ -273,6 +273,20 @@ That path merges only after one live read of the merge request confirms it is op
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
+## Linear issues are part of completion
+
+A firstmate home can hold one captain rule mechanically: work is not complete until the corresponding Linear issue is current.
+It is opt-in per home and per task - a gitignored `config/linear.env` credential plus an explicit task-to-issue binding - and a home that never binds one pays a single `[ -d ]` test and gains no state.
+
+The mechanism boundary is three files.
+`bin/fm-linear-lib.sh` owns the activation gates, the private `state/linear` layout, and the content-derived delivery identity that makes re-queueing idempotent.
+`bin/fm-linear-sync.sh` owns the commands and the delivery sequence, including the read-back that recovers a comment Linear committed but never acknowledged.
+`bin/fm-linear-transport.sh` is the only place that reaches Linear or reads the credential, and `FM_LINEAR_TRANSPORT` replaces it wholesale, which is the seam that makes the whole path testable with no credential and no network.
+
+Enforcement is deliberately harness-independent: the completion gate lives in `bin/fm-teardown.sh` and the owed-handback surfacing lives in the `bin/fm-session-start.sh` digest, so no primary-harness turn-end registration carries a second verdict alongside the continuity state machine in [`turnend-guard.md`](turnend-guard.md).
+`bin/fm-linear-sync.sh hook` is the optional passive surface for an operator who wants that nag, scoped by `bin/fm-primary-scope-lib.sh` so it is inert in a project repo or a task worktree.
+The [Linear synchronization reference](linear-sync.md) owns the operator contract and the reasoning behind that placement, [`configuration.md`](configuration.md#linear-synchronization-configlinearenv--statelinear) owns the two files you set, and [`verification/linear-sync.md`](verification/linear-sync.md) owns the current evidence.
+
 ## Optional Relay
 
 Relay is opt-in presence for the shared `@myfirstmate` bot on both public surfaces it supports, X and Discord.

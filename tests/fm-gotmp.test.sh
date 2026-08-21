@@ -82,6 +82,12 @@ make_fake_root() {
   # teardown now requires.
   ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
+  # fm-linear-lib.sh (and the fm-primary-scope-lib.sh it sources): teardown
+  # sources it for the Linear completion gate. Neither does anything in this
+  # fixture, which has no state/linear, but both are real siblings teardown
+  # now requires.
+  ln -s "$ROOT/bin/fm-linear-lib.sh" "$fake/bin/fm-linear-lib.sh"
+  ln -s "$ROOT/bin/fm-primary-scope-lib.sh" "$fake/bin/fm-primary-scope-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
   # Receiver-wake retirement sources the pending-reply library, which in turn
@@ -171,6 +177,12 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # teardown now requires.
   ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
+  # fm-linear-lib.sh (and the fm-primary-scope-lib.sh it sources): teardown
+  # sources it for the Linear completion gate. Neither does anything in this
+  # fixture, which has no state/linear, but both are real siblings teardown
+  # now requires.
+  ln -s "$ROOT/bin/fm-linear-lib.sh" "$fake/bin/fm-linear-lib.sh"
+  ln -s "$ROOT/bin/fm-primary-scope-lib.sh" "$fake/bin/fm-primary-scope-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
   ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"

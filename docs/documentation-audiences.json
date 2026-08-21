@@ -26,6 +26,7 @@
   "readmeSetupTargets": [
     "docs/configuration.md",
     "docs/wedge-alarm.md",
+    "docs/linear-sync.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
     "docs/zellij-backend.md",
@@ -289,6 +290,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/linear-sync.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },
@@ -354,6 +359,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/linear-sync.md",
       "audience": "maintainer-verification"
     },
     {

@@ -529,6 +529,27 @@ The session-start digest separately prints a "Public commitments" subsection fro
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
 See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind restart recovery, retained-loop disposition, and the relay-disabled zero-overhead guarantee.
 
+## Linear synchronization (config/linear.env / state/linear)
+
+Firstmate can hold one rule mechanically: work is not complete until the corresponding Linear issue is current.
+[`linear-sync.md`](linear-sync.md) owns the operator contract, the setup steps, the guarantees, and the supported limits; `bin/fm-linear-sync.sh --help` owns the commands and flags.
+This section owns only the two files you set.
+
+`config/linear.env` is the single credential and configuration owner for a home, gitignored with the rest of `config/`.
+It accepts `LINEAR_API_KEY`, required and non-empty, and an optional `LINEAR_API_URL` that must be an `https://` endpoint and defaults to `https://api.linear.app/graphql`.
+The file is refused rather than used when it is a symlink, carries more than one hard link, is not mode 0600, or holds a key containing whitespace or control characters, so a world-readable paste fails loudly instead of leaking.
+The key never reaches a command line, an environment variable a child inherits by name, a request body, a durable record, or any output: `bin/fm-linear-transport.sh` writes it to a mode-0600 temp file as a complete header line, hands `curl` that file, and removes it on every exit path.
+`FM_LINEAR_API_KEY_OVERRIDE` and `FM_LINEAR_API_URL_OVERRIDE` let a direct invocation bypass the file, matching how every other firstmate client treats an explicit environment value.
+
+`state/linear` (mode 0700) is this home's private transport, created only by `bin/fm-linear-sync.sh bind`: `bindings/` for the durable task-to-issue binding, `outbox/` for typed pending deliveries, `sent/` for the receipt ledger, `attempts/` for a held delivery's retry state, `refused/` for a delivery Linear rejected with its one-line reason, `discarded/` for explicitly authorized drops, and a transient `.lock.<delivery-id>` while one is being delivered.
+A delivery's id is derived from its own content, so re-queueing an identical handback after a retry, a crash, or a restart resolves to the same record and changes nothing.
+`FM_LINEAR_LOCK_STALE_SECS` (default 300) is how long a per-delivery lock may sit before a later run treats it as abandoned, so a crashed delivery stays retryable.
+
+Activation is those two things and no third flag.
+A home that never bound a Linear issue has no `state/linear`, so `bin/fm-teardown.sh`'s completion gate and the session-start digest's owed-handback subsection each cost one `[ -d ]` test and produce no output and no file.
+No harness hook file registers any of this; [`linear-sync.md`](linear-sync.md) records why the harness-independent cleanup and session-start gates are the owner instead.
+See [verification/linear-sync.md](verification/linear-sync.md) for the current maintainer evidence.
+
 ## Process-to-event sources (state/procevent)
 
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
