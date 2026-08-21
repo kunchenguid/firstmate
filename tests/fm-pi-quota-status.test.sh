@@ -2063,12 +2063,21 @@ assert(!lifecycle.widgetText(240).includes("72.5%"), "uncorrelated Claude quota 
 await sleep(30);
 const callsAfterClaude = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 assert(callsAfterClaude === callsBeforeClaude, "uncorrelatable Claude auth invoked quota-axi");
+const callsBeforeKimi = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 await lifecycle.emit("model_select", { model: fixtureModel("kimi-coding", "kimi-fixture") });
 await waitFor(
-  () => lifecycle.widgetText(240).includes("account unverified"),
-  "Kimi quota without report-side identity was not classified unverified",
+  () => lifecycle.widgetText(240).includes("account correlation unavailable"),
+  "Kimi quota without report-side identity was not classified before refresh",
 );
 assert(!lifecycle.widgetText(240).includes("83%"), "unidentified Kimi quota was presented as active");
+await sleep(180);
+const callsAfterKimi = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
+assert(callsAfterKimi === callsBeforeKimi, "uncorrelatable Kimi auth invoked quota-axi on cadence");
+await lifecycle.emit("model_select", { model: fixtureModel("openai-codex", "codex-cadence") });
+await waitFor(
+  () => lifecycle.widgetText(400).includes("week 94% left"),
+  "supported cadence fixture did not restore Codex quota",
+);
 const callsBeforeCadence = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
 await sleep(180);
 const callsAfterCadence = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
@@ -2093,8 +2102,8 @@ const kimiApiKey = makePi(
 );
 await kimiApiKey.emit("session_start", { reason: "startup" });
 await waitFor(
-  () => kimiApiKey.widgetText(240).includes("account unverified"),
-  `stored Kimi API-key quota without identity was not refused: ${kimiApiKey.widgetText(240)}`,
+  () => kimiApiKey.widgetText(240).includes("account correlation unavailable"),
+  `stored Kimi API-key quota without identity was not refused before refresh: ${kimiApiKey.widgetText(240)}`,
 );
 assert(!kimiApiKey.widgetText(240).includes("83%"), "unidentified Kimi API-key quota was presented as active");
 await kimiApiKey.emit("session_shutdown", { reason: "quit" });
@@ -2107,8 +2116,8 @@ const runtimeKimiApiKey = makePi(
 );
 await runtimeKimiApiKey.emit("session_start", { reason: "startup" });
 assert(
-  runtimeKimiApiKey.widgetText(240).includes("non-subscription auth"),
-  "a Kimi runtime API key was correlated with the unrelated stored credential",
+  runtimeKimiApiKey.widgetText(240).includes("account correlation unavailable"),
+  "a Kimi runtime API key was not rejected before quota refresh",
 );
 await sleep(30);
 const callsAfterRuntimeKimi = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8")).trim().split(/\n/).filter(Boolean).length;
@@ -2127,7 +2136,7 @@ await waitFor(
   "provider-switch failure fixture did not publish initial Codex quota",
 );
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "fail\n");
-await switchedFailure.emit("model_select", { model: fixtureModel("kimi-coding", "kimi-fixture") });
+await switchedFailure.emit("model_select", { model: fixtureModel("openai-codex", "codex-switched") });
 await waitFor(
   () => switchedFailure.widgetText(240).includes("quota-axi failed"),
   `provider-switch process failure was hidden by the old report: ${switchedFailure.widgetText(240)}`,
@@ -2337,6 +2346,29 @@ await waitFor(
 );
 await authTimeout.emit("session_shutdown", { reason: "quit" });
 
+const cachedAuthTimeoutOptions = {};
+const cachedAuthTimeout = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 200, timeoutMs: 500 }),
+  "openai-codex",
+  "tui",
+  cachedAuthTimeoutOptions,
+);
+await cachedAuthTimeout.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => cachedAuthTimeout.widgetText(400).includes("week 94% left"),
+  "auth-timeout cache fixture did not publish initial quota",
+);
+cachedAuthTimeoutOptions.authDelayMs = 1000;
+await waitFor(
+  () => cachedAuthTimeout.widgetText(400).includes("auth timed out"),
+  `refresh auth timeout was not exposed: ${cachedAuthTimeout.widgetText(400)}`,
+);
+assert(
+  cachedAuthTimeout.widgetText(400).includes("week 94% left"),
+  "refresh auth timeout discarded independently fresh quota",
+);
+await cachedAuthTimeout.emit("session_shutdown", { reason: "quit" });
+
 const stalledAuthOptions = { authNever: true };
 const stalledAuth = makePi(
   createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 5_000 }),
@@ -2382,6 +2414,35 @@ await oversizedAuth.emit("session_shutdown", { reason: "quit" });
 await writeFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, savedAuthFile);
 
 await setStoredOAuth("openai-codex", fixtureAccessToken("fixture-codex-account"));
+const unrelatedCredentialWrite = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 500,
+}));
+await unrelatedCredentialWrite.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => unrelatedCredentialWrite.widgetText(400).includes("week 94% left"),
+  "unrelated-credential fixture did not publish initial quota",
+);
+const callsBeforeUnrelatedCredential = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+await setStoredOAuth("anthropic", "replacement-anthropic-access");
+await sleep(100);
+const callsAfterUnrelatedCredential = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+assert(
+  unrelatedCredentialWrite.widgetText(400).includes("week 94% left"),
+  "unrelated credential write invalidated active-provider quota",
+);
+assert(
+  callsAfterUnrelatedCredential === callsBeforeUnrelatedCredential,
+  "unrelated credential write invoked quota-axi",
+);
+await unrelatedCredentialWrite.emit("session_shutdown", { reason: "quit" });
+
 const credentialChange = makePi(createFirstmateQuotaStatusExtension({
   refreshMs: 60_000,
   timeoutMs: 500,
@@ -2780,6 +2841,44 @@ assert(!staleFallback.widgetText(400).includes("94%"), "cached quota survived it
 await staleFallback.emit("session_shutdown", { reason: "quit" });
 assert(staleFallbackClock.tasks.size === 0, "stale-fallback shutdown leaked a timer");
 delete process.env.FM_QUOTA_TEST_STALE_REFRESHED_AT;
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+
+const malformedRefreshStart = Date.now();
+const malformedRefreshClock = new FakeClock(malformedRefreshStart);
+process.env.FM_QUOTA_TEST_NOW_MS = String(malformedRefreshStart);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  malformedRefreshStart + 24 * 60 * 60 * 1000,
+);
+const malformedRefresh = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => malformedRefreshClock.nowMs,
+  timers: malformedRefreshClock.timers,
+}));
+await malformedRefresh.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => malformedRefresh.widgetText(400).includes("week 94% left"),
+  "malformed-refresh fixture did not publish fresh quota",
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "malformed\n");
+malformedRefreshClock.advance(5 * 60 * 1000);
+await waitFor(
+  () => malformedRefresh.widgetText(400).includes("malformed data"),
+  `malformed refresh was not exposed beside cached quota: ${malformedRefresh.widgetText(400)}`,
+);
+assert(
+  malformedRefresh.widgetText(400).includes("week 94% left"),
+  "malformed refresh discarded independently fresh quota",
+);
+malformedRefreshClock.advance(60 * 1000);
+assert(!malformedRefresh.widgetText(400).includes("94%"), "malformed refresh kept quota beyond cache expiry");
+assert(malformedRefresh.widgetText(400).includes("malformed data"), "cache expiry hid malformed refresh outcome");
+await malformedRefresh.emit("session_shutdown", { reason: "quit" });
+assert(malformedRefreshClock.tasks.size === 0, "malformed-refresh shutdown leaked a timer");
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
 

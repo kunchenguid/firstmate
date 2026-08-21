@@ -30,10 +30,11 @@ export type FreshQuotaView = {
   freshnessTimestampMs: number;
   reportFreshUntilMs: number;
   freshUntilMs: number;
-  refreshFailure?: QuotaFailureReason | null;
+  refreshFailure?: QuotaRefreshIssue | null;
 };
 
 export type QuotaFailureReason = "missing" | "failed" | "timeout" | "overflow" | "cancelled";
+export type QuotaRefreshIssue = QuotaFailureReason | "malformed" | "auth-timeout";
 
 export type QuotaUnsupportedReason =
   | "provider"
@@ -1652,6 +1653,12 @@ const FAILURE_TEXT: Readonly<Record<QuotaFailureReason, { long: string; compact:
   cancelled: { long: "quota refresh cancelled", compact: "cancelled" },
 };
 
+const REFRESH_ISSUE_TEXT: Readonly<Record<QuotaRefreshIssue, { long: string; compact: string }>> = {
+  ...FAILURE_TEXT,
+  malformed: { long: "malformed data", compact: "malformed" },
+  "auth-timeout": { long: "auth timed out", compact: "auth timeout" },
+};
+
 function firstFitting(candidates: string[], width: number): string {
   for (const candidate of candidates) {
     if (visibleWidth(candidate) <= width) return candidate;
@@ -1663,10 +1670,10 @@ function fitExplicitNarrow(
   label: string,
   windows: number,
   width: number,
-  refreshFailure?: QuotaFailureReason | null,
+  refreshFailure?: QuotaRefreshIssue | null,
 ): string {
   const count = `${windows} window${windows === 1 ? "" : "s"}`;
-  const failure = refreshFailure ? FAILURE_TEXT[refreshFailure].compact : null;
+  const failure = refreshFailure ? REFRESH_ISSUE_TEXT[refreshFailure].compact : null;
   const candidates = failure
     ? [
         `Quota ${label}: narrow - ${count} cached; refresh ${failure}`,
@@ -1754,7 +1761,7 @@ export function formatQuotaStatus(view: QuotaView, width: number, nowMs = Date.n
   if (view.credits && !append(formatCredits(view.credits))) return narrow();
   if (
     view.refreshFailure &&
-    !append(`refresh unavailable (${FAILURE_TEXT[view.refreshFailure].long})`)
+    !append(`refresh unavailable (${REFRESH_ISSUE_TEXT[view.refreshFailure].long})`)
   ) return narrow();
   return full;
 }
