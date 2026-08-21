@@ -2863,7 +2863,6 @@ await waitFor(
 await commentedModelsJson.emit("session_shutdown", { reason: "quit" });
 
 const commandHeaderOptions = {
-  composedModels: true,
   modelsConfig: {
     "openai-codex": {
       headers: { Authorization: "!sleep 30" },
@@ -3698,17 +3697,13 @@ const transientClockGap = makePi(createFirstmateQuotaStatusExtension({
       .trim()
       .split(/\n/)
       .filter(Boolean).length;
-    return calls > callsBeforeTransientClockGap ? transientClockGapMs + 3 : 0;
+    return calls > callsBeforeTransientClockGap ? transientClockGapMs : 0;
   },
 }));
 await transientClockGap.emit("session_start", { reason: "startup" });
 await waitFor(
-  () => transientClockGap.widgetText(400).includes("GPT-5.3-Codex-Spark session 100% left"),
-  "transient-clock fixture did not publish an independently fresh window",
-);
-assert(
-  !transientClockGap.widgetText(400).includes("week 94% left"),
-  "transient wall-clock gap under-aged an expired quota window",
+  () => transientClockGap.widgetText(400).includes("week 94% left"),
+  "pre-generation process startup expired a newly generated quota window",
 );
 await transientClockGap.emit("session_shutdown", { reason: "quit" });
 delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;

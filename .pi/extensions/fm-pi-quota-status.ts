@@ -31,6 +31,7 @@ const DEFAULT_TIMEOUT_MS = 20 * 1000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_MAX_AUTH_BYTES = 1024 * 1024;
 const DEFAULT_REVISION_CHECK_MS = 1000;
+const WALL_CLOCK_QUANTIZATION_MS = 2;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const WINDOWS_TREE_KILL_TIMEOUT_MS = 5000;
 const WINDOWS_JOB_SUPERVISOR = String.raw`
@@ -587,6 +588,7 @@ function effectiveEndpointRevision(provider: string, endpoint: string): string {
 }
 
 function modelsConfigPreservesQuotaProvenance(value: unknown, model: ActiveModel): boolean {
+  if (value === undefined) return true;
   if (!isRecord(value)) return false;
   const knownProviderFields = new Set([
     "name",
@@ -638,7 +640,6 @@ function effectiveModelPreservesQuotaProvenance(
 ): boolean {
   const effectiveModel = registry.find?.call(modelRegistry, model.provider, model.id);
   if (!effectiveModel || activeModelRevision(effectiveModel) !== activeModelRevision(model)) return false;
-  if (effectiveModel === model) return true;
   const configStore = registry.runtime?.config;
   const getProviderConfig = configStore?.getProvider;
   if (typeof getProviderConfig !== "function") return false;
@@ -659,14 +660,39 @@ type ClockSample = {
 function conservativePublicationAgeMs(
   processStartedAt: ClockSample | null,
   publishedAt: ClockSample | null,
+  generatedAtMs: number,
 ): number | null {
   if (
     !processStartedAt ||
     !publishedAt ||
+    !Number.isFinite(generatedAtMs) ||
     publishedAt.monotonicBeforeMs < processStartedAt.monotonicAfterMs
   ) return null;
-  const processElapsedMs = publishedAt.monotonicAfterMs - processStartedAt.monotonicBeforeMs;
-  return Number.isFinite(processElapsedMs) && processElapsedMs >= 0 ? processElapsedMs : null;
+  const minimumProcessElapsedMs =
+    publishedAt.monotonicBeforeMs - processStartedAt.monotonicAfterMs;
+  const maximumProcessElapsedMs =
+    publishedAt.monotonicAfterMs - processStartedAt.monotonicBeforeMs;
+  if (
+    !Number.isFinite(minimumProcessElapsedMs) ||
+    !Number.isFinite(maximumProcessElapsedMs) ||
+    minimumProcessElapsedMs < 0 ||
+    maximumProcessElapsedMs < minimumProcessElapsedMs
+  ) return null;
+
+  const wallElapsedMs = publishedAt.wallMs - processStartedAt.wallMs;
+  const consistentClocks =
+    wallElapsedMs >= minimumProcessElapsedMs - WALL_CLOCK_QUANTIZATION_MS &&
+    wallElapsedMs <= maximumProcessElapsedMs + WALL_CLOCK_QUANTIZATION_MS;
+  const generatedDuringProcess =
+    generatedAtMs >= processStartedAt.wallMs - WALL_CLOCK_QUANTIZATION_MS &&
+    generatedAtMs <= publishedAt.wallMs + WALL_CLOCK_QUANTIZATION_MS;
+  if (!consistentClocks || !generatedDuringProcess) return maximumProcessElapsedMs;
+
+  const publicationSampleWidthMs =
+    publishedAt.monotonicAfterMs - publishedAt.monotonicBeforeMs;
+  const mappedAgeMs = Math.max(0, publishedAt.wallMs - generatedAtMs) +
+    publicationSampleWidthMs + WALL_CLOCK_QUANTIZATION_MS;
+  return Math.min(maximumProcessElapsedMs, mappedAgeMs);
 }
 
 function decodeUtf8(value: Uint8Array): string | null {
@@ -2124,6 +2150,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             const publicationAgeMs = conservativePublicationAgeMs(
               processStartedAt,
               publishedAt,
+              timelineOriginMs,
             );
             const retainedPublication = publicationAgeMs === null ? null : publication;
             const elapsedAtPublicationMs = publicationAgeMs ?? 0;
