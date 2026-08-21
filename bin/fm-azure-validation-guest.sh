@@ -1008,7 +1008,7 @@ pathlib.Path(sys.argv[1]).write_text(json.dumps(value, sort_keys=True, separator
 PY
 RESULT=$STATE/result-a$ATTEMPT.json
 python3 - "$REQUEST" "$IDENTITY" "$RESULT" "$VM_RESOURCE_ID" "$VM_INSTANCE_ID" \
-  "$(cat /proc/sys/kernel/random/boot_id)" "$OUTCOME" "$CURRENT_HEAD" "$CURRENT_TREE" "$REMOTE_HEAD" "$PR" "$CHECKS_GREEN" "$SHARD_RECEIPTS" <<'PY'
+  "$(cat /proc/sys/kernel/random/boot_id)" "$OUTCOME" "$CURRENT_HEAD" "$CURRENT_TREE" "$REMOTE_HEAD" "$PR" "$CHECKS_GREEN" "$SHARD_RECEIPTS" "$ATTEMPT" <<'PY'
 import json
 import pathlib
 import sys
@@ -1037,6 +1037,7 @@ result = {
     "vm_resource_id": sys.argv[4],
     "vm_instance_id": sys.argv[5],
     "boot_id": sys.argv[6],
+    "attempt": int(sys.argv[14]),
     "outcome": sys.argv[7],
     "pr_url": sys.argv[11] or None,
     "checks_green": sys.argv[12] == "true",
@@ -1099,4 +1100,10 @@ if [ -n "$OUTPUT_URL" ]; then
   rm -f "$CURL_CONFIG"
 fi
 BOOT_ID=$(cat /proc/sys/kernel/random/boot_id)
-printf 'FM_AZURE_VALIDATION_RESULT %s boot=%s outcome=%s\n' "$RESULT_DIGEST" "$BOOT_ID" "$OUTCOME"
+# The marker binds the published result to the ATTEMPT that produced it. A
+# respond/reattach attempt runs on the same VM and the same boot, so boot_id
+# and every identity field in result.json are identical across the attempts of
+# one run: without the attempt there is nothing a control-plane read can see
+# that tells attempt 1's completed marker from attempt 2's own answer
+# (generation azv-36b2 ground truth).
+printf 'FM_AZURE_VALIDATION_RESULT %s boot=%s outcome=%s attempt=%s\n' "$RESULT_DIGEST" "$BOOT_ID" "$OUTCOME" "$ATTEMPT"

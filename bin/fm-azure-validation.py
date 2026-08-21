@@ -58,6 +58,29 @@ UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][
 PR_URL = re.compile(r"^https://github\.com/[^/]+/[^/]+/pull/[1-9][0-9]*$")
 NM_RUN_ID = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
 RUNNER_INVOCATION = re.compile(r"^azr-[a-z0-9]{12}(?:-a[2-9][0-9]*)?$")
+# The authenticated result marker. `attempt` is required: every other field
+# a control-plane read can see is identical across the attempts of one run
+# (same VM, same boot, same run id), so without it an unbound view cannot be
+# told from this attempt's own answer.
+MARKER = re.compile(
+    r"FM_AZURE_VALIDATION_RESULT\s+(sha256:[0-9a-f]{64})\s+boot=([0-9a-f-]{36})"
+    r"\s+outcome=([a-z-]+)\s+attempt=([0-9]{1,18})"
+)
+# The pre-attempt marker shape. A guest sealed into a cell BEFORE the attempt
+# stamp existed cannot be changed (the request is digest-sealed), so its output
+# must stay readable or every cell in flight across that upgrade is stranded.
+# Only consulted when the output carries no stamped marker at all: MARKER's
+# prefix is exactly this shape, so a stamped marker would match it too.
+LEGACY_MARKER = re.compile(
+    r"FM_AZURE_VALIDATION_RESULT\s+(sha256:[0-9a-f]{64})\s+boot=([0-9a-f-]{36})"
+    r"\s+outcome=([a-z-]+)"
+)
+# Whether a guest CAN name its attempt is a property of the guest, read from the
+# sealed bytes that actually run. It must never be inferred from whether a
+# marker parsed: LEGACY_MARKER is MARKER minus the attempt group, so ANY
+# malformation of the attempt field satisfies "no stamped marker matched".
+GUEST_STAMPS_ATTEMPT = re.compile(r"^[^\n]*FM_AZURE_VALIDATION_RESULT[^\n]*attempt=", re.MULTILINE)
+MARKER_SETTLE_SECONDS = 300
 # Shard transports legitimately run VM creation plus admission plus command
 # submission in one subprocess: near 300 seconds unloaded and well past it
 # under any operator-host load. The old 300-second cap manufactured
@@ -170,6 +193,32 @@ def now_utc():
 def iso_utc(value=None):
     value = value or now_utc()
     return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def marker_settle_seconds():
+    """How long an unbound terminal control view may persist before it is believed."""
+    raw = os.environ.get("FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS")
+    if raw is None or not raw.strip():
+        return MARKER_SETTLE_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValidationError("FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS must be a whole number of seconds")
+    if value < 0:
+        raise ValidationError("FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS must not be negative")
+    return value
+
+
+def seconds_since(stamp):
+    """Elapsed seconds since an exact recorded UTC stamp, or None when unreadable.
+
+    None is never treated as "long enough": an unreadable stamp keeps an
+    ambiguous view unsettled rather than authorizing a terminal decision.
+    """
+    try:
+        return (now_utc() - parse_utc(stamp, "recorded stamp")).total_seconds()
+    except (ValidationError, TypeError):
+        return None
 
 
 def parse_utc(value, label):
@@ -1627,11 +1676,96 @@ def create_cell(env, state, selected, replacement=False):
     adopt_resources(env, state)
 
 
+def sealed_guest_text(env, state):
+    """The exact guest text this cell's request was sealed with.
+
+    The seal binds the guest a cell was ADMITTED with. Reading the working tree
+    instead made that seal depend on the tree never changing, so ANY later edit
+    to the guest refused `respond`, `reattach` AND `replace` on every cell
+    already in flight, stranding them with no recovery (`replace` is the only
+    documented way out of `failed-retained`, and it routes through here too).
+    `submit` stages a byte copy of the guest beside the request, so that copy is
+    the sealed artifact and is what a resumed attempt must run. The working tree
+    is used only when it still matches the seal, which keeps a cell whose
+    payload was pruned behaving exactly as before. Neither source is trusted on
+    provenance: the bytes are read ONCE, digested in memory, and those exact
+    bytes are what is returned, so what executes on the cell is what was
+    verified rather than whatever a later read would have found. This widens
+    recovery without widening what may execute.
+    """
+    expected = state["request"]["protocol"]["guest_digest"]
+    candidates = []
+    state_dir = env.get("state_dir")
+    if state_dir:
+        candidates.append(Path(state_dir) / "payloads" / state["cell"] / "guest.sh")
+    candidates.append(GUEST)
+    for candidate in candidates:
+        try:
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+        except OSError:
+            continue
+        # ONE read. Digesting the file and then re-reading it to return would
+        # verify bytes that are not the bytes returned: a writer landing between
+        # the two reads passes the check and ships different content, and that
+        # content is uploaded as the Run Command script and executes as root on
+        # the cell. Digest exactly the bytes that are handed back.
+        try:
+            data = candidate.read_bytes()
+        except OSError:
+            continue
+        if "sha256:" + hashlib.sha256(data).hexdigest() == expected:
+            try:
+                return data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+    raise ValidationError(
+        "no guest matching this cell's exact sealed request digest is available; "
+        "neither the staged payload copy nor the working tree carries {}".format(expected)
+    )
+
+
+def guest_text_stamps_attempt(text):
+    """Does this exact guest text emit an attempt-stamped result marker?"""
+    return bool(GUEST_STAMPS_ATTEMPT.search(text))
+
+
+def guest_stamps_attempt(env, state):
+    """Whether this cell's SEALED guest can name the attempt in its marker.
+
+    Read from the guest, never inferred from the output. Inferring it from "no
+    stamped marker matched" hands the weaker pre-stamp contract to any cell
+    whose marker is merely MALFORMED, and the marker is the guest's last line by
+    design, which is exactly where an output cap lands. The consequence is not
+    theoretical: a stale attempt-1 marker truncated inside its own attempt field
+    makes the stamped set empty, binds legacy, sets the expected digest to
+    attempt 1's own, matches the blob that still holds attempt 1's archive, and
+    skips the attempt check - accepting attempt 1's result as attempt 2's
+    answer, which is the exact silent false verdict this binding exists to
+    prevent. Recorded at create time where the sealed text is already in hand,
+    and derived from the sealed guest for a cell whose state predates that.
+    An underivable answer takes the STRICT contract, never the weaker one.
+    """
+    recorded = state.get("guest_stamps_attempt")
+    if isinstance(recorded, bool):
+        return recorded
+    try:
+        return guest_text_stamps_attempt(sealed_guest_text(env, state))
+    except (ValidationError, KeyError, TypeError, OSError):
+        # A state that cannot answer the question at all - no seal recorded, no
+        # staged payload, a truncated request - is not evidence that the guest
+        # cannot stamp. Take the STRICT contract: the worst case is a cell that
+        # must be observed again, never one that accepts another attempt's
+        # result as this attempt's answer.
+        return True
+
+
 def create_run_command(env, state, mode, input_url=None, output_url=None, response=None):
     resources = state["resources"]
-    current_digest = sha256_file(GUEST)
-    if current_digest != state["request"]["protocol"]["guest_digest"]:
-        raise ValidationError("trusted guest changed after exact request preparation")
+    guest_text = sealed_guest_text(env, state)
+    # Recorded from the bytes that are about to run, so observe never has to
+    # guess it from output that may be truncated.
+    state["guest_stamps_attempt"] = guest_text_stamps_attempt(guest_text)
     attempt = state["attempt"]
     name = "{}-a{}".format(mode, attempt)
     run_id = resources["vm_id"] + "/runCommands/" + name
@@ -1670,7 +1804,7 @@ def create_run_command(env, state, mode, input_url=None, output_url=None, respon
         "location": "eastus",
         "tags": run_tags,
         "properties": {
-            "source": {"script": GUEST.read_text(encoding="utf-8")},
+            "source": {"script": guest_text},
             "parameters": arguments,
             "protectedParameters": protected,
             "asyncExecution": True,
@@ -1695,6 +1829,9 @@ def create_run_command(env, state, mode, input_url=None, output_url=None, respon
         raise ValidationError("created validation Run Command has foreign identity")
     resources["run_command_name"] = name
     resources["run_command_id"] = run_id
+    # Every attempt starts its own settling window: a stamp left by the
+    # previous attempt's unbound view must never shorten this one's.
+    state.pop("unbound_view_since", None)
     resources.setdefault("run_commands", []).append({
         "id": run_id,
         "identity": immutable_identity(run_command, "run-command"),
@@ -1889,13 +2026,103 @@ def observe(env, args):
             return
         output = str((view or {}).get("output", ""))
         error = str((view or {}).get("error", ""))
-        marker = re.search(r"FM_AZURE_VALIDATION_RESULT\s+(sha256:[0-9a-f]{64})\s+boot=([0-9a-f-]{36})\s+outcome=([a-z-]+)", output)
-        if not marker:
+        stamped = list(MARKER.finditer(output))
+        # Accept ANY marker naming the attempt being observed, not merely the
+        # first one in the output: re.search would hand back an earlier
+        # attempt's line and retain an attempt that completed correctly.
+        mine = {
+            (found.group(1), found.group(2), found.group(3))
+            for found in stamped
+            if int(found.group(4)) == state["attempt"]
+        }
+        binding = "attempt"
+        if len(mine) > 1:
+            # Two different results claiming one attempt is not an answer.
+            mine = set()
+        if not mine and not stamped and not guest_stamps_attempt(env, state):
+            # No stamped marker anywhere AND the sealed guest provably cannot
+            # stamp. The second half is what keeps a malformed marker from
+            # buying the weaker contract. Either nothing published, or the cell
+            # runs a guest sealed BEFORE the stamp existed. That guest cannot be
+            # changed, because the request is digest-sealed, so refusing to read
+            # it would strand every cell in flight across this upgrade: the
+            # attempt would be retained on a fully-published result and
+            # `expected_result_digest` would never be set, making the result
+            # unreachable. Fall back to the pre-stamp shape, which is consulted
+            # ONLY here because MARKER's prefix is exactly that shape and would
+            # otherwise match a stamped marker too. A stamped marker naming
+            # another attempt never reaches this branch and still fails closed.
+            legacy = LEGACY_MARKER.search(output)
+            if legacy:
+                mine = {(legacy.group(1), legacy.group(2), legacy.group(3))}
+                binding = "legacy"
+        if not mine:
+            # A terminal control state whose output does not carry THIS
+            # attempt's marker proves nothing about this attempt. The run
+            # command, the VM, the boot, and every identity field in
+            # result.json are shared across the attempts of one run, so an
+            # unbound view is ambiguous between "the guest died before
+            # publishing" and "the control plane has not caught up with the
+            # attempt just created". Retaining on the first such read is
+            # destructive and unrecoverable: failed-retained is a phase
+            # observe itself refuses, so one premature poll strands a cell
+            # whose attempt is still executing (generation azv-36b2 ground
+            # truth: read nine seconds after the respond Run Command was
+            # created). Fail closed by never ACCEPTING an unbound view, and
+            # take the terminal decision only once the ambiguity persists.
+            settle_seconds = marker_settle_seconds()
+            since = state.get("unbound_view_since")
+            if not since:
+                state["unbound_view_since"] = iso_utc()
+                save_state(env, state)
+                since = state["unbound_view_since"]
+            waited = seconds_since(since)
+            if waited is None or waited < settle_seconds:
+                observed = ",".join(sorted({found.group(4) for found in stamped})) or "none"
+                print(
+                    "AZURE VALIDATION UNSETTLED cell={} attempt={} control_state={} "
+                    "marker_attempt={} waited={}s settle={}s".format(
+                        state["cell"], state["attempt"], execution,
+                        observed, "unknown" if waited is None else int(waited), settle_seconds,
+                    )
+                )
+                return
             transition(env, state, "failed-retained", "cell ended without an authenticated result marker", control_error=error[-2000:])
             raise ValidationError("cell ended without an authenticated result; worktree and lease remain retained")
-        state["expected_result_digest"] = marker.group(1)
-        state["expected_boot_id"] = marker.group(2)
-        outcome = marker.group(3)
+        state.pop("unbound_view_since", None)
+        digest, boot_id, outcome = next(iter(mine))
+        # How this observation was bound decides how strictly the collected
+        # result is checked. A stamped marker means the guest can name its
+        # attempt, so its result MUST; a legacy marker cannot, so it is held to
+        # the pre-stamp contract instead of being refused.
+        state["result_binding"] = binding
+        # A republished byte-identical result is a non-answer, not a verdict.
+        # An attempt that resumes a parked run without answering its gate, or
+        # one whose upload never happened and left the previous attempt's
+        # archive in place, publishes the exact bytes the previous attempt
+        # did. Name that instead of surfacing a generic failure.
+        previous = state.get("attempt_result_digests") or {}
+        stale = sorted(
+            key for key, value in previous.items()
+            if value == digest and key != str(state["attempt"])
+        )
+        if stale:
+            transition(
+                env, state, "failed-retained",
+                "attempt republished attempt {} result unchanged; the gate was not answered".format(
+                    ", ".join(stale)
+                ),
+                control_error=error[-2000:],
+            )
+            raise ValidationError(
+                "attempt {} published a byte-identical copy of attempt {}'s result; the operator "
+                "response did not reach the in-cell pipeline, so this is a non-answer, not a "
+                "verdict".format(state["attempt"], ", ".join(stale))
+            )
+        previous[str(state["attempt"])] = digest
+        state["attempt_result_digests"] = previous
+        state["expected_result_digest"] = digest
+        state["expected_boot_id"] = boot_id
         if outcome == "needs-decision":
             transition(env, state, "needs-decision", "no-mistakes ask-user gate owns the exact run")
         else:
@@ -1941,6 +2168,22 @@ def verify_result_identity(state, result):
     for key, wanted in expected.items():
         if result.get(key) != wanted:
             raise ValidationError("validation result identity mismatch: {}".format(key))
+    # The attempt is the only field separating one attempt's result from
+    # another's on a resumed run, so where the guest can name it, it is required
+    # rather than defaulted: a result that does not declare its attempt is
+    # refused, never assumed to be the current one. `result_binding` is set by
+    # observe from the marker it actually read, so a cell whose sealed guest
+    # predates the stamp is held to the pre-stamp contract instead of being
+    # refused, and every cell that CAN prove its attempt still must.
+    if state.get("result_binding", "attempt") != "legacy":
+        if not isinstance(result.get("attempt"), int) or isinstance(result.get("attempt"), bool):
+            raise ValidationError("validation result does not declare the attempt that produced it")
+        if result["attempt"] != state["attempt"]:
+            raise ValidationError(
+                "validation result was produced by attempt {}, not the observed attempt {}".format(
+                    result["attempt"], state["attempt"]
+                )
+            )
     head = result.get("current_head")
     tree = result.get("current_tree")
     if (

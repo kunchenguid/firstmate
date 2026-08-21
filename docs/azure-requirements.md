@@ -89,8 +89,11 @@ creates it, the crewmate completes a task, and both release cleanly.
 Status: PARTIAL. Both lanes are code-complete pending their live acceptance runs.
 
 Two lanes exist.
-The validation-cell lane (`docs/azure-validation.md`) has never closed a cell; there is no
-`azure-validation` state under `$FM_HOME/state`.
+The validation-cell lane (`docs/azure-validation.md`) has never closed a cell.
+Its state is not absent: `$FM_HOME/state/azure-validation/azv-36b2726cbcf3.json` holds the
+complete record of the first live attempt, including its transition timestamps, and is the
+ground truth correcting the account below. An earlier revision of this line claimed no
+`azure-validation` state existed; that was never re-checked against the directory.
 A stranding strand was fixed: a passed run carrying a short receipt set is now demoted to failed
 so the cell collects and retains legibly.
 The root cause behind "an in-cell bridge producing no receipts" is now found and fixed: the
@@ -131,14 +134,78 @@ compute zero, worktree disk and evidence retained, control reservation released.
 That attempt exposed two blockers that stand between this lane and its acceptance sentence, and
 neither is the receipts strand:
 
-1. `respond` does not answer a gate. It reports success and starts a new attempt, but the guest
-   re-publishes the byte-identical previous result: attempt 2's `result.json` matched attempt 1
-   exactly (sha256 prefix `330ddea31bfbbb05` both times, `run.log` identical at 3056 bytes, same
-   `run_id`, same `needs-decision`, same gate), after which the control command reported Failed.
-   The runtime bundle carried no-mistakes v1.48.0, so this is not the v1.41.2-era behavior. Until
-   the operator action reaches the in-cell pipeline, a parked cell can only be retained, and an
-   unchanged republished result should be refused as a non-answer rather than surfacing as a
-   generic failure.
+1. `observe` took a terminal decision on a control view it never bound to the attempt, and the
+   decision was unrecoverable. This was recorded here as "`respond` does not answer a gate" plus
+   "the guest re-publishes the byte-identical previous result". The second is wrong under every
+   reading of the evidence. The first is NOT ESTABLISHED rather than confirmed: it was inferred
+   from a control-plane read that cannot support it. Ground truth is the cell's own state file
+   (`$FM_HOME/state/azure-validation/azv-36b2726cbcf3.json`), whose events read `responding` at
+   09:47:51, `failed-retained` at 09:48:00, and compute removed at 09:50:30. The host declared the
+   attempt dead NINE SECONDS after creating its Run Command and deleted the VM 2m39s in; attempt 1
+   had taken 1h57m. `observe` treated a terminal `executionState` whose output carried no result
+   marker as proof the attempt had died, and nothing bound the view it read to the attempt it had
+   just created. The marker is the guest's LAST action, so its absence proves nothing about an
+   attempt still working, and `failed-retained` is a phase `observe` itself refuses, so one
+   premature read was terminal.
+   The byte-identical result was never a republish, and that does not depend on which hypothesis
+   below is true. The result blob has one fixed name per cell (`staging.result_blob` is
+   `control/result.tar.gz`), overwritten by each attempt's upload, and attempt 2 never reached its
+   upload, so any later download necessarily returned attempt 1's archive unchanged. That is the
+   whole of the reported evidence: the same sha256 prefix `330ddea31bfbbb05`, the same 3056-byte
+   `run.log`, the same `run_id`, the same `needs-decision`, the same gate. `collect` never ran at
+   all, the state file carries no `result` and `state/azure-validation/results/` is empty, so the
+   comparison was made by downloading the one blob directly, twice.
+   TWO HYPOTHESES REMAIN OPEN for what produced that view, and the evidence to date does not
+   separate them. Neither is settled:
+   (a) the view was stale, describing something other than the nine-second-old attempt; or
+   (b) attempt 2's guest genuinely failed fast, after its auth-home write-back and before its
+   marker. `control_error` carries exactly two lines, the auth-home pull and push warnings, and
+   those are emitted from the guest's own SEQUENTIAL path rather than from a trap: the sealed
+   guest staged at `payloads/azv-36b2726cbcf3/guest.sh` calls `auth_home_pull` at line 504 and
+   `auth_home_push` at line 895, its only trap is `cleanup_mounts EXIT`, and its marker is at line
+   1102. A guest that got past 895 and died before 1102 produces exactly that stderr.
+   On resource identity (b) is the better-supported reading: `resources.run_commands` records two
+   distinct Azure resources, `start-a1` and `respond-a2`, and `respond` rebinds `run_command_id`
+   to `respond-a2` inside `create_run_command` BEFORE the `responding` transition at 09:47:51, so
+   the 09:48:00 read addressed a resource nine seconds old, which cannot inherit `start-a1`'s
+   stderr. An earlier revision of this section asserted (a) as fact and ruled (b) out. That was
+   wrong, and ruling (b) out risks sending the next operator away from a real respond-path bug.
+   Separating the two needs a live cell.
+   What IS established holds under both, and is what the fix rests on: the operator's response was
+   delivered to the cell as a protected run-command parameter, and `observe` then ended the
+   attempt on a view it had never bound to it.
+   The latent defect this exposed is worse than the reported one. Had that view carried attempt
+   1's MARKER rather than no marker, `observe` would have accepted it, `collect` would have
+   downloaded attempt 1's archive, matched its digest, and PASSED `verify_result_identity`,
+   because on a resumed attempt the VM, boot id, run id, heads and every other verified field are
+   identical and `result.json` carried no attempt number. A silent false verdict is categorically
+   worse than a generic failure.
+   Fixed: the guest stamps `attempt` into `result.json` and appends `attempt=<n>` to its marker;
+   `observe` accepts any marker naming the attempt it is observing, refuses a stamped marker that
+   names another attempt, refuses two conflicting results claiming one attempt, and never accepts
+   an unbound view, deferring the terminal decision behind a settling window
+   (`FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS`, default 300 seconds, re-armed for every attempt
+   in `create_run_command`) so silence means "could not tell" and never authorizes the destructive
+   action, including when the recorded stamp is itself unreadable; `observe` refuses a result
+   byte-identical to an earlier attempt's as an explicit non-answer rather than a generic failure;
+   and `verify_result_identity` refuses a result that declares no attempt or another attempt's.
+   A cell whose SEALED guest predates the stamp is not stranded by any of that: its unstamped
+   marker is still read, and its result is held to the pre-stamp contract. Nor does a guest edit
+   brick a cell in flight: `create_run_command` now runs the guest the request was SEALED with,
+   taken from the copy `submit` stages beside the request and accepted only when its digest is the
+   sealed digest, so `respond`, `reattach` and `replace` keep working across any edit to the
+   working tree while the seal itself still binds exactly what may execute.
+   Residual, not fixed: `observe` still drives into `failed-retained`, a phase it refuses, so a
+   false negative that outlasts the settling window is recoverable only through `replace`.
+   Upgrading no-mistakes on the HOST is NOT the fix and cannot reach a running cell. The cell's
+   version comes from the `runtime.tar.gz` handed to `submit --runtime-bundle`; nothing in this
+   repo BUILDS that bundle, it is extracted only on a `start` boot, and the request is
+   digest-sealed. The staged payload copy for `azv-36b2726cbcf3` declares
+   `no_mistakes_version: 1.48.0` across 110 files, read from that bundle rather than from the
+   state file, which records only its digest. Host 1.48.0 to 1.53.0 changes what runs in a cell
+   only by rebuilding the bundle from the upgraded binary and submitting a NEW cell. Do not spend
+   time waiting on a host upgrade here.
+
 2. The sealed suite is not Linux-clean, so every cell run parks. Shard 2 failed on host-coupled
    units that cannot pass inside a Linux cell (passwordless sudo, tmux window creation, Keychain
    approval markers), alongside 377 passing units. Until those units skip loudly off macOS, no
@@ -206,6 +273,14 @@ neither is the receipts strand:
    deliberately NOT done here: deny-all egress in that cell is a security property, and trading
    it for a green check is an owner-level decision about the cell's security posture, not a test
    suite's call.
+
+Open finding from the same attempt, not addressed by that fix: the guest's `adjudicate_gates`
+polls `control/gate-response-a<n>-<i>.txt` through `fetch_gate_response`, and nothing in this
+repo ever writes that blob, so the loop can only ever time out at its
+`FM_AZURE_VALIDATION_GATE_WAIT_SECONDS` default of 5400 seconds. That is 90 minutes of billable
+cell per gate for nothing, and it is consistent with attempt 1's 1h57m wall time. The remedy is
+a scope decision between wiring the host to publish the blob and deleting the loop; the
+in-attempt response path the guest already has does not need it.
 
 So the receipts fix is exercised live up to the gate, which is exactly what used to be
 impossible, and `close` stays unproven: the acceptance sentence below is not yet met.
@@ -749,13 +824,38 @@ accepts for codex-authored work.
 
 ## R7. Everything is logged in
 
-Status: HOLDS, through R8.
+Status: DONE.
 
-The eight pi profiles renew on their own now, which is R8.
-Two of the three profiles in `~/.local/share/agent-fleet/accounts/claude/` hold blanked,
-length-zero tokens; the third is `refreshable` with material declared valid to 2026-09-10.
-None of the three is needed for R6 anymore: the GLM lane authenticates with a Foundry
-deployment key and reviews all authors, so R7 holds with no owner login outstanding.
+Re-checked 2026-08-21 against `bin/fm-credential-expiry.py report` and the live roster rather
+than against an earlier note. Every credential a live lane reads is present and current, and no
+owner login is outstanding. Authors and no-mistakes run on the eight pi profiles `openai-codex`
+and `-2` through `-5`, `-7`, `-8`, `-9`, all `usable` to 2026-08-29; the numbering skips 6, and
+those eight names are exactly the slots `~/.pi/agent/auth.json` holds, which is what
+`bin/fm-pi-refresh.py` renews. R8 keeps them moving: its LaunchAgent
+`com.firstmate.pi-auth-refresh` is active with seven runs and last exit code 0. The crosscheck
+roster reads its GLM primary plus three of those same pi profiles, and the GLM lane
+authenticates with an api key rather than an owner login, so it adds no login to this
+requirement; whether that lane returns verdicts is R6 and not this.
+
+Nothing on a live path reads a claude credential, an `accounts/codex/*` profile, or
+`accounts/pi/1` through `6`. No script under `bin/`, `tools/` or `skills/` names the claude or
+codex pools at all outside the expiry reporter, no live file under `$FM_HOME/config` names them,
+and the pi slot list comes from pi's own `auth.json` rather than a scan of the account
+directory, so the numbered leftovers are never selected. Their state is recorded here rather
+than owed. An earlier revision of this section called the third claude profile "refreshable with
+material declared valid to 2026-09-10", which read the REFRESH token's horizon as readiness.
+What is true: two of the three profiles in `~/.local/share/agent-fleet/accounts/claude/` hold
+blanked, length-zero access AND refresh tokens, and the third's ACCESS token expired
+2026-08-17T20:31:18Z behind a refresh token good to 2026-09-10. `refreshable` states that a
+refresh token is held, never that the profile is ready to use. Renewing it is an OWNER LOGIN:
+nothing refreshes claude on a schedule, `bin/fm-pi-refresh.py` is hardcoded to `accounts/pi` and
+names claude nowhere, and `bin/fm-credential-expiry.py` only reads. None of it is needed, which
+is what makes this requirement met rather than blocked.
+
+This status stands on R8 continuing to hold, because the pi horizon is 2026-08-29 and the
+LaunchAgent is what advances it. Re-read `bin/fm-credential-expiry.py report` in full before
+relying on this line: a truncated listing miscounts the pool, and the profile numbering is not
+contiguous.
 
 ## R8. Auth refreshes on its own
 
