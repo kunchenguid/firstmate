@@ -1751,23 +1751,40 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default remote branch target expected actual status
-  if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+  # Which remote does this checkout develop on? resolve_update_base
+  # (fm-dev-remote-lib.sh) reads it off the default branch's own configured
+  # upstream - e.g. a fork tracking fork/main - so a pooled worktree is
+  # provisioned from the lineage this repo actually develops on rather than
+  # from a hardcoded origin that may be a diverged upstream template it cannot
+  # even reach. The locally recorded default branch is only good enough to read
+  # that config; the remote's CURRENT default is re-resolved from the remote
+  # itself below. Origin remains the answer when nothing local names a default
+  # branch to read an upstream from - it is the only remote nameable at that
+  # point, and is what a project clone records anyway.
+  remote=origin
+  if default=$(default_branch "$worktree"); then
+    resolve_update_base "$worktree" "$default"
+    remote=$RESOLVE_BASE_REMOTE
+  fi
+  if ! git -C "$worktree" remote get-url "$remote" >/dev/null 2>&1; then
+    echo "error: no $remote remote for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+  if ! git -C "$worktree" fetch --quiet "$remote"; then
+    echo "error: could not fetch $remote for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+  if ! git -C "$worktree" remote set-head "$remote" --auto >/dev/null 2>&1; then
+    echo "error: could not resolve $remote's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  default=$(default_branch "$worktree" "$remote") || {
+    echo "error: could not determine $remote's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  # resolve_update_base (fm-ff-lib.sh) follows this checkout's own configured
-  # upstream for $default - e.g. a fork tracking fork/main - rather than
-  # hardcoding origin, so a task worktree is provisioned from the lineage this
-  # repo actually develops on. Falls back to origin/$default when no upstream
-  # is configured, unchanged from before.
+  # Now that the remote's own default branch is current, settle the exact base:
+  # the configured upstream again, so a default branch tracking something other
+  # than the remote's like-named branch still wins.
   resolve_update_base "$worktree" "$default"
   remote=$RESOLVE_BASE_REMOTE
   branch=$RESOLVE_BASE_BRANCH

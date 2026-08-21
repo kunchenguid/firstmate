@@ -639,6 +639,34 @@ default_branch() {
   return 1
 }
 
+# Which remote does this checkout actually develop on, and what is the default
+# branch's name there? resolve_update_base (fm-dev-remote-lib.sh) follows
+# $PROJ's own configured upstream - e.g. a fork tracking fork/main - rather
+# than a hardcoded origin that may be a diverged upstream template. Resolved at
+# most once per run (pure local git-config reads) and cached in DEV_REMOTE /
+# DEV_BRANCH so every landed-work check agrees on one answer.
+#
+# Knowing the default branch's NAME is only needed to read its upstream; when
+# it cannot be determined at all, the remote is still knowable, so this settles
+# on "origin" rather than refusing. Callers that additionally need the branch
+# name (a local-default comparison) check DEV_BRANCH themselves.
+DEV_REMOTE=
+DEV_BRANCH=
+DEV_REMOTE_RESOLVED=0
+resolve_dev_remote() {
+  local name
+  [ "$DEV_REMOTE_RESOLVED" -eq 0 ] || return 0
+  DEV_REMOTE_RESOLVED=1
+  if name=$(default_branch); then
+    resolve_update_base "$PROJ" "$name"
+    DEV_REMOTE=$RESOLVE_BASE_REMOTE
+    DEV_BRANCH=$RESOLVE_BASE_BRANCH
+  else
+    DEV_REMOTE=origin
+    DEV_BRANCH=
+  fi
+}
+
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
@@ -815,16 +843,15 @@ pr_number_from_target() {
 }
 
 ensure_commit_object() {
-  local target=$1 commit=$2 n default remote
+  local target=$1 commit=$2 n
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
   # A PR lives on the remote this checkout actually develops on (e.g. a
-  # fork), not necessarily "origin" - see resolve_update_base.
-  default=$(default_branch) || return 1
-  resolve_update_base "$PROJ" "$default"
-  remote=$RESOLVE_BASE_REMOTE
-  git -C "$WT" remote get-url "$remote" >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet "$remote" "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  # fork), not necessarily "origin" - see resolve_dev_remote. Only the remote
+  # matters here, so an undeterminable default branch does not block the fetch.
+  resolve_dev_remote
+  git -C "$WT" remote get-url "$DEV_REMOTE" >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet "$DEV_REMOTE" "refs/pull/$n/head" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
@@ -914,18 +941,17 @@ pr_open_state() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name remote branch ref default_tree merged_tree
+  local name branch ref default_tree merged_tree
   name=$(default_branch) || return 1
   # Compare against the remote this checkout actually develops on (e.g. a
-  # fork), not necessarily "origin" - see resolve_update_base. Otherwise a
+  # fork), not necessarily "origin" - see resolve_dev_remote. Otherwise a
   # checkout tracking a diverged fork would be checked against the wrong
   # default branch's tree entirely.
-  resolve_update_base "$PROJ" "$name"
-  remote=$RESOLVE_BASE_REMOTE
-  branch=$RESOLVE_BASE_BRANCH
-  if git -C "$WT" remote get-url "$remote" >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet "$remote" "+refs/heads/$branch:refs/remotes/$remote/$branch" >/dev/null 2>&1 || return 1
-    ref="refs/remotes/$remote/$branch"
+  resolve_dev_remote
+  branch=${DEV_BRANCH:-$name}
+  if git -C "$WT" remote get-url "$DEV_REMOTE" >/dev/null 2>&1; then
+    git -C "$WT" fetch --quiet "$DEV_REMOTE" "+refs/heads/$branch:refs/remotes/$DEV_REMOTE/$branch" >/dev/null 2>&1 || return 1
+    ref="refs/remotes/$DEV_REMOTE/$branch"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else

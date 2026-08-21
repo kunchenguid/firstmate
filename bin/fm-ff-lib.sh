@@ -38,11 +38,15 @@ first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
 
+# Which branch is <dir>'s default? Read from <remote>'s recorded HEAD, else
+# from a local main/master. <remote> defaults to origin because that is what a
+# project clone (which has no fork/upstream split) records; a checkout that
+# develops on a fork passes that fork instead, once it has been resolved.
 default_branch() {
-  local dir=$1 ref branch
-  ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  local dir=$1 remote=${2:-origin} ref branch
+  ref=$(git -C "$dir" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
   if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
+    echo "${ref#"$remote"/}"
     return 0
   fi
   for branch in main master; do

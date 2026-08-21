@@ -233,9 +233,46 @@ test_fork_tracking_checkout_diffs_and_fetches_pr_from_fork() {
   pass "fm-review-diff follows a checkout's configured upstream (fork) for both the base and the PR fetch, not a hardcoded origin"
 }
 
+test_local_branch_upstream_falls_back_to_origin() {
+  local case_dir out origin_tip
+  case_dir=$(make_case local-upstream)
+  # main tracking a LOCAL branch is a configured upstream that names no remote
+  # at all (branch.main.remote = "."). Splitting the short upstream on "/"
+  # yielded the bare branch name as both remote and branch, so the review
+  # silently stopped fetching and diffed against the stale local default.
+  git -C "$case_dir/project" branch -q dev main
+  git -C "$case_dir/project" branch --quiet --set-upstream-to=dev main
+
+  # origin moves past the local checkout, so whether the run actually fetched
+  # through the resolved remote is observable in the tracking ref afterwards.
+  git clone -q "$case_dir/origin.git" "$case_dir/_push"
+  printf 'origin-moved\n' > "$case_dir/_push/moved.txt"
+  git -C "$case_dir/_push" add moved.txt
+  git -C "$case_dir/_push" commit -qm "origin advanced past the local checkout"
+  git -C "$case_dir/_push" push -q origin main
+  rm -rf "$case_dir/_push"
+  origin_tip=$(git -C "$case_dir/origin.git" rev-parse main)
+
+  printf 'task work\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "task work"
+  write_task_meta "$case_dir"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" "diff base: origin/main" \
+    "local-upstream: a local-branch upstream names no remote, so the base must fall back to origin/main"
+  assert_not_contains "$out" "diff base: dev" \
+    "local-upstream: the tracked local branch's name must never be treated as a remote"
+  [ "$(git -C "$case_dir/project" rev-parse refs/remotes/origin/main)" = "$origin_tip" ] \
+    || fail "local-upstream: origin/main was not refreshed, so the base was never fetched through the resolved remote"
+  pass "fm-review-diff falls back to origin/<default> when the default branch tracks a local branch"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_fork_tracking_checkout_diffs_and_fetches_pr_from_fork
+test_local_branch_upstream_falls_back_to_origin

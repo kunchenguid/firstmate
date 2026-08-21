@@ -173,7 +173,7 @@ family_for_basename() {
     fm-backlog-handoff.test.sh|fm-on.test.sh|fm-remote-backlog-handoff.test.sh|\
     fm-remote-doctor.test.sh|fm-remote-job.test.sh|fm-remote-job-orphan-reap.test.sh|\
     fm-remote-reply.test.sh|fm-remote-secondmate-lifecycle-e2e.test.sh|\
-    fm-remote-secondmate-trace-context.test.sh|\
+    fm-remote-secondmate-trace-context.test.sh|fm-remote-update-follows-fork.test.sh|\
     fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-startup-memory-budget.test.sh|fm-stow-cascade.test.sh|\
@@ -986,6 +986,21 @@ families_for_changed_path() {
       # Pin or cleanup changes also select the real-Herdr family so the required
       # lane's contract coverage re-runs.
       printf '%s\n' real-herdr-gated
+      ;;
+    bin/fm-dev-remote-lib.sh)
+      # The single owner of development-remote resolution. Every tool that
+      # fetches, diffs, or reports divergence against "the development remote"
+      # goes through it - directly (review-diff, teardown, lint, this runner)
+      # or through fm-ff-lib.sh (update/bootstrap, spawn's pooled worktree
+      # base, the stow cascade and config push, the fleet snapshot) - so a
+      # change here selects all of their families, not just whichever suites
+      # happen to name the file.
+      printf '%s\n' pr-forge
+      printf '%s\n' session-bootstrap
+      printf '%s\n' secondmate
+      printf '%s\n' backend-dispatch
+      printf '%s\n' snapshot-bearings
+      printf '%s\n' pure-contract-unit
       ;;
     bin/fm-lint.sh|bin/fm-install-shellcheck.sh|\
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\

@@ -227,8 +227,43 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+test_fork_tracking_pool_refreshes_from_fork_not_origin() {
+  local rec id out status fork_tip
+  id='pool-fork-tracking-r6'
+  rec=$(make_case fork-tracking "$id")
+  read_case_record "$rec"
+
+  # The checkout develops on a fork while origin is an upstream template it
+  # cannot even reach - this repo's own shape (AGENTS.md task
+  # fm-fleet-follows-fork). Only the fork carries the fork-only tooling.
+  git clone --quiet --bare "$PROJECT_DIR" "$CASE_DIR/fork.git"
+  git -C "$PROJECT_DIR" remote add fork "file://$CASE_DIR/fork.git"
+  git clone --quiet "file://$CASE_DIR/fork.git" "$CASE_DIR/fork-publisher"
+  printf 'fork-only tooling\n' > "$CASE_DIR/fork-publisher/fork-only.txt"
+  git -C "$CASE_DIR/fork-publisher" add fork-only.txt
+  git -C "$CASE_DIR/fork-publisher" \
+    -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm fork-only
+  git -C "$CASE_DIR/fork-publisher" push --quiet origin main
+  git -C "$PROJECT_DIR" fetch --quiet fork
+  git -C "$PROJECT_DIR" branch --quiet --set-upstream-to=fork/main main
+  git -C "$PROJECT_DIR" remote set-url origin "file://$CASE_DIR/missing-origin.git"
+  fork_tip=$(git --git-dir="$CASE_DIR/fork.git" rev-parse main)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should provision a pooled worktree from the fork it tracks: $out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$fork_tip" ] \
+    || fail "spawn did not start the pooled worktree at the fork's tip"
+  assert_grep 'fork-only tooling' "$POOL_DIR/fork-only.txt" \
+    "the pooled worktree is missing the fork-only file it should have been provisioned with"
+  [ ! -e "$POOL_DIR/advanced-main.txt" ] \
+    || fail "spawn provisioned the pooled worktree from origin's diverged lineage instead of the fork's"
+  pass "a pooled worktree tracking a fork is provisioned from that fork, even when origin is unreachable"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
+test_fork_tracking_pool_refreshes_from_fork_not_origin
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
