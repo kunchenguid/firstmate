@@ -56,8 +56,33 @@ compose() {  # <origin> <key>
   printf '%s-decision-%s' "$1" "$2"
 }
 
+task_show() {
+  (cd "$FM_HOME" && tasks-axi show "$1" --full) 2>/dev/null
+}
+
+show_field() {
+  local output=$1 field=$2
+  printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
+}
+
+normalized_blocked_by() {
+  local blocked
+  blocked=$(show_field "$1" blocked_by | tr -d '[:space:]')
+  blocked=${blocked#\"}
+  blocked=${blocked%\"}
+  [ "$blocked" != - ] || blocked=''
+  printf '%s' "$blocked"
+}
+
+list_has_key() {
+  case ",$1," in
+    *",$2,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' routed='' id dep tmp
+  local origin=${1:-} key=${2:-} decision_file='' routed='' id dep tmp show state blocked hold_show hold_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -73,9 +98,22 @@ command_resolve() {
   [ -f "$decision_file" ] || fail "decision file does not exist: $decision_file"
   [ -n "$routed" ] || fail "at least one --routed-to task is required; use answer when the captain's answer routes no work"
   routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
-  # The routed identities become part of the recorded decision text, so the
-  # record still says what work the answer released; the same inputs always
-  # rebuild the same text, keeping an exact retry idempotent.
+  hold_show=$(task_show "$id") || fail "captain decision $id does not exist in the active home"
+  hold_body=$(show_field "$hold_show" body)
+  case "$hold_body" in
+    *"Resolution recorded by fm-captain-hold."*|*"Resolution recorded by fm-decision-hold."*)
+      resolution_recorded=1
+      ;;
+  esac
+  for dep in $routed; do
+    show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"
+    state=$(show_field "$show" state)
+    [ "$state" != done ] || [ "$resolution_recorded" = 1 ] \
+      || fail "routed task $dep is already done"
+    blocked=$(normalized_blocked_by "$show")
+    list_has_key "$blocked" "$id" || [ "$resolution_recorded" = 1 ] \
+      || fail "routed task $dep is not durably blocked by $id"
+  done
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-decision-hold-resolve.XXXXXX") \
     || fail "cannot stage the captain decision"
   if ! { cat "$decision_file" && printf '\n\nRouted work:\n' \
@@ -88,11 +126,12 @@ command_resolve() {
     exit 1
   fi
   rm -f -- "$tmp"
-  # Clear the recorded dependency edges the old resolve path owned. A closed
-  # blocker already reads as resolved, so a failure here is loud but not fatal
-  # to the recorded close.
   for dep in $routed; do
-    (cd "$FM_HOME" && tasks-axi unblock "$dep" --by "$id" >/dev/null 2>&1) || true
+    show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
+    if list_has_key "$(normalized_blocked_by "$show")" "$id"; then
+      (cd "$FM_HOME" && tasks-axi unblock "$dep" --by "$id" >/dev/null) \
+        || fail "could not route the recorded decision to $dep"
+    fi
   done
   printf 'resolved: %s -> %s\n' "$id" "$routed"
 }

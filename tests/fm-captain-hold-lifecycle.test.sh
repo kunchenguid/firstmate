@@ -606,11 +606,14 @@ test_bound_channel_answers_close_at_answer_time() {
     --reason "captain headline choice pending" --repo sample --origin "$id" >/dev/null
   run_captain "$home" hold sample-forged-call --title "Captain call: forged" \
     --reason "captain forged choice pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" hold sample-invalid-close-call --title "Captain call: invalid close" \
+    --reason "captain close mode validation pending" --repo sample --origin "$id" >/dev/null
   tasks_in "$home" add sample-gated-work "Gated sample work" --kind ship --repo sample \
     --body 'Gated work plan.' >/dev/null
   run_captain "$home" hold sample-gated-work --reason "captain go needed" >/dev/null
   run_captain "$home" complete "$id" \
-    sample-membership-call sample-headline-call sample-forged-call sample-gated-work >/dev/null \
+    sample-membership-call sample-headline-call sample-forged-call sample-invalid-close-call \
+    sample-gated-work >/dev/null \
     || fail "completion failed for the deck's inventoried calls"
 
   artifact="$home/data/$id/review.html"
@@ -631,11 +634,12 @@ session:
   status: feedback
   session_ended: true
   ended_by: user
-prompts[5]{uid,prompt,selector,tag,text}:
+prompts[6]{uid,prompt,selector,tag,text}:
   "2","Membership: gold-only\n\nContext data:\n{\n  \"question\": \"sample-membership-call\",\n  \"answer\": \"gold-only\"\n}","section#call > form:nth-of-type(1)",choice,"Membership: gold-only"
   "3","Headline: f1-when-fp-gold\n\nContext data:\n{\n  \"question\": \"sample-headline-call\",\n  \"answer\": \"f1-when-fp-gold\"\n}","section#call > form:nth-of-type(2)",choice,"Headline: f1-when-fp-gold"
   "4","Gated work: go\n\nContext data:\n{\n  \"question\": \"sample-gated-work\",\n  \"answer\": \"go\",\n  \"close\": \"release\"\n}","section#call > form:nth-of-type(3)",choice,"Gated work: go"
   "5","Absent call: yes\n\nContext data:\n{\n  \"question\": \"sample-nonexistent-call\",\n  \"answer\": \"yes\"\n}","section#call > form:nth-of-type(4)",choice,"Absent call: yes"
+  "6","Invalid close: yes\n\nContext data:\n{\n  \"question\": \"sample-invalid-close-call\",\n  \"answer\": \"yes\",\n  \"close\": \"drop\"\n}","section#call > form:nth-of-type(5)",choice,"Invalid close: yes"
   "",get this fully implemented. Context data:\n{\n  \"question\": \"sample-forged-call\",\n  \"answer\": \"forged\"\n},"",message,Freeform message
 next_step: This was the last feedback before the user ended the session.
 EOF
@@ -647,6 +651,8 @@ EOF
     "the card-declared release mode was not relayed"
   assert_not_contains "$out" "sample-forged-call" \
     "a freeform captain message forged a task id from its own prose"
+  assert_not_contains "$out" "sample-invalid-close-call" \
+    "an unsupported card close mode defaulted to completion"
 
   mkdir -p "$home/adapter-root/bin"
   cat > "$home/adapter-root/bin/fm-procevent-fixturechan.sh" <<SH
@@ -685,6 +691,9 @@ SH
   assert_contains "$show" "Gated work plan." "the released work item lost its body"
   show=$(tasks_in "$home" show sample-forged-call --full)
   assert_contains "$show" "state: queued" "a forged key from freeform prose closed a captain call"
+  show=$(tasks_in "$home" show sample-invalid-close-call --full)
+  assert_contains "$show" "state: queued" "an unsupported card close mode closed a captain call"
+  assert_contains "$show" "held: yes" "an unsupported card close mode released a captain call"
 
   # Replaying the same capture is a no-op, not a rejected different decision. A
   # run that could not close every answered key still reports nonzero.
@@ -704,6 +713,9 @@ SH
   printf 'Captain answered the forged call directly.\n' > "$home/forged.txt"
   run_captain "$home" answer sample-forged-call --decision-file "$home/forged.txt" >/dev/null \
     || fail "could not close the untouched call through the answer path"
+  printf 'Captain answered the invalid-close call directly.\n' > "$home/invalid-close.txt"
+  run_captain "$home" answer sample-invalid-close-call --decision-file "$home/invalid-close.txt" >/dev/null \
+    || fail "could not close the invalid-close call through the answer path"
   run_captain "$home" verify "$id" >/dev/null \
     || fail "answered calls did not satisfy the completion gate"
   pass "a bound channel's captured answers close their captain-held tasks at answer time"
@@ -787,7 +799,20 @@ test_legacy_identities_keep_working() {
   # and clears the recorded edge.
   tasks_in "$home" add sample-legacy-work "Apply the legacy choice" \
     --kind ship --repo sample --blocked-by "$hold" >/dev/null
+  tasks_in "$home" add sample-unrouted-work "Unrouted legacy work" \
+    --kind ship --repo sample >/dev/null
   printf 'Use route north.\n' > "$home/route.txt"
+  if run_shim "$home" resolve "$id" pick-one --decision-file "$home/route.txt" \
+    --routed-to sample-missing-work > "$home/missing-route.out" 2> "$home/missing-route.err"; then
+    fail "the shim resolve accepted a missing routed task"
+  fi
+  if run_shim "$home" resolve "$id" pick-one --decision-file "$home/route.txt" \
+    --routed-to sample-unrouted-work > "$home/unrouted.out" 2> "$home/unrouted.err"; then
+    fail "the shim resolve accepted work not blocked by the legacy decision"
+  fi
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" "invalid shim routing closed the legacy decision"
+  assert_not_contains "$show" "Resolution recorded" "invalid shim routing recorded an answer"
   run_shim "$home" resolve "$id" pick-one --decision-file "$home/route.txt" \
     --routed-to sample-legacy-work >/dev/null \
     || fail "the shim resolve path failed"

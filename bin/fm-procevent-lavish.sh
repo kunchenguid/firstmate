@@ -175,7 +175,7 @@ cmd_answers() {
   local file=${1-}
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
-  perl -e '
+  perl -MJSON::PP -e '
     use strict; use warnings;
     my ($path) = @ARGV;
     open my $fh, "<", $path or exit 1;
@@ -214,15 +214,17 @@ cmd_answers() {
       my $prompt = $f{prompt};
       next unless defined $prompt && $prompt =~ /Context data:\s*(\{.*\})/s;
       my $ctx = $1;
-      next unless $ctx =~ /"question"\s*:\s*"((?:[^"\\]|\\.)*)"/;
-      my $key = $1;
-      next unless $ctx =~ /"answer"\s*:\s*"((?:[^"\\]|\\.)*)"/;
-      my $answer = $1;
-      # The optional close mode a card declared; only the two published values
-      # survive, so freeform prose can never smuggle a mode in.
+      my $data = eval { decode_json($ctx) };
+      next unless ref($data) eq "HASH";
+      my $key = $data->{question};
+      my $answer = $data->{answer};
+      next if !defined($key) || ref($key) || !defined($answer) || ref($answer);
       my $mode = "";
-      $mode = $1 if $ctx =~ /"close"\s*:\s*"(done|release)"/;
-      $_ =~ s/\\(.)/$1/g for ($key, $answer);
+      if (exists $data->{close}) {
+        next if !defined($data->{close}) || ref($data->{close})
+          || ($data->{close} ne "done" && $data->{close} ne "release");
+        $mode = $data->{close};
+      }
       next unless $key =~ /\A[A-Za-z0-9._-]{1,128}\z/;
       next unless length $answer && length($answer) <= 512;
       my $label = defined $f{text} ? $f{text} : "";
