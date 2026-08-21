@@ -189,6 +189,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/updatethecaptain-stop/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/updatethecaptain/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
