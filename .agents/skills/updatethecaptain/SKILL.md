@@ -31,6 +31,7 @@ Everything else already has an owner and is referenced here, never restated.
 
 While this loop is running the captain has asked for the whole report on every tick, including a tick where nothing has changed.
 That is a deliberate exception to section 8's rule that no-change updates are not captain-facing progress.
+Equally, while this loop is running a tick is never collapsed into section 9's short acknowledgement, however quiet the ten minutes were, and the full four-part report is always sent.
 It is scoped to this loop and ends with it; it never changes what an unrequested wake surfaces.
 
 ## Procedure
