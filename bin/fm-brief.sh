@@ -398,6 +398,24 @@ if [ "$BASE_SET" -eq 1 ]; then
   LOCAL_RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`$BASE\`."
   LOCAL_REBASE_LINE="Keep your branch a clean fast-forward onto \`$BASE\` - if it has advanced, rebase onto it so the eventual merge stays a fast-forward."
   LOCAL_MERGE_LINE="The configured merge authority approves the ready branch, then firstmate merges it into local \`$BASE\` through the guarded fast-forward path."
+  # Epic plan workflow (epwf-02): --base is the epic-story signal, so an epic
+  # ship brief carries the refresh-not-reauthor contract. The upfront plan is a
+  # skeleton; the worker refreshes it against current HEAD (when it matters),
+  # commits it durably, gates a material divergence at plan-review, and lets
+  # firstmate promote the approved plan into the canonical epic. The two leading
+  # blank lines are part of the value so `$SETUP2${EPIC_PLAN_SECTION}` in the
+  # template keeps NON-epic briefs byte-identical (empty value = no change).
+  # shellcheck disable=SC2016  # backticks/braces are literal brief text; only "$ID" interpolates.
+  EPIC_PLAN_SECTION=$(printf '%s\n' \
+'' \
+'' \
+'# Epic plan workflow' \
+'This is an epic story. The epic pipeline authored an UPFRONT plan for it at design time: a skeleton - the dependency DAG, sequencing, and security acceptance criteria - not line-accurate steps. Firstmate attaches that upfront plan in the # Task section above.' \
+'Do NOT re-author a plan from scratch. START from the attached upfront plan and REFRESH it against the current HEAD you branched from: re-verify its anchors (files, line counts, symbols), fold in whatever landed since design, and keep its direction.' \
+'Refreshing is MANDATORY when HEAD moved materially since design (a refactor or extraction landed), the story is security-sensitive, or a scout report supersedes the plan. SKIP it only for a frozen-contract mechanical story whose upfront plan still matches HEAD exactly - then follow the upfront plan as-is.' \
+'ALWAYS commit your task-time plan (refreshed or as-is) under `plans/'"$ID"'-plan/` in this worktree before you implement. It is the durable record and the input to promotion - never leave it uncommitted.' \
+'If your refresh materially diverges from the upfront plan, STOP before implementing and gate it: append `needs-decision: [key=plan-review] {what changed and why}` and wait. This plan-review gate is the divergence firewall - never implement an un-approved re-plan. On approval firstmate promotes your committed plan into the canonical epic plan so downstream stories read it.' \
+'If you discover something that breaks the epic assumptions BEYOND this story (a dependency is wrong, a sibling story contract must change), do NOT silently re-plan around it: append `needs-decision: [key=plan-review] epic-level: {what breaks}` and stop, so it goes to epic-level plan-review.')
 else
   BASE_CONTRACT_LINE=""
   BRANCH_STEP="First action: create your branch: \`git checkout -b fm/$ID\`"
@@ -405,6 +423,7 @@ else
   LOCAL_RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
   LOCAL_REBASE_LINE="Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward."
   LOCAL_MERGE_LINE="The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path."
+  EPIC_PLAN_SECTION=""
 fi
 case "$MODE" in
   direct-PR)
@@ -479,7 +498,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. $BRANCH_STEP$SETUP2
+1. $BRANCH_STEP$SETUP2${EPIC_PLAN_SECTION}
 
 # Rules
 $RULE1
