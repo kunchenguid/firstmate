@@ -974,7 +974,7 @@ canonical_existing_dir() {
   local target=$1
   [ -n "$target" ] || return 1
   [ -d "$target" ] || return 1
-  ( cd "$target" && pwd -P )
+  fm_canonical_path "$target"
 }
 
 retry_wait_secs_is_valid() {
@@ -2451,6 +2451,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     ORCA_PATH_MATCH_VERIFIED=1
   fi
   if [ -d "$WT" ]; then
+    validate_worktree_branch_identity "$WT" "$ID" || exit 1
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
       if git -C "$WT" checkout --detach -q 2>/dev/null; then
