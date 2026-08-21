@@ -430,6 +430,11 @@ type CompatibleModelRegistry = {
     configured: boolean;
     source?: "stored" | "runtime" | "environment" | "fallback" | "models_json_key" | "models_json_command";
   };
+  runtime?: {
+    config?: {
+      getProvider?: (provider: string) => unknown;
+    };
+  };
 };
 
 type CachedQuota = {
@@ -558,6 +563,95 @@ function activeModelRevision(model: ActiveModel | undefined): string {
 
 function effectiveEndpointRevision(provider: string, endpoint: string): string {
   return JSON.stringify([provider, canonicalBaseUrl(endpoint) ?? endpoint]);
+}
+
+function modelsConfigPreservesQuotaProvenance(value: unknown, model: ActiveModel): boolean {
+  if (!isRecord(value)) return false;
+  const knownProviderFields = new Set([
+    "name",
+    "baseUrl",
+    "apiKey",
+    "api",
+    "oauth",
+    "headers",
+    "compat",
+    "authHeader",
+    "models",
+    "modelOverrides",
+  ]);
+  if (Object.keys(value).some((field) => !knownProviderFields.has(field))) return false;
+  if (
+    value.headers !== undefined ||
+    value.compat !== undefined ||
+    value.oauth !== undefined ||
+    value.authHeader === true
+  ) return false;
+  if (
+    value.baseUrl !== undefined &&
+    (typeof value.baseUrl !== "string" || !isOfficialProviderBaseUrl(model.provider, value.baseUrl))
+  ) return false;
+  if (value.models !== undefined) {
+    if (!Array.isArray(value.models)) return false;
+    for (const candidate of value.models) {
+      if (!isRecord(candidate)) return false;
+      if (candidate.id === model.id) return false;
+    }
+  }
+  if (value.modelOverrides !== undefined) {
+    if (!isRecord(value.modelOverrides)) return false;
+    const override = value.modelOverrides[model.id];
+    if (override !== undefined) {
+      if (!isRecord(override)) return false;
+      if (Object.keys(override).some((field) => field !== "name" && field !== "cost")) return false;
+    }
+  }
+  return true;
+}
+
+function effectiveModelPreservesQuotaProvenance(
+  registry: CompatibleModelRegistry,
+  modelRegistry: ExtensionContext["modelRegistry"],
+  model: ActiveModel,
+): boolean {
+  const effectiveModel = registry.find?.call(modelRegistry, model.provider, model.id);
+  if (!effectiveModel || activeModelRevision(effectiveModel) !== activeModelRevision(model)) return false;
+  if (effectiveModel === model) return true;
+  const configStore = registry.runtime?.config;
+  const getProviderConfig = configStore?.getProvider;
+  if (typeof getProviderConfig !== "function") return false;
+  try {
+    const config = getProviderConfig.call(configStore, model.provider);
+    return modelsConfigPreservesQuotaProvenance(config, model);
+  } catch {
+    return false;
+  }
+}
+
+function conservativePublicationAgeMs(
+  processStartedAtWallMs: number,
+  processStartedAtMonotonicMs: number,
+  publishedAtWallMs: number,
+  publishedAtMonotonicMs: number,
+  timelineOriginMs: number,
+): number | null {
+  if (
+    !Number.isFinite(processStartedAtWallMs) ||
+    !Number.isFinite(processStartedAtMonotonicMs) ||
+    !Number.isFinite(publishedAtWallMs) ||
+    !Number.isFinite(publishedAtMonotonicMs) ||
+    !Number.isFinite(timelineOriginMs) ||
+    publishedAtMonotonicMs < processStartedAtMonotonicMs
+  ) return null;
+  const processElapsedMs = publishedAtMonotonicMs - processStartedAtMonotonicMs;
+  const wallElapsedMs = publishedAtWallMs - processStartedAtWallMs;
+  if (
+    wallElapsedMs < 0 ||
+    timelineOriginMs < Math.min(processStartedAtWallMs, publishedAtWallMs) ||
+    timelineOriginMs > Math.max(processStartedAtWallMs, publishedAtWallMs)
+  ) return processElapsedMs;
+  const wallAgeMs = Math.max(0, publishedAtWallMs - timelineOriginMs);
+  const backwardAdjustmentMs = Math.max(0, processElapsedMs - wallElapsedMs);
+  return Math.min(processElapsedMs, wallAgeMs + backwardAdjustmentMs);
 }
 
 function exactAccountId(value: unknown): string | null {
@@ -1083,7 +1177,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       try {
         provider = registry.getProvider.call(ctx.modelRegistry, model.provider);
         if (
-          registry.find.call(ctx.modelRegistry, model.provider, model.id) !== model ||
+          !effectiveModelPreservesQuotaProvenance(registry, ctx.modelRegistry, model) ||
           registry.getRegisteredProviderConfig.call(ctx.modelRegistry, model.provider) !== undefined ||
           registry.getRegisteredNativeProvider.call(ctx.modelRegistry, model.provider) !== undefined
         ) {
@@ -1925,25 +2019,25 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             const publishedAtMonotonicMs = monotonicNow();
             const publishedAtWallMs = now();
             const timelineOriginMs = publication?.generatedAtMs ?? report?.generatedAtMs ?? publishedAtWallMs;
-            const processElapsedMs = Math.max(
-              0,
-              publishedAtMonotonicMs - processStartedAtMonotonicMs,
+            const publicationAgeMs = conservativePublicationAgeMs(
+              processStartedAtWallMs,
+              processStartedAtMonotonicMs,
+              publishedAtWallMs,
+              publishedAtMonotonicMs,
+              timelineOriginMs,
             );
-            const wallElapsedMs = publishedAtWallMs - processStartedAtWallMs;
-            const generationProgress = wallElapsedMs === 0
-              ? 0
-              : (timelineOriginMs - processStartedAtWallMs) / wallElapsedMs;
-            const elapsedAtPublicationMs = processElapsedMs * (
-              1 - Math.min(1, Math.max(0, Number.isFinite(generationProgress) ? generationProgress : 0))
-            );
+            const retainedPublication = publicationAgeMs === null ? null : publication;
+            const elapsedAtPublicationMs = publicationAgeMs ?? 0;
             session.quota = {
-              view: publication
+              view: retainedPublication
                 ? revalidateFreshQuotaView(
-                    publication,
+                    retainedPublication,
                     timelineOriginMs + elapsedAtPublicationMs,
                   )
-                : selected,
-              publication,
+                : publication
+                  ? { kind: "stale", provider: publication.provider, label: publication.label }
+                  : selected,
+              publication: retainedPublication,
               publishedAtMonotonicMs,
               elapsedAtPublicationMs,
               elapsedThroughMs: 0,

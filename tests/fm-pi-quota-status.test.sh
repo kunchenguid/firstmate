@@ -2414,6 +2414,13 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
     modelRegistry: providerOptions.legacyRegistry
       ? {}
       : {
+          runtime: {
+            config: {
+              getProvider(providerId) {
+                return providerOptions.modelsConfig?.[providerId];
+              },
+            },
+          },
           getProvider(providerId) {
             return providerComposition(providerId);
           },
@@ -2771,6 +2778,28 @@ assert(
 );
 await modelsJsonOverlay.emit("session_shutdown", { reason: "quit" });
 
+const cosmeticModelOverlay = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
+  "openai-codex",
+  "tui",
+  {
+    composedModels: true,
+    modelsConfig: {
+      "openai-codex": {
+        modelOverrides: {
+          "fixture-model": { name: "Renamed Codex" },
+        },
+      },
+    },
+  },
+);
+await cosmeticModelOverlay.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => cosmeticModelOverlay.widgetText(400).includes("week 94% left"),
+  `cosmetic models.json override suppressed official quota: ${cosmeticModelOverlay.widgetText(400)}`,
+);
+await cosmeticModelOverlay.emit("session_shutdown", { reason: "quit" });
+
 await writeFile(`${process.env.PI_CODING_AGENT_DIR}/models.json`, `{
   // Pi models.json accepts line comments and trailing commas.
   "providers": {
@@ -2790,7 +2819,14 @@ await waitFor(
 );
 await commentedModelsJson.emit("session_shutdown", { reason: "quit" });
 
-const commandHeaderOptions = { composedModels: true };
+const commandHeaderOptions = {
+  composedModels: true,
+  modelsConfig: {
+    "openai-codex": {
+      headers: { Authorization: "!sleep 30" },
+    },
+  },
+};
 await writeFile(`${process.env.PI_CODING_AGENT_DIR}/models.json`, JSON.stringify({
   providers: {
     "openai-codex": {
@@ -3514,6 +3550,49 @@ await waitFor(
 );
 assert(!processAge.widgetText(400).includes("94%"), "expired process output was published as fresh");
 await processAge.emit("session_shutdown", { reason: "quit" });
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
+const processRollbackStart = Date.now();
+const processRollbackMs = 2 * 60 * 1000;
+process.env.FM_QUOTA_TEST_NOW_MS = String(processRollbackStart - processRollbackMs);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  processRollbackStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const callsBeforeProcessRollback = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+const processRollback = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => {
+    const calls = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+      .trim()
+      .split(/\n/)
+      .filter(Boolean).length;
+    return calls > callsBeforeProcessRollback
+      ? processRollbackStart - processRollbackMs
+      : processRollbackStart;
+  },
+  monotonicNow: () => {
+    const calls = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+      .trim()
+      .split(/\n/)
+      .filter(Boolean).length;
+    return calls > callsBeforeProcessRollback ? 7 * 60 * 1000 : 0;
+  },
+}));
+await processRollback.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => processRollback.widgetText(400).includes("stale"),
+  "backward process clock discontinuity did not fail closed",
+);
+assert(!processRollback.widgetText(400).includes("94%"), "ambiguous process age published stale quota as fresh");
+await processRollback.emit("session_shutdown", { reason: "quit" });
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
 const postStartupGenerationStart = Date.now();
