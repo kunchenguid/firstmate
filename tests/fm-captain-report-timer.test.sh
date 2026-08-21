@@ -4,7 +4,8 @@
 #
 # The timer has no daemon of its own: it is an authenticated custom check that
 # the existing watcher dispatches. So the contract worth pinning is the one a
-# report loop actually depends on - it stays silent before its interval, it
+# report loop actually depends on - an unadorned arm runs the ten-minute cadence
+# the captain asked for, it stays silent before its interval, it
 # produces exactly one line per elapsed interval, re-arming resets the wait, a
 # tampered check stops being trusted, and a due timer really does reach the
 # durable wake queue through a real bin/fm-watch.sh rather than only through
@@ -44,12 +45,23 @@ run_check() {  # <state>
   bash "$1/captain-report.check.sh" 2>/dev/null
 }
 
-# Backdate the stamp by <seconds> so an interval can elapse without waiting.
-age_stamp() {  # <state> <seconds>
-  local state=$1 seconds=$2 last
-  last=$(cat "$state/.captain-report-timer") || return 1
-  printf '%s\n' "$((last - seconds))" > "$state/.captain-report-timer"
+# Put the stamp <seconds> in the past so an interval can elapse without waiting.
+# Anchored to the CURRENT time rather than to the stamp arm wrote, because the
+# check measures against the current time too: anchoring to the armed stamp
+# instead makes every "not yet due" case silently lose its margin to however
+# long arm and the surrounding work took, which on a loaded machine is enough
+# to fire a timer the case declared not due yet.
+set_elapsed() {  # <state> <seconds>
+  local state=$1 seconds=$2 now
+  now=$(date +%s) || return 1
+  printf '%s\n' "$((now - seconds))" > "$state/.captain-report-timer"
 }
+
+# The margin a "not yet due" probe stops short of its interval by. One second
+# would pin the boundary exactly, but it also fails whenever the probe's own
+# process start crosses a second, so keep a few seconds of slack: still early,
+# never flaky.
+EARLY_MARGIN=3
 
 test_arm_publishes_a_registered_check() {
   local dir state out
@@ -106,9 +118,9 @@ test_timer_is_silent_before_its_interval() {
   timer "$state" arm --interval 600 >/dev/null || fail "arm failed"
   out=$(run_check "$state")
   [ -z "$out" ] || fail "the timer printed before its interval elapsed: $out"
-  age_stamp "$state" 599 || fail "could not age the stamp"
+  set_elapsed "$state" $((600 - EARLY_MARGIN)) || fail "could not age the stamp"
   out=$(run_check "$state")
-  [ -z "$out" ] || fail "the timer printed one second early: $out"
+  [ -z "$out" ] || fail "the timer printed before its interval had elapsed: $out"
   pass "the timer prints nothing until its full interval has elapsed"
 }
 
@@ -116,24 +128,46 @@ test_elapsed_interval_produces_exactly_one_line() {
   local dir state first second
   dir=$(make_home one-line); state="$dir/state"
   timer "$state" arm --interval 600 >/dev/null || fail "arm failed"
-  age_stamp "$state" 601 || fail "could not age the stamp"
+  set_elapsed "$state" 601 || fail "could not age the stamp"
   first=$(run_check "$state")
   assert_contains "$first" "captain report due" "an elapsed interval did not wake firstmate"
   [ "$(printf '%s\n' "$first" | wc -l | tr -d ' ')" = 1 ] \
     || fail "the timer printed more than one line: $first"
   second=$(run_check "$state")
   [ -z "$second" ] || fail "the timer repeated its line without a fresh interval: $second"
-  age_stamp "$state" 601 || fail "could not age the stamp again"
+  set_elapsed "$state" 601 || fail "could not age the stamp again"
   second=$(run_check "$state")
   assert_contains "$second" "captain report due" "the second interval did not wake firstmate"
   pass "each elapsed interval produces exactly one wake line"
+}
+
+# The captain asked to be kept posted "every ten minutes", so the cadence an
+# unadorned `arm` runs is part of the contract, not an implementation detail:
+# the skill arms with no --interval at all.
+test_default_cadence_is_ten_minutes() {
+  local dir state out
+  dir=$(make_home default-cadence); state="$dir/state"
+  out=$(timer "$state" arm) || fail "arm with no interval failed"
+  assert_contains "$out" "interval=600s" \
+    "arm did not default to the ten-minute captain-report cadence"
+  out=$(timer "$state" status) || fail "status failed on a default-cadence timer"
+  assert_contains "$out" "armed interval=600s" \
+    "status did not report the ten-minute default the skill actually arms"
+  set_elapsed "$state" $((600 - EARLY_MARGIN)) || fail "could not age the stamp"
+  out=$(run_check "$state")
+  [ -z "$out" ] || fail "the default timer spoke before ten minutes elapsed: $out"
+  set_elapsed "$state" 601 || fail "could not age the stamp past ten minutes"
+  out=$(run_check "$state")
+  assert_contains "$out" "captain report due" \
+    "ten elapsed minutes did not produce a report wake on the default cadence"
+  pass "arming with no interval reports on the ten-minute cadence the captain asked for"
 }
 
 test_rearming_restarts_the_wait() {
   local dir state out
   dir=$(make_home rearm); state="$dir/state"
   timer "$state" arm --interval 600 >/dev/null || fail "arm failed"
-  age_stamp "$state" 601 || fail "could not age the stamp"
+  set_elapsed "$state" 601 || fail "could not age the stamp"
   timer "$state" arm --interval 600 >/dev/null || fail "re-arm failed"
   out=$(run_check "$state")
   [ -z "$out" ] || fail "re-arming did not restart the wait: $out"
@@ -149,7 +183,7 @@ test_rearming_at_a_new_interval_is_what_the_watcher_runs() {
   timer "$state" arm --interval 60 >/dev/null || fail "re-arm at a new interval failed"
   out=$(timer "$state" status) || fail "status failed after the new interval"
   assert_contains "$out" "armed interval=60s" "status reported a cadence the check does not run"
-  age_stamp "$state" 61 || fail "could not age the stamp"
+  set_elapsed "$state" 61 || fail "could not age the stamp"
   out=$(run_check "$state")
   assert_contains "$out" "captain report due" "the new interval was not the one actually armed"
   pass "re-arming at a new interval rewrites the check the watcher actually runs"
@@ -218,7 +252,7 @@ test_due_timer_surfaces_as_a_check_wake() {
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$TIMER" arm --interval 60 >/dev/null \
     || fail "arm failed"
-  age_stamp "$state" 61 || fail "could not age the stamp"
+  set_elapsed "$state" 61 || fail "could not age the stamp"
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "the watcher did not exit for a due captain-report timer"
@@ -238,6 +272,7 @@ test_status_reports_the_armed_cadence_then_disarm
 test_disarm_is_harmless_when_nothing_is_armed
 test_timer_is_silent_before_its_interval
 test_elapsed_interval_produces_exactly_one_line
+test_default_cadence_is_ten_minutes
 test_rearming_restarts_the_wait
 test_rearming_at_a_new_interval_is_what_the_watcher_runs
 test_invalid_interval_is_refused_without_arming
