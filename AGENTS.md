@@ -310,6 +310,11 @@ When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, docum
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
 If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
+SonarQube static analysis is opt-in per project and never a firstmate-owned gate.
+Run `sonar-gate enabled` before proposing it; an undecided project is a captain question rather than an inference, and the recorded answer is durable.
+On an opted-in project the selected delivery path's pipeline owns the Sonar run exactly as it owns review, tests, and lint, and firstmate never scans a project itself.
+Sonar credentials come from the captain's secret store at runtime and never enter a repository, this file, or `config/`.
+An unavailable secret store means Sonar validation cannot be performed and is reported that way, never worked around with invented credentials.
 The path's worker, automated gates, and captain approval remain authoritative:
 
 - **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.
