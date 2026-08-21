@@ -5,6 +5,7 @@ import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { TextDecoder } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   createQuotaStatusFormatter,
@@ -322,11 +323,12 @@ const NON_ROUTING_MODEL_OVERRIDE_FIELDS = new Set([
   "maxTokens",
   "samplingParams",
 ]);
-const WALL_CLOCK_SAMPLE_TOLERANCE_MS = 2;
+const FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 type QuotaProcessResult =
   | { kind: "ok"; stdout: string }
   | { kind: "failed"; stdout: string; exitCode: number | null }
+  | { kind: "malformed" }
   | { kind: Exclude<QuotaFailureReason, "failed"> };
 
 type QuotaProcess = {
@@ -452,6 +454,12 @@ type CompatibleModelRegistry = {
 type CachedQuota = {
   view: QuotaView;
   publication: FreshQuotaView | null;
+  wallFilter: {
+    source: FreshQuotaView;
+    view: FreshQuotaView;
+    validFromMs: number;
+    validUntilMs: number;
+  } | null;
   publishedAtMonotonicMs: number;
   elapsedAtPublicationMs: number;
   elapsedThroughMs: number;
@@ -641,32 +649,43 @@ function effectiveModelPreservesQuotaProvenance(
   }
 }
 
+type ClockSample = {
+  wallMs: number;
+  monotonicBeforeMs: number;
+  monotonicAfterMs: number;
+};
+
 function conservativePublicationAgeMs(
-  processStartedAtWallMs: number,
-  processStartedAtMonotonicMs: number,
-  publishedAtWallMs: number,
-  publishedAtMonotonicMs: number,
+  processStartedAt: ClockSample | null,
+  publishedAt: ClockSample | null,
   timelineOriginMs: number,
 ): number | null {
   if (
-    !Number.isFinite(processStartedAtWallMs) ||
-    !Number.isFinite(processStartedAtMonotonicMs) ||
-    !Number.isFinite(publishedAtWallMs) ||
-    !Number.isFinite(publishedAtMonotonicMs) ||
+    !processStartedAt ||
+    !publishedAt ||
     !Number.isFinite(timelineOriginMs) ||
-    publishedAtMonotonicMs < processStartedAtMonotonicMs
+    publishedAt.monotonicBeforeMs < processStartedAt.monotonicAfterMs
   ) return null;
-  const processElapsedMs = publishedAtMonotonicMs - processStartedAtMonotonicMs;
-  const wallElapsedMs = publishedAtWallMs - processStartedAtWallMs;
+  const processElapsedMs = publishedAt.monotonicAfterMs - processStartedAt.monotonicBeforeMs;
+  const wallElapsedMs = publishedAt.wallMs - processStartedAt.wallMs;
   if (
     wallElapsedMs < 0 ||
-    timelineOriginMs < Math.min(processStartedAtWallMs, publishedAtWallMs) ||
-    timelineOriginMs > Math.max(processStartedAtWallMs, publishedAtWallMs)
+    timelineOriginMs < Math.min(processStartedAt.wallMs, publishedAt.wallMs) ||
+    timelineOriginMs > Math.max(processStartedAt.wallMs, publishedAt.wallMs)
   ) return processElapsedMs;
-  const wallAgeMs = Math.max(0, publishedAtWallMs - timelineOriginMs);
-  const clockSampleDifferenceMs = Math.abs(processElapsedMs - wallElapsedMs);
-  if (clockSampleDifferenceMs > WALL_CLOCK_SAMPLE_TOLERANCE_MS) return processElapsedMs;
-  return Math.min(processElapsedMs, wallAgeMs + Math.ceil(clockSampleDifferenceMs));
+  const wallAgeMs = Math.max(0, publishedAt.wallMs - timelineOriginMs);
+  return Math.min(
+    processElapsedMs,
+    wallAgeMs + Math.ceil(Math.abs(processElapsedMs - wallElapsedMs)),
+  );
+}
+
+function decodeUtf8(value: Uint8Array): string | null {
+  try {
+    return FATAL_UTF8_DECODER.decode(value);
+  } catch {
+    return null;
+  }
 }
 
 function exactAccountId(value: unknown): string | null {
@@ -680,7 +699,9 @@ function jwtPayload(token: string | undefined): Record<string, unknown> | null {
   const encoded = token.split(".")[1];
   if (!encoded) return null;
   try {
-    const parsed: unknown = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    const decoded = decodeUtf8(Buffer.from(encoded, "base64url"));
+    if (decoded === null) return null;
+    const parsed: unknown = JSON.parse(decoded);
     return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
       ? parsed as Record<string, unknown>
       : null;
@@ -872,16 +893,17 @@ export function runQuotaAxiJson(options: {
     if (error.code === "ENOENT") {
       finish({ kind: "missing" });
     } else {
-      finish({
-        kind: "failed",
-        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-        exitCode: null,
-      });
+      const stdout = decodeUtf8(Buffer.concat(stdoutChunks));
+      finish(stdout === null
+        ? { kind: "malformed" }
+        : { kind: "failed", stdout, exitCode: null });
     }
   });
   child.on("close", (code) => {
-    const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-    if (code === 0) {
+    const stdout = decodeUtf8(Buffer.concat(stdoutChunks));
+    if (stdout === null) {
+      finish({ kind: "malformed" });
+    } else if (code === 0) {
       finish({ kind: "ok", stdout });
     } else if (useWindowsSupervisor && code === 127) {
       finish({ kind: "missing" });
@@ -933,6 +955,17 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
   const formatStatus = createQuotaStatusFormatter();
   const referenceRevisions = new WeakMap<object, number>();
   let nextReferenceRevision = 1;
+
+  function clockSample(): ClockSample | null {
+    const monotonicBeforeMs = monotonicNow();
+    const wallMs = now();
+    const monotonicAfterMs = monotonicNow();
+    if (
+      !Number.isFinite(wallMs) ||
+      monotonicAfterMs < monotonicBeforeMs
+    ) return null;
+    return { wallMs, monotonicBeforeMs, monotonicAfterMs };
+  }
 
   function referenceRevision(value: unknown): number {
     if ((typeof value !== "object" || value === null) && typeof value !== "function") return 0;
@@ -1059,7 +1092,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           }
           if (bytesRead > maxAuthBytes) return { kind: "overflow" };
           if (bytesRead !== stats.size) return { kind: "failed" };
-          const input = buffer.subarray(0, bytesRead).toString("utf8");
+          const input = decodeUtf8(buffer.subarray(0, bytesRead));
+          if (input === null) return { kind: "failed" };
           return {
             kind: "ok",
             value: JSON.parse(input) as unknown,
@@ -1531,6 +1565,38 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       );
     }
 
+    function wallFilteredQuotaView(
+      quota: CachedQuota,
+      cached: FreshQuotaView,
+      nowMs: number,
+    ): QuotaView {
+      const existing = quota.wallFilter;
+      if (
+        existing?.source === cached &&
+        nowMs >= existing.validFromMs &&
+        nowMs < existing.validUntilMs
+      ) return existing.view;
+
+      const source = cached.publicationWindows === undefined
+        ? cached
+        : { ...cached, publicationWindows: undefined };
+      const filtered = revalidateFreshQuotaView(source, nowMs);
+      if (filtered.kind !== "fresh") return filtered;
+      let validFromMs = Number.NEGATIVE_INFINITY;
+      for (const window of cached.windows) {
+        if (window.resetsAtMs !== null && window.resetsAtMs <= nowMs) {
+          validFromMs = Math.max(validFromMs, window.resetsAtMs);
+        }
+      }
+      quota.wallFilter = {
+        source: cached,
+        view: filtered,
+        validFromMs,
+        validUntilMs: filtered.freshUntilMs,
+      };
+      return filtered;
+    }
+
     function cachedQuotaView(session: ActiveSession, nowMs: number): QuotaView | null {
       if (changedLiveModelView(session) || session.target.kind !== "supported" || !session.quota) {
         return null;
@@ -1546,12 +1612,14 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (cached.kind !== "fresh") return cached;
       if (
         cached.freshnessTimestampMs > nowMs + 60_000 ||
-        nowMs >= cached.freshUntilMs ||
+        nowMs >= cached.reportFreshUntilMs ||
         authoritativeTimelineMs(session.quota) >= cached.freshUntilMs
       ) {
         return { kind: "stale", provider: cached.provider, label: cached.label };
       }
-      return cached;
+      return nowMs < cached.freshUntilMs
+        ? cached
+        : wallFilteredQuotaView(session.quota, cached, nowMs);
     }
 
     function currentView(session: ActiveSession, nowMs = now()): QuotaView {
@@ -1958,8 +2026,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           render(session);
           return;
         }
-        const processStartedAtWallMs = now();
-        const processStartedAtMonotonicMs = monotonicNow();
+        const processStartedAt = clockSample();
         const running = runQuotaAxiJson({
           command,
           timeoutMs,
@@ -2048,14 +2115,13 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             session.lastFailure = null;
             const recoverable = recoverableFreshView(selected);
             const publication = recoverable ? quotaPublicationFreshView(recoverable) : null;
-            const publishedAtMonotonicMs = monotonicNow();
-            const publishedAtWallMs = now();
+            const publishedAt = clockSample();
+            const publishedAtMonotonicMs = publishedAt?.monotonicAfterMs ?? monotonicNow();
+            const publishedAtWallMs = publishedAt?.wallMs ?? now();
             const timelineOriginMs = publication?.generatedAtMs ?? report?.generatedAtMs ?? publishedAtWallMs;
             const publicationAgeMs = conservativePublicationAgeMs(
-              processStartedAtWallMs,
-              processStartedAtMonotonicMs,
-              publishedAtWallMs,
-              publishedAtMonotonicMs,
+              processStartedAt,
+              publishedAt,
               timelineOriginMs,
             );
             const retainedPublication = publicationAgeMs === null ? null : publication;
@@ -2070,6 +2136,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
                   ? { kind: "stale", provider: publication.provider, label: publication.label }
                   : selected,
               publication: retainedPublication,
+              wallFilter: null,
               publishedAtMonotonicMs,
               elapsedAtPublicationMs,
               elapsedThroughMs: 0,

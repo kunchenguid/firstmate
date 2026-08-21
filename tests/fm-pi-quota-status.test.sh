@@ -66,6 +66,10 @@ case "$mode" in
     printf '%s\n' '{not-json'
     exit 0
     ;;
+  invalid_utf8)
+    FM_QUOTA_TEST_INVALID_UTF8=1 FM_QUOTA_TEST_FULL=$full FM_QUOTA_TEST_PROVIDER=$provider \
+      exec node "${FM_QUOTA_TEST_FIXTURE:?}"
+    ;;
   overflow)
     node -e 'process.stdout.write("x".repeat(8192))'
     exit 0
@@ -554,7 +558,14 @@ if (process.env.FM_QUOTA_TEST_STALE_FAILURE) {
     };
   }
 }
-process.stdout.write(JSON.stringify({ generatedAt, schemaVersion: 5, providers }));
+const output = Buffer.from(JSON.stringify({ generatedAt, schemaVersion: 5, providers }));
+if (process.env.FM_QUOTA_TEST_INVALID_UTF8 === "1") {
+  const marker = Buffer.from('"Codex"');
+  const markerIndex = output.indexOf(marker);
+  if (markerIndex < 0) throw new Error("Codex label marker not found");
+  output[markerIndex + 1] = 0xff;
+}
+process.stdout.write(output);
 JS
 
 cleanup() {
@@ -2214,6 +2225,18 @@ assert(
     JSON.parse(structuredTimeoutResult.stdout).providers[0].state.error === "Codex quota request timed out",
   "nonzero quota-axi JSON did not retain its bounded stdout and exit status",
 );
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "invalid_utf8\n");
+const invalidUtf8 = runQuotaAxiJson({
+  timeoutMs: 1000,
+  maxOutputBytes: 1024 * 1024,
+  full: true,
+  provider: "codex",
+});
+const invalidUtf8Result = await invalidUtf8.promise;
+assert(
+  invalidUtf8Result.kind === "malformed",
+  `invalid UTF-8 quota output was accepted as ${invalidUtf8Result.kind}`,
+);
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 let windowsTimeoutResult;
@@ -3451,6 +3474,12 @@ assert(
   !forwardExpiry.widgetText(400).includes("week 94% left"),
   "forward clock jump exposed a reset quota window",
 );
+assert(
+  forwardExpiry.widgetText(400).includes("GPT-5.3-Codex-Spark session 100% left") &&
+    forwardExpiry.widgetText(400).includes("plan pro") &&
+    forwardExpiry.widgetText(400).includes("credits 0"),
+  "forward clock jump hid fresh sibling windows or quota metadata",
+);
 forwardExpiryClock.wallNowMs = forwardExpiryStart + 2 * 60_000;
 assert(
   forwardExpiry.widgetText(400).includes("week 94% left"),
@@ -3657,7 +3686,7 @@ const postStartupGeneration = makePi(createFirstmateQuotaStatusExtension({
       .trim()
       .split(/\n/)
       .filter(Boolean).length;
-    return calls > callsBeforePostStartupGeneration ? postStartupGenerationDelayMs : 0;
+    return calls > callsBeforePostStartupGeneration ? postStartupGenerationDelayMs + 3 : 0;
   },
 }));
 await postStartupGeneration.emit("session_start", { reason: "startup" });
