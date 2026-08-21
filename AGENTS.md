@@ -124,6 +124,8 @@ state/               volatile runtime signals; gitignored
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (section 13)
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
   slack-refused/     private Socket Mode refusal records keyed by message ts or envelope id when malformed; every non-captain event is recorded here without acknowledgement or wake
+  slack-decision-bindings/  private records binding a posted decision message ts to its decision key and option count; written only by bin/fm-slack-post.sh decision, read by the socket reaction path
+  slack-decision-resolved/  private per-decision-key captain answer records written once by the socket reaction path; a later removal or contradictory reaction is reported as a conflict, never a reversal
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated X-mode durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
@@ -463,6 +465,7 @@ Private evidence reports may retain exact identifiers, paths, status lines, vali
 
 Every escalation must stand alone and remain concise.
 Concise is also enforced mechanically before delivery: the `bin/fm-slack-post.sh` header owns the captain-message size caps and the `--long <reason>` escape.
+Post a captain decision to the Slack channel with `bin/fm-slack-post.sh decision <key> <text> [option...]` so the captain can answer with an emoji reaction; the header owns binding, option numbering, and refusal mechanics.
 Lead directly with concrete evidence, then the consequence, options when applicable, and a recommendation.
 Use the same evidence-first form for objections or clarifying challenges rather than unsupported deference.
 

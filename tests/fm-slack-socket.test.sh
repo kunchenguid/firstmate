@@ -197,6 +197,259 @@ test_malformed_event() {
   pass "malformed inbound event is recorded as refused"
 }
 
+# The fake curl answers chat.postMessage with this ts, so every decision posted
+# through fm-slack-post.sh in this suite binds to it.
+DECISION_TS=1786735224.700000
+
+# Slack reaction event frames, mirroring the recorded envelope field style in
+# the captain home's state/slack-refused/ fixtures (string channel/user/ts
+# fields, event_ts on the outer event) and Slack's documented reaction_added /
+# reaction_removed shape: type, user, reaction, item{type,channel,ts},
+# item_user (the reacted message's author), event_ts.
+reaction_event() {
+  local kind=$1 user=$2 reaction=$3 item_ts=$4 item_user=$5 event_ts=$6
+  printf '{"type":"%s","user":"%s","reaction":"%s","item":{"type":"message","channel":"%s","ts":"%s"},"item_user":"%s","event_ts":"%s"}' \
+    "$kind" "$user" "$reaction" "$CHANNEL_ID" "$item_ts" "$item_user" "$event_ts"
+}
+
+run_decision() {
+  local home=$1 fakebin=$2
+  shift 2
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SLACK_API_URL=https://slack.test/api FM_SLACK_CURL_BIN="$fakebin/curl" \
+    PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-slack-post.sh" decision "$@"
+}
+
+assert_reaction_refused() {
+  local case_name=$1 event=$2 expected_reason=$3
+  local home="$TMP_ROOT/$case_name" fakebin out refusal
+  make_home "$home"
+  fakebin=$(make_fake_curl "$home/fake")
+  out=$(run_event "$home" "$fakebin" "env-$case_name" "$event") \
+    || fail "$case_name event failed"
+  [ -z "$out" ] || fail "$case_name event emitted a wake: $out"
+  refusal="$home/state/slack-refused/$DECISION_TS.json"
+  [ -f "$refusal" ] || fail "$case_name refusal was not recorded"
+  [ "$(jq -r '.reason' "$refusal")" = "$expected_reason" ] \
+    || fail "$case_name refusal reason was wrong: $(jq -r '.reason' "$refusal")"
+}
+
+test_reaction_approve() {
+  local home="$TMP_ROOT/reaction-approve" fakebin log event out expected record
+  make_home "$home"
+  fakebin=$(make_fake_curl "$home/fake")
+  log="$home/curl.log"; : > "$log"
+  FM_SLACK_CURL_LOG="$log" run_decision "$home" "$fakebin" merge-pr-42 "Ship PR 42?" >/dev/null \
+    || fail "decision post failed"
+  event=$(reaction_event reaction_added "$CAPTAIN_USER" white_check_mark "$DECISION_TS" "$BOT_USER" 1786735300.000100)
+  out=$(FM_SLACK_CURL_LOG="$log" run_event "$home" "$fakebin" env-reaction-approve "$event") \
+    || fail "reaction_added event failed"
+  printf -v expected 'slack-captain-message %s\t%s' 1786735300.000100 'merge-pr-42: yes'
+  [ "$out" = "$expected" ] || fail "reaction answer wake differs from the typed path: $out"
+  record="$home/state/slack-decision-resolved/merge-pr-42.json"
+  [ -f "$record" ] || fail "reaction answer was not recorded"
+  [ "$(jq -r '.answer' "$record")" = yes ] || fail "recorded answer was wrong"
+  [ -f "$home/state/slack-inbox/1786735300.000100.json" ] || fail "reaction event was not stashed"
+  [ "$(grep -c '^method=reactions.add ' "$log")" -eq 1 ] \
+    || fail "reaction answer was not acknowledged once"
+  grep -F 'timestamp=1786735224.700000' "$log" | grep -F 'name=eyes' >/dev/null \
+    || fail "ack did not land on the decision message"
+  pass "captain check reaction resolves the bound decision as yes"
+}
+
+test_reaction_decline() {
+  local home="$TMP_ROOT/reaction-decline" fakebin event out expected record
+  make_home "$home"
+  fakebin=$(make_fake_curl "$home/fake")
+  run_decision "$home" "$fakebin" merge-pr-42 "Ship PR 42?" >/dev/null \
+    || fail "decision post failed"
+  event=$(reaction_event reaction_added "$CAPTAIN_USER" x "$DECISION_TS" "$BOT_USER" 1786735300.000100)
+  out=$(run_event "$home" "$fakebin" env-reaction-decline "$event") \
+    || fail "reaction_added event failed"
+  printf -v expected 'slack-captain-message %s\t%s' 1786735300.000100 'merge-pr-42: no'
+  [ "$out" = "$expected" ] || fail "decline wake differs from the typed path: $out"
+  record="$home/state/slack-decision-resolved/merge-pr-42.json"
+  [ "$(jq -r '.answer' "$record")" = no ] || fail "recorded decline was wrong"
+  pass "captain x reaction resolves the bound decision as no"
+}
+
+test_reaction_option() {
+  local home="$TMP_ROOT/reaction-option" fakebin event out expected record
+  make_home "$home"
+  fakebin=$(make_fake_curl "$home/fake")
+  run_decision "$home" "$fakebin" pick-harness "Pick a harness" claude codex pi >/dev/null \
+    || fail "decision post failed"
+  event=$(reaction_event reaction_added "$CAPTAIN_USER" two "$DECISION_TS" "$BOT_USER" 1786735300.000100)
+  out=$(run_event "$home" "$fakebin" env-reaction-option "$event") \
+    || fail "reaction_added event failed"
+  printf -v expected 'slack-captain-message %s\t%s' 1786735300.000100 'pick-harness: 2'
+  [ "$out" = "$expected" ] || fail "option wake differs from the typed path: $out"
+  record="$home/state/slack-decision-resolved/pick-harness.json"
+  [ "$(jq -r '.answer' "$record")" = 2 ] || fail "recorded option was wrong"
+  pass "captain number reaction selects the matching numbered option"
+}
+
+test_reaction_option_out_of_range() {
+  local home="$TMP_ROOT/reaction-option-out-of-range" fakebin event out refusal
+  make_home "$home"
+  fakebin=$(make_fake_curl "$home/fake")
+  run_decision "$home" "$fakebin" pick-harness "Pick a harness" claude codex >/dev/null \
+    || fail "decision post failed"
+  event=$(reaction_event reaction_added "$CAPTAIN_USER" three "$DECISION_TS" "$BOT_USER" 1786735300.000100)
+  out=$(run_event "$home" "$fakebin" env-reaction-option-out-of-range "$event") \
+    || fail "reaction_added event failed"
+  [ -z "$out" ] || fail "out-of-range option emitted a wake: $out"
+  refusal="$home/state/slack-refused/$DECISION_TS.json"
+  [ "$(jq -r '.reason' "$refusal")" = option-out-of-range ] \
+    || fail "out-of-range refusal reason was wrong"
+  [ ! -e "$home/state/slack-decision-resolved/pick-harness.json" ] \
+    || fail "out-of-range option resolved the decision"
+  pass "a number reaction beyond the posted options is refused, never guessed"
+}
+
+test_reaction_unbound() {
+  local event
+  event=$(reaction_event reaction_added "$CAPTAIN_USER" white_check_mark "$DECISION_TS" "$BOT_USER" 1786735300.000100)
+  assert_reaction_refused reaction-unbound "$event" unbound-message
+  pass "a reaction on a message with no recorded binding is refused, never guessed"
+}
+
+test_reaction_unmapped() {
+  local home="$TMP_ROOT/reaction-unmapped" fakebin event out refusal
+  make_home "$home"
+  fakebin=$(make_fake_curl "$home/fake")
+  run_decision "$home" "$fakebin" merge-pr-42 "Ship PR 42?" >/dev/null \
+    || fail "decision post failed"
+  event=$(reaction_event reaction_added "$CAPTAIN_USER" thumbsup "$DECISION_TS" "$BOT_USER" 1786735300.000100)
+  out=$(run_event "$home" "$fakebin" env-reaction-unmapped "$event") \
+    || fail "reaction_added event failed"
+  [ -z "$out" ] || fail "unmapped reaction emitted a wake: $out"
+  refusal="$home/state/slack-refused/$DECISION_TS.json"
+  [ "$(jq -r '.reason' "$refusal")" = unmapped-reaction ] \
+    || fail "unmapped refusal reason was wrong"
+  [ ! -e "$home/state/slack-decision-resolved/merge-pr-42.json" ] \
+    || fail "unmapped reaction resolved the decision"
+  pass "an unmapped reaction leaves the decision unanswered and firstmate waiting"
+}
+
+test_reaction_non_captain() {
+  local event
+  event=$(reaction_event reaction_added U0SOMEONE2 white_check_mark "$DECISION_TS" "$BOT_USER" 1786735300.000100)
+  assert_reaction_refused reaction-non-captain "$event" non-captain-user
+  pass "a reaction from a non-captain is refused and recorded"
+}
+
+test_reaction_bot_self() {
+  local event
+  event=$(reaction_event reaction_added "$BOT_USER" eyes "$DECISION_TS" "$BOT_USER" 1786735300.000100)
+  assert_reaction_refused reaction-bot-self "$event" non-captain-user
+  pass "firstmate's own ack reaction keeps refusing"
+}
+
+test_reaction_non_firstmate_message() {
+  local event
+  event=$(reaction_event reaction_added "$CAPTAIN_USER" white_check_mark "$DECISION_TS" U0SOMEONE2 1786735300.000100)
+  assert_reaction_refused reaction-non-firstmate "$event" non-firstmate-message
+  pass "a captain reaction on someone else's message is refused and recorded"
+}
+
+test_reaction_removed_after_answer() {
+  local home="$TMP_ROOT/reaction-removed-after-answer" fakebin event out expected record
+  make_home "$home"
+  fakebin=$(make_fake_curl "$home/fake")
+  run_decision "$home" "$fakebin" merge-pr-42 "Ship PR 42?" >/dev/null \
+    || fail "decision post failed"
+  event=$(reaction_event reaction_added "$CAPTAIN_USER" white_check_mark "$DECISION_TS" "$BOT_USER" 1786735300.000100)
+  run_event "$home" "$fakebin" env-reaction-add "$event" >/dev/null \
+    || fail "reaction_added event failed"
+  event=$(reaction_event reaction_removed "$CAPTAIN_USER" white_check_mark "$DECISION_TS" "$BOT_USER" 1786735310.000200)
+  out=$(run_event "$home" "$fakebin" env-reaction-remove "$event") \
+    || fail "reaction_removed event failed"
+  printf -v expected 'slack-captain-reaction %s\t%s' 1786735310.000200 \
+    'conflict: merge-pr-42 was answered yes by white_check_mark; removal does not reopen it'
+  [ "$out" = "$expected" ] || fail "removal conflict was not reported: $out"
+  record="$home/state/slack-decision-resolved/merge-pr-42.json"
+  [ "$(jq -r '.answer' "$record")" = yes ] || fail "removal reversed the recorded answer"
+  pass "removing a reaction after the answer is reported, never a reversal"
+}
+
+test_reaction_removed_unresolved() {
+  local home="$TMP_ROOT/reaction-removed-unresolved" fakebin event out
+  make_home "$home"
+  fakebin=$(make_fake_curl "$home/fake")
+  run_decision "$home" "$fakebin" merge-pr-42 "Ship PR 42?" >/dev/null \
+    || fail "decision post failed"
+  event=$(reaction_event reaction_removed "$CAPTAIN_USER" white_check_mark "$DECISION_TS" "$BOT_USER" 1786735310.000200)
+  out=$(run_event "$home" "$fakebin" env-reaction-remove-unresolved "$event") \
+    || fail "reaction_removed event failed"
+  [ -z "$out" ] || fail "removal before any answer emitted a wake: $out"
+  [ ! -e "$home/state/slack-decision-resolved/merge-pr-42.json" ] \
+    || fail "removal recorded an answer"
+  pass "removing a reaction before any answer stays silent"
+}
+
+test_reaction_conflict_second_answer() {
+  local home="$TMP_ROOT/reaction-conflict-second" fakebin event out expected record
+  make_home "$home"
+  fakebin=$(make_fake_curl "$home/fake")
+  run_decision "$home" "$fakebin" merge-pr-42 "Ship PR 42?" >/dev/null \
+    || fail "decision post failed"
+  event=$(reaction_event reaction_added "$CAPTAIN_USER" white_check_mark "$DECISION_TS" "$BOT_USER" 1786735300.000100)
+  run_event "$home" "$fakebin" env-reaction-add "$event" >/dev/null \
+    || fail "reaction_added event failed"
+  event=$(reaction_event reaction_added "$CAPTAIN_USER" x "$DECISION_TS" "$BOT_USER" 1786735305.000150)
+  out=$(run_event "$home" "$fakebin" env-reaction-second "$event") \
+    || fail "second reaction_added event failed"
+  printf -v expected 'slack-captain-reaction %s\t%s' 1786735305.000150 \
+    'conflict: merge-pr-42 was already answered yes; ignored x'
+  [ "$out" = "$expected" ] || fail "contradictory answer was not reported: $out"
+  record="$home/state/slack-decision-resolved/merge-pr-42.json"
+  [ "$(jq -r '.answer' "$record")" = yes ] || fail "contradictory reaction overwrote the first answer"
+  pass "a contradictory second reaction is reported and the first answer stands"
+}
+
+test_reaction_duplicate_silent() {
+  local home="$TMP_ROOT/reaction-duplicate" fakebin event out
+  make_home "$home"
+  fakebin=$(make_fake_curl "$home/fake")
+  run_decision "$home" "$fakebin" merge-pr-42 "Ship PR 42?" >/dev/null \
+    || fail "decision post failed"
+  event=$(reaction_event reaction_added "$CAPTAIN_USER" white_check_mark "$DECISION_TS" "$BOT_USER" 1786735300.000100)
+  run_event "$home" "$fakebin" env-reaction-add "$event" >/dev/null \
+    || fail "reaction_added event failed"
+  out=$(run_event "$home" "$fakebin" env-reaction-dup "$event") \
+    || fail "duplicate reaction_added event failed"
+  [ -z "$out" ] || fail "a duplicate of the answering reaction emitted a wake: $out"
+  [ "$(jq -r '.answer' "$home/state/slack-decision-resolved/merge-pr-42.json")" = yes ] \
+    || fail "duplicate reaction changed the recorded answer"
+  pass "a repeated delivery of the answering reaction stays silent"
+}
+
+test_bridge_reaction() {
+  local home="$TMP_ROOT/bridge-reaction" fakebin payload
+  make_home "$home"
+  fakebin=$(make_fake_curl "$home/fake")
+  run_decision "$home" "$fakebin" merge-pr-42 "Ship PR 42?" >/dev/null \
+    || fail "decision post failed"
+  cat > "$fakebin/node" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"envelope_id":"env-bridge-reaction","event":{"type":"reaction_added","user":"U0CAPTAIN1","reaction":"white_check_mark","item":{"type":"message","channel":"C0BQ9K1TJKG","ts":"1786735224.700000"},"item_user":"U0BR5SQ4WN4","event_ts":"1786735300.000100"}}'
+SH
+  chmod +x "$fakebin/node"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SLACK_API_URL=https://slack.test/api FM_SLACK_CURL_BIN="$fakebin/curl" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-slack-socket.sh" \
+    || fail "socket bridge failed on a reaction event"
+  payload=$(awk -F '\t' '$3 == "check" && $4 == "slack-socket:1786735300.000100" { print $5 }' \
+    "$home/state/.wake-queue")
+  case "$payload" in
+    *'slack-captain-message 1786735300.000100 merge-pr-42: yes') ;;
+    *) fail "socket bridge did not publish the reaction answer wake: $payload" ;;
+  esac
+  pass "supervised bridge keys a reaction answer wake by its event ts"
+}
+
 test_supervision() {
   local home="$TMP_ROOT/supervision"
   make_home "$home"
@@ -247,6 +500,20 @@ case "${FM_SLACK_SOCKET_TEST_CASE:-all}" in
   bot-user) test_bot_user ;;
   subtype) test_subtype ;;
   malformed) test_malformed_event ;;
+  reaction-approve) test_reaction_approve ;;
+  reaction-decline) test_reaction_decline ;;
+  reaction-option) test_reaction_option ;;
+  reaction-option-out-of-range) test_reaction_option_out_of_range ;;
+  reaction-unbound) test_reaction_unbound ;;
+  reaction-unmapped) test_reaction_unmapped ;;
+  reaction-non-captain) test_reaction_non_captain ;;
+  reaction-bot-self) test_reaction_bot_self ;;
+  reaction-non-firstmate-message) test_reaction_non_firstmate_message ;;
+  reaction-removed-after-answer) test_reaction_removed_after_answer ;;
+  reaction-removed-unresolved) test_reaction_removed_unresolved ;;
+  reaction-conflict-second-answer) test_reaction_conflict_second_answer ;;
+  reaction-duplicate-silent) test_reaction_duplicate_silent ;;
+  bridge-reaction) test_bridge_reaction ;;
   supervision) test_supervision ;;
   bootstrap) test_bootstrap ;;
   all)
@@ -263,6 +530,20 @@ case "${FM_SLACK_SOCKET_TEST_CASE:-all}" in
     test_bot_user
     test_subtype
     test_malformed_event
+    test_reaction_approve
+    test_reaction_decline
+    test_reaction_option
+    test_reaction_option_out_of_range
+    test_reaction_unbound
+    test_reaction_unmapped
+    test_reaction_non_captain
+    test_reaction_bot_self
+    test_reaction_non_firstmate_message
+    test_reaction_removed_after_answer
+    test_reaction_removed_unresolved
+    test_reaction_conflict_second_answer
+    test_reaction_duplicate_silent
+    test_bridge_reaction
     test_supervision
     test_bootstrap
     ;;

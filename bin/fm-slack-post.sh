@@ -7,8 +7,21 @@
 # Usage:
 #   fm-slack-post.sh [--long <reason>] message <text> [thread_ts]
 #   fm-slack-post.sh [--long <reason>] update <message_ts> <text>
+#   fm-slack-post.sh [--long <reason>] decision <key> <text> [option...]
 #   fm-slack-post.sh board <text>   # chat.update when state/slack-board.ts exists,
 #                                   # otherwise chat.postMessage and record ts
+#
+# decision posts a captain decision and records a private binding under
+# state/slack-decision-bindings/ from the posted message timestamp to the
+# decision key, so a later captain emoji reaction on that message resolves the
+# key through the socket reaction path (bin/fm-slack-socket-event.sh). With
+# options, each is numbered with its keycap emoji (1..9, more is refused) so a
+# one/two/three reaction unambiguously selects it; the option count is recorded
+# in the binding so an out-of-range number reaction is refused, never guessed.
+# The decision key is slug-shaped ([A-Za-z0-9._-], not dot-leading, <= 120
+# chars) and validated before posting. A post that succeeds but cannot record
+# its binding dies loudly naming the ts, because reactions on that message
+# would be refused as unbound.
 #
 # Captain message size guard (this header is the contract owner):
 # The captain-facing message and update paths cap size before delivery at 12
@@ -113,6 +126,32 @@ captain_comms_guard_or_die() {
   fms_captain_comms_guard "$1" "$LONG_REASON" || exit 1
 }
 
+# Number each option with its keycap emoji (digit + U+FE0F + U+20E3). The emoji
+# bytes are emitted as octal escapes so the script stays ASCII-only and works
+# under LC_ALL=C and stock Bash 3.2, where $'\uXXXX' is unsupported.
+number_options() {
+  local n=0 opt
+  for opt in "$@"; do
+    n=$((n + 1))
+    printf '%d\357\270\217\342\203\243 %s\n' "$n" "$opt"
+  done
+}
+
+post_decision() {
+  local key=$1 text=$2 ts
+  shift 2
+  fms_decision_key_valid "$key" || die "invalid decision key"
+  [ "$#" -le 9 ] || die "too many options (max 9)"
+  if [ "$#" -gt 0 ]; then
+    text=$(printf '%s\n' "$text"; number_options "$@")
+  fi
+  captain_comms_guard_or_die "$text"
+  ts=$(post_message "$text")
+  fms_decision_binding_publish "$STATE" "$ts" "$key" "$#" \
+    || die "decision posted at $ts but its binding was not recorded; reactions on it will be refused"
+  printf '%s\n' "$ts"
+}
+
 cmd=${1-}
 shift || true
 case "$cmd" in
@@ -120,6 +159,10 @@ case "$cmd" in
     [ "$#" -ge 1 ] || die "usage: fm-slack-post.sh [--long <reason>] message <text> [thread_ts]"
     captain_comms_guard_or_die "$1"
     post_message "$@"
+    ;;
+  decision)
+    [ "$#" -ge 2 ] || die "usage: fm-slack-post.sh [--long <reason>] decision <key> <text> [option...]"
+    post_decision "$@"
     ;;
   update)
     [ "$#" -eq 2 ] || die "usage: fm-slack-post.sh [--long <reason>] update <message_ts> <text>"
@@ -140,6 +183,6 @@ case "$cmd" in
     fi
     ;;
   *)
-    die "usage: fm-slack-post.sh [--long <reason>] message|update ... | board <text>"
+    die "usage: fm-slack-post.sh [--long <reason>] message|update|decision ... | board <text>"
     ;;
 esac

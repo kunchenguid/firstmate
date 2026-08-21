@@ -845,3 +845,72 @@ if fms_poll_shim_valid "$shim" "$home" "$ROOT" 2>/dev/null; then
   fail "tampered slack-watch.check.sh shim must not validate"
 fi
 pass "slack-watch.check.sh shim rejects tampering"
+
+# --- decision posts ------------------------------------------------------------
+# A decision post must bind the returned message ts to its decision key so a
+# later captain emoji reaction can resolve that key, and must number posted
+# options with the keycap emoji so a number reaction is unambiguous.
+
+home="$TMP_ROOT/decision-plain"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-decision-plain")
+unset FM_SLACK_CURL_LOG FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+log="$home/curl.log"; : > "$log"
+ts=$(FM_SLACK_CURL_LOG="$log" run_post "$home" "$fakebin" decision merge-pr-42 "Ship PR 42?") \
+  || fail "decision post failed"
+[ "$ts" = "1786735224.690829" ] || fail "decision post must return the posted ts: $ts"
+binding="$home/state/slack-decision-bindings/1786735224.690829.json"
+[ -f "$binding" ] || fail "decision post must record its binding"
+[ "$(jq -r '.key' "$binding")" = merge-pr-42 ] || fail "binding recorded the wrong key"
+[ "$(jq -r '.options' "$binding")" = 0 ] || fail "plain decision must record zero options"
+grep -F 'text=Ship%20PR%2042%3F' "$log" >/dev/null \
+  || fail "plain decision must post the text unchanged"
+pass "fm-slack-post decision binds the posted ts to the decision key"
+
+home="$TMP_ROOT/decision-options"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-decision-options")
+unset FM_SLACK_CURL_LOG FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+log="$home/curl.log"; : > "$log"
+ts=$(FM_SLACK_CURL_LOG="$log" run_post "$home" "$fakebin" \
+  decision pick-harness "Pick a harness" claude codex pi) \
+  || fail "option decision post failed"
+binding="$home/state/slack-decision-bindings/1786735224.690829.json"
+[ "$(jq -r '.options' "$binding")" = 3 ] || fail "option decision must record the option count"
+# The posted text must number each option with the keycap emoji: the combining
+# enclosing keycap U+20E3 appears exactly once per option in the encoded text
+# (counted on the fake-curl data line, since the client logs the payload twice).
+[ "$(grep '^data=' "$log" | grep -o '%E2%83%A3' | wc -l | tr -d '[:space:]')" = 3 ] \
+  || fail "option decision must number options with keycap emoji"
+grep -F 'claude' "$log" >/dev/null || fail "option decision must post the option texts"
+grep -F 'codex' "$log" >/dev/null || fail "option decision must post the option texts"
+pass "fm-slack-post decision numbers posted options with keycap emoji"
+
+home="$TMP_ROOT/decision-bad-key"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-decision-bad-key")
+unset FM_SLACK_CURL_LOG FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+log="$home/curl.log"; : > "$log"
+if FM_SLACK_CURL_LOG="$log" run_post "$home" "$fakebin" decision 'bad key' "Ship?" >/dev/null 2>&1; then
+  fail "decision post must refuse an invalid key"
+fi
+! grep -F 'chat.postMessage' "$log" >/dev/null \
+  || fail "invalid key must refuse before posting"
+pass "fm-slack-post decision refuses an invalid key before posting"
+
+home="$TMP_ROOT/decision-too-many"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-decision-too-many")
+unset FM_SLACK_CURL_LOG FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+log="$home/curl.log"; : > "$log"
+if FM_SLACK_CURL_LOG="$log" run_post "$home" "$fakebin" \
+  decision pick-ten "Pick one" o1 o2 o3 o4 o5 o6 o7 o8 o9 o10 >/dev/null 2>&1; then
+  fail "decision post must refuse more than nine options"
+fi
+! grep -F 'chat.postMessage' "$log" >/dev/null \
+  || fail "too many options must refuse before posting"
+pass "fm-slack-post decision refuses more than nine options before posting"

@@ -22,7 +22,7 @@ FM_SLACK_APP_TOKEN="$FMS_APP_TOKEN" node "$SCRIPT_DIR/fm-slack-socket.mjs" | whi
   wake=$(printf '%s\n' "$event" \
     | FM_SLACK_APP_TOKEN="$FMS_APP_TOKEN" "$SCRIPT_DIR/fm-slack-socket-event.sh" "$envelope_id") || exit 2
   [ -n "$wake" ] || continue
-  ts=$(printf '%s\n' "$event" | jq -r '.ts // empty' 2>/dev/null) || exit 2
+  ts=$(printf '%s\n' "$event" | jq -r '.ts // .event_ts // empty' 2>/dev/null) || exit 2
   fm_wake_append check "slack-socket:$ts" "check: $SCRIPT_DIR/fm-slack-socket.sh: $wake" || exit 2
 done
 pipeline_status=("${PIPESTATUS[@]}")

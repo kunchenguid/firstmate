@@ -407,6 +407,90 @@ fms_refusal_publish() {
     | fmx_private_artifact_publish_stdin "$dir" "${key}.json" 600 >/dev/null 2>&1
 }
 
+# Decision keys name the question a posted decision message carries, so a later
+# captain emoji reaction can be bound to it. Slug-shaped and bounded so the key
+# is safe as a private artifact basename and as wake-line text.
+fms_decision_key_valid() {
+  case "$1" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 120 ]
+}
+
+# The captain's INBOUND answer vocabulary for reactions on bound decision
+# messages: check approves, x declines, and the number emojis select the
+# matching numbered option. Distinct from FMS_REACTION_MAP, which is
+# firstmate's OUTBOUND state vocabulary - there white_check_mark means done,
+# here it is the captain's yes. Anything outside this map is not an answer.
+fms_reaction_answer_map() {
+  case "$1" in
+    white_check_mark) printf 'yes\n' ;;
+    x) printf 'no\n' ;;
+    one) printf '1\n' ;;
+    two) printf '2\n' ;;
+    three) printf '3\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Record which decision key a posted decision message timestamp carries, with
+# the number of options the message offered (0 for a plain approve/decline).
+# Written by bin/fm-slack-post.sh decision after a successful post; read by the
+# socket reaction path, which never answers from an unbound message.
+fms_decision_binding_publish() {
+  local state=$1 ts=$2 key=$3 options=$4 dir
+  fms_message_ts_valid "$ts" || return 1
+  fms_decision_key_valid "$key" || return 1
+  case "$options" in ''|*[!0-9]*) return 1 ;; esac
+  dir="$state/slack-decision-bindings"
+  jq -n --arg key "$key" --argjson options "$options" \
+    '{key:$key,options:$options}' \
+    | fmx_private_artifact_publish_stdin "$dir" "${ts}.json" 600 >/dev/null 2>&1
+}
+
+# Print the bound decision key and option count for a message timestamp as
+# "<key><TAB><options>", or fail when no valid binding was recorded.
+fms_decision_binding_read() {
+  local state=$1 ts=$2 dir file key options
+  fms_message_ts_valid "$ts" || return 1
+  dir="$state/slack-decision-bindings"
+  fmx_private_artifact_file_valid "$dir" "${ts}.json" 600 2>/dev/null || return 1
+  file="$dir/${ts}.json"
+  key=$(jq -r '.key // empty' "$file" 2>/dev/null) || return 1
+  options=$(jq -r '.options // empty' "$file" 2>/dev/null) || return 1
+  fms_decision_key_valid "$key" || return 1
+  case "$options" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\t%s\n' "$key" "$options"
+}
+
+# Record the captain's resolved answer for a decision key exactly once: 0 when
+# the answer was recorded, 1 when the key was already answered (the first
+# answer stands and the caller reports the conflict), 2 on error. A removed or
+# contradictory reaction must never overwrite the first answer silently.
+fms_decision_answer_record() {
+  local state=$1 key=$2 answer=$3 reaction=$4 message_ts=$5 event_ts=$6 dir
+  fms_decision_key_valid "$key" || return 2
+  fms_message_ts_valid "$message_ts" || return 2
+  fms_message_ts_valid "$event_ts" || return 2
+  case "$answer" in ''|*$'\t'*|*$'\n'*) return 2 ;; esac
+  case "$reaction" in ''|*$'\t'*|*$'\n'*) return 2 ;; esac
+  dir="$state/slack-decision-resolved"
+  jq -n --arg key "$key" --arg answer "$answer" --arg reaction "$reaction" \
+    --arg message_ts "$message_ts" --arg event_ts "$event_ts" \
+    '{key:$key,answer:$answer,reaction:$reaction,message_ts:$message_ts,event_ts:$event_ts}' \
+    | fmx_private_artifact_publish_stdin_once "$dir" "${key}.json" 600 >/dev/null 2>&1
+}
+
+# The wake line for a reaction REPORT (a removal or contradiction conflict), a
+# distinct line type from the slack-captain-message answer a typed reply and a
+# resolving reaction both produce.
+fms_reaction_report_line() {
+  local ts=$1 text=$2
+  fms_message_ts_valid "$ts" || return 1
+  [ -n "$text" ] || return 1
+  printf 'slack-captain-reaction %s\t%s\n' "$ts" "$text"
+}
+
 fms_poll_cursor_read() {
   local state=$1 cursor
   cursor="$state/slack-poll.cursor/slack-poll.cursor"
