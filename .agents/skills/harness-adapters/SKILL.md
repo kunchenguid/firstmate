@@ -327,7 +327,7 @@ The current tmux and Herdr adapters pass their captures and capability descripto
 See `docs/herdr-backend.md` "Composer and injection safety" for Herdr's current boundary and `tests/fm-backend-herdr.test.sh` for regression coverage.
 
 Startup dialog: the "Run Grok Build in a project directory?" project picker appears ONLY when grok is launched from a non-project directory (home, Desktop, Downloads, `/tmp`).
-`fm-spawn` launches inside the treehouse worktree (a git repo root), so the picker never appears and grok treats the worktree as a trusted project automatically - no post-launch keystroke is needed.
+`fm-spawn` launches inside the isolated task worktree (a Git repo root), so the picker never appears and grok treats the worktree as a trusted project automatically - no post-launch keystroke is needed.
 Pin `[hints] project_picker_disabled = true` in `~/.grok/config.toml` if a non-project launch ever needs to skip it.
 
 **TRUECOLOR placeholder styling: covered (task afk-herdr-false-pending, 2026-07-10).**
@@ -350,7 +350,7 @@ Its `Stop` command fires only when the current workspace holds a `.fm-grok-turne
 `fm-spawn` writes that per-task pointer (`<worktree>/.fm-grok-turnend`, gitignored via git info/exclude like the other harnesses' worktree hook files) and a matching registry entry naming this task's `state/<id>.turn-ended`.
 The hook reads `$GROK_WORKSPACE_ROOT`, which is always set for hooks and equals the worktree.
 This keeps the hook outside the worktree, needs no trust grant, and writes only firstmate-owned files.
-`fm-teardown` removes the worktree pointer before returning a pooled worktree.
+`fm-teardown` removes the worktree pointer before cleaning up the task worktree.
 Secondmate spawns skip the pointer (idle panes are healthy, no stale-pane detection for them).
 
 **Primary-session guard fact (verified 2026-07-28, Grok 0.2.112 and 0.2.73).**
@@ -419,7 +419,7 @@ Herdr additionally draws the composer's rules with half-block glyphs, which the 
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
-Firstmate acquires and enters the treehouse worktree before launching Cursor, then passes that same absolute path through `--workspace`.
+Firstmate acquires and enters the isolated task worktree before launching Cursor, then passes that same absolute path through `--workspace`.
 NEVER pass Cursor's own `-w/--worktree`: it allocates a SECOND worktree under `~/.cursor/worktrees` and would break firstmate's worktree-isolation contract.
 The raw CLI accepts repeatable `--add-dir <path>` for deliberate multi-root workspaces; the adapter adds none, and the brief rides inline as the positional prompt, so the private brief directory needs no grant.
 

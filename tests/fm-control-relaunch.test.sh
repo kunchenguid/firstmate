@@ -775,14 +775,21 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   local dir out
   dir=$(new_case spawnharness rl21)
   add_ship_task "$dir" rl21 claude
-  mkdir -p "$dir/home/config"
+  printf 'worktree_provider=project-command\n' >> "$dir/home/state/rl21.meta"
+  mkdir -p "$dir/home/config/worktree-acquire"
   printf 'codex\n' > "$dir/home/config/crew-harness"
+  printf '%s\n' 'echo acquisition-must-not-run <slug> && false' \
+    > "$dir/home/config/worktree-acquire/proj"
   printf 'zsh' > "$dir/fake/command"
   out=$(run_spawn "$dir" rl21 --relaunch)
   [ "$(meta_field "$dir" rl21 harness)" = claude ] \
     || fail "fm-spawn --relaunch without --harness must reuse the recorded harness, got '$(meta_field "$dir" rl21 harness)'"
+  [ "$(meta_field "$dir" rl21 worktree_provider)" = project-command ] \
+    || fail "fm-spawn --relaunch dropped the recorded project-command cleanup identity"
   assert_contains "$out" "spawned rl21 harness=claude" "the launch should report the recorded harness"
-  pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
+  assert_no_grep 'acquisition-must-not-run' "$dir/fake/keys" \
+    "fm-spawn --relaunch reran the project's fresh worktree acquisition command"
+  pass "fm-spawn --relaunch: it reuses the recorded worktree and harness without rerunning fresh acquisition"
 }
 
 # fm-spawn arms per-task wiring on harness PREFIXES, because a task launched

@@ -579,6 +579,38 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
 }
 
+test_project_command_worktree_uses_guarded_native_git_cleanup() {
+  local case_dir rc
+  case_dir=$(make_case project-command-cleanup)
+  write_meta "$case_dir" local-only ship
+  printf 'worktree_provider=project-command\n' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected treehouse return\n' >> "$FM_FAKE_TREEHOUSE_LOG"
+exit 99
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  : > "$case_dir/treehouse.log"
+
+  set +e
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "project-command cleanup should succeed through native Git"
+  assert_absent "$case_dir/wt" \
+    "project-command teardown left the registered worktree directory behind"
+  git -C "$case_dir/project" worktree list --porcelain \
+    | grep -F "worktree $case_dir/wt" >/dev/null \
+    && fail "project-command teardown left the worktree registered"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "project-command teardown incorrectly called Treehouse"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "project-command teardown left task metadata after successful cleanup"
+  pass "project-command worktrees keep the standard safety checks and use guarded native Git cleanup"
+}
+
 test_teardown_prompts_tasks_axi_done_when_compatible() {
   local case_dir out
   case_dir=$(make_case tasks-axi-reminder)
@@ -1781,6 +1813,89 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   pass "forced secondmate teardown retains Herdr child identity until exact pane disappearance"
 }
 
+test_forced_secondmate_project_command_child_uses_native_git_cleanup() {
+  local case_dir home rc child_b_wt
+  case_dir=$(make_case project-command-child)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  printf 'worktree_provider=project-command\n' >> "$home/state/child-b.meta"
+  # git reports registrations physically, so the expected path must be too.
+  child_b_wt=$(cd "$case_dir/child-b-wt" && pwd -P)
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "project-command-child: forced secondmate teardown should complete"
+  assert_absent "$case_dir/child-b-wt" \
+    "project-command-child: the project-command child worktree was not removed"
+  git -C "$case_dir/project" worktree list --porcelain \
+    | grep -F "worktree $child_b_wt" >/dev/null \
+    && fail "project-command-child: cleanup left a stale git worktree registration"
+  assert_no_grep "$case_dir/child-b-wt" "$case_dir/treehouse.log" \
+    "project-command-child: the project-command child was handed to Treehouse"
+  assert_grep "$case_dir/child-a-wt" "$case_dir/treehouse.log" \
+    "project-command-child: the Treehouse child stopped going through treehouse return"
+  assert_absent "$home" \
+    "project-command-child: forced teardown left the retired secondmate home"
+  pass "forced secondmate cleanup removes a project-command child through registered native Git, never Treehouse"
+}
+
+# Children are enumerated in name order, so an unknown provider recorded on the
+# SECOND child is only a genuine pre-cleanup refusal if the FIRST child's pane,
+# worktree, and records all survive it. The provider schema check therefore
+# belongs in the non-destructive preflight, alongside every other child refusal.
+test_forced_secondmate_unknown_child_provider_refuses_before_changes() {
+  local case_dir home rc child
+  case_dir=$(make_case unknown-child-provider)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  printf 'worktree_provider=some-future-provider\n' >> "$home/state/child-b.meta"
+  : > "$case_dir/kill.log"
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/kill.log"
+exit 0
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "unknown-child-provider: forced teardown accepted an unknown child worktree provider"
+  [ ! -s "$case_dir/kill.log" ] \
+    || fail "unknown-child-provider: refusal killed an endpoint before the schema check"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "unknown-child-provider: refusal returned a worktree before the schema check"
+  for child in child-a child-b; do
+    [ -e "$home/state/$child.meta" ] \
+      || fail "unknown-child-provider: refusal erased $child's durable record"
+    [ -d "$case_dir/$child-wt" ] \
+      || fail "unknown-child-provider: refusal removed $child's worktree"
+  done
+  [ -d "$home" ] || fail "unknown-child-provider: refusal removed the secondmate home"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "unknown-child-provider: refusal erased the parent record"
+  assert_grep "unsupported worktree provider 'some-future-provider'" "$case_dir/stderr" \
+    "unknown-child-provider: refusal did not name the unsupported provider"
+  assert_grep "forced teardown changed nothing" "$case_dir/stderr" \
+    "unknown-child-provider: refusal did not explain its non-mutating boundary"
+  pass "an unknown child worktree provider refuses in preflight, before any child is torn down"
+}
+
 configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" nested_home="$1/secondmate-home/nested-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -2592,6 +2707,7 @@ EOF
 }
 
 test_local_only_fork_remote_allows
+test_project_command_worktree_uses_guarded_native_git_cleanup
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
@@ -2607,6 +2723,8 @@ test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
+test_forced_secondmate_project_command_child_uses_native_git_cleanup
+test_forced_secondmate_unknown_child_provider_refuses_before_changes
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed

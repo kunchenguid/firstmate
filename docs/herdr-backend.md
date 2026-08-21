@@ -3,7 +3,8 @@
 Herdr is an experimental agent-native terminal backend with native per-pane agent state and push events.
 Firstmate requires Herdr protocol 14 or newer; broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0, while protocol-16 features remain gated by availability.
 Default-on presentation spaces have a higher floor of Herdr 0.8.0 for the reason given under [Presentation spaces](#presentation-spaces).
-Herdr provides the terminal session while Treehouse continues to provide task worktrees.
+Herdr provides the terminal session while Treehouse provides task worktrees by default.
+A trusted project-local acquisition command may prepare the worktree instead; [`configuration.md`](configuration.md#project-worktree-acquisition) owns that shared override.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
 ## Setup
@@ -230,6 +231,11 @@ The poll density bounds the residual possibility of an extremely fast complete t
 `pane read --lines N` can return empty output when N is below the viewport height.
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
 This generous floor is required for small composer and peek reads.
+
+`pane get` reports `foreground_cwd` for the live foreground process, which is what Treehouse worktree discovery reads, while `cwd` stays frozen at pane creation.
+A project-local acquisition command instead runs its `cd` in the pane's own top-level shell and then exits, leaving no foreground process to read.
+Worktree discovery for that provider therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines, exactly as the Zellij and cmux backends already do.
+This active probe is scoped to spawn-time worktree discovery and is not advertised as a general live-cwd API.
 
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
 The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.

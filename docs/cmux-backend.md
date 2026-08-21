@@ -1,7 +1,8 @@
 # cmux runtime backend
 
 cmux is an experimental macOS GUI terminal backend.
-It provides task workspaces and surfaces while Treehouse continues to provide git worktrees.
+It provides task workspaces and surfaces while Treehouse provides Git worktrees by default.
+A trusted project-local acquisition command may prepare the worktree instead; [`configuration.md`](configuration.md#project-worktree-acquisition) owns that shared override.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared selection and metadata semantics.
 
 ## Setup
@@ -87,8 +88,8 @@ A genuinely fresh surface returns an internal error from `read-screen` until som
 Target readiness therefore uses the structural `list-panes` response instead of a content read.
 Capture remains bounded and locally trimmed after `read-screen` becomes available.
 
-`current_directory` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
-Spawn-time worktree discovery sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
+`current_directory` follows a top-level shell `cd` but not a foreground acquisition subshell such as the one opened by `treehouse get`.
+Spawn-time worktree discovery sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines for either acquisition provider.
 
 Literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.

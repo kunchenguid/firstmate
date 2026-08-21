@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
-# secondmate in its isolated firstmate home.
+# Spawn a direct report: a crewmate in a Treehouse, project-prepared, or Orca
+# worktree, or a secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
@@ -48,8 +48,9 @@
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
-#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
-#   session provider only, exactly like herdr/zellij, so it does. An
+#   terminal, so ship/scout Orca spawns do not run the acquisition path;
+#   tmux, herdr, zellij, and cmux use treehouse get unless the project has a
+#   local config/worktree-acquire/<project-name> command (details below). An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
@@ -89,6 +90,7 @@
 #   immediately after its owning parent (firstmate or 2ndmate-<id>) contiguous
 #   child block. Ordering never authorizes lifecycle cleanup, and any
 #   unavailable, ambiguous, or failed move warns while the spawn continues.
+#   Worktree acquisition and task metadata otherwise follow the shared path.
 #   Every projected create, prune, and move captures and verifies the named
 #   session's exact active workspace and tab. A detected focus change restores
 #   only that exact tab id; an ambiguous pre-operation snapshot refuses the
@@ -134,8 +136,35 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   A local config/worktree-acquire/<project-name> file may replace treehouse get
+#   for fresh ship/scout acquisition on tmux, herdr, zellij, and cmux.
+#   <project-name> is the primary project directory's basename.
+#   The file contains exactly one non-empty shell command line and must contain
+#   the literal <slug> placeholder at least once.
+#   The command runs in the project-root shell as trusted local configuration;
+#   every <slug> is replaced with a single-quoted form of the already-validated
+#   task id, so task input is never interpolated as shell syntax.
+#   A successful command must leave that shell in the prepared worktree; for a
+#   creator that does not enter it, use a command shaped like
+#   `path/to/create <slug> && cd path/to/worktrees/<slug>`.
+#   The command's completion status is recorded privately so an immediate
+#   refusal (including an already-existing target) is reported without waiting
+#   for the cwd timeout; any existing or partly-created worktree is preserved.
+#   No working-directory read is issued until that status is published, so a
+#   backend whose read is an active pane probe never types into the operator's
+#   still-running command.
+#   The usual two-identical-cwd-read isolation proof, 60 one-second polls, base
+#   refresh, and failure preservation remain unchanged.
+#   The setting is deliberately ignored by --relaunch, --secondmate, and Orca:
+#   relaunch adopts the recorded worktree, a secondmate launch adopts its seeded
+#   home, and Orca owns acquisition itself.
+#   Successful custom acquisition records worktree_provider=project-command so
+#   fm-teardown can apply the same landed/dirty checks before guarded native Git
+#   worktree removal; absent means the existing Treehouse cleanup path.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
-#   origin, resolves the current remote default branch, and resets to its tip.
+#   origin, resolves the current remote default branch, and resets its current
+#   attached branch (or detached HEAD) to that tip without checking out another
+#   branch or detaching it.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
@@ -665,6 +694,11 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
+SPAWN_WORKTREE_ACQUIRE_STATUS=
+SPAWN_WORKTREE_ACQUIRE_STATUS_TMP=
+WORKTREE_PROVIDER=
+WORKTREE_ACQUIRE_COMMAND=
+WORKTREE_ACQUIRE_CONFIG=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -779,6 +813,10 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  [ -z "$SPAWN_WORKTREE_ACQUIRE_STATUS" ] \
+    || rm -f -- "$SPAWN_WORKTREE_ACQUIRE_STATUS" 2>/dev/null || true
+  [ -z "$SPAWN_WORKTREE_ACQUIRE_STATUS_TMP" ] \
+    || rm -f -- "$SPAWN_WORKTREE_ACQUIRE_STATUS_TMP" 2>/dev/null || true
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -1013,6 +1051,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
+  WORKTREE_PROVIDER=$(fm_meta_get "$RELAUNCH_META" worktree_provider)
+  case "$WORKTREE_PROVIDER" in
+    ''|project-command) ;;
+    *)
+      echo "error: task $ID records unsupported worktree provider '$WORKTREE_PROVIDER'; refusing to relaunch without a known cleanup contract" >&2
+      exit 1
+      ;;
+  esac
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
     exit 1
@@ -1683,7 +1729,7 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
 # Every backend's own current-path read (tmux's pane_current_path, herdr's
-# foreground_cwd, zellij/cmux's active pwd probe against the live shell) can
+# foreground_cwd or marker probe, zellij/cmux's active pwd probe) can
 # report the OS-level, physically-resolved cwd, so comparing it against a
 # still-symlinked PROJ_ABS can misfire both ways: false-negative (the poll
 # below never notices the pane left the project) or false-positive (the
@@ -1699,6 +1745,52 @@ real_path_or_raw() {  # <path>
   else
     printf '%s\n' "$path"
   fi
+}
+
+resolve_worktree_acquire_command() {
+  local project_name line extra quoted_slug
+  project_name=$(basename "$PROJ_ABS")
+  WORKTREE_ACQUIRE_CONFIG="$CONFIG/worktree-acquire/$project_name"
+  if [ ! -e "$WORKTREE_ACQUIRE_CONFIG" ] && [ ! -L "$WORKTREE_ACQUIRE_CONFIG" ]; then
+    WORKTREE_ACQUIRE_CONFIG=
+    WORKTREE_PROVIDER=
+    return 0
+  fi
+  if [ ! -f "$WORKTREE_ACQUIRE_CONFIG" ]; then
+    echo "error: project worktree acquisition config is not a regular file: $WORKTREE_ACQUIRE_CONFIG" >&2
+    return 1
+  fi
+  line=
+  extra=
+  exec 7< "$WORKTREE_ACQUIRE_CONFIG" || {
+    echo "error: project worktree acquisition config cannot be read: $WORKTREE_ACQUIRE_CONFIG" >&2
+    return 1
+  }
+  if ! IFS= read -r line <&7 && [ -z "$line" ]; then
+    exec 7<&-
+    echo "error: project worktree acquisition config must contain exactly one non-empty command line: $WORKTREE_ACQUIRE_CONFIG" >&2
+    return 1
+  fi
+  if IFS= read -r extra <&7 || [ -n "$extra" ]; then
+    exec 7<&-
+    echo "error: project worktree acquisition config must contain exactly one non-empty command line: $WORKTREE_ACQUIRE_CONFIG" >&2
+    return 1
+  fi
+  exec 7<&-
+  [ -n "$line" ] || {
+    echo "error: project worktree acquisition config must contain exactly one non-empty command line: $WORKTREE_ACQUIRE_CONFIG" >&2
+    return 1
+  }
+  case "$line" in
+    *'<slug>'*) ;;
+    *)
+      echo "error: project worktree acquisition config must contain the literal <slug> placeholder: $WORKTREE_ACQUIRE_CONFIG" >&2
+      return 1
+      ;;
+  esac
+  quoted_slug=$(shell_quote "$ID")
+  WORKTREE_ACQUIRE_COMMAND=${line//"<slug>"/$quoted_slug}
+  WORKTREE_PROVIDER='project-command'
 }
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
@@ -1727,8 +1819,12 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# reset --hard moves the current branch ref when HEAD is attached and moves only
+# detached HEAD otherwise; it never checks out the default branch or changes the
+# attached-vs-detached identity acquired for this task.
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 default target expected actual status branch_before branch_after
+  branch_before=$(git -C "$worktree" symbolic-ref --quiet HEAD 2>/dev/null || true)
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -1762,12 +1858,21 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
+  branch_after=$(git -C "$worktree" symbolic-ref --quiet HEAD 2>/dev/null || true)
+  if [ "$branch_after" != "$branch_before" ]; then
+    echo "error: refreshing pooled worktree '$worktree' changed its branch identity from '${branch_before:-detached HEAD}' to '${branch_after:-detached HEAD}'; refusing to launch" >&2
+    return 1
+  fi
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
   fi
 }
+
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  resolve_worktree_acquire_command || exit 1
+fi
 
 herdr_projection_meta_field_exact() {  # <meta> <key>
   local meta=$1 key=$2 count
@@ -2112,7 +2217,7 @@ spawn_send_text_line() {  # <target> <text>
 spawn_current_path() {  # <target>
   case "$BACKEND" in
     tmux) fm_backend_tmux_current_path "$1" ;;
-    herdr) fm_backend_herdr_current_path "$1" ;;
+    herdr) fm_backend_herdr_current_path "$1" "$WORKTREE_PROVIDER" ;;
     zellij) fm_backend_zellij_current_path "$1" "$W" ;;
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
@@ -2212,9 +2317,19 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  if [ "$WORKTREE_PROVIDER" = project-command ]; then
+    SPAWN_WORKTREE_ACQUIRE_STATUS="$STATE/.worktree-acquire-$ID.${BASHPID:-$$}.status"
+    SPAWN_WORKTREE_ACQUIRE_STATUS_TMP="$SPAWN_WORKTREE_ACQUIRE_STATUS.partial"
+    rm -f -- "$SPAWN_WORKTREE_ACQUIRE_STATUS" "$SPAWN_WORKTREE_ACQUIRE_STATUS_TMP"
+    acquire_status_quoted=$(shell_quote "$SPAWN_WORKTREE_ACQUIRE_STATUS")
+    acquire_status_tmp_quoted=$(shell_quote "$SPAWN_WORKTREE_ACQUIRE_STATUS_TMP")
+    acquire_line="__fm_worktree_acquire() { $WORKTREE_ACQUIRE_COMMAND; }; if __fm_worktree_acquire; then __fm_worktree_acquire_rc=0; else __fm_worktree_acquire_rc=\$?; fi; unset -f __fm_worktree_acquire; printf '%s\\n' \"\$__fm_worktree_acquire_rc\" > $acquire_status_tmp_quoted && mv -f -- $acquire_status_tmp_quoted $acquire_status_quoted; unset __fm_worktree_acquire_rc"
+    spawn_send_text_line "$WT_TARGET" "$acquire_line"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the acquisition command: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -2226,7 +2341,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A single read that already differs from PROJ_ABS_REAL is not proof the pane
   # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
   # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
+  # checkout entirely) before the shell catches up with the acquisition command. That
   # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
   # below (it resolves to a real, distinct worktree top-level too), so accepting it
   # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
@@ -2234,8 +2349,42 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # a mismatch just becomes the new candidate rather than resetting the wait, so a
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  #
+  # A project command's cwd read waits for the atomically published completion
+  # status first, and the poll issues NO read at all before that. The read is
+  # passive only on tmux: herdr's project-command read, zellij's and cmux's
+  # reads are ACTIVE probes that type a `pwd` line into the pane. The operator's
+  # acquisition command owns that pane's foreground while it runs and may read
+  # its own stdin, so probing it would inject text into trusted local code for a
+  # value this loop discards until the command reports completion anyway.
   candidate=""
+  acquire_complete=0
   for _ in $(seq 1 60); do
+    if [ "$WORKTREE_PROVIDER" = project-command ] && [ "$acquire_complete" -ne 1 ]; then
+      if [ -f "$SPAWN_WORKTREE_ACQUIRE_STATUS" ]; then
+        acquire_rc=
+        IFS= read -r acquire_rc < "$SPAWN_WORKTREE_ACQUIRE_STATUS" || {
+          echo "error: could not read completion status for project worktree acquisition; existing work is preserved. Inspect window $T" >&2
+          exit 1
+        }
+        case "$acquire_rc" in
+          0) acquire_complete=1 ;;
+          ''|*[!0-9]*)
+            echo "error: project worktree acquisition returned an invalid completion status; existing work is preserved. Inspect window $T" >&2
+            exit 1
+            ;;
+          *)
+            echo "error: project worktree acquisition for '$PROJ_ABS' exited with status $acquire_rc before entering an isolated worktree; any existing or partly-created target is preserved. Inspect window $T, land or deliberately remove that target, then retry" >&2
+            exit 1
+            ;;
+        esac
+      fi
+      if [ "$acquire_complete" -ne 1 ]; then
+        candidate=""
+        sleep 1
+        continue
+      fi
+    fi
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
@@ -2254,11 +2403,22 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    if [ "$WORKTREE_PROVIDER" = project-command ]; then
+      echo "error: project worktree acquisition did not finish and enter a worktree within 60s; any existing or partly-created target is preserved. Inspect window $T" >&2
+    else
+      echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    fi
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  if [ "$WORKTREE_PROVIDER" = project-command ]; then
+    validate_spawn_worktree "project worktree acquisition" "$T"
+    rm -f -- "$SPAWN_WORKTREE_ACQUIRE_STATUS" "$SPAWN_WORKTREE_ACQUIRE_STATUS_TMP"
+    SPAWN_WORKTREE_ACQUIRE_STATUS=
+    SPAWN_WORKTREE_ACQUIRE_STATUS_TMP=
+  else
+    validate_spawn_worktree "treehouse get" "$T"
+  fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
@@ -2632,7 +2792,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project worktree_provider harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2643,6 +2803,7 @@ preserve_relaunch_meta() {
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
+  [ -z "$WORKTREE_PROVIDER" ] || echo "worktree_provider=$WORKTREE_PROVIDER"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
