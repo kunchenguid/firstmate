@@ -127,9 +127,9 @@ function exactEnum<T extends string>(value: unknown, allowed: readonly T[]): T |
   return value as T;
 }
 
-function exactText(value: unknown, maximum = 200): string | null {
-  if (typeof value !== "string" || value.length === 0 || value.length > maximum) return null;
-  return cleanText(value, maximum) === value ? value : null;
+function exactText(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return cleanText(value, value.length) === value ? value : null;
 }
 
 const QUOTA_WINDOW_KINDS = ["session", "weekly", "monthly", "model", "credits", "unknown"] as const;
@@ -477,6 +477,126 @@ function parseWindow(
   if (value.resetText !== undefined && resetText === null) return null;
 
   return { id, label, kind, percentRemaining, resetsAtMs, resetText };
+}
+
+function readableWindowDuration(windowSeconds: number): string {
+  const hours = windowSeconds / 3600;
+  return `${Number.isInteger(hours) ? hours : Number(hours.toFixed(2))}h`;
+}
+
+function matchesCodexWindowIdentity(
+  window: Record<string, unknown>,
+  actualId: string,
+  expectedId: string,
+  label: string,
+  kind: QuotaWindowKind,
+): boolean {
+  return actualId === expectedId && window.label === label && window.kind === kind;
+}
+
+function matchesCodexModelWindowIdentity(
+  window: Record<string, unknown>,
+  id: string,
+  suffix: string,
+  labelSuffix: string,
+): boolean {
+  return id.startsWith("model:") &&
+    id.endsWith(`:${suffix}`) &&
+    id.length > `model::${suffix}`.length &&
+    typeof window.label === "string" &&
+    window.label.endsWith(` ${labelSuffix}`) &&
+    window.label.length > labelSuffix.length + 1 &&
+    window.kind === "model";
+}
+
+function codexWindowBaseIdentity(window: Record<string, unknown>): string | null {
+  const rawId = exactText(window.id);
+  if (rawId === null) return null;
+  const id = rawId.replace(/_[2-9]\d*$/, "");
+  const windowSeconds = window.windowSeconds === undefined
+    ? null
+    : finiteNumber(window.windowSeconds);
+  if (window.windowSeconds !== undefined && (windowSeconds === null || windowSeconds <= 0)) return null;
+
+  if (windowSeconds === null) {
+    if (matchesCodexWindowIdentity(window, id, "five_hour", "session", "session")) return id;
+    if (matchesCodexWindowIdentity(window, id, "weekly", "week", "weekly")) return id;
+    if (
+      matchesCodexWindowIdentity(
+        window,
+        id,
+        "code_review_five_hour",
+        "code review session",
+        "session",
+      ) ||
+      matchesCodexWindowIdentity(
+        window,
+        id,
+        "code_review_weekly",
+        "code review week",
+        "weekly",
+      ) ||
+      matchesCodexModelWindowIdentity(window, id, "5h", "session") ||
+      matchesCodexModelWindowIdentity(window, id, "7d", "week")
+    ) return id;
+    return null;
+  }
+
+  if (windowSeconds === 18_000) {
+    if (
+      matchesCodexWindowIdentity(window, id, "five_hour", "session", "session") ||
+      matchesCodexWindowIdentity(
+        window,
+        id,
+        "code_review_five_hour",
+        "code review session",
+        "session",
+      ) ||
+      matchesCodexModelWindowIdentity(window, id, "5h", "session")
+    ) return id;
+    return null;
+  }
+
+  if (windowSeconds === 604_800) {
+    if (
+      matchesCodexWindowIdentity(window, id, "weekly", "week", "weekly") ||
+      matchesCodexWindowIdentity(
+        window,
+        id,
+        "code_review_weekly",
+        "code review week",
+        "weekly",
+      ) ||
+      matchesCodexModelWindowIdentity(window, id, "7d", "week")
+    ) return id;
+    return null;
+  }
+
+  const duration = readableWindowDuration(windowSeconds);
+  if (
+    matchesCodexWindowIdentity(window, id, `window:${duration}`, `${duration} window`, "unknown") ||
+    matchesCodexWindowIdentity(
+      window,
+      id,
+      `code_review_window:${duration}`,
+      `${duration} window`,
+      "unknown",
+    ) ||
+    matchesCodexModelWindowIdentity(window, id, `window:${duration}`, `${duration} window`)
+  ) return id;
+  return null;
+}
+
+function validCodexWindowIdentities(windows: Record<string, unknown>[]): boolean {
+  const counts = new Map<string, number>();
+  for (const window of windows) {
+    const baseId = codexWindowBaseIdentity(window);
+    if (baseId === null) return false;
+    const count = (counts.get(baseId) ?? 0) + 1;
+    counts.set(baseId, count);
+    if (window.id !== (count === 1 ? baseId : `${baseId}_${count}`)) return false;
+  }
+  return true;
 }
 
 function parseCredits(value: unknown): QuotaCreditsView | null | undefined {
@@ -1468,7 +1588,10 @@ function validProviderFields(
   if (parsedWindows.some((window) => window === null)) return false;
   if (new Set(parsedWindows.map((window) => window?.id)).size !== parsedWindows.length) return false;
   const rawWindows = value.windows.filter(isRecord);
-  if (rawWindows.length !== value.windows.length) return false;
+  if (
+    rawWindows.length !== value.windows.length ||
+    (value.provider === "codex" && !validCodexWindowIdentities(rawWindows))
+  ) return false;
   if ((schemaVersion === 5 || projection === "full") && value.quotaSemantics === undefined) return false;
   const untrustedWindowIds = isRecord(value.state) && Array.isArray(value.state.untrustedWindowIds)
     ? value.state.untrustedWindowIds as string[]

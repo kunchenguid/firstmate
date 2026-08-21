@@ -455,6 +455,7 @@ type ActiveSession = {
   refreshPending: boolean;
   refreshTimer: unknown | null;
   expiryTimer: unknown | null;
+  expiryTimerView: FreshQuotaView | null;
   modelRefreshTimer: unknown | null;
   recoveryTimer: unknown | null;
   revisionTimer: unknown | null;
@@ -1426,7 +1427,11 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       return view?.kind === "stale" ? view.recoverable ?? null : null;
     }
 
-    function cachedQuotaView(session: ActiveSession, nowMs: number): QuotaView | null {
+    function cachedQuotaView(
+      session: ActiveSession,
+      nowMs: number,
+      commitThroughMs?: number,
+    ): QuotaView | null {
       if (changedLiveModelView(session) || session.target.kind !== "supported" || !session.quota) {
         return null;
       }
@@ -1437,17 +1442,22 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         session.quota.compositionRevision !== session.target.compositionRevision ||
         session.quota.endpointRevision !== session.target.endpointRevision
       ) return null;
-      const cached = session.quota.view;
-      const recoverable = recoverableFreshView(cached);
+      let cached = session.quota.view;
+      let recoverable = recoverableFreshView(cached);
       if (!recoverable) return cached;
-      const revalidated = revalidateFreshQuotaView(recoverable, nowMs);
-      if (
-        revalidated.kind === "fresh" ||
-        nowMs >= recoverable.reportFreshUntilMs
-      ) {
-        session.quota.view = revalidated;
+      if (commitThroughMs !== undefined) {
+        const committed = revalidateFreshQuotaView(recoverable, commitThroughMs);
+        if (
+          committed.kind === "fresh" ||
+          commitThroughMs >= recoverable.reportFreshUntilMs
+        ) {
+          session.quota.view = committed;
+          cached = committed;
+          recoverable = recoverableFreshView(committed);
+          if (!recoverable) return committed;
+        }
       }
-      return revalidated;
+      return revalidateFreshQuotaView(recoverable, nowMs);
     }
 
     function currentView(session: ActiveSession, nowMs = now()): QuotaView {
@@ -1485,6 +1495,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     function clearExpiry(session: ActiveSession): void {
       if (session.expiryTimer !== null) timers.clearTimeout(session.expiryTimer);
       session.expiryTimer = null;
+      session.expiryTimerView = null;
     }
 
     function failCredentialMonitoring(session: ActiveSession): void {
@@ -1658,38 +1669,68 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       unrefTimer(timer);
     }
 
-    function render(session: ActiveSession, override?: QuotaView): void {
+    function sameExpiryPublication(
+      left: FreshQuotaView | null,
+      right: FreshQuotaView | null,
+    ): boolean {
+      return left !== null && right !== null &&
+        left.windows === right.windows &&
+        left.freshnessTimestampMs === right.freshnessTimestampMs &&
+        left.reportFreshUntilMs === right.reportFreshUntilMs;
+    }
+
+    function render(
+      session: ActiveSession,
+      override?: QuotaView,
+      scheduleFromMs?: number,
+    ): void {
       if (active !== session) return;
       if (session.recoveryTimer !== null) timers.clearTimeout(session.recoveryTimer);
       session.recoveryTimer = null;
       const view = override ?? currentView(session);
-      clearExpiry(session);
       const renderScheduledAtMs = now();
+      const schedulingBaseMs = scheduleFromMs ?? renderScheduledAtMs;
       const cachedFreshView = recoverableFreshView(session.quota?.view ?? null);
       const recoverableSkewView = cachedFreshView &&
           renderScheduledAtMs < cachedFreshView.freshnessTimestampMs - 60_000
         ? cachedFreshView
         : null;
-      const nextRevalidationMs = view.kind === "fresh"
+      const schedulingView = cachedFreshView
+        ? revalidateFreshQuotaView(cachedFreshView, schedulingBaseMs)
+        : view;
+      const schedulingSkewView = cachedFreshView &&
+          schedulingBaseMs < cachedFreshView.freshnessTimestampMs - 60_000
+        ? cachedFreshView
+        : null;
+      const nextRevalidationMs = schedulingView.kind === "fresh"
         ? Math.min(
-            view.freshUntilMs,
-            nextQuotaStatusTransitionMs(view, renderScheduledAtMs),
+            schedulingView.freshUntilMs,
+            nextQuotaStatusTransitionMs(schedulingView, schedulingBaseMs),
           )
-        : recoverableSkewView
-          ? recoverableSkewView.freshnessTimestampMs - 60_000
+        : schedulingSkewView
+          ? schedulingSkewView.freshnessTimestampMs - 60_000
           : null;
-      if (nextRevalidationMs !== null) {
+      if (!sameExpiryPublication(session.expiryTimerView, cachedFreshView)) {
+        clearExpiry(session);
+      }
+      if (nextRevalidationMs !== null && session.expiryTimer === null) {
+        const delayMs = Math.min(
+          MAX_TIMER_DELAY_MS,
+          Math.max(0, nextRevalidationMs - schedulingBaseMs),
+        );
+        const timerBoundaryMs = schedulingBaseMs + delayMs;
         let timer: unknown;
         timer = timers.setTimeout(() => {
           if (active !== session || session.expiryTimer !== timer) return;
           session.expiryTimer = null;
-          cachedQuotaView(session, now());
-          render(session);
-        }, Math.min(
-          MAX_TIMER_DELAY_MS,
-          Math.max(0, nextRevalidationMs - renderScheduledAtMs),
-        ));
+          session.expiryTimerView = null;
+          const timerNowMs = now();
+          const commitThroughMs = Math.min(timerNowMs, timerBoundaryMs);
+          cachedQuotaView(session, timerNowMs, commitThroughMs);
+          render(session, undefined, commitThroughMs);
+        }, delayMs);
         session.expiryTimer = timer;
+        session.expiryTimerView = cachedFreshView;
         unrefTimer(timer);
       }
       session.ctx.ui.setWidget(WIDGET_KEY, (_tui, theme) => ({
@@ -1743,7 +1784,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       const recoverable = recoverableFreshView(session.quota?.view ?? null);
       session.lastFailure = issue;
       if (cached?.kind === "fresh" && session.quota) {
-        session.quota.view = { ...cached, refreshFailure: issue };
+        session.quota.view = { ...(recoverable ?? cached), refreshFailure: issue };
         render(session);
       } else if (recoverable) {
         render(session);
@@ -1995,6 +2036,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         refreshPending: false,
         refreshTimer: null,
         expiryTimer: null,
+        expiryTimerView: null,
         modelRefreshTimer: null,
         recoveryTimer: null,
         revisionTimer: null,
