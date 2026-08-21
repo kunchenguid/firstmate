@@ -538,16 +538,25 @@ hold_delivery() {  # <delivery-id> <reason>
 }
 
 refuse_delivery() {  # <delivery-id> <reason>
-  local id=$1 reason=$2 outbox refused_dir
+  local id=$1 reason=$2 outbox refused_dir clean_reason
   outbox="$(fm_linear_outbox_dir "$STATE")/$id.json"
   refused_dir=$(fm_linear_refused_dir "$STATE")
+  clean_reason=$(printf '%s' "$reason" | fm_linear_clean_line | fm_linear_bound_bytes 300)
   if [ -f "$outbox" ] && [ ! -L "$outbox" ]; then
-    fmx_private_artifact_publish_stdin "$refused_dir" "$id.json" 600 < "$outbox" || true
-    rm -f -- "$outbox"
+    if fmx_private_artifact_publish_stdin "$refused_dir" "$id.json" 600 < "$outbox" \
+      && fmx_private_artifact_file_valid "$refused_dir" "$id.json" 600 \
+      && printf '%s\n' "$clean_reason" | fmx_private_artifact_publish_stdin "$refused_dir" "$id.reason" 600 \
+      && fmx_private_artifact_file_valid "$refused_dir" "$id.reason" 600; then
+      rm -f -- "$outbox" "$(fm_linear_attempts_dir "$STATE")/$id"
+      return 0
+    fi
+    rm -f -- "$refused_dir/$id.json" "$refused_dir/$id.reason"
+    hold_delivery "$id" "$reason"
+    return 1
   fi
-  printf '%s\n' "$(printf '%s' "$reason" | fm_linear_clean_line | fm_linear_bound_bytes 300)" \
-    | fmx_private_artifact_publish_stdin "$refused_dir" "$id.reason" 600 || true
+  printf '%s\n' "$clean_reason" | fmx_private_artifact_publish_stdin "$refused_dir" "$id.reason" 600 || true
   rm -f -- "$(fm_linear_attempts_dir "$STATE")/$id"
+  return 0
 }
 
 # GraphQL variable sigils, not shell expansions.
@@ -710,14 +719,20 @@ deliver_one_locked() {  # <delivery-id>
   # The record must still hash to its own filename, and the issue must still be
   # bound to the task. A tampered or orphaned record never reaches Linear.
   if [ "$(fm_linear_delivery_id "$task" "$issue" "$status" "$comment")" != "$id" ]; then
-    refuse_delivery "$id" 'the delivery record does not match its own derived identity'
-    printf 'fm-linear-sync: delivery %s failed its identity check and was quarantined\n' "$id" >&2
-    return 1
+    if refuse_delivery "$id" 'the delivery record does not match its own derived identity'; then
+      printf 'fm-linear-sync: delivery %s failed its identity check and was quarantined\n' "$id" >&2
+      return 1
+    fi
+    printf 'fm-linear-sync: delivery %s failed its identity check but could not be quarantined; it is preserved and still owed\n' "$id" >&2
+    return 3
   fi
   if [ "$marker" != "$(fm_linear_marker "$id")" ]; then
-    refuse_delivery "$id" 'the delivery record carries a marker that is not its own'
-    printf 'fm-linear-sync: delivery %s carries a forged marker and was quarantined\n' "$id" >&2
-    return 1
+    if refuse_delivery "$id" 'the delivery record carries a marker that is not its own'; then
+      printf 'fm-linear-sync: delivery %s carries a forged marker and was quarantined\n' "$id" >&2
+      return 1
+    fi
+    printf 'fm-linear-sync: delivery %s carries a forged marker but could not be quarantined; it is preserved and still owed\n' "$id" >&2
+    return 3
   fi
   if ! fm_linear_binding_issues "$STATE" "$task" | grep -Fxq -- "$issue"; then
     hold_delivery "$id" "issue $issue is no longer bound to task $task"
@@ -738,9 +753,12 @@ deliver_one_locked() {  # <delivery-id>
   case "$rc" in
     0) ;;
     1)
-      refuse_delivery "$id" "issue $issue is not reachable on this Linear workspace"
-      printf 'fm-linear-sync: Linear does not have issue %s; delivery %s is held for a decision\n' "$issue" "$id" >&2
-      return 1
+      if refuse_delivery "$id" "issue $issue is not reachable on this Linear workspace"; then
+        printf 'fm-linear-sync: Linear does not have issue %s; delivery %s is held for a decision\n' "$issue" "$id" >&2
+        return 1
+      fi
+      printf 'fm-linear-sync: Linear does not have issue %s and delivery %s could not be quarantined; it is preserved and still owed\n' "$issue" "$id" >&2
+      return 3
       ;;
     *)
       hold_delivery "$id" 'the issue read-back did not complete'
@@ -809,10 +827,14 @@ deliver_one_locked() {  # <delivery-id>
         '[.data.team.states.nodes[]? | select(.name == $n) | .id] | first // ""' \
         < "$response" 2>/dev/null)
       if [ -z "$state_id" ]; then
-        refuse_delivery "$id" "the team has no workflow state named '$status'"
-        printf 'fm-linear-sync: %s has no workflow state named "%s"; delivery %s is held for a decision\n' \
+        if refuse_delivery "$id" "the team has no workflow state named '$status'"; then
+          printf 'fm-linear-sync: %s has no workflow state named "%s"; delivery %s is held for a decision\n' \
+            "$issue" "$status" "$id" >&2
+          return 1
+        fi
+        printf 'fm-linear-sync: %s has no workflow state named "%s" and delivery %s could not be quarantined; it is preserved and still owed\n' \
           "$issue" "$status" "$id" >&2
-        return 1
+        return 3
       fi
       build_request "$request" "$LINEAR_STATUS_MUTATION" \
         "$(jq -n --arg id "$ISSUE_UUID" --arg stateId "$state_id" '{id:$id, stateId:$stateId}')" || return 3

@@ -573,6 +573,42 @@ test_an_unknown_issue_is_quarantined_and_still_blocks() {
   pass "an issue Linear does not have is quarantined, keeps blocking, and clears only on an explicit discard"
 }
 
+test_a_refusal_that_cannot_be_quarantined_holds_instead() {
+  local home rc out refused_dir id
+  home=$(make_home refusal-cannot-quarantine)
+  write_credential "$home"
+  run_sync "$home" bind ship-11 ENG-406 >/dev/null || fail "bind failed"
+  queue_comment "$home" ship-11 'nowhere to put this' >/dev/null || fail "queue failed"
+  id=$(one_id "$home/state/linear/outbox" .json) || fail "queue left no outbox record"
+
+  refused_dir="$home/state/linear/refused"
+  ( umask 077; mkdir -p "$refused_dir" ) || fail "cannot pre-create the refused dir"
+  chmod 500 "$refused_dir"
+
+  rc=0
+  run_sync "$home" deliver --all >/dev/null 2> "$home/r.err" || rc=$?
+  chmod 700 "$refused_dir"
+  [ "$rc" -eq 3 ] || fail "a refusal that cannot be quarantined must hold instead (rc=$rc)"
+  assert_grep "preserved and still owed" "$home/r.err" \
+    "the fallback must say the handback is still owed, not discarded"
+
+  assert_present "$home/state/linear/outbox/$id.json" \
+    "the outbox record must survive when the quarantine write fails"
+  assert_absent "$refused_dir/$id.json" \
+    "no partial quarantine record should be left behind when the copy could not be confirmed"
+
+  out=$(run_sync "$home" pending ship-11)
+  assert_contains "$out" "queued  task=ship-11" \
+    "pending must still show the handback as owed, not refused"
+
+  rc=$(expect_failure "an unquarantinable refusal still blocks completion" \
+    env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$SYNC" guard-work ship-11)
+  [ "$rc" -eq 1 ] || fail "guard-work must still refuse while the handback is preserved"
+
+  pass "a refusal that cannot be quarantined preserves the outbox record and holds instead of discarding it"
+}
+
 # --- 5. the completion gate --------------------------------------------------
 
 test_cleanup_refuses_while_a_linear_handback_is_owed() {
@@ -886,6 +922,7 @@ test_disconnected_linear_preserves_the_handback
 test_transport_failure_holds_then_lands_once
 test_a_partial_delivery_completes_its_status_without_reposting
 test_an_unknown_issue_is_quarantined_and_still_blocks
+test_a_refusal_that_cannot_be_quarantined_holds_instead
 test_cleanup_refuses_while_a_linear_handback_is_owed
 test_cleanup_of_an_unbound_task_is_unaffected
 test_startup_surfaces_owed_handbacks_only_when_owed
