@@ -18,8 +18,10 @@
 #       [--status <status>] [--ref <backlog-ref>] [--reason <text>]
 #       --reason is REQUIRED when --status is needs-attention (same rule and
 #       same server-side guard as the `status` subcommand below), and is
-#       REFUSED for every other starting status - use the `status`
-#       subcommand, which owns every other status's reason.
+#       REFUSED for every other starting status. Only `waiting` and
+#       `needs-attention` store a reason on the card at all; for `waiting`
+#       the `status` subcommand owns it, and for the rest a reason is not
+#       stored anywhere `show` will render it.
 #   fm-dashboard.sh list [--status <status>] [--captain <c>] [--starred] \
 #       [--sort updated|date|status|title] [--json]
 #   fm-dashboard.sh show <id> [--json]
@@ -221,11 +223,19 @@ cmd_add() {
   if [ "$status" = needs_attention ] && [ -z "$reason" ]; then
     die "add: --status needs-attention requires --reason - say what he needs to decide, approve, or supply"
   fi
-  # needs_attention is the only status whose reason `add` can write; every
-  # other one is owned by the `status` subcommand. Refuse rather than send a
-  # value the server will drop on the floor.
+  # needs_attention is the only status whose reason `add` can write. Refuse
+  # rather than send a value the server will drop on the floor - and only
+  # point at the `status` subcommand for a status that actually persists a
+  # reason there, since for the rest that command drops it just as quietly.
   if [ "$status" != needs_attention ] && [ -n "$reason" ]; then
-    die "add: --reason is only accepted with --status needs-attention (got status '$status'); use 'fm-dashboard.sh status <id> $status --reason ...' instead"
+    local why
+    case "$status" in
+      needs_attention|waiting)
+        why="use 'fm-dashboard.sh status <id> $status --reason ...' instead" ;;
+      *)
+        why="a reason is not stored for '$status' - drop --reason or use --status needs-attention" ;;
+    esac
+    die "add: --reason is only accepted with --status needs-attention (got status '$status'); $why"
   fi
   local body
   body=$(jq -n --arg t "$title" --arg c "$captain" --arg p "$prompt" --arg a "$agent" \

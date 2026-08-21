@@ -132,6 +132,12 @@ Retiring either check on the assumption the other one covers it would reopen the
 
 Existing `needs-attention` cards set before this guard existed are not migrated or rewritten - the guard governs what can be set from now on, not what already sits on the board.
 
+One further gap, recorded rather than fixed here: **a status-change reason is only ever persisted and shown for `waiting` and `needs-attention`.**
+Those are the two statuses with a reason column (`waiting_reason`, `needs_attention_reason`).
+Passing `--reason` to `bin/fm-dashboard.sh status <id> working|paused|testing|complete` exits 0 and records the text only as a status-history note, which neither the `status` subcommand nor `show` ever surfaces - so it is written somewhere nobody reads.
+That is pre-existing behaviour this task deliberately did not change; it is named here so it is a known gap rather than a surprise.
+What this task did do is stop `add` from adding a second way into the same hole: `add --reason` is refused outright for any status but `needs-attention`, and the refusal only points at the `status` subcommand when the status given is one that genuinely stores a reason there.
+
 ## Link policy (standing order 17)
 
 `bin/fm-dashboard.sh link` and the underlying `POST /api/tasks/{id}/notes` endpoint reject, structurally, any link whose host contains `github`, any link that is not a full `http(s)://` URL, and any link whose host is local-only and will not resolve from the Admiral's phone (`bin/fleet-dashboard/server/validation.py`).

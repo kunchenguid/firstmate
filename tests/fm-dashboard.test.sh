@@ -189,6 +189,20 @@ test_add_refuses_a_reason_for_a_status_that_cannot_carry_one() {
   assert_contains "$out" "only accepted with --status needs-attention" \
     "add's refusal did not explain that --reason belongs to needs-attention"
   assert_contains "$out" "waiting" "add's refusal did not name the status that was given"
+  # `waiting` genuinely persists a reason through the status subcommand, so it
+  # is the one status the refusal may redirect to.
+  assert_contains "$out" "status <id> waiting --reason" \
+    "add's refusal did not point at the subcommand that owns the waiting reason"
+
+  # `working` does not store a reason anywhere `show` renders, so the refusal
+  # must not send the caller to a command that would drop it just as quietly.
+  out=$("$DASH" add --title "Working with a reason" --captain firstmate --prompt "x" \
+    --status working --reason "ready for his eyes" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "add --status working --reason was accepted, and the reason is silently dropped"
+  assert_contains "$out" "a reason is not stored for 'working'" \
+    "add's refusal did not say a reason is not stored for working"
+  assert_not_contains "$out" "status <id> working --reason" \
+    "add's refusal redirected to a command that drops the reason for working too"
 
   # The same starting status is still creatable without a reason, and the
   # `status` subcommand still owns and persists the waiting reason.
