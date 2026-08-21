@@ -319,16 +319,18 @@ resolution_block() {  # <mode>
 }
 
 # Reconstruct the actual body text from tasks-axi's show output, where a body
-# containing newlines or quotes prints as one quoted line with JSON-style
-# escapes. Best-effort presentation-layer reversal; the pristine original is
-# additionally preserved by --archive-body on every rewrite.
+# containing newlines or quotes prints as one quoted JSON string.
 unescape_shown_body() {  # <shown-body-field>
   local body=$1
   case "$body" in
     \"*\")
-      body=${body#\"}
-      body=${body%\"}
-      printf '%s' "$body" | perl -pe 's/\\n/\n/g; s/\\t/\t/g; s/\\r/\r/g; s/\\"/"/g; s/\\\\/\\/g'
+      printf '%s' "$body" | perl -MJSON::PP -e '
+        local $/;
+        my $value = decode_json(<STDIN>);
+        binmode STDOUT, ":raw";
+        utf8::encode($value) if utf8::is_utf8($value);
+        print $value;
+      '
       ;;
     *) printf '%s' "$body" ;;
   esac
@@ -443,7 +445,8 @@ command_hold() {
 write_resolution_record() {  # <task-id> <mode> <shown-body>
   local id=$1 mode=$2 body=$3 new_body tmp
   new_body=$(resolution_block "$mode")
-  body=$(unescape_shown_body "$body")
+  body=$(unescape_shown_body "$body") \
+    || fail "could not decode the existing body for $id"
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
   fi
@@ -628,13 +631,20 @@ keyed_decision_text() {  # <source> <task-id> <answer> <label>
   [ -z "$4" ] || printf 'Answer as shown to the captain: %s\n' "$4"
 }
 
+legacy_keyed_decision_text() {  # <source> <key> <answer> <label>
+  printf 'Captain answered this decision through %s.\n' "$1"
+  printf 'Decision key: %s\n' "$2"
+  printf 'Answer: %s\n' "$3"
+  [ -z "$4" ] || printf 'Answer as shown to the captain: %s\n' "$4"
+}
+
 sanitize_field() {  # <text>
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-512
 }
 
 command_answers() {
-  local origin='' source='' key answer label mode id show state hold_kind body digest
-  local tmp err closed=0 skipped=0 reason release_flag
+  local origin='' source='' key answer label mode id show state hold_kind body digest legacy_digest legacy_key
+  local recorded_digest recorded_mode tmp err closed=0 skipped=0 reason release_flag
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
@@ -680,23 +690,39 @@ command_answers() {
     fi
     keyed_decision_text "$source" "$id" "$answer" "$label" > "$tmp" \
       || fail "cannot stage the captain decision for $id"
+    digest=$(sha256_text "$(cat "$tmp")")
+    legacy_digest=''
+    if [ "$id" != "$key" ]; then
+      legacy_key=$key
+    elif [ "$origin" = "$BINDING_ANY" ] && [ "${id#*-decision-}" != "$id" ]; then
+      legacy_key=${id#*-decision-}
+    else
+      legacy_key=''
+    fi
+    if [ -n "$legacy_key" ]; then
+      legacy_digest=$(sha256_text "$(legacy_keyed_decision_text "$source" "$legacy_key" "$answer" "$label")")
+    fi
     show=$(task_show "$id") || { printf 'skipped: %s (absent)\n' "$id"; skipped=$((skipped + 1)); continue; }
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
-    if [ "$state" = "done" ]; then
-      # A replayed delivery of the identical answer is an idempotent no-op;
-      # anything else already closed stays closed and is left for a direct,
-      # deliberate `answer` rather than a channel side effect.
-      digest=$(sha256_text "$(cat "$tmp")")
-      if body_has_resolution_record "$body" \
-        && [ "$(recorded_decision_digest "$body" || true)" = "$digest" ]; then
+    recorded_digest=$(recorded_decision_digest "$body" || true)
+    recorded_mode=$(recorded_resolution_mode "$body" || true)
+    if body_has_resolution_record "$body" \
+      && { [ "$recorded_digest" = "$digest" ] \
+        || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
+          && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
+      if { [ -z "$release_flag" ] && [ "$state" = done ] && [ "$recorded_mode" != released ]; } \
+        || { [ "$release_flag" = --release ] && [ "$state" != done ] \
+          && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
         printf 'closed: %s\n' "$id"
         closed=$((closed + 1))
-      else
-        printf 'skipped: %s (already closed)\n' "$id"
-        skipped=$((skipped + 1))
+        continue
       fi
+    fi
+    if [ "$state" = "done" ]; then
+      printf 'skipped: %s (already closed)\n' "$id"
+      skipped=$((skipped + 1))
       continue
     fi
     if [ "$hold_kind" != captain ]; then

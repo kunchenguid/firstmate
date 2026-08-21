@@ -306,7 +306,7 @@ test_release_frees_held_work() {
   local home show
   home=$(make_home release-work)
   tasks_in "$home" add sample-widget "Ship the sample widget" --kind ship --repo sample \
-    --body 'The widget plan body.' >/dev/null \
+    --body 'The widget plan body. Literal escape: \n. Unicode: café.' >/dev/null \
     || fail "could not create the held work item"
   run_captain "$home" hold sample-widget --reason "captain go needed before shipping" >/dev/null \
     || fail "could not hold the work item for the captain"
@@ -319,6 +319,8 @@ test_release_frees_held_work() {
   assert_contains "$show" "Resolution mode: released" "the release did not record its close path"
   assert_contains "$show" "Go: ship it as planned." "the release lost the captain's words"
   assert_contains "$show" "The widget plan body." "the release destroyed the work item body"
+  assert_contains "$show" 'Literal escape: \\n. Unicode: café.' \
+    "the release corrupted escaped or Unicode body text"
   run_captain "$home" answer sample-widget --decision-file "$home/go.txt" --release >/dev/null \
     || fail "identical release retry was not idempotent"
 
@@ -694,6 +696,8 @@ SH
   [ "$rc" -ne 0 ] || fail "a run that skipped a key reported success"
   assert_contains "$out" "closed: sample-membership-call" \
     "replaying an identical capture was not idempotent: $out"
+  assert_contains "$out" "closed: sample-gated-work" \
+    "replaying an identical released answer was not idempotent: $out"
   assert_contains "$out" "skipped: sample-nonexistent-call" \
     "a key naming no task was not reported as skipped: $out"
 
@@ -752,7 +756,7 @@ EOF
 # identities through the shim, short decision keys in recorded metadata, a
 # concrete-origin binding, and the chat fallback for old rows.
 test_legacy_identities_keep_working() {
-  local home id hold out show
+  local home id hold out show legacy_text legacy_digest
   home=$(make_home legacy-compat)
   id=sample-legacy-review
   mkdir -p "$home/data/$id"
@@ -814,6 +818,24 @@ test_legacy_identities_keep_working() {
     || fail "a short key did not resolve through the concrete-origin binding"
   show=$(tasks_in "$home" show "$id-decision-third-choice" --full)
   assert_contains "$show" "state: done" "the legacy-keyed answer did not close its row"
+
+  run_shim "$home" hold "$id" fourth-choice \
+    --title "Fourth choice" --reason "captain fourth choice pending" --repo sample >/dev/null
+  legacy_text=$(printf 'Captain answered this decision through legacy replay.\nDecision key: fourth-choice\nAnswer: option c\n')
+  if command -v shasum >/dev/null 2>&1; then
+    legacy_digest=$(printf '%s' "$legacy_text" | shasum -a 256 | awk '{print $1}')
+  else
+    legacy_digest=$(printf '%s' "$legacy_text" | sha256sum | awk '{print $1}')
+  fi
+  printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: none\nResolution mode: answered\n\nCaptain decision:\n%s\n' \
+    "$legacy_digest" "$legacy_text" > "$home/legacy-body.txt"
+  tasks_in "$home" update "$id-decision-fourth-choice" --body-file "$home/legacy-body.txt" --archive-body >/dev/null
+  tasks_in "$home" done "$id-decision-fourth-choice" >/dev/null
+  out=$(printf 'fourth-choice\toption c\t\n' \
+    | run_captain "$home" answers "$id" --source "legacy replay") \
+    || fail "an identical pre-collapse keyed answer was not idempotent"
+  assert_contains "$out" "closed: $id-decision-fourth-choice" \
+    "the pre-collapse keyed answer digest was treated as drift"
   pass "legacy identities, metadata, bindings, and the shim keep working"
 }
 
