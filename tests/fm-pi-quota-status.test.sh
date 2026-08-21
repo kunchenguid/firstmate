@@ -492,11 +492,16 @@ if (process.env.FM_QUOTA_TEST_FAILURE) {
       description: "No quota windows are available.",
       effectiveAvailability: [],
     };
-    entry.attempts = entry.attempts.map((attempt) => ({
-      source: attempt.source,
-      status: "failed",
-      error: process.env.FM_QUOTA_TEST_FAILURE,
-    }));
+    entry.attempts = entry.provider === "codex"
+      ? [
+          { source: "oauth", status: "failed", error: process.env.FM_QUOTA_TEST_FAILURE },
+          { source: "cli-rpc", status: "failed", error: process.env.FM_QUOTA_TEST_FAILURE },
+        ]
+      : entry.attempts.map((attempt) => ({
+          source: attempt.source,
+          status: "failed",
+          error: process.env.FM_QUOTA_TEST_FAILURE,
+        }));
     entry.state = {
       status: "error",
       stale: false,
@@ -529,11 +534,16 @@ if (process.env.FM_QUOTA_TEST_STALE_FAILURE) {
         ? { unresolvedWindowIds: semantics.unresolvedWindowIds }
         : {}),
     };
-    entry.attempts = entry.attempts.map((attempt) => ({
-      source: attempt.source,
-      status: "failed",
-      error: staleFailure,
-    }));
+    entry.attempts = entry.provider === "codex"
+      ? [
+          { source: "oauth", status: "failed", error: staleFailure },
+          { source: "cli-rpc", status: "failed", error: staleFailure },
+        ]
+      : entry.attempts.map((attempt) => ({
+          source: attempt.source,
+          status: "failed",
+          error: staleFailure,
+        }));
     entry.state = {
       status: "stale",
       stale: true,
@@ -724,6 +734,17 @@ function schema5Default(value) {
 const now = Date.now();
 const parsed = parseQuotaAxiJson(JSON.stringify(report(now)));
 assert(parsed, "valid quota-axi schema-3 JSON was rejected");
+for (const generatedAt of [
+  "2026-08-20T12:00:00.000",
+  "2026-02-30T12:00:00.000Z",
+]) {
+  const invalidTimestampReport = report(now);
+  invalidTimestampReport.generatedAt = generatedAt;
+  assert(
+    parseQuotaAxiJson(JSON.stringify(invalidTimestampReport)) === null,
+    `noncanonical generatedAt ${generatedAt} was accepted`,
+  );
+}
 const currentSchema = schema5Default(report(now));
 const parsedCurrentSchema = parseQuotaAxiJson(JSON.stringify(currentSchema));
 assert(parsedCurrentSchema, "quota-axi schema-5 default JSON was rejected");
@@ -739,6 +760,21 @@ assert(
   selectActiveProviderQuota(parsedSchema5Full, "openai-codex", { nowMs: now }).kind === "fresh",
   "valid quota-axi schema-5 full provider was not fresh",
 );
+for (const resetsAt of [
+  schema5Full.providers[1].windows[0].resetsAt.slice(0, -1),
+  "2026-02-30T12:00:00.000Z",
+]) {
+  const invalidWindowTimestamp = structuredClone(schema5Full);
+  invalidWindowTimestamp.providers[1].windows[0].resetsAt = resetsAt;
+  const invalidWindowTimestampParsed = parseQuotaAxiJson(
+    JSON.stringify(invalidWindowTimestamp),
+    { projection: "full" },
+  );
+  assert(
+    selectActiveProviderQuota(invalidWindowTimestampParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+    `noncanonical window timestamp ${resetsAt} was accepted as fresh`,
+  );
+}
 for (const [projection, schema5Report] of [
   ["default", currentSchema],
   ["full", schema5Full],
@@ -808,6 +844,78 @@ assert(
   selectActiveProviderQuota(codexWithApiSourceParsed, "openai-codex", { nowMs: now }).kind === "malformed",
   "producer-impossible Codex API source was accepted as fresh",
 );
+for (const oauthAttempt of [
+  { source: "oauth", status: "failed", error: "Codex quota unavailable" },
+  { source: "oauth", status: "skipped", error: "credentials_missing" },
+]) {
+  const cliRpcCodex = structuredClone(schema5Full);
+  cliRpcCodex.providers[1].source = "cli-rpc";
+  cliRpcCodex.providers[1].state.sourcesTried = ["oauth", "cli-rpc"];
+  cliRpcCodex.providers[1].attempts = [
+    oauthAttempt,
+    { source: "cli-rpc", status: "success" },
+  ];
+  const cliRpcCodexParsed = parseQuotaAxiJson(
+    JSON.stringify(cliRpcCodex),
+    { projection: "full" },
+  );
+  assert(
+    selectActiveProviderQuota(cliRpcCodexParsed, "openai-codex", { nowMs: now }).kind === "fresh",
+    `valid Codex cli-rpc fallback after ${oauthAttempt.status} OAuth was rejected`,
+  );
+}
+for (const [description, source, attempts] of [
+  [
+    "foreign attempt source",
+    "oauth",
+    [
+      { source: "bogus", status: "skipped", error: "credentials_missing" },
+      { source: "oauth", status: "success" },
+    ],
+  ],
+  [
+    "reordered attempts",
+    "cli-rpc",
+    [
+      { source: "cli-rpc", status: "success" },
+      { source: "oauth", status: "failed", error: "Codex quota unavailable" },
+    ],
+  ],
+  [
+    "missing OAuth failure diagnostic",
+    "cli-rpc",
+    [
+      { source: "oauth", status: "failed" },
+      { source: "cli-rpc", status: "success" },
+    ],
+  ],
+  [
+    "invalid OAuth skip diagnostic",
+    "cli-rpc",
+    [
+      { source: "oauth", status: "skipped", error: "not_a_credential_state" },
+      { source: "cli-rpc", status: "success" },
+    ],
+  ],
+  [
+    "Codex credential marker",
+    "oauth",
+    [{ source: "oauth", status: "success", credentialPresent: true }],
+  ],
+]) {
+  const invalidCodexAttempts = structuredClone(schema5Full);
+  invalidCodexAttempts.providers[1].source = source;
+  invalidCodexAttempts.providers[1].attempts = attempts;
+  invalidCodexAttempts.providers[1].state.sourcesTried = attempts.map((attempt) => attempt.source);
+  const invalidCodexAttemptsParsed = parseQuotaAxiJson(
+    JSON.stringify(invalidCodexAttempts),
+    { projection: "full" },
+  );
+  assert(
+    selectActiveProviderQuota(invalidCodexAttemptsParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+    `${description} was accepted as fresh Codex provenance`,
+  );
+}
 const scopedCodexReport = structuredClone(schema5Full);
 scopedCodexReport.providers = [scopedCodexReport.providers[1]];
 assert(
@@ -1724,8 +1832,11 @@ const staleMixedPace = structuredClone(fullyPopulated);
 staleMixedPace.providers[1].source = "cache";
 staleMixedPace.providers[1].state.status = "stale";
 staleMixedPace.providers[1].state.stale = true;
-staleMixedPace.providers[1].state.sourcesTried = ["oauth", "cache"];
-staleMixedPace.providers[1].attempts[0].status = "failed";
+staleMixedPace.providers[1].state.sourcesTried = ["oauth", "cli-rpc", "cache"];
+staleMixedPace.providers[1].attempts = [
+  { source: "oauth", status: "failed", error: "Codex quota unavailable" },
+  { source: "cli-rpc", status: "failed", error: "Codex quota unavailable" },
+];
 for (const window of staleMixedPace.providers[1].windows) {
   window.pace = { status: "unknown", reason: "stale" };
 }

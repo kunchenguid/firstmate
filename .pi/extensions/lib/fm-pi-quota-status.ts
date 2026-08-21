@@ -112,9 +112,14 @@ function cleanText(value: unknown, maximum = 120): string | null {
 }
 
 function parseTimestamp(value: unknown): number | null {
-  if (typeof value !== "string") return null;
+  if (
+    typeof value !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)
+  ) return null;
   const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : null;
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value
+    ? timestamp
+    : null;
 }
 
 function exactEnum<T extends string>(value: unknown, allowed: readonly T[]): T | null {
@@ -502,6 +507,8 @@ type ParsedAccount = {
 type ParsedAttempt = {
   source: string;
   status: "success" | "failed" | "skipped";
+  error: string | null;
+  credentialPresent: boolean | null;
 };
 
 function parseAccount(value: unknown): ParsedAccount | null | undefined {
@@ -527,11 +534,18 @@ function parseAttempts(value: unknown): ParsedAttempt[] | null | undefined {
     if (!isRecord(entry)) return null;
     const source = exactText(entry.source);
     const status = exactEnum(entry.status, QUOTA_ATTEMPT_STATUSES);
-    if (!source || !status) return null;
-    if (entry.error !== undefined && typeof entry.error !== "string") return null;
-    if (entry.credentialPresent !== undefined && typeof entry.credentialPresent !== "boolean") return null;
-    if (status === "success" && entry.error !== undefined) return null;
-    attempts.push({ source, status });
+    const error = entry.error === undefined ? null : exactText(entry.error);
+    const credentialPresent = entry.credentialPresent === undefined
+      ? null
+      : typeof entry.credentialPresent === "boolean" ? entry.credentialPresent : null;
+    if (
+      !source ||
+      !status ||
+      (entry.error !== undefined && error === null) ||
+      (entry.credentialPresent !== undefined && credentialPresent === null) ||
+      (status === "success" && error !== null)
+    ) return null;
+    attempts.push({ source, status, error, credentialPresent });
   }
   return attempts;
 }
@@ -569,6 +583,42 @@ function validFreshAttemptSource(
   return successes.length === 1 && successes[0]?.source === source;
 }
 
+function validCodexAttemptGrammar(
+  source: string | null,
+  status: string | null,
+  attempts: ParsedAttempt[],
+): boolean {
+  const oauth = attempts[0];
+  if (
+    !oauth ||
+    oauth.source !== "oauth" ||
+    oauth.credentialPresent !== null ||
+    (oauth.status === "success" && oauth.error !== null) ||
+    (oauth.status === "failed" && oauth.error === null) ||
+    (oauth.status === "skipped" && ![
+      "credentials_missing",
+      "credentials_expired",
+      "credentials_invalid",
+    ].includes(oauth.error ?? ""))
+  ) return false;
+  if (oauth.status === "success") {
+    return attempts.length === 1 && status === "fresh" && source === "oauth";
+  }
+
+  const cli = attempts[1];
+  if (
+    attempts.length !== 2 ||
+    !cli ||
+    cli.source !== "cli-rpc" ||
+    cli.credentialPresent !== null ||
+    cli.status === "skipped" ||
+    (cli.status === "success" ? cli.error !== null : cli.error === null)
+  ) return false;
+  return cli.status === "success"
+    ? status === "fresh" && source === "cli-rpc"
+    : status !== "fresh";
+}
+
 function validAttemptProvenance(
   provider: string,
   source: string | null,
@@ -582,7 +632,10 @@ function validAttemptProvenance(
   const expectedSources = status === "stale"
     ? [...new Set([...attemptedSources, "cache"])]
     : attemptedSources;
-  if (!exactStringArray(sourcesTried, expectedSources)) return false;
+  if (
+    !exactStringArray(sourcesTried, expectedSources) ||
+    (provider === "codex" && !validCodexAttemptGrammar(source, status, attempts))
+  ) return false;
   if (status === "fresh") {
     return source !== null && validFreshAttemptSource(provider, source, attempts);
   }
