@@ -97,7 +97,8 @@ test_check_refuses_to_start_the_return() {
   set -e
   [ "$rc" -eq 2 ] || fail "check should refuse to start the return (rc=$rc): $out"
   assert_contains "$out" 'refusing to start the away-mode return from check' "the refusal did not name what it declined to do"
-  assert_contains "$out" 'bin/fm-afk-return.sh guard' "the refusal did not name the read-only command"
+  assert_contains "$out" 'bin/fm-afk-return.sh (or begin) to return' "the refusal did not name the command that completes the return"
+  assert_contains "$out" 'bin/fm-afk-return.sh guard to report without changing anything' "the refusal did not name the read-only command"
   [ -e "$dir/home/state/.afk" ] || fail "refused check cleared away mode anyway"
   [ -e "$dir/home/state/.afk-daemon-terminal" ] || fail "refused check tore down the daemon terminal record"
   [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "refused check opened a catch-up gate"
