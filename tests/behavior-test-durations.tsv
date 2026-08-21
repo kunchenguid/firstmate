@@ -68,6 +68,7 @@
 25	tests/fm-gotmp.test.sh
 3459	tests/fm-grok-harness.test.sh
 6995	tests/fm-herdr-lab.test.sh
+3000	tests/fm-host-capability-gate.test.sh
 98	tests/fm-lint.test.sh
 187	tests/fm-lock.test.sh
 1686	tests/fm-macos-permissions.test.sh
@@ -76,6 +77,7 @@
 2000	tests/fm-pi-account-home.test.sh
 10	tests/fm-pi-primary-live-e2e.test.sh
 80	tests/fm-pi-primary-types.test.sh
+4000	tests/fm-pi-refresh.test.sh
 3170	tests/fm-pi-watch-extension.test.sh
 1574	tests/fm-pr-merge.test.sh
 802	tests/fm-prompt-exec.test.sh
@@ -126,4 +128,4 @@
 92	tests/operating-fundamentals.test.sh
 100	tests/runner-entry-probe.test.sh
 1000	tests/test-suite-seal.test.sh
-4000	tests/fm-pi-refresh.test.sh
+1500	tests/fm-cloud-provider-seal.test.sh

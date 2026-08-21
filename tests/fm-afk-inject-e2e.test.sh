@@ -38,8 +38,13 @@ export FM_GATE_REFUSE_BYPASS=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
-# Skip gracefully if tmux is not installed.
-command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
+# shellcheck source=tests/host-capability-gate.sh
+. "$(dirname "${BASH_SOURCE[0]}")/host-capability-gate.sh"
+fm_require_host_capability real-tmux-server "whole-file" || exit 0
+# Past this gate tmux is REQUIRED, not probed: a host that reaches here and has
+# no tmux is a broken host, and this file goes red rather than skipping quietly.
+command -v tmux >/dev/null 2>&1 \
+  || { printf 'not ok - afk injection e2e: tmux is missing on a host that claims the real-tmux-server capability\n' >&2; exit 1; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="afk-e2e-$$"

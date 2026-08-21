@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Structural backstop: `az` is not reachable from an admitted behavior test.
+#
+# On 2026-08-20 a real, billable Standard_D4as_v6 worker VM
+# (vm-fm7c799d-wkr-01) was created by the sealed suite. Its task tag was
+# `cloud-noenv-c7`, a hardcoded fixture id in tests/fm-spawn-cloud.test.sh, and
+# its repository-generation was not a commit that exists. Nothing in the
+# controller tracked it and nothing would have cleaned it up. The cause was
+# ambient environment: the unit deliberately omits FM_WORKER_PROVIDER_COMMAND to
+# prove the lifecycle refuses an identity-less request, and with the operator's
+# fleet.env sourced the lifecycle instead resolved the REAL Azure provider and
+# shelled out to `az`.
+#
+# tests/run.sh scrubs that ambient environment and binds a refusing fixture
+# provider. This shim is the layer under both: it sits on every admitted test's
+# PATH, so even a path that reconstructs the real provider adapter cannot reach
+# the Azure control plane. A test that legitimately needs a fake `az` puts one in
+# its own fakebin, which it prepends ahead of this directory.
+#
+# The refusal is recorded, not merely printed: tests/run.sh reads
+# FM_TEST_CLOUD_REACH_LOG after every test and turns any recorded reach into a
+# failed suite, so this can never be a quiet skip.
+set -u
+
+log=${FM_TEST_CLOUD_REACH_LOG:-}
+test_script=${FM_TEST_CURRENT_TEST:-unknown-test}
+if [ -n "$log" ]; then
+  printf 'FM_CLOUD_REACH test=%s via=az argv=%s\n' "${test_script##*/}" "$*" >> "$log"
+fi
+printf 'test admission refused: %s attempted a real Azure control-plane call (az %s); a behavior test must use an explicit fixture provider\n' \
+  "${test_script##*/}" "$*" >&2
+exit 97

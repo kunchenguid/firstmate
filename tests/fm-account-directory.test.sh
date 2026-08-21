@@ -186,6 +186,7 @@ test_profile_eligibility_requires_enabled_worker() {
 }
 
 test_claude_approval_marker_contract() {
+  fm_require_host_capability system-openat-binding "test_claude_approval_marker_contract" || return 0
   local account cache_dir marker marker_dir out race_hook status
   reset_accounts
   mkdir -p "$ACCOUNT_ROOT/claude/1/.agent-fleet-quota-cache/quota-axi"
@@ -385,6 +386,7 @@ test_codex_timeout_skips_wedged_account() {
 }
 
 test_claude_rotates_eligible_accounts_without_treating_usage_as_health() {
+  fm_require_host_capability system-openat-binding "test_claude_rotates_eligible_accounts_without_treating_usage_as_health" || return 0
   local out err expected
   reset_accounts
   mkdir -p "$ACCOUNT_ROOT/claude/3" "$ACCOUNT_ROOT/claude/2" "$ACCOUNT_ROOT/claude/1"
@@ -414,6 +416,7 @@ test_claude_rotates_eligible_accounts_without_treating_usage_as_health() {
 }
 
 test_concurrent_claude_selections_spread_without_usage() {
+  fm_require_host_capability system-openat-binding "test_concurrent_claude_selections_spread_without_usage" || return 0
   local output_dir i status counts expected pid
   local -a pids=()
   reset_accounts
@@ -446,6 +449,7 @@ test_concurrent_claude_selections_spread_without_usage() {
 }
 
 test_claude_fails_closed_when_no_usable_crew_account_exists() {
+  fm_require_host_capability system-openat-binding "test_claude_fails_closed_when_no_usable_crew_account_exists" || return 0
   local out status
   reset_accounts
   mkdir -p "$ACCOUNT_ROOT/claude/2" "$ACCOUNT_ROOT/claude/1"
@@ -466,6 +470,7 @@ test_claude_fails_closed_when_no_usable_crew_account_exists() {
 }
 
 test_claude_uses_only_explicit_last_resort_after_primary_exhaustion() {
+  fm_require_host_capability system-openat-binding "test_claude_uses_only_explicit_last_resort_after_primary_exhaustion" || return 0
   local out err
   reset_accounts
   mkdir -p "$ACCOUNT_ROOT/claude/2" "$ACCOUNT_ROOT/claude/1"
@@ -508,6 +513,7 @@ test_codex_rotates_accounts_tied_for_best_fresh_score() {
 }
 
 test_default_root_uses_passwd_home_not_ambient_home() {
+  fm_require_host_capability system-openat-binding "test_default_root_uses_passwd_home_not_ambient_home" || return 0
   local passwd_home hostile_home expected out
   passwd_home="$TMP_ROOT/passwd-home"
   hostile_home="$TMP_ROOT/hostile-home"
@@ -527,6 +533,7 @@ test_default_root_uses_passwd_home_not_ambient_home() {
 }
 
 test_prepare_installs_and_verifies_per_account_herdr_hooks() {
+  fm_require_host_capability system-openat-binding "test_prepare_installs_and_verifies_per_account_herdr_hooks" || return 0
   local codex_home claude_home
   reset_accounts
   set_remaining 1 90,80
@@ -772,6 +779,7 @@ test_main_home_ship_and_scout_use_managed_treehouse_source() {
 }
 
 test_spawn_uses_direct_claude_fallback_and_hook() {
+  fm_require_host_capability system-openat-binding "test_spawn_uses_direct_claude_fallback_and_hook" || return 0
   local record id out launch meta
   reset_accounts
   : > "$TMP_ROOT/agent-fleet.log"
@@ -819,6 +827,7 @@ test_claude_spawn_rejects_mismatched_explicit_model() {
 }
 
 test_direct_claude_recovery_resolves_legacy_default_to_anchor() {
+  fm_require_host_capability system-openat-binding "test_direct_claude_recovery_resolves_legacy_default_to_anchor" || return 0
   local record id meta meta_tmp launch
   reset_accounts
   mkdir -p "$ACCOUNT_ROOT/claude/2"

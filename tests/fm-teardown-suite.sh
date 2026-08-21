@@ -3790,6 +3790,7 @@ SH
 }
 
 test_managed_child_teardown_locks_generation_before_snapshot() {
+  fm_require_host_capability origin-egress "test_managed_child_teardown_locks_generation_before_snapshot" || return 0
   local case_dir af_log child_id child_project child_worktree kill_started allow_kill teardown_pid teardown_rc updater_rc
   case_dir=$(make_case managed-child-generation-lock)
   af_log="$case_dir/agent-fleet.log"
@@ -3916,6 +3917,7 @@ SH
 }
 
 test_forced_secondmate_child_uses_child_home_for_endpoint_verification() {
+  fm_require_host_capability origin-egress "test_forced_secondmate_child_uses_child_home_for_endpoint_verification" || return 0
   local case_dir af_log zellij_log child_project child_worktree child_id rc
   case_dir=$(make_case secondmate-child-home-probe)
   af_log="$case_dir/agent-fleet.log"
@@ -3992,6 +3994,7 @@ SH
 }
 
 test_forced_secondmate_quiesces_parent_before_child_cleanup() {
+  fm_require_host_capability origin-egress "test_forced_secondmate_quiesces_parent_before_child_cleanup" || return 0
   local case_dir child_project child_worktree child_id parent_live parent_quiesced rc
   local child_live child_quiesced
   case_dir=$(make_case secondmate-parent-quiesce)
@@ -4157,6 +4160,7 @@ SH
 }
 
 test_forced_secondmate_retains_child_on_treehouse_failure() {
+  fm_require_host_capability origin-egress "test_forced_secondmate_retains_child_on_treehouse_failure" || return 0
   local case_dir child_worktree child_id lock child_pid_file child_ready_file child_pid rc
   child_id=child-return-failure-x6
   setup_forced_secondmate_child_case secondmate-child-return-failure "$child_id"
@@ -4215,6 +4219,7 @@ SH
 }
 
 test_forced_secondmate_retains_unverified_process_group() {
+  fm_require_host_capability origin-egress "test_forced_secondmate_retains_unverified_process_group" || return 0
   local case_dir child_worktree child_id lock child_pid_file rc group anchor_state owner ps_broken
   child_id=child-return-unverified-x8
   setup_forced_secondmate_child_case secondmate-child-return-unverified "$child_id"
@@ -4299,6 +4304,7 @@ test_bounded_runner_preserves_command_status_125() {
 }
 
 test_forced_secondmate_retains_child_when_treehouse_unavailable() {
+  fm_require_host_capability origin-egress "test_forced_secondmate_retains_child_when_treehouse_unavailable" || return 0
   local case_dir child_worktree child_id rc
   child_id=child-return-unavailable-x7
   setup_forced_secondmate_child_case secondmate-child-return-unavailable "$child_id"
@@ -4322,6 +4328,7 @@ test_forced_secondmate_retains_child_when_treehouse_unavailable() {
 }
 
 test_forced_secondmate_retains_child_on_checkout_lock_contention() {
+  fm_require_host_capability origin-egress "test_forced_secondmate_retains_child_on_checkout_lock_contention" || return 0
   local case_dir child_project child_worktree child_id lock_root lock parent_live child_live rc
   case_dir=$(make_case secondmate-child-checkout-contention)
   child_project="$case_dir/child-project"
@@ -4833,6 +4840,7 @@ SH
 }
 
 test_normal_secondmate_retires_proven_detached_head() {
+  fm_require_host_capability origin-egress "test_normal_secondmate_retires_proven_detached_head" || return 0
   local case_dir rc
   case_dir=$(make_case normal-secondmate-quiescence)
   prepare_secondmate_home_fixture "$case_dir"
@@ -4886,6 +4894,7 @@ test_forced_secondmate_retains_untracked_skill_draft() {
 }
 
 test_forced_secondmate_retains_unique_detached_head() {
+  fm_require_host_capability origin-egress "test_forced_secondmate_retains_unique_detached_head" || return 0
   local case_dir rc
   case_dir=$(make_case secondmate-clean-unique-commit)
   prepare_secondmate_home_fixture "$case_dir"
@@ -4917,6 +4926,7 @@ test_forced_secondmate_retains_unique_detached_head() {
 }
 
 test_forced_secondmate_retains_stash() {
+  fm_require_host_capability origin-egress "test_forced_secondmate_retains_stash" || return 0
   local case_dir rc
   case_dir=$(make_case secondmate-retained-stash)
   prepare_secondmate_home_fixture "$case_dir"
@@ -4946,6 +4956,7 @@ test_forced_secondmate_retains_stash() {
 }
 
 test_forced_secondmate_retains_unlanded_child_work() {
+  fm_require_host_capability origin-egress "test_forced_secondmate_retains_unlanded_child_work" || return 0
   local case_dir child_id child_worktree rc
   child_id=child-unlanded-x7
   setup_forced_secondmate_child_case secondmate-child-unlanded "$child_id"
@@ -4968,6 +4979,7 @@ test_forced_secondmate_retains_unlanded_child_work() {
 }
 
 test_forced_secondmate_retains_unquiesced_unmanaged_child() {
+  fm_require_host_capability origin-egress "test_forced_secondmate_retains_unquiesced_unmanaged_child" || return 0
   local case_dir child_id child_project child_worktree parent_live child_live rc
   case_dir=$(make_case secondmate-unmanaged-child-live)
   child_id=child-live-x9
@@ -5229,6 +5241,7 @@ write_secondmate_meta() {
 }
 
 test_secondmate_state_enumeration_fails_closed() {
+  fm_require_host_capability origin-egress "test_secondmate_state_enumeration_fails_closed" || return 0
   local case_dir rc
   case_dir=$(make_case missing-secondmate-state)
   prepare_secondmate_home_fixture "$case_dir"
@@ -5260,6 +5273,7 @@ test_secondmate_state_enumeration_fails_closed() {
 }
 
 test_secondmate_missing_treehouse_child_is_retained() {
+  fm_require_host_capability origin-egress "test_secondmate_missing_treehouse_child_is_retained" || return 0
   local case_dir child_id missing_worktree rc
   case_dir=$(make_case missing-treehouse-child)
   child_id=missing-child
@@ -5442,6 +5456,7 @@ test_secondmate_registry_duplicate_home_blocks_removal() {
 }
 
 test_secondmate_retirement_retains_idle_registered_child() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_retains_idle_registered_child" || return 0
   local case_dir child_home parent_home rc
   case_dir=$(make_case secondmate-idle-registered-child)
   prepare_secondmate_home_fixture "$case_dir"
@@ -5466,6 +5481,7 @@ test_secondmate_retirement_retains_idle_registered_child() {
 }
 
 test_secondmate_retirement_retains_unlanded_project_clone() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_retains_unlanded_project_clone" || return 0
   local case_dir rc
   case_dir=$(make_case secondmate-unlanded-project-clone)
   prepare_secondmate_home_fixture "$case_dir"
@@ -5485,6 +5501,7 @@ test_secondmate_retirement_retains_unlanded_project_clone() {
 }
 
 test_secondmate_project_tags_do_not_prove_landing() {
+  fm_require_host_capability origin-egress "test_secondmate_project_tags_do_not_prove_landing" || return 0
   local case_dir clone rc
   case_dir=$(make_case secondmate-project-tag-only)
   prepare_secondmate_home_fixture "$case_dir"
@@ -5508,6 +5525,7 @@ test_secondmate_project_tags_do_not_prove_landing() {
 }
 
 test_secondmate_project_origin_authority_survives_home_removal() {
+  fm_require_host_capability origin-egress "test_secondmate_project_origin_authority_survives_home_removal" || return 0
   local drift_case drift_clone drift_origin in_home_case in_home_clone in_home_origin rc
   drift_case=$(make_case secondmate-project-origin-drift)
   prepare_secondmate_home_fixture "$drift_case"
@@ -5544,6 +5562,7 @@ test_secondmate_project_origin_authority_survives_home_removal() {
 }
 
 test_secondmate_retirement_recurses_into_ignored_nested_repositories() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_recurses_into_ignored_nested_repositories" || return 0
   local case_dir source_clone clone nested_origin nested rc
   case_dir=$(make_case secondmate-nested-project-repository)
   prepare_secondmate_home_fixture "$case_dir"
@@ -5578,6 +5597,7 @@ test_secondmate_retirement_recurses_into_ignored_nested_repositories() {
 }
 
 test_secondmate_retirement_rejects_linked_worktree_graphs() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_rejects_linked_worktree_graphs" || return 0
   local nested_case nested_source nested_clone nested_worktree nested_exclude external_case external_clone external_worktree rc
   nested_case=$(make_case secondmate-nested-linked-worktree)
   prepare_secondmate_home_fixture "$nested_case"
@@ -5618,6 +5638,7 @@ test_secondmate_retirement_rejects_linked_worktree_graphs() {
 }
 
 test_secondmate_retirement_accounts_for_directory_symlinks() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_accounts_for_directory_symlinks" || return 0
   local escape_case escape_clone escape_exclude external cycle_case cycle_clone cycle_exclude rc
   escape_case=$(make_case secondmate-project-symlink-escape)
   prepare_secondmate_home_fixture "$escape_case"
@@ -5657,6 +5678,7 @@ test_secondmate_retirement_accounts_for_directory_symlinks() {
 }
 
 test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority" || return 0
   local loopback_case loopback_clone loopback_source loopback_origin stale_case stale_clone unique_tip rc
   loopback_case=$(make_case secondmate-loopback-origin)
   prepare_secondmate_home_fixture "$loopback_case"
@@ -5701,6 +5723,7 @@ test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority() {
 }
 
 test_secondmate_retirement_rejects_mount_boundaries() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_rejects_mount_boundaries" || return 0
   local case_dir mounted rc root_case
   case_dir=$(make_case secondmate-project-mount-boundary)
   prepare_secondmate_home_fixture "$case_dir"
@@ -5746,6 +5769,7 @@ test_secondmate_retirement_rejects_mount_boundaries() {
 }
 
 test_secondmate_retirement_rejects_effective_ssh_redirects() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_rejects_effective_ssh_redirects" || return 0
   local case_dir clone source redirect local_origin rc
   case_dir=$(make_case secondmate-effective-ssh-redirect)
   prepare_secondmate_home_fixture "$case_dir"
@@ -5778,6 +5802,7 @@ SH
 }
 
 test_secondmate_retirement_rejects_incomplete_surviving_authority() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_rejects_incomplete_surviving_authority" || return 0
   local case_dir source rc promisor_case promisor_source
   case_dir=$(make_case secondmate-shallow-source-authority)
   prepare_secondmate_home_fixture "$case_dir"
@@ -5851,6 +5876,7 @@ test_secondmate_retirement_validates_top_level_source_storage() {
 }
 
 test_secondmate_retirement_rejects_local_network_aliases() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_rejects_local_network_aliases" || return 0
   local case_dir clone source ssh_home local_origin rc
   case_dir=$(make_case secondmate-local-network-alias)
   prepare_secondmate_home_fixture "$case_dir"
@@ -5883,6 +5909,7 @@ test_secondmate_retirement_rejects_local_network_aliases() {
 }
 
 test_secondmate_retirement_rejects_in_home_remote_object_storage() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_rejects_in_home_remote_object_storage" || return 0
   local case_dir clone source in_home_origin external_authority rc
   case_dir=$(make_case secondmate-remote-object-alternate)
   prepare_secondmate_home_fixture "$case_dir"
@@ -5908,6 +5935,7 @@ test_secondmate_retirement_rejects_in_home_remote_object_storage() {
 }
 
 test_secondmate_retirement_rejects_source_common_dir_in_home() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_rejects_source_common_dir_in_home" || return 0
   local case_dir source owner rc
   case_dir=$(make_case secondmate-source-common-in-home)
   prepare_secondmate_home_fixture "$case_dir"
@@ -6078,6 +6106,7 @@ SH
 }
 
 test_secondmate_retirement_retains_reflog_and_rewritten_history() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_retains_reflog_and_rewritten_history" || return 0
   local reflog_case clone unique_tip rc rewrite_case grafts
   reflog_case=$(make_case secondmate-reflog-only-history)
   prepare_secondmate_home_fixture "$reflog_case"
@@ -6120,6 +6149,7 @@ test_secondmate_retirement_retains_reflog_and_rewritten_history() {
 }
 
 test_secondmate_retirement_rejects_http_proxy_and_object_redirects() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_rejects_http_proxy_and_object_redirects" || return 0
   local proxy_case clone source rc object_case objects pack redirected
   proxy_case=$(make_case secondmate-scoped-http-proxy)
   prepare_secondmate_home_fixture "$proxy_case"
@@ -6291,6 +6321,7 @@ test_surviving_object_storage_is_bound_through_graph_proof() {
 }
 
 test_secondmate_retirement_serializes_child_spawn() {
+  fm_require_host_capability origin-egress "test_secondmate_retirement_serializes_child_spawn" || return 0
   local case_dir rc teardown_pid spawn_rc waited
   case_dir=$(make_case secondmate-retirement-child-race)
   prepare_secondmate_home_fixture "$case_dir"
@@ -6366,6 +6397,7 @@ SH
 }
 
 test_nested_secondmate_cleanup_requires_child_home_lock() {
+  fm_require_host_capability origin-egress "test_nested_secondmate_cleanup_requires_child_home_lock" || return 0
   local case_dir nested holder_pid waited rc
   case_dir=$(make_case nested-secondmate-home-lock)
   prepare_secondmate_home_fixture "$case_dir"
@@ -6420,6 +6452,7 @@ test_nested_secondmate_cleanup_requires_child_home_lock() {
 }
 
 test_secondmate_registry_updates_are_locked_and_literal() {
+  fm_require_host_capability origin-egress "test_secondmate_registry_updates_are_locked_and_literal" || return 0
   local case_dir id other_home holder_pid waited rc
   case_dir=$(make_case secondmate-registry-locked-literal)
   id='foo.bar'

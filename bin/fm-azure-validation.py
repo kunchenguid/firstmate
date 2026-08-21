@@ -38,6 +38,14 @@ SCHEMA = "fm.azure-validation/v1"
 RESULT_SCHEMA = "fm.azure-validation-result/v1"
 CREDENTIALS_SCHEMA = "fm.azure-validation-credentials/v1"
 RUNTIME_SCHEMA = "fm.azure-validation-runtime/v1"
+# Byte-identical to CELL_HOST_CAPABILITY_DECLARATION in
+# bin/fm-azure-validation-shard-bridge.py. This side is the refusal: a behavior
+# shard command that does not carry exactly this declaration is not the sealed
+# planner route, so the cell cannot quietly widen or drop the skip set.
+CELL_HOST_CAPABILITY_DECLARATION = (
+    "FM_TEST_HOST_CAPABILITIES_ABSENT="
+    "real-tmux-server,passwordless-root-escalation,system-openat-binding,origin-egress"
+)
 # Azure firstmate is powered entirely by pi-codex; the single claude profile
 # exists only for the cross-check lane. Add further providers here only when
 # a lane actually consumes them.
@@ -2518,7 +2526,9 @@ def validate_shard_request(state, request, bundle_path, blob):
     if kind == "behavior":
         exact = [
             "bin/fm-azure-runner-command.sh", "bash", "-c",
-            "FM_TEST_SKIP_HERDR=1 bin/fm-behavior-shards.sh --run {} {} results/executed-{}.tsv".format(shard, count, shard),
+            "{} FM_TEST_SKIP_HERDR=1 bin/fm-behavior-shards.sh --run {} {} results/executed-{}.tsv".format(
+                CELL_HOST_CAPABILITY_DECLARATION, shard, count, shard
+            ),
         ]
         if command != exact or request.get("artifacts") != ["results/executed-{}.tsv".format(shard)]:
             raise ValidationError("behavior shard command differs from the sealed planner route")

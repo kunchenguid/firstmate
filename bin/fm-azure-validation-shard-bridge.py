@@ -33,6 +33,34 @@ SAFE_CELL = re.compile(r"^azv-[a-z0-9]{12}$")
 SAFE_PUBLIC_REMOTE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$")
 SHA = re.compile(r"^[0-9a-f]{40,64}$")
 MAX_ARCHIVE = 1024**3
+# The cell declares, BY NAME, the sealed-suite host capabilities its shard
+# workers cannot provide. FOUR of them, and the list below is the authority;
+# if you are reading this comment to learn what the cell skips, read the
+# constant too, and docs/azure-requirements.md R4 which owns the full account.
+#
+# Measured on the first live cell (azv-36b2726cbcf3, 2026-08-20): the shard
+# worker has no tmux server it can create windows in, no passwordless sudo or
+# systemd-run, and no /usr/bin/cpp to derive SYS_openat from. A local
+# reproduction of that package closure (Ubuntu 24.04 with this repo's own apt
+# set, unprivileged, no build toolchain) reproduced all three.
+#
+# The fourth is origin-egress, and it is by far the largest: the runner unit
+# that executes these shards sets PrivateNetwork=yes,
+# RestrictAddressFamilies=AF_UNIX and IPAddressDeny=any, so bin/fm-teardown.sh's
+# secondmate upstream-authority probe can never resolve or reach the origin
+# remote's host. That skips THIRTY-THREE units, the whole secondmate
+# teardown/retirement family in tests/fm-teardown-suite.sh. The set was
+# enumerated to convergence - both teardown files run to completion with the
+# network off, 143 of 143 cases - and those units are SKIPPED in the cell, not
+# preserved by some other route; macOS and CI are where that coverage lives.
+# tests/host-capability-gate.sh turns each name into a LOUD skip of the
+# exact units bound to it in tests/host-capabilities.tsv; nothing else changes,
+# and no other host is affected. Keep this string byte-identical to the copy in
+# bin/fm-azure-validation.py, which refuses any shard command that differs.
+CELL_HOST_CAPABILITY_DECLARATION = (
+    "FM_TEST_HOST_CAPABILITIES_ABSENT="
+    "real-tmux-server,passwordless-root-escalation,system-openat-binding,origin-egress"
+)
 MAX_WAIT_SECONDS = 4 * 3600
 
 
@@ -216,7 +244,9 @@ def submit_requests(environment, kind, count, command):
         if kind == "behavior":
             argv = [
                 "bin/fm-azure-runner-command.sh", "bash", "-c",
-                "FM_TEST_SKIP_HERDR=1 bin/fm-behavior-shards.sh --run {} {} results/executed-{}.tsv".format(shard, count, shard),
+                "{} FM_TEST_SKIP_HERDR=1 bin/fm-behavior-shards.sh --run {} {} results/executed-{}.tsv".format(
+                    CELL_HOST_CAPABILITY_DECLARATION, shard, count, shard
+                ),
             ]
             artifacts = ["results/executed-{}.tsv".format(shard)]
             resource_class = "behavior-heavy"

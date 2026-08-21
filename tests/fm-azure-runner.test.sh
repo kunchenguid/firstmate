@@ -308,6 +308,9 @@ PY
 
 linux_systemd_drop_integration() {
   [ "$(uname -s)" = Linux ] || { pass "Linux systemd uid/capability integration is CI-owned"; return; }
+  fm_require_host_capability passwordless-root-escalation "linux_systemd_drop_integration" || return 0
+  # Still a REQUIRED condition on every Linux host that has not declared the
+  # absence by name: an unprivileged CI runner must go red here, not skip.
   if ! command -v systemd-run >/dev/null || ! sudo -n true >/dev/null 2>&1; then
     fail "Linux systemd integration requires passwordless sudo"
   fi

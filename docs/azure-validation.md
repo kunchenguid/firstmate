@@ -257,6 +257,14 @@ The bridge parses duration inventory and returned manifests as data and reproduc
 For behavior parallelism, the bridge creates one exact clean Git bundle and eight `fm.azure-validation-shard/v1` requests.
 Each request binds the cell, round, shard index/count, branch, current head, tree, bundle, fixed command, command digest, and declared manifest artifact.
 The fixed behavior command is the existing sealed `bin/fm-behavior-shards.sh --run <N> 8` route with the explicit Azure/Linux non-Herdr selection already used by isolated CI.
+It also carries the cell's own host-capability declaration, `FM_TEST_HOST_CAPABILITIES_ABSENT`, naming by name the four sealed-suite capabilities a shard worker cannot provide: a real tmux server it can create windows in, passwordless sudo with `systemd-run`, the `/usr/bin/cpp` binding `bin/fm-account-directory.sh` needs before it can validate a Claude quota-axi Keychain approval marker, and outbound reach to the origin remote's host (`origin-egress`).
+Be exact about what the fourth one costs, because it is much the largest and a skip must never read as coverage.
+The runner unit that executes these shards sets `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX` and `IPAddressDeny=any`, so `bin/fm-teardown.sh`'s secondmate upstream-authority probe can never resolve or reach the origin host, and `origin-egress` therefore skips THIRTY-THREE units - the whole secondmate teardown/retirement family in `tests/fm-teardown-suite.sh`.
+The cell verifies none of that family: not the landed-work refusals, not the registry locking, not the network-authority pinning, not the child quiescence ordering.
+That coverage lives on macOS and in CI, which is where any change to `bin/fm-teardown.sh` must be proven.
+The set was enumerated to convergence rather than sampled: both teardown files run to completion with the network off, 143 of 143 cases, and `docs/azure-requirements.md` R4 owns the full account.
+Each name turns the exact units bound to it in `tests/host-capabilities.tsv` into a loud `FM_HOST_CAPABILITY_SKIP` line and leaves every other unit running; `bin/fm-azure-validation.py` pins the same constant and refuses any behavior shard command that differs, and no host outside the cell is affected.
+The declaration is a claim the environment makes about itself, never a probe of the capability, and `tests/host-capability-gate.sh` refuses it outright on Darwin: on a Mac these units always run, so a broken Mac goes red instead of quiet.
 The local dispatcher downloads only that credential-free bundle, materializes a temporary Git checkout, and prepares one existing Azure runner invocation per shard.
 It does not run the command locally.
 

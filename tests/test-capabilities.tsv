@@ -41,6 +41,7 @@ fm-cd-pretool-check.test.sh	hermetic
 fm-checkout-identity-cost.test.sh	hermetic
 fm-checkout-refresh.test.sh	hermetic
 fm-checkout-return-boundary.test.sh	hermetic
+fm-cloud-provider-seal.test.sh	hermetic
 fm-cloud-state.test.sh	hermetic
 fm-composer-ghost.test.sh	hermetic
 fm-composer-lib.test.sh	hermetic
@@ -60,6 +61,7 @@ fm-github-pr.test.sh	hermetic
 fm-gotmp.test.sh	hermetic
 fm-grok-harness.test.sh	hermetic
 fm-herdr-lab.test.sh	hermetic
+fm-host-capability-gate.test.sh	hermetic
 fm-lint.test.sh	hermetic
 fm-lock.test.sh	hermetic
 fm-macos-permissions.test.sh	hermetic

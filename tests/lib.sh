@@ -39,6 +39,26 @@ export FM_GATE_REFUSE_BYPASS=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# The host-capability gate (fm_require_host_capability). Test files that do not
+# source this library source tests/host-capability-gate.sh directly; it is
+# idempotent either way.
+# shellcheck source=tests/host-capability-gate.sh
+. "$(dirname "${BASH_SOURCE[0]}")/host-capability-gate.sh"
+
+# The cloud seal's per-unit assertion. tests/run.sh already fails the whole
+# suite over any recorded reach; this lets the unit that owns the boundary go
+# red by itself, naming what it should never have touched.
+fm_assert_no_cloud_reach() {
+  local message=$1 log=${FM_TEST_CLOUD_REACH_LOG:-} reached
+  [ -n "$log" ] \
+    || { printf 'not ok - %s (FM_TEST_CLOUD_REACH_LOG is unset; the cloud seal did not run)\n' "$message" >&2; exit 97; }
+  reached=$(cat "$log" 2>/dev/null || true)
+  [ -z "$reached" ] || {
+    printf 'not ok - %s\n%s\n' "$message" "$reached" >&2
+    exit 1
+  }
+}
+
 # --- reporters --------------------------------------------------------------
 
 fail() {

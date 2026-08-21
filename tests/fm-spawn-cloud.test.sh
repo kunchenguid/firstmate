@@ -621,20 +621,31 @@ test_cloud_spawn_fails_closed_when_the_lifecycle_refuses_the_request() {
   # lifecycle refuses the request, so the spawn must roll back rather than
   # leave a lane that exists nowhere.
   #
-  # The identity variables are unset EXPLICITLY and the provider is pinned to
-  # the case fixture, rather than trusting the ambient environment not to carry
-  # them. An operator shell exports the real subscription, tenant, resource
-  # group and image; inherited here, this unit's request would be admitted and
-  # its reconcile would reach the real Azure adapter, which is how a test that
-  # believes it is exercising a fake creates a billable VM tagged with this
-  # unit's own hardcoded fixture id.
+  # THIS UNIT IS WHY THE CLOUD SEAL EXISTS. Omitting the identity is the whole
+  # point of the case, and until 2026-08-20 the omission was only ever a local
+  # fact: run it in a shell with the operator's fleet.env sourced and the
+  # ambient FM_AZURE_* satisfied the very identity check this asserts is
+  # missing, the lifecycle resolved the REAL Azure provider by default, and the
+  # request was SERVED. It created billable VMs tagged with this fixture's own
+  # id, tracked by no controller record and released by nothing.
+  #
+  # Two independent defenses, deliberately kept together. The explicit unset
+  # below states this unit's premise locally, so it holds even if the ambient
+  # seal in tests/run.sh is ever weakened. The seal itself covers every OTHER
+  # test, which is what a per-unit unset can never do.
+  #
+  # The provider is deliberately NOT pinned to the case fixture here. Under the
+  # seal the unbound provider IS the refusing one, so a request that reaches any
+  # provider at all is recorded and fm_assert_no_cloud_reach below catches it.
+  # Pinning a working fixture would make a reach unrecorded and silently neuter
+  # that assertion: this unit must prove it reached NO provider, not that the
+  # provider it reached was a safe one.
   out=$(
     unset FM_AZURE_SUBSCRIPTION_ID FM_AZURE_TENANT_ID \
       FM_AZURE_DEPLOYMENT_GENERATION FM_AZURE_OWNER_TAG FM_AZURE_NAMING_PREFIX \
       FM_AZURE_RESOURCE_GROUP FM_AZURE_STORAGE_NAME FM_AZURE_WORKER_STATE_DIR \
       FM_AZURE_VM_IMAGE_ID FM_AZURE_WORKER_IMAGE_ID
-    FM_WORKER_PROVIDER_COMMAND="python3 $CASE_DIR/provider.py" \
-      FM_SPAWN_CLOUD=azure \
+    FM_SPAWN_CLOUD=azure \
       run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR"
   )
   status=$?
@@ -642,6 +653,7 @@ test_cloud_spawn_fails_closed_when_the_lifecycle_refuses_the_request() {
   assert_contains "$out" "cloud worker request was refused" "the refusal did not surface the request failure: $out"
   assert_absent "$HOME_DIR/state/$id.meta" "a refused cloud spawn left task metadata behind"
   assert_no_grep 'LAUNCH' "$CASE_DIR/launch.log" "a refused cloud spawn launched a local lane anyway"
+  fm_assert_no_cloud_reach "the identity-less cloud spawn reached a worker provider instead of being refused before one"
   pass "a refused worker request rolls the spawn back instead of stranding the task"
 }
 

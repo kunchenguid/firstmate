@@ -144,6 +144,69 @@ neither is the receipts strand:
    approval markers), alongside 377 passing units. Until those units skip loudly off macOS, no
    intent reaches a green test step here.
 
+   Partially closed. The retained shard responses under
+   `$FM_HOME/state/azure-validation/shards/azv-36b2726cbcf3/*/response/` are the measurement, and
+   they name eleven failing test files, not three. Three classes are genuine host capabilities the
+   cell does not have, and those are now gated: a real tmux server it can create windows in
+   (`server exited unexpectedly` on the shard-2 and shard-4 workers), passwordless sudo with
+   `systemd-run` (`Linux systemd integration requires passwordless sudo`), and the `/usr/bin/cpp`
+   binding `bin/fm-account-directory.sh` needs before it can validate any Claude quota-axi
+   Keychain approval marker (`system openat binding unavailable`). Fifteen units across six test
+   files are bound to those three capabilities in `tests/host-capabilities.tsv`; the cell declares
+   the three absences by name in `bin/fm-azure-validation-shard-bridge.py`, and
+   `tests/host-capability-gate.sh` turns each into a loud `FM_HOST_CAPABILITY_SKIP`. The gate
+   refuses that declaration on Darwin, so macOS coverage is unchanged and cannot be switched off,
+   and CI declares nothing, so its coverage is unchanged too.
+
+   The other five failing files have now been MEASURED rather than inferred, by running the
+   whole sealed suite in a local reproduction of the cell's own package closure (Ubuntu 24.04
+   with `bin/fm-azure-cell-image.sh`'s apt set, unprivileged, no build toolchain, four parallel
+   shards). That run executed 121 test files and failed six, and every failing assertion matched
+   the cell's own text. They are three different kinds of thing.
+
+   FIXED, because it was a hermeticity defect in the test rather than a host capability:
+   `fm-session-start`. Two of its units forced a `MISSING: node` diagnostic by deleting a fakebin
+   `node`. Bootstrap detects a tool with `command -v` against a real system base PATH, so that
+   only works on a host where node lives outside `/usr/bin`. On macOS it does; on the Linux the
+   cell runs, nodesource installs `/usr/bin/node` and the deletion changed nothing, so both units
+   failed for a reason that had nothing to do with what they test. They now choose the first
+   bootstrap-required tool this host does not already provide, and FAIL loudly if the host
+   provides all of them.
+
+   NOT GATED, because they are capacity rather than capability: `fm-pi-watch-extension` fails
+   under four-way parallel load and PASSES on its own in the same container, and
+   `fm-watcher-lock` failed in the cell with exit 124, a timeout, next to `Killed` lines in the
+   same shard log. A skip in either would hide a real regression.
+
+   GATED, as a fourth declared capability: `fm-teardown-a` and `fm-teardown-b` refuse with
+   `secondmate home upstream probe cleanup is unverified`. Instrumenting
+   `run_secondmate_remote_probe` showed the probe never runs at all; `secondmate_remote_identity`
+   fails first, because it needs outbound DNS resolution and network reach to the origin remote's
+   host. With network both files pass all 143 units; with `--network none` the identical refusal
+   returns. The cell's repository-command egress is deny-all BY DESIGN
+   (`bin/fm-azure-runner-command.sh`), so this is a genuine and permanent capability absence
+   there, and no package fixes it. That is `origin-egress`.
+
+   The affected units were enumerated to CONVERGENCE, in one deterministic pass rather than by
+   iteration: the suite invokes every case through a single choke point, `run_partitioned_test`,
+   so running each case in a subshell there reports every failure in one run instead of stopping
+   at the first. Both files were run to completion with the network off - 143 of 143 cases - and
+   the result is exactly 33 units, all in the secondmate teardown/retirement family. An earlier
+   one-at-a-time iteration had found only 19 and had not converged; the difference is why the
+   partial set was not shipped.
+
+   BE CLEAR ABOUT WHAT THIS COSTS. Those 33 units are SKIPPED in the cell, not preserved by some
+   other route. The cell does not verify secondmate teardown or retirement authority at all: not
+   the landed-work refusals, not the registry locking, not the network-authority pinning, not the
+   child quiescence ordering. macOS and CI still run every one of them, and CI is where that
+   coverage now lives for any change touching `bin/fm-teardown.sh`.
+
+   The alternative the owner could choose later is to permit the upstream-authority probe a
+   narrow egress path to the origin host, which would give the cell this coverage back. That was
+   deliberately NOT done here: deny-all egress in that cell is a security property, and trading
+   it for a green check is an owner-level decision about the cell's security posture, not a test
+   suite's call.
+
 So the receipts fix is exercised live up to the gate, which is exactly what used to be
 impossible, and `close` stays unproven: the acceptance sentence below is not yet met.
 

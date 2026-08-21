@@ -1,0 +1,75 @@
+# Host capabilities the sealed suite depends on, and the EXACT units bound to
+# each one. tests/host-capability-gate.sh reads this file; the structural guard
+# in tests/fm-host-capability-gate.test.sh pins it against the real call sites
+# and against a literal count, so this set cannot grow or shrink in silence.
+#
+# Two record kinds, both tab-separated:
+#
+#   capability<TAB>NAME<TAB>PLATFORMS<TAB>DESCRIPTION
+#     PLATFORMS is a comma-separated list of `uname -s` values that CAN provide
+#     the capability. A platform outside the list skips; a platform inside it
+#     RUNS the unit, and the unit FAILS if the capability is really missing.
+#
+#   unit<TAB>TEST-FILE<TAB>LABEL<TAB>CAPABILITY
+#     LABEL is the enclosing shell function name, or `whole-file` when the whole
+#     test file is gated. It must match the second literal argument of the
+#     fm_require_host_capability call site exactly.
+#
+# An environment that runs on a listed platform but still cannot provide a
+# capability declares that absence itself, by name, in
+# FM_TEST_HOST_CAPABILITIES_ABSENT. That declaration is REFUSED on Darwin: on a
+# Mac these units always run, so a broken Mac goes red instead of quiet.
+
+capability	real-tmux-server	Darwin,Linux	a host that can start a real tmux server and create windows in it
+capability	passwordless-root-escalation	Linux	passwordless sudo plus systemd-run transient scopes, for the real Linux uid/capability-drop broker
+capability	system-openat-binding	Darwin,Linux	a system C preprocessor (/usr/bin/cpp) that yields SYS_openat, which bin/fm-account-directory.sh needs before it can validate any Claude quota-axi Keychain approval marker
+
+capability	origin-egress	Darwin,Linux	outbound DNS resolution and network reach to the origin remote's host, which bin/fm-teardown.sh's secondmate_remote_identity must complete before any secondmate upstream-authority probe can run; a sandbox whose repository-command egress is deny-all by design, as the Azure validation cell's is, can never provide it
+unit	tests/fm-backend-tmux-smoke.test.sh	whole-file	real-tmux-server
+unit	tests/fm-backend-tmux-target-exists.test.sh	whole-file	real-tmux-server
+unit	tests/fm-afk-inject-e2e.test.sh	whole-file	real-tmux-server
+unit	tests/fm-afk-launch.test.sh	unit_concurrent_start_serialized	real-tmux-server
+unit	tests/fm-afk-launch.test.sh	e2e_tmux	real-tmux-server
+unit	tests/fm-azure-runner.test.sh	linux_systemd_drop_integration	passwordless-root-escalation
+unit	tests/fm-account-directory.test.sh	test_claude_approval_marker_contract	system-openat-binding
+unit	tests/fm-account-directory.test.sh	test_claude_rotates_eligible_accounts_without_treating_usage_as_health	system-openat-binding
+unit	tests/fm-account-directory.test.sh	test_concurrent_claude_selections_spread_without_usage	system-openat-binding
+unit	tests/fm-account-directory.test.sh	test_claude_fails_closed_when_no_usable_crew_account_exists	system-openat-binding
+unit	tests/fm-account-directory.test.sh	test_claude_uses_only_explicit_last_resort_after_primary_exhaustion	system-openat-binding
+unit	tests/fm-account-directory.test.sh	test_default_root_uses_passwd_home_not_ambient_home	system-openat-binding
+unit	tests/fm-account-directory.test.sh	test_prepare_installs_and_verifies_per_account_herdr_hooks	system-openat-binding
+unit	tests/fm-account-directory.test.sh	test_spawn_uses_direct_claude_fallback_and_hook	system-openat-binding
+unit	tests/fm-account-directory.test.sh	test_direct_claude_recovery_resolves_legacy_default_to_anchor	system-openat-binding
+unit	tests/fm-teardown-suite.sh	test_forced_secondmate_child_uses_child_home_for_endpoint_verification	origin-egress
+unit	tests/fm-teardown-suite.sh	test_forced_secondmate_quiesces_parent_before_child_cleanup	origin-egress
+unit	tests/fm-teardown-suite.sh	test_forced_secondmate_retains_child_on_checkout_lock_contention	origin-egress
+unit	tests/fm-teardown-suite.sh	test_forced_secondmate_retains_child_on_treehouse_failure	origin-egress
+unit	tests/fm-teardown-suite.sh	test_forced_secondmate_retains_child_when_treehouse_unavailable	origin-egress
+unit	tests/fm-teardown-suite.sh	test_forced_secondmate_retains_stash	origin-egress
+unit	tests/fm-teardown-suite.sh	test_forced_secondmate_retains_unique_detached_head	origin-egress
+unit	tests/fm-teardown-suite.sh	test_forced_secondmate_retains_unlanded_child_work	origin-egress
+unit	tests/fm-teardown-suite.sh	test_forced_secondmate_retains_unquiesced_unmanaged_child	origin-egress
+unit	tests/fm-teardown-suite.sh	test_forced_secondmate_retains_unverified_process_group	origin-egress
+unit	tests/fm-teardown-suite.sh	test_managed_child_teardown_locks_generation_before_snapshot	origin-egress
+unit	tests/fm-teardown-suite.sh	test_nested_secondmate_cleanup_requires_child_home_lock	origin-egress
+unit	tests/fm-teardown-suite.sh	test_normal_secondmate_retires_proven_detached_head	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_missing_treehouse_child_is_retained	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_project_origin_authority_survives_home_removal	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_project_tags_do_not_prove_landing	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_registry_updates_are_locked_and_literal	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_accounts_for_directory_symlinks	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_recurses_into_ignored_nested_repositories	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_rejects_effective_ssh_redirects	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_rejects_http_proxy_and_object_redirects	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_rejects_in_home_remote_object_storage	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_rejects_incomplete_surviving_authority	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_rejects_linked_worktree_graphs	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_rejects_local_network_aliases	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_rejects_mount_boundaries	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_rejects_source_common_dir_in_home	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_retains_idle_registered_child	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_retains_reflog_and_rewritten_history	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_retains_unlanded_project_clone	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_retirement_serializes_child_spawn	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_state_enumeration_fails_closed	origin-egress

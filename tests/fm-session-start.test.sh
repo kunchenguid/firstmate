@@ -32,6 +32,29 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_test_tmproot_into TMP_ROOT fm-session-start-tests
 fm_git_identity fmtest fmtest@example.invalid
 
+# A bootstrap-required tool this host does NOT already provide on BASE_PATH.
+#
+# Two units force a MISSING diagnostic by deleting a tool from the fakebin.
+# Both used to delete `node`, which made them depend on the HOST rather than on
+# the product: bootstrap detects with `command -v` against a real system PATH,
+# so on macOS (node outside /usr/bin) the deletion worked, and on the Linux the
+# Azure validation cell runs (nodesource puts node in /usr/bin) it did nothing
+# and the assertions failed for a reason that had nothing to do with what they
+# test. Choose by evidence instead, and FAIL loudly if this host provides every
+# candidate: a required condition that fails when unmet, never a silent skip.
+# It ASSIGNS rather than echoes on purpose: `fail` exits, and an exit inside a
+# command substitution kills only the subshell, which would leave the caller
+# holding an empty tool name and asserting nothing.
+fm_session_start_absent_tool() {  # <variable-name>
+  local out_name=$1 candidate
+  for candidate in chrome-devtools-axi lavish-axi gh-axi quota-axi tasks-axi no-mistakes treehouse node; do
+    PATH="$BASE_PATH" command -v "$candidate" >/dev/null 2>&1 && continue
+    printf -v "$out_name" '%s' "$candidate"
+    return 0
+  done
+  fail "no bootstrap-required tool is absent from BASE_PATH ($BASE_PATH), so no MISSING diagnostic can be constructed"
+}
+
 # --- world builders ----------------------------------------------------------
 
 # new_world <name>: a real, throwaway git repo on `main` (so the worktree-tangle
@@ -366,7 +389,22 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
-  rm -f "$fakebin/node"
+  #
+  # This used to hardcode `node`, which made the unit depend on the HOST rather
+  # than on the product: bootstrap detects a tool with `command -v`, and BASE_PATH
+  # is a real system PATH. On macOS node lives outside /usr/bin so removing the
+  # fake made it missing; on the Linux the Azure validation cell runs, node is
+  # installed at /usr/bin/node, so removing the fake changed nothing, no MISSING
+  # line appeared, and the unit failed for a reason that had nothing to do with
+  # digest ordering.
+  #
+  # So pick the tool by evidence instead of by name: the first bootstrap-required
+  # tool this host does NOT already provide on BASE_PATH. If the host provides all
+  # of them, the unit cannot construct the diagnostic it exists to order, and it
+  # says so and FAILS - a required condition that fails when unmet, never a skip.
+  local missing_tool=
+  fm_session_start_absent_tool missing_tool
+  rm -f "$fakebin/$missing_tool"
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
 
@@ -389,8 +427,8 @@ EOF
   [ "$context_line" -lt "$fleet_line" ] || fail "CONTEXT did not precede FLEET STATE"
   [ "$fleet_line" -lt "$next_line" ] || fail "FLEET STATE did not precede NEXT STEP"
 
-  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: node' | head -1 | cut -d: -f1)
-  [ -n "$missing_line" ] || fail "MISSING diagnostic did not appear at all"
+  missing_line=$(printf '%s\n' "$out" | grep -nE "MISSING(_MANUAL)?: $missing_tool\b" | head -1 | cut -d: -f1)
+  [ -n "$missing_line" ] || fail "MISSING diagnostic for $missing_tool did not appear at all: $out"
   [ "$missing_line" -lt "$fleet_line" ] || fail "actionable MISSING diagnostic was buried after the bulk fleet-state digest"
 
   pass "digest sections are ordered diagnostics-first, bulk-context-last"
@@ -549,7 +587,9 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  rm -f "$fakebin/node"
+  local missing_tool=
+  fm_session_start_absent_tool missing_tool
+  rm -f "$fakebin/$missing_tool"
 
   append_wake "$home/state" signal task-z "needs-decision: pick a library"
 
@@ -558,7 +598,7 @@ EOF
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
   # fm-bootstrap.sh's own exact MISSING-tool line format.
-  assert_contains "$out" "MISSING: node (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
+  assert_contains "$out" "MISSING: $missing_tool (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
   # fm-wake-drain.sh's real drained record (raw tab-separated queue line).
   assert_contains "$out" "$(printf 'signal\ttask-z\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
 

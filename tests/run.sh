@@ -17,6 +17,37 @@ if [ "${1:-}" = --skip-herdr ]; then
 fi
 
 python3 "$SEAL" verify || exit $?
+
+# --- ambient seal -----------------------------------------------------------
+#
+# Drop the operator environment BEFORE any test is admitted. A behavior test may
+# only see what it sets for itself; the names are declared in
+# tests/ambient-seal.tsv with the measurement behind each one.
+#
+# This is not tidiness. With the operator's fleet.env sourced, the unit that
+# means to prove "an identity-less cloud request is refused" was not refused: it
+# was served, by the REAL Azure provider, and it created a billable
+# Standard_D4as_v6 VM (vm-fm7c799d-wkr-01, 2026-08-20) carrying the fixture task
+# id `cloud-noenv-c7` and a repository-generation that is not a commit that
+# exists. No controller record tracked it and nothing would have released it.
+AMBIENT_SEAL=$TEST_DIR/ambient-seal.tsv
+[ -r "$AMBIENT_SEAL" ] || { echo "test admission refused: ambient seal is unreadable: $AMBIENT_SEAL" >&2; exit 97; }
+sealed_names=$(python3 "$TEST_DIR/ambient-seal.py" names "$AMBIENT_SEAL") \
+  || { echo "test admission refused: could not evaluate the ambient seal" >&2; exit 97; }
+for sealed_name in $sealed_names; do
+  unset "$sealed_name" || { echo "test admission refused: could not unset $sealed_name" >&2; exit 97; }
+done
+if [ -n "$sealed_names" ]; then
+  printf 'FM_AMBIENT_SEAL dropped=%s\n' "$(printf '%s' "$sealed_names" | tr '\n' ',')"
+fi
+
+# A host that declares itself unable to provide a sealed-suite capability says so
+# once per invocation, before any test runs. The per-unit FM_HOST_CAPABILITY_SKIP
+# lines are the detail; this is the header that makes a reduced run impossible to
+# read as a full one.
+if [ -n "${FM_TEST_HOST_CAPABILITIES_ABSENT:-}" ]; then
+  printf 'FM_HOST_CAPABILITY_DECLARATION absent=%s\n' "$FM_TEST_HOST_CAPABILITIES_ABSENT"
+fi
 if [ "$#" -eq 0 ]; then
   set -- "$TEST_DIR"/*.test.sh
 fi
@@ -27,6 +58,36 @@ chmod 700 "$suite_root"
 runner_pid=$$
 original_path=$PATH
 real_herdr=$(command -v herdr 2>/dev/null || true)
+
+# --- cloud seal -------------------------------------------------------------
+#
+# The ambient seal above removes an INHERITED provider. This is the other half:
+# what a test gets when it names no provider at all.
+#
+# bin/fm-worker-lifecycle.py defaults FM_WORKER_PROVIDER_COMMAND to the real
+# Azure adapter. That default is correct for an operator and catastrophic here,
+# so every admitted test is handed a refusing fixture provider instead, and a
+# refusing `az` sits on its PATH underneath that. A test that genuinely drives a
+# provider names its own fixture on its own command line and wins.
+#
+# Reaches are RECORDED, not just refused: the log is read after every test and
+# any entry fails the suite. A guard that only printed could be scrolled past.
+cloud_reach_log=$suite_root/cloud-reach.log
+: > "$cloud_reach_log"
+cloud_guard_bin=$TEST_DIR/cloud-guard-bin
+provider_refusal="python3 $TEST_DIR/cloud-provider-refusal.py"
+cloud_reach_check=$TEST_DIR/cloud-reach-check.sh
+[ -x "$cloud_guard_bin/az" ] && [ -r "$TEST_DIR/cloud-provider-refusal.py" ] && [ -x "$cloud_reach_check" ] \
+  || { echo "test admission refused: the cloud seal is missing its guard, refusal provider, or reach check" >&2; exit 97; }
+# Even a path that somehow bypassed both layers finds no credentials here.
+azure_config_empty=$suite_root/azure-config-empty
+mkdir -p "$azure_config_empty"
+chmod 700 "$azure_config_empty"
+
+# Called after each admitted test; turns any recorded reach into a failed suite.
+check_cloud_reach() {
+  "$cloud_reach_check" "$cloud_reach_log"
+}
 lab_state=$suite_root/herdr-state
 mkdir -p "$lab_state"
 chmod 700 "$lab_state"
@@ -72,7 +133,10 @@ run_admitted() {
   token=$suite_root/admission.json
   rm -f "$token"
   write_token "$token" "$test_script" "$capability" || return 1
-  PATH="$TEST_DIR/herdr-guard-bin:$original_path" \
+  PATH="$TEST_DIR/herdr-guard-bin:$cloud_guard_bin:$original_path" \
+  FM_WORKER_PROVIDER_COMMAND="$provider_refusal" \
+  AZURE_CONFIG_DIR="$azure_config_empty" \
+  FM_TEST_CLOUD_REACH_LOG="$cloud_reach_log" \
   FM_TEST_RUNNER_ACTIVE=firstmate-test-runner-v1 \
   FM_TEST_RUNNER_PID="$runner_pid" \
   FM_TEST_RUNNER_TOKEN="$token" \
@@ -111,7 +175,10 @@ run_herdr_lab() (
   token=$suite_root/admission.json
   rm -f "$token"
   write_token "$token" "$test_script" "$capability" || exit 1
-  PATH="$TEST_DIR/herdr-guard-bin:$original_path" \
+  PATH="$TEST_DIR/herdr-guard-bin:$cloud_guard_bin:$original_path" \
+  FM_WORKER_PROVIDER_COMMAND="$provider_refusal" \
+  AZURE_CONFIG_DIR="$azure_config_empty" \
+  FM_TEST_CLOUD_REACH_LOG="$cloud_reach_log" \
   HERDR_SESSION="$session" \
   HERDR_LAB_HELPER="$LAB_HELPER" \
   FM_HERDR_LAB_STATE_DIR="$lab_state" \
@@ -137,11 +204,13 @@ for requested in "$@"; do
   case "$capability" in
     hermetic)
       run_admitted "$test_script" "$capability" || result=1
+      check_cloud_reach || result=1
       ;;
     herdr-lab|herdr-mixed)
       if [ "$skip_herdr" -eq 1 ]; then
         if [ "$capability" = herdr-mixed ]; then
           run_admitted "$test_script" "$capability" || result=1
+          check_cloud_reach || result=1
         else
           printf 'skip: %s declares real Herdr lifecycle; --skip-herdr selected\n' "${test_script#"$ROOT/"}"
         fi
@@ -151,6 +220,7 @@ for requested in "$@"; do
         result=1
       else
         run_herdr_lab "$test_script" "$capability" || result=1
+        check_cloud_reach || result=1
       fi
       ;;
   esac

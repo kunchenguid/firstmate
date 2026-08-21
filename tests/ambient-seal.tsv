@@ -1,0 +1,35 @@
+# Ambient operator environment the sealed suite REFUSES to inherit.
+#
+# tests/run.sh unsets every name matched here before it admits a single test, so
+# a behavior test sees only what it sets for itself. tests/fm-cloud-provider-seal.test.sh
+# pins this file against run.sh and against an exact literal count, so the seal
+# cannot be widened or narrowed without a visible diff.
+#
+# Two record kinds, both tab-separated:
+#
+#   exact<TAB>NAME<TAB>WHY
+#   prefix<TAB>PREFIX<TAB>WHY
+#
+# WHY is not decoration. Each of these was measured, not guessed:
+#
+#   FM_HOME alone makes tests/fm-worker-lifecycle.test.sh non-deterministic. On
+#   merged main, same commit, same machine: `env -i` plus PATH passes 36/36;
+#   adding FM_HOME=<real operator home> fails the Azure provider refusal matrix;
+#   a full operator shell fails the classification/admission matrix instead. The
+#   failing unit VARIES between runs, which is the signature of a suite reading
+#   real, changing operator state.
+#
+#   FM_WORKER_PROVIDER_COMMAND and the FM_AZURE_* identity together are how a
+#   test that means to prove a REFUSAL instead provisioned a real billable VM
+#   (vm-fm7c799d-wkr-01, 2026-08-20, task tag `cloud-noenv-c7`, a fixture id).
+#
+# Nothing under FM_TEST_ is sealed: that prefix is the runner's own contract with
+# the test (FM_TEST_SKIP_HERDR, FM_TEST_HOST_CAPABILITIES_ABSENT, ...), and CI
+# sets FM_PI_* deliberately.
+
+exact	FM_HOME	the operator's real firstmate home; a suite that reads it reads live, changing controller state
+exact	FM_WORKER_PROVIDER_COMMAND	an inherited provider is the one seam where a test can reach real cloud compute
+exact	FM_SPAWN_CLOUD	an inherited cloud switch routes every spawn a test makes into Azure
+prefix	FM_AZURE_	operator Azure identity, capacity and budget bindings; their presence is what turns a refusal into a served request
+prefix	AZURE_	Azure CLI/SDK configuration and credentials
+prefix	ARM_	Azure Resource Manager credentials used by the SDK and terraform-style tooling

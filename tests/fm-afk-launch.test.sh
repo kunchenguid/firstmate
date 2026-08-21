@@ -26,6 +26,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 START="$ROOT/bin/fm-afk-start.sh"
 
+# shellcheck source=tests/host-capability-gate.sh
+. "$(dirname "${BASH_SOURCE[0]}")/host-capability-gate.sh"
+
 FAILED=0
 FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS=${FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS:-30}
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
@@ -279,7 +282,9 @@ unit_failed_start_rolls_back_state() {
 }
 
 unit_concurrent_start_serialized() {
-  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (concurrent start)"; return 0; }
+  fm_require_host_capability real-tmux-server "unit_concurrent_start_serialized" || return 0
+  command -v tmux >/dev/null 2>&1 \
+    || { fail "concurrent start: tmux is missing on a host that claims the real-tmux-server capability"; return 1; }
   local st cap_session cap_pane first second rec count
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-concurrent.XXXXXX")
   cap_session="fm-afk-concurrent-cap-$$"
@@ -2005,7 +2010,9 @@ e2e_herdr() {
 # detached session).
 # ---------------------------------------------------------------------------
 e2e_tmux() {
-  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (tmux e2e)"; return 0; }
+  fm_require_host_capability real-tmux-server "e2e_tmux" || return 0
+  command -v tmux >/dev/null 2>&1 \
+    || { fail "tmux e2e: tmux is missing on a host that claims the real-tmux-server capability"; return 1; }
   local cap_session home_tmp cap_pane before during after rec
   cap_session="fm-afk-launch-cap-$$"
   home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-home.XXXXXX")
