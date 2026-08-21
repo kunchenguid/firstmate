@@ -2377,6 +2377,31 @@ await waitFor(
 );
 await delayedAuthSync.emit("session_shutdown", { reason: "quit" });
 
+const repairedCorrelationWatcher = new EventEmitter();
+repairedCorrelationWatcher.close = () => {};
+let notifyRepairedCorrelation;
+await setStoredOAuth("openai-codex", "opaque-fixture-token");
+const repairedCorrelation = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 500,
+  watchAuthDirectory(_path, _options, listener) {
+    notifyRepairedCorrelation = listener;
+    return repairedCorrelationWatcher;
+  },
+}));
+await repairedCorrelation.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => repairedCorrelation.widgetText(240).includes("account correlation unavailable"),
+  `uncorrelatable login was not explicit: ${repairedCorrelation.widgetText(240)}`,
+);
+await setStoredOAuth("openai-codex", fixtureAccessToken("fixture-codex-account"));
+notifyRepairedCorrelation("change", "auth.json");
+await waitFor(
+  () => repairedCorrelation.widgetText(400).includes("week 94% left"),
+  `repaired account correlation did not refresh after credential change: ${repairedCorrelation.widgetText(400)}`,
+);
+await repairedCorrelation.emit("session_shutdown", { reason: "quit" });
+
 const authTimeout = makePi(
   createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 40 }),
   "openai-codex",
@@ -2412,6 +2437,27 @@ assert(
   "refresh auth timeout discarded independently fresh quota",
 );
 await cachedAuthTimeout.emit("session_shutdown", { reason: "quit" });
+
+const modelsReadFailure = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 150,
+  timeoutMs: 500,
+}));
+await modelsReadFailure.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => modelsReadFailure.widgetText(400).includes("week 94% left"),
+  "models-read-failure fixture did not publish initial quota",
+);
+await writeFile(`${process.env.PI_CODING_AGENT_DIR}/models.json`, "{\n");
+await waitFor(
+  () => modelsReadFailure.widgetText(400).includes("auth unavailable"),
+  `models.json read failure was not exposed: ${modelsReadFailure.widgetText(400)}`,
+);
+assert(
+  modelsReadFailure.widgetText(400).includes("week 94% left"),
+  "transient models.json read failure discarded independently fresh quota",
+);
+await modelsReadFailure.emit("session_shutdown", { reason: "quit" });
+await fs.promises.rm(`${process.env.PI_CODING_AGENT_DIR}/models.json`);
 
 const stalledAuthOptions = { authNever: true };
 const stalledAuth = makePi(

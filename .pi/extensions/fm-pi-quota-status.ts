@@ -777,8 +777,13 @@ export function runQuotaAxiJson(options: {
 function refreshIssueView(reason: QuotaRefreshIssue, provider: string): QuotaView {
   if (reason === "malformed") return { kind: "malformed", provider };
   if (reason === "unverified") return { kind: "unverified", provider };
-  if (reason === "auth-timeout") {
-    return { kind: "unsupported", provider, reason: "auth-timeout" };
+  if (
+    reason === "auth-timeout" ||
+    reason === "auth-cancelled" ||
+    reason === "auth-overflow" ||
+    reason === "auth-unavailable"
+  ) {
+    return { kind: "unsupported", provider, reason };
   }
   return { kind: "failure", provider, reason };
 }
@@ -1160,6 +1165,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           view: unsupportedView(model.provider, "auth-unavailable"),
           modelRevision: preflight.modelRevision,
           compositionRevision: preflight.compositionRevision,
+          credentialRevision: credentialResult.revision,
         };
       }
       const provider = registry.getProvider?.call(ctx.modelRegistry, model.provider);
@@ -1170,6 +1176,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           view: unsupportedView(model.provider, "auth-inspection"),
           modelRevision: preflight.modelRevision,
           compositionRevision: preflight.compositionRevision,
+          credentialRevision: credentialResult.revision,
         };
       }
       const credential = storedOAuthCredential(credentialResult.credential);
@@ -1179,6 +1186,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           view: unsupportedView(model.provider, "auth-unavailable"),
           modelRevision: preflight.modelRevision,
           compositionRevision: preflight.compositionRevision,
+          credentialRevision: credentialResult.revision,
         };
       }
       const modelsResult = await readBoundedJson(modelsFile, signal);
@@ -1235,6 +1243,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           view: unsupportedView(model.provider, "custom-endpoint"),
           modelRevision: preflight.modelRevision,
           compositionRevision: preflight.compositionRevision,
+          credentialRevision: credentialResult.revision,
         };
       }
       const verification = quotaVerification(model.provider, resolvedAuth.apiKey);
@@ -1244,6 +1253,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           view: unsupportedView(model.provider, "account-correlation"),
           modelRevision: preflight.modelRevision,
           compositionRevision: preflight.compositionRevision,
+          credentialRevision: credentialResult.revision,
         };
       }
       return {
@@ -1285,16 +1295,44 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         left.endpointRevision === right.endpointRevision;
     }
 
-    function preservesCachedTarget(
+    function cachedTargetRefreshIssue(
       previous: QuotaTarget,
       outcome: Extract<QuotaTarget, { kind: "unsupported" }>,
-    ): previous is Extract<QuotaTarget, { kind: "supported" }> {
-      return outcome.view.reason === "auth-timeout" &&
-        outcome.credentialRevision !== undefined &&
-        previous.kind === "supported" &&
-        previous.credentialRevision === outcome.credentialRevision &&
-        previous.modelRevision === outcome.modelRevision &&
-        previous.compositionRevision === outcome.compositionRevision;
+    ): QuotaRefreshIssue | null {
+      if (
+        outcome.credentialRevision === undefined ||
+        previous.kind !== "supported" ||
+        previous.credentialRevision !== outcome.credentialRevision ||
+        previous.modelRevision !== outcome.modelRevision ||
+        previous.compositionRevision !== outcome.compositionRevision
+      ) return null;
+      switch (outcome.view.reason) {
+        case "auth-timeout":
+        case "auth-cancelled":
+        case "auth-overflow":
+        case "auth-unavailable":
+          return outcome.view.reason;
+        default:
+          return null;
+      }
+    }
+
+    function targetCredentialBinding(
+      target: QuotaTarget,
+    ): { piProvider: string; credentialRevision: string } | null {
+      if (target.kind === "supported") {
+        return {
+          piProvider: target.piProvider,
+          credentialRevision: target.credentialRevision,
+        };
+      }
+      if (target.kind === "unsupported" && target.credentialRevision !== undefined) {
+        return {
+          piProvider: target.view.provider,
+          credentialRevision: target.credentialRevision,
+        };
+      }
+      return null;
     }
 
     function viewForTarget(target: QuotaTarget): QuotaView {
@@ -1438,7 +1476,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         session.credentialCheckPending = true;
         return;
       }
-      if (session.target.kind === "supported") {
+      if (targetCredentialBinding(session.target)) {
         void checkCredentialRevision(session);
         return;
       }
@@ -1457,8 +1495,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         active !== session ||
         !session.credentialMonitoringAvailable ||
         session.refreshInFlight ||
-        session.credentialCheckAbort !== null ||
-        session.target.kind !== "supported"
+        session.credentialCheckAbort !== null
       ) return;
       if (!targetMatchesLiveModel(session)) {
         resetForLiveModel(session);
@@ -1467,11 +1504,13 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       }
 
       const target = session.target;
+      const binding = targetCredentialBinding(target);
+      if (!binding) return;
       const generation = session.generation;
       const controller = new AbortController();
       session.credentialCheckAbort = controller;
       try {
-        const result = await readStoredCredential(target.piProvider, controller.signal);
+        const result = await readStoredCredential(binding.piProvider, controller.signal);
         if (
           active !== session ||
           session.generation !== generation ||
@@ -1486,7 +1525,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           failCredentialMonitoring(session);
           return;
         }
-        if (result.revision === target.credentialRevision) return;
+        if (result.revision === binding.credentialRevision) return;
         credentialsChanged(session);
       } finally {
         if (session.credentialCheckAbort === controller) session.credentialCheckAbort = null;
@@ -1659,8 +1698,9 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         }
         const previousTarget = session.target;
         if (target.kind === "unsupported") {
-          if (preservesCachedTarget(previousTarget, target)) {
-            publishRefreshIssue(session, "auth-timeout", previousTarget.piProvider);
+          const cachedIssue = cachedTargetRefreshIssue(previousTarget, target);
+          if (cachedIssue && previousTarget.kind === "supported") {
+            publishRefreshIssue(session, cachedIssue, previousTarget.piProvider);
             return;
           }
           session.target = target;
@@ -1733,8 +1773,9 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         }
         session.process = null;
         if (completedTarget.kind === "unsupported") {
-          if (preservesCachedTarget(target, completedTarget)) {
-            publishRefreshIssue(session, "auth-timeout", target.piProvider);
+          const cachedIssue = cachedTargetRefreshIssue(target, completedTarget);
+          if (cachedIssue) {
+            publishRefreshIssue(session, cachedIssue, target.piProvider);
             return;
           }
           session.target = completedTarget;

@@ -34,7 +34,14 @@ export type FreshQuotaView = {
 };
 
 export type QuotaFailureReason = "missing" | "failed" | "timeout" | "overflow" | "cancelled";
-export type QuotaRefreshIssue = QuotaFailureReason | "malformed" | "unverified" | "auth-timeout";
+export type QuotaRefreshIssue =
+  | QuotaFailureReason
+  | "malformed"
+  | "unverified"
+  | "auth-timeout"
+  | "auth-cancelled"
+  | "auth-overflow"
+  | "auth-unavailable";
 
 export type QuotaUnsupportedReason =
   | "provider"
@@ -1658,6 +1665,9 @@ const REFRESH_ISSUE_TEXT: Readonly<Record<QuotaRefreshIssue, { long: string; com
   malformed: { long: "malformed data", compact: "malformed" },
   unverified: { long: "account unverified", compact: "unverified" },
   "auth-timeout": { long: "auth timed out", compact: "auth timeout" },
+  "auth-cancelled": { long: "auth cancelled", compact: "auth cancelled" },
+  "auth-overflow": { long: "auth data too large", compact: "auth too large" },
+  "auth-unavailable": { long: "auth unavailable", compact: "auth unavailable" },
 };
 
 function firstFitting(candidates: string[], width: number): string {
