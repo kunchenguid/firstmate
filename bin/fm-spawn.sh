@@ -66,6 +66,10 @@
 #   depend on the Wayfinder map. Scout and secondmate spawns skip that check.
 #   A scout against a project that publishes bin/wayfinder-lifecycle-gate must
 #   record --wayfinder-child or --wayfinder-no-child for teardown.
+#   Wayfinder task metadata records wayfinder_independent=1 for a ship exempt
+#   from relaunch handoff, or exactly one scout classification:
+#   wayfinder_child=<number-or-title>, which teardown verifies with accept-child,
+#   or wayfinder_no_child=1, which records ordinary scout teardown.
 #   The project command owns the resolution policy;
 #   Firstmate only invokes it.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
