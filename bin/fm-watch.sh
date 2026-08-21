@@ -774,6 +774,12 @@ WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
+  if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
+    echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
+    exit 1
+  fi
+fi
 if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
   echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
   exit 1
@@ -828,6 +834,12 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
 fi
 
 resurface_after_downtime() {
+  # Handling successors already have a predecessor-delivered wake on the way.
+  # Re-announcing from this cycle is what turned a lost handshake into an
+  # unbounded recovery loop; stay in the poll loop and supervise instead.
+  if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
+    return 0
+  fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
       echo "watcher: recovery state could not be consumed safely" >&2
@@ -837,21 +849,6 @@ resurface_after_downtime() {
   fi
   wake "check: rearm-resurface"
 }
-
-if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-  touch "$STATE/.last-watcher-beat"
-  handling_wait=0
-  while [ "$handling_wait" -lt 600 ]; do
-    fm_recovery_marker_snapshot "$WATCHER_DOWNTIME_MARKER" || true
-    case "$FM_RECOVERY_MARKER_TOKEN" in
-      pending:downtime:*) ;;
-      *) break ;;
-    esac
-    sleep 0.05
-    handling_wait=$((handling_wait + 1))
-  done
-  [ "$handling_wait" -lt 600 ] || WATCHER_RECOVERY_PENDING=1
-fi
 
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
