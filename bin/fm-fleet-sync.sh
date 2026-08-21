@@ -13,6 +13,11 @@
 # stashed, or discarded.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
+# This walks project clones under $FM_HOME/projects only, never the firstmate
+# checkout, so origin IS the development remote here: firstmate clones each
+# project from its origin, and a project's own remotes are the captain's to
+# configure. It therefore deliberately does not resolve a configured upstream
+# the way the firstmate self-update path does (bin/fm-dev-remote-lib.sh).
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite

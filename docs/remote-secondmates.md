@@ -213,6 +213,7 @@ Local secondmates retain their generation-specific local pointer contract; remot
 
 `/updatefirstmate` updates each remote code root from its own configured upstream - the same checkout-local git branch tracking the primary checkout itself follows, falling back to `origin/<default>` when none is set - then guardedly fast-forwards the persistent remote home to that code-root commit.
 The remote code root's own git remotes are that host's responsibility to keep pointed at the lineage the fleet actually develops on; a code root whose upstream resolves to a different repository than the primary checkout's own fork updates from the wrong lineage with no error, the same failure mode a misconfigured primary checkout has.
+Point such a code root at that lineage by setting its default branch's tracking upstream (`git -C <code-root> branch --set-upstream-to=<remote>/<default> <default>`) rather than by repointing its `origin`: the update path follows the configured upstream, so the fork can be added under its own remote name while `origin` keeps naming whatever the clone came from, and no existing remote's meaning changes underneath the host.
 Dirty, diverged, unavailable, or otherwise unsafe targets are reported and left untouched.
 
 Retire a remote second mate with the normal guarded command:

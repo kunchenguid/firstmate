@@ -2,8 +2,10 @@
 # Review a crewmate branch against the authoritative base.
 #
 # Pooled project clones do not keep their local default branch current, so this
-# helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# helper compares remote-backed projects against the development remote's
+# <default> after fetching that branch (the checkout's own configured upstream,
+# e.g. a fork, falling back to origin/<default>; see the resolve_update_base
+# call below), and local-only projects against the local default branch.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is

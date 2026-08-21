@@ -276,13 +276,14 @@ secondmate_sync() {
   # checkout's current default-branch commit. That path is purely LOCAL - no
   # fetch, no origin dependency: a linked-worktree home already holds the primary's
   # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
-  # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
-  # for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
-  # .agents/skills/) actually changed, so a secondmate already on the primary's
-  # version is never disturbed (AGENTS.md bootstrap + supervision). Unlike
-  # /updatefirstmate, startup owns the live-convergence send itself because it is
-  # a deterministic locked sweep and can report success as BOOTSTRAP_INFO while
-  # preserving failed sends as NUDGE_SECONDMATES retry markers.
+  # /updatefirstmate refreshes it from its configured upstream. Startup sends
+  # reread nudges only for RUNNING secondmates whose instruction surface
+  # (AGENTS.md, bin/, or .agents/skills/) actually changed, so a secondmate
+  # already on the primary's version is never disturbed (AGENTS.md bootstrap +
+  # supervision). Unlike /updatefirstmate, startup owns the live-convergence
+  # send itself because it is a deterministic locked sweep and can report
+  # success as BOOTSTRAP_INFO while preserving failed sends as
+  # NUDGE_SECONDMATES retry markers.
   [ -d "$STATE" ] || return 0
   local primary_head
   if ! primary_head=$(primary_head_commit "$FM_ROOT"); then
