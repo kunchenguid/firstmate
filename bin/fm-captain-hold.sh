@@ -541,8 +541,12 @@ command_answer() {
   fi
 
   # Not held and not closed: only an already-recorded release replays cleanly.
-  if body_has_resolution_record "$body" \
-    && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
+  if body_has_resolution_record "$body"; then
+    recorded_mode=$(recorded_resolution_mode "$body" || true)
+    [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
+      || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
+    [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
+      || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
     printf 'released: %s\n' "$id"
     return 0
   fi

@@ -323,6 +323,15 @@ test_release_frees_held_work() {
     "the release corrupted escaped or Unicode body text"
   run_captain "$home" answer sample-widget --decision-file "$home/go.txt" --release >/dev/null \
     || fail "identical release retry was not idempotent"
+  if run_captain "$home" answer sample-widget --decision-file "$home/go.txt" \
+    > "$home/wrong-mode.out" 2> "$home/wrong-mode.err"; then
+    fail "a released answer replay without --release reported completion"
+  fi
+  assert_grep "mode released" "$home/wrong-mode.err" \
+    "the mismatched replay did not name the recorded release mode"
+  show=$(tasks_in "$home" show sample-widget --full)
+  assert_contains "$show" "state: queued" "a mismatched release replay closed the work item"
+  assert_contains "$show" "held: no" "a mismatched release replay re-held the work item"
 
   # A NEW captain gate on the same task later takes a NEW answer.
   run_captain "$home" hold sample-widget --reason "captain pricing call needed" >/dev/null \
