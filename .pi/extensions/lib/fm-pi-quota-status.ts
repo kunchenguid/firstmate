@@ -133,6 +133,10 @@ function exactText(value: unknown): string | null {
   return cleanText(value, value.length) === value ? value : null;
 }
 
+function opaqueIdentifier(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 const QUOTA_WINDOW_KINDS = ["session", "weekly", "monthly", "model", "credits", "unknown"] as const;
 const QUOTA_CREDIT_UNITS = ["usd", "credits"] as const;
 const QUOTA_PROVIDER_SOURCES = ["oauth", "cli-rpc", "api", "web", "cache", "unavailable"] as const;
@@ -268,15 +272,23 @@ function validTextArray(value: unknown): boolean {
   return Array.isArray(value) && value.every((entry) => exactText(entry) !== null);
 }
 
-function validNonemptyTextArray(value: unknown): value is string[] {
+function validIdentifierArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((entry) => opaqueIdentifier(entry) !== null);
+}
+
+function validNonemptyIdentifierArray(value: unknown): value is string[] {
   return Array.isArray(value) &&
     value.length > 0 &&
-    value.every((entry) => exactText(entry) !== null) &&
+    value.every((entry) => opaqueIdentifier(entry) !== null) &&
     new Set(value).size === value.length;
 }
 
 function validOptionalTextArray(value: unknown): boolean {
   return value === undefined || validTextArray(value);
+}
+
+function validOptionalIdentifierArray(value: unknown): boolean {
+  return value === undefined || validIdentifierArray(value);
 }
 
 function roundedPace(value: number): number {
@@ -460,7 +472,7 @@ function parseWindow(
   providerIsStale: boolean,
 ): QuotaWindowView | null {
   if (!isRecord(value)) return null;
-  const id = exactText(value.id);
+  const id = opaqueIdentifier(value.id);
   const label = cleanText(value.label);
   const kind = exactEnum(value.kind, QUOTA_WINDOW_KINDS);
   if (!id || !label || !kind) return null;
@@ -529,7 +541,7 @@ function matchesCodexModelWindowIdentity(
 }
 
 function codexWindowBaseIdentity(window: Record<string, unknown>): string | null {
-  const rawId = exactText(window.id);
+  const rawId = opaqueIdentifier(window.id);
   if (rawId === null) return null;
   const id = rawId.replace(/_(?:[2-9]|[1-9]\d+)$/, "");
   const windowSeconds = window.windowSeconds === undefined
@@ -863,7 +875,7 @@ function validEffectivePace(
   for (const field of listFields) {
     const entries = value[field];
     if (entries === undefined) continue;
-    if (!validNonemptyTextArray(entries)) return false;
+    if (!validNonemptyIdentifierArray(entries)) return false;
     for (const entry of entries) {
       if (seen.has(entry) || !boundedBySet.has(entry)) return false;
       seen.add(entry);
@@ -872,7 +884,7 @@ function validEffectivePace(
   if (!validOptionalNumber(value.worstReservePercentPoints)) return false;
   const worstId = value.worstReserveWindowId === undefined
     ? null
-    : exactText(value.worstReserveWindowId);
+    : opaqueIdentifier(value.worstReserveWindowId);
   if (value.worstReserveWindowId !== undefined && worstId === null) return false;
   if (worstId !== null && !boundedBySet.has(worstId)) return false;
   if ((value.worstReservePercentPoints !== undefined) !== (worstId !== null)) return false;
@@ -884,23 +896,23 @@ function validEffectivePace(
       value.behindWindowIds === undefined &&
       value.onPaceWindowIds === undefined &&
       value.worstReservePercentPoints === undefined &&
-      validNonemptyTextArray(value.unknownWindowIds);
+      validNonemptyIdentifierArray(value.unknownWindowIds);
   } else {
     if (value.worstReservePercentPoints === undefined) return false;
     if (requireAuditFields && worstId !== null && !seen.has(worstId)) return false;
     if (status === "ahead") {
-      structurallyValid = validNonemptyTextArray(value.aheadWindowIds) &&
+      structurallyValid = validNonemptyIdentifierArray(value.aheadWindowIds) &&
         value.behindWindowIds === undefined;
     } else if (status === "behind") {
       structurallyValid = value.aheadWindowIds === undefined &&
-        (!requireAuditFields || validNonemptyTextArray(value.behindWindowIds));
+        (!requireAuditFields || validNonemptyIdentifierArray(value.behindWindowIds));
     } else if (status === "on_pace") {
       structurallyValid = value.aheadWindowIds === undefined &&
         value.behindWindowIds === undefined &&
-        (!requireAuditFields || validNonemptyTextArray(value.onPaceWindowIds));
+        (!requireAuditFields || validNonemptyIdentifierArray(value.onPaceWindowIds));
     } else {
-      structurallyValid = validNonemptyTextArray(value.aheadWindowIds) &&
-        (!requireAuditFields || validNonemptyTextArray(value.behindWindowIds));
+      structurallyValid = validNonemptyIdentifierArray(value.aheadWindowIds) &&
+        (!requireAuditFields || validNonemptyIdentifierArray(value.behindWindowIds));
     }
   }
   if (!structurallyValid || !requireAuditFields) return structurallyValid;
@@ -1039,7 +1051,7 @@ function validRunway(
   if (!validOptionalTimestamp(value.projectedExhaustedAt)) return false;
   const limitingWindowId = value.limitingWindowId === undefined
     ? null
-    : exactText(value.limitingWindowId);
+    : opaqueIdentifier(value.limitingWindowId);
   if (value.limitingWindowId !== undefined && limitingWindowId === null) return false;
   if (limitingWindowId !== null && !boundedBySet.has(limitingWindowId)) return false;
   const projectionConfidence = value.projectionConfidence === undefined
@@ -1049,7 +1061,7 @@ function validRunway(
   if (value.projectionBasis !== undefined && value.projectionBasis !== "cycle_average") return false;
   if (
     value.unmeasurableWindowIds !== undefined &&
-    !validNonemptyTextArray(value.unmeasurableWindowIds)
+    !validNonemptyIdentifierArray(value.unmeasurableWindowIds)
   ) return false;
   if (
     Array.isArray(value.unmeasurableWindowIds) &&
@@ -1071,7 +1083,7 @@ function validRunway(
       value.limitingWindowId === undefined &&
       value.projectionConfidence === undefined &&
       value.projectionBasis === undefined &&
-      validNonemptyTextArray(value.unmeasurableWindowIds);
+      validNonemptyIdentifierArray(value.unmeasurableWindowIds);
   }
   if (value.unmeasurableWindowIds !== undefined) return false;
   const exhaustedWindowIds = boundedBy.filter(
@@ -1188,7 +1200,7 @@ function validSelection(
   if (!validOptionalNumber(value.spendPriority, (number) => number >= -100 && number <= 100)) return false;
   if (
     value.unmeasurableWindowIds !== undefined &&
-    !validNonemptyTextArray(value.unmeasurableWindowIds)
+    !validNonemptyIdentifierArray(value.unmeasurableWindowIds)
   ) return false;
   if (
     Array.isArray(value.unmeasurableWindowIds) &&
@@ -1212,7 +1224,7 @@ function validSelection(
   if (status === "known") {
     return value.spendPriority !== undefined && value.unmeasurableWindowIds === undefined;
   }
-  return value.spendPriority === undefined && validNonemptyTextArray(value.unmeasurableWindowIds);
+  return value.spendPriority === undefined && validNonemptyIdentifierArray(value.unmeasurableWindowIds);
 }
 
 function validEffectiveAvailability(
@@ -1229,15 +1241,15 @@ function validEffectiveAvailability(
 ): boolean {
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_AVAILABILITY_STATUSES);
-  if (exactText(value.scope) === null || !status) return false;
+  if (opaqueIdentifier(value.scope) === null || !status) return false;
   if (!validOptionalNumber(value.effectivePercentRemaining, (number) => number >= 0 && number <= 100)) return false;
-  if (!validNonemptyTextArray(value.boundedBy)) return false;
+  if (!validNonemptyIdentifierArray(value.boundedBy)) return false;
   const boundedBy = value.boundedBy;
   const boundedBySet = new Set(boundedBy);
   if (boundedBy.some((id) => !windowsById.has(id))) return false;
   if (
     value.limitingWindowIds !== undefined &&
-    !validNonemptyTextArray(value.limitingWindowIds)
+    !validNonemptyIdentifierArray(value.limitingWindowIds)
   ) return false;
   if (
     Array.isArray(value.limitingWindowIds) &&
@@ -1254,7 +1266,7 @@ function validEffectiveAvailability(
   if (status === "known") {
     if (
       value.effectivePercentRemaining === undefined ||
-      !validNonemptyTextArray(value.limitingWindowIds)
+      !validNonemptyIdentifierArray(value.limitingWindowIds)
     ) return false;
     const effectivePercentRemaining = Math.min(...percentages as number[]);
     const limitingWindowIds = boundedBy.filter(
@@ -1486,7 +1498,7 @@ function validQuotaSemantics(
   if (!status) return false;
   if (requireDescription && typeof value.description !== "string") return false;
   if (value.description !== undefined && typeof value.description !== "string") return false;
-  if (!validOptionalTextArray(value.unresolvedWindowIds)) return false;
+  if (!validOptionalIdentifierArray(value.unresolvedWindowIds)) return false;
   const unresolvedWindowIds = Array.isArray(value.unresolvedWindowIds)
     ? value.unresolvedWindowIds as string[]
     : [];
@@ -1508,7 +1520,7 @@ function validQuotaSemantics(
         ))
   ) return false;
   const windowsById = new Map(windows.map((window) => [window.id, window]));
-  const rawWindowsById = new Map(rawWindows.map((window) => [exactText(window.id) ?? "", window]));
+  const rawWindowsById = new Map(rawWindows.map((window) => [opaqueIdentifier(window.id) ?? "", window]));
   if (
     windowsById.size !== windows.length ||
     rawWindowsById.size !== rawWindows.length ||
@@ -1521,7 +1533,7 @@ function validQuotaSemantics(
   const scopes = new Set<string>();
   for (const [index, entry] of value.effectiveAvailability.entries()) {
     if (!isRecord(entry)) return false;
-    const scope = exactText(entry.scope);
+    const scope = opaqueIdentifier(entry.scope);
     const expectedEntry = expected.effectiveAvailability[index];
     if (
       scope === null ||
@@ -1572,7 +1584,7 @@ function validProviderState(value: unknown, requireFullFields: boolean): boolean
   if (value.reason !== undefined && reason === null) return false;
   if (status === "fresh" && reason !== null) return false;
   if (reason === "credentials_expired" && authStatus !== "expired_refreshable") return false;
-  if (!validOptionalTextArray(value.untrustedWindowIds)) return false;
+  if (!validOptionalIdentifierArray(value.untrustedWindowIds)) return false;
   if (requireFullFields && !validTextArray(value.sourcesTried)) return false;
   return validOptionalTextArray(value.sourcesTried);
 }

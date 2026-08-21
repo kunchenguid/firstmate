@@ -435,6 +435,7 @@ type CachedQuota = {
   view: QuotaView;
   publication: FreshQuotaView | null;
   publishedAtMonotonicMs: number;
+  elapsedAtPublicationMs: number;
   elapsedThroughMs: number;
   timelineOriginMs: number;
   piProvider: string;
@@ -1441,7 +1442,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     }
 
     function authoritativeTimelineMs(quota: CachedQuota): number {
-      const elapsedMs = Math.max(
+      const elapsedMs = quota.elapsedAtPublicationMs + Math.max(
         quota.elapsedThroughMs,
         monotonicNow() - quota.publishedAtMonotonicMs,
         0,
@@ -1458,7 +1459,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       );
       quota.view = revalidateFreshQuotaView(
         quota.publication,
-        quota.timelineOriginMs + quota.elapsedThroughMs,
+        quota.timelineOriginMs + quota.elapsedAtPublicationMs + quota.elapsedThroughMs,
       );
     }
 
@@ -1889,6 +1890,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           render(session);
           return;
         }
+        const processStartedAtMonotonicMs = monotonicNow();
         const running = runQuotaAxiJson({
           command,
           timeoutMs,
@@ -1977,14 +1979,24 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             session.lastFailure = null;
             const recoverable = recoverableFreshView(selected);
             const publication = recoverable ? quotaPublicationFreshView(recoverable) : null;
+            const publishedAtMonotonicMs = monotonicNow();
+            const elapsedAtPublicationMs = Math.max(
+              0,
+              publishedAtMonotonicMs - processStartedAtMonotonicMs,
+            );
+            const timelineOriginMs = publication?.generatedAtMs ?? report?.generatedAtMs ?? now();
             session.quota = {
               view: publication
-                ? revalidateFreshQuotaView(publication, publication.generatedAtMs)
+                ? revalidateFreshQuotaView(
+                    publication,
+                    timelineOriginMs + elapsedAtPublicationMs,
+                  )
                 : selected,
               publication,
-              publishedAtMonotonicMs: monotonicNow(),
+              publishedAtMonotonicMs,
+              elapsedAtPublicationMs,
               elapsedThroughMs: 0,
-              timelineOriginMs: publication?.generatedAtMs ?? report?.generatedAtMs ?? now(),
+              timelineOriginMs,
               piProvider: completedProvider,
               credentialRevision: completedTarget.credentialRevision,
               modelRevision: completedTarget.modelRevision,

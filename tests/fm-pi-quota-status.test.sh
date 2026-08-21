@@ -1168,6 +1168,28 @@ assert(
   longFeatureView.windows.some((window) => window.id === `model:${longFeature}:7d`),
   "long Codex metered-feature identity was truncated",
 );
+const opaqueFeatureIdentity = structuredClone(schema5Full);
+const opaqueFeature = "preview  beta";
+opaqueFeatureIdentity.providers[1].windows[1].id = `model:${opaqueFeature}:5h`;
+opaqueFeatureIdentity.providers[1].windows[2].id = `model:${opaqueFeature}:7d`;
+opaqueFeatureIdentity.providers[1].quotaSemantics = schema5CodexSemantics(
+  opaqueFeatureIdentity,
+  true,
+);
+const opaqueFeatureParsed = parseQuotaAxiJson(
+  JSON.stringify(opaqueFeatureIdentity),
+  { projection: "full" },
+);
+const opaqueFeatureView = selectActiveProviderQuota(
+  opaqueFeatureParsed,
+  "openai-codex",
+  { nowMs: now },
+);
+assert(opaqueFeatureView.kind === "fresh", "opaque Codex metered-feature identity was rejected");
+assert(
+  opaqueFeatureView.windows.some((window) => window.id === `model:${opaqueFeature}:7d`),
+  "opaque Codex metered-feature identity was normalized",
+);
 assert(quotaProviderForPiProvider("openai-codex") === "codex", "openai-codex provider mapping failed");
 assert(quotaProviderForPiProvider("anthropic") === "claude", "anthropic provider mapping failed");
 assert(quotaProviderForPiProvider("github-copilot") === "copilot", "GitHub Copilot provider mapping failed");
@@ -3443,6 +3465,40 @@ assert(
 );
 await publicationSkew.emit("session_shutdown", { reason: "quit" });
 assert(publicationSkewClock.tasks.size === 0, "recoverable publication skew leaked a timer");
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
+const processAgeStart = Date.now();
+process.env.FM_QUOTA_TEST_NOW_MS = String(processAgeStart);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  processAgeStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const callsBeforeProcessAge = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+const processAge = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => processAgeStart,
+  monotonicNow: () => {
+    const calls = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+      .trim()
+      .split(/\n/)
+      .filter(Boolean).length;
+    return calls > callsBeforeProcessAge ? 7 * 60 * 1000 : 0;
+  },
+}));
+await processAge.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => processAge.widgetText(400).includes("stale"),
+  "quota process age was not included in publication freshness",
+);
+assert(!processAge.widgetText(400).includes("94%"), "expired process output was published as fresh");
+await processAge.emit("session_shutdown", { reason: "quit" });
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
 const overflowSkewStart = Date.now();
