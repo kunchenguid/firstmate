@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
 
-FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_WAKE_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_WAKE_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -314,11 +314,14 @@ fm_lock_role() {
   cat "$1/role" 2>/dev/null
 }
 
+# Every path tool below takes `--`, and every `cd` takes it too: a path whose
+# first character is a dash is otherwise parsed as an option bundle, which BSD
+# basename rejects loudly enough to prefix an operator-visible message.
 fm_lock_abs_path() {
   local path=$1 dir base
-  dir=$(dirname "$path")
-  base=$(basename "$path")
-  dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+  dir=$(dirname -- "$path")
+  base=$(basename -- "$path")
+  dir=$(cd -- "$dir" 2>/dev/null && pwd -P) || return 1
   printf '%s/%s\n' "$dir" "$base"
 }
 
@@ -338,17 +341,17 @@ fm_lock_prepare_owner() {
 
 fm_lock_link_owner() {
   local lockdir=$1 owner
-  owner=$(readlink "$lockdir" 2>/dev/null) || return 1
+  owner=$(readlink -- "$lockdir" 2>/dev/null) || return 1
   [ -n "$owner" ] || return 1
   case "$owner" in
     /*) printf '%s\n' "$owner" ;;
-    *) printf '%s/%s\n' "$(dirname "$lockdir")" "$owner" ;;
+    *) printf '%s/%s\n' "$(dirname -- "$lockdir")" "$owner" ;;
   esac
 }
 
 fm_lock_points_to_owner() {
   local lockdir=$1 ownerdir=$2 actual
-  actual=$(readlink "$lockdir" 2>/dev/null) || return 1
+  actual=$(readlink -- "$lockdir" 2>/dev/null) || return 1
   [ "$actual" = "$ownerdir" ]
 }
 
@@ -361,8 +364,8 @@ fm_lock_discard_owner() {
 
 fm_lock_remove_stray_owner_link() {
   local lockdir=$1 ownerdir=$2 stray
-  stray="$lockdir/$(basename "$ownerdir")"
-  if [ -L "$stray" ] && [ "$(readlink "$stray" 2>/dev/null || true)" = "$ownerdir" ]; then
+  stray="$lockdir/$(basename -- "$ownerdir")"
+  if [ -L "$stray" ] && [ "$(readlink -- "$stray" 2>/dev/null || true)" = "$ownerdir" ]; then
     rm -f "$stray" 2>/dev/null || true
   fi
 }
@@ -1228,7 +1231,7 @@ fm_wake_signal_sig() {  # <file> -> "size:mtime"
 }
 
 fm_wake_signal_seen_path() {  # <state> <file>
-  printf '%s/.seen-%s' "$1" "$(basename "$2" | tr '.' '_')"
+  printf '%s/.seen-%s' "$1" "$(basename -- "$2" | tr '.' '_')"
 }
 
 # 0 when <file>'s current signature exactly matches its recorded seen marker,
