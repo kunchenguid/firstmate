@@ -351,6 +351,75 @@ status_open_decisions() {  # <status-file>
   printf '%s' "$open"
 }
 
+# 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.
+_fm_open_set_has() {  # <open-set> <key>
+  case "$1" in
+    "$2"$'\t'*|*$'\n'"$2"$'\t'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The verb stored for <key> in a folded open set (empty when it has no record).
+_fm_open_set_verb() {  # <open-set> <key>
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "$2"$'\t'*) line=${line#*$'\t'}; printf '%s' "${line%%$'\t'*}"; return 0 ;;
+    esac
+  done <<EOF
+$1
+EOF
+  return 0
+}
+
+# The verb that last moved <key> in a status stream, which is what tells a
+# consumer HOW the status side currently reads that key. Prints the opening verb
+# (needs-decision or blocked) while the key is still open, the closing verb
+# (resolved, or the captain-held durable-transfer verb) once it is closed, and
+# nothing at all when no line in the stream ever stated a transition for it.
+#
+# The distinction between the two closing verbs is the whole point: a
+# `captain-held` close is the VERIFIED handoff to a durable captain-held task
+# (fm-captain-hold.sh complete writes it only after verifying that task), so the
+# structured row staying open afterwards is correct. A `resolved` close claims
+# the question is settled outright, so a structured row still open behind it is a
+# contradiction between the two records - see fm-captain-hold.sh's `diverged`.
+#
+# Semantics are not re-derived here: every line goes through the same
+# _fm_decision_fold_line rule the two folds use, and the reported verb is read
+# off the transitions that rule produces. Only lines whose parsed key equals the
+# requested one can move that key, so a caller-supplied key other than "default"
+# lets the scan pre-filter the stream to lines carrying its token and stay cheap
+# on a long log.
+status_key_closing_verb() {  # <status-file> <key>
+  local f=$1 want=$2 line resolve held open='' was verb='' stream
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  [ -n "$want" ] || return 0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  if [ "$want" = default ]; then
+    stream=$(cat "$f") || return 0
+  else
+    stream=$(grep -F "[key=$want]" "$f") || stream=''
+  fi
+  [ -n "$stream" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    was=0
+    _fm_open_set_has "$open" "$want" && was=1
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+    if [ "$was" = 1 ] && ! _fm_open_set_has "$open" "$want"; then
+      verb=$(status_line_verb "$line")
+    fi
+  done <<EOF
+$stream
+EOF
+  if _fm_open_set_has "$open" "$want"; then
+    _fm_open_set_verb "$open" "$want"
+    return 0
+  fi
+  printf '%s' "$verb"
+}
+
 # Fleet-wide wrapper around status_open_decisions: scans every task's status
 # log under <state> and prefixes each still-open decision with its owning task
 # id, so a per-wake or per-session surface can print the consolidated open set

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end tests for captain-held tasks: the one primitive behind "a decision
 # is simply a task waiting on the captain", its completion gate, its recorded
-# answers, and the legacy compatibility for pre-collapse decision identities.
+# answers, the record-divergence guard over its two records, and the legacy
+# compatibility for pre-collapse decision identities.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1028,6 +1029,142 @@ test_origin_slug_validation_precedes_path_construction() {
   pass "completion and verification validate origins before constructing paths"
 }
 
+# --- record divergence ------------------------------------------------------
+
+run_drain() {  # <home>
+  local home=$1
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-wake-drain.sh" 2>/dev/null
+}
+
+# Reconstructs the 2026-08-06 loss with synthetic names: the answer was posted
+# as a `resolved [key=...]` line and nothing else, so the status fold went quiet
+# while the durable captain-held task stayed open and kept reading as if the
+# captain had never spoken. Both identities that can carry a captain call must
+# be caught - the collapsed one (the key IS the task id) and the legacy derived
+# one a pre-collapse origin minted - and the report must reach the drain, which
+# is where firstmate actually looks.
+test_status_resolution_over_an_open_hold_is_signalled() {
+  local home id out drain
+  home=$(make_home divergence-signalled)
+  id=sample-route-review
+  tasks_in "$home" add "$id" "Investigate sample routing" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the investigation fixture"
+  write_origin_meta "$home" "$id"
+  run_captain "$home" hold sample-route-call \
+    --title "Choose route: north or south" --reason "captain route choice pending" \
+    --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the collapsed-identity captain call"
+  run_captain "$home" hold "$id-decision-access" \
+    --title "Open or restricted sample access" --reason "captain access choice pending" \
+    --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the legacy-identity captain call"
+  cat > "$home/state/$id.status" <<'EOF'
+working: report drafted
+needs-decision [key=sample-route-call]: north or south
+resolved [key=sample-route-call]: answered: north
+needs-decision [key=access]: open or restricted sample access
+resolved [key=access]: answered: restricted
+done: report complete
+EOF
+
+  out=$(run_captain "$home" diverged) || fail "diverged failed on the reconstructed loss"
+  printf '%s\n' "$out" | grep -F "sample-route-call	$id	sample-route-call" >/dev/null \
+    || fail "the collapsed-identity divergence was not signalled: $out"
+  printf '%s\n' "$out" | grep -F "$id-decision-access	$id	access" >/dev/null \
+    || fail "the legacy-identity divergence was not signalled: $out"
+
+  drain=$(run_drain "$home") || fail "the drain failed while reporting divergence"
+  printf '%s\n' "$drain" | grep -F 'RECORD DIVERGENCE' >/dev/null \
+    || fail "the divergence never reached the drain: $drain"
+  printf '%s\n' "$drain" | grep -F 'sample-route-call [key=sample-route-call]' >/dev/null \
+    || fail "the drain section omitted the collapsed-identity divergence: $drain"
+  printf '%s\n' "$drain" | grep -F "$id-decision-access [key=access]" >/dev/null \
+    || fail "the drain section omitted the legacy-identity divergence: $drain"
+
+  # It signals; it never closes. Both records must survive the report unchanged,
+  # because closing a captain call wrongly removes it from review entirely.
+  assert_grep "sample-route-call" "$home/data/backlog.md" "the report must not remove the captain-held task"
+  tasks_in "$home" show sample-route-call --full | grep -E '^  held: yes' >/dev/null \
+    || fail "the report released or closed the captain-held task"
+  [ "$(grep -c '^resolved \[key=sample-route-call\]' "$home/state/$id.status")" = 1 ] \
+    || fail "the report rewrote the status log"
+
+  # And it names BOTH reconciliation directions. A status resolution is not proof
+  # the captain ruled: one of the real cases dissolved because its premise was
+  # false and another was a question of fact whose first reading was wrong, so
+  # the only safe instruction is "reconcile with what actually happened".
+  printf '%s\n' "$drain" | grep -F 'fm-captain-hold.sh answer' >/dev/null \
+    || fail "the drain section does not say how to record the captain's answer: $drain"
+  printf '%s\n' "$drain" | grep -F 're-open the status decision' >/dev/null \
+    || fail "the drain section does not offer the re-open direction: $drain"
+  pass "a status resolution over a still-open captain-held task is signalled, not closed"
+}
+
+# The false-signal boundary, driven by the shapes that are genuinely fine. A
+# captain call whose deliverable IS the decision has no routed work item at all,
+# and that is legitimate: routed work must never be part of the test. Nor may a
+# verified `captain-held` transfer, a still-open status decision, an already
+# answered call, or an ordinary task that merely had a keyed question answered.
+test_legitimate_holds_produce_no_divergence_signal() {
+  local home id out drain answer
+  home=$(make_home divergence-no-false-signal)
+  id=sample-systems-review
+  tasks_in "$home" add "$id" "Investigate sample systems" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the investigation fixture"
+  write_origin_meta "$home" "$id"
+
+  # (1) The decision IS the deliverable: held for the captain, nothing routed,
+  # no status line anywhere naming it.
+  run_captain "$home" hold sample-standalone-call \
+    --title "Adopt the sample naming convention" --reason "captain call with no routed work" \
+    --repo sample >/dev/null || fail "could not register the deliverable-is-the-decision call"
+  # (2) The verified transfer: still open structurally, closed on the status side
+  # by the captain-held verb command_complete writes.
+  run_captain "$home" hold sample-transfer-call \
+    --title "Choose the sample retention window" --reason "captain retention choice pending" \
+    --repo sample >/dev/null || fail "could not register the transferred call"
+  # (4) An already answered call whose status line reads resolved.
+  run_captain "$home" hold sample-answered-call \
+    --title "Choose the sample export format" --reason "captain export choice pending" \
+    --repo sample >/dev/null || fail "could not register the answered call"
+  answer="$home/answer.txt"
+  printf 'Export as CSV.\n' > "$answer"
+  run_captain "$home" answer sample-answered-call --decision-file "$answer" >/dev/null \
+    || fail "could not record the captain answer fixture"
+  # (5) An ordinary in-flight work item that is not held for the captain.
+  tasks_in "$home" add sample-plain-work "Ordinary sample work" --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the ordinary work fixture"
+
+  cat > "$home/state/$id.status" <<'EOF'
+working: report drafted
+needs-decision [key=sample-transfer-call]: choose the retention window
+captain-held [key=sample-transfer-call]: tracked by sample-transfer-call
+needs-decision [key=sample-open-call]: still open on both sides
+needs-decision [key=sample-answered-call]: choose the export format
+resolved [key=sample-answered-call]: answered: CSV
+needs-decision [key=sample-plain-work]: worker question about the sample fixture
+resolved [key=sample-plain-work]: answered: go ahead
+EOF
+  # (3) A still-open status decision whose structured twin is also still open.
+  run_captain "$home" hold sample-open-call \
+    --title "Choose the sample refresh cadence" --reason "captain cadence choice pending" \
+    --repo sample >/dev/null || fail "could not register the still-open call"
+
+  out=$(run_captain "$home" diverged) || fail "diverged failed on the legitimate shapes"
+  [ -z "$out" ] || fail "legitimate captain holds produced a false divergence signal: $out"
+
+  drain=$(run_drain "$home") || fail "the drain failed on the legitimate shapes"
+  if printf '%s\n' "$drain" | grep -F 'RECORD DIVERGENCE' >/dev/null; then
+    fail "the drain printed a divergence section with nothing diverging: $drain"
+  fi
+  printf '%s\n' "$drain" | grep -F 'sample-open-call' >/dev/null \
+    || fail "setup error: the still-open decision should still reach OPEN DECISIONS: $drain"
+  pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
@@ -1043,3 +1180,5 @@ test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
+test_status_resolution_over_an_open_hold_is_signalled
+test_legitimate_holds_produce_no_divergence_signal
