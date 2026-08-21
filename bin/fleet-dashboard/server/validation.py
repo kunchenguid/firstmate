@@ -66,9 +66,31 @@ REPORT_SHAPED_PHRASES = (
 _CLAUSE_SEPARATORS = re.compile(r"\s+[-\u2013\u2014]+\s+|[,;:.!?()\[\]/\n]+")
 
 # Hedges that can sit in front of a report phrase without changing that the
-# clause opens as a report ("Still investigating...", "We're looking into...").
+# clause opens as a report ("Still investigating...", "We're looking into...",
+# "We are investigating..."). Deliberately a closed grammatical class - the
+# first-person subjects plus the English copulas - not an open list of
+# subjects: a subject noun in front of a report phrase ("The team is looking
+# into it") stays a miss, in the same reworded-phrasing blind spot documented
+# in docs/dashboard.md.
 _LEADING_FILLER = frozenset(
-    {"still", "currently", "now", "just", "already", "we", "we're", "i", "i'm", "im"}
+    {
+        "still",
+        "currently",
+        "now",
+        "just",
+        "already",
+        "we",
+        "we're",
+        "i",
+        "i'm",
+        "im",
+        "is",
+        "are",
+        "was",
+        "were",
+        "'s",
+        "'re",
+    }
 )
 
 # Trailers that can sit behind a report phrase without changing that the

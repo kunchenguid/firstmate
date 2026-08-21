@@ -230,6 +230,9 @@ REPORT_SHAPED = [
     "Emails bouncing since Tuesday - following up on it",
     "The permit is under investigation",
     "Still chasing the supplier",
+    "We are investigating the checkout timeout",
+    "I was digging into the bounced payouts",
+    "We were keeping an eye on the disk usage",
 ]
 REWORDED_REPORTS = [
     "No change since last time",
@@ -242,6 +245,8 @@ REWORDED_REPORTS = [
     "Ran the script twice, both failed",
     "It is not fixed yet",
     "Heard back from the supplier, no news",
+    "The team is looking into the failed backup",
+    "The crew was investigating the leak",
 ]
 GENUINE_ASKS = [
     "Pick red or blue for the trim",
@@ -282,10 +287,10 @@ counts = (
     sum(refused(r) for r in REWORDED_REPORTS),
     sum(refused(r) for r in GENUINE_ASKS),
 )
-if counts != (15, 0, 0):
+if counts != (18, 0, 0):
     failures.append(
         f"documented rates drifted: caught/missed/false-positive counts are {counts}, "
-        "docs/dashboard.md says 15/15 caught, 0/10 reworded caught, 0/12 false positives"
+        "docs/dashboard.md says 18/18 caught, 0/12 reworded caught, 0/12 false positives"
     )
 
 for line in failures:
