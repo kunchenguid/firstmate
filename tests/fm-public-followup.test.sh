@@ -1593,6 +1593,31 @@ test_registration_replay_preserves_delivery_and_retirement() {
   pass "registration replay preserves delivered and retired loop states"
 }
 
+test_redelivery_does_not_report_retired_loop_open() {
+  local home log out
+  home=$(make_home redelivery-retired)
+  log="$home/curl.log"; : > "$log"
+  seed_commitment "$home" pf-redelivery-retired req-redelivery-retired discord main work-redelivery-retired
+  emit_terminal "$home" "$home" pf-redelivery-retired main work-redelivery-retired >/dev/null \
+    || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-redelivery-retired >/dev/null \
+    || fail "initial delivery failed"
+  run_pf "$home" retire pf-redelivery-retired --reason "thread finished" >/dev/null \
+    || fail "retire failed"
+
+  out=$(FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-redelivery-retired) \
+    || fail "idempotent redelivery failed"
+  assert_contains "$out" "already delivered pf-redelivery-retired" \
+    "redelivery must remain idempotent"
+  case "$out" in
+    *"still OPEN"*) fail "redelivery must not report a retired loop as open: $out" ;;
+  esac
+  [ "$(grep -c '^url=.*connector/followup' "$log" || true)" -eq 1 ] \
+    || fail "redelivery must not post a second public reply"
+  pass "redelivery does not report a retired loop as open"
+}
+
 test_retire_reason_closes_the_open_loop() {
   local home log out registry_file receipt_mode
   home=$(make_home retire-reason)
@@ -1879,6 +1904,7 @@ test_rechain_delivers_second_post_on_same_thread
 test_rechain_resumes_after_partial_add
 test_rechain_claims_delivered_source_once
 test_registration_replay_preserves_delivery_and_retirement
+test_redelivery_does_not_report_retired_loop_open
 test_retire_reason_closes_the_open_loop
 test_retention_creates_no_false_teardown_refusal
 test_expiry_escalation_uses_now_override

@@ -760,13 +760,15 @@ record_posted() {
 }
 
 # Delivery keeps the registration. Stamp it delivered and tell the caller the
-# public loop is still open. Missing records are a no-op so the already-posted
-# path can succeed after a prior successful stamp.
+# public loop is still open.
 mark_loop_delivered() {
-  local id=$1
-  [ -f "$(fm_pf_registry_dir "$STATE")/$id" ] || return 0
-  fm_pf_registry_stamp_delivered "$STATE" "$id" "$(now_rfc3339)" \
-    || die "could not stamp registration '$id' as delivered after the public reply landed" 1
+  local id=$1 rc=0
+  fm_pf_registry_stamp_delivered "$STATE" "$id" "$(now_rfc3339)" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3) return 3 ;;
+    *) die "could not stamp registration '$id' as delivered after the public reply landed" 1 ;;
+  esac
 }
 
 print_loop_open_disposition() {
@@ -793,6 +795,7 @@ cmd_deliver() {
   require_tools
 
   local payload delivery attempt request platform text tmp_text hash chunks rc receipt receipt_fields receipt_dry_run link_status
+  local loop_retained=0
   payload=$(obligation_json "$id") || die "could not read the backlog through tasks-axi" 1
   [ -n "$payload" ] || die "no public-followup obligation '$id' in this home's backlog" 1
 
@@ -817,9 +820,9 @@ cmd_deliver() {
           *) die "obligation '$id' is already $delivery, but its registration is missing or invalid and the legacy X link cannot be verified; reconcile it before any later terminal follow-up" 1 ;;
         esac
       fi
-      mark_loop_delivered "$id"
+      if mark_loop_delivered "$id"; then loop_retained=1; fi
       printf 'already delivered %s state=%s\n' "$id" "$delivery"
-      print_loop_open_disposition "$id" "$request"
+      [ "$loop_retained" -eq 0 ] || print_loop_open_disposition "$id" "$request"
       return 0
       ;;
     ready|retry-due|context-blocked|unknown|partial)
@@ -900,9 +903,9 @@ EOF
       if ! clear_public_followup_link "$id"; then
         die "the public reply for '$id' POSTED and its receipt was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
       fi
-      mark_loop_delivered "$id"
+      if mark_loop_delivered "$id"; then loop_retained=1; fi
       printf 'delivered %s request=%s platform=%s chunks=%s\n' "$id" "$request" "$platform" "$chunks"
-      print_loop_open_disposition "$id" "$request"
+      [ "$loop_retained" -eq 0 ] || print_loop_open_disposition "$id" "$request"
       return 0
     fi
     die "the public reply for '$id' POSTED but its receipt could not be recorded; close it with 'record-posted $id --attempt $attempt --chunks <exact-count>' before any retry, or the thread will get a second reply" 1
@@ -947,7 +950,7 @@ cmd_record_posted() {
     || die "public-followup registration for '$id' is missing or invalid; reconcile it before recording a receipt so any legacy X link can be cleared" 1
   require_tools
 
-  local payload request platform
+  local payload request platform loop_retained=0
   payload=$(obligation_json "$id") || die "could not read the backlog through tasks-axi" 1
   [ -n "$payload" ] || die "no public-followup obligation '$id' in this home's backlog" 1
   request=$(pf_field "$payload" '.public_followup.request.request_id')
@@ -958,9 +961,9 @@ cmd_record_posted() {
   if ! clear_public_followup_link "$id"; then
     die "the receipt for '$id' was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
   fi
-  mark_loop_delivered "$id"
+  if mark_loop_delivered "$id"; then loop_retained=1; fi
   printf 'recorded %s attempt=%s request=%s\n' "$id" "$attempt" "$request"
-  print_loop_open_disposition "$id" "$request"
+  [ "$loop_retained" -eq 0 ] || print_loop_open_disposition "$id" "$request"
 }
 
 # --- subcommand: guard-work -------------------------------------------------

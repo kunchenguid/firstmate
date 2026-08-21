@@ -355,7 +355,7 @@ fm_pf_registry_stamp_delivered() {
       | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$state")" "$id" 600 \
       || rc=$?
   else
-    rc=1
+    rc=3
   fi
   fm_pf_registry_lock_release "$state" "$id"
   return "$rc"
