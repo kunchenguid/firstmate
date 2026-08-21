@@ -36,7 +36,13 @@ done
 case "$url" in
   */auth.test) body='{"ok":true,"user_id":"U0BR5SQ4WN4"}' ;;
   */chat.postMessage) body='{"ok":true,"ts":"1786735224.700000","channel":"C0BQ9K1TJKG"}' ;;
-  */reactions.add) body='{"ok":true}' ;;
+  */reactions.add)
+    if [ -n "${FAKE_SLACK_REACTION_FAIL:-}" ]; then
+      body='{"ok":false,"error":"reaction_failed"}'
+    else
+      body='{"ok":true}'
+    fi
+    ;;
   */reactions.remove) body='{"ok":true}' ;;
   *) body='{"ok":false,"error":"unexpected_method"}' ;;
 esac
@@ -153,6 +159,28 @@ test_captain() {
   [ "$(grep -c '^method=reactions.add' "$log")" -eq 1 ] || fail "captain event was not acknowledged once"
   [ "$(grep -c '^method=chat.postMessage' "$log")" -eq 0 ] || fail "captain event posted an acknowledgement message"
   pass "captain event produces the poll wake, inbox, and received reaction"
+}
+
+test_captain_ack_retry() {
+  local home="$TMP_ROOT/captain-ack-retry" fakebin log event out expected
+  make_home "$home"
+  fakebin=$(make_fake_curl "$home/fake")
+  log="$home/curl.log"; : > "$log"
+  event='{"type":"message","channel":"C0BQ9K1TJKG","user":"U0CAPTAIN1","text":"status","ts":"1786735224.690830"}'
+  out=$(FM_SLACK_CURL_LOG="$log" FAKE_SLACK_REACTION_FAIL=1 \
+    run_event "$home" "$fakebin" env-captain-failed-ack "$event") \
+    || fail "captain event with failed acknowledgement failed"
+  printf -v expected 'slack-captain-message %s\t%s' 1786735224.690830 status
+  [ "$out" = "$expected" ] || fail "failed acknowledgement suppressed the captain wake: $out"
+  [ -f "$home/state/slack-inbox/1786735224.690830.json" ] || fail "failed acknowledgement suppressed inbox publication"
+  [ ! -e "$home/state/slack-acked/1786735224.690830" ] || fail "failed acknowledgement recorded completion"
+  [ -f "$home/state/slack-ack-pending/1786735224.690830" ] || fail "failed acknowledgement lost its retry marker"
+  out=$(FM_SLACK_CURL_LOG="$log" run_event "$home" "$fakebin" env-captain-retry "$event") \
+    || fail "captain acknowledgement retry failed"
+  [ -z "$out" ] || fail "captain acknowledgement retry duplicated the wake: $out"
+  [ -f "$home/state/slack-acked/1786735224.690830" ] || fail "successful retry did not retain its marker"
+  [ ! -e "$home/state/slack-ack-pending/1786735224.690830" ] || fail "successful retry remained pending"
+  pass "Socket Mode retries failed acknowledgement without duplicating delivery"
 }
 
 assert_refused() {
@@ -496,6 +524,7 @@ case "${FM_SLACK_SOCKET_TEST_CASE:-all}" in
   bridge) test_bridge ;;
   bridge-fails-closed) test_bridge_fails_closed ;;
   captain) test_captain ;;
+  captain-ack-retry) test_captain_ack_retry ;;
   other-user) test_other_user ;;
   bot-user) test_bot_user ;;
   subtype) test_subtype ;;
@@ -526,6 +555,7 @@ case "${FM_SLACK_SOCKET_TEST_CASE:-all}" in
     test_bridge
     test_bridge_fails_closed
     test_captain
+    test_captain_ack_retry
     test_other_user
     test_bot_user
     test_subtype

@@ -30,7 +30,8 @@ CAPTAIN_USER=U_CAPTAIN1
 # A fake curl answering every Slack method the clients call. Per-case overrides:
 # FAKE_SLACK_BOT_USER, FAKE_SLACK_CHANNEL, FAKE_SLACK_HISTORY,
 # FAKE_SLACK_REPLIES, FAKE_SLACK_POST, FAKE_SLACK_UPDATE, FAKE_SLACK_JOIN_TS,
-# FAKE_SLACK_REACTION_FAIL. Echoes the fakebin dir.
+# FAKE_SLACK_REACTION_FAIL, FAKE_SLACK_REACTION_FAIL_ONCE,
+# FAKE_SLACK_ALREADY_REACTED. Echoes the fakebin dir.
 make_fake_curl() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -81,7 +82,13 @@ case "$url" in
     fi
     ;;
   */reactions.add)
-    if [ -n "${FAKE_SLACK_REACTION_FAIL:-}" ]; then
+    if [ -n "${FAKE_SLACK_ALREADY_REACTED:-}" ]; then
+      body='{"ok":false,"error":"already_reacted"}'
+    elif [ -n "${FAKE_SLACK_REACTION_FAIL:-}" ]; then
+      body='{"ok":false,"error":"reaction_failed"}'
+    elif [ -n "${FAKE_SLACK_REACTION_FAIL_ONCE:-}" ] \
+      && [ "$(cat "$FAKE_SLACK_REACTION_FAIL_ONCE" 2>/dev/null || printf 0)" -gt 0 ]; then
+      printf '0\n' > "$FAKE_SLACK_REACTION_FAIL_ONCE"
       body='{"ok":false,"error":"reaction_failed"}'
     else
       body='{"ok":true}'

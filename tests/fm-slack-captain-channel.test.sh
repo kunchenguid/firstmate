@@ -212,6 +212,7 @@ case "$url" in
       { ok:true, messages: [ .[]
           | select(.ts == $p or .thread_ts == $p)
           | select((.ts|tonumber) > ($o|tonumber)) ] }' "$STORE") ;;
+  */reactions.add) body='{"ok":true}' ;;
   */chat.postMessage)
     newts=$(jq -r '[.[].ts|tonumber]|max|.+0.000001|tostring' "$STORE")
     jq -c --arg t "$newts" --arg x "$text" --arg th "$thread_ts" \
@@ -246,9 +247,12 @@ jq -n --arg p "$parent_ts" --arg n "$newer_ts" --arg cap "$CAPTAIN_USER" \
   '[{ts:$p,text:"action item",user:$cap},
     {ts:$n,text:"newer note",user:$cap}]' > "$home/fake-store.json"
 out=$(run_semantic_poll "$home" "$fakebin"); rc=$?
-[ "$rc" -eq 0 ] && [ -n "$out" ] || fail "thread setup poll1 must offer the older parent"
+[ "$rc" -eq 0 ] || fail "thread setup poll1 failed"
+printf -v expected 'slack-captain-message %s\t%s\nslack-captain-message %s\t%s' \
+  "$parent_ts" "action item" "$newer_ts" "newer note"
+[ "$out" = "$expected" ] || fail "thread setup poll1 must offer both pending messages: $out"
 out=$(run_semantic_poll "$home" "$fakebin"); rc=$?
-[ "$rc" -eq 0 ] && [ -n "$out" ] || fail "thread setup poll2 must offer the newer note"
+[ "$rc" -eq 0 ] && [ -z "$out" ] || fail "thread setup poll2 must not duplicate either message: $out"
 jq --arg p "$parent_ts" --arg r "$reply_ts" --arg cap "$CAPTAIN_USER" \
   '. + [{ts:$r,thread_ts:$p,text:"yes merge it",user:$cap}]' "$home/fake-store.json" \
   > "$home/fake-store.next" && mv "$home/fake-store.next" "$home/fake-store.json"
@@ -291,11 +295,126 @@ out=$(run_poll "$home" "$fakebin"); rc=$?
 [ "$rc" -eq 0 ] || fail "poll must survive a failed reaction (rc=$rc)"
 printf -v expected 'slack-captain-message %s\t%s' "1786735226.333333" "still wake"
 [ "$out" = "$expected" ] || fail "failed reaction must not suppress wake: $out"
-[ -f "$home/state/slack-acked/1786735226.333333" ] || fail "failed reaction must retain ack marker"
+[ ! -e "$home/state/slack-acked/1786735226.333333" ] \
+  || fail "failed reaction must not record a completed acknowledgement"
+[ -f "$home/state/slack-ack-pending/1786735226.333333" ] \
+  || fail "failed reaction must retain its durable retry marker"
 [ "$(count_ack_posts "$log")" -eq 0 ] || fail "failed reaction must not fall back to a message post"
 unset FAKE_SLACK_REACTION_FAIL
 unset FAKE_SLACK_HISTORY
 pass "fm-slack-poll wakes even when the received reaction fails"
+
+# --- publication precedes acknowledgement and retry ------------------------
+
+home="$TMP_ROOT/ack-retry"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-ack-retry")
+log="$home/curl-ack-retry.log"
+ack_fail_once="$home/ack-fail-once"
+printf '1\n' > "$ack_fail_once"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+export FAKE_SLACK_BOT_USER=$BOT_USER
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FAKE_SLACK_REACTION_FAIL_ONCE="$ack_fail_once"
+export FAKE_SLACK_HISTORY='{"ok":true,"messages":[{"type":"message","user":"'"$CAPTAIN_USER"'","text":"durable before courtesy ack","ts":"1786735226.444444"}]}'
+out=$(run_poll "$home" "$fakebin"); rc=$?
+[ "$rc" -eq 0 ] || fail "ack failure poll must survive a failed acknowledgement (rc=$rc)"
+printf -v expected 'slack-captain-message %s\t%s' "1786735226.444444" "durable before courtesy ack"
+[ "$out" = "$expected" ] || fail "ack failure must still emit the primary wake: $out"
+[ -f "$home/state/slack-inbox/1786735226.444444.json" ] \
+  || fail "ack failure must still publish the captain message"
+[ "$(grep -c '^method=reactions.add' "$log")" -eq 1 ] \
+  || fail "first poll must attempt one acknowledgement"
+inbox_digest=$(sha256sum "$home/state/slack-inbox/1786735226.444444.json")
+out=$(run_poll "$home" "$fakebin"); rc=$?
+[ "$rc" -eq 0 ] && [ -z "$out" ] \
+  || fail "ack retry must not publish or wake the message again: $out"
+[ "$(grep -c '^method=reactions.add' "$log")" -eq 2 ] \
+  || fail "a later poll must retry the failed acknowledgement"
+[ "$(sha256sum "$home/state/slack-inbox/1786735226.444444.json")" = "$inbox_digest" ] \
+  || fail "a later poll must not republish the already durable inbox message"
+[ -f "$home/state/slack-acked/1786735226.444444" ] \
+  || fail "successful retry must retain the acknowledgement marker"
+[ ! -e "$home/state/slack-ack-pending/1786735226.444444" ] \
+  || fail "successful retry must remove the pending acknowledgement marker"
+pass "fm-slack-poll publishes and wakes before best-effort acknowledgement, then retries only the acknowledgement"
+unset FAKE_SLACK_REACTION_FAIL_ONCE
+
+# --- interrupted acknowledgement remains independently retryable ------------
+
+home="$TMP_ROOT/ack-interrupted"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-ack-interrupted")
+log="$home/curl-ack-interrupted.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+export FAKE_SLACK_BOT_USER=$BOT_USER
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+. "$ROOT/bin/fm-x-lib.sh"
+printf '%s\n' 1786735226.499999 \
+  | fmx_private_artifact_publish_stdin "$home/state/slack-offered" 1786735226.499999 600 >/dev/null \
+  || fail "interrupted acknowledgement setup could not record delivery"
+printf '%s\n' 1786735226.499999 \
+  | fmx_private_artifact_publish_stdin "$home/state/slack-ack-pending" 1786735226.499999 600 >/dev/null \
+  || fail "interrupted acknowledgement setup could not record pending work"
+export FAKE_SLACK_HISTORY='{"ok":true,"messages":[]}'
+out=$(run_poll "$home" "$fakebin"); rc=$?
+[ "$rc" -eq 0 ] && [ -z "$out" ] || fail "interrupted acknowledgement retry emitted a primary wake: $out"
+[ -f "$home/state/slack-acked/1786735226.499999" ] || fail "interrupted acknowledgement was not completed"
+[ ! -e "$home/state/slack-ack-pending/1786735226.499999" ] || fail "completed interrupted acknowledgement stayed pending"
+[ "$(count_ack_reactions "$log")" -eq 1 ] || fail "interrupted acknowledgement was not retried once"
+pass "fm-slack-poll resumes acknowledgement from its durable pending marker"
+
+home="$TMP_ROOT/ack-already-reacted"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-ack-already-reacted")
+log="$home/curl-ack-already-reacted.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+export FAKE_SLACK_BOT_USER=$BOT_USER
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FAKE_SLACK_ALREADY_REACTED=1
+printf '%s\n' 1786735226.500000 \
+  | fmx_private_artifact_publish_stdin "$home/state/slack-offered" 1786735226.500000 600 >/dev/null \
+  || fail "already-reacted setup could not record delivery"
+printf '%s\n' 1786735226.500000 \
+  | fmx_private_artifact_publish_stdin "$home/state/slack-ack-pending" 1786735226.500000 600 >/dev/null \
+  || fail "already-reacted setup could not record pending work"
+export FAKE_SLACK_HISTORY='{"ok":true,"messages":[]}'
+out=$(run_poll "$home" "$fakebin"); rc=$?
+[ "$rc" -eq 0 ] && [ -z "$out" ] || fail "already-reacted retry emitted a primary wake: $out"
+[ -f "$home/state/slack-acked/1786735226.500000" ] || fail "already-reacted retry did not record completion"
+[ ! -e "$home/state/slack-ack-pending/1786735226.500000" ] || fail "already-reacted retry remained pending"
+out=$(run_poll "$home" "$fakebin"); rc=$?
+[ "$rc" -eq 0 ] && [ -z "$out" ] || fail "completed already-reacted retry emitted output: $out"
+[ "$(count_ack_reactions "$log")" -eq 1 ] || fail "already-reacted completion did not stop retries"
+unset FAKE_SLACK_ALREADY_REACTED
+pass "fm-slack-poll completes an acknowledgement Slack already applied"
+
+# --- failed acknowledgement does not block newer delivery -------------------
+
+home="$TMP_ROOT/ack-head-of-line"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-ack-head-of-line")
+log="$home/curl-ack-head-of-line.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+export FAKE_SLACK_BOT_USER=$BOT_USER
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FAKE_SLACK_REACTION_FAIL=1
+export FAKE_SLACK_HISTORY='{"ok":true,"messages":[
+  {"type":"message","user":"'"$CAPTAIN_USER"'","text":"first","ts":"1786735226.555551"},
+  {"type":"message","user":"'"$CAPTAIN_USER"'","text":"second","ts":"1786735226.555552"}]}'
+out=$(run_poll "$home" "$fakebin"); rc=$?
+[ "$rc" -eq 0 ] || fail "poll with two failed acknowledgements exited $rc"
+printf -v expected 'slack-captain-message %s\t%s\nslack-captain-message %s\t%s' \
+  1786735226.555551 first 1786735226.555552 second
+[ "$out" = "$expected" ] || fail "failed acknowledgement blocked a newer captain message: $out"
+[ -f "$home/state/slack-inbox/1786735226.555551.json" ] || fail "first captain message was not published"
+[ -f "$home/state/slack-inbox/1786735226.555552.json" ] || fail "second captain message was not published"
+unset FAKE_SLACK_REACTION_FAIL
+pass "fm-slack-poll delivers newer messages independently of failed acknowledgements"
 
 # --- channel enforcement ----------------------------------------------------
 

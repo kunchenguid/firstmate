@@ -335,28 +335,60 @@ fms_message_text_oneline() {
 
 fms_post_ack() {
   local message_ts=$1 body_file=${2:-}
+  export FMS_POST_ACK_FAILED=0
   fms_message_ts_valid "$message_ts" || return 1
   fms_channel_configured || return 1
   if [ -z "$body_file" ]; then
     body_file=$(mktemp "${TMPDIR:-/tmp}/fm-slack-ack.XXXXXX") || return 1
   fi
   if ! fms_add_reaction "$message_ts" received "$body_file"; then
+    if jq -e '.ok == false and .error == "already_reacted"' "$body_file" >/dev/null 2>&1; then
+      return 0
+    fi
     printf 'slack-captain-warning received reaction failed for %s\n' "$message_ts" >&2
+    export FMS_POST_ACK_FAILED=1
   fi
   return 0
 }
 
-fms_ack_claim() {
+fms_ack_pending_record() {
   local state=$1 ts=$2 dir
   fms_message_ts_valid "$ts" || return 2
-  dir="$state/slack-acked"
+  dir="$state/slack-ack-pending"
   printf '%s\n' "$ts" | fmx_private_artifact_publish_stdin_once "$dir" "$ts" 600
 }
 
-fms_ack_claim_release() {
+fms_ack_pending_release() {
   local state=$1 ts=$2
   fms_message_ts_valid "$ts" || return 1
-  rm -f -- "$state/slack-acked/$ts" 2>/dev/null
+  rm -f -- "$state/slack-ack-pending/$ts" 2>/dev/null
+}
+
+fms_ack_complete() {
+  local state=$1 ts=$2 dir rc
+  fms_message_ts_valid "$ts" || return 2
+  dir="$state/slack-acked"
+  printf '%s\n' "$ts" | fmx_private_artifact_publish_stdin_once "$dir" "$ts" 600 >/dev/null 2>&1
+  rc=$?
+  case "$rc" in
+    0|1) ;;
+    *) return 2 ;;
+  esac
+  fms_ack_pending_release "$state" "$ts"
+}
+
+fms_ack_message() {
+  local state=$1 ts=$2 body_file=${3:-} rc
+  if fmx_private_artifact_file_valid "$state/slack-acked" "$ts" 600 2>/dev/null; then
+    fms_ack_pending_release "$state" "$ts"
+    return 0
+  fi
+  fms_ack_pending_record "$state" "$ts" >/dev/null 2>&1
+  rc=$?
+  case "$rc" in 0|1) ;; *) return 2 ;; esac
+  fms_post_ack "$ts" "$body_file"
+  [ "$FMS_POST_ACK_FAILED" -eq 0 ] || return 1
+  fms_ack_complete "$state" "$ts"
 }
 
 fms_wake_line() {

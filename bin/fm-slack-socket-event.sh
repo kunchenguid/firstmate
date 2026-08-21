@@ -5,8 +5,12 @@
 # under state/slack-refused/ without acknowledgement or wake:
 #
 # message - the typed captain path: a human captain message with text on the
-#   configured channel is acked once with the received reaction, stashed in the
-#   inbox, and wakes firstmate once with `slack-captain-message <ts><TAB><text>`.
+#   configured channel is published durably to the inbox and wakes firstmate
+#   once with `slack-captain-message <ts><TAB><text>` before the courtesy
+#   acknowledgement: the `received` reaction is best-effort, a failure leaves
+#   a durable marker under state/slack-ack-pending/ for a later poll or
+#   repeated event to retry, and an acknowledgement failure never suppresses
+#   delivery of newer captain messages.
 #
 # reaction_added / reaction_removed - the captain's emoji answer path. A
 #   reaction is accepted from the pinned captain id only, on a message
@@ -106,21 +110,9 @@ handle_reaction_added() {
     *) exit 2 ;;
   esac
 
-  if ! fmx_private_artifact_file_valid "$STATE/slack-acked" "$ts" 600 2>/dev/null; then
-    case $(fms_ack_claim "$STATE" "$ts"; echo $?) in
-      0)
-        if ! fms_post_ack "$ts" "$ACK_FILE"; then
-          fms_ack_claim_release "$STATE" "$ts"
-          exit 2
-        fi
-        ;;
-      1) ;;
-      *) exit 2 ;;
-    esac
-  fi
-
   fms_inbox_publish "$STATE" "$event_ts" "$EVENT_FILE" || exit 2
   fms_wake_line "$event_ts" "$key: $answer"
+  fms_ack_message "$STATE" "$ts" "$ACK_FILE" || true
 }
 
 handle_reaction_removed() {
@@ -160,29 +152,17 @@ handle_message() {
   message_text=$(fms_message_text_oneline "$EVENT_FILE") || exit 2
   [ -n "$message_text" ] || refuse empty-message
 
-  if fmx_private_artifact_file_valid "$STATE/slack-offered" "$ts" 600 2>/dev/null; then
-    exit 0
+  if ! fmx_private_artifact_file_valid "$STATE/slack-inbox" "${ts}.json" 600 2>/dev/null; then
+    fms_inbox_publish "$STATE" "$ts" "$EVENT_FILE" || exit 2
   fi
-
-  if ! fmx_private_artifact_file_valid "$STATE/slack-acked" "$ts" 600 2>/dev/null; then
-    case $(fms_ack_claim "$STATE" "$ts"; echo $?) in
-      0)
-        if ! fms_post_ack "$ts" "$ACK_FILE"; then
-          fms_ack_claim_release "$STATE" "$ts"
-          exit 2
-        fi
-        ;;
-      1) ;;
-      *) exit 2 ;;
-    esac
-  fi
-
-  fms_inbox_publish "$STATE" "$ts" "$EVENT_FILE" || exit 2
+  fms_ack_pending_record "$STATE" "$ts" >/dev/null 2>&1
+  case "$?" in 0|1) ;; *) exit 2 ;; esac
   case $(fms_offer_claim "$STATE" "$ts"; echo $?) in
     0) fms_wake_line "$ts" "$message_text" ;;
-    1) exit 0 ;;
+    1) ;;
     *) exit 2 ;;
   esac
+  fms_ack_message "$STATE" "$ts" "$ACK_FILE" || true
 }
 
 tab=$(printf '\t')

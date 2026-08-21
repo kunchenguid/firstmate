@@ -548,8 +548,9 @@ The watcher runs the Slack shim on that configured Slack poll cycle via a dedica
 
 `bin/fm-slack-poll.sh` calls `conversations.history` and, when needed, `conversations.replies` on the configured channel only.
 It never calls `conversations.list` or any other discovery API.
-A newly offered human captain message is acknowledged once in-thread with a fixed constant (`On it.`), stashed at `state/slack-inbox/<ts>.json`, and wakes firstmate once with `slack-captain-message <ts><TAB><text>`.
-Ack markers under `state/slack-acked/` and offer markers under `state/slack-offered/` keep repeats silent across later polls and watcher restarts.
+A newly offered human captain message is first stashed at `state/slack-inbox/<ts>.json` and wakes firstmate once with `slack-captain-message <ts><TAB><text>`, then receives a best-effort `received` reaction.
+An acknowledgement failure leaves a durable marker under `state/slack-ack-pending/` for later polls or a repeated Socket Mode event to retry independently, without republishing the inbox entry or repeating the wake.
+Completion markers under `state/slack-acked/` stop acknowledgement retries, while offer markers under `state/slack-offered/` keep delivery repeats silent across later polls, repeated events, and watcher restarts.
 
 `bin/fm-slack-socket.mjs` starts from Slack's `apps.connections.open` response, acknowledges every envelope before dispatch, and reconnects clean socket closures without alarming.
 Both clean disconnects and instantly failed connection attempts use bounded backoff, so a local connect failure cannot become a hot retry loop.

@@ -9,8 +9,8 @@
 # Reads exclusively the configured channel id via conversations.history and
 # conversations.replies. Never calls conversations.list or any discovery API.
 # Each newly offered captain message is stashed at state/slack-inbox/<ts>.json,
-# acknowledged once with a received reaction, then wakes firstmate once
-# with: slack-captain-message <ts><TAB><text>
+# wakes firstmate once with slack-captain-message <ts><TAB><text>, then receives
+# a best-effort acknowledgement reaction that may be retried without re-waking.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,6 +54,23 @@ STORE_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-slack-poll-store.XXXXXX") || exit 0
 ACK_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-slack-poll-ack.XXXXXX") || exit 0
 trap 'rm -f "$BODY_FILE" "$MSG_FILE" "$STORE_FILE" "$ACK_FILE"' EXIT
 
+retry_pending_acks() {
+  local path ts
+  [ -d "$STATE/slack-ack-pending" ] || return 0
+  for path in "$STATE/slack-ack-pending"/*; do
+    [ -f "$path" ] || continue
+    ts=${path##*/}
+    fms_message_ts_valid "$ts" || continue
+    if ! fmx_private_artifact_file_valid "$STATE/slack-offered" "$ts" 600 2>/dev/null \
+      && fmx_private_artifact_file_valid "$STATE/slack-inbox" "${ts}.json" 600 2>/dev/null; then
+      continue
+    fi
+    fms_ack_message "$STATE" "$ts" "$ACK_FILE" || true
+  done
+}
+
+retry_pending_acks
+
 cursor=$(fms_poll_cursor_read "$STATE")
 [ -n "$cursor" ] || cursor=0
 
@@ -61,7 +78,7 @@ collect_messages() {
   local parent_ts=${1:-} data
   fms_channel_configured || return 1
   data="channel=$(printf '%s' "$FMS_CHANNEL_ID" | jq -sRr @uri)&limit=50"
-  if [ "$cursor" != 0 ]; then
+  if [ -n "$parent_ts" ] && [ "$cursor" != 0 ]; then
     data="${data}&oldest=$(printf '%s' "$cursor" | jq -sRr @uri)"
   fi
   if [ -n "$parent_ts" ]; then
@@ -100,8 +117,6 @@ if [ ! -s "$STORE_FILE" ]; then
   exit 0
 fi
 
-selected=
-selected_json=
 while IFS=$'\t' read -r ts row; do
   [ -n "$ts" ] || continue
   [ -n "$row" ] || continue
@@ -109,57 +124,30 @@ while IFS=$'\t' read -r ts row; do
   if fmx_private_artifact_file_valid "$STATE/slack-offered" "$ts" 600 2>/dev/null; then
     continue
   fi
-  selected=$ts
-  selected_json=$row
-  break
-done < <(sort -t $'\t' -k1,1n "$STORE_FILE")
-
-if [ -z "$selected" ] || [ -z "$selected_json" ]; then
-  clear_error
-  exit 0
-fi
-
-printf '%s\n' "$selected_json" > "$MSG_FILE"
-message_text=$(fms_message_text_oneline "$MSG_FILE") || message_text=
-[ -n "$message_text" ] || { emit_error_once "empty captain message"; exit 0; }
-
-if fmx_private_artifact_file_valid "$STATE/slack-acked" "$selected" 600 2>/dev/null; then
-  :
-else
-  case $(fms_ack_claim "$STATE" "$selected"; echo $?) in
+  printf '%s\n' "$row" > "$MSG_FILE"
+  message_text=$(fms_message_text_oneline "$MSG_FILE") || message_text=
+  [ -n "$message_text" ] || { emit_error_once "empty captain message"; continue; }
+  if ! fmx_private_artifact_file_valid "$STATE/slack-inbox" "${ts}.json" 600 2>/dev/null \
+    && ! fms_inbox_publish "$STATE" "$ts" "$MSG_FILE"; then
+    emit_error_once "cannot write inbox"
+    continue
+  fi
+  fms_ack_pending_record "$STATE" "$ts" >/dev/null 2>&1
+  case "$?" in
+    0|1) ;;
+    *) emit_error_once "cannot record pending message ack"; continue ;;
+  esac
+  case $(fms_offer_claim "$STATE" "$ts"; echo $?) in
     0)
-      if ! fms_post_ack "$selected" "$ACK_FILE"; then
-        fms_ack_claim_release "$STATE" "$selected"
-        emit_error_once "ack post failed"
-        exit 0
-      fi
+      clear_error
+      fms_wake_line "$ts" "$message_text" || emit_error_once "cannot format wake"
       ;;
     1) ;;
     *)
-      emit_error_once "cannot record message ack"
-      exit 0
+      emit_error_once "cannot record message offer"
+      continue
       ;;
   esac
-fi
-
-if ! fms_inbox_publish "$STATE" "$selected" "$MSG_FILE"; then
-  emit_error_once "cannot write inbox"
-  exit 0
-fi
-
-case $(fms_offer_claim "$STATE" "$selected"; echo $?) in
-  0)
-    clear_error
-    fms_wake_line "$selected" "$message_text" || { emit_error_once "cannot format wake"; exit 0; }
-  ;;
-  1)
-    clear_error
-    exit 0
-  ;;
-  *)
-    emit_error_once "cannot record message offer"
-    exit 0
-  ;;
-esac
-
-fms_poll_cursor_write "$STATE" "$selected" >/dev/null 2>&1 || true
+  fms_ack_message "$STATE" "$ts" "$ACK_FILE" || true
+  fms_poll_cursor_write "$STATE" "$ts" >/dev/null 2>&1 || true
+done < <(sort -t $'\t' -k1,1n "$STORE_FILE")
