@@ -13,7 +13,7 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are two documented exceptions. The absorb classification
+# There are three documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -23,7 +23,9 @@
 # open-decisions fold" below) also writes: it persists a per-status-file byte
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time.
+# log every time. crew_worktree_written_since reads the task's meta file and walks
+# a bounded slice of its worktree instead of a status file, so callers run it only
+# at the moment they would otherwise escalate.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -34,6 +36,19 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # Overridable so tests can stub the run-step/pane verdict without a real worktree
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
+
+# fm_run_timed, the shared hard bound the worktree write probe below puts around
+# its one filesystem walk. bin/fm-timeout-lib.sh owns bounded execution for this
+# repo, so nothing here re-derives the coreutils/BSD/perl selection. That library
+# declares `set -u` for its own hygiene, which a sourced sibling must not impose on
+# THIS library's consumers - several of them deliberately run without it - so the
+# caller's setting is restored around the source.
+case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
+# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_CLASSIFY_LIB_DIR/fm-timeout-lib.sh"
+[ "$_fm_classify_nounset" = on ] || set +u
+unset _fm_classify_nounset
 
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
@@ -1200,6 +1215,95 @@ crew_is_provably_working() {  # <id>
 # escalating a possible wedge.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
+}
+
+# Directories excluded from the worktree write probe below, and the depth it walks.
+# The excluded set is everything a supervisor read or a package manager can write
+# without the crew doing any work - .git first, so firstmate's own read-only git
+# commands against the worktree can never make the probe self-fulfilling - plus the
+# large generated trees that would make the walk expensive. Both are overridable so
+# a home with an unusual layout can widen or narrow the probe. The list is a skip
+# list, so clearing it skips nothing and widens the walk to the whole depth-bounded
+# tree; it never disables the probe, which would quietly cost the wedge detector a
+# liveness input on a home that meant to widen it. Defaulted with the plain form so
+# an explicitly empty value stays empty: clearing the knob in the environment is the
+# documented way to ask for that wider walk, and treating empty as unset would hand
+# the default skip list back to exactly the home that asked for more coverage.
+FM_WORKTREE_WRITE_PRUNE=${FM_WORKTREE_WRITE_PRUNE-'.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'}
+FM_WORKTREE_WRITE_MAXDEPTH=${FM_WORKTREE_WRITE_MAXDEPTH:-6}
+
+# Wall-clock seconds the probe's single walk may take. The walk runs synchronously
+# inside the caller's poll loop at the exact moment an escalation would otherwise
+# fire, and -xdev keeps it out of a nested mount but cannot help when the worktree
+# root ITSELF sits on a hung network or container mount; unbounded, such a walk
+# would wedge the very supervisor that exists to notice a wedge, stalling its
+# heartbeat instead of escalating. Hitting the bound is a negative outcome like
+# every other: it reads as no evidence, so the caller's escalation schedule is
+# untouched and a stall that writes nothing still escalates on the existing
+# schedule. A value that is not a positive integer is not a bound at all (`timeout
+# 0` and the perl fallback's `alarm 0` both disable the deadline), so the default
+# applies instead; the check lives at the point of use so an in-process override
+# gets it too.
+FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
+
+# 0 when some regular file under <id>'s recorded worktree is newer than
+# <anchor-file>: positive evidence the crew is still producing work even though its
+# rendered pane has gone quiet. This is the third liveness input the wedge detector
+# has, after pane quietness and the run step, and it exists because neither of
+# those can see a crew that is writing source, then tests, then documentation
+# behind a static pane - the 2026-08-14 case of eight consecutive possible-wedge
+# escalations against a crew that was demonstrably working the whole time.
+#
+# 1 for every other outcome, including an id with no recorded worktree, a worktree
+# that is gone, a missing anchor, and a walk that fails or finds nothing. Absence of
+# evidence therefore always leaves the caller's existing escalation schedule
+# untouched, so a crew that writes nothing still escalates exactly as before.
+#
+# A kind=secondmate task records a provisioned firstmate home, not a code tree, and
+# such a home runs its OWN supervision inside it: its state/ directory churns a
+# watcher beacon, pane hashes, and heartbeats whether or not the mate is producing
+# anything, so a walk there would report liveness for a mate that has done nothing.
+# Those homes are excluded outright rather than by pruning "state", which would also
+# hide a legitimate source directory of that name in an ordinary worktree. The
+# exclusion is a negative outcome like any other, so an unproductive mate keeps
+# escalating on the caller's unchanged schedule.
+#
+# The anchor is the caller's own idle-window timer file, whose mtime already marks
+# when the quiet window opened, so `-newer` needs no clock arithmetic, no temp
+# file, and no portable mtime-setting. Not a pure status-file read (see the header):
+# one pruned, depth-bounded, wall-clock-bounded walk per call, which callers must
+# reach only when they are otherwise about to escalate, never on every poll. A walk
+# that outlives FM_WORKTREE_WRITE_TIMEOUT is killed and reported as no evidence, so
+# a hung mount costs the escalation nothing but the bound. -xdev holds that walk to the
+# worktree's own filesystem rather than descending into a nested network or container
+# mount, so a write that lands only under such a mount is one more negative outcome.
+crew_worktree_written_since() {  # <id> <state> <anchor-file>
+  local id=$1 state=$2 anchor=$3 wt kind name hit bound
+  local -a names=() prune=()
+  [ -n "$id" ] || return 1
+  [ -f "$anchor" ] || return 1
+  wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ "$kind" != secondmate ] || return 1
+  if [ -e "$wt/.fm-secondmate-home" ] || [ -L "$wt/.fm-secondmate-home" ]; then
+    return 1
+  fi
+  read -r -a names <<< "$FM_WORKTREE_WRITE_PRUNE"
+  for name in ${names[@]+"${names[@]}"}; do
+    [ "${#prune[@]}" -eq 0 ] || prune+=( -o )
+    prune+=( -name "$name" )
+  done
+  bound=$FM_WORKTREE_WRITE_TIMEOUT
+  case "$bound" in ''|*[!0-9]*|0) bound=10 ;; esac
+  if [ "${#prune[@]}" -gt 0 ]; then
+    hit=$(fm_run_timed "$bound" find "$wt" -xdev -maxdepth "$FM_WORKTREE_WRITE_MAXDEPTH" \
+      \( "${prune[@]}" \) -prune -o -type f -newer "$anchor" -print -quit 2>/dev/null || true)
+  else
+    hit=$(fm_run_timed "$bound" find "$wt" -xdev -maxdepth "$FM_WORKTREE_WRITE_MAXDEPTH" \
+      -type f -newer "$anchor" -print -quit 2>/dev/null || true)
+  fi
+  [ -n "$hit" ]
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
