@@ -1239,6 +1239,24 @@ assert(
   selectActiveProviderQuota(fullyPopulatedParsed, "openai-codex", { nowMs: now }).kind === "fresh",
   "valid schema-3 through-reset runway was rejected",
 );
+const schema3FullParsed = parseQuotaAxiJson(
+  JSON.stringify(fullyPopulated),
+  { projection: "full" },
+);
+assert(
+  selectActiveProviderQuota(schema3FullParsed, "openai-codex", { nowMs: now }).kind === "fresh",
+  "valid schema-3 full projection was rejected",
+);
+const schema3FullWithoutSemantics = structuredClone(fullyPopulated);
+delete schema3FullWithoutSemantics.providers[1].quotaSemantics;
+const schema3FullWithoutSemanticsParsed = parseQuotaAxiJson(
+  JSON.stringify(schema3FullWithoutSemantics),
+  { projection: "full" },
+);
+assert(
+  selectActiveProviderQuota(schema3FullWithoutSemanticsParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "schema-3 full output without quota semantics was accepted as fresh",
+);
 const schema5Populated = structuredClone(fullyPopulated);
 schema5Populated.schemaVersion = 5;
 delete schema5Populated.providers[1].windows[0].pace.projectionBasis;
@@ -2533,9 +2551,16 @@ assert(
 );
 await unrelatedCredentialWrite.emit("session_shutdown", { reason: "quit" });
 
+const credentialChangeWatcher = new EventEmitter();
+credentialChangeWatcher.close = () => {};
+let notifyCredentialChange;
 const credentialChange = makePi(createFirstmateQuotaStatusExtension({
   refreshMs: 60_000,
   timeoutMs: 500,
+  watchAuthDirectory(_path, _options, listener) {
+    notifyCredentialChange = listener;
+    return credentialChangeWatcher;
+  },
 }));
 await credentialChange.emit("session_start", { reason: "startup" });
 await waitFor(
@@ -2543,6 +2568,11 @@ await waitFor(
   "credential-change fixture did not publish initial account quota",
 );
 await setStoredOAuth("openai-codex", fixtureAccessToken("replacement-codex-account"));
+notifyCredentialChange("change", "auth.json");
+assert(
+  !credentialChange.widgetText(400).includes("94%"),
+  "credential change remained visible while its revision check was pending",
+);
 await waitFor(
   () => !credentialChange.widgetText(400).includes("94%"),
   "credential change remained fresh after watcher invalidation",
@@ -2559,6 +2589,47 @@ assert(
   credentialChange.widgetWriteCount === writesAfterCredentialShutdown,
   "shutdown leaked the credential watcher",
 );
+
+const transientCredentialWatcher = new EventEmitter();
+let transientCredentialWatcherCloses = 0;
+transientCredentialWatcher.close = () => {
+  transientCredentialWatcherCloses += 1;
+};
+let notifyTransientCredentialChange;
+const transientCredentialRead = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 500,
+  watchAuthDirectory(_path, _options, listener) {
+    notifyTransientCredentialChange = listener;
+    return transientCredentialWatcher;
+  },
+}));
+await transientCredentialRead.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => transientCredentialRead.widgetText(400).includes("week 94% left"),
+  "transient credential-read fixture did not publish initial quota",
+);
+const validCredentialStorage = await readFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, "utf8");
+await writeFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, "{\n");
+notifyTransientCredentialChange("change", "auth.json");
+assert(
+  !transientCredentialRead.widgetText(400).includes("94%"),
+  "temporarily unverifiable credentials retained cached quota",
+);
+await waitFor(
+  () => transientCredentialRead.widgetText(240).includes("auth unavailable"),
+  `transient credential-read failure was not explicit: ${transientCredentialRead.widgetText(240)}`,
+);
+assert(transientCredentialWatcherCloses === 0, "transient credential-read failure closed the healthy watcher");
+await writeFile(`${process.env.PI_CODING_AGENT_DIR}/auth.json`, validCredentialStorage);
+notifyTransientCredentialChange("change", "auth.json");
+await waitFor(
+  () => transientCredentialRead.widgetText(400).includes("week 94% left"),
+  `repaired credential storage did not restore fresh quota: ${transientCredentialRead.widgetText(400)}`,
+);
+assert(transientCredentialWatcherCloses === 0, "repaired credential storage did not retain its watcher");
+await transientCredentialRead.emit("session_shutdown", { reason: "quit" });
+assert(transientCredentialWatcherCloses === 1, "credential watcher was not closed at shutdown");
 
 const silentCredentialWatcher = new EventEmitter();
 silentCredentialWatcher.close = () => {};

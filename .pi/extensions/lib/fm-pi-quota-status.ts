@@ -1384,7 +1384,7 @@ function validProviderFields(
   if (new Set(parsedWindows.map((window) => window?.id)).size !== parsedWindows.length) return false;
   const rawWindows = value.windows.filter(isRecord);
   if (rawWindows.length !== value.windows.length) return false;
-  if (schemaVersion === 5 && value.quotaSemantics === undefined) return false;
+  if ((schemaVersion === 5 || projection === "full") && value.quotaSemantics === undefined) return false;
   const untrustedWindowIds = isRecord(value.state) && Array.isArray(value.state.untrustedWindowIds)
     ? value.state.untrustedWindowIds as string[]
     : [];

@@ -446,6 +446,8 @@ type ActiveSession = {
   operationAbort: AbortController | null;
   credentialCheckAbort: AbortController | null;
   credentialCheckPending: boolean;
+  credentialCheckQuarantined: boolean;
+  credentialCheckIssue: QuotaRefreshIssue | null;
   credentialWatcher: FSWatcher | null;
   credentialMonitoringAvailable: boolean;
   refreshInFlight: boolean;
@@ -1357,6 +1359,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         ? preflightTarget(session.ctx, session.ctx.model)
         : credentialMonitoringView(session);
       session.credentialCheckPending = false;
+      session.credentialCheckQuarantined = false;
+      session.credentialCheckIssue = null;
       session.quota = null;
       session.lastFailure = null;
       void cancelProcess(session);
@@ -1418,12 +1422,24 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     function currentView(session: ActiveSession, nowMs = now()): QuotaView {
       const changedModel = changedLiveModelView(session);
       if (changedModel) return changedModel;
+      if (session.credentialCheckQuarantined) {
+        const provider = targetCredentialBinding(session.target)?.piProvider ??
+          session.ctx.model?.provider ??
+          "no model";
+        return session.credentialCheckIssue
+          ? refreshIssueView(session.credentialCheckIssue, provider)
+          : { kind: "refreshing", provider };
+      }
       if (session.target.kind === "unsupported") return session.target.view;
       if (session.target.kind === "resolving") {
         return { kind: "refreshing", provider: session.target.piProvider };
       }
       const selected = cachedQuotaView(session, nowMs);
-      if (!selected) return { kind: "refreshing", provider: session.target.piProvider };
+      if (!selected) {
+        return session.lastFailure
+          ? refreshIssueView(session.lastFailure, session.target.piProvider)
+          : { kind: "refreshing", provider: session.target.piProvider };
+      }
       if (!session.lastFailure) return selected;
       if (selected.kind === "fresh") {
         return selected.refreshFailure === session.lastFailure
@@ -1452,6 +1468,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.generation += 1;
       session.target = credentialMonitoringView(session);
       session.credentialCheckPending = false;
+      session.credentialCheckQuarantined = false;
+      session.credentialCheckIssue = null;
       session.quota = null;
       session.lastFailure = null;
       void cancelProcess(session);
@@ -1465,19 +1483,48 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.quota = null;
       session.lastFailure = null;
       session.credentialCheckPending = false;
+      session.credentialCheckQuarantined = false;
+      session.credentialCheckIssue = null;
       void cancelProcess(session);
       render(session);
       void refresh(session);
     }
 
+    function quarantineCredentialCheck(session: ActiveSession): void {
+      const changed = !session.credentialCheckQuarantined || session.credentialCheckIssue !== null;
+      session.credentialCheckQuarantined = true;
+      session.credentialCheckIssue = null;
+      if (changed) render(session);
+    }
+
+    function releaseCredentialCheck(session: ActiveSession): void {
+      const changed = session.credentialCheckQuarantined || session.credentialCheckIssue !== null;
+      session.credentialCheckQuarantined = false;
+      session.credentialCheckIssue = null;
+      if (changed) render(session);
+    }
+
+    function credentialReadIssue(
+      result: Exclude<BoundedCredentialResult, { kind: "ok" | "cancelled" }>,
+    ): QuotaRefreshIssue {
+      if (result.kind === "timeout") return "auth-timeout";
+      if (result.kind === "overflow") return "auth-overflow";
+      return "auth-unavailable";
+    }
+
     function credentialFileChanged(session: ActiveSession): void {
       if (active !== session) return;
-      if (session.refreshInFlight || session.credentialCheckAbort !== null) {
-        session.credentialCheckPending = true;
+      if (targetCredentialBinding(session.target)) {
+        quarantineCredentialCheck(session);
+        if (session.refreshInFlight || session.credentialCheckAbort !== null) {
+          session.credentialCheckPending = true;
+          return;
+        }
+        void checkCredentialRevision(session);
         return;
       }
-      if (targetCredentialBinding(session.target)) {
-        void checkCredentialRevision(session);
+      if (session.refreshInFlight || session.credentialCheckAbort !== null) {
+        session.credentialCheckPending = true;
         return;
       }
       if (
@@ -1522,10 +1569,17 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         if (result.kind === "cancelled") return;
         session.credentialCheckAbort = null;
         if (result.kind !== "ok") {
-          failCredentialMonitoring(session);
+          const issue = credentialReadIssue(result);
+          const changed = !session.credentialCheckQuarantined || session.credentialCheckIssue !== issue;
+          session.credentialCheckQuarantined = true;
+          session.credentialCheckIssue = issue;
+          if (changed) render(session);
           return;
         }
-        if (result.revision === binding.credentialRevision) return;
+        if (result.revision === binding.credentialRevision) {
+          if (!session.credentialCheckPending) releaseCredentialCheck(session);
+          return;
+        }
         credentialsChanged(session);
       } finally {
         if (session.credentialCheckAbort === controller) session.credentialCheckAbort = null;
@@ -1704,12 +1758,17 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             return;
           }
           session.target = target;
+          session.credentialCheckQuarantined = false;
+          session.credentialCheckIssue = null;
           session.quota = null;
           session.lastFailure = null;
           render(session);
           return;
         }
         session.target = target;
+        if (session.credentialCheckQuarantined && !session.credentialCheckPending) {
+          releaseCredentialCheck(session);
+        }
         if (previousTarget.kind !== "supported" || !supportedTargetsMatch(previousTarget, target)) {
           session.quota = null;
           session.lastFailure = null;
@@ -1779,12 +1838,17 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             return;
           }
           session.target = completedTarget;
+          session.credentialCheckQuarantined = false;
+          session.credentialCheckIssue = null;
           session.quota = null;
           session.lastFailure = null;
           render(session);
           return;
         }
         session.target = completedTarget;
+        if (session.credentialCheckQuarantined && !session.credentialCheckPending) {
+          releaseCredentialCheck(session);
+        }
         if (!supportedTargetsMatch(completedTarget, target)) {
           session.quota = null;
           session.refreshPending = true;
@@ -1883,6 +1947,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         operationAbort: null,
         credentialCheckAbort: null,
         credentialCheckPending: false,
+        credentialCheckQuarantined: false,
+        credentialCheckIssue: null,
         credentialWatcher: null,
         credentialMonitoringAvailable: false,
         refreshInFlight: false,
@@ -1906,7 +1972,21 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           void refresh(session);
           return;
         }
-        if (refreshMs > DEFAULT_REVISION_CHECK_MS) void checkCredentialRevision(session);
+        if (refreshMs > DEFAULT_REVISION_CHECK_MS) {
+          if (
+            session.target.kind === "unsupported" &&
+            (
+              session.target.view.reason === "auth-timeout" ||
+              session.target.view.reason === "auth-cancelled" ||
+              session.target.view.reason === "auth-overflow" ||
+              session.target.view.reason === "auth-unavailable"
+            )
+          ) {
+            void refresh(session);
+          } else {
+            void checkCredentialRevision(session);
+          }
+        }
       }, Math.min(refreshMs, DEFAULT_REVISION_CHECK_MS));
       unrefTimer(session.revisionTimer);
       render(session);
@@ -1926,6 +2006,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       active.target = active.credentialMonitoringAvailable
         ? preflightTarget(ctx, ctx.model)
         : credentialMonitoringView(active);
+      active.credentialCheckQuarantined = false;
+      active.credentialCheckIssue = null;
       active.quota = null;
       active.lastFailure = null;
       void cancelProcess(active);
