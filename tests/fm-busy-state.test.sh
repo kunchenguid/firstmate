@@ -8,7 +8,9 @@
 # adapter isolation (one adapter's writer or Grok's regex can never classify
 # another adapter); endpoint death is the only process-level override and
 # yields dead, never busy; converted adapters never classify from rendered
-# footer text. All hermetic over temp dirs; no real agent session is invoked.
+# footer text. On the writer side: arm seeds fm-spawn metadata or preserves an
+# explicit state/source/event triple. All hermetic
+# over temp dirs; no real agent session is invoked.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -37,6 +39,18 @@ test_arm_seeds_busy_spawn() {
   out=$(fm_busy_classify tmux w1 claude t1 "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed should classify 'busy fm-spawn', got '$out'"
   pass "arm mints a gen sidecar and seeds busy fm-spawn at seq=1"
+}
+
+test_arm_preserves_explicit_state_source_event() {
+  local state rec
+  state=$(new_state_dir arm-explicit)
+  "$EV" arm "$state" t1 --state idle --source claude-hook --event stop >/dev/null \
+    || fail "arm with explicit metadata failed"
+  rec=$(fm_busy_record_read "$state" t1) \
+    || fail "armed explicit record was unreadable: $rec"
+  [ "$rec" = "idle claude-hook stop 1" ] \
+    || fail "expected 'idle claude-hook stop 1', got '$rec'"
+  pass "arm preserves explicit state, source, and event metadata"
 }
 
 test_apply_advances_seq_and_source() {
@@ -380,6 +394,7 @@ test_boolean_view_never_promotes_unknown() {
 }
 
 test_arm_seeds_busy_spawn
+test_arm_preserves_explicit_state_source_event
 test_apply_advances_seq_and_source
 test_apply_current_gen_reset
 test_apply_unarmed_refused
