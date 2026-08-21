@@ -75,6 +75,8 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-branch-prefix-lib.sh
+. "$SCRIPT_DIR/fm-branch-prefix-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -101,6 +103,20 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+if [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
+  CONFIG=$(resolve_directory_input FM_CONFIG_OVERRIDE "$FM_CONFIG_OVERRIDE") || exit 1
+else
+  CONFIG="$FM_HOME/config"
+fi
+# config/branch-prefix (local, gitignored): the prefix generated ship briefs
+# use for the task branch, so a shared repo where another fleet already owns
+# `fm/*` can be pointed at a distinct prefix (e.g. `ryan-fm/`) instead of the
+# scaffold's stock language silently overriding per-task instructions.
+# fm_branch_prefix_resolve (bin/fm-branch-prefix-lib.sh) is the one owner of
+# this resolution; bin/fm-merge-local.sh and bin/fm-review-diff.sh share it so
+# a configured prefix stays consistent everywhere a task branch is named.
+# Absent or empty resolves to the default `fm/`. See docs/configuration.md.
+BRANCH_PREFIX=$(fm_branch_prefix_resolve "$CONFIG")
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -355,7 +371,7 @@ fi
 case "$MODE" in
   direct-PR)
     SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    RULE1='1. Never push to the default branch (push only your `'"$BRANCH_PREFIX$ID"'` branch). Never merge a PR.'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=direct-PR
@@ -367,14 +383,14 @@ EOF
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`$BRANCH_PREFIX$ID\` branch; firstmate handles the merge into local \`main\`."
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+The task is complete only when committed on your branch \`$BRANCH_PREFIX$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+When it is implemented and committed, append \`done: ready in branch $BRANCH_PREFIX$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
@@ -425,7 +441,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b $BRANCH_PREFIX$ID\`$SETUP2
 
 # Rules
 $RULE1

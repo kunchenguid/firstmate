@@ -214,7 +214,7 @@ Text is typed once; only Enter is retried.
 
 On an idle or done native baseline, submit confirmation first waits for `working` or `blocked` across a bounded polling window.
 If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer is delivery, and proven pending text retries Enter.
-After the retry budget, `fm_composer_queued_enter_verdict` treats proven pending text plus a generating busy signal as a queued delivered Enter, and keeps an idle pending composer as a genuine swallow.
+After the retry budget, `fm_composer_queued_enter_verdict` treats proven pending text plus a generating busy signal as a queued delivered Enter; an idle pending composer instead falls to `fm_backend_herdr_swallow_sweep`, a bounded (`FM_BACKEND_HERDR_SWALLOW_RETRIES`, default 2) Enter-only follow-up that catches a stubborn but ultimately landable swallow (verified incident: 2026-08-18, recurred 2026-08-20 - a manual operator follow-up Enter reliably landed text the main loop had reported swallowed) before finally reporting a genuine swallow.
 On an already active or unreadable baseline, the adapter falls back to conservative composer clearance, with a pre-Enter rendered-footer transition when that baseline is unavailable.
 A fully unreadable target stops retrying and reports unknown.
 blocked is not treated as a queued-Enter busy signal, so a Cursor pane that reports blocked in every state does not receive that conversion.
