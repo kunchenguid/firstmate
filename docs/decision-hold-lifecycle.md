@@ -23,13 +23,20 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
+Closing a hold is an ordinary tasks-axi close, and every close prunes the Done section to `done_keep`, so once more than `done_keep` newer closes have landed a resolved decision record has left `data/backlog.md` for the append-only done archive beside it, possibly long before its origin's completion gate runs.
+Every read that judges an identity's durability or resolution therefore consults the live backlog first and then that archive, through tasks-axi's own parser over a read-only view in which each dated archive block is presented as the Done section it was pruned from, so the script never parses task lines itself and never writes the archive.
+The archive is a durable read source rather than a weaker gate: an archived record satisfies `verify` only when it already carries the resolution record the script wrote before it was pruned, an exact close retry against it stays idempotent while a drifted retry is still refused, and `hold` refuses to reopen an archived identity.
+An archived record closed outside the script still fails `verify` and still blocks teardown, `repair` reaches only live records, and raising or overriding `done_keep` is never how the gate is satisfied.
+An archive that exists but cannot be read is reported by name as that read fault rather than as an absent record or as an origin this home does not own, and the read-only view never outlives the lookup that staged it.
+
 The `resolve`, `answer`, and `decline` subcommands close active holds, while `repair` attests a hold already closed outside the script.
 All four require a non-empty captain decision file and record the same resolution block in the hold body with the decision digest, routed identities, and a `Resolution mode:` naming the path.
 An exact retry is idempotent, while a changed decision or, for `resolve`, a changed routed-task set is rejected.
 
 The `resolve` subcommand is the routed path and additionally requires at least one existing dependent task whose structured `blocked-by` edge points to the hold.
-It clears each dependency edge through tasks-axi and marks the hold Done only after those writes succeed.
+It clears each still-live dependency edge through tasks-axi and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, and a failed intermediate step leaves the hold open.
+A routed task counts wherever it durably lives, so a retry is not defeated by routed work that ordinary pruning archived after an earlier attempt recorded the resolution and cleared its edge, while a routed task in neither tier is still refused.
 
 The public `answer` and `decline` subcommands share one unrouted close implementation and differ only in the `Resolution mode:` they record and the outcome word they print, so neither can drift into a weaker ordinary close than the other.
 Both ordinarily record `(none)` as the routed identities and refuse while any task in the same backlog is still blocked by the hold, because releasing routed work without recording it is `resolve`'s job.
@@ -93,6 +100,7 @@ Unrouted close-path verification date: 2026-08-13.
 Answer-time closure verification date: 2026-08-16.
 Cross-origin answer-time closure verification date: 2026-08-19.
 Reserved close/drop answer verification date: 2026-08-20.
+Done-pruning retention verification date: 2026-08-19.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -113,6 +121,16 @@ A replayed delivery closes nothing new and is not rejected as a different decisi
 A separate regression drives the real `fm-send` over a stubbed transport to prove the chat channel reaches the same intake for a decision already transferred to its hold, which the status ledger alone can no longer close.
 The cross-origin regression drives a bound source through the real runner and adapter interface, closes full-identity holds from different origins, and proves that over-limit, malformed, non-decision, routed-work, absent-hold, and replayed answers all fail or skip without weakening the existing guards.
 A reserved `__drop__` answer through that same published poll shape declines the matching hold with a dropped-by-captain record and leaves Bearings' Captain's Call even when existing independent work is routed behind it; that dependent work remains queued and is not closed.
+
+Seven regressions cover the done-archive read tier, with synthetic `sample` identities.
+The first three exercise ordinary Done pruning at the tracked `done_keep = 10`, which the first and second assert from the copied `.tasks.toml`, so the incident's retention is reproduced and never raised.
+The first answers twelve inventoried decisions through the routed, declined, and answered close paths and then closes the scout, so ordinary Done pruning has already moved the three oldest resolved records into `data/done-archive.md`; before the archive-aware read that shape made `verify` report them absent and teardown refuse, and after it `verify`, a later `complete` pass, every exact close retry, and teardown all succeed, a drifted retry and a reopen of an archived identity are still refused, an explicit `prune --keep 0` verifies the same way, and the archive's bytes never change.
+The second reproduces a routed close whose final close failed transiently after it had already recorded the captain decision and cleared the routing edge, then completes that routed work and lets ordinary pruning archive it, and proves the exact retry closes the hold and clears `verify` while a drifted decision, a drifted routed set, and a routed task in neither tier are all still refused.
+The third closes a hold outside the script and lets ten more closes prune it, then proves that `verify` and teardown still refuse it, that no close path or `repair` can record an answer onto the archived record, and that neither the archive nor the live backlog gains a resolution record.
+The fourth runs the gate from another working directory with a relative `TMPDIR`, which is the shape the staged view crosses when tasks-axi reads it from the active home, and proves an archived resolved decision still verifies, still retries idempotently, still refuses a reopen, still clears teardown, and leaves no view behind.
+The fifth rewrites the archive's only block heading to one this reader does not know and proves `verify`, `repair`, and `hold` each report that read fault by name, teardown still refuses, the origin metadata survives, and nothing reads the record as merely absent or as satisfied.
+The sixth deletes an origin's metadata and report so only the durable record still answers for ownership, and proves an unreadable archive is reported as that read fault rather than as an origin this home does not own.
+The seventh kills a lookup while its read-only view is staged and proves the view is removed with it.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -135,6 +153,13 @@ ok - a channel source with no decision binding closes nothing
 ok - an any-origin bound source closes full-identity holds across origins
 ok - the answer path keeps every guard the unrouted close path already had
 ok - the chat channel feeds the same keyed-answer intake a captured review does
+ok - resolved decisions survive ordinary Done pruning for the completion gate
+ok - a resolve retry survives routed work that Done pruning archived after routing
+ok - an archived record without a recorded captain decision still blocks the gate
+ok - an archived resolved decision verifies under a relative TMPDIR
+ok - an unreadable done archive is never read as an absent decision
+ok - an unreadable archive is reported as a read fault, not as a foreign origin
+ok - a killed archive lookup leaves no read-only view behind
 
 $ bash tests/fm-bearings-board.test.sh
 ok - path prints the stable home-scoped board location
@@ -171,9 +196,11 @@ ok - the run abort and the leaked-process reap both complete before the destruct
 
 $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
 
 $ bin/fm-doc-audience-check.sh
-fm-doc-audience-check: ok surfaces=68 local_links=253
+fm-doc-audience-check: ok surfaces=69 local_links=256
 
 $ git diff --check
 (no output)
