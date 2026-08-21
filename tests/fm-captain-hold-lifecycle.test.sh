@@ -1231,7 +1231,7 @@ test_archived_captain_answer_still_completes_the_investigation() {
 # the two ways the archive read itself can fail, because reporting either as "no
 # record" would restore exactly the false absent this change removes.
 test_unanswered_and_absent_captain_calls_still_fail_distinguishably() {
-  local home id absent_err closed_err archived_err unstaged_err unreadable_err out
+  local home id absent_err closed_err archived_err unheld_err unstaged_err unreadable_err out
   home=$(make_home retention-gate-guard)
   id=sample-guarded-review
   mkdir -p "$home/data/$id"
@@ -1300,10 +1300,31 @@ test_unanswered_and_absent_captain_calls_still_fail_distinguishably() {
     "cleanup was refused for some other reason, so this proves nothing about the gate"
   assert_present "$home/state/$id.meta" "a refused cleanup must preserve the investigation record"
 
-  # The three messages must be tellable apart, which is the whole repair here.
+  # (4) A recorded entry that is open but was never held for the captain. It is
+  # not the captain's item at all, and dropping it from the inventory is the
+  # repair rather than answering it, so it must say that in its own words.
+  tasks_in "$home" add sample-unheld-call "Choose the unheld option" --repo sample >/dev/null \
+    || fail "could not create the unheld call"
+  printf 'decision_keys=sample-unheld-call\n' >> "$home/state/$id.meta"
+  if run_captain "$home" verify "$id" > "$home/unheld.out" 2> "$home/unheld.err"; then
+    fail "verification passed an inventory entry that is not held for the captain"
+  fi
+  unheld_err=$(cat "$home/unheld.err")
+  assert_contains "$unheld_err" "is not held for the captain" \
+    "a recorded but unheld entry must be named as not the captain's item"
+  assert_contains "$unheld_err" "$home/data/backlog.md" \
+    "the unheld message must name the file the record was found in"
+
+  # Every pair of the three refusals must be tellable apart, which is the whole
+  # repair here.
   [ "$absent_err" != "$closed_err" ] || fail "no record and unanswered read identically: $absent_err"
   [ "$closed_err" != "$archived_err" ] \
     || fail "the unanswered message does not distinguish which file holds the record"
+  [ "$absent_err" != "$archived_err" ] \
+    || fail "no record and an archived record with no answer read identically: $absent_err"
+  [ "$unheld_err" != "$absent_err" ] && [ "$unheld_err" != "$closed_err" ] \
+    && [ "$unheld_err" != "$archived_err" ] \
+    || fail "the unheld refusal does not read differently from the other two: $unheld_err"
 
   # Recording the answer, once, is what actually clears the gate - and it clears
   # it for the backlog copy, so the pass is earned rather than assumed.
@@ -1321,7 +1342,7 @@ test_unanswered_and_absent_captain_calls_still_fail_distinguishably() {
     *archived*) fail "the answered call is in the active backlog; the pass must not claim otherwise: $out" ;;
   esac
 
-  # (4) Retention moves that answered record into the archive, and then the copy
+  # (5) Retention moves that answered record into the archive, and then the copy
   # the read needs cannot be staged at all. Nothing was read, so the archive is
   # unexamined: this must blame the staging rather than the layout, and above all
   # must not read as an absent record.
@@ -1345,7 +1366,7 @@ test_unanswered_and_absent_captain_calls_still_fail_distinguishably() {
   assert_not_contains "$unstaged_err" "layout changed" \
     "nothing was read, so the staging failure must not be blamed on the archive layout"
 
-  # (5) The archive still carries the entry, but its own section heading is no
+  # (6) The archive still carries the entry, but its own section heading is no
   # longer one tasks-axi accepts, so the record cannot be read back. Only this
   # throwaway fixture is damaged, and only its heading: the entry line is left
   # intact so the read reaches the parse instead of stopping at "no entry".
@@ -1381,7 +1402,7 @@ test_unanswered_and_absent_captain_calls_still_fail_distinguishably() {
     || fail "a layout the parser rejects and a copy that could not be staged read identically: $unreadable_err"
   [ "$unreadable_err" != "$closed_err" ] && [ "$unreadable_err" != "$archived_err" ] \
     || fail "an unreadable archive reads as a recorded-but-unanswered call: $unreadable_err"
-  pass "no-record, recorded-but-unanswered, archived-but-unanswered, unstageable, and unreadable captain-call records all still fail, distinguishably"
+  pass "no-record, recorded-but-unanswered, archived-but-unanswered, unheld, unstageable, and unreadable captain-call records all still fail, distinguishably"
 }
 
 # The siblings that share the same lookup. Reading the archive is not permission
@@ -1424,6 +1445,22 @@ test_archived_records_are_readable_but_never_written() {
     "the refusal must say the archive cannot take the change, not that the task is absent"
   cmp -s "$home/data/done-archive.md" "$home/archive-before.md" \
     || fail "a refused answer still wrote to the archive"
+
+  # The release is the same answer the archive already records, so only its close
+  # mode differs: lifting a hold is a write, and the archive takes no writes.
+  if run_captain "$home" answer sample-archived-call --decision-file "$home/answer.txt" --release \
+    > "$home/release.out" 2> "$home/release.err"; then
+    fail "--release was accepted against an archived record that was never reopened"
+  fi
+  err=$(cat "$home/release.err")
+  assert_contains "$err" "$home/data/done-archive.md" \
+    "the release refusal must name the archive as where the record is"
+  assert_not_contains "$err" "has no record" \
+    "a release against an archived record must not be refused as if the task were absent"
+  cmp -s "$home/data/done-archive.md" "$home/archive-before.md" \
+    || fail "a refused release still wrote to the archive"
+  cmp -s "$home/data/backlog.md" "$home/backlog-before.md" \
+    || fail "a refused release resurrected the archived row in the active backlog"
 
   # Holding the same id again would mint a second row for a call the captain has
   # already answered, splitting one identity across the two files.
@@ -1473,6 +1510,137 @@ test_archived_records_are_readable_but_never_written() {
   pass "archived captain-call records are readable, replayable, and never written or duplicated"
 }
 
+# Reading the archive and being able to open it are different questions. A path
+# that exists and is not a readable regular file leaves it unknown whether the
+# record is in there, so it has to stop the gate in its own words instead of
+# reading as "no record", and it has to stop `hold` from minting a second row for
+# a call the archive may already hold. No archive file at all is the opposite
+# case and stays quiet, because a home that has never had a row trimmed is
+# healthy rather than broken.
+test_unopenable_archive_refuses_instead_of_reading_as_absent() {
+  local home id out err
+  home=$(make_home retention-archive-unopenable)
+  id=sample-unopenable-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Guard the archive read" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the guarded-read origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Guard the archive read\n\nOne captain choice was needed and has been answered.\n' \
+    > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-unopenable-call --title "Choose the guarded option" \
+    --reason "captain guarded choice pending" --repo sample >/dev/null \
+    || fail "could not register the captain-held task"
+  printf 'Take the guarded option.\n' > "$home/answer.txt"
+  run_captain "$home" answer sample-unopenable-call --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  run_captain "$home" complete "$id" sample-unopenable-call >/dev/null \
+    || fail "completion failed on the answered inventory"
+
+  # Nothing has been trimmed yet, so there is no archive file at all. That is the
+  # normal healthy state of a young home and must not be a failure of any kind.
+  assert_absent "$home/data/done-archive.md" \
+    "setup error: retention has not run, so no archive file should exist yet"
+  run_captain "$home" verify "$id" >/dev/null 2> "$home/no-archive.err" \
+    || fail "a home with no archive file at all was refused: $(cat "$home/no-archive.err")"
+
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  out=$(run_captain "$home" verify "$id") || fail "verification failed on the archived answer"
+  assert_contains "$out" "1 answered and archived" \
+    "setup error: the record should now be read out of the archive"
+
+  # The archive path becomes a symlink, which this read deliberately refuses to
+  # follow. The record is still in there, which is exactly why the refusal must
+  # not read as an absent record.
+  mv "$home/data/done-archive.md" "$home/archive-elsewhere.md"
+  ln -s "$home/archive-elsewhere.md" "$home/data/done-archive.md"
+  if run_captain "$home" verify "$id" > "$home/unopenable.out" 2> "$home/unopenable.err"; then
+    fail "verification passed while the archive could not be opened at all"
+  fi
+  err=$(cat "$home/unopenable.err")
+  assert_contains "$err" "$home/data/done-archive.md" \
+    "the refusal must name the archive path it could not open"
+  assert_contains "$err" "not a readable regular file" \
+    "the refusal must say the archive could not be read, not that the record is gone"
+  assert_not_contains "$err" "has no record" \
+    "an archive that was never searched must not be reported as holding no record"
+
+  # And `hold` must not mint a second row for a call the archive may already
+  # hold, which is the split identity that guard exists to prevent.
+  if run_captain "$home" hold sample-unopenable-call --title "Choose the guarded option" \
+    --reason "captain guarded choice pending" > "$home/hold.out" 2> "$home/hold.err"; then
+    fail "hold created a row for an archived call while the archive could not be read"
+  fi
+  assert_grep "not a readable regular file" "$home/hold.err" \
+    "the refused hold must name the unreadable archive rather than a missing task"
+  assert_no_grep "sample-unopenable-call" "$home/data/backlog.md" \
+    "the refused hold minted a second row for a call the archive may already hold"
+
+  # Non-vacuity: the same gate passes again the moment the archive is readable.
+  rm -f "$home/data/done-archive.md"
+  mv "$home/archive-elsewhere.md" "$home/data/done-archive.md"
+  out=$(run_captain "$home" verify "$id") \
+    || fail "the gate stayed refused once the archive was readable again"
+  assert_contains "$out" "1 answered and archived" \
+    "the restored archive must be read exactly as it was before"
+  pass "an archive path that cannot be opened refuses loudly and blocks a duplicate hold"
+}
+
+# The archive is only found through this home's own `[markdown]` table, so every
+# spelling of that table header TOML accepts has to be recognized. Each home here
+# configures a NON-default archive, so a header form this read failed to match
+# would fall back to the tracked default, find no archive there, and report the
+# answered record as absent all over again.
+test_markdown_table_header_forms_all_locate_the_archive() {
+  local home form archive=data/retired-rows.md out index=0
+  while IFS= read -r form; do
+    [ -n "$form" ] || continue
+    index=$((index + 1))
+    home=$(make_home "markdown-header-$index")
+    case "$form" in
+      CRLF)
+        form='[markdown]'
+        printf 'backend = "markdown"\r\n\r\n%s\r\npath = "data/backlog.md"\r\narchive = "%s"\r\ndone_keep = 10\r\n' \
+          "$form" "$archive" > "$home/.tasks.toml"
+        form='[markdown] with carriage returns'
+        ;;
+      *)
+        printf 'backend = "markdown"\n\n%s\npath = "data/backlog.md"\narchive = "%s"\ndone_keep = 10\n' \
+          "$form" "$archive" > "$home/.tasks.toml"
+        ;;
+    esac
+    tasks_in "$home" add sample-header-call "Choose the header option" --repo sample >/dev/null \
+      || fail "could not create the call under header form <$form>"
+    run_captain "$home" hold sample-header-call --reason "captain header choice pending" >/dev/null \
+      || fail "could not hold the call under header form <$form>"
+    printf 'Take the header option.\n' > "$home/answer.txt"
+    run_captain "$home" answer sample-header-call --decision-file "$home/answer.txt" >/dev/null \
+      || fail "could not record the answer under header form <$form>"
+    tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+      || fail "could not run backlog retention under header form <$form>"
+    assert_grep "sample-header-call" "$home/$archive" \
+      "setup error: retention should have used the configured archive under header form <$form>"
+    assert_absent "$home/data/done-archive.md" \
+      "setup error: the tracked default archive must stay unused, or this proves nothing"
+
+    # The exact replay only reaches its record if the configured archive was the
+    # file that got searched.
+    out=$(run_captain "$home" answer sample-header-call --decision-file "$home/answer.txt" 2>&1) \
+      || fail "the configured [markdown] archive was not found under header form <$form>: $out"
+    assert_contains "$out" "answered: sample-header-call" \
+      "the archived answer must replay under header form <$form>"
+  done <<'EOF'
+[markdown]
+[markdown] # the markdown backend
+[ markdown ]
+["markdown"]
+CRLF
+EOF
+  [ "$index" = 5 ] || fail "not every header form was exercised: $index"
+  pass "every [markdown] table header form TOML accepts still locates the configured archive"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
@@ -1493,3 +1661,5 @@ test_legitimate_holds_produce_no_divergence_signal
 test_archived_captain_answer_still_completes_the_investigation
 test_unanswered_and_absent_captain_calls_still_fail_distinguishably
 test_archived_records_are_readable_but_never_written
+test_unopenable_archive_refuses_instead_of_reading_as_absent
+test_markdown_table_header_forms_all_locate_the_archive

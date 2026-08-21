@@ -141,9 +141,17 @@ fm_tasks_axi_backend_available() {
 # are dropped, so every archived row lands under a single section and the read
 # never depends on the parser tolerating a repeated section heading. tasks-axi
 # stays the single owner of the backlog format; the copy only makes the archive's
-# own section headings legible to it, and fm_tasks_axi_archive_show keeps a copy
-# it cannot parse, a copy it could not stage, and an absent record as three
-# separate answers.
+# own section headings legible to it.
+#
+# THE OUTCOMES ARE KEPT APART, and fm_tasks_axi_record_show below is the one
+# owner of the whole two-file read so a caller never has to compose it again: a
+# record found in the backlog, a record found in the archive, no record in
+# either, a copy that cannot be parsed, a copy that could not be staged, and an
+# archive path that could not be read at all are six separate answers. Only "no
+# record" is quiet, because only that one is honest: a home that has never had a
+# row trimmed has no archive file, which is the healthy normal state, while an
+# archive that exists and cannot be read is a record that may well be there and
+# must never be reported as absent. Each caller owns its own wording for these.
 
 # One `[markdown]` file path from <home>'s own tasks-axi config, resolved the way
 # tasks-axi resolves it: the configured value when present, else the default the
@@ -154,15 +162,27 @@ fm_tasks_axi_backend_available() {
 # back that other backend's file: the archive lookup would read the wrong file
 # and report an archived record as absent, which is the failure this whole read
 # exists to remove.
+# Recognizing the table has to be generous for the same reason. Missing a header
+# TOML accepts falls back to the default, which for a home that configured its
+# own paths names a file that does not exist and reports an archived record as
+# absent all over again, so a trailing comment, a carriage return, whitespace
+# inside the brackets, and a quoted key all still name this table.
 fm_tasks_axi_markdown_path() {  # <home> <key> <default-relative>
-  local home=$1 key=$2 default=$3 config="$1/.tasks.toml" value=''
+  local home=$1 key=$2 default=$3 config="$1/.tasks.toml" value='' quotes="\"'"
   if [ -f "$config" ] && [ ! -L "$config" ]; then
-    value=$(awk -v key="$key" '
+    value=$(awk -v key="$key" -v quotes="$quotes" '
       /^[ \t]*\[/ {
         section = $0
-        sub(/^[ \t]+/, "", section)
-        sub(/[ \t]+$/, "", section)
-        in_markdown = (section == "[markdown]")
+        sub(/\r$/, "", section)
+        sub(/#.*$/, "", section)
+        sub(/^[ \t]*\[+[ \t]*/, "", section)
+        sub(/[ \t]*\]+[ \t]*$/, "", section)
+        edge = substr(section, 1, 1)
+        if (length(section) > 1 && index(quotes, edge) > 0 &&
+            substr(section, length(section), 1) == edge) {
+          section = substr(section, 2, length(section) - 2)
+        }
+        in_markdown = (section == "markdown")
         next
       }
       !in_markdown { next }
@@ -200,9 +220,19 @@ fm_tasks_axi_archive_file() {  # <home>
 # the signal that separates an unreadable archive from an absent record below.
 # Deliberately over-inclusive is fine and under-inclusive is not, so it matches
 # the canonical entry line and lets tasks-axi give the real answer.
+#   0 - the archive carries an entry for this id
+#   1 - it does not, which INCLUDES there being no archive file at all: a home
+#       that has never had a row trimmed has nothing to search, and that is the
+#       healthy normal state rather than a failure
+#   4 - the archive path exists but is not a readable regular file, so the
+#       question was never asked; a caller must not read this as no entry, and a
+#       caller using this as a fail-closed guard must refuse rather than proceed
 fm_tasks_axi_archive_has_entry() {  # <archive-file> <id>
   local file=$1 id=$2 pattern
-  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 1
+  fi
+  { [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ]; } || return 4
   pattern=$(printf '%s' "$id" | sed 's/[][\\.*^$+?(){}|/]/\\&/g')
   grep -Eq "^- \[[ x]\] $pattern - " "$file" 2>/dev/null
 }
@@ -217,10 +247,13 @@ fm_tasks_axi_archive_has_entry() {  # <archive-file> <id>
 #       so nothing was read at all; the repair is this machine's temp space
 #       rather than the archive, and a caller must blame neither the layout nor
 #       an absent record
+#   4 - the archive path could not be read at all, so whether it carries the
+#       entry is unknown; passed through from fm_tasks_axi_archive_has_entry
 fm_tasks_axi_archive_show() {  # <home> <id>
   local home=$1 id=$2 archive view out rc=0
   archive=$(fm_tasks_axi_archive_file "$home")
-  fm_tasks_axi_archive_has_entry "$archive" "$id" || return 1
+  fm_tasks_axi_archive_has_entry "$archive" "$id" || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
   view=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-archive-view.XXXXXX") || return 3
   # Every archived row under ONE section: the first dated heading becomes the
   # `## Done` heading the parser accepts and the later ones are dropped, so their
@@ -241,4 +274,34 @@ fm_tasks_axi_archive_show() {  # <home> <id>
   rm -f -- "$view"
   { [ "$rc" -eq 0 ] && [ -n "$out" ]; } || return 2
   printf '%s\n' "$out"
+}
+
+# One task record from wherever it lives: the active backlog first, then the
+# archive retention moved a closed row into. This is the whole two-file read in
+# one place, so no caller composes it again and a new outcome is added here once.
+# It sets globals rather than printing because a caller also needs to know WHICH
+# file answered, which a command substitution could not carry back out.
+#   0 - found; FM_TASKS_AXI_RECORD is the record and FM_TASKS_AXI_RECORD_ARCHIVED
+#       is 1 when the archive answered and 0 when the active backlog did
+#   1 - no record in either file
+#   2 - the archive carries the entry but it could not be read back
+#   3 - the archive carries the entry but no readable copy of it could be staged
+#   4 - the archive path could not be read at all
+FM_TASKS_AXI_RECORD=''
+FM_TASKS_AXI_RECORD_ARCHIVED=0
+# shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+fm_tasks_axi_record_show() {  # <home> <id>
+  local home=$1 id=$2 rc=0
+  FM_TASKS_AXI_RECORD=''
+  FM_TASKS_AXI_RECORD_ARCHIVED=0
+  if FM_TASKS_AXI_RECORD=$( (cd "$home" && tasks-axi show "$id" --full) 2>/dev/null ); then
+    return 0
+  fi
+  FM_TASKS_AXI_RECORD=$(fm_tasks_axi_archive_show "$home" "$id") || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    FM_TASKS_AXI_RECORD_ARCHIVED=1
+    return 0
+  fi
+  FM_TASKS_AXI_RECORD=''
+  return "$rc"
 }

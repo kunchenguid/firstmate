@@ -71,36 +71,24 @@ compose() {  # <origin> <key>
   printf '%s-decision-%s' "$1" "$2"
 }
 
-task_show() {
-  (cd "$FM_HOME" && tasks-axi show "$1" --full) 2>/dev/null
-}
-
-# One record from either file, set as globals so the caller can also tell WHERE
-# it came from; a command substitution could not carry that back out.
-#   0 - found, 1 - no record in either file, 2 - unreadable archive,
-#   3 - no readable copy of the archive could be staged
+# The shared two-file read from bin/fm-tasks-axi-lib.sh, in this shim's own
+# globals; that library owns the read and its outcomes, and this owns only the
+# wording below.
 RECORD_SHOW=''
 RECORD_ARCHIVED=0
 load_record() {  # <task-id>
-  local id=$1 rc=0
-  RECORD_SHOW=''
-  RECORD_ARCHIVED=0
-  if RECORD_SHOW=$(task_show "$id"); then
-    return 0
-  fi
-  RECORD_SHOW=$(fm_tasks_axi_archive_show "$FM_HOME" "$id") || rc=$?
-  if [ "$rc" -eq 0 ]; then
-    RECORD_ARCHIVED=1
-    return 0
-  fi
-  RECORD_SHOW=''
+  local rc=0
+  fm_tasks_axi_record_show "$FM_HOME" "$1" || rc=$?
+  RECORD_SHOW=$FM_TASKS_AXI_RECORD
+  RECORD_ARCHIVED=$FM_TASKS_AXI_RECORD_ARCHIVED
   return "$rc"
 }
 
 # load_record, turning each failure into a plain diagnostic that names what was
 # searched instead of reporting an archived record as missing. A layout the parser
-# rejects and a copy that could never be staged are separate answers, because the
-# archive is only implicated in the first.
+# rejects, a copy that could never be staged, and an archive that could not be
+# opened are separate answers, because they call for different repairs and only
+# the last leaves it unknown whether the record is in there at all.
 require_record() {  # <label> <task-id>
   local label=$1 id=$2 rc=0
   load_record "$id" || rc=$?
@@ -108,6 +96,8 @@ require_record() {  # <label> <task-id>
     || fail "$label $id is archived in $ARCHIVE_FILE but tasks-axi could not read that record; the archive layout changed"
   [ "$rc" -ne 3 ] \
     || fail "$label $id is archived in $ARCHIVE_FILE but no readable copy of that archive could be staged; nothing was read"
+  [ "$rc" -ne 4 ] \
+    || fail "$ARCHIVE_FILE exists but is not a readable regular file, so the archive could not be searched for $label $id"
   [ "$rc" -eq 0 ] \
     || fail "$label $id has no record: no task $id in $BACKLOG_FILE and none in $ARCHIVE_FILE"
 }

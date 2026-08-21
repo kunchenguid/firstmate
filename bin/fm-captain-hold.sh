@@ -277,31 +277,30 @@ show_field_value() {  # <show-output> <field>
   printf '%s' "$value"
 }
 
-# The two-file read scope from this script's header, in one place every read
-# below goes through. Following load_decision's convention above, this sets
-# globals instead of printing, so a caller can also name WHERE the record was
-# found without paying for a second lookup.
+# The two-file read scope from this script's header, in this script's own terms:
+# bin/fm-tasks-axi-lib.sh owns the read and its outcomes, and this names WHERE the
+# record was found in the files this script reports on. Following load_decision's
+# convention above, it sets globals instead of printing, so a caller can name that
+# file without paying for a second lookup.
 #   0 - found; DURABLE_SHOW is the record and DURABLE_SOURCE the file it came from
 #   1 - no record in either file
 #   2 - the archive carries the entry but it could not be read back
 #   3 - the archive carries the entry but no readable copy of it could be staged
+#   4 - the archive path could not be read at all
 DURABLE_SHOW=''
 DURABLE_SOURCE=''
 load_durable_record() {  # <task-id>
-  local id=$1 rc=0
-  DURABLE_SHOW=''
+  local rc=0
   DURABLE_SOURCE=''
-  if DURABLE_SHOW=$(task_show "$id"); then
-    DURABLE_SOURCE=$BACKLOG_FILE
-    return 0
-  fi
-  DURABLE_SHOW=$(fm_tasks_axi_archive_show "$FM_HOME" "$id") || rc=$?
-  if [ "$rc" -eq 0 ]; then
+  fm_tasks_axi_record_show "$FM_HOME" "$1" || rc=$?
+  DURABLE_SHOW=$FM_TASKS_AXI_RECORD
+  [ "$rc" -eq 0 ] || return "$rc"
+  if [ "$FM_TASKS_AXI_RECORD_ARCHIVED" = 1 ]; then
     DURABLE_SOURCE=$ARCHIVE_FILE
-    return 0
+  else
+    DURABLE_SOURCE=$BACKLOG_FILE
   fi
-  DURABLE_SHOW=''
-  return "$rc"
+  return 0
 }
 
 unreadable_archive() {  # <task-id>
@@ -315,11 +314,19 @@ unstageable_archive() {  # <task-id>
   fail "captain call $1 is archived in $ARCHIVE_FILE but no readable copy of that archive could be staged; nothing was read, so this cannot confirm what the captain answered"
 }
 
-# The two archive-read failures, each said in its own words. Neither may degrade
-# into "no record": a record that exists is never reported as absent.
+# The archive file itself could not be opened, so whether it holds this record is
+# unknown. It cannot claim the record is archived and it must never claim the
+# record is absent, and it names the id so the reader knows what was being asked.
+unsearchable_archive() {  # <task-id>
+  fail "$ARCHIVE_FILE exists but is not a readable regular file, so the archive could not be searched for $1; a record may well be in there, and a symlink or an unreadable mode has to be fixed before this can tell"
+}
+
+# Every archive-read failure, each said in its own words. None may degrade into
+# "no record": a record that exists, or might exist, is never reported as absent.
 archive_read_failed() {  # <status> <task-id>
   [ "$1" -ne 2 ] || unreadable_archive "$2"
   [ "$1" -ne 3 ] || unstageable_archive "$2"
+  [ "$1" -ne 4 ] || unsearchable_archive "$2"
 }
 
 # The single "no record in either file" message. It names both files on purpose:
@@ -342,12 +349,16 @@ require_durable_record() {  # <task-id>
 
 # Does this home own the origin? A task row retention already archived is still
 # this home's own record of it, so a long-finished investigation can complete a
-# later review pass instead of being disowned.
+# later review pass instead of being disowned. An archive that cannot be read is
+# not evidence of no ownership, so it says that rather than disowning the origin.
 origin_exists_here() {  # <origin-id>
+  local rc=0
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
   task_show "$1" >/dev/null 2>&1 && return 0
-  fm_tasks_axi_archive_has_entry "$ARCHIVE_FILE" "$1"
+  fm_tasks_axi_archive_has_entry "$ARCHIVE_FILE" "$1" || rc=$?
+  [ "$rc" -ne 4 ] || unsearchable_archive "$1"
+  return "$rc"
 }
 
 list_has_key() {  # <comma-list> <key>
@@ -472,7 +483,7 @@ verify_loaded_durable() {  # <task-id>
 # still names real tasks.
 #
 # This one never exits, so the keyed intake can skip a single unusable row
-# instead of aborting a batch of answers, and reports which of the three things
+# instead of aborting a batch of answers, and reports which of the four things
 # happened.
 #   0 - resolved; RESOLVED_ID names the task and DURABLE_SHOW/DURABLE_SOURCE
 #       carry its record
@@ -481,6 +492,8 @@ verify_loaded_durable() {  # <task-id>
 #       names the id that was probed
 #   3 - the archive carries the entry but no readable copy of it could be staged;
 #       RESOLVED_ID names the id that was probed
+#   4 - the archive path could not be read at all; RESOLVED_ID names the id that
+#       was probed
 RESOLVED_ID=''
 resolve_and_load() {  # <origin-or-empty> <entry>
   local origin=$1 entry=$2 legacy rc=0
@@ -518,7 +531,7 @@ require_resolved_record() {  # <origin-or-empty> <entry>
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind
+  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind archive_rc
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -559,9 +572,16 @@ command_hold() {
     # backlog is: minting the id again would create a second row for a call the
     # captain already answered and split one identity across the two files. The
     # cheap entry match is deliberate, so even an archive tasks-axi can no longer
-    # parse blocks the duplicate instead of waving it through.
-    ! fm_tasks_axi_archive_has_entry "$ARCHIVE_FILE" "$id" \
-      || fail "task $id is already closed and archived in $ARCHIVE_FILE; a new captain call needs its own task"
+    # parse blocks the duplicate instead of waving it through. This guard is
+    # fail-closed all the way: an archive it could not open answers neither yes
+    # nor no, so it refuses rather than minting the second row on a guess.
+    archive_rc=0
+    fm_tasks_axi_archive_has_entry "$ARCHIVE_FILE" "$id" || archive_rc=$?
+    case "$archive_rc" in
+      0) fail "task $id is already closed and archived in $ARCHIVE_FILE; a new captain call needs its own task" ;;
+      1) : ;;
+      *) archive_read_failed "$archive_rc" "$id" ;;
+    esac
     [ -n "$title" ] || fail "--title is required to create task $id"
     validate_one_line title "$title"
     if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
@@ -879,11 +899,11 @@ command_answers() {
         continue
         ;;
     esac
-    # One resolution, one record, four distinguishable skips: a key that names
+    # One resolution, one record, five distinguishable skips: a key that names
     # nothing, an archive whose layout moved, an archive no copy could be staged
-    # from, and (below) a record that exists but cannot take this answer. A key
-    # whose answer was recorded and later trimmed out of the backlog resolves
-    # here like any other.
+    # from, an archive that could not be opened, and (below) a record that exists
+    # but cannot take this answer. A key whose answer was recorded and later
+    # trimmed out of the backlog resolves here like any other.
     resolve_rc=0
     resolve_and_load "$origin" "$key" || resolve_rc=$?
     if [ "$resolve_rc" -eq 2 ]; then
@@ -893,6 +913,12 @@ command_answers() {
     fi
     if [ "$resolve_rc" -eq 3 ]; then
       printf 'skipped: %s (archived in %s but no readable copy of that archive could be staged)\n' \
+        "$key" "$ARCHIVE_FILE"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if [ "$resolve_rc" -eq 4 ]; then
+      printf 'skipped: %s (%s exists but is not a readable regular file, so the archive could not be searched)\n' \
         "$key" "$ARCHIVE_FILE"
       skipped=$((skipped + 1))
       continue
