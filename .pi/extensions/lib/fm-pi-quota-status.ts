@@ -1660,7 +1660,14 @@ function validProviderFields(
     providerIsStale,
     untrustedWindowIds,
   )) return false;
-  if (parseCredits(value.credits) === null) return false;
+  const credits = parseCredits(value.credits);
+  if (
+    credits === null ||
+    (provider === "codex" && credits !== undefined && (
+      credits.unit !== "credits" ||
+      (credits.remaining === null && credits.unlimited === null)
+    ))
+  ) return false;
   const account = parseAccount(value.account);
   const attempts = parseAttempts(value.attempts);
   if (account === null || attempts === null) return false;

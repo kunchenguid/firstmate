@@ -494,6 +494,7 @@ type ActiveSession = {
   modelRefreshTimer: unknown | null;
   recoveryTimer: unknown | null;
   revisionTimer: unknown | null;
+  wallViewRevision: string;
 };
 
 function positiveNumber(value: number | undefined, fallback: number): number {
@@ -658,26 +659,14 @@ type ClockSample = {
 function conservativePublicationAgeMs(
   processStartedAt: ClockSample | null,
   publishedAt: ClockSample | null,
-  timelineOriginMs: number,
 ): number | null {
   if (
     !processStartedAt ||
     !publishedAt ||
-    !Number.isFinite(timelineOriginMs) ||
     publishedAt.monotonicBeforeMs < processStartedAt.monotonicAfterMs
   ) return null;
   const processElapsedMs = publishedAt.monotonicAfterMs - processStartedAt.monotonicBeforeMs;
-  const wallElapsedMs = publishedAt.wallMs - processStartedAt.wallMs;
-  if (
-    wallElapsedMs < 0 ||
-    timelineOriginMs < Math.min(processStartedAt.wallMs, publishedAt.wallMs) ||
-    timelineOriginMs > Math.max(processStartedAt.wallMs, publishedAt.wallMs)
-  ) return processElapsedMs;
-  const wallAgeMs = Math.max(0, publishedAt.wallMs - timelineOriginMs);
-  return Math.min(
-    processElapsedMs,
-    wallAgeMs + Math.ceil(Math.abs(processElapsedMs - wallElapsedMs)),
-  );
+  return Number.isFinite(processElapsedMs) && processElapsedMs >= 0 ? processElapsedMs : null;
 }
 
 function decodeUtf8(value: Uint8Array): string | null {
@@ -1654,6 +1643,17 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         : selected;
     }
 
+    function quotaWallRevision(view: QuotaView): string {
+      if (view.kind !== "fresh") return view.kind;
+      return JSON.stringify([
+        view.kind,
+        referenceRevision(view.windows),
+        view.freshnessTimestampMs,
+        view.reportFreshUntilMs,
+        view.freshUntilMs,
+      ]);
+    }
+
     function clearExpiry(session: ActiveSession): void {
       if (session.expiryTimer !== null) timers.clearTimeout(session.expiryTimer);
       if (session.statusTimer !== null) timers.clearTimeout(session.statusTimer);
@@ -1840,6 +1840,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.recoveryTimer = null;
       const view = override ?? currentView(session);
       const schedulingBaseMs = now();
+      session.wallViewRevision = quotaWallRevision(view);
       if (session.expiryTimerQuota !== session.quota) {
         clearExpiry(session);
         session.expiryTimerQuota = session.quota;
@@ -1901,6 +1902,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           const renderView = !changedModel && current.kind === "refreshing" && view.kind === "stale"
             ? view
             : current;
+          session.wallViewRevision = quotaWallRevision(renderView);
           if ((renderView.kind === "fresh") !== (view.kind === "fresh")) {
             scheduleRecoveredView(session);
           }
@@ -2122,7 +2124,6 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             const publicationAgeMs = conservativePublicationAgeMs(
               processStartedAt,
               publishedAt,
-              timelineOriginMs,
             );
             const retainedPublication = publicationAgeMs === null ? null : publication;
             const elapsedAtPublicationMs = publicationAgeMs ?? 0;
@@ -2223,6 +2224,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         modelRefreshTimer: null,
         recoveryTimer: null,
         revisionTimer: null,
+        wallViewRevision: "refreshing",
       };
       active = session;
       watchCredentials(session);
@@ -2236,6 +2238,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           resetForLiveModel(session);
           void refresh(session);
           return;
+        }
+        const wallView = currentView(session);
+        if (quotaWallRevision(wallView) !== session.wallViewRevision) {
+          render(session, wallView);
         }
         if (refreshMs > DEFAULT_REVISION_CHECK_MS) {
           if (

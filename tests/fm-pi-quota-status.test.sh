@@ -1341,6 +1341,12 @@ const tinyNegativeCreditView = selectActiveProviderQuota(tinyNegativeCreditParse
 const tinyNegativeCreditText = formatQuotaStatus(tinyNegativeCreditView, 400, now);
 assert(tinyNegativeCreditText.includes("credits -<0.1"), `small negative credits lost their sign: ${tinyNegativeCreditText}`);
 assert(!tinyNegativeCreditText.includes("credits -0"), `negative credits were presented as zero: ${tinyNegativeCreditText}`);
+const absentCreditReport = report(now);
+delete absentCreditReport.providers[1].credits;
+const absentCreditParsed = parseQuotaAxiJson(JSON.stringify(absentCreditReport));
+const absentCreditView = selectActiveProviderQuota(absentCreditParsed, "openai-codex", { nowMs: now });
+assert(absentCreditView.kind === "fresh", "optional absent Codex credits hid fresh quota");
+assert(!formatQuotaStatus(absentCreditView, 400, now).includes("credits"), "absent Codex credits rendered a balance");
 const tinyPercentReport = report(now);
 tinyPercentReport.providers[1].windows[0].percentUsed = 99.96;
 tinyPercentReport.providers[1].windows[0].percentRemaining = 0.04;
@@ -1522,6 +1528,10 @@ const unknownCreditUnit = report(now);
 unknownCreditUnit.providers[1].credits.unit = "bananas";
 const paddedCreditUnit = report(now);
 paddedCreditUnit.providers[1].credits.unit = " credits ";
+const codexUsdCredits = report(now);
+codexUsdCredits.providers[1].credits.unit = "usd";
+const codexEmptyCredits = report(now);
+codexEmptyCredits.providers[1].credits = { unit: "credits" };
 const missingProviderSource = report(now);
 delete missingProviderSource.providers[1].source;
 const unknownProviderSource = report(now);
@@ -2011,6 +2021,8 @@ for (const [malformedReport, description] of [
   [paddedWindowKind, "normalized window kind"],
   [unknownCreditUnit, "unknown credit unit"],
   [paddedCreditUnit, "normalized credit unit"],
+  [codexUsdCredits, "Codex credits with a foreign unit"],
+  [codexEmptyCredits, "Codex credits without a balance state"],
   [missingProviderSource, "missing provider source"],
   [unknownProviderSource, "unknown provider source"],
   [paddedProviderSource, "normalized provider source"],
@@ -3654,21 +3666,21 @@ assert(!processRollback.widgetText(400).includes("94%"), "ambiguous process age 
 await processRollback.emit("session_shutdown", { reason: "quit" });
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
-const postStartupGenerationStart = Date.now();
-const postStartupGenerationDelayMs = 15_000;
-process.env.FM_QUOTA_TEST_NOW_MS = String(postStartupGenerationStart + postStartupGenerationDelayMs);
+const transientClockGapStart = Date.now();
+const transientClockGapMs = 15_000;
+process.env.FM_QUOTA_TEST_NOW_MS = String(transientClockGapStart + transientClockGapMs);
 process.env.FM_QUOTA_TEST_FIRST_RESET_MS = String(10_000);
 await setStoredOAuth(
   "openai-codex",
   fixtureAccessToken("fixture-codex-account"),
-  postStartupGenerationStart + 24 * 60 * 60 * 1000,
+  transientClockGapStart + 24 * 60 * 60 * 1000,
 );
 await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
-const callsBeforePostStartupGeneration = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+const callsBeforeTransientClockGap = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
   .trim()
   .split(/\n/)
   .filter(Boolean).length;
-const postStartupGeneration = makePi(createFirstmateQuotaStatusExtension({
+const transientClockGap = makePi(createFirstmateQuotaStatusExtension({
   refreshMs: 5 * 60 * 1000,
   freshnessMs: 6 * 60 * 1000,
   timeoutMs: 500,
@@ -3677,8 +3689,8 @@ const postStartupGeneration = makePi(createFirstmateQuotaStatusExtension({
       .trim()
       .split(/\n/)
       .filter(Boolean).length;
-    return postStartupGenerationStart + (calls > callsBeforePostStartupGeneration
-      ? postStartupGenerationDelayMs
+    return transientClockGapStart + (calls > callsBeforeTransientClockGap
+      ? transientClockGapMs
       : 0);
   },
   monotonicNow: () => {
@@ -3686,15 +3698,19 @@ const postStartupGeneration = makePi(createFirstmateQuotaStatusExtension({
       .trim()
       .split(/\n/)
       .filter(Boolean).length;
-    return calls > callsBeforePostStartupGeneration ? postStartupGenerationDelayMs + 3 : 0;
+    return calls > callsBeforeTransientClockGap ? transientClockGapMs + 3 : 0;
   },
 }));
-await postStartupGeneration.emit("session_start", { reason: "startup" });
+await transientClockGap.emit("session_start", { reason: "startup" });
 await waitFor(
-  () => postStartupGeneration.widgetText(400).includes("week 94% left"),
-  "pre-generation startup time expired a newly generated quota window",
+  () => transientClockGap.widgetText(400).includes("GPT-5.3-Codex-Spark session 100% left"),
+  "transient-clock fixture did not publish an independently fresh window",
 );
-await postStartupGeneration.emit("session_shutdown", { reason: "quit" });
+assert(
+  !transientClockGap.widgetText(400).includes("week 94% left"),
+  "transient wall-clock gap under-aged an expired quota window",
+);
+await transientClockGap.emit("session_shutdown", { reason: "quit" });
 delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
@@ -3863,6 +3879,44 @@ assert(
 await idleCountdown.emit("session_shutdown", { reason: "quit" });
 assert(countdownClock.tasks.size === 0, "idle reset countdown leaked a timer");
 delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
+const idleForwardClockStart = Date.now();
+const idleForwardClock = new SplitClock(idleForwardClockStart);
+process.env.FM_QUOTA_TEST_NOW_MS = String(idleForwardClockStart);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  idleForwardClockStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const idleForward = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => idleForwardClock.wallNowMs,
+  monotonicNow: () => idleForwardClock.timerNowMs,
+  timers: idleForwardClock.timers,
+}));
+await idleForward.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => idleForward.widgetText(400).includes("week 94% left"),
+  "idle-forward fixture did not publish fresh quota",
+);
+const writesBeforeIdleForwardSkew = idleForward.widgetWriteCount;
+idleForwardClock.wallNowMs += 10 * 60_000;
+idleForwardClock.advanceTimers(1000);
+assert(
+  idleForward.widgetWriteCount > writesBeforeIdleForwardSkew,
+  "idle forward clock change did not request a footer redraw",
+);
+assert(
+  idleForward.widgetText(400).includes("stale") &&
+    !idleForward.widgetText(400).includes("94%"),
+  "idle forward clock change left expired quota on screen",
+);
+await idleForward.emit("session_shutdown", { reason: "quit" });
+assert(idleForwardClock.tasks.size === 0, "idle forward-clock check leaked a timer");
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
 const delayedCountdownStart = Date.now();
