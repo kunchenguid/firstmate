@@ -56,6 +56,7 @@ make_tmux_stub() {  # <dir>
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
+printf '%s\n' "${FM_COMPOSER_HARNESS-}" > "$D/composer-harness"
 case "${1:-}" in
   send-keys)
     shift
@@ -898,6 +899,23 @@ test_agy_unknown_hook_root_refuses_the_relaunch() {
   pass "fm-spawn --relaunch: an unrecognized agy hook root refuses instead of retiring blind"
 }
 
+# fm-control exports the target's composer scope and then invokes fm-spawn as a
+# plain relaunch child, so the replacement's own launch-boundary declaration is
+# what must decide every composer read of the NEW pane. Without it the child
+# would keep reading the replacement's pane under the retired adapter's proof.
+test_relaunch_scopes_composer_reads_to_the_replacement_harness() {
+  local dir declared
+  dir=$(new_case agyscope rl39)
+  add_ship_task "$dir" rl39 agy
+  arm_agy_wiring "$dir" rl39 .agents fm.abcdefabcdef
+  printf 'zsh' > "$dir/fake/command"
+  FM_COMPOSER_HARNESS=agy run_spawn "$dir" rl39 --relaunch --harness claude >/dev/null
+  declared=$(cat "$dir/fake/composer-harness" 2>/dev/null || true)
+  [ "$declared" = claude ] \
+    || fail "the replacement's pane must be read as claude, got '${declared:-none}'"
+  pass "fm-spawn --relaunch: composer reads are scoped to the replacement, never the retired adapter"
+}
+
 test_cursor_session_binding_is_retired_on_a_harness_switch() {
   local dir
   dir=$(new_case cursorwiring rl35)
@@ -1406,6 +1424,7 @@ test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_agy_wiring_is_retired_on_a_harness_switch
+test_relaunch_scopes_composer_reads_to_the_replacement_harness
 test_agy_unknown_hook_root_refuses_the_relaunch
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything

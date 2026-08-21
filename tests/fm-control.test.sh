@@ -202,6 +202,14 @@ run_control() {
     "$CONTROL" "$@" 2>&1
 }
 
+# run_send <case-dir> <args...>: the data plane against the same case fixture,
+# so both planes' composer-harness declaration is asserted from one stub.
+run_send() {
+  local dir=$1; shift
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_SEND_SETTLE=0 "$SEND" "$@" 2>&1
+}
+
 alive_as() {  # <case-dir> <command-name>
   printf '%s' "$2" > "$1/fake/command"
 }
@@ -304,6 +312,23 @@ test_control_declares_the_targets_composer_harness() {
       || fail "a ${pair%%:*} task should declare composer harness '${pair#*:}', got '$(cat "$dir/fake/composer-harness")'"
   done
   pass "fm-control: every composer read is scoped to the target's verified adapter"
+}
+
+# The data plane declares the same contract from the same recorded value, so a
+# task recorded under a raw launch command's basename keeps its adapter's
+# composer proof on a steer exactly as it does on a lifecycle verb.
+test_send_declares_the_targets_composer_harness() {
+  local dir out rc pair
+  for pair in agy:agy agy-1.1.8:agy claude:claude; do
+    dir=$(new_case "sendharness-${pair%%:*}")
+    add_task "$dir" t1 "${pair%%:*}"
+    alive_as "$dir" "${pair%%:*}"
+    out=$(run_send "$dir" t1 "hello"); rc=$?
+    expect_code 0 "$rc" "a steer to ${pair%%:*} should succeed"$'\n'"$out"
+    [ "$(cat "$dir/fake/composer-harness")" = "${pair#*:}" ] \
+      || fail "fm-send to a ${pair%%:*} task should declare composer harness '${pair#*:}', got '$(cat "$dir/fake/composer-harness")'"
+  done
+  pass "fm-send: the steered pane's composer read is scoped to its verified adapter"
 }
 
 test_prefixed_recorded_harness_reaches_each_control_verb() {
@@ -901,6 +926,7 @@ test_opencode_interrupts_twice_and_others_once
 test_unverified_harness_is_refused
 test_harness_family_resolution
 test_control_declares_the_targets_composer_harness
+test_send_declares_the_targets_composer_harness
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability

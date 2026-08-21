@@ -401,7 +401,13 @@ fm_send_resolve_target() {  # <raw-target>
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
-export FM_COMPOSER_HARNESS="$TARGET_HARNESS"
+# A task launched from a raw command records that command's basename, so the
+# recorded value resolves to its verified adapter before it is declared, the
+# same normalization bin/fm-control.sh and bin/fm-spawn.sh apply; an
+# unrecognized value is declared as recorded.
+FM_COMPOSER_HARNESS=$(fm_control_harness_family "$TARGET_HARNESS") \
+  || FM_COMPOSER_HARNESS=$TARGET_HARNESS
+export FM_COMPOSER_HARNESS
 shift
 
 # Supervision lease guard: a steer is overlap territory between the two Pi

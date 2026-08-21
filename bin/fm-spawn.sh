@@ -1253,6 +1253,18 @@ case "$ARG3" in
     ;;
 esac
 
+# Declare THIS launch's target harness for every composer read below, the same
+# way bin/fm-send.sh and bin/fm-control.sh declare theirs. It is set on every
+# spawn rather than only for the adapters with a harness-scoped composer proof,
+# because this script also runs as fm-control's relaunch child and would
+# otherwise inherit the REPLACED adapter's declaration while reading the
+# replacement's pane. A raw launch command records its basename, so the value
+# resolves to its verified adapter first and falls back to the recorded name
+# when it resolves to none.
+FM_COMPOSER_HARNESS=$(fm_control_harness_family "$HARNESS") \
+  || FM_COMPOSER_HARNESS=$HARNESS
+export FM_COMPOSER_HARNESS
+
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
 # Claude-compatible hook dialect explicitly rejects the model-reawakening and
@@ -3004,7 +3016,6 @@ if [ "$HARNESS" = kimi ]; then
   fi
 fi
 if [ "$HARNESS" = agy ]; then
-  export FM_COMPOSER_HARNESS=agy
   if ! agy_wait_for_ready; then
     agy_spawn_fail "Agy did not show the verified trust or ready surface before brief delivery"
     exit 1
