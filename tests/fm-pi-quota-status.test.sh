@@ -75,6 +75,7 @@ case "$mode" in
     exit 1
     ;;
   leader_exit)
+    descendants_before=$(wc -l < "${FM_QUOTA_TEST_DESCENDANT_PIDS:?}")
     node -e '
       const fs = require("node:fs");
       fs.appendFileSync(process.env.FM_QUOTA_TEST_DESCENDANT_PIDS, `${process.pid}\n`);
@@ -82,6 +83,9 @@ case "$mode" in
         fs.appendFileSync(process.env.FM_QUOTA_TEST_SURVIVORS, `${process.pid}\n`);
       }, 1000);
     ' &
+    while [ "$(wc -l < "${FM_QUOTA_TEST_DESCENDANT_PIDS:?}")" -le "$descendants_before" ]; do
+      sleep 0.01
+    done
     exit 0
     ;;
   leader_exit_closed_stdio)
@@ -126,15 +130,51 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$pid" ] || exit 2
 kill -0 "$pid" 2>/dev/null || exit 3
-children=$(ps -eo pid=,ppid= | awk -v parent="$pid" '$2 == parent { print $1 }')
-known_descendants=$(cat "${FM_QUOTA_TEST_DESCENDANT_PIDS:?}" 2>/dev/null || true)
-for child in $children $known_descendants; do
-  kill -KILL "$child" 2>/dev/null || true
+kill -TERM "$pid" 2>/dev/null || exit 3
+attempt=0
+while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 100 ]; do
+  sleep 0.01
+  attempt=$((attempt + 1))
 done
-kill -KILL "$pid" 2>/dev/null || true
+if kill -0 "$pid" 2>/dev/null; then
+  kill -KILL "$pid" 2>/dev/null || true
+fi
 exit 0
 SH
-chmod +x "$FAKEBIN/quota-axi" "$FAKEBIN/taskkill"
+
+cat > "$FAKEBIN/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+set -u
+exec node "${FM_QUOTA_TEST_WINDOWS_SUPERVISOR:?}"
+SH
+chmod +x "$FAKEBIN/quota-axi" "$FAKEBIN/taskkill" "$FAKEBIN/powershell.exe"
+
+cat > "$TMP_ROOT/windows-job-supervisor.mjs" <<'JS'
+import { spawn } from "node:child_process";
+
+const payload = JSON.parse(Buffer.from(process.env.FM_QUOTA_JOB_PAYLOAD, "base64").toString("utf8"));
+const child = spawn(payload.command, payload.arguments, {
+  detached: true,
+  shell: false,
+  stdio: ["ignore", "inherit", "inherit"],
+});
+let settled = false;
+const finish = (code) => {
+  if (settled) return;
+  settled = true;
+  if (child.pid) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+    }
+  }
+  setTimeout(() => process.exit(code), 10);
+};
+child.on("error", (error) => finish(error.code === "ENOENT" ? 127 : 126));
+child.on("exit", (code) => finish(code ?? 126));
+process.on("SIGTERM", () => finish(143));
+process.on("SIGINT", () => finish(130));
+JS
 
 cat > "$TMP_ROOT/quota-fixture.mjs" <<'JS'
 const configuredNow = Number(process.env.FM_QUOTA_TEST_NOW_MS);
@@ -249,7 +289,7 @@ const provider = (provider, label, source, fields) => ({
     status: "fresh",
     stale: false,
     refreshedAt: generatedAt,
-    sourcesTried: ["fake"],
+    sourcesTried: fields.attempts.map(({ source: attemptedSource }) => attemptedSource),
   },
 });
 const codexWindows = [
@@ -330,6 +370,10 @@ const allProviders = [
     },
     credits: { unlimited: true, unit: "credits" },
     account: { accountId: "fixture-claude-account" },
+    attempts: [
+      { source: "oauth-file", status: "success" },
+      { source: "oauth-profile", status: "success" },
+    ],
   }),
   provider("codex", "Codex", "oauth", {
     plan: "pro",
@@ -344,6 +388,7 @@ const allProviders = [
     },
     credits: { remaining: 0, unlimited: false, unit: "credits" },
     account: { accountId: "fixture-codex-account" },
+    attempts: [{ source: "oauth", status: "success" }],
   }),
   provider("copilot", "GitHub Copilot", "api", {
     plan: "business",
@@ -355,6 +400,7 @@ const allProviders = [
       unresolvedWindowIds: [],
     },
     account: { accountId: "fixture-copilot-account" },
+    attempts: [{ source: "api", status: "success" }],
   }),
   provider("grok", "Grok", "web", {
     windows: grokWindows,
@@ -438,6 +484,7 @@ export FM_QUOTA_TEST_DESCENDANT_PIDS="$DESCENDANT_PID_LOG"
 export FM_QUOTA_TEST_SURVIVORS="$SURVIVOR_LOG"
 export FM_QUOTA_TEST_TASKKILL_CALLS="$TASKKILL_LOG"
 export FM_QUOTA_TEST_FIXTURE="$TMP_ROOT/quota-fixture.mjs"
+export FM_QUOTA_TEST_WINDOWS_SUPERVISOR="$TMP_ROOT/windows-job-supervisor.mjs"
 export PI_CODING_AGENT_DIR="$PI_CONFIG"
 export PATH="$FAKEBIN:$PATH"
 printf '%s\n' '{}' > "$AUTH_FILE"
@@ -493,7 +540,12 @@ function plain(value) {
   return String(value ?? "").replace(/\x1b\[[0-9;]*m/g, "");
 }
 function report(now = Date.now()) {
-  const state = { status: "fresh", stale: false, refreshedAt: new Date(now).toISOString(), sourcesTried: ["fake"] };
+  const state = (sourcesTried) => ({
+    status: "fresh",
+    stale: false,
+    refreshedAt: new Date(now).toISOString(),
+    sourcesTried,
+  });
   return {
     generatedAt: new Date(now).toISOString(),
     schemaVersion: 3,
@@ -507,7 +559,11 @@ function report(now = Date.now()) {
           { id: "session", label: "session", kind: "session", percentRemaining: 72.5, resetsAt: new Date(now + 2 * 60 * 60 * 1000).toISOString() },
         ],
         credits: { unlimited: true, unit: "credits" },
-        state,
+        state: state(["oauth-file", "oauth-profile"]),
+        attempts: [
+          { source: "oauth-file", status: "success" },
+          { source: "oauth-profile", status: "success" },
+        ],
       },
       {
         provider: "codex",
@@ -521,7 +577,8 @@ function report(now = Date.now()) {
           { id: "spark-week", label: "GPT-5.3-Codex-Spark week", kind: "model", percentRemaining: 100, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString() },
         ],
         credits: { remaining: 0, unlimited: false, unit: "credits" },
-        state,
+        state: state(["oauth"]),
+        attempts: [{ source: "oauth", status: "success" }],
       },
       {
         provider: "kimi",
@@ -530,7 +587,7 @@ function report(now = Date.now()) {
         windows: [
           { id: "weekly", label: "week", kind: "weekly", percentRemaining: 83, resetsAt: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString() },
         ],
-        state,
+        state: state(["pi:kimi-coding"]),
         attempts: [{ source: "pi:kimi-coding", status: "success" }],
       },
     ],
@@ -579,6 +636,7 @@ function schema5Default(value) {
     delete provider.label;
     delete provider.source;
     delete provider.account;
+    delete provider.attempts;
     delete provider.state.refreshedAt;
     delete provider.state.sourcesTried;
   }
@@ -866,8 +924,8 @@ assert(
   selectActiveProviderQuota(failedKimiParsed, "kimi-coding", {
     nowMs: now,
     expectedSuccessfulSource: "pi:kimi-coding",
-  }).kind === "unverified",
-  "failed Pi Kimi source was accepted as active quota",
+  }).kind === "malformed",
+  "fresh Kimi report with no successful source was not rejected as malformed",
 );
 const invalidKimiAttempt = report(now);
 invalidKimiAttempt.providers[2].attempts[0].status = "maybe";
@@ -1097,8 +1155,10 @@ partialKimi.providers = [{
   source: "api",
   state: {
     ...partialKimiProvider.state,
+    sourcesTried: ["pi:kimi-coding"],
     untrustedWindowIds: ["unparsed_limit"],
   },
+  attempts: [{ source: "pi:kimi-coding", status: "success" }],
   windows: [partialKimiProvider.windows[0]],
   quotaSemantics: {
     status: "partial",
@@ -1148,8 +1208,8 @@ const schema5RunwayWithoutConfidenceParsed = parseQuotaAxiJson(
   { projection: "full" },
 );
 assert(
-  selectActiveProviderQuota(schema5RunwayWithoutConfidenceParsed, "openai-codex", { nowMs: now }).kind === "fresh",
-  "valid schema-5 through-reset runway without projection confidence was rejected",
+  selectActiveProviderQuota(schema5RunwayWithoutConfidenceParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "schema-5 through-reset runway accepted missing projection confidence",
 );
 const schema5RunwayWithRemovedField = structuredClone(schema5Populated);
 schema5RunwayWithRemovedField.providers[1].quotaSemantics.effectiveAvailability[0].runway.projectionBasis = "cycle_average";
@@ -1376,6 +1436,12 @@ freshUnusableAuth.providers[1].state.authStatus = "unusable";
 const freshCredentialExpiryReason = structuredClone(fullyPopulated);
 freshCredentialExpiryReason.providers[1].state.reason = "credentials_expired";
 freshCredentialExpiryReason.providers[1].state.authStatus = "usable";
+const missingFullAttempts = structuredClone(fullyPopulated);
+delete missingFullAttempts.providers[1].attempts;
+const failedFreshSourceAttempt = structuredClone(fullyPopulated);
+failedFreshSourceAttempt.providers[1].attempts[0].status = "failed";
+const inconsistentSourcesTried = structuredClone(fullyPopulated);
+inconsistentSourcesTried.providers[1].state.sourcesTried = ["cli-rpc"];
 const falseUnknownSelectionParsed = parseQuotaAxiJson(
   JSON.stringify(falseUnknownSelection),
   { projection: "full" },
@@ -1430,6 +1496,9 @@ for (const [malformedReport, description] of [
   [invalidAuthStatus, "invalid auth status"],
   [freshUnusableAuth, "fresh state with unusable auth"],
   [freshCredentialExpiryReason, "fresh state with expired-credential reason"],
+  [missingFullAttempts, "full provider without source attempts"],
+  [failedFreshSourceAttempt, "fresh source without a successful attempt"],
+  [inconsistentSourcesTried, "state sources detached from ordered attempts"],
 ]) {
   const structurallyParsed = parseQuotaAxiJson(JSON.stringify(malformedReport));
   assert(structurallyParsed, `${description} fixture should remain structurally parseable`);
@@ -1457,6 +1526,8 @@ const staleMixedPace = structuredClone(fullyPopulated);
 staleMixedPace.providers[1].source = "cache";
 staleMixedPace.providers[1].state.status = "stale";
 staleMixedPace.providers[1].state.stale = true;
+staleMixedPace.providers[1].state.sourcesTried = ["oauth", "cache"];
+staleMixedPace.providers[1].attempts[0].status = "failed";
 for (const window of staleMixedPace.providers[1].windows) {
   window.pace = { status: "unknown", reason: "stale" };
 }
@@ -1599,8 +1670,8 @@ const leaderTaskkillCalls = (await readFile(process.env.FM_QUOTA_TEST_TASKKILL_C
   .split(/\n/)
   .filter(Boolean);
 assert(
-  leaderTaskkillCalls.length === 2,
-  `Windows leader exit did not terminate its live supervisor tree: ${leaderTaskkillCalls}`,
+  leaderTaskkillCalls.length === 1,
+  `Windows job supervisor required a late tree kill after normal completion: ${leaderTaskkillCalls}`,
 );
 const grokProcess = runQuotaAxiJson({
   timeoutMs: 1000,
@@ -1673,6 +1744,8 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
   let footer = "BUILTIN_FOOTER";
   const theme = { fg(_color, text) { return `\x1b[2m${text}\x1b[0m`; } };
   const providerCompositions = new Map();
+  const registeredProviderConfigs = new Map();
+  const registeredNativeProviders = new Map();
   function createProviderComposition(providerId) {
     return {
       id: providerId,
@@ -1721,6 +1794,12 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
       : {
           getProvider(providerId) {
             return providerComposition(providerId);
+          },
+          getRegisteredProviderConfig(providerId) {
+            return registeredProviderConfigs.get(providerId);
+          },
+          getRegisteredNativeProvider(providerId) {
+            return registeredNativeProviders.get(providerId);
           },
           isUsingOAuth() {
             return providerOptions.authType !== "api_key";
@@ -1775,6 +1854,13 @@ function makePi(factory, provider = "openai-codex", mode = "tui", providerOption
     writes,
     widgetText,
     replaceProviderComposition(providerId = ctx.model?.provider) {
+      providerCompositions.set(providerId, createProviderComposition(providerId));
+    },
+    registerProviderOverride(providerId = ctx.model?.provider) {
+      registeredProviderConfigs.set(providerId, {
+        api: "openai-codex-responses",
+        streamSimple() {},
+      });
       providerCompositions.set(providerId, createProviderComposition(providerId));
     },
     get footer() { return footer; },
@@ -1985,6 +2071,37 @@ await waitFor(
   "provider composition replacement did not re-resolve quota",
 );
 await liveComposition.emit("session_shutdown", { reason: "quit" });
+
+const providerOverride = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 500,
+}));
+await providerOverride.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => providerOverride.widgetText(400).includes("week 94% left"),
+  "provider-override fixture did not publish built-in quota",
+);
+const callsBeforeProviderOverride = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+providerOverride.registerProviderOverride();
+const overriddenProviderText = providerOverride.widgetText(240);
+assert(
+  overriddenProviderText.includes("provider override"),
+  `custom provider implementation was not rejected: ${overriddenProviderText}`,
+);
+assert(!overriddenProviderText.includes("94%"), "custom provider implementation retained built-in quota");
+await sleep(30);
+const callsAfterProviderOverride = (await readFile(process.env.FM_QUOTA_TEST_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+assert(
+  callsAfterProviderOverride === callsBeforeProviderOverride,
+  "custom provider implementation invoked quota-axi",
+);
+await providerOverride.emit("session_shutdown", { reason: "quit" });
 
 const delayedAuthWatcher = new EventEmitter();
 delayedAuthWatcher.close = () => {};

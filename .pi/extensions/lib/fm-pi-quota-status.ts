@@ -44,6 +44,7 @@ export type QuotaUnsupportedReason =
   | "auth-cancelled"
   | "auth-overflow"
   | "auth-unavailable"
+  | "provider-override"
   | "custom-endpoint"
   | "account-correlation"
   | "credential-monitoring";
@@ -516,9 +517,59 @@ function parseAttempts(value: unknown): ParsedAttempt[] | null | undefined {
     if (!source || !status) return null;
     if (entry.error !== undefined && typeof entry.error !== "string") return null;
     if (entry.credentialPresent !== undefined && typeof entry.credentialPresent !== "boolean") return null;
+    if (status === "success" && entry.error !== undefined) return null;
     attempts.push({ source, status });
   }
   return attempts;
+}
+
+function exactStringArray(value: unknown, expected: string[]): boolean {
+  return Array.isArray(value) &&
+    value.length === expected.length &&
+    value.every((entry, index) => entry === expected[index]);
+}
+
+function validFreshAttemptSource(
+  provider: string,
+  source: string,
+  attempts: ParsedAttempt[],
+): boolean {
+  const successes = attempts.filter((attempt) => attempt.status === "success");
+  if (provider === "claude" && source === "oauth") {
+    const primary = successes.filter((attempt) => (
+      attempt.source === "oauth-file" || attempt.source === "keychain"
+    ));
+    return primary.length === 1 && successes.every((attempt) => (
+      attempt.source === primary[0]?.source || attempt.source === "oauth-profile"
+    ));
+  }
+  if (provider === "kimi" && source === "api") {
+    return successes.length === 1 && (
+      successes[0]?.source === "pi:kimi-coding" ||
+      successes[0]?.source === "kimi-code-cli"
+    );
+  }
+  return successes.length === 1 && successes[0]?.source === source;
+}
+
+function validAttemptProvenance(
+  provider: string,
+  source: string | null,
+  status: string | null,
+  sourcesTried: unknown,
+  attempts: ParsedAttempt[] | undefined,
+  requireFullFields: boolean,
+): boolean {
+  if (attempts === undefined) return !requireFullFields;
+  const attemptedSources = attempts.map((attempt) => attempt.source);
+  const expectedSources = status === "stale"
+    ? [...new Set([...attemptedSources, "cache"])]
+    : attemptedSources;
+  if (!exactStringArray(sourcesTried, expectedSources)) return false;
+  if (status === "fresh") {
+    return source !== null && validFreshAttemptSource(provider, source, attempts);
+  }
+  return attempts.every((attempt) => attempt.status !== "success");
 }
 
 function exactTextArray(value: unknown, expected: string[]): boolean {
@@ -740,7 +791,6 @@ function expectedEffectiveRunway(
 function matchesExpectedRunway(
   value: Record<string, unknown>,
   expected: Record<string, unknown>,
-  schemaVersion: number,
 ): boolean {
   for (const field of [
     "status",
@@ -751,13 +801,7 @@ function matchesExpectedRunway(
   ] as const) {
     if (value[field] !== expected[field]) return false;
   }
-  const optionalConfidence = schemaVersion === 5 && expected.status === "through_reset";
-  if (
-    optionalConfidence
-      ? value.projectionConfidence !== undefined &&
-        value.projectionConfidence !== expected.projectionConfidence
-      : value.projectionConfidence !== expected.projectionConfidence
-  ) return false;
+  if (value.projectionConfidence !== expected.projectionConfidence) return false;
   const expectedBlockers = expected.unmeasurableWindowIds;
   return Array.isArray(expectedBlockers)
     ? exactTextArray(value.unmeasurableWindowIds, expectedBlockers as string[])
@@ -806,7 +850,7 @@ function validRunway(
           unmeasurableWindowIds: [...boundedBy, ...unresolvedWindowIds],
         }
       : expectedEffectiveRunway(boundedBy, rawWindowsById, generatedAtMs, schemaVersion);
-    return matchesExpectedRunway(value, expected, schemaVersion);
+    return matchesExpectedRunway(value, expected);
   }
 
   if (status === "unknown") {
@@ -1339,7 +1383,17 @@ function validProviderFields(
     untrustedWindowIds,
   )) return false;
   if (parseCredits(value.credits) === null) return false;
-  if (parseAccount(value.account) === null || parseAttempts(value.attempts) === null) return false;
+  const account = parseAccount(value.account);
+  const attempts = parseAttempts(value.attempts);
+  if (account === null || attempts === null) return false;
+  if (!validAttemptProvenance(
+    exactText(value.provider) ?? "",
+    source,
+    status,
+    isRecord(value.state) ? value.state.sourcesTried : undefined,
+    attempts,
+    requireFullFields,
+  )) return false;
   return true;
 }
 
@@ -1537,6 +1591,7 @@ const UNSUPPORTED_TEXT: Readonly<Record<QuotaUnsupportedReason, { detail: string
   "auth-cancelled": { detail: "auth cancelled", compact: "Quota: auth cancelled" },
   "auth-overflow": { detail: "auth data too large", compact: "Quota: auth too large" },
   "auth-unavailable": { detail: "auth unavailable", compact: "Quota: auth unavailable" },
+  "provider-override": { detail: "provider override", compact: "Quota: provider override" },
   "custom-endpoint": { detail: "custom endpoint", compact: "Quota: custom endpoint" },
   "account-correlation": { detail: "account correlation unavailable", compact: "Quota: account unknown" },
   "credential-monitoring": {

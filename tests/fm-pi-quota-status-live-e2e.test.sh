@@ -77,7 +77,8 @@ process.stdout.write(JSON.stringify({
       ],
     },
     credits: { remaining: 0, unlimited: false, unit: "credits" },
-    state: { status: "fresh", stale: false, refreshedAt: generatedAt, sourcesTried: ["live-fake"] },
+    state: { status: "fresh", stale: false, refreshedAt: generatedAt, sourcesTried: ["oauth"] },
+    attempts: [{ source: "oauth", status: "success" }],
   }],
 }));
 JS

@@ -26,54 +26,269 @@ const DEFAULT_MAX_AUTH_BYTES = 1024 * 1024;
 const DEFAULT_REVISION_CHECK_MS = 1000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const WINDOWS_TREE_KILL_TIMEOUT_MS = 5000;
-const WINDOWS_PROCESS_SUPERVISOR = String.raw`
-const { spawn } = require("node:child_process");
-const [command, ...args] = process.argv.slice(1);
-let outcome = null;
-let outcomeSent = false;
-let stdoutEnded = false;
-let stderrEnded = false;
-const keepAlive = setInterval(() => {}, 60_000);
-const send = (message) => {
-  if (typeof process.send !== "function" || !process.connected) process.exit(70);
-  try {
-    process.send(message);
-  } catch {
-    process.exit(70);
-  }
-};
-const sendOutcome = () => {
-  if (outcomeSent || outcome === null) return;
-  outcomeSent = true;
-  send(outcome);
-};
-const finish = (message) => {
-  if (outcome !== null) return;
-  outcome = message;
-  if (stdoutEnded && stderrEnded) sendOutcome();
-  else setTimeout(sendOutcome, 50);
-};
-const child = spawn(command, args, {
-  shell: false,
-  windowsHide: true,
-  stdio: ["ignore", "pipe", "pipe"],
-});
-child.stdout.on("data", (chunk) => send({ kind: "stdout", data: chunk.toString("base64") }));
-child.stdout.on("end", () => {
-  stdoutEnded = true;
-  if (stderrEnded) sendOutcome();
-});
-child.stderr.on("data", (chunk) => send({ kind: "stderr", data: chunk.toString("base64") }));
-child.stderr.on("end", () => {
-  stderrEnded = true;
-  if (stdoutEnded) sendOutcome();
-});
-child.on("error", (error) => finish({ kind: "spawn-error", code: error.code }));
-child.on("exit", (code, signal) => finish({ kind: "exit", code, signal }));
-process.on("disconnect", () => {
-  clearInterval(keepAlive);
-  process.exit(0);
-});
+const WINDOWS_JOB_SUPERVISOR = String.raw`
+$ErrorActionPreference = "Stop"
+$jobSource = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class FirstmateQuotaJob
+{
+    const uint CREATE_SUSPENDED = 0x00000004;
+    const uint CREATE_NO_WINDOW = 0x08000000;
+    const uint DUPLICATE_SAME_ACCESS = 0x00000002;
+    const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+    const uint STARTF_USESTDHANDLES = 0x00000100;
+    const uint WAIT_FAILED = 0xFFFFFFFF;
+    const int JobObjectExtendedLimitInformation = 9;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct STARTUPINFO
+    {
+        public int cb;
+        public string lpReserved;
+        public string lpDesktop;
+        public string lpTitle;
+        public uint dwX;
+        public uint dwY;
+        public uint dwXSize;
+        public uint dwYSize;
+        public uint dwXCountChars;
+        public uint dwYCountChars;
+        public uint dwFillAttribute;
+        public uint dwFlags;
+        public short wShowWindow;
+        public short cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public uint dwProcessId;
+        public uint dwThreadId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetInformationJobObject(IntPtr job, int informationClass, IntPtr information, uint length);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcessW(
+        string applicationName,
+        StringBuilder commandLine,
+        IntPtr processAttributes,
+        IntPtr threadAttributes,
+        bool inheritHandles,
+        uint creationFlags,
+        IntPtr environment,
+        string currentDirectory,
+        ref STARTUPINFO startupInfo,
+        out PROCESS_INFORMATION processInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint ResumeThread(IntPtr thread);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr GetStdHandle(int handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DuplicateHandle(
+        IntPtr sourceProcess,
+        IntPtr sourceHandle,
+        IntPtr targetProcess,
+        out IntPtr targetHandle,
+        uint desiredAccess,
+        bool inheritHandle,
+        uint options);
+
+    static void Require(bool value)
+    {
+        if (!value) throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+
+    static IntPtr InheritableStdHandle(int id)
+    {
+        IntPtr current = GetCurrentProcess();
+        IntPtr duplicate;
+        Require(DuplicateHandle(
+            current,
+            GetStdHandle(id),
+            current,
+            out duplicate,
+            0,
+            true,
+            DUPLICATE_SAME_ACCESS));
+        return duplicate;
+    }
+
+    public static int Run(string executable, string arguments)
+    {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        IntPtr input = IntPtr.Zero;
+        IntPtr output = IntPtr.Zero;
+        IntPtr error = IntPtr.Zero;
+        PROCESS_INFORMATION process = new PROCESS_INFORMATION();
+        try
+        {
+            var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            IntPtr limitsPointer = Marshal.AllocHGlobal(Marshal.SizeOf(limits));
+            try
+            {
+                Marshal.StructureToPtr(limits, limitsPointer, false);
+                Require(SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    limitsPointer,
+                    (uint)Marshal.SizeOf(limits)));
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(limitsPointer);
+            }
+
+            input = InheritableStdHandle(-10);
+            output = InheritableStdHandle(-11);
+            error = InheritableStdHandle(-12);
+            var startup = new STARTUPINFO();
+            startup.cb = Marshal.SizeOf(startup);
+            startup.dwFlags = STARTF_USESTDHANDLES;
+            startup.hStdInput = input;
+            startup.hStdOutput = output;
+            startup.hStdError = error;
+            var commandLine = new StringBuilder("\"" + executable + "\" " + arguments);
+            Require(CreateProcessW(
+                executable,
+                commandLine,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                true,
+                CREATE_SUSPENDED | CREATE_NO_WINDOW,
+                IntPtr.Zero,
+                null,
+                ref startup,
+                out process));
+            Require(AssignProcessToJobObject(job, process.hProcess));
+            if (ResumeThread(process.hThread) == UInt32.MaxValue)
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (WaitForSingleObject(process.hProcess, UInt32.MaxValue) == WAIT_FAILED)
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            uint exitCode;
+            Require(GetExitCodeProcess(process.hProcess, out exitCode));
+            return unchecked((int)exitCode);
+        }
+        catch
+        {
+            if (process.hProcess != IntPtr.Zero) TerminateProcess(process.hProcess, 70);
+            throw;
+        }
+        finally
+        {
+            if (process.hThread != IntPtr.Zero) CloseHandle(process.hThread);
+            if (process.hProcess != IntPtr.Zero) CloseHandle(process.hProcess);
+            if (input != IntPtr.Zero) CloseHandle(input);
+            if (output != IntPtr.Zero) CloseHandle(output);
+            if (error != IntPtr.Zero) CloseHandle(error);
+            CloseHandle(job);
+        }
+    }
+}
+'@
+Add-Type -TypeDefinition $jobSource -Language CSharp
+$childScript = @'
+$ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
+$payloadText = [System.Text.Encoding]::UTF8.GetString(
+  [Convert]::FromBase64String($env:FM_QUOTA_JOB_PAYLOAD)
+)
+$payload = ConvertFrom-Json $payloadText
+$command = [string]$payload.command
+[string[]]$arguments = @($payload.arguments | ForEach-Object { [string]$_ })
+Remove-Item Env:FM_QUOTA_JOB_PAYLOAD -ErrorAction SilentlyContinue
+try {
+  $resolved = Get-Command -Name $command -CommandType Application,ExternalScript -ErrorAction Stop
+} catch {
+  exit 127
+}
+try {
+  & $resolved.Source @arguments
+  if ($null -eq $LASTEXITCODE) { exit 0 }
+  exit [int]$LASTEXITCODE
+} catch {
+  [Console]::Error.WriteLine($_.Exception.Message)
+  exit 126
+}
+'@
+$childEncoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($childScript))
+$powershell = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+$arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $childEncoded"
+exit [FirstmateQuotaJob]::Run($powershell, $arguments)
 `;
 
 const OFFICIAL_PROVIDER_BASE_URLS: Readonly<Record<string, string>> = {
@@ -197,6 +412,8 @@ type CompatibleProvider = {
 
 type CompatibleModelRegistry = {
   getProvider?: (provider: string) => CompatibleProvider | undefined;
+  getRegisteredProviderConfig?: (provider: string) => unknown;
+  getRegisteredNativeProvider?: (provider: string) => unknown;
   isUsingOAuth?: (model: ActiveModel) => boolean;
   getProviderAuthStatus?: (provider: string) => {
     configured: boolean;
@@ -386,17 +603,20 @@ function killProcess(child: ChildProcess, processGroupId: number | null): void {
     } catch {
     }
   }
-  if (process.platform === "win32" && child.pid) {
-    const result = spawnSync(
-      "taskkill",
-      ["/PID", String(child.pid), "/T", "/F"],
-      {
-        stdio: "ignore",
-        windowsHide: true,
-        timeout: WINDOWS_TREE_KILL_TIMEOUT_MS,
-      },
-    );
-    if (!result.error && result.status === 0) return;
+  if (process.platform === "win32") {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (child.pid) {
+      const result = spawnSync(
+        "taskkill",
+        ["/PID", String(child.pid), "/T", "/F"],
+        {
+          stdio: "ignore",
+          windowsHide: true,
+          timeout: WINDOWS_TREE_KILL_TIMEOUT_MS,
+        },
+      );
+      if (!result.error && result.status === 0) return;
+    }
   }
   if (child.exitCode !== null || child.signalCode !== null) return;
   try {
@@ -422,11 +642,28 @@ export function runQuotaAxiJson(options: {
   ];
   const useWindowsSupervisor = process.platform === "win32";
   const child = useWindowsSupervisor
-    ? spawn(process.execPath, ["-e", WINDOWS_PROCESS_SUPERVISOR, "--", command, ...args], {
-        shell: false,
-        stdio: ["ignore", "ignore", "ignore", "ipc"],
-        windowsHide: true,
-      })
+    ? spawn(
+        "powershell.exe",
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-EncodedCommand",
+          Buffer.from(WINDOWS_JOB_SUPERVISOR, "utf16le").toString("base64"),
+        ],
+        {
+          shell: false,
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+          env: {
+            ...process.env,
+            FM_QUOTA_JOB_PAYLOAD: Buffer.from(JSON.stringify({ command, arguments: args }), "utf8")
+              .toString("base64"),
+          },
+        },
+      )
     : spawn(command, args, {
         detached: true,
         shell: false,
@@ -469,44 +706,16 @@ export function runQuotaAxiJson(options: {
     if (stderrBytes > maxOutputBytes) finish({ kind: "overflow" });
   };
 
-  if (useWindowsSupervisor) {
-    child.on("message", (message: unknown) => {
-      if (!isRecord(message) || typeof message.kind !== "string") return;
-      if (
-        (message.kind === "stdout" || message.kind === "stderr") &&
-        typeof message.data === "string"
-      ) {
-        const chunk = Buffer.from(message.data, "base64");
-        if (message.kind === "stdout") receiveStdout(chunk);
-        else receiveStderr(chunk);
-        return;
-      }
-      if (message.kind === "spawn-error") {
-        finish({ kind: message.code === "ENOENT" ? "missing" : "failed" });
-        return;
-      }
-      if (message.kind === "exit") {
-        finish(message.code === 0
-          ? { kind: "ok", stdout: Buffer.concat(stdoutChunks).toString("utf8") }
-          : { kind: "failed" });
-      }
-    });
-  } else {
-    child.stdout?.on("data", receiveStdout);
-    child.stderr?.on("data", receiveStderr);
-  }
+  child.stdout?.on("data", receiveStdout);
+  child.stderr?.on("data", receiveStderr);
   child.on("error", (error: NodeJS.ErrnoException) => {
     finish({ kind: error.code === "ENOENT" ? "missing" : "failed" });
   });
   child.on("close", (code) => {
-    if (useWindowsSupervisor) {
-      if (!settled) finish({ kind: "failed" });
-      return;
-    }
     if (code === 0) {
       finish({ kind: "ok", stdout: Buffer.concat(stdoutChunks).toString("utf8") });
     } else {
-      finish({ kind: "failed" });
+      finish({ kind: useWindowsSupervisor && code === 127 ? "missing" : "failed" });
     }
   });
 
@@ -559,6 +768,12 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     try {
       const provider = registry.getProvider.call(ctx.modelRegistry, model.provider);
       if (!provider) return "provider-missing";
+      const registeredConfig = typeof registry.getRegisteredProviderConfig === "function"
+        ? registry.getRegisteredProviderConfig.call(ctx.modelRegistry, model.provider)
+        : "unavailable";
+      const registeredNative = typeof registry.getRegisteredNativeProvider === "function"
+        ? registry.getRegisteredNativeProvider.call(ctx.modelRegistry, model.provider)
+        : "unavailable";
       const apiKey = provider.auth?.apiKey;
       const oauth = provider.auth?.oauth;
       const usingOAuth = typeof registry.isUsingOAuth === "function"
@@ -569,6 +784,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         : undefined;
       return JSON.stringify([
         referenceRevision(provider),
+        referenceRevision(registry.getRegisteredProviderConfig),
+        referenceRevision(registeredConfig),
+        referenceRevision(registry.getRegisteredNativeProvider),
+        referenceRevision(registeredNative),
         provider.id,
         provider.name,
         provider.baseUrl,
@@ -745,6 +964,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       const registry = ctx.modelRegistry as unknown as CompatibleModelRegistry;
       if (
         typeof registry.getProvider !== "function" ||
+        typeof registry.getRegisteredProviderConfig !== "function" ||
+        typeof registry.getRegisteredNativeProvider !== "function" ||
         typeof registry.isUsingOAuth !== "function"
       ) {
         return {
@@ -754,7 +975,28 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           compositionRevision,
         };
       }
-      const provider = registry.getProvider.call(ctx.modelRegistry, model.provider);
+      let provider: CompatibleProvider | undefined;
+      try {
+        provider = registry.getProvider.call(ctx.modelRegistry, model.provider);
+        if (
+          registry.getRegisteredProviderConfig.call(ctx.modelRegistry, model.provider) !== undefined ||
+          registry.getRegisteredNativeProvider.call(ctx.modelRegistry, model.provider) !== undefined
+        ) {
+          return {
+            kind: "unsupported",
+            view: unsupportedView(model.provider, "provider-override"),
+            modelRevision,
+            compositionRevision,
+          };
+        }
+      } catch {
+        return {
+          kind: "unsupported",
+          view: unsupportedView(model.provider, "auth-inspection"),
+          modelRevision,
+          compositionRevision,
+        };
+      }
       if (registry.isUsingOAuth.call(ctx.modelRegistry, model)) {
         if (provider?.auth?.oauth?.isSubscription !== true) {
           return {
