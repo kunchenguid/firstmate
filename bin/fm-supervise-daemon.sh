@@ -1029,7 +1029,9 @@ housekeeping() {  # <state>
   # escalated as one - but it MUST re-surface, so neither a forgotten pause nor a
   # forgotten captain hold can rot invisibly. Past the window: busy (resumed) or gone
   # -> drop; still idle and still declaring the wait -> escalate a recheck digest and
-  # reset the marker so the window repeats.
+  # reset the marker so the window repeats. The digest names WHICH human the wait is
+  # on, because the captain is the one reading it: an external dependency for a
+  # paused: declaration, and the captain themself for a verified hold transfer.
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
@@ -1052,7 +1054,10 @@ housekeeping() {  # <state>
       2) rm -f "$marker" ;;
       *)
         last=$(last_status_line "$state/$task.status")
-        if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
+        if [ -n "$last" ] && status_is_captain_held "$last"; then
+          escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"
+          _now > "$marker"
+        elif [ -n "$last" ] && status_is_paused "$last"; then
           escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
           _now > "$marker"
         else

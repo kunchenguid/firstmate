@@ -146,17 +146,27 @@ status_is_paused() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
+# 0 if a status line's leading verb is the verified captain-held transfer verb.
+# The same pure verb read as status_is_paused, and the discriminator a supervisor
+# needs once a declared wait has already been recognized: the two declarations get
+# the same bounded cadence, but they block on DIFFERENT humans, so a recheck that
+# names an external dependency for a hold points the captain away from the fact
+# that they are the one who can clear it.
+status_is_captain_held() {  # <status-line>
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
+}
+
 # 0 if a status line declares either an external-wait pause or a verified
 # captain-held transfer.
 # Both declarations can intentionally leave an exited crew's endpoint idle, so
 # the watcher applies its bounded pause cadence when agent death confirms that
 # no live decision gate is being silenced.
 status_is_paused_or_captain_held() {  # <status-line>
-  local line=$1 verb
-  status_is_paused "$line" && return 0
-  [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
-  [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
+  local line=$1
+  status_is_paused "$line" || status_is_captain_held "$line"
 }
 
 # --- durable keyed decisions ------------------------------------------------

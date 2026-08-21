@@ -417,8 +417,14 @@ busy_turn_over_age() {  # <task>
 # timer would. The bounded re-surface itself is the shared resurface_absorbed
 # above, throttled by this window's own .paused-resurfaced-<key> marker. Advances
 # the stale suppressor to <hash> and flags the key paused.
+#
+# The recheck names WHICH human the declared wait is on, because that is the whole
+# point of a recheck the captain reads: an external dependency for paused:, and the
+# captain themself for a verified hold. Only the captain-held verb takes the second
+# wording; a caller that reached the bounded cadence off pause tracking alone, with
+# no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -428,9 +434,15 @@ handle_paused_stale() {  # <window> <task> <hash>
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" \
-    "stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
-  triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+  if status_is_captain_held "$(last_status_line "$statusf")"; then
+    detail="captain-held, awaiting the captain"
+    reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
+  else
+    detail="paused, awaiting external"
+    reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
+  fi
+  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)"
+  triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
 # Apply the busy-pane completed-turn bound to a window whose bound has already
@@ -474,7 +486,7 @@ clear_pause_tracking() {  # <window-key>
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive
+  local win=$1 task=$2 key last recheck_file class agent_alive kind
   key=$(window_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
@@ -483,8 +495,12 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
+  # Read once past the declared-wait gate and reused by both liveness gates below,
+  # so a mate's stale poll costs one metadata scan rather than one per gate, and the
+  # far more common no-declaration path above still costs none.
+  kind=$(window_kind "$win")
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
+    if [ "$kind" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
@@ -501,7 +517,7 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
-  if [ "$(window_kind "$win")" != secondmate ]; then
+  if [ "$kind" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"
@@ -510,16 +526,14 @@ pause_state_class() {  # <window> <task>
     fi
   fi
   # Recover paused classification for a declared wait that authoritative crew state
-  # could not name. An ordinary crew needs agent death to confirm no live decision
-  # gate is being silenced. A mate's endpoint liveness is deliberately never read
-  # above, so that confirmation is unavailable by design and cannot be required:
-  # without this, a mate's captain hold - which has no current-state mapping and so
-  # arrives here as `none` - would be silenced by every caller rather than taking the
-  # bounded re-surface cadence, and a forgotten hold would rot invisibly.
-  if [ "$class" = none ] \
-    && { [ "${agent_alive:-unknown}" = dead ] || [ "$(window_kind "$win")" = secondmate ]; }; then
-    class=paused
-  fi
+  # could not name. Reaching here already proves the only two admissible cases: an
+  # ordinary crew whose agent the gate above confirmed dead, so no live decision gate
+  # is being silenced, or a secondmate, whose endpoint liveness is deliberately never
+  # read and so cannot supply that confirmation. Without the mate case a mate's
+  # captain hold - which has no current-state mapping and so arrives as `none` -
+  # would be silenced by every caller rather than taking the bounded re-surface
+  # cadence, and a forgotten hold would rot invisibly.
+  [ "$class" = none ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
     *) rm -f "$recheck_file" ;;
