@@ -22,7 +22,24 @@ let launchInFlight = null;
 let restorationInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
+let armHandoff = new WeakMap();
 let armRecovery = new WeakMap();
+
+// The arm child runs through a login shell so it inherits the operator's real
+// PATH. Login-shell initialization is unbounded and belongs to the machine, so
+// the wrapper announces its handoff on fd 3 the moment that initialization is
+// done and immediately before the arm script takes over. waitForArmReady arms
+// its window on that announcement, so the window measures only the arm script's
+// own execution. The announcement is best-effort: a shell that cannot write
+// fd 3 still execs the arm script, and its successor is then reported as still
+// starting rather than as a failure.
+const ARM_HANDOFF_MARKER = "fm-arm-exec";
+const ARM_COMMAND = [
+  'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"',
+  '[ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"',
+  `{ printf '${ARM_HANDOFF_MARKER}\\n' >&3; exec 3>&-; } 2>/dev/null`,
+  'exec "$FM_ROOT_OVERRIDE/bin/fm-watch-arm.sh" --restart',
+].join("; ");
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -34,16 +51,33 @@ function setArmStatus(status) {
   armStatus = status;
 }
 
+// Expiry never decides that a successor failed, only which interval expired.
+// Before the arm child announces its handoff it has not run a single arm
+// instruction, so expiry there reports "starting"; after the handoff the window
+// measures the arm script itself, which is firstmate's own cost to bound, and
+// expiry there reports "timeout".
 function waitForArmReady(armChild) {
   const readiness = armReadiness.get(armChild);
   if (!readiness) return Promise.resolve("failed");
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve("timeout"), ARM_READY_TIMEOUT_MS);
-    timer.unref();
-    void readiness.then((status) => {
-      clearTimeout(timer);
-      resolve(status);
-    });
+  const handoff = armHandoff.get(armChild);
+  return new Promise((resolveReady) => {
+    let settled = false;
+    let expiry = null;
+    const settle = (status) => {
+      if (settled) return;
+      settled = true;
+      if (expiry) clearTimeout(expiry);
+      resolveReady(status);
+    };
+    const openWindow = (onExpiry) => {
+      if (settled) return;
+      if (expiry) clearTimeout(expiry);
+      expiry = setTimeout(() => settle(onExpiry), ARM_READY_TIMEOUT_MS);
+      expiry.unref();
+    };
+    openWindow("starting");
+    void handoff?.then(() => openWindow("timeout"));
+    void readiness.then((status) => settle(status));
   });
 }
 
@@ -248,24 +282,32 @@ function restorationFailure(status) {
 }
 
 async function restoreAfterActionableClose(paths, sessionID, client, predecessorArmPid) {
-  let failure = "";
+  let note = "";
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
     const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true);
-    if (status === "armed") return { failure: "", recovery: armRecovery.get(armChild) };
+    if (status === "armed") return { note: "", recovery: armRecovery.get(armChild) };
     // An actionable line belongs to this arm's close handler.
     // Do not retire it before that handler can start the successor cycle.
-    if (status === "wake") return { failure: "", recovery: armRecovery.get(armChild) };
-    failure = restorationFailure(status);
+    if (status === "wake") return { note: "", recovery: armRecovery.get(armChild) };
+    if (status === "starting") {
+      // The successor has not begun arming, so its shell is still starting up
+      // rather than its watcher failing. Retiring it would only buy another
+      // equally slow start, so keep it and deliver the wake now, saying so.
+      return {
+        note: `watcher: starting - OpenCode left the successor watcher coming up; it had not begun arming within ${ARM_READY_TIMEOUT_MS}ms`,
+      };
+    }
+    note = restorationFailure(status);
     if (!(await retireArm(armChild))) {
       setArmStatus("failed");
-      return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms` };
+      return { note: `${note}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms` };
     }
     if (status === "read-only" || status === "not-primary" || status === "skipped") break;
     if (attempt === REARM_RETRY_LIMIT) break;
     await waitForRetry(attempt + 1);
   }
   setArmStatus("failed");
-  return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries` };
+  return { note: `${note}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries` };
 }
 
 async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid) {
@@ -302,10 +344,10 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     FM_CONFIG_OVERRIDE: paths.config,
     FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
   };
-  const armChild = spawn("bash", ["-lc", 'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"; exec "$FM_ROOT_OVERRIDE/bin/fm-watch-arm.sh" --restart'], {
+  const armChild = spawn("bash", ["-lc", ARM_COMMAND], {
     cwd: paths.root,
     env,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", "pipe"],
   });
   child = armChild;
   let stdout = "";
@@ -318,6 +360,13 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveReadiness = resolve;
   });
   armReadiness.set(armChild, readiness);
+  const handoffStream = armChild.stdio[3];
+  armHandoff.set(armChild, new Promise((resolveHandoff) => {
+    if (!handoffStream?.on) return;
+    handoffStream.on("data", (chunk) => {
+      if (chunk.toString().includes(ARM_HANDOFF_MARKER)) resolveHandoff();
+    });
+  }));
   const settleReadiness = (status) => {
     if (readinessSettled) return;
     readinessSettled = true;
@@ -334,16 +383,23 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     const recovery = `${stdout}\n${stderr}`.match(/^watcher: started pid=([0-9]+).* recovery-generation=([A-Za-z0-9._-]+)$/m);
     if (recovery) armRecovery.set(armChild, { watcherPid: recovery[1], generation: recovery[2] });
   };
-  armChild.stdout.on("data", (chunk) => {
-    stdout += chunk.toString();
-    observeRecovery();
-    observeArmOutput(stdout, stderr, settleReadiness);
-  });
-  armChild.stderr.on("data", (chunk) => {
-    stderr += chunk.toString();
-    observeRecovery();
-    observeArmOutput(stdout, stderr, settleReadiness);
-  });
+  // Readiness is read entirely from these two streams, so an arm without them
+  // can never report itself established. Settle it unready rather than waiting
+  // out the window in silence against listeners attached to nothing.
+  if (!armChild.stdout || !armChild.stderr) {
+    settleReadiness("failed");
+  } else {
+    armChild.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      observeRecovery();
+      observeArmOutput(stdout, stderr, settleReadiness);
+    });
+    armChild.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+      observeRecovery();
+      observeArmOutput(stdout, stderr, settleReadiness);
+    });
+  }
   armChild.on("close", (code, signal) => {
     if (settled) return;
     settled = true;
@@ -362,7 +418,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       restorationInFlight = restoration;
       void restoration.then((result) => {
         if (restorationInFlight === restoration) restorationInFlight = null;
-        const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
+        const message = result.note ? `${classification.message}\n\n${result.note}` : classification.message;
         return sendPrompt(paths, client, sessionID, wakePrompt(message), result.recovery);
       }).catch(() => {
       });
@@ -409,22 +465,41 @@ function armAttempt(status, armChild, includeArmChild) {
   return includeArmChild ? { status, armChild } : status;
 }
 
-async function ensureArm(paths, sessionID, client, predecessorArmPid = "", includeArmChild = false) {
-  let launchResult = null;
-  if (!launchInFlight) {
-    const launch = beginArm(paths, sessionID, client, predecessorArmPid);
-    launchInFlight = launch;
-    try {
-      launchResult = await launch;
-    } finally {
-      if (launchInFlight === launch) launchInFlight = null;
-    }
-  } else {
-    launchResult = await launchInFlight;
+// Refusals beginArm reaches by reading mutable preconditions: whether this
+// session holds the fleet lock, whether this root is the primary, whether any
+// work is in flight, and which session asked. Single-flight must not hand one
+// of these to a caller that arrived after the decision was taken, because by
+// then the precondition it refused on may already have changed - a session that
+// takes the lock a moment after a read-only verdict would inherit that verdict
+// and never arm at all. The remaining statuses ("existing", "retrying",
+// "spawned") are shared coordination truth and stay shared: that sharing is
+// what keeps one session from running two watchers.
+const SUPERSEDABLE_REFUSALS = new Set(["skipped", "not-primary", "read-only", "not-needed"]);
+
+// Returns the launch decision plus whether this caller joined one already in
+// progress rather than making it.
+async function beginOrJoinArm(paths, sessionID, client, predecessorArmPid) {
+  if (launchInFlight) return { result: await launchInFlight, joined: true };
+  const launch = beginArm(paths, sessionID, client, predecessorArmPid);
+  launchInFlight = launch;
+  try {
+    return { result: await launch, joined: false };
+  } finally {
+    if (launchInFlight === launch) launchInFlight = null;
   }
-  const armChild = launchResult.armChild;
+}
+
+async function ensureArm(paths, sessionID, client, predecessorArmPid = "", includeArmChild = false) {
+  let { result, joined } = await beginOrJoinArm(paths, sessionID, client, predecessorArmPid);
+  // Decide once more for this caller, on preconditions read now. One extra
+  // attempt is enough: it is exactly the decision this caller would have made
+  // had no launch been in flight when it asked.
+  if (joined && SUPERSEDABLE_REFUSALS.has(result.status)) {
+    ({ result } = await beginOrJoinArm(paths, sessionID, client, predecessorArmPid));
+  }
+  const armChild = result.armChild;
   if (!armChild) {
-    return armAttempt(launchResult.status, null, includeArmChild);
+    return armAttempt(result.status, null, includeArmChild);
   }
   return armAttempt(await waitForArmReady(armChild), armChild, includeArmChild);
 }

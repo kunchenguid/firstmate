@@ -374,8 +374,7 @@ test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
   out=$(printf '{"hook_event_name":"Stop","session_id":"ordinary","cwd":"%s","stop_hook_active":false}\n' "$no_token" \
     | HOME="$HOME_DIR" bash "$hook" 2>&1)
   rc=$?
-  expect_code 0 "$rc" "Kimi hook must never block a tokenless session"
-  [ -z "$out" ] || fail "Kimi hook printed into a tokenless session: $out"
+  expect_code_out 0 "$rc" "$out" "Kimi hook must never block a tokenless session"
   snapshot_after=$(find "$no_token" -mindepth 1 -print)
   [ "$snapshot_before" = "$snapshot_after" ] || fail "Kimi hook wrote inside a tokenless workspace"
   assert_absent "$target" "tokenless Kimi hook invocation touched a task marker"
@@ -384,8 +383,7 @@ test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
   out=$(printf '{"hook_event_name":"Stop","session_id":"crew","cwd":"%s","stop_hook_active":false}\n' "$WT_DIR" \
     | HOME="$HOME_DIR" bash "$hook" 2>&1)
   rc=$?
-  expect_code 0 "$rc" "registered Kimi hook invocation did not exit zero"
-  [ -z "$out" ] || fail "registered Kimi hook invocation printed output: $out"
+  expect_code_out 0 "$rc" "$out" "registered Kimi hook invocation did not exit zero"
   assert_present "$target" "registered Kimi hook invocation did not touch the turn-end marker"
 
   rm "$target"
@@ -394,8 +392,7 @@ test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
   out=$(printf '{"hook_event_name":"Stop","session_id":"crew","cwd":"%s","stop_hook_active":false}\n' "$WT_DIR" \
     | HOME="$HOME_DIR" PATH="$fakebin" "$hook" 2>&1)
   rc=$?
-  expect_code 0 "$rc" "Kimi hook without jq must still exit zero"
-  [ -z "$out" ] || fail "Kimi hook without jq printed output: $out"
+  expect_code_out 0 "$rc" "$out" "Kimi hook without jq must still exit zero"
   assert_absent "$target" "Kimi hook without jq touched the turn-end marker"
   pass "Kimi hook stays silent and inert without a Firstmate registry token"
 }

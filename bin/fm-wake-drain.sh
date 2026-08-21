@@ -316,6 +316,28 @@ RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
 
 RAW_ROWS=$(fm_wake_print_deduped "$FM_WAKE_QUEUE") || exit "$?"
 ACK_THROUGH=$(awk -F '\t' '$2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }' "$FM_WAKE_QUEUE") || exit 1
+# Test-only pre-commit boundary, for tests that must act on a drain after it has
+# read the queue and before it commits.
+# FM_WAKE_DRAIN_TEST_HOLD_BEFORE_COMMIT names a path: the drain announces its
+# arrival by creating "<path>.at", then parks until <path> appears. Parking on a
+# release file rather than for a fixed number of seconds is what makes such a
+# test independent of machine speed - a duration can be outrun by a slow runner,
+# and then the drain commits before the test acts on it.
+# The ceiling below exists only so a broken or abandoned test cannot park a drain
+# forever; a test that reaches it has already failed.
+# FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT is the older fixed-seconds form.
+case "${FM_WAKE_DRAIN_TEST_HOLD_BEFORE_COMMIT:-}" in
+  '') ;;
+  *)
+    : > "${FM_WAKE_DRAIN_TEST_HOLD_BEFORE_COMMIT}.at"
+    fm_wake_drain_hold_waited=0
+    while [ ! -e "$FM_WAKE_DRAIN_TEST_HOLD_BEFORE_COMMIT" ] \
+      && [ "$fm_wake_drain_hold_waited" -lt 3000 ]; do
+      sleep 0.02
+      fm_wake_drain_hold_waited=$((fm_wake_drain_hold_waited + 1))
+    done
+    ;;
+esac
 case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   0) ;;
   ''|*[!0-9]*) ;;

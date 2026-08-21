@@ -594,6 +594,7 @@ SH
 }
 
 test_interruption_before_and_after_raw_commit() {
+  local hold
   local dir state before_out after_out replay_out empty_out pid rc count i sequence generation
   dir=$(make_case interruption)
   state="$dir/state"
@@ -604,14 +605,22 @@ test_interruption_before_and_after_raw_commit() {
   printf 'done: interruption fixture\n' > "$state/task.status"
   append_wake "$state" signal task.status "signal: task" || fail "pre-commit interruption wake append failed"
 
-  FM_STATE_OVERRIDE="$state" FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT=5 "$DRAIN" > "$before_out" &
+  # Park the drain at its pre-commit boundary and interrupt it there. The old
+  # form waited for the queue lock and relied on a fixed five-second window still
+  # being open when the interrupt landed: the lock is taken well before that
+  # window opens, and a runner slow enough to starve this poll let the drain
+  # commit first, which is exactly the "unexpectedly succeeded" red. A drain that
+  # waits to be released cannot be outrun, whatever the machine is doing.
+  hold="$dir/release-precommit"
+  FM_STATE_OVERRIDE="$state" FM_WAKE_DRAIN_TEST_HOLD_BEFORE_COMMIT="$hold" \
+    "$DRAIN" > "$before_out" &
   pid=$!
   i=0
-  while [ "$i" -lt 100 ] && [ ! -e "$state/.wake-queue.lock" ]; do
+  while [ "$i" -lt 400 ] && [ ! -e "$hold.at" ]; do
     sleep 0.05
     i=$((i + 1))
   done
-  [ -e "$state/.wake-queue.lock" ] || { kill "$pid" 2>/dev/null || true; fail "pre-commit drain never entered its serialized read boundary"; }
+  [ -e "$hold.at" ] || { kill "$pid" 2>/dev/null || true; fail "pre-commit drain never reached its pre-commit boundary"; }
   kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain before raw commitment"
   set +e
   wait "$pid"

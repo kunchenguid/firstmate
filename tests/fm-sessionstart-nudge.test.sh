@@ -56,8 +56,7 @@ expect_silent_zero() {
   shift
   local out status=0
   out=$("$@" 2>&1) || status=$?
-  expect_code 0 "$status" "$label must exit 0"
-  [ -z "$out" ] || fail "$label must be silent, got: $out"
+  expect_code_out 0 "$status" "$out" "$label must exit 0"
 }
 
 test_genuine_primary_nudges() {
@@ -165,8 +164,7 @@ if (prompts.length !== 1) throw new Error(`expected one prompt, got ${prompts.le
 if (prompts[0] !== process.env.EXPECTED) throw new Error(`unexpected prompt: ${prompts[0]}`);
 EOF
   ) || status=$?
-  expect_code 0 "$status" "OpenCode exact nudge delivery"
-  [ -z "$out" ] || fail "OpenCode exact nudge delivery printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode exact nudge delivery"
   pass "OpenCode session.created delivers the exact wrapper nudge once per session"
 }
 
@@ -379,8 +377,7 @@ await fire(["--fork=session-id"]);
 await fire([], [{ type: "message" }], oldTimestamp);
 JS
   ) || status=$?
-  expect_code 0 "$status" "Pi continuation classification"
-  [ -z "$out" ] || fail "Pi continuation classification printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi continuation classification"
   expected=$(printf '%s\n' \
     '--source startup' \
     '--source startup' \
@@ -457,8 +454,7 @@ if (content.includes("PI_LARGE_DIGEST_SUFFIX")) throw new Error("delivery exceed
 if (!content.includes("FIRSTMATE_OP: v1 session-start:")) throw new Error("operational provenance was lost");
 JS
   ) || status=$?
-  expect_code 0 "$status" "Pi large session-start delivery"
-  [ -z "$out" ] || fail "Pi large session-start delivery printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi large session-start delivery"
   pass "Pi retains a bounded digest prefix and loudly marks oversized delivery"
 }
 
