@@ -4,6 +4,7 @@ import { constants, watch, type FSWatcher } from "node:fs";
 import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { performance } from "node:perf_hooks";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   createQuotaStatusFormatter,
@@ -343,6 +344,7 @@ export type FirstmateQuotaStatusOptions = {
   maxOutputBytes?: number;
   maxAuthBytes?: number;
   now?: () => number;
+  monotonicNow?: () => number;
   width?: () => number;
   timers?: QuotaTimerScheduler;
   authFile?: string;
@@ -431,13 +433,15 @@ type CompatibleModelRegistry = {
 
 type CachedQuota = {
   view: QuotaView;
+  publication: FreshQuotaView | null;
+  publishedAtMonotonicMs: number;
+  elapsedThroughMs: number;
+  timelineOriginMs: number;
   piProvider: string;
   credentialRevision: string;
   modelRevision: string;
   compositionRevision: string;
   endpointRevision: string;
-  expiredThroughMs: number | null;
-  deferPastExpiry: boolean;
 };
 
 type ActiveSession = {
@@ -459,7 +463,7 @@ type ActiveSession = {
   refreshTimer: unknown | null;
   expiryTimer: unknown | null;
   statusTimer: unknown | null;
-  expiryTimerView: FreshQuotaView | null;
+  expiryTimerQuota: CachedQuota | null;
   modelRefreshTimer: unknown | null;
   recoveryTimer: unknown | null;
   revisionTimer: unknown | null;
@@ -804,6 +808,11 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
   const maxOutputBytes = positiveNumber(options.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
   const maxAuthBytes = Math.floor(positiveNumber(options.maxAuthBytes, DEFAULT_MAX_AUTH_BYTES));
   const now = options.now ?? Date.now;
+  const monotonicClock = options.monotonicNow ?? (options.now ? now : () => performance.now());
+  const monotonicNow = () => {
+    const value = monotonicClock();
+    return Number.isFinite(value) ? value : 0;
+  };
   const width = options.width;
   const timers = options.timers ?? defaultTimers;
   const authFile = options.authFile ?? defaultAuthFile();
@@ -1431,27 +1440,29 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       return view?.kind === "stale" ? view.recoverable ?? null : null;
     }
 
-    function nextAuthoritativeExpiryMs(
-      view: FreshQuotaView,
-      expiredThroughMs: number | null,
-    ): number {
-      const afterMs = expiredThroughMs ?? Number.NEGATIVE_INFINITY;
-      let deadlineMs = view.reportFreshUntilMs > afterMs
-        ? view.reportFreshUntilMs
-        : Number.POSITIVE_INFINITY;
-      for (const window of view.windows) {
-        if (window.resetsAtMs !== null && window.resetsAtMs > afterMs) {
-          deadlineMs = Math.min(deadlineMs, window.resetsAtMs);
-        }
-      }
-      return deadlineMs;
+    function authoritativeTimelineMs(quota: CachedQuota): number {
+      const elapsedMs = Math.max(
+        quota.elapsedThroughMs,
+        monotonicNow() - quota.publishedAtMonotonicMs,
+        0,
+      );
+      return quota.timelineOriginMs + elapsedMs;
     }
 
-    function cachedQuotaView(
-      session: ActiveSession,
-      nowMs: number,
-      commitThroughMs?: number,
-    ): QuotaView | null {
+    function advanceAuthoritativeQuota(session: ActiveSession, quota: CachedQuota): void {
+      if (session.quota !== quota || quota.publication === null) return;
+      quota.elapsedThroughMs = Math.max(
+        quota.elapsedThroughMs,
+        monotonicNow() - quota.publishedAtMonotonicMs,
+        0,
+      );
+      quota.view = revalidateFreshQuotaView(
+        quota.publication,
+        quota.timelineOriginMs + quota.elapsedThroughMs,
+      );
+    }
+
+    function cachedQuotaView(session: ActiveSession, nowMs: number): QuotaView | null {
       if (changedLiveModelView(session) || session.target.kind !== "supported" || !session.quota) {
         return null;
       }
@@ -1463,23 +1474,15 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         session.quota.endpointRevision !== session.target.endpointRevision
       ) return null;
       const cached = session.quota.view;
-      const recoverable = recoverableFreshView(cached);
-      if (!recoverable) return cached;
-      const nextExpiryMs = nextAuthoritativeExpiryMs(
-        recoverable,
-        session.quota.expiredThroughMs,
-      );
-      if (nowMs < nextExpiryMs) session.quota.deferPastExpiry = false;
-      if (commitThroughMs !== undefined && commitThroughMs >= nextExpiryMs) {
-        session.quota.expiredThroughMs = Math.max(
-          session.quota.expiredThroughMs ?? Number.NEGATIVE_INFINITY,
-          commitThroughMs,
-        );
+      if (cached.kind !== "fresh") return cached;
+      if (
+        cached.freshnessTimestampMs > nowMs + 60_000 ||
+        nowMs >= cached.freshUntilMs ||
+        authoritativeTimelineMs(session.quota) >= cached.freshUntilMs
+      ) {
+        return { kind: "stale", provider: cached.provider, label: cached.label };
       }
-      return revalidateFreshQuotaView(
-        recoverable,
-        Math.max(nowMs, session.quota.expiredThroughMs ?? Number.NEGATIVE_INFINITY),
-      );
+      return cached;
     }
 
     function currentView(session: ActiveSession, nowMs = now()): QuotaView {
@@ -1519,7 +1522,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       if (session.statusTimer !== null) timers.clearTimeout(session.statusTimer);
       session.expiryTimer = null;
       session.statusTimer = null;
-      session.expiryTimerView = null;
+      session.expiryTimerQuota = null;
     }
 
     function failCredentialMonitoring(session: ActiveSession): void {
@@ -1694,65 +1697,44 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       unrefTimer(timer);
     }
 
-    function sameExpiryPublication(
-      left: FreshQuotaView | null,
-      right: FreshQuotaView | null,
-    ): boolean {
-      return left !== null && right !== null &&
-        left.windows === right.windows &&
-        left.freshnessTimestampMs === right.freshnessTimestampMs &&
-        left.reportFreshUntilMs === right.reportFreshUntilMs;
-    }
-
     function render(session: ActiveSession, override?: QuotaView): void {
       if (active !== session) return;
       if (session.recoveryTimer !== null) timers.clearTimeout(session.recoveryTimer);
       session.recoveryTimer = null;
       const view = override ?? currentView(session);
       const schedulingBaseMs = now();
-      const cachedFreshView = recoverableFreshView(session.quota?.view ?? null);
-      const committedThroughMs = session.quota?.expiredThroughMs ?? Number.NEGATIVE_INFINITY;
-      const recoverableSkewView = cachedFreshView &&
-          schedulingBaseMs < cachedFreshView.freshnessTimestampMs - 60_000
-        ? cachedFreshView
-        : null;
-      const schedulingView = cachedFreshView
-        ? revalidateFreshQuotaView(cachedFreshView, Math.max(schedulingBaseMs, committedThroughMs))
-        : view;
-      if (!sameExpiryPublication(session.expiryTimerView, cachedFreshView)) {
+      if (session.expiryTimerQuota !== session.quota) {
         clearExpiry(session);
+        session.expiryTimerQuota = session.quota;
       }
-      if (cachedFreshView !== null) session.expiryTimerView = cachedFreshView;
 
-      const authoritativeExpiryMs = cachedFreshView
-        ? nextAuthoritativeExpiryMs(cachedFreshView, session.quota?.expiredThroughMs ?? null)
-        : Number.POSITIVE_INFINITY;
-      if (Number.isFinite(authoritativeExpiryMs) && session.expiryTimer === null) {
-        const referenceMs = session.quota?.expiredThroughMs ?? cachedFreshView?.freshnessTimestampMs ?? schedulingBaseMs;
+      const quota = session.quota;
+      const authoritativeView = quota?.view;
+      if (
+        quota?.publication &&
+        authoritativeView?.kind === "fresh" &&
+        session.expiryTimer === null
+      ) {
         const delayMs = Math.min(
           MAX_TIMER_DELAY_MS,
-          authoritativeExpiryMs > schedulingBaseMs
-            ? authoritativeExpiryMs - schedulingBaseMs
-            : session.quota?.deferPastExpiry
-              ? Math.max(1, authoritativeExpiryMs - referenceMs)
-              : 0,
+          Math.max(0, authoritativeView.freshUntilMs - authoritativeTimelineMs(quota)),
         );
         let timer: unknown;
         timer = timers.setTimeout(() => {
-          if (active !== session || session.expiryTimer !== timer) return;
+          if (active !== session || session.expiryTimer !== timer || session.quota !== quota) return;
           session.expiryTimer = null;
-          const timerNowMs = now();
-          cachedQuotaView(session, timerNowMs, timerNowMs);
+          advanceAuthoritativeQuota(session, quota);
           render(session);
         }, delayMs);
         session.expiryTimer = timer;
         unrefTimer(timer);
       }
 
-      const nextStatusMs = schedulingView.kind === "fresh"
-        ? nextQuotaStatusTransitionMs(schedulingView, schedulingBaseMs)
-        : recoverableSkewView
-          ? recoverableSkewView.freshnessTimestampMs - 60_000
+      const nextStatusMs = view.kind === "fresh"
+        ? nextQuotaStatusTransitionMs(view, schedulingBaseMs)
+        : authoritativeView?.kind === "fresh" &&
+            schedulingBaseMs < authoritativeView.freshnessTimestampMs - 60_000
+          ? authoritativeView.freshnessTimestampMs - 60_000
           : Number.POSITIVE_INFINITY;
       if (Number.isFinite(nextStatusMs) && session.statusTimer === null) {
         const delayMs = Math.min(
@@ -1778,16 +1760,13 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             : boundedComponentWidth;
           const renderNowMs = now();
           const changedModel = changedLiveModelView(session);
-          const renderView = changedModel ?? (
-            view.kind === "fresh" || recoverableSkewView !== null
-              ? currentView(session, renderNowMs)
-              : view
-          );
-          if (
-            renderView.kind === "fresh" &&
-            ((view.kind !== "fresh" && recoverableSkewView !== null) ||
-              (view.kind === "fresh" && renderView.freshUntilMs < view.freshUntilMs))
-          ) scheduleRecoveredView(session);
+          const current = changedModel ?? currentView(session, renderNowMs);
+          const renderView = !changedModel && current.kind === "refreshing" && view.kind === "stale"
+            ? view
+            : current;
+          if ((renderView.kind === "fresh") !== (view.kind === "fresh")) {
+            scheduleRecoveredView(session);
+          }
           const plain = formatStatus(renderView, availableWidth, renderNowMs);
           return plain ? [theme.fg("dim", plain)] : [];
         },
@@ -1817,12 +1796,15 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       provider: string,
     ): void {
       const cached = cachedQuotaView(session, now());
-      const recoverable = recoverableFreshView(session.quota?.view ?? null);
+      const quota = session.quota;
       session.lastFailure = issue;
-      if (cached?.kind === "fresh" && session.quota) {
-        session.quota.view = { ...(recoverable ?? cached), refreshFailure: issue };
+      if (quota?.view.kind === "fresh") {
+        quota.view = { ...quota.view, refreshFailure: issue };
+        if (quota.publication) {
+          quota.publication = { ...quota.publication, refreshFailure: issue };
+        }
         render(session);
-      } else if (recoverable) {
+      } else if (cached?.kind === "fresh") {
         render(session);
       } else {
         session.quota = null;
@@ -1993,15 +1975,21 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
             publishRefreshIssue(session, "unverified", completedProvider);
           } else {
             session.lastFailure = null;
+            const recoverable = recoverableFreshView(selected);
+            const publication = recoverable ? quotaPublicationFreshView(recoverable) : null;
             session.quota = {
-              view: selected.kind === "fresh" ? quotaPublicationFreshView(selected) : selected,
+              view: publication
+                ? revalidateFreshQuotaView(publication, publication.generatedAtMs)
+                : selected,
+              publication,
+              publishedAtMonotonicMs: monotonicNow(),
+              elapsedThroughMs: 0,
+              timelineOriginMs: publication?.generatedAtMs ?? report?.generatedAtMs ?? now(),
               piProvider: completedProvider,
               credentialRevision: completedTarget.credentialRevision,
               modelRevision: completedTarget.modelRevision,
               compositionRevision: completedTarget.compositionRevision,
               endpointRevision: completedTarget.endpointRevision,
-              expiredThroughMs: null,
-              deferPastExpiry: selected.kind === "fresh" && selected.publicationWindows !== undefined,
             };
             render(session);
           }
@@ -2075,7 +2063,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         refreshTimer: null,
         expiryTimer: null,
         statusTimer: null,
-        expiryTimerView: null,
+        expiryTimerQuota: null,
         modelRefreshTimer: null,
         recoveryTimer: null,
         revisionTimer: null,

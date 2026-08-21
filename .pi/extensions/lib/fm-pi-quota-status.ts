@@ -1713,7 +1713,7 @@ export function selectActiveProviderQuota(
     : DEFAULT_QUOTA_FRESHNESS_MS;
   let freshnessTimestampMs = report.generatedAtMs;
   let reportFreshUntilMs = report.generatedAtMs + freshnessMs;
-  if (nowMs >= reportFreshUntilMs) {
+  if (nowMs >= reportFreshUntilMs + freshnessMs) {
     return { kind: "stale", provider, label: null };
   }
 
@@ -1831,12 +1831,8 @@ export function selectActiveProviderQuota(
     freshUntilMs,
   };
   const selected = revalidateFreshQuotaView(freshView, nowMs);
-  if (
-    selected.kind === "stale" &&
-    nowMs < freshnessTimestampMs - 60_000 &&
-    nowMs < reportFreshUntilMs
-  ) return { ...selected, recoverable: freshView };
-  if (selected.kind === "fresh" && selected.windows !== freshView.windows) {
+  if (selected.kind === "stale") return { ...selected, recoverable: freshView };
+  if (selected.windows !== freshView.windows) {
     return { ...selected, publicationWindows: freshView.windows };
   }
   return selected;

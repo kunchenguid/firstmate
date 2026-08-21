@@ -2141,6 +2141,21 @@ assert(
     formatQuotaStatus(publicationRecoveredView, 400, now + 2 * 60_000).includes("week 94% left"),
   "temporary publication-time forward skew discarded a recoverable window",
 );
+const reportForwardView = selectActiveProviderQuota(
+  publicationForwardParsed,
+  "openai-codex",
+  { nowMs: now + 7 * 60_000 },
+);
+assert(
+  reportForwardView.kind === "stale" && reportForwardView.recoverable,
+  "forward-skewed report freshness was not retained safely",
+);
+assert(
+  reportForwardView.kind === "stale" &&
+    reportForwardView.recoverable &&
+    revalidateFreshQuotaView(reportForwardView.recoverable, now + 2 * 60_000).kind === "fresh",
+  "temporary forward skew discarded the validated report publication",
+);
 assert(selectActiveProviderQuota(parsed, "custom-proxy", { nowMs: now }).kind === "unsupported", "unsupported provider was not isolated");
 const ansiReport = report(now);
 ansiReport.providers[1].label = "Co\x1b[31mdex";
@@ -3274,6 +3289,7 @@ const backwardExpiry = makePi(createFirstmateQuotaStatusExtension({
   freshnessMs: 6 * 60 * 1000,
   timeoutMs: 500,
   now: () => backwardExpiryClock.wallNowMs,
+  monotonicNow: () => backwardExpiryClock.timerNowMs,
   timers: backwardExpiryClock.timers,
 }));
 await backwardExpiry.emit("session_start", { reason: "startup" });
@@ -3292,15 +3308,12 @@ assert(
 );
 backwardExpiryClock.wallNowMs += 120_000;
 assert(
-  backwardExpiry.widgetText(400).includes("week 94% left"),
-  "clock recovery did not restore a still-fresh cached window",
+  !backwardExpiry.widgetText(400).includes("week 94% left"),
+  "clock recovery resurrected a monotonically expired window",
 );
-backwardExpiryClock.wallNowMs += 60_000;
-backwardExpiryClock.advanceTimers(60_000);
-assert(!backwardExpiry.widgetText(400).includes("week 94% left"), "rescheduled expiry retained a reset window");
 assert(
   backwardExpiry.widgetText(400).includes("GPT-5.3-Codex-Spark session 100% left"),
-  "rescheduled expiry hid a fresh sibling window",
+  "monotonic expiry hid a fresh sibling window",
 );
 await backwardExpiry.emit("session_shutdown", { reason: "quit" });
 assert(backwardExpiryClock.tasks.size === 0, "backward-clock expiry leaked a timer");
@@ -3322,6 +3335,7 @@ const forwardExpiry = makePi(createFirstmateQuotaStatusExtension({
   freshnessMs: 6 * 60 * 1000,
   timeoutMs: 500,
   now: () => forwardExpiryClock.wallNowMs,
+  monotonicNow: () => forwardExpiryClock.timerNowMs,
   timers: forwardExpiryClock.timers,
 }));
 await forwardExpiry.emit("session_start", { reason: "startup" });
@@ -3344,6 +3358,54 @@ assert(forwardExpiryClock.tasks.size === 0, "forward-clock expiry leaked a timer
 delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
+const reportForwardStart = Date.now();
+const reportForwardClock = new SplitClock(reportForwardStart + 7 * 60_000);
+process.env.FM_QUOTA_TEST_NOW_MS = String(reportForwardStart);
+process.env.FM_QUOTA_TEST_FIRST_RESET_MS = String(3 * 60_000);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  reportForwardStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const reportForward = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => reportForwardClock.wallNowMs,
+  monotonicNow: () => reportForwardClock.timerNowMs,
+  timers: reportForwardClock.timers,
+}));
+await reportForward.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => reportForward.widgetText(400).includes("stale"),
+  "forward-skewed report was not withheld at publication",
+);
+assert(!reportForward.widgetText(400).includes("94%"), "forward-skewed report exposed stale quota");
+reportForwardClock.wallNowMs = reportForwardStart + 2 * 60_000;
+assert(
+  reportForward.widgetText(400).includes("week 94% left"),
+  "temporary forward report skew discarded a recoverable publication",
+);
+reportForwardClock.advanceTimers(3 * 60_000);
+assert(
+  !reportForward.widgetText(400).includes("week 94% left"),
+  "monotonic report expiry did not retire a reset window",
+);
+reportForwardClock.wallNowMs = reportForwardStart + 60_000;
+assert(
+  !reportForward.widgetText(400).includes("week 94% left"),
+  "wall rollback resurrected a monotonically expired report window",
+);
+assert(
+  reportForward.widgetText(400).includes("GPT-5.3-Codex-Spark session 100% left"),
+  "report expiry hid an independently fresh sibling",
+);
+await reportForward.emit("session_shutdown", { reason: "quit" });
+assert(reportForwardClock.tasks.size === 0, "forward-report skew leaked a timer");
+delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
 const publicationSkewStart = Date.now();
 const publicationSkewClock = new SplitClock(publicationSkewStart);
 publicationSkewClock.wallNowMs -= 120_000;
@@ -3359,6 +3421,7 @@ const publicationSkew = makePi(createFirstmateQuotaStatusExtension({
   freshnessMs: 6 * 60 * 1000,
   timeoutMs: 500,
   now: () => publicationSkewClock.wallNowMs,
+  monotonicNow: () => publicationSkewClock.timerNowMs,
   timers: publicationSkewClock.timers,
 }));
 await publicationSkew.emit("session_start", { reason: "startup" });
@@ -3397,6 +3460,7 @@ const overflowSkew = makePi(createFirstmateQuotaStatusExtension({
   freshnessMs: 6 * 60 * 1000,
   timeoutMs: 500,
   now: () => overflowSkewClock.wallNowMs,
+  monotonicNow: () => overflowSkewClock.timerNowMs,
   timers: overflowSkewClock.timers,
 }));
 await overflowSkew.emit("session_start", { reason: "startup" });
@@ -3415,24 +3479,12 @@ assert(
 );
 overflowSkewClock.wallNowMs = overflowSkewStart;
 assert(
-  overflowSkew.widgetText(400).includes("week 94% left"),
-  "large-skew clock recovery did not restore recoverable fresh quota",
-);
-const writesBeforeRecoveredPublication = overflowSkew.widgetWriteCount;
-overflowSkewClock.advanceTimers(0);
-assert(
-  overflowSkew.widgetWriteCount > writesBeforeRecoveredPublication,
-  "large-skew recovery did not republish its fresh expiry deadline",
-);
-overflowSkewClock.wallNowMs += 60_000;
-overflowSkewClock.advanceTimers(60_000);
-assert(
   !overflowSkew.widgetText(400).includes("week 94% left"),
-  "large-skew recovery retained a quota window past reset",
+  "large-skew recovery resurrected a monotonically expired window",
 );
 assert(
   overflowSkew.widgetText(400).includes("GPT-5.3-Codex-Spark session 100% left"),
-  "large-skew recovery hid a still-fresh sibling window",
+  "large-skew expiry hid a still-fresh sibling window",
 );
 await overflowSkew.emit("session_shutdown", { reason: "quit" });
 assert(overflowSkewClock.tasks.size === 0, "large-skew expiry leaked a timer");
@@ -3530,6 +3582,7 @@ const delayedCountdown = makePi(createFirstmateQuotaStatusExtension({
   freshnessMs: 6 * 60 * 1000,
   timeoutMs: 500,
   now: () => delayedCountdownClock.wallNowMs,
+  monotonicNow: () => delayedCountdownClock.timerNowMs,
   timers: delayedCountdownClock.timers,
 }));
 await delayedCountdown.emit("session_start", { reason: "startup" });
