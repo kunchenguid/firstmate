@@ -475,6 +475,48 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+## Away-mode daemon lifetime
+
+Verified on 2026-08-22 with Claude Code 2.1.222 on macOS 26.5.2 arm64 and tmux 3.6a, in a throwaway state directory on a private tmux socket (never a live home).
+This record exists because a 2026-08-21 away-mode session read as "the daemon exits about 38 seconds after launch", and the leading hypothesis blamed the launch shape.
+It does not: the daemon's lifetime is bounded only by a deliberate lifecycle stop.
+
+Both launch shapes were hosted in a Claude Code tracked background job against `FM_STATE_OVERRIDE`, `FM_SUPERVISOR_BACKEND=tmux`, and a private-socket supervisor pane:
+
+| Launch shape | Command run in the tracked background job | Observed lifetime |
+| --- | --- | --- |
+| `exec`-wrapped | `exec bin/fm-afk-start.sh` | alive at 4m47s |
+| documented native | `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` | alive at 1m54s |
+
+`exec` replaces the job shell, so the daemon becomes the tracked job process itself (`ps` reported it as a session leader); that does not shorten its life.
+
+What did end it was `bin/fm-afk-return.sh check` run with away mode active and no catch-up gate open, which shares `begin`'s stop-and-drain body:
+
+```
+BEFORE: daemon pid=35356 alive=yes; .afk present=yes; gate present=no
+fm-afk-launch: away mode stopped; daemon terminal torn down and .afk cleared
+fm-afk-return: catch-up clear; ordinary captain work may proceed
+AFTER: daemon alive=no; .afk present=no
+```
+
+The daemon logged its ordinary signal-trapped `daemon shutting down` line and its background job reported exit 0, which is why the shutdown read as spontaneous.
+`check` now refuses that case (`tests/fm-afk-return.test.sh`), and re-running the same call against a live daemon leaves it running:
+
+```
+T+30s: daemon pid=60600 alive=yes
+fm-afk-return: refusing to start the away-mode return from check: away mode is still active and no return catch-up is open
+rc=2
+=== T+75s ===
+daemon alive=yes
+.afk present=yes
+```
+
+Portable regressions for both refusals:
+
+```sh
+bin/fm-test-run.sh tests/fm-afk-return.test.sh tests/fm-daemon.test.sh tests/fm-afk-launch.test.sh
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

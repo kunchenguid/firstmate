@@ -45,6 +45,7 @@ batched digest rather than per-wake injections.
      support").
    Both paths share `bin/fm-afk-start.sh` as the daemon entry.
    The native path tells it that the launcher already prepared lifecycle state; the terminal-backed path lets the entry perform its existing state setup inside the new terminal.
+   Those two are the only shapes it accepts: a bare or `exec`-wrapped invocation declares neither and is refused, because an away session with no launcher lifecycle record cannot be stopped or reconciled.
    It exits immediately if the identity-backed daemon lock already names a live process, otherwise it execs `bin/fm-supervise-daemon.sh` in the foreground.
    The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
@@ -61,6 +62,7 @@ No `/back` is needed. The first genuine message is the return signal:
 - A message **without** the current operational prefix or a legacy bare marker, and **not** starting with `/afk` -> the captain is back.
   Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
   That script owns correct-ordered daemon shutdown, durable wake presentation and post-handling acknowledgement, escalation and wedge evidence, and the return-catch-up gate.
+  Its `check` subcommand completes a return that is already under way and refuses to start one; `guard` is the read-only way to ask whether a return is pending.
   If it reports a firstmate-actionable `blocked:` event, remediate it immediately through the normal lifecycle, or explicitly reclassify it with a durable reason and close its decision key with `resolved [key=...]`, then run `bin/fm-afk-return.sh check`.
   Once the daemon stops, resume full per-wake responsiveness through the emitted primary-harness supervision protocol while blocker handling proceeds, so the gate never creates a blind wait.
   Do not answer a Bearings request or perform any other ordinary captain work until the check exits successfully.

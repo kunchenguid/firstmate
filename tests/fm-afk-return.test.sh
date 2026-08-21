@@ -79,6 +79,47 @@ EOF
   printf 'blocked [key=%s]: firstmate can refresh the synthetic token\n' "$key" > "$dir/home/state/repair-task.status"
 }
 
+test_check_refuses_to_start_the_return() {
+  local dir out rc
+  dir="$TMP_ROOT/check-refuses-start"
+  install_runner "$dir"
+  date +%s > "$dir/home/state/.afk"
+  printf 'none\t-\tnative\n' > "$dir/home/state/.afk-daemon-terminal"
+  : > "$dir/home/state/.fake-drain"
+
+  # The 2026-08-21 incident: `check` reads like a status probe, but it shares
+  # begin's stop-and-drain body. Run with away mode active and no gate open, it
+  # performed the whole return - stopping the daemon and clearing state/.afk -
+  # which left supervision off while the flag looked live to everything else.
+  set +e
+  out=$(run_return "$dir" check)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "check should refuse to start the return (rc=$rc): $out"
+  assert_contains "$out" 'refusing to start the away-mode return from check' "the refusal did not name what it declined to do"
+  assert_contains "$out" 'bin/fm-afk-return.sh guard' "the refusal did not name the read-only command"
+  [ -e "$dir/home/state/.afk" ] || fail "refused check cleared away mode anyway"
+  [ -e "$dir/home/state/.afk-daemon-terminal" ] || fail "refused check tore down the daemon terminal record"
+  [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "refused check opened a catch-up gate"
+  [ ! -e "$dir/home/stop.log" ] || fail "refused check stopped away mode"
+
+  # `guard` is the command that answers the same question without mutating.
+  set +e
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$dir/bin/fm-afk-return.sh" guard 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "guard should refuse ordinary work while away mode is active (rc=$rc): $out"
+  [ -e "$dir/home/state/.afk" ] || fail "guard cleared away mode"
+  [ ! -e "$dir/home/stop.log" ] || fail "guard stopped away mode"
+
+  # begin is the command that means it, and check then completes the return.
+  out=$(run_return "$dir" begin) || fail "begin should perform the return: $out"
+  [ ! -e "$dir/home/state/.afk" ] || fail "begin did not clear away mode"
+  [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 1 ] || fail "begin did not stop away mode exactly once"
+  out=$(run_return "$dir" check) || fail "check should stay idempotent once the return is complete: $out"
+  pass "check refuses to start the return, guard reports without mutating, begin owns the transition"
+}
+
 test_return_gate_orders_catchup_before_bearings() {
   local dir out rc gate wake_count
   dir="$TMP_ROOT/ordering"
@@ -275,6 +316,7 @@ test_check_retries_recorded_terminal_teardown() {
   pass "check retries recorded terminal teardown and keeps catch-up gated until success"
 }
 
+test_check_refuses_to_start_the_return
 test_return_gate_orders_catchup_before_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
