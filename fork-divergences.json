@@ -210,6 +210,21 @@
         "bin/fm-session-start.sh",
         "docs/configuration.md"
       ]
+    },
+    {
+      "id": "firstmate-next-cache-reclaim",
+      "summary": "Report which pooled worktrees hold regenerable Next.js build output and how much, deleting nothing: the sweep inspects and reports only, and teardown-side reclamation is absent because ownership cannot be proven under a process-bound worktree hold.",
+      "class": "private",
+      "topic": "fm/divergence/firstmate-next-cache-reclaim",
+      "introduced": "2026-08-20",
+      "upstream_pr": null,
+      "retire_when": "Upstream Firstmate reclaims regenerable build output from pooled worktrees itself - removing it when a copy is returned to the pool and offering a supported way to reclaim it from idle copies - so a stock installation no longer accumulates it.",
+      "paths": [
+        "AGENTS.md",
+        "bin/fm-next-cache-lib.sh",
+        "bin/fm-next-cache-sweep.sh",
+        "tests/fm-next-cache-sweep.test.sh"
+      ]
     }
   ],
   "retired_upstream": []
