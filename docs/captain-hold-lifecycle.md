@@ -12,9 +12,9 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 
 Two files hold real records, and only one of them is ever written.
 Backlog retention does not delete a closed task, it moves it out of the active backlog and into the configured archive, so an answered captain call lives in `data/backlog.md` until retention trims it and in `data/done-archive.md` afterwards.
-Every read that asks whether a captain call's record exists therefore consults both files: archived means the answer was recorded and the row was later trimmed, never that the record is missing.
+Every read that asks whether a durable record exists therefore consults both files: archived means the answer was recorded and the row was later trimmed, never that the record is missing.
 Every mutation still targets the active backlog alone, the only file tasks-axi writes, so a record found in the archive can be reported on and replayed but never changed or re-minted.
-`bin/fm-tasks-axi-lib.sh` owns the archive read itself, and `bin/fm-captain-hold.sh`'s header owns the one deliberate exception, `diverged`, whose subject is by definition an open task the archive cannot hold.
+`bin/fm-tasks-axi-lib.sh` owns the archive read itself, and `bin/fm-captain-hold.sh`'s header owns the one deliberate exception among its own reads, `diverged`, whose subject is by definition an open task the archive cannot hold.
 
 The `hold` subcommand places an existing task under an active captain hold, or creates the task when nothing exists to hold, then verifies the hold through `tasks-axi hold <id> --reason <reason> --kind captain`.
 Repeats are idempotent, a closed task is refused rather than reopened whether its row is still in the active backlog or has been archived out of it, and `--until` stores the captain's own deferral date through tasks-axi's date gate.
@@ -28,6 +28,7 @@ A hold whose `--until` date has passed keeps those annotations while tasks-axi r
 
 The `complete` subcommand unions the reviewed captain-held task ids into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
 A post-teardown visual review can complete against the surviving report and durable tasks without recreating volatile task metadata.
+The ownership check `complete` runs on that origin falls back to the archive as well, so an investigation whose own row retention has already trimmed out of the backlog still owns a later review pass, and an archive that cannot be searched refuses in the archive's own words rather than disowning the origin.
 It accepts `--none` as an explicit semantic inventory result, refused while the origin still has a lifecycle-open keyed status decision, and verifies every listed task against tasks-axi before recording completion.
 With a non-empty inventory it appends a `captain-held [key=<key>]: tracked by <inventory>` transfer event for every still-open keyed status decision, which `bin/fm-classify-lib.sh` recognizes as closing the live status copy without claiming that the captain has answered it.
 
@@ -103,6 +104,7 @@ An answered captain call that retention moved into the archive keeps the captain
 The gate is not looser for it: an inventory entry with no record in either file, a recorded entry closed with no recorded answer, that same entry after retention archives it, and a recorded entry that is open without the captain hold all still fail, each of the three refusals is asserted, every pair of them is asserted to differ, and cleanup is refused by the gate itself while any of them stands.
 An archive that still carries the entry is refused in its own words in each of the two ways the read can fail, a section heading the parser no longer accepts and a copy that could not be staged at all, and each of those messages is asserted to be neither the no-record wording nor any of the other refusals, which is what keeps an archive that cannot be read from ever collapsing back into a false "absent".
 An archive path that exists but cannot be read as a regular file is the third such refusal, and it is proved to stop the gate rather than pass it, to stop `hold` from minting a second row for a call the archive may already hold, and to say that the archive could not be searched rather than that both files were: no archive file at all stays quiet in the same test, because a home that has never had a row trimmed is healthy.
+Origin ownership is proved on the same two files: an investigation whose own row retention archived still completes a later review pass, while an archive that could not be searched refuses in the archive's own words instead of reading as an origin this home does not own.
 On the write side, an archived record takes an exact `answer` replay and a replayed keyed delivery while leaving both files byte-identical, and refuses a drifted answer, a `--release`, and a `hold` that would mint a second row for the same call.
 Every archive fixture is built by running `tasks-axi prune --keep 0 --state done` inside the throwaway home, never by hand-editing a backlog or archive file; the error paths then damage only that disposable archive, its own section heading or the readability of its path.
 

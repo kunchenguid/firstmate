@@ -1510,6 +1510,61 @@ test_archived_records_are_readable_but_never_written() {
   pass "archived captain-call records are readable, replayable, and never written or duplicated"
 }
 
+# The last sibling that shared the backlog-only lookup: the ownership check
+# `complete` runs over the ORIGIN. A row retention has archived is still this
+# home's own record of it, so a long-finished investigation can attest a later
+# review pass instead of being disowned by the home that ran it. An archive that
+# cannot be opened leaves ownership unknown, which is not the same answer as not
+# owned, so that refuses in its own words rather than naming another home.
+test_archived_origin_still_owns_a_later_review_pass() {
+  local home id call out err
+  home=$(make_home retention-archived-origin)
+  id=sample-archived-origin
+  call=sample-later-review-call
+  tasks_in "$home" add "$id" "Investigate the archived origin" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the origin"
+  tasks_in "$home" add "$call" "Choose the later option" --repo sample >/dev/null \
+    || fail "could not create the captain call"
+  run_captain "$home" hold "$call" --reason "captain later choice pending" >/dev/null \
+    || fail "could not hold the captain call"
+  printf 'Take the later option.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  tasks_in "$home" "done" "$id" >/dev/null || fail "could not close the origin"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null || fail "could not run backlog retention"
+
+  # Ownership rests on the archived row alone here: no attestation metadata was
+  # ever written and there is no report deliverable to answer it first, so a
+  # backlog-only lookup has nothing left to find.
+  assert_absent "$home/state/$id.meta" \
+    "setup error: attestation metadata would answer ownership before the archive read"
+  assert_absent "$home/data/$id" \
+    "setup error: a report deliverable would answer ownership before the archive read"
+  assert_no_grep "$id" "$home/data/backlog.md" \
+    "setup error: retention should have moved the origin row out of the active backlog"
+  assert_grep "$id" "$home/data/done-archive.md" \
+    "setup error: retention should have moved the origin row into the archive"
+
+  out=$(run_captain "$home" complete "$id" "$call" 2>&1) \
+    || fail "completion disowned an origin whose own row retention archived: $out"
+  assert_contains "$out" "captain-call inventory reviewed" \
+    "the later review pass over an archived origin was not recorded"
+
+  # And the fail-closed half: an archive path that cannot be opened must not be
+  # read as evidence that some other home owns this origin.
+  mv "$home/data/done-archive.md" "$home/archive-elsewhere.md"
+  ln -s "$home/archive-elsewhere.md" "$home/data/done-archive.md"
+  if run_captain "$home" complete "$id" "$call" > "$home/origin.out" 2> "$home/origin.err"; then
+    fail "completion attested an origin while the archive could not be searched"
+  fi
+  err=$(cat "$home/origin.err")
+  assert_contains "$err" "not a readable regular file" \
+    "the refusal must name the archive it could not search"
+  assert_not_contains "$err" "is not owned by the active home" \
+    "an archive that was never searched must not read as a disowned origin"
+  pass "an origin whose own row retention archived still owns a later review pass"
+}
+
 # Reading the archive and being able to open it are different questions. A path
 # that exists and is not a readable regular file leaves it unknown whether the
 # record is in there, so it has to stop the gate in its own words instead of
@@ -1665,5 +1720,6 @@ test_legitimate_holds_produce_no_divergence_signal
 test_archived_captain_answer_still_completes_the_investigation
 test_unanswered_and_absent_captain_calls_still_fail_distinguishably
 test_archived_records_are_readable_but_never_written
+test_archived_origin_still_owns_a_later_review_pass
 test_unopenable_archive_refuses_instead_of_reading_as_absent
 test_markdown_table_header_forms_all_locate_the_archive

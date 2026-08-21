@@ -163,10 +163,17 @@ fm_tasks_axi_backend_available() {
 # and report an archived record as absent, which is the failure this whole read
 # exists to remove.
 # Recognizing the table has to be generous for the same reason. Missing a header
-# TOML accepts falls back to the default, which for a home that configured its
-# own paths names a file that does not exist and reports an archived record as
-# absent all over again, so a trailing comment, a carriage return, whitespace
-# inside the brackets, and a quoted key all still name this table.
+# tasks-axi itself honors falls back to the default, which for a home that
+# configured its own paths names a file that does not exist and reports an
+# archived record as absent all over again, so a trailing comment, a carriage
+# return, and whitespace inside the brackets all still name this table.
+# tasks-axi is the file's real reader, so it also bounds that scope: a quoted
+# `["markdown"]` key is NOT a header it honors (0.2.4, the FM_TASKS_AXI_MIN
+# floor, and 0.2.5 both fall back to the tracked default paths under it), so a
+# home spelling it that way has no configured archive for retention to write.
+# The unquoting below still matches that header, which for such a home would
+# name a configured archive tasks-axi never writes, so that spelling is
+# unsupported here exactly as it is there.
 fm_tasks_axi_markdown_path() {  # <home> <key> <default-relative>
   local home=$1 key=$2 default=$3 config="$1/.tasks.toml" value='' quotes="\"'"
   if [ -f "$config" ] && [ ! -L "$config" ]; then

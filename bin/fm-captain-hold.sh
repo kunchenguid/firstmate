@@ -24,8 +24,9 @@
 # lives in `data/backlog.md` until retention trims it and in
 # `data/done-archive.md` afterwards, and both are equally valid homes for a real
 # record: archived means the answer was recorded and the row was later trimmed,
-# never that the record is missing. Every read that asks whether a captain call's
-# record exists consults both files, so a completed investigation whose calls
+# never that the record is missing. Every read that asks whether a durable
+# record exists consults both files - a captain call's record and the origin
+# `complete` checks ownership of alike - so a completed investigation whose calls
 # were all answered stays completable no matter how much work has closed since.
 # Every mutation still targets the active backlog alone, the only file tasks-axi
 # writes, so a caller that found a record in the archive may report on it but
