@@ -444,6 +444,15 @@ command_hold() {
   printf '%s\n' "$id"
 }
 
+# Best-effort push of the just-recorded captain decision into this home's fleet
+# memory so recall accumulates every decision automatically (memval-04).
+# fm-remember.sh owns all fail-open guards (memory unwired, node missing, hub
+# slow); it never blocks or changes this command's outcome, so a failure here
+# never leaves a decision unrecorded in the backlog.
+remember_decision() {  # <decision-text>
+  "$SCRIPT_DIR/fm-remember.sh" "$1" >/dev/null 2>&1 || true
+}
+
 # Record a resolution block at the top of the task body, preserving the
 # previous body below it and archiving the pristine original.
 write_resolution_record() {  # <task-id> <mode> <shown-body>
@@ -465,6 +474,7 @@ write_resolution_record() {  # <task-id> <mode> <shown-body>
     fail "could not record the captain decision on $id"
   fi
   rm -f -- "$tmp"
+  remember_decision "$DECISION_TEXT"
 }
 
 close_answered() {  # <task-id> <release-0-or-1>

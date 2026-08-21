@@ -227,6 +227,8 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
      Use `--archive-body` when recoverability matters.
      Never append.
    - File each undone next step as a queued backlog item with a genuine `blocked-by` dependency when applicable.
+   - For each durable captain decision or learning this sweep files to a memory file, also push it to this home's fleet memory with `bin/fm-remember.sh "<entry text>"`, so recall accumulates it next spawn (memval-04).
+     This is a best-effort side-effect that never changes what the pass files to disk: the helper does nothing when this home has no memory wiring, and its write path dedups, so overlapping with a decision that decision-hold already wrote is a safe no-op.
 4. **Use inspect-then-update.**
    For every retained fact, ask which current statement it supersedes, whether it can be a one-sentence rewrite, and whether a stale entry should be refreshed, archived, or routed to an existing stronger owner.
    The only graduation moves are promotion to tracked shared material through a PR, folding a learning into the captain-preference destination selected by AGENTS.md, archiving a stale entry to `data/memory-archive.md`, autonomous offload of an eligible non-pinned conditional entry to an already-existing allowed owner through the reduce flow above, captain-approved offload of a pinned durable conditional entry to a JIT-loaded owner executed through the migration step above, or deletion of an entry that is a duplicate or already preserved through a stronger existing owner.
