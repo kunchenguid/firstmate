@@ -132,15 +132,18 @@
 #   reads the TARGET home's config/claude-account, and a crewmate or scout spawn
 #   reads its own home's. The file holds the absolute path of a Claude config
 #   store directory (the CLAUDE_CONFIG_DIR value) on its first non-empty,
-#   non-comment line. Present and valid, that store is forwarded onto a claude
-#   launch, and onto a PINNED secondmate launch whatever harness it runs, so the
-#   claude workers that home spawns land on the same account. Absent, the store
-#   is firstmate's own CLAUDE_CONFIG_DIR exactly as before, so an unpinned spawn
-#   is unchanged. A pin naming a missing, non-absolute, traversing, or
-#   unreadable store REFUSES the spawn before any endpoint exists rather than
-#   falling back to the primary's account. Because it is re-resolved per spawn,
-#   the pin is durable across every respawn path (recovery, --relaunch,
-#   /updatefirstmate, restart), and config/ is gitignored so it stays home-local
+#   non-comment line (bin/fm-config-line-lib.sh owns that shared line format).
+#   Present and valid, that store is forwarded onto EVERY launch out of that
+#   home - every harness and every kind - because the pin governs the whole
+#   home's Claude account and a non-claude pane still spawns claude workers of
+#   its own. Absent, the store is firstmate's own CLAUDE_CONFIG_DIR and keeps
+#   the narrower claude-harness-only rule exactly as before, so an unpinned
+#   spawn is unchanged. A pin naming a missing, non-absolute, traversing, or
+#   unreadable store, or a config/ this user cannot search, REFUSES the spawn
+#   before any endpoint exists rather than falling back to the primary's
+#   account. Because it is re-resolved per spawn, the pin is durable across
+#   every respawn path (recovery, --relaunch, /updatefirstmate, restart), and
+#   config/ is gitignored so it stays home-local
 #   and is never inherited between homes. A remote route's pin lives in the
 #   remote home's own config/ and is read and validated by the host-local spawn.
 #   A pinned launch reports `claude_account=<path>` on its success line.
@@ -277,6 +280,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-config-line-lib.sh
+. "$SCRIPT_DIR/fm-config-line-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1683,24 +1688,19 @@ fi
 CLAUDE_STORE=
 CLAUDE_STORE_PINNED=0
 
-# First non-empty, non-comment line of <file>, whitespace-trimmed; empty when
-# the file holds only blank or comment lines.
-claude_account_pin_value() {  # <file>
-  local line
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [ -n "$line" ] || continue
-    case "$line" in '#'*) continue ;; esac
-    printf '%s\n' "$line"
-    return 0
-  done < "$1"
-  return 0
-}
-
 resolve_claude_store() {  # <config-dir> <subject>
   local config_dir=$1 subject=$2 pin_file value
   pin_file="$config_dir/claude-account"
+  # An existing config/ that cannot be searched makes every test below it lie:
+  # stat of the pin file fails, so a pin that IS set reads as absent and the
+  # launch quietly falls back to the primary's account. Refuse first, so "no
+  # pin" is only ever concluded from a directory this user can actually look in.
+  # A config/ that does not exist at all is the ordinary unpinned case and is
+  # left exactly as before.
+  if [ -e "$config_dir" ] && { [ ! -d "$config_dir" ] || [ ! -x "$config_dir" ]; }; then
+    echo "error: $subject may pin a Claude account at $pin_file, but $config_dir is not a searchable directory for this user, so an absent pin cannot be told apart from an unreadable one; fix its permissions (launching would bill the primary's Claude account instead)" >&2
+    return 1
+  fi
   if [ ! -e "$pin_file" ]; then
     # A dangling symlink is a pin the operator meant to set, not an absent one.
     if [ -L "$pin_file" ]; then
@@ -1714,7 +1714,7 @@ resolve_claude_store() {  # <config-dir> <subject>
     echo "error: $subject pins a Claude account at $pin_file, but that is not a readable regular file; fix or remove it (launching would bill the primary's Claude account instead)" >&2
     return 1
   fi
-  value=$(claude_account_pin_value "$pin_file")
+  value=$(fm_config_first_line "$pin_file")
   if [ -z "$value" ]; then
     echo "error: $subject has an empty Claude account pin at $pin_file; put the absolute path of its Claude config store on the first line, or remove the file to use the primary's account" >&2
     return 1
@@ -2847,15 +2847,18 @@ esac
 # else firstmate's own CLAUDE_CONFIG_DIR - so the worker uses the credential the
 # task is meant to bill. Nothing resolved is the single-store default and needs
 # no prefix.
-# A PINNED secondmate gets the prefix whatever harness it runs on, because the
-# pin governs that whole home's Claude account: the agent carries the value into
-# the claude workers it spawns itself, and a codex or cursor secondmate would
-# otherwise put its own claude crewmates on the primary's account - the exact
-# silent mis-billing the pin exists to prevent. Every other launch keeps the
-# original claude-only rule.
-if [ -n "$CLAUDE_STORE" ] \
-   && { [ "$HARNESS" = claude ] \
-        || { [ "$KIND" = secondmate ] && [ "$CLAUDE_STORE_PINNED" -eq 1 ]; }; }; then
+# A PIN gets the prefix on EVERY launch out of that home - every harness and
+# every kind - because the pin is a statement about the whole home's Claude
+# account, not about one pane's harness. A codex, pi, cursor, grok, or kimi pane
+# still has `claude` on its PATH, and any stray invocation there, or any claude
+# worker that pane's own agent spawns, would otherwise land on the machine
+# default and bill the primary. Forwarding on every pinned launch is also what
+# makes the claude_account= success line below true by construction.
+# An AMBIENT inherited CLAUDE_CONFIG_DIR with no pin keeps the original narrower
+# rule exactly: claude harness only. It is firstmate's own environment rather
+# than a durable decision about this home, so it must not widen anything.
+if [ "$CLAUDE_STORE_PINNED" -eq 1 ] \
+   || { [ -n "$CLAUDE_STORE" ] && [ "$HARNESS" = claude ]; }; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_STORE") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then

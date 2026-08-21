@@ -253,9 +253,11 @@ A Firstmate home pins the Claude account its workers bill by putting the absolut
 Only the first non-empty, non-comment line is read, with surrounding whitespace trimmed.
 `bin/fm-spawn.sh` re-resolves the store from that file at every launch, so the pin survives every respawn path - fresh spawn, session-start liveness respawn, control-plane relaunch, and `/updatefirstmate` - without any of them carrying it forward.
 A `--secondmate` spawn reads the target home's file and a crewmate or scout spawn reads its own home's, so pinning one secondmate home puts that second mate and every worker it spawns on their own Claude subscription instead of the primary's.
-A pinned store is forwarded onto a claude launch, and onto a pinned secondmate launch whatever harness that agent itself runs, because a codex or cursor second mate still spawns claude workers of its own.
-With no pin the forwarded store is firstmate's own `CLAUDE_CONFIG_DIR` exactly as before, so an unpinned home's launches are unchanged.
+A pinned store is forwarded onto every launch out of that home, whatever harness and whatever kind of agent it launches, because the pin is a statement about the whole home's Claude account rather than about one pane's harness.
+A codex, pi, cursor, grok, or kimi pane still has `claude` on its path and still spawns claude workers of its own, so a pane without the store would put that work on the machine-default account.
+With no pin the forwarded store is firstmate's own `CLAUDE_CONFIG_DIR` and keeps the narrower claude-harness-only rule exactly as before, so an unpinned home's launches are unchanged.
 A pin whose value is not an absolute, traversal-free, readable, searchable directory refuses the spawn before any endpoint exists, naming the home and the path, and never falls back to the primary's account, because silently billing the wrong subscription is the failure this pin exists to prevent.
+A `config/` directory that exists but that the launching user cannot search refuses on the same grounds, because a pin set there would read as absent and quietly bill the primary.
 A pinned launch reports `claude_account=<path>` on its success line.
 This file is home-local and is not part of secondmate inherited configuration, so the primary's own pin never propagates downstream; a remote route's pin lives in the remote home's own `config/`, where the host-local spawn reads and validates it against that host's filesystem.
 Create the store directory and authenticate it once with `CLAUDE_CONFIG_DIR=<path> claude` before pinning it; Firstmate reads the path and never writes credentials.

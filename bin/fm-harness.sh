@@ -29,6 +29,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-config-line-lib.sh
+. "$SCRIPT_DIR/fm-config-line-lib.sh"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
@@ -125,19 +127,9 @@ resolve_crew() {
 # Print the first non-empty, non-comment line of config/secondmate-harness
 # (leading/trailing whitespace trimmed), or nothing when the file is absent or
 # holds only blank/comment lines.
+# bin/fm-config-line-lib.sh owns that shared line convention.
 secondmate_line() {
-  local line
-  [ -f "$CONFIG/secondmate-harness" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [ -n "$line" ] || continue
-    case "$line" in
-      '#'*) continue ;;
-    esac
-    printf '%s\n' "$line"
-    return 0
-  done < "$CONFIG/secondmate-harness"
+  fm_config_first_line "$CONFIG/secondmate-harness"
 }
 
 # Print the 1-based whitespace-separated token (1=harness, 2=model, 3=effort) of

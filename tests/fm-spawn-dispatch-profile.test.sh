@@ -983,6 +983,82 @@ test_unusable_secondmate_account_pin_refuses_loudly() {
   pass "a pin naming a missing store refuses before any endpoint exists, never falling back silently"
 }
 
+test_pinned_home_carries_its_account_onto_a_non_claude_crewmate() {
+  local rec id store out status launch
+  id=profile-sm-child-codex-z28
+  rec=$(make_spawn_case profile-sm-child-codex codex "$id")
+  read_case_record "$rec"
+  store="$CASE_DIR/claude-brandt"
+  # HOME_DIR stands in for the pinned home: this is the ordinary codex crewmate
+  # its agent dispatches. That pane still has claude on its path and still
+  # spawns claude workers of its own, so the pin has to reach it too.
+  pin_claude_account "$HOME_DIR" "$store"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-primary" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a codex crewmate spawn from a pinned home should succeed"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=codex" "the pin must not disturb crewmate harness resolution"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$store'" \
+    "a non-claude crewmate from a pinned home did not carry that home's Claude account"
+  assert_not_contains "$launch" "$CASE_DIR/claude-primary" \
+    "a non-claude crewmate from a pinned home must not fall back to an inherited store"
+  assert_contains "$out" "claude_account=$store" \
+    "the success line reported an account this launch did not actually carry"
+  pass "a pinned home carries its Claude account onto non-claude crewmates, so claude_account= is true for them"
+}
+
+test_unsearchable_config_directory_refuses_rather_than_reading_as_unpinned() {
+  local rec id sm store out status
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "unsearchable config directory case skipped: root can still search a mode-0 directory"
+    return 0
+  fi
+
+  # The home's OWN config/ holds the pin its crewmates resolve. An existing but
+  # unsearchable one makes the pin unstatable, so the absence test would read it
+  # as "no pin" and quietly bill the primary. The harness comes from the flag so
+  # this exercises the account resolution rather than harness resolution.
+  id=profile-child-unsearchable-z29
+  rec=$(make_spawn_case profile-child-unsearchable claude "$id")
+  read_case_record "$rec"
+  store="$CASE_DIR/claude-brandt"
+  pin_claude_account "$HOME_DIR" "$store"
+  chmod 000 "$HOME_DIR/config"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-primary" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude)
+  status=$?
+  chmod 755 "$HOME_DIR/config"
+  expect_code 1 "$status" "an unsearchable config directory must refuse the spawn"$'\n'"$out"
+  assert_contains "$out" "task $id" "the refusal did not name the subject of the launch"
+  assert_contains "$out" "$HOME_DIR/config" "the refusal did not name the config directory to fix"
+  assert_absent "$HOME_DIR/state/$id.meta" "an unsearchable config directory still wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unsearchable config directory still typed a launch command"
+
+  # The same shape on a --secondmate target home must also refuse before any
+  # endpoint exists rather than launching that agent on the primary's account.
+  id=profile-sm-unsearchable-z30
+  rec=$(make_spawn_case profile-sm-unsearchable claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  pin_claude_account "$sm" "$CASE_DIR/claude-brandt"
+  chmod 000 "$sm/config"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-primary" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  chmod 755 "$sm/config"
+  expect_code 1 "$status" "an unsearchable secondmate config directory must refuse the spawn"$'\n'"$out"
+  assert_contains "$out" "$sm/config" "the secondmate refusal did not name the config directory to fix"
+  assert_absent "$HOME_DIR/state/$id.meta" "an unsearchable secondmate config directory still wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unsearchable secondmate config directory still typed a launch command"
+  pass "an existing but unsearchable config directory refuses instead of silently reading as no pin"
+}
+
 test_malformed_secondmate_account_pins_refuse_rather_than_fall_back() {
   local rec id sm out status case_name
   id=profile-sm-badpin-z27
@@ -1071,7 +1147,9 @@ test_unpinned_secondmate_adds_no_prefix_with_the_single_store_default
 test_pinned_secondmate_carries_its_account_on_a_non_claude_harness
 test_secondmate_pin_reaches_the_crewmates_that_home_spawns
 test_secondmate_respawn_without_a_home_argument_still_honours_the_pin
+test_pinned_home_carries_its_account_onto_a_non_claude_crewmate
 test_unusable_secondmate_account_pin_refuses_loudly
+test_unsearchable_config_directory_refuses_rather_than_reading_as_unpinned
 test_malformed_secondmate_account_pins_refuse_rather_than_fall_back
 
 echo "# all fm-spawn-dispatch-profile tests passed"
