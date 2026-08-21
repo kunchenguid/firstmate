@@ -60,13 +60,23 @@ class FrameError(Exception):
     """A frame could not be encoded or decoded."""
 
 
-def encode(kind, payload=b""):
-    """Return the wire bytes for one frame."""
+def check_header(kind, length):
+    """Raise FrameError unless a decoded header is one this format allows.
+
+    Both directions of the stream decode headers, and audio that happens to
+    look like one must be rejected identically wherever that happens, so the
+    rules live here rather than beside each decoder.
+    """
     if kind not in KINDS:
         raise FrameError("unknown frame kind: {!r}".format(kind))
-    if len(payload) > MAX_PAYLOAD:
+    if length > MAX_PAYLOAD:
         raise FrameError("payload of {} bytes exceeds the {} byte limit".format(
-            len(payload), MAX_PAYLOAD))
+            length, MAX_PAYLOAD))
+
+
+def encode(kind, payload=b""):
+    """Return the wire bytes for one frame."""
+    check_header(kind, len(payload))
     return HEADER.pack(kind, len(payload)) + payload
 
 
@@ -111,11 +121,7 @@ class Reader:
         if head is None:
             return None
         kind, length = HEADER.unpack(head)
-        if kind not in KINDS:
-            raise FrameError("unknown frame kind: {!r}".format(kind))
-        if length > MAX_PAYLOAD:
-            raise FrameError("payload of {} bytes exceeds the {} byte limit".format(
-                length, MAX_PAYLOAD))
+        check_header(kind, length)
         if length == 0:
             return kind, b""
         payload = self._exact(length)

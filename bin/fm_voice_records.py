@@ -181,7 +181,16 @@ def _parse_backlog(path):
 
 
 def _last_event(state_dir, task_id):
-    """Return (verb, line) from the last status event, or (None, None)."""
+    """Return (verb, line) from the last status event, or (None, None).
+
+    The verb is what precedes the first ':' and the first '[', whichever comes
+    first, which is what status_line_verb in bin/fm-classify-lib.sh does and
+    that remains the owner of the format. The bracket matters: status metadata
+    sits between the verb and the colon, as in "done [token]: shipped it" and
+    "needs-decision [key=api-shape]: which shape". A line carrying no colon is
+    not a status line, and anything that does not read as a single state word is
+    reported as a note rather than spoken aloud as a state.
+    """
     path = os.path.join(state_dir, task_id + ".status")
     try:
         with open(path, encoding="utf-8", errors="replace") as handle:
@@ -191,7 +200,9 @@ def _last_event(state_dir, task_id):
     if not lines:
         return None, None
     line = lines[-1]
-    verb = line.split(":", 1)[0].strip().lower() if ":" in line else "note"
+    verb = "note"
+    if ":" in line:
+        verb = line.split(":", 1)[0].split("[", 1)[0].strip().lower()
     if not re.fullmatch(r"[a-z-]+", verb or ""):
         verb = "note"
     return verb, line
@@ -280,16 +291,22 @@ def fleet_status(home=None, scope=None):
             "than guessing at it.")
         return answer
 
-    withheld = 0
+    # Distinct denied items, not denial events. The lists below overlap by
+    # design: one task can be in flight, held for the captain and carrying a
+    # pull request at once, and counting each refusal would tell the captain
+    # three things are being withheld when it is one.
+    withheld_ids = set()
     by_id = {w["id"]: w for w in workers}
 
-    def keep(*fields):
-        return not _denied(denies, *fields)
+    def keep(item_id, *fields):
+        if _denied(denies, item_id, *fields):
+            withheld_ids.add(item_id)
+            return False
+        return True
 
     detail_in_flight = []
     for item in in_flight:
         if not keep(item["id"], item["title"]):
-            withheld += 1
             continue
         worker = by_id.get(item["id"])
         detail_in_flight.append({
@@ -303,14 +320,12 @@ def fleet_status(home=None, scope=None):
     detail_captain = []
     for item in held_for_captain:
         if not keep(item["id"], item["title"], item["tags"].get("hold", "")):
-            withheld += 1
             continue
         detail_captain.append({"id": item["id"], "title": item["title"]})
 
     detail_prs = []
     for worker in with_pr:
         if not keep(worker["id"], worker["pr"]):
-            withheld += 1
             continue
         detail_prs.append({"id": worker["id"], "url": worker["pr"]})
 
@@ -322,7 +337,7 @@ def fleet_status(home=None, scope=None):
     capped(detail_in_flight, "in_flight_detail")
     capped(detail_captain, "awaiting_captain_detail")
     capped(detail_prs, "pull_request_detail")
-    answer["withheld_as_confidential"] = withheld
+    answer["withheld_as_confidential"] = len(withheld_ids)
     answer["detail"] = (
         "The lists name at most {} items each; the counts above are the whole "
         "picture. Give the captain the counts and a couple of names, not every "
@@ -343,6 +358,10 @@ def queue_request(text, home=None, root=None):
     env = dict(os.environ, FM_HOME=home)
     done = subprocess.run(
         [inbox, "note", body],
+        # The relay's stdin is the captain's audio when this runs under
+        # --serve, and fm-inbox.sh reads a body from stdin for an argument of
+        # "-", so no child of the relay is given that stream to consume.
+        stdin=subprocess.DEVNULL,
         env=env, capture_output=True, text=True, timeout=30, check=False)
     if done.returncode != 0:
         raise RecordError("fm-inbox.sh note failed: {}".format(

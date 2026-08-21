@@ -68,7 +68,11 @@ EOF
     pr=https://github.com/example/alpha/pull/7
   fm_write_meta "$HOME_FIXTURE/state/gamma-three.meta" kind=ship mode=direct-PR
   printf 'working: reading the failing test\n' > "$HOME_FIXTURE/state/alpha-one.status"
-  printf 'blocked: needs a credential\n' > "$HOME_FIXTURE/state/gamma-three.status"
+  # The bracketed shape, which is what bin/fm-secondmate-report.sh writes and
+  # what a keyed decision line looks like. Status metadata sits between the verb
+  # and the colon, so a reader that only cuts at the colon reads no verb here.
+  printf 'blocked [key=api-shape]: needs a credential (via-helper)\n' \
+    > "$HOME_FIXTURE/state/gamma-three.status"
 }
 
 records_status() {
@@ -143,11 +147,17 @@ try:
 except frame.FrameError:
     pass
 
-# The magic string exists so a chatty login shell cannot desynchronise the
-# stream, so it has to be findable in a prefix that contains junk.
-noise = b"Welcome to the host!\n" + frame.MAGIC + frame.encode(frame.BYE)
-check(noise.index(frame.MAGIC) == len(b"Welcome to the host!\n"),
-      "magic not locatable after preamble noise")
+# The relay's uplink decodes headers itself, on an asynchronous stream Reader
+# cannot drive, and calls this to decide whether to read the payload at all. A
+# bogus length has to be refused BEFORE the read, or the relay waits for up to
+# four gigabytes while the captain waits for an answer.
+for kind, length in ((b"\xff", 0), (frame.AUDIO, frame.MAX_PAYLOAD + 1)):
+    try:
+        frame.check_header(kind, length)
+        sys.exit("frame: check_header accepted %r/%d" % (kind, length))
+    except frame.FrameError:
+        pass
+frame.check_header(frame.AUDIO, frame.MAX_PAYLOAD)
 PY
 pass "wire format round trips and rejects a desynchronised stream"
 
@@ -185,6 +195,88 @@ if options.tail_ms <= 0:
     sys.exit("the trailing silence default must be positive; 0 is never answered")
 PY
 pass "the relay and the reader agree on the tool names and the handover argument"
+
+# --- credentials -------------------------------------------------------------
+#
+# The relay rebuilds the model session on every turn, on purpose. Resolving AWS
+# credentials belongs to the relay's start rather than to that rebuild: the
+# sandbox profile's credential_process costs about a second, and a second spent
+# there is a second added to the delay this whole build exists to keep honest.
+# Nothing here talks to AWS; the resolver is replaced with a counter.
+
+python3 - "$ROOT/bin" <<'PY' || fail "credential reuse"
+import asyncio, sys, time
+sys.path.insert(0, sys.argv[1])
+import importlib.util, pathlib
+spec = importlib.util.spec_from_file_location(
+    "relay", str(pathlib.Path(sys.argv[1]) / "fm-voice-relay.py"))
+relay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(relay)
+
+def check(cond, label):
+    if not cond:
+        sys.exit("credentials: " + label)
+
+calls = []
+expiry = [None]
+delay = [0.0]
+
+def fake(profile, verbose=False):
+    calls.append(profile)
+    time.sleep(delay[0])
+    return {"aws_access_key_id": "AK%d" % len(calls)}, expiry[0]
+
+relay.resolve_credentials = fake
+
+async def take(cache, count):
+    return [await cache.get() for _ in range(count)]
+
+# Three sessions, one resolution: the second and third turns pay nothing.
+cache = relay.Credentials("a-profile")
+got = asyncio.run(take(cache, 3))
+check(len(calls) == 1, "three sessions resolved credentials %d times" % len(calls))
+check([c["aws_access_key_id"] for c in got] == ["AK1"] * 3,
+      "every session should get the same credentials: %s" % got)
+
+# A session that edits what it was handed must not edit what the next one gets.
+got[0]["aws_access_key_id"] = "tampered"
+check(asyncio.run(take(cache, 1))[0]["aws_access_key_id"] == "AK1",
+      "one session must not be able to corrupt the shared credentials")
+
+# Credentials with an expiry are refreshed ahead of it, because a relay left
+# running outlives them and a dead credential is a dead session.
+del calls[:]
+expiry[0] = time.time() + relay.Credentials.REFRESH_MARGIN - 1
+cache = relay.Credentials("a-profile")
+asyncio.run(take(cache, 2))
+check(len(calls) == 2,
+      "credentials near expiry should be refreshed, resolved %d times" % len(calls))
+
+# Whenever a resolution does happen it must stay off the event loop, or the
+# relay stops reading the captain's audio for as long as it takes.
+del calls[:]
+expiry[0] = None
+delay[0] = 0.3
+
+async def resolve_while_the_loop_runs():
+    ticks = []
+
+    async def tick():
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            ticks.append(1)
+
+    task = asyncio.create_task(tick())
+    await relay.Credentials("slow-profile").get()
+    during = len(ticks)
+    task.cancel()
+    return during
+
+during = asyncio.run(resolve_while_the_loop_runs())
+check(during >= 2,
+      "the event loop ran %d times during a 0.3s credential resolution" % during)
+PY
+pass "credentials are resolved once per relay, refreshed before expiry, off the event loop"
 
 # --- the laptop end ---------------------------------------------------------
 #
@@ -257,27 +349,6 @@ except frame.FrameError as exc:
     check("before it said hello" in str(exc),
           "the refusal should name the early close: %s" % exc)
 
-# The laptop gets the client and its local imports and nothing else, because
-# docs/voice-relay.md tells the captain to copy exactly two files. A third local
-# import would leave that instruction wrong and the laptop failing at import time,
-# a long way from the change that caused it.
-import ast, pathlib as _p
-bindir = _p.Path(sys.argv[1])
-tree = ast.parse((bindir / "fm-voice-client.py").read_text(encoding="utf-8"))
-local = set()
-for node in ast.walk(tree):
-    names = []
-    if isinstance(node, ast.Import):
-        names = [alias.name for alias in node.names]
-    elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-        names = [node.module]
-    for name in names:
-        if (bindir / (name + ".py")).exists():
-            local.add(name + ".py")
-check(local == {"fm_voice_frame.py"},
-      "the laptop needs exactly fm_voice_frame.py beside the client, found %s "
-      "(update docs/voice-relay.md if this is intended)" % sorted(local))
-
 # The two ends must agree on the sample rates, or the reply plays at the wrong
 # pitch and nothing reports an error.
 relay_spec = importlib.util.spec_from_file_location(
@@ -288,6 +359,39 @@ check((client.IN_RATE, client.OUT_RATE) == (relay.IN_RATE, relay.OUT_RATE),
       "the two ends disagree on the sample rates")
 PY
 pass "the laptop client builds the right remote command and survives a chatty login shell"
+
+# docs/voice-relay.md tells the captain to copy exactly two files to the laptop,
+# so the real property is that the client runs from a directory holding exactly
+# those two and nothing else from bin/. A third local import would leave that
+# instruction wrong and the laptop dying at import time, a long way from the
+# change that caused it. Run there with no PYTHONPATH, so bin/ cannot supply the
+# missing piece the way it does on this host.
+LAPTOP="$TMP_ROOT/laptop"
+mkdir -p "$LAPTOP"
+cp "$ROOT/bin/fm-voice-client.py" "$ROOT/bin/fm_voice_frame.py" "$LAPTOP/"
+
+set +e
+copied_out=$(cd "$LAPTOP" && env -u PYTHONPATH python3 ./fm-voice-client.py --help 2>&1)
+copied_code=$?
+set -e
+expect_code 0 "$copied_code" \
+  "the client must start with only the two copied files: $copied_out"
+assert_contains "$copied_out" 'fm-voice-client.py' \
+  "the copied client should print its own usage"
+
+# The negative half, so the case above is not passing because bin/ was reachable
+# after all: without its one companion the client must fail at import and name it.
+SHORT="$TMP_ROOT/laptop-missing-companion"
+mkdir -p "$SHORT"
+cp "$ROOT/bin/fm-voice-client.py" "$SHORT/"
+set +e
+short_out=$(cd "$SHORT" && env -u PYTHONPATH python3 ./fm-voice-client.py --help 2>&1)
+short_code=$?
+set -e
+[ "$short_code" -ne 0 ] || fail "the client started without fm_voice_frame.py beside it"
+assert_contains "$short_out" 'fm_voice_frame' \
+  "the import failure should name the file the laptop is missing"
+pass "the client runs from a laptop holding only the two files the guide names"
 
 # --- read scope -------------------------------------------------------------
 
@@ -316,6 +420,14 @@ assert_contains "$wide" 'beta-two' "full scope should name what waits on the cap
 assert_contains "$wide" '"state": "working"' "full scope should carry the state verb"
 assert_not_contains "$wide" 'reading the failing test' \
   "full scope must not carry the raw event line"
+# The same rule against the bracketed shape: the verb is still the verb, and the
+# metadata and the note stay unspoken.
+assert_contains "$wide" '"state": "blocked"' \
+  "a status line with a metadata token before the colon should still report its verb"
+assert_not_contains "$wide" 'key=api-shape' \
+  "full scope must not carry status metadata"
+assert_not_contains "$wide" 'needs a credential' \
+  "full scope must not carry the raw event line of a bracketed status"
 pass "the wide scope names open work and reports state without quoting event lines"
 
 # The default is the wide scope, because that is the access the captain granted.
@@ -379,6 +491,25 @@ printf '%s\n' "$(printf '%s' "$DENY_TOKEN" | tr '[:upper:]' '[:lower:]')" \
 lower=$(records_status --scope full) || fail "lowercase deny list failed"
 assert_not_contains "$lower" "$DENY_TOKEN" "the deny list must match regardless of case"
 pass "the deny list matches regardless of case"
+
+# The withheld figure counts denied items, not refusals, and the lists overlap by
+# design: alpha-one is in flight AND carries a pull request, beta-two is in flight
+# AND waiting on the captain. Counting each refusal would tell the captain four
+# things are being withheld when two are, which is a wrong number spoken
+# confidently about exactly the subject the captain is most careful with.
+printf '%s\n%s\n' alpha-one beta-two > "$HOME_FIXTURE/config/voice-read-deny"
+overlap=$(records_status --scope full) || fail "overlapping deny list failed"
+assert_contains "$overlap" '"withheld_as_confidential": 2' \
+  "two denied items appearing in two lists each must be withheld twice, not four times"
+assert_not_contains "$overlap" 'alpha-one' "a denied item must not be named"
+assert_not_contains "$overlap" 'beta-two' "a denied item must not be named"
+assert_not_contains "$overlap" 'github.com' \
+  "denying an item must suppress its pull request link too"
+assert_contains "$overlap" '"in_flight": 3' \
+  "denying items must not change the count of in-flight work"
+assert_contains "$overlap" '"open_pull_requests": 1' \
+  "denying items must not change the count of open pull requests"
+pass "an item denied in more than one list is counted as withheld once"
 
 rm -f "$HOME_FIXTURE/config/voice-read-deny"
 

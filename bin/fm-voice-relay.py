@@ -58,6 +58,7 @@ Options:
 import argparse
 import asyncio
 import base64
+import datetime
 import json
 import os
 import queue
@@ -166,12 +167,25 @@ def widen_path():
         os.environ["PATH"] = os.pathsep.join(added + parts)
 
 
+def _expires_at(stamp):
+    """Return an ISO 8601 expiry as epoch seconds, or None when there is none."""
+    if not stamp:
+        return None
+    try:
+        when = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    return when.timestamp()
+
+
 def resolve_credentials(profile, verbose=False):
-    """Return AWS credentials as a dict, preferring ones already in the environment.
+    """Return (credentials dict, expiry epoch or None), preferring the environment.
 
     The sandbox profile's credential_process costs about a second, so ambient
-    credentials win when they are present. This runs once per relay start and
-    never inside a turn.
+    credentials win when they are present. It also blocks the caller for that
+    second, so Credentials below owns when this runs and keeps it out of a turn.
     """
     if os.environ.get("AWS_ACCESS_KEY_ID"):
         log(verbose, "using credentials already in the environment")
@@ -179,12 +193,16 @@ def resolve_credentials(profile, verbose=False):
             "aws_access_key_id": os.environ["AWS_ACCESS_KEY_ID"],
             "aws_secret_access_key": os.environ["AWS_SECRET_ACCESS_KEY"],
             "aws_session_token": os.environ.get("AWS_SESSION_TOKEN"),
-        }
+        }, None
     log(verbose, "exporting credentials from profile {}".format(profile))
     widen_path()
     done = subprocess.run(
         ["aws", "configure", "export-credentials", "--profile", profile,
          "--format", "process"],
+        # The relay's own stdin is the captain's audio in --serve mode. A child
+        # that read it would eat frames and desynchronise the uplink, so no
+        # child gets it.
+        stdin=subprocess.DEVNULL,
         capture_output=True, text=True, timeout=60, check=False)
     if done.returncode != 0:
         raise SystemExit(
@@ -195,7 +213,46 @@ def resolve_credentials(profile, verbose=False):
         "aws_access_key_id": blob["AccessKeyId"],
         "aws_secret_access_key": blob["SecretAccessKey"],
         "aws_session_token": blob.get("SessionToken"),
-    }
+    }, _expires_at(blob.get("Expiration"))
+
+
+class Credentials:
+    """The relay's credentials, resolved once and shared by every session it opens.
+
+    A session is rebuilt for every turn, on purpose and for a measured reason
+    (see renew), so resolving per session would charge the credential_process
+    second to each turn after the first. The relay resolves once at start and
+    every later session reuses that answer, so a reconnect costs a reconnect
+    and not a credential fetch.
+
+    Credentials that carry an expiry are refreshed a few minutes ahead of it,
+    because a relay left running outlives them. Every resolution, the first one
+    included, runs in a worker thread, so the event loop keeps reading the
+    captain's audio while it happens.
+    """
+
+    REFRESH_MARGIN = 300
+
+    def __init__(self, profile, verbose=False):
+        self.profile = profile
+        self.verbose = verbose
+        self._creds = None
+        self._expires = None
+        self._lock = asyncio.Lock()
+
+    def _usable(self):
+        if self._creds is None:
+            return False
+        if self._expires is None:
+            return True
+        return time.time() + self.REFRESH_MARGIN < self._expires
+
+    async def get(self):
+        async with self._lock:
+            if not self._usable():
+                self._creds, self._expires = await asyncio.to_thread(
+                    resolve_credentials, self.profile, self.verbose)
+            return dict(self._creds)
 
 
 class Downlink:
@@ -254,9 +311,10 @@ class Downlink:
 class Session:
     """One Nova Sonic bidirectional session, plus the turn bookkeeping around it."""
 
-    def __init__(self, options, down):
+    def __init__(self, options, down, credentials):
         self.options = options
         self.down = down
+        self.credentials = credentials
         self.verbose = options.verbose
         self.prompt = str(uuid.uuid4())
         self.stream = None
@@ -297,7 +355,7 @@ class Session:
             InvokeModelWithBidirectionalStreamOperationInput)
         from aws_sdk_bedrock_runtime.config import AsyncBedrockRuntimeConfig
 
-        creds = resolve_credentials(self.options.profile, self.verbose)
+        creds = await self.credentials.get()
         began = time.monotonic()
         config = await AsyncBedrockRuntimeConfig.resolve(
             endpoint_uri="https://bedrock-runtime.{}.amazonaws.com".format(
@@ -412,8 +470,8 @@ class Session:
 
     # ---------------------------------------------------------------- downlink
 
-    def _mark(self, name):
-        now = time.monotonic()
+    def _mark(self, name, at=None):
+        now = at if at is not None else time.monotonic()
         self.turn.setdefault(name, now)
         base = self.turn.get("talk_end")
         if base is None:
@@ -504,6 +562,14 @@ class Session:
             if stop == "END_TURN":
                 # Trap 1: this, not completionEnd, is the end of the reply.
                 self._mark("reply_end")
+                # first_audio above is stamped when the model event is decoded.
+                # The Downlink knows the later instant when that audio reached
+                # the connection, which is the one the captain hears, so it is
+                # reported too rather than measured and thrown away. It can only
+                # be read once the frame is out, hence here and not there.
+                wire = self.down.first_audio()
+                if wire is not None:
+                    self._mark("first_audio_wire", wire)
                 self.replies += 1
                 self.turn_done.set()
 
@@ -573,7 +639,7 @@ async def renew(session, options, down):
     """
     log(options.verbose, "renewing the session for a new turn")
     await session.close()
-    fresh = Session(options, down)
+    fresh = Session(options, down, session.credentials)
     await fresh.start()
     down.send_json(frame.NOTICE, {
         "event": "renewed", "connect_seconds": fresh.connect_seconds})
@@ -591,17 +657,22 @@ async def serve(options):
     sys.stdout.buffer.write(frame.MAGIC)
     sys.stdout.buffer.flush()
     down = Downlink(sys.stdout.buffer)
-    session = Session(options, down)
+    session = Session(options, down, Credentials(options.profile, options.verbose))
     await session.start()
     down.send_json(frame.NOTICE, {
         "event": "ready", "model": options.model, "region": options.region,
         "read_scope": session.scope, "tail_ms": options.tail_ms,
         "connect_seconds": session.connect_seconds})
 
+    status = 0
     try:
         while True:
             head = await reader.readexactly(frame.HEADER.size)
             kind, length = frame.HEADER.unpack(head)
+            # Before the payload read, not after: a desynchronised uplink offers
+            # a length of up to 4 GiB, and waiting for that many bytes is a hang
+            # rather than the loud error this format promises.
+            frame.check_header(kind, length)
             payload = await reader.readexactly(length) if length else b""
             if kind == frame.TALK_START:
                 if session.replies or session.ended.is_set():
@@ -620,10 +691,16 @@ async def serve(options):
                 break
     except (asyncio.IncompleteReadError, ConnectionResetError):
         log(options.verbose, "client closed the connection")
+    except frame.FrameError as exc:
+        sys.stderr.write(
+            "fm-voice-relay: the uplink is not a frame stream any more: {}\n"
+            .format(exc))
+        status = 2
     finally:
         await session.close()
         down.send(frame.BYE)
         down.close()
+    return status
 
 
 async def self_test(options):
@@ -669,7 +746,7 @@ async def self_test(options):
             return self.first
 
     sink = Sink()
-    session = Session(options, sink)
+    session = Session(options, sink, Credentials(options.profile, options.verbose))
     await session.start()
     await session.talk_start()
     # Paced at real time, because a file pushed as fast as the socket accepts it
@@ -723,6 +800,7 @@ async def self_test(options):
         "tool_names": session.tool_names,
         "tool_use_s": since("tool_use"),
         "first_audio_s": since("first_audio"),
+        "first_audio_wire_s": since("first_audio_wire"),
         "reply_end_s": since("reply_end"),
         "reply_audio_seconds": round(sink.bytes / float(OUT_RATE * 2), 3),
         "answered": sink.bytes > 0,
