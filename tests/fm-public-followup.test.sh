@@ -1586,7 +1586,7 @@ EOF
 }
 
 test_retention_creates_no_false_teardown_refusal() {
-  local home home2 rc out
+  local home home2 rc out registry tmp
   home=$(make_home retain-teardown)
   seed_commitment "$home" pf-retain req-retain discord main ship-retain
   fm_write_meta "$home/state/ship-retain.meta" \
@@ -1618,8 +1618,16 @@ test_retention_creates_no_false_teardown_refusal() {
   emit_terminal "$home2" "$home2" pf-keep main work-keep >/dev/null || fail "emit2 failed"
   run_pf "$home2" consume >/dev/null || fail "consume2 failed"
   FAKE_CURL_LOG="$home2/curl.log" run_pf "$home2" deliver pf-keep >/dev/null || fail "deliver2 failed"
+  registry="$home2/state/public-followup/registry/pf-keep"
+  tmp="$registry.tmp"
+  grep -v -E '^(state|delivered_at|delivered_obligation)=' "$registry" > "$tmp"
+  printf 'state=open\n' >> "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$registry"
   out=$(run_pf "$home2" pending)
   assert_contains "$out" "open-loop pf-keep" "pending must keep a delivered registration as an open loop"
+  assert_grep 'state=delivered' "$registry" \
+    "pending must repair a settled registration left open after legacy cleanup failed"
   pass "retention creates no false teardown refusal and pending no longer prunes"
 }
 
@@ -1627,16 +1635,22 @@ test_expiry_escalation_uses_now_override() {
   local home out exp now_closing now_expired
   home=$(make_home expiry-window)
   seed_repro_commitment "$home" pf-exp req-exp main work-exp
+  exp=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' '2026-08-28T01:12:00Z' +%s 2>/dev/null) \
+    || exp=$(date -u -d '2026-08-28T01:12:00Z' +%s)
+  now_closing=$((exp - 3600))
+  now_expired=$((exp + 60))
+  out=$(FMX_NOW_OVERRIDE="$now_expired" run_pf "$home" pending)
+  assert_contains "$out" "unresolved pf-exp" "an owed reply must remain listed after expiry"
+  assert_contains "$out" "can no longer be reached" \
+    "an expired unresolved reply must escalate the unreachable thread"
+  assert_contains "$out" "captain decision" \
+    "an expired unresolved reply must name the captain call"
   "$EMIT" --home "$home" --obligation pf-exp --relation rel-code \
     --source-home main --work-id work-exp --generation 1 \
     --outcome report-ready --deliverable report_path=data/x/report.md \
     --outcome-text 'Reproduced.' >/dev/null || fail "emit failed"
   run_pf "$home" consume >/dev/null || fail "consume failed"
   FAKE_CURL_LOG="$home/curl.log" run_pf "$home" deliver pf-exp >/dev/null || fail "deliver failed"
-  exp=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' '2026-08-28T01:12:00Z' +%s 2>/dev/null) \
-    || exp=$(date -u -d '2026-08-28T01:12:00Z' +%s)
-  now_closing=$((exp - 3600))
-  now_expired=$((exp + 60))
   out=$(FMX_NOW_OVERRIDE="$now_closing" run_pf "$home" pending)
   assert_contains "$out" "open-loop pf-exp" "closing window must still list the loop"
   assert_contains "$out" "DEADLINE:" "a window under 48 hours must escalate"
@@ -1650,10 +1664,31 @@ test_expiry_escalation_uses_now_override() {
   pass "expiry escalation is pinned by FMX_NOW_OVERRIDE"
 }
 
+test_brief_fails_without_typed_deliverable_keys() {
+  local home real_tasks
+  home=$(make_home brief-keys)
+  seed_commitment "$home" pf-brief req-brief discord main work-brief
+  real_tasks=$(command -v tasks-axi)
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+exit 69
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  REAL_TASKS_AXI="$real_tasks" expect_failure \
+    "brief must fail when typed deliverable keys cannot be read" \
+    run_pf "$home" brief pf-brief
+  assert_contains "$EXPECT_OUT" "could not read public-followup obligation" \
+    "brief must explain why it cannot produce executable instructions"
+  assert_not_contains "$EXPECT_OUT" "<key>=<value>" \
+    "brief must never substitute a generic deliverable placeholder"
+  pass "brief fails explicitly when typed deliverable keys are unavailable"
+}
+
 test_prechange_registration_is_open_and_unrechainable() {
   local home file out
   home=$(make_home prechange)
   mkdir -p "$home/state/public-followup/registry"
+  chmod 700 "$home/state/public-followup" "$home/state/public-followup/registry"
   file="$home/state/public-followup/registry/pf-legacy"
   printf 'obligation_id=pf-legacy\nrelation_id=rel-code\nwork_home=main\nwork_id=work-legacy\ngeneration=1\nplatform=discord\nrequest_id=req-legacy\n' \
     > "$file"
@@ -1783,6 +1818,7 @@ test_rechain_resumes_after_partial_add
 test_retire_reason_closes_the_open_loop
 test_retention_creates_no_false_teardown_refusal
 test_expiry_escalation_uses_now_override
+test_brief_fails_without_typed_deliverable_keys
 test_prechange_registration_is_open_and_unrechainable
 test_x_request_teardown_warns_when_final_unposted
 test_secondmate_promotion_uses_teardown_parent_resolution

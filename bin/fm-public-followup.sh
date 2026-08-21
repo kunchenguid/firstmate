@@ -291,26 +291,27 @@ cmd_brief() {
   work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
   generation=$(fm_pf_registry_get "$STATE" "$id" generation)
 
-  outcome='<pr-merged|report-ready|local-main|failed>'
-  # Two backslashes so the unquoted brief heredoc emits a single continuation.
-  # shellcheck disable=SC1003
-  deliverable_flags='    --deliverable <key>=<value> \\'
-  if command -v jq >/dev/null 2>&1 && command -v tasks-axi >/dev/null 2>&1 \
-      && payload=$(obligation_json "$id") && [ -n "$payload" ]; then
-    outcome=$(pf_field "$payload" '.public_followup.expected_final.type')
-    [ -n "$outcome" ] || outcome='<pr-merged|report-ready|local-main|failed>'
-    keys=$(printf '%s' "$payload" | jq -r '.public_followup.expected_final.required_deliverables[]? // empty' 2>/dev/null)
-    if [ -n "$keys" ]; then
-      deliverable_flags=
-      while IFS= read -r key; do
-        [ -n "$key" ] || continue
-        deliverable_flags="${deliverable_flags}    --deliverable ${key}=<value> \\\\
+  require_tools
+  payload=$(obligation_json "$id") \
+    || die "could not read public-followup obligation '$id' through tasks-axi" 1
+  [ -n "$payload" ] \
+    || die "public-followup obligation '$id' is missing from tasks-axi" 1
+  outcome=$(pf_field "$payload" '.public_followup.expected_final.type')
+  [ -n "$outcome" ] \
+    || die "public-followup obligation '$id' has no expected final type" 1
+  keys=$(printf '%s' "$payload" \
+    | jq -er '.public_followup.expected_final.required_deliverables
+        | select(type == "array" and length > 0)
+        | .[] | select(type == "string" and length > 0)' 2>/dev/null) \
+    || die "public-followup obligation '$id' has no readable required deliverable keys" 1
+  deliverable_flags=
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    deliverable_flags="${deliverable_flags}    --deliverable ${key}=<value> \\\\
 "
-      done <<EOF
+  done <<EOF
 $keys
 EOF
-    fi
-  fi
 
   cat <<EOF
 When this work reaches its promised terminal outcome, report it as typed data
@@ -476,8 +477,22 @@ cmd_consume() {
 
 # print_open_loop <id> <payload>: the session-start line for a public loop that
 # is still open after delivery (or whose obligation has left the backlog).
+print_window_escalation() {
+  local expires=$1 window
+  window=$(fm_pf_followup_window_class "$expires")
+  case "$window" in
+    expired)
+      printf '  DEADLINE: thread can no longer be reached (window closed %s); this needs a captain decision\n' \
+        "${expires:-unknown}"
+      ;;
+    closing)
+      printf '  DEADLINE: window closes %s (under 48 hours)\n' "${expires:-unknown}"
+      ;;
+  esac
+}
+
 print_open_loop() {
-  local id=$1 payload=$2 request platform summary delivered expires window ctx note
+  local id=$1 payload=$2 request platform summary delivered expires ctx
   request=$(fm_pf_registry_get "$STATE" "$id" request_id)
   [ -n "$request" ] || request=$(pf_field "$payload" '.public_followup.request.request_id')
   platform=$(fm_pf_registry_get "$STATE" "$id" platform)
@@ -492,32 +507,20 @@ print_open_loop() {
       summary=$(printf '%s' "$ctx" | fm_pf_b64_decode | jq -r '.public_safe_summary // empty' 2>/dev/null | fm_pf_clean_outcome_text)
     fi
   fi
-  window=$(fm_pf_followup_window_class "$expires")
-  case "$window" in
-    expired)
-      note="DEADLINE: thread can no longer be reached (window closed ${expires:-unknown}); this needs a captain decision"
-      ;;
-    closing)
-      note="DEADLINE: window closes ${expires:-unknown} (under 48 hours)"
-      ;;
-    *)
-      note=
-      ;;
-  esac
   printf 'open-loop %s request=%s platform=%s\n' "$id" "${request:-unknown}" "${platform:-unknown}"
   printf '  delivered=%s window-closes=%s\n' "${delivered:-unknown}" "${expires:-unknown}"
   printf '  summary=%s\n' "$summary"
   if ! fm_pf_registry_rechainable "$STATE" "$id"; then
     printf '  unrechainable: pre-change registration lacks request_context_b64\n'
   fi
-  [ -z "$note" ] || printf '  %s\n' "$note"
+  print_window_escalation "$expires"
   printf '  -> bind the follow-on with rechain, or close the loop with retire %s --reason ...\n' "$id"
 }
 
 cmd_pending() {
   gate_or_exit
 
-  local listing id payload delivery task_state summary platform request printed=0 loop_state settled
+  local listing id payload delivery task_state summary platform request expires printed=0 loop_state settled
   # An unreadable backlog with registrations present is exactly the silence this
   # whole path exists to prevent, so say so rather than printing nothing.
   if ! command -v jq >/dev/null 2>&1 || ! command -v tasks-axi >/dev/null 2>&1 \
@@ -558,6 +561,10 @@ cmd_pending() {
       settled=1
     fi
     if [ "$settled" -eq 1 ]; then
+      if [ "$loop_state" != delivered ]; then
+        fm_pf_registry_stamp_delivered "$STATE" "$id" "$(now_rfc3339)" \
+          || die "could not stamp settled registration '$id' as delivered" 1
+      fi
       # Keep the registration. Clearing a leftover legacy link is best-effort
       # and never the close; only retire removes the record.
       if public_followup_registration_valid "$id"; then
@@ -572,6 +579,9 @@ cmd_pending() {
     request=$(pf_field "$payload" '.public_followup.request.request_id')
     printf 'unresolved %s state=%s platform=%s request=%s summary=%s\n' \
       "$id" "${delivery:-unknown}" "${platform:-unknown}" "${request:-unknown}" "$summary"
+    expires=$(fm_pf_registry_get "$STATE" "$id" followup_expires_at)
+    [ -n "$expires" ] || expires=$(pf_field "$payload" '.public_followup.request.followup_expires_at')
+    print_window_escalation "$expires"
     if ! fm_pf_registry_rechainable "$STATE" "$id"; then
       printf '  unrechainable: pre-change registration lacks request_context_b64\n'
     fi
