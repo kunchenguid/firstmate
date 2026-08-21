@@ -349,6 +349,7 @@ done
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
 [ "$WAYFINDER_STATE_SET" -eq 0 ] || [ -n "$WAYFINDER_STATE" ] || { echo "error: --wayfinder-state requires a non-empty value" >&2; exit 1; }
+[ "$WAYFINDER_STATE_SET" -eq 0 ] || [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || { echo "error: --wayfinder-state and --wayfinder-independent cannot be combined" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.

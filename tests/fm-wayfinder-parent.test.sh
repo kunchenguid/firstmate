@@ -445,8 +445,6 @@ test_complete_none_alone_remains_insufficient() {
   id=wf-shopify-compliance
   snap="$TMP_ROOT/complete-none.json"
   write_snapshot "$snap" historical
-  mkdir -p "$home/data/$id"
-  printf '# Compliance research\n\nAnswered locally.\n' > "$home/data/$id/report.md"
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "project=$project" \
@@ -466,8 +464,10 @@ test_complete_none_alone_remains_insufficient() {
   rc=$?
   set -e
   expect_code 2 "$rc" "complete --none must not satisfy accept-child"$'\n'"$out"
-  assert_contains "$out" "local-completion-is-not-resolution" \
-    "complete --none still masqueraded as Wayfinder resolution"
+  assert_contains "$out" "FAIL 5 open" \
+    "complete --none alone did not leave the Wayfinder child unresolved"
+  assert_absent "$home/data/$id/report.md" \
+    "complete --none fixture must not supply a local report"
   pass "fm-decision-hold.sh complete --none alone remains insufficient"
 }
 
@@ -491,6 +491,16 @@ test_map_dependent_spawn_and_promote() {
   [ "$rc" -ne 0 ] || fail "map-dependent spawn should refuse while handoff rejects"
   assert_contains "$out" "gate failed" "spawn did not surface the project handoff rejection"
   assert_absent "$home/state/$id.meta" "refused map-dependent spawn wrote task metadata"
+
+  set +e
+  out=$(run_spawn "$home" "$fakebin" "$id" "$project" claude --mode no-mistakes --yolo off \
+    --wayfinder-state "$snap_bad" --wayfinder-independent)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "contradictory Wayfinder spawn flags must be refused"$'\n'"$out"
+  assert_contains "$out" "--wayfinder-state and --wayfinder-independent cannot be combined" \
+    "spawn accepted contradictory Wayfinder flags"
+  assert_absent "$home/state/$id.meta" "contradictory Wayfinder spawn flags wrote task metadata"
 
   set +e
   out=$(run_spawn "$home" "$fakebin" "$id" "$project" claude --mode no-mistakes --yolo off)
@@ -559,6 +569,17 @@ test_map_dependent_spawn_and_promote() {
   [ "$rc" -ne 0 ] || fail "map-dependent promotion should refuse while handoff rejects"
   assert_contains "$out" "gate failed" "promotion did not surface the project handoff rejection"
   assert_grep "kind=scout" "$home/state/$id.meta" "refused promotion flipped the scout to a ship"
+
+  set +e
+  out=$(run_promote "$home" "$id" --mode no-mistakes --yolo off \
+    --wayfinder-state "$snap_bad" --wayfinder-independent)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "contradictory Wayfinder promotion flags must be refused"$'\n'"$out"
+  assert_contains "$out" "--wayfinder-state and --wayfinder-independent cannot be combined" \
+    "promotion accepted contradictory Wayfinder flags"
+  assert_grep "kind=scout" "$home/state/$id.meta" \
+    "contradictory Wayfinder promotion flags flipped the scout to a ship"
 
   set +e
   out=$(run_promote "$home" "$id" --mode no-mistakes --yolo off --wayfinder-state "$snap_good")
