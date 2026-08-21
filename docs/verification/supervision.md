@@ -505,16 +505,19 @@ AFTER: daemon alive=no; .afk present=no
 
 The daemon logged its ordinary signal-trapped `daemon shutting down` line and its background job reported exit 0, which is why the shutdown read as spontaneous.
 `check` now refuses that case (`tests/fm-afk-return.test.sh`), and re-running the same call against a live daemon leaves it running.
-The refusal wording below was finalized after this capture; the `rc=2` refusal and the surviving daemon are what was observed.
+The transcript below is verbatim from that capture.
 
 ```
 T+30s: daemon pid=60600 alive=yes
-fm-afk-return: refusing to start the away-mode return from check: away-mode lifecycle state is still live and no return catch-up is open
+fm-afk-return: refusing to start the away-mode return from check: away mode is still active and no return catch-up is open
 rc=2
 === T+75s ===
 daemon alive=yes
 .afk present=yes
 ```
+
+Its first refusal line was reworded later in this same change, to describe the guard's real condition: no catch-up gate open while away-mode lifecycle state is still live.
+That condition covers a surviving daemon-terminal record as well as `state/.afk`, so the captured wording understated when the refusal fires.
 
 Portable regressions for both refusals, plus the launcher lifecycle units that now run under the declared launch shape:
 

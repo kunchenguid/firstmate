@@ -40,7 +40,7 @@ test_afk_start_refuses_an_unowned_direct_launch() {
   [ "$status" -eq 2 ] || fail "an unowned direct fm-afk-start.sh launch should refuse with exit 2 (got $status): $out"
   assert_contains "$out" "refusing to start the away-mode daemon directly" "the refusal did not name the unowned direct launch"
   assert_contains "$out" "bin/fm-afk-launch.sh start-native" "the refusal did not name the harness-native launch shape"
-  assert_contains "$out" "bin/fm-afk-launch.sh start" "the refusal did not name the terminal-backed launch shape"
+  assert_contains "$out" "harness without one: run bin/fm-afk-launch.sh start" "the refusal did not name the terminal-backed launch shape"
   assert_not_contains "$out" "starting supervise daemon" "the unowned launch reached daemon startup"
   assert_absent "$state/.afk" "the unowned launch wrote the away-mode flag before refusing"
   assert_absent "$state/.supervise-daemon.log" "the unowned launch started the daemon"
