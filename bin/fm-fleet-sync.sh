@@ -295,6 +295,7 @@ report_stuck() {
 sync_project() {
   PROJ=$1
   label=$(project_label)
+  mode_err=
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
@@ -304,8 +305,24 @@ sync_project() {
     echo "$label: skipped: not a git repo"
     return 0
   fi
-  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
-  mode=${mode_line%% *}
+  mode_err=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync-mode.XXXXXX") || {
+    echo "$label: skipped: could not create mode lookup temp file"
+    return 0
+  }
+  if mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" --with-name --path "$PROJ" 2>"$mode_err"); then
+    IFS=' ' read -r label mode _ <<EOF
+$mode_line
+EOF
+  else
+    reason="registered mode lookup failed"
+    if [ -s "$mode_err" ]; then
+      reason="$reason: $(first_line "$(cat "$mode_err")")"
+    fi
+    rm -f "$mode_err"
+    echo "$label: skipped: $reason"
+    return 0
+  fi
+  rm -f "$mode_err"
   if [ "$mode" = "local-only" ]; then
     echo "$label: skipped: local-only project"
     return 0

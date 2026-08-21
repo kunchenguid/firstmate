@@ -29,7 +29,7 @@ make_home() {  # <name> [<registry-line>...]
   local name=$1 home projects fakebin
   shift
   home="$TMP_ROOT/$name/home"
-  projects="$TMP_ROOT/$name/projects"
+  projects="$home/projects"
   fakebin="$TMP_ROOT/$name/bin"
   mkdir -p "$home/data" "$home/state" "$home/config" "$projects/proj" "$fakebin"
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
@@ -54,7 +54,7 @@ run_spawn() {  # <home> <fakebin> <spawn-args...>
   shift 2
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -183,6 +183,27 @@ ROWS
   pass "fm-spawn: a rigor downgrade against the registered posture is announced, never blocked"
 }
 
+test_spawn_resolves_standing_posture_by_registered_path() {
+  local home external fakebin out
+  home="$TMP_ROOT/external-spawn/home"
+  external="$TMP_ROOT/external-spawn/pai/agent"
+  fakebin="$TMP_ROOT/external-spawn/bin"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects" "$external" "$fakebin"
+  printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+  printf -- "- pai-agent [no-mistakes path=%s] - external fixture (added 2026-01-01)\n" "$external" \
+    > "$home/data/projects.md"
+  write_brief "$home" delivery-extpath-e1 local-only
+
+  out=$(run_spawn "$home" "$fakebin" delivery-extpath-e1 "$external" claude --mode local-only --yolo off)
+
+  assert_contains "$out" "standing posture for pai-agent is no-mistakes" \
+    "spawn did not resolve the registered external project name from its path"
+  assert_not_contains "$out" "standing posture for agent is no-mistakes" \
+    "spawn still used the external path basename as the registry key"
+  pass "fm-spawn: registry deviation notices resolve external absolute paths to their registered project name"
+}
+
 # A scout's deliverable is a report, so it records no delivery posture at all;
 # teardown already treats an absent mode as the most protective one.
 test_scout_records_no_delivery_posture() {
@@ -272,11 +293,119 @@ EOF
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
 }
 
+test_project_mode_resolves_registered_paths() {
+  local home external unknown outf errf status out
+  home="$TMP_ROOT/project-path/home"
+  external="$TMP_ROOT/project-path/external/agent"
+  unknown="$TMP_ROOT/project-path/unknown/agent"
+  outf="$TMP_ROOT/project-path.out"
+  errf="$TMP_ROOT/project-path.err"
+  mkdir -p "$home/data" "$home/projects/tree" "$external" "$unknown"
+  {
+    printf -- '- tree [direct-PR] - in-tree fixture (added 2026-01-01)\n'
+    printf -- "- pai-agent [local-only path=%s] - external fixture (added 2026-01-01)\n" "$external"
+  } > "$home/data/projects.md"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --path "$external" 2>/dev/null)
+  [ "$out" = "local-only off" ] || fail "external absolute path did not resolve local-only (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw --with-name --path "$external" 2>/dev/null)
+  [ "$out" = "pai-agent local-only off" ] || fail "--with-name did not expose the external path's registry name (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --path "$home/projects/tree" 2>/dev/null)
+  [ "$out" = "direct-PR off" ] || fail "in-tree registered path did not resolve declared mode (got '$out')"
+
+  FM_HOME="$home" "$PROJECT_MODE" --path "$unknown" >"$outf" 2>"$errf"
+  status=$?
+  expect_code 0 "$status" "unknown path should keep the protective default, not refuse"
+  [ "$(cat "$outf")" = "no-mistakes off" ] || fail "unknown path did not default to no-mistakes off"
+  assert_grep 'no project registered for path' "$errf" "unknown path did not print a diagnostic"
+
+  {
+    printf -- '- one [local-only path=%s] - duplicate fixture (added 2026-01-01)\n' "$external"
+    printf -- '- two [direct-PR path=%s] - duplicate fixture (added 2026-01-01)\n' "$external"
+  } > "$home/data/projects.md"
+  FM_HOME="$home" "$PROJECT_MODE" --path "$external" >"$outf" 2>"$errf"
+  status=$?
+  [ "$status" -ne 0 ] || fail "duplicate path identities should refuse"
+  assert_grep 'ambiguous path identity' "$errf" "duplicate path refusal did not explain the ambiguity"
+
+  printf -- "- prose [local-only] - external fixture at \`%s\` (added 2026-01-01)\n" "$external" \
+    > "$home/data/projects.md"
+  FM_HOME="$home" "$PROJECT_MODE" --path "$external" >"$outf" 2>"$errf"
+  status=$?
+  expect_code 0 "$status" "free-form description paths should stay unknown, not refuse"
+  [ "$(cat "$outf")" = "no-mistakes off" ] || fail "description path parsed as a registered identity"
+  assert_grep 'no project registered for path' "$errf" "description path fallback did not print the unknown-path diagnostic"
+
+  printf -- '- bad [local-only path=relative/project] - malformed fixture (added 2026-01-01)\n' \
+    > "$home/data/projects.md"
+  FM_HOME="$home" "$PROJECT_MODE" --path "$unknown" >"$outf" 2>"$errf"
+  status=$?
+  [ "$status" -ne 0 ] || fail "malformed structured path identity should refuse"
+  assert_grep 'malformed path identity' "$errf" "malformed identity refusal did not name the problem"
+  pass "fm-project-mode: path lookup handles external, in-tree, unknown, ambiguous, and malformed identities"
+}
+
+test_project_mode_path_lookup_preserves_relative_override_base() {
+  local base caller home external unknown outf errf out status abs_data abs_project_root
+  base="$TMP_ROOT/project-path-cwd"
+  caller="$base/caller"
+  home="$caller/home"
+  external="$base/external/project"
+  unknown="$base/unknown/project"
+  mkdir -p "$caller" "$home/data" "$external"
+  printf -- "- ext [direct-PR path=%s] - external fixture (added 2026-01-01)\n" "$external" \
+    > "$home/data/projects.md"
+
+  out=$(cd "$caller" && FM_HOME=home "$PROJECT_MODE" --with-name --path "$external" 2>/dev/null)
+  [ "$out" = "ext direct-PR off" ] || fail "relative FM_HOME was resolved from the project path instead of caller cwd (got '$out')"
+
+  mkdir -p "$caller/data-rel"
+  printf -- "- datarel [local-only path=%s] - external fixture (added 2026-01-01)\n" "$external" \
+    > "$caller/data-rel/projects.md"
+  out=$(cd "$caller" && FM_HOME=missing-home FM_DATA_OVERRIDE=data-rel "$PROJECT_MODE" --with-name --path "$external" 2>/dev/null)
+  [ "$out" = "datarel local-only off" ] || fail "relative FM_DATA_OVERRIDE was resolved from the project path instead of caller cwd (got '$out')"
+
+  abs_data="$base/absolute-data"
+  abs_project_root="$caller/projects-rel"
+  mkdir -p "$abs_data" "$abs_project_root/tree" "$unknown"
+  {
+    printf -- '- missing [direct-PR] - absent in-home fixture (added 2026-01-01)\n'
+    printf -- '- tree [no-mistakes] - in-tree fixture (added 2026-01-01)\n'
+    printf -- "- ext [local-only path=%s] - external fixture (added 2026-01-01)\n" "$external"
+  } > "$abs_data/projects.md"
+  outf="$base/project-mode-cwd.out"
+  errf="$base/project-mode-cwd.err"
+  (cd "$caller" && FM_HOME=missing-home FM_DATA_OVERRIDE="$abs_data" FM_PROJECTS_OVERRIDE=projects-rel \
+    "$PROJECT_MODE" --with-name --path "$abs_project_root/tree" >"$outf" 2>"$errf")
+  status=$?
+  expect_code 0 "$status" "relative FM_PROJECTS_OVERRIDE should resolve from caller cwd"
+  [ "$(cat "$outf")" = "tree no-mistakes off" ] || fail "relative FM_PROJECTS_OVERRIDE did not match the in-home project path"
+  [ ! -s "$errf" ] || fail "relative FM_PROJECTS_OVERRIDE printed an unexpected diagnostic: $(cat "$errf")"
+
+  (cd "$caller" && FM_HOME=missing-home FM_DATA_OVERRIDE="$abs_data" FM_PROJECTS_OVERRIDE=projects-rel \
+    "$PROJECT_MODE" --with-name --path "$external" >"$outf" 2>"$errf")
+  status=$?
+  expect_code 0 "$status" "missing in-home clone should not break external path lookup"
+  [ "$(cat "$outf")" = "ext local-only off" ] || fail "external path was not resolved after an absent in-home clone"
+  [ ! -s "$errf" ] || fail "external path lookup printed an unexpected diagnostic: $(cat "$errf")"
+
+  (cd "$caller" && FM_HOME=missing-home FM_DATA_OVERRIDE="$abs_data" FM_PROJECTS_OVERRIDE=projects-rel \
+    "$PROJECT_MODE" --path "$unknown" >"$outf" 2>"$errf")
+  status=$?
+  expect_code 0 "$status" "missing in-home clone should not make an unknown path malformed"
+  [ "$(cat "$outf")" = "no-mistakes off" ] || fail "unknown path did not keep the protective default"
+  assert_grep 'no project registered for path' "$errf" "unknown path did not print its default diagnostic"
+  pass "fm-project-mode: path normalization keeps relative overrides based at the caller cwd"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
+test_spawn_resolves_standing_posture_by_registered_path
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_project_mode_maps_the_conditional_policy
+test_project_mode_resolves_registered_paths
+test_project_mode_path_lookup_preserves_relative_override_base
 echo "# all fm-task-delivery tests passed"

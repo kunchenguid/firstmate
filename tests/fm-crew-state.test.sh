@@ -479,6 +479,7 @@ EOF
   assert_contains "$out" "state: done" "green ci-monitor run -> done"
   assert_contains "$out" "source: run-step" "green ci-monitor -> run-step source"
   assert_contains "$out" "checks green" "green ci-monitor detail mentions checks green"
+  assert_contains "$out" "run-id=01RUN" "green ci-monitor detail includes run identity"
   assert_not_contains "$out" "state: working" "green ci-monitor must not read as still validating"
   pass "ci-monitoring run with checks already green surfaces done"
 }
@@ -681,6 +682,7 @@ test_terminal_failed() {
   local out; out=$(run_crew_state "$d" feat-e)
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
+  assert_contains "$out" "run-id=01RUN" "failed run detail includes run identity"
   pass "terminal failed run is authoritative"
 }
 

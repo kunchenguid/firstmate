@@ -370,6 +370,26 @@ test_local_only_skipped() {
   pass "local-only clone is skipped (benign), not flagged STUCK"
 }
 
+test_external_registered_local_only_path_skipped() {
+  local home clone out
+  home=$(new_home)
+  clone="$home/external/agent"
+  mkdir -p "$clone" "$home/data"
+  git init -q "$clone"
+  git -C "$clone" symbolic-ref HEAD refs/heads/main
+  commit_file "$clone" file.txt v0 C0
+  printf -- "- pai-agent [local-only path=%s] - external fixture (added 2026-01-01)\n" "$clone" \
+    > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "pai-agent: skipped: local-only project" \
+    "external registered local-only path should resolve by path, not basename"
+  assert_not_contains "$out" "agent: skipped: no origin remote" \
+    "external registered local-only path fell back to basename/default mode"
+  pass "external registered local-only project paths are skipped before remote sync"
+}
+
 test_single_project_by_bare_name_resolves() {
   local home out
   home=$(new_home)
@@ -613,6 +633,7 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_external_registered_local_only_path_skipped
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves

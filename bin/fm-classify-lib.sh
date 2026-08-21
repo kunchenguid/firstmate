@@ -1197,10 +1197,8 @@ signal_reason_is_actionable() {  # <file> ...
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
-  local id=$1 line state src
-  [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+crew_absorb_class_from_state_line() {  # <line>
+  local line=$1 state src
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
@@ -1209,6 +1207,60 @@ crew_absorb_class() {  # <id>
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
   printf 'none'
+}
+
+crew_state_line() {  # <id>
+  local id=$1
+  [ -n "$id" ] || return 1
+  "$FM_CREW_STATE_BIN" "$id" 2>/dev/null || true
+}
+
+crew_absorb_class() {  # <id>
+  local line
+  line=$(crew_state_line "$1" || true)
+  crew_absorb_class_from_state_line "$line"
+}
+
+crew_actionable_run_state_line_from_state_line() {  # <line>
+  local line=$1 state src
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  src=${line#*source: }; src=${src%% *}
+  case "$state" in
+    parked|done|failed) [ "$src" = run-step ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$line"
+}
+
+crew_run_generation_from_state_line() {  # <line>
+  local line=$1 token generation=''
+  for token in $line; do
+    case "$token" in
+      run-id=*|run-head=*|runs-row=*)
+        generation="${generation}${generation:+ }$token"
+        ;;
+    esac
+  done
+  [ -n "$generation" ] || return 1
+  printf '%s\n' "$generation"
+}
+
+crew_actionable_run_state_marker_from_state_line() {  # <line>
+  local line=$1 generation
+  line=$(crew_actionable_run_state_line_from_state_line "$line") || return 1
+  generation=$(crew_run_generation_from_state_line "$line" || true)
+  if [ -n "$generation" ]; then
+    printf '%s\n%s\n' "$generation" "$line"
+  else
+    printf '%s\n' "$line"
+  fi
+}
+
+crew_actionable_run_state_line() {  # <id>
+  local line
+  line=$(crew_state_line "$1" || true)
+  crew_actionable_run_state_line_from_state_line "$line"
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class

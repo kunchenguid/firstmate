@@ -381,10 +381,10 @@ nm_ci_checks_state() {
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
 # is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# matching row's status word plus a stable row token, or empty when the branch
+# has no run within FM_CREW_STATE_RUNS_LIMIT rows.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row st rest br sha row_key
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -403,7 +403,8 @@ nm_runs_status_for_branch() {  # <branch>
       if ! nm_coarse_head_matches_worktree "$sha"; then
         continue
       fi
-      printf '%s' "$st"
+      row_key=$(printf '%s' "$row" | LC_ALL=C tr -cs 'A-Za-z0-9._/@:-' '_')
+      printf '%s\t%s' "$st" "runs-row=$row_key"
       return 0
     fi
   done <<< "$out"
@@ -437,6 +438,7 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+COARSE_RUN_GENERATION=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -453,14 +455,36 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
+      COARSE_MATCH=$(nm_runs_status_for_branch "$CREW_BRANCH")
+      if [ -n "$COARSE_MATCH" ]; then
+        COARSE_STATUS=${COARSE_MATCH%%$'\t'*}
+        COARSE_RUN_GENERATION=${COARSE_MATCH#*$'\t'}
         HAVE_RUN=1
         RUN_SOURCE=coarse
       fi
     fi
   fi
 fi
+
+run_generation_token() {  # <value>
+  printf '%s' "$1" | LC_ALL=C tr -cs 'A-Za-z0-9._/@:-' '_'
+}
+
+run_generation_detail() {
+  local run_id run_head detail=''
+  case "$RUN_SOURCE" in
+    full)
+      run_id=$(strip_quotes "$(nm_field id)")
+      run_head=$(strip_quotes "$(nm_field head)")
+      [ -n "$run_id" ] && detail="run-id=$(run_generation_token "$run_id")"
+      [ -n "$run_head" ] && detail="${detail}${detail:+ }run-head=$(run_generation_token "$run_head")"
+      ;;
+    coarse)
+      detail=$COARSE_RUN_GENERATION
+      ;;
+  esac
+  [ -n "$detail" ] && printf '%s' "$detail"
+}
 
 # --- run-step authoritative path -------------------------------------------
 
@@ -577,6 +601,8 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  run_generation=$(run_generation_detail)
+  [ -n "$run_generation" ] && RUN_DETAIL="$RUN_DETAIL${RUN_DETAIL:+$SEP}$run_generation"
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 
