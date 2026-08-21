@@ -704,8 +704,16 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
+# A remote second mate's Claude account is pinned in its OWN home on that host,
+# so the host-local spawn reads and validates the store where it actually lives
+# rather than having the parent guess at a path it cannot see.
+REMOTE_CLAUDE_STORE="$TMP_ROOT/remote-claude-account"
+mkdir -p "$REMOTE_CLAUDE_STORE" "$REMOTE_HOME/config"
+printf '%s\n' "$REMOTE_CLAUDE_STORE" > "$REMOTE_HOME/config/claude-account"
 out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
+assert_grep "CLAUDE_CONFIG_DIR='$REMOTE_CLAUDE_STORE'" "$HERDR_LOG" \
+  "the remote launch did not carry the remote home's own Claude account pin"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
 assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/ios.meta" "parent metadata omitted the pinned remote Herdr session"

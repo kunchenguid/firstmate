@@ -41,6 +41,10 @@
 # is deliberately NOT in the list: it is the primary's own setting for launching
 # secondmates, and a secondmate never spawns secondmates, so it must not flow
 # downstream.
+# config/claude-account is deliberately NOT in the list either: it pins the
+# Claude account a home's own launches bill, so inheriting it would put every
+# secondmate back on the primary's subscription - the exact opposite of what it
+# is for (docs/configuration.md "Claude account store").
 #
 # That single declaration is also the ONE owner of the inherited-material
 # allowlist for remote routes: bin/fm-remote-inherit-push.sh (sender) and

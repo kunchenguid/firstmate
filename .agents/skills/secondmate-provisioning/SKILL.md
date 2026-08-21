@@ -97,6 +97,11 @@ When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` f
 Because this resolves from the file on every spawn, the pin is durable across every respawn (recovery, `/updatefirstmate`, restart) exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps a secondmate pinned to Opus even if the primary's own default model later changes.
 This is secondmate-only: crewmate/scout model resolution is untouched by this file.
 
+A second mate that belongs to a separate business or subscription gets its own Claude account by writing that account's config-store path into its OWN home's `config/claude-account`; [`docs/configuration.md`](../../../docs/configuration.md) owns that file's schema, resolution, and refusal behavior.
+Set it in the secondmate home rather than the primary's, because the primary's own file governs the primary's crewmates, and never add it to the inherited set - an inherited account pin would put the whole fleet back on one subscription.
+It is re-resolved at every launch, so wiring the account is a one-time step per home rather than something a respawn can undo, and a home with no pin keeps billing the primary's account exactly as before.
+For a remote route, write the file on that host inside the remote home, because the parent cannot see or validate a path on the other side of the route.
+
 This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
 Before a local launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
 The locked session-start deferred network stage runs the same bootstrap sweep for every live local secondmate home, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records).

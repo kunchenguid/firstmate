@@ -247,6 +247,20 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
+## Claude account store (config/claude-account)
+
+A Firstmate home pins the Claude account its workers bill by putting the absolute path of a Claude config store directory - the `CLAUDE_CONFIG_DIR` value - in the local, gitignored `config/claude-account`.
+Only the first non-empty, non-comment line is read, with surrounding whitespace trimmed.
+`bin/fm-spawn.sh` re-resolves the store from that file at every launch, so the pin survives every respawn path - fresh spawn, session-start liveness respawn, control-plane relaunch, and `/updatefirstmate` - without any of them carrying it forward.
+A `--secondmate` spawn reads the target home's file and a crewmate or scout spawn reads its own home's, so pinning one secondmate home puts that second mate and every worker it spawns on their own Claude subscription instead of the primary's.
+A pinned store is forwarded onto a claude launch, and onto a pinned secondmate launch whatever harness that agent itself runs, because a codex or cursor second mate still spawns claude workers of its own.
+With no pin the forwarded store is firstmate's own `CLAUDE_CONFIG_DIR` exactly as before, so an unpinned home's launches are unchanged.
+A pin whose value is not an absolute, traversal-free, readable, searchable directory refuses the spawn before any endpoint exists, naming the home and the path, and never falls back to the primary's account, because silently billing the wrong subscription is the failure this pin exists to prevent.
+A pinned launch reports `claude_account=<path>` on its success line.
+This file is home-local and is not part of secondmate inherited configuration, so the primary's own pin never propagates downstream; a remote route's pin lives in the remote home's own `config/`, where the host-local spawn reads and validates it against that host's filesystem.
+Create the store directory and authenticate it once with `CLAUDE_CONFIG_DIR=<path> claude` before pinning it; Firstmate reads the path and never writes credentials.
+Other harnesses keep their own account mechanisms and are outside this file's scope.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
@@ -610,6 +624,7 @@ FM_COMPOSER_CAPTURE_LINES=20   # fleet-wide bound for tail-capture composer read
 FM_COMPOSER_PI_MAX_LINES=8     # fleet-wide: maximum rows admitted between Pi's identity-corroborated separator pair; taller or ambiguous candidates stay unknown
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, used by styled tmux, herdr, and Zellij reads)
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
+CLAUDE_CONFIG_DIR=      # Claude's own config-store path; forwarded onto claude launches when no config/claude-account pin applies (see "Claude account store")
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables

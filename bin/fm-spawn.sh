@@ -127,6 +127,23 @@
 #   secondmate receives the primary's read-only shared captain-preference file
 #   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
 #   config reread generations because the new agent reads the converged files.
+#   Every launch resolves the Claude credential/config store it forwards from
+#   DURABLE state rather than from the invoking environment: a --secondmate spawn
+#   reads the TARGET home's config/claude-account, and a crewmate or scout spawn
+#   reads its own home's. The file holds the absolute path of a Claude config
+#   store directory (the CLAUDE_CONFIG_DIR value) on its first non-empty,
+#   non-comment line. Present and valid, that store is forwarded onto a claude
+#   launch, and onto a PINNED secondmate launch whatever harness it runs, so the
+#   claude workers that home spawns land on the same account. Absent, the store
+#   is firstmate's own CLAUDE_CONFIG_DIR exactly as before, so an unpinned spawn
+#   is unchanged. A pin naming a missing, non-absolute, traversing, or
+#   unreadable store REFUSES the spawn before any endpoint exists rather than
+#   falling back to the primary's account. Because it is re-resolved per spawn,
+#   the pin is durable across every respawn path (recovery, --relaunch,
+#   /updatefirstmate, restart), and config/ is gitignored so it stays home-local
+#   and is never inherited between homes. A remote route's pin lives in the
+#   remote home's own config/ and is read and validated by the host-local spawn.
+#   A pinned launch reports `claude_account=<path>` on its success line.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -1643,6 +1660,97 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# --- Claude account store for this launch -----------------------------------
+# The store is resolved from DURABLE state at every spawn, never inherited from
+# whatever environment happened to invoke this one, so it survives every respawn
+# path (fresh spawn, session-start liveness respawn, control-plane --relaunch,
+# /updatefirstmate) without any of them plumbing it through.
+#
+# A home pins its Claude account by putting the absolute path of a Claude
+# config/credential store directory in config/claude-account. A --secondmate
+# spawn reads the TARGET home's file, which is what gives each persistent
+# secondmate its own Claude subscription instead of the primary's; a crewmate or
+# scout reads its own home's file, which is what carries a secondmate's pin down
+# to the workers that home spawns even when the launch environment does not.
+# For a remote route the same file is read by the host-local spawn from the
+# remote home's own config/, so the path is validated on the host it lives on.
+#
+# With no pin the value is firstmate's own CLAUDE_CONFIG_DIR exactly as before,
+# so an unpinned spawn is byte-identical to the pre-pin behavior.
+# A pin that does not name a usable store REFUSES the spawn here, before any
+# endpoint exists: silently falling back to the primary's account is the
+# wrong-account billing this pin exists to prevent.
+CLAUDE_STORE=
+CLAUDE_STORE_PINNED=0
+
+# First non-empty, non-comment line of <file>, whitespace-trimmed; empty when
+# the file holds only blank or comment lines.
+claude_account_pin_value() {  # <file>
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] || continue
+    case "$line" in '#'*) continue ;; esac
+    printf '%s\n' "$line"
+    return 0
+  done < "$1"
+  return 0
+}
+
+resolve_claude_store() {  # <config-dir> <subject>
+  local config_dir=$1 subject=$2 pin_file value
+  pin_file="$config_dir/claude-account"
+  if [ ! -e "$pin_file" ]; then
+    # A dangling symlink is a pin the operator meant to set, not an absent one.
+    if [ -L "$pin_file" ]; then
+      echo "error: $subject pins a Claude account at $pin_file, but that path is a broken symlink; repair or remove it (launching would bill the primary's Claude account instead)" >&2
+      return 1
+    fi
+    CLAUDE_STORE=${CLAUDE_CONFIG_DIR:-}
+    return 0
+  fi
+  if [ ! -f "$pin_file" ] || [ ! -r "$pin_file" ]; then
+    echo "error: $subject pins a Claude account at $pin_file, but that is not a readable regular file; fix or remove it (launching would bill the primary's Claude account instead)" >&2
+    return 1
+  fi
+  value=$(claude_account_pin_value "$pin_file")
+  if [ -z "$value" ]; then
+    echo "error: $subject has an empty Claude account pin at $pin_file; put the absolute path of its Claude config store on the first line, or remove the file to use the primary's account" >&2
+    return 1
+  fi
+  case "$value" in
+    /*) ;;
+    *)
+      echo "error: $subject pins Claude account store '$value' in $pin_file, which is not an absolute path; use the store directory's full path" >&2
+      return 1
+      ;;
+  esac
+  case "/$value/" in
+    */../*|*/./*)
+      echo "error: $subject pins Claude account store '$value' in $pin_file, which contains traversal components; use the store directory's resolved path" >&2
+      return 1
+      ;;
+  esac
+  if [ ! -d "$value" ]; then
+    echo "error: $subject pins Claude account store '$value' in $pin_file, but no such directory exists; create it and authenticate that store once with CLAUDE_CONFIG_DIR='$value' claude, or correct the pin" >&2
+    return 1
+  fi
+  if [ ! -r "$value" ] || [ ! -x "$value" ]; then
+    echo "error: $subject pins Claude account store '$value' in $pin_file, but that directory is not readable and searchable by this user; fix its permissions or correct the pin" >&2
+    return 1
+  fi
+  CLAUDE_STORE=$value
+  CLAUDE_STORE_PINNED=1
+  return 0
+}
+
+if [ "$KIND" = secondmate ]; then
+  resolve_claude_store "$PROJ_ABS/config" "secondmate $ID" || exit 1
+else
+  resolve_claude_store "$CONFIG" "task $ID" || exit 1
+fi
+
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
     no-mistakes) echo 3 ;;
@@ -2732,15 +2840,23 @@ case "$HARNESS" in
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac
-# Crewmate panes are created by a long-lived tmux/herdr daemon that does not
-# inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+# Panes are created by a long-lived tmux/herdr daemon that does not inherit
+# firstmate's current environment, so a bare `claude` in the pane falls back to
+# the default ~/.claude store even when the launch was meant for another one.
+# Forward the store resolved above - this launch's config/claude-account pin,
+# else firstmate's own CLAUDE_CONFIG_DIR - so the worker uses the credential the
+# task is meant to bill. Nothing resolved is the single-store default and needs
+# no prefix.
+# A PINNED secondmate gets the prefix whatever harness it runs on, because the
+# pin governs that whole home's Claude account: the agent carries the value into
+# the claude workers it spawns itself, and a codex or cursor secondmate would
+# otherwise put its own claude crewmates on the primary's account - the exact
+# silent mis-billing the pin exists to prevent. Every other launch keeps the
+# original claude-only rule.
+if [ -n "$CLAUDE_STORE" ] \
+   && { [ "$HARNESS" = claude ] \
+        || { [ "$KIND" = secondmate ] && [ "$CLAUDE_STORE_PINNED" -eq 1 ]; }; }; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_STORE") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
@@ -2849,4 +2965,11 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+# Report a pinned Claude account so the operator can confirm which subscription
+# this launch bills without reading the pane. Absent when nothing is pinned, so
+# an unpinned spawn's success line is unchanged.
+SPAWN_CLAUDE_ACCOUNT=
+if [ "$CLAUDE_STORE_PINNED" -eq 1 ]; then
+  SPAWN_CLAUDE_ACCOUNT=" claude_account=$CLAUDE_STORE"
+fi
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_CLAUDE_ACCOUNT"
