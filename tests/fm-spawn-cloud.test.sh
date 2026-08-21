@@ -789,6 +789,176 @@ test_cloud_switch_off_and_on_share_the_same_base_metadata() {
   pass "cloud metadata stays additive over the local metadata shape"
 }
 
+# The names spawn_cloud_persist_convergence_artifacts writes into
+# state/<id>.cloud-env from paths OTHER than the SPAWN_CLOUD_ENV_ALLOWLIST loop.
+# This list is the ONLY thing that excuses a name from the equality assertion
+# below, and it is spelled out here rather than falling out of a filter so that
+# adding an export somewhere else in that block is a visible decision instead of
+# a silent exemption. The compartment block (FM_SECONDMATE_*) is listed even
+# though a crewmate spawn never writes it, so the contract is stated once for
+# both lanes rather than depending on which lane a test happens to drive.
+CLOUD_ENV_NON_ALLOWLIST_EXPORTS='FM_SPAWN_CLOUD_WALL_SECONDS FM_WORKER_PROVIDER_COMMAND FM_SECONDMATE_LEG_SECONDS FM_SECONDMATE_POLL_SECONDS FM_SECONDMATE_IDLE_SECONDS FM_SECONDMATE_TTL_HOURS FM_SECONDMATE_CHILD_PROJECT'
+
+# A shape-valid value for one contract name. The SHAPES are what the readers
+# accept (a phase enum, a bounded integer, a directory); the NAMES they are
+# keyed off are pattern suffixes, never the specific variable this defect was
+# reported as. A future contract name whose shape none of these fit fails the
+# spawn below, which is red for a true reason and says so.
+cloud_env_contract_sentinel() {  # <name>
+  case $1 in
+    # Mirrors of the values the rest of this suite's cloud lane runs with, so
+    # the fixture provider and the controller still agree with each other.
+    FM_AZURE_SUBSCRIPTION_ID) printf '%s' "$SUB" ;;
+    FM_AZURE_DEPLOYMENT_GENERATION) printf 'dep-one' ;;
+    FM_AZURE_OWNER_TAG) printf 'owner' ;;
+    FM_AZURE_NAMING_PREFIX) printf 'fmtest' ;;
+    FM_AZURE_WORKER_STATE_DIR) printf '%s' "$HOME_DIR/state/azure-workers" ;;
+    *_STATE_DIR) printf '%s' "$CASE_DIR/contract-state" ;;
+    *_POLICY_PHASE) printf 'commissioning' ;;
+    *_WORKER_MAX) printf '16' ;;
+    *_SECONDMATE_MAX) printf '2' ;;
+    *_BOUND_OVERRIDE) date -u +%Y-%m-%d ;;
+    *_ALLOW_UNTRAINED_FORECAST|*_PROTECT_DURABLE_STATE|*_WARM_IDLE) printf '0' ;;
+    # The commissioning ceiling is not a free knob: admission refuses any
+    # value other than the reviewed one.
+    *_CEILING_USD) printf '1500' ;;
+    *_HOURS) printf '24' ;;
+    *_SECONDS|*_USD|*_THRESHOLD) printf '900' ;;
+    *) printf 'fmcontract-%s' "$1" ;;
+  esac
+}
+
+test_persisted_cloud_env_matches_the_deployment_read_set_exactly() {
+  # THE CLOSED-PANE CONTRACT, asserted as an EFFECT, in BOTH directions.
+  #
+  # state/<id>.cloud-env is the ONLY channel between the operator's shell and
+  # the compartment/crewmate monitors, whose Herdr panes inherit nothing. What
+  # that file must carry is decided on the far side, by the code that reads it
+  # when a lifecycle call reaches the provider and the provider shells out to
+  # bin/fm-azure-pilot.sh for the deployment. This test derives that read set
+  # from those readers (bin/fm-cloud-env-contract.py) and asserts the file the
+  # spawn ACTUALLY WROTE equals it.
+  #
+  # EQUALITY, not containment, and that is the whole point of the second half.
+  # A contract name the file cannot carry is an outage - that is the defect this
+  # test exists for. But an EXTRA name the file carries and no reader wants is
+  # the opposite failure and the more dangerous one: SPAWN_CLOUD_ENV_ALLOWLIST
+  # is what keeps a secret-bearing FM_AZURE_* off disk, and a containment-only
+  # assertion would let anyone widen it to FM_AZURE_GITHUB_TOKEN_FILE or the
+  # FM_AZURE_VALIDATION_*_KEY_FILE pair and stay green. So the probe environment
+  # is deliberately WIDER than the contract - it is the contract UNION every
+  # name the allowlist currently spells - and any probe name that survives into
+  # the file without a reader asking for it fails here.
+  #
+  # THE COMPARISON IS SCOPED TO THE FILE, NOT TO THE PROBE. An earlier revision
+  # intersected the file's contents with the probe before comparing, which put
+  # every name written by a path OTHER than the allowlist loop outside the
+  # assertion entirely - a one-line `printf export FM_AZURE_CLIENT_SECRET`
+  # added anywhere else in spawn_cloud_persist_convergence_artifacts stayed
+  # green. The persist block really does have such paths (the wall, the
+  # provider-command override, the compartment leg block), so the exemption is
+  # spelled out by name in CLOUD_ENV_NON_ALLOWLIST_EXPORTS below and every
+  # other name in the file, whatever wrote it, is compared. A silent
+  # consequence of an intersect is how the last one hid.
+  #
+  # Deliberately not a grep for any one variable: a name added to a reader and
+  # not to the allowlist goes red here without this test ever having heard of
+  # it. That is the failure that had to reach a live Azure run before, because
+  # every provider in this suite is a fixture that never shells out to the
+  # pilot at all.
+  local record id out env_file required declared probe count name want got
+  local missing extra persisted mismatched
+  id=cloud-env-c30
+  record=$(make_cloud_case env-contract "$id")
+  read_cloud_case "$record"
+  # stderr is captured separately, not folded in: every ContractError the
+  # derivation raises goes to stderr, so folding it into $required would put the
+  # refusal text into the name list, and dropping it leaves the failure reading
+  # "could not be derived:" with nothing after the colon. A sealed re-drive of
+  # the async-def hoist produced exactly that empty message.
+  local contract_err="$CASE_DIR/contract.err"
+  required=$("$ROOT/bin/fm-cloud-env-contract.py" 2>"$contract_err") \
+    || fail "the cloud-env contract could not be derived: $(cat "$contract_err" 2>/dev/null)"
+  count=$(printf '%s\n' "$required" | grep -c '^FM_')
+  # Vacuity guard: a derivation that silently matched nothing would make every
+  # assertion below pass while proving nothing at all.
+  [ "$count" -ge 12 ] || fail "the cloud-env contract derived only $count names; the derivation is broken"
+  # What the allowlist SPELLS, read only to widen the probe environment. It is
+  # never asserted against directly - the assertions below are all about the
+  # file the spawn wrote - but without it an extra allowlist name would simply
+  # be unset at spawn time and leave no trace to catch.
+  declared=$(sed -n "s/^SPAWN_CLOUD_ENV_ALLOWLIST='\(.*\)'$/\1/p" "$ROOT/bin/fm-spawn.sh" | tr ' ' '\n' | grep '^FM_')
+  count=$(printf '%s\n' "$declared" | grep -c '^FM_')
+  # Second vacuity guard: a failed extraction would silently narrow the probe
+  # back to the contract and disarm the extra-name half of this test.
+  [ "$count" -ge 12 ] || fail "only $count allowlist names could be read from bin/fm-spawn.sh; the probe environment would be too narrow to detect an extra name"
+  # Every name the persist block emits as a LITERAL `export NAME=` line, from
+  # any path, not just the allowlist loop. Also probe-widening only, never
+  # asserted against: a rogue export is written only when its variable is set,
+  # so without setting it the rogue line is inert and the file never shows it.
+  # That inertness is exactly what let a hand-added
+  # `printf 'export FM_AZURE_CLIENT_SECRET=%q\n'` pass review round two.
+  local emitted
+  # grep -o, not an anchored sed: these printfs appear after `||` and inside
+  # case arms, so a line-start anchor sees one of the three and the guard below
+  # is what caught that. The `%s` form (the allowlist loop itself) has no
+  # literal name and is deliberately not matched.
+  emitted=$(grep -o "printf 'export [A-Za-z_][A-Za-z0-9_]*=" "$ROOT/bin/fm-spawn.sh" \
+    | sed "s/^printf 'export //; s/=$//" | sort -u)
+  count=$(printf '%s\n' "$emitted" | grep -c '^[A-Za-z_]')
+  # Third vacuity guard, same reason as the other two.
+  [ "$count" -ge 2 ] || fail "only $count literal export names could be read from bin/fm-spawn.sh; the probe environment would miss a non-allowlist export path"
+  probe=$(printf '%s\n%s\n%s\n' "$required" "$declared" "$emitted" | grep '^[A-Za-z_]' | sort -u)
+  out=$(
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      export "$name=$(cloud_env_contract_sentinel "$name")"
+    done <<PROBE
+$probe
+PROBE
+    FM_SPAWN_CLOUD=azure \
+      FM_TEST_ACTUAL_USD=2000 \
+      FM_WORKER_PROVIDER_COMMAND="python3 $CASE_DIR/provider.py" \
+      FIXTURE_STATE="$CASE_DIR/provider-state.json" \
+      run_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR"
+  )
+  expect_code 0 $? "the contract cloud spawn should succeed: $out"
+  env_file="$HOME_DIR/state/$id.cloud-env"
+  assert_present "$env_file" "the cloud spawn persisted no environment for the closed pane"
+  # EVERY name the file carries, minus the explicitly named non-allowlist
+  # exports. Nothing is filtered by the probe here, so a name written by any
+  # other path in the persist block - allowlisted or not, FM_AZURE_ or not -
+  # lands in the comparison and has to be accounted for.
+  persisted=$(sed -n 's/^export \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$env_file" | sort -u \
+    | comm -23 - <(printf '%s\n' "$CLOUD_ENV_NON_ALLOWLIST_EXPORTS" | tr ' ' '\n' | grep . | sort -u))
+  missing=$(comm -23 <(printf '%s\n' "$required" | sort -u) <(printf '%s\n' "$persisted") | tr '\n' ' ')
+  extra=$(comm -13 <(printf '%s\n' "$required" | sort -u) <(printf '%s\n' "$persisted") | tr '\n' ' ')
+  missing=${missing% }
+  extra=${extra% }
+  [ -z "$missing" ] || fail "the persisted cloud-env cannot reach the deployment path: the closed pane never sees $missing (regenerate SPAWN_CLOUD_ENV_ALLOWLIST in bin/fm-spawn.sh with bin/fm-cloud-env-contract.py --allowlist; if a name is here only because some reader MENTIONS it and its value would be a credential, the answer is an entry in SECRET_BEARING_EXCLUSIONS in bin/fm-cloud-env-contract.py, NOT a new allowlist entry)"
+  [ -z "$extra" ] || fail "the persisted cloud-env writes names no reader on the deployment path asks for: $extra (SPAWN_CLOUD_ENV_ALLOWLIST is what keeps a secret-bearing FM_AZURE_* off disk; drop them, or add the reader that needs them, or record the judgment in SECRET_BEARING_EXCLUSIONS in bin/fm-cloud-env-contract.py. If one is a DELIBERATE non-allowlist export from another path in spawn_cloud_persist_convergence_artifacts, name it in CLOUD_ENV_NON_ALLOWLIST_EXPORTS in this file - deliberately, in the open, never by widening a filter)"
+  mismatched=
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    want=$(cloud_env_contract_sentinel "$name")
+    # Read it the way a monitor does: source the file in an environment
+    # scrubbed to what a Herdr pane actually keeps. `env -u FM_*` is not a
+    # thing, and unsetting by prefix here would leave the operator's own
+    # exports leaking in and hide exactly this defect.
+    # The inner script must stay unexpanded: $1/$2 are the scrubbed shell's own
+    # arguments, and the indirect read is what proves the name is reachable.
+    # shellcheck disable=SC2016
+    got=$(env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-C}" \
+      bash -c '. "$1" >/dev/null 2>&1 || true; value=$2; printf "%s" "${!value-}"' \
+      _ "$env_file" "$name")
+    [ "$got" = "$want" ] || mismatched="$mismatched $name"
+  done <<CONTRACT
+$required
+CONTRACT
+  [ -z "$mismatched" ] || fail "the persisted cloud-env does not round-trip its value for$mismatched"
+  pass "the persisted cloud-env equals the deployment read set, value-exact through a closed environment, with no name the readers never asked for"
+}
+
 test_cloud_monitor_launch_carries_fm_home() {
   # The Herdr server starts endpoint panes in a closed environment; the
   # monitor's launch string must therefore carry FM_HOME inline or the
@@ -1504,6 +1674,7 @@ test_monitor_lands_despite_a_collection_error
 test_monitor_keeps_the_outcome_when_the_worktree_moved
 test_cloud_spawn_stays_durably_queued_without_admission
 test_cloud_monitor_launch_carries_fm_home
+test_persisted_cloud_env_matches_the_deployment_read_set_exactly
 test_respawn_sweeps_stale_cloud_artifacts
 test_queued_spawn_converges_through_the_monitor
 test_monitor_stands_down_when_dispatch_already_claimed

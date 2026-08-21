@@ -36,6 +36,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-worker-supervisor.py` | Execute one exactly bound command and emit one bounded digest-bound guest result       |
 | `fm-worker-authority.py` | Issue release receipts from ordinary endpoint, report, landing, account, and worktree authorities |
 | `fm-azure-worker-provider.py` | Reconcile exact Azure worker generations through the landed private foundation    |
+| `fm-cloud-env-contract.py` | Derive the FM_AZURE_* names a cloud placement must persist for the closed monitor pane |
 | `fm-spawn.sh`            | Spawn, native-resume, or provider-neutrally continue crewmates while recording pre-metadata Treehouse acquisition ownership |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule through quota or the deferred legacy pool-summary branch |
 | `fm-account-directory.sh` | Select a direct Claude/Codex account directory and install its per-profile Herdr hook |

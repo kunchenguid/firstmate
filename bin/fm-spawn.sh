@@ -4505,13 +4505,22 @@ spawn_cloud_record_account_placement() {  # <profile> <account-home>
 # the crewmate entrypoint (CLOUD_WORKER_LAUNCH, the exact launch string every
 # local backend uses) runs on the worker through a detached bounded
 # `execute`, whose digest-bound result lands in state/<id>.worker-result.json.
-# The exact worker-lane environment names read by bin/fm-worker-lifecycle.py
-# and bin/fm-azure-worker-provider.py (regenerate with:
-#   grep -ohE 'FM_AZURE_[A-Z0-9_]+' bin/fm-worker-lifecycle.py \
-#     bin/fm-azure-worker-provider.py | sort -u
-# ). An explicit allowlist, not a prefix glob, so a future secret-bearing
-# FM_AZURE_* variable can never land on disk silently.
-SPAWN_CLOUD_ENV_ALLOWLIST='FM_AZURE_AUTHOR_CAPACITY_MODE FM_AZURE_CAPACITY_PROFILE FM_AZURE_DEPLOYMENT_GENERATION FM_AZURE_NAMING_PREFIX FM_AZURE_OWNER_TAG FM_AZURE_RESOURCE_GROUP FM_AZURE_STORAGE_NAME FM_AZURE_SUBSCRIPTION_ID FM_AZURE_WORKER_ADMISSION_HOURS FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST FM_AZURE_WORKER_COMMISSIONING_CEILING_USD FM_AZURE_WORKER_COST_ATTRIBUTION FM_AZURE_WORKER_HOUR_PLANNING_THRESHOLD FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS FM_AZURE_WORKER_MAX FM_AZURE_WORKER_POLICY_PHASE FM_AZURE_WORKER_STATE_DIR FM_AZURE_WORKER_STEADY_TARGET_USD FM_AZURE_WORKER_WARM_IDLE'
+# The exact cloud-lane environment names the far side of the closed pane reads.
+# DERIVED, not hand-kept: bin/fm-cloud-env-contract.py is the one owner of that
+# set, and tests/fm-spawn-cloud.test.sh asserts the PERSISTED file against it,
+# so a name added to a reader without landing here goes red. Regenerate with:
+#   bin/fm-cloud-env-contract.py --allowlist
+# The readers are bin/fm-worker-lifecycle.py, bin/fm-azure-worker-provider.py,
+# AND bin/fm-azure-pilot.sh - the pilot is a SUBPROCESS of the provider
+# (run_pilot_create), so the grep of the provider alone that used to regenerate
+# this line never saw the twelve names the pilot's own require_cloud_environment
+# refuses without. That omission made a compartment child's worker impossible to
+# create on any machine, in any configuration, which no hermetic test could see
+# because they all drive a fixture provider that never shells out to the pilot.
+# Still an explicit literal and not a prefix glob: a secret-bearing FM_AZURE_*
+# must never land on disk silently, and the contract records that judgment in
+# its SECRET_BEARING_EXCLUSIONS rather than leaving it to a pattern.
+SPAWN_CLOUD_ENV_ALLOWLIST='FM_AZURE_ADMIN_EMAIL FM_AZURE_ADMIN_SSH_PUBLIC_KEY FM_AZURE_ADMIN_USERNAME FM_AZURE_BUDGET_START_DATE FM_AZURE_CLEANUP_TIMEOUT_SECONDS FM_AZURE_DEPLOYMENT_GENERATION FM_AZURE_KEY_VAULT_NAME FM_AZURE_MUTATION_STATE_DIR FM_AZURE_NAMING_PREFIX FM_AZURE_OPERATOR_DATA_PLANE_IP FM_AZURE_OWNER_TAG FM_AZURE_PROTECT_DURABLE_STATE FM_AZURE_RESOURCE_GROUP FM_AZURE_RUNNER_OPERATOR_OBJECT_ID FM_AZURE_RUNNER_VALIDATION_SKU FM_AZURE_SECONDMATE_MAX FM_AZURE_STEADY_STATE_BUDGET_TARGET_USD FM_AZURE_STORAGE_NAME FM_AZURE_SUBSCRIPTION_ID FM_AZURE_TENANT_ID FM_AZURE_VM_FAMILY FM_AZURE_WORKER_ADMISSION_HOURS FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST FM_AZURE_WORKER_COMMISSIONING_CEILING_USD FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE FM_AZURE_WORKER_DAILY_BOUND_USD FM_AZURE_WORKER_HOUR_PLANNING_THRESHOLD FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS FM_AZURE_WORKER_IDLE_RELEASE_SECONDS FM_AZURE_WORKER_IMAGE_ID FM_AZURE_WORKER_MAX FM_AZURE_WORKER_POLICY_PHASE FM_AZURE_WORKER_SKUS FM_AZURE_WORKER_SLOTS FM_AZURE_WORKER_STATE_DIR FM_AZURE_WORKER_STEADY_TARGET_USD FM_AZURE_WORKER_WARM_IDLE'
 spawn_cloud_persist_convergence_artifacts() {
   # A queued request outlives this process, but the entrypoint argv and the
   # FM_AZURE_* identity environment exist only here. Persist both so the
