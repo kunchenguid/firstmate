@@ -59,7 +59,7 @@ MIN_INTERVAL=60
 MAX_INTERVAL=86400
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # The generated check embeds its stamp path as a single-quoted literal, so a
 # path carrying a quote or a newline would break out of that literal. Refuse
@@ -189,7 +189,12 @@ cmd_arm() {
     remove_artifact "$TRUST" || true
     die "cannot register the timer check"
   fi
-  fm_custom_check_registered "$STATE" "$ID" || die "the timer check did not register"
+  if ! fm_custom_check_registered "$STATE" "$ID"; then
+    remove_artifact "$CHECK" || true
+    remove_artifact "$STAMP" || true
+    remove_artifact "$TRUST" || true
+    die "the timer check did not register"
+  fi
   printf 'armed: state/%s.check.sh interval=%ss\n' "$ID" "$interval"
 }
 
