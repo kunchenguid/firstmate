@@ -170,11 +170,11 @@ EOF
   fi
 
   run_captain "$home" hold sample-route-call \
-    --title "Choose the sample route and access" --reason "captain route and access choices pending" \
+    --title "Choose route: north, south" --reason "captain route and access choices pending" \
     --repo sample --origin "$id" >/dev/null \
     || fail "could not register the captain-held task"
   run_captain "$home" hold sample-route-call \
-    --title "Choose the sample route and access" --reason "captain route and access choices pending" \
+    --title "Choose route: north, south" --reason "captain route and access choices pending" \
     --repo sample >/dev/null \
     || fail "idempotent hold retry failed"
   [ "$(grep -cE "^- \[ \] sample-route-call -" "$home/data/backlog.md")" = 1 ] \
@@ -836,6 +836,11 @@ test_legacy_identities_keep_working() {
     || fail "an identical pre-collapse keyed answer was not idempotent"
   assert_contains "$out" "closed: $id-decision-fourth-choice" \
     "the pre-collapse keyed answer digest was treated as drift"
+  out=$(printf '%s-decision-fourth-choice\toption c\t\n' "$id" \
+    | run_captain "$home" answers --source "legacy replay") \
+    || fail "a full legacy task-id replay without an origin was not idempotent"
+  assert_contains "$out" "closed: $id-decision-fourth-choice" \
+    "the origin-free legacy replay digest was treated as drift"
   pass "legacy identities, metadata, bindings, and the shim keep working"
 }
 

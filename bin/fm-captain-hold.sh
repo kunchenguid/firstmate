@@ -227,11 +227,27 @@ show_field() {  # <show-output> <field>
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
 }
 
-# A show field's empty marker is a quoted dash; normalize it to empty.
+decode_shown_value() {  # <shown-field>
+  local value=$1
+  case "$value" in
+    \"*\")
+      printf '%s' "$value" | perl -MJSON::PP -e '
+        local $/;
+        my $value = decode_json(<STDIN>);
+        binmode STDOUT, ":raw";
+        utf8::encode($value) if utf8::is_utf8($value);
+        print $value;
+      '
+      ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+# Decode show-encoded scalar fields and normalize the empty marker.
 show_field_value() {  # <show-output> <field>
   local value
-  value=$(show_field "$1" "$2")
-  [ "$value" != '"-"' ] || value=''
+  value=$(decode_shown_value "$(show_field "$1" "$2")")
+  [ "$value" != '-' ] || value=''
   printf '%s' "$value"
 }
 
@@ -318,24 +334,6 @@ resolution_block() {  # <mode>
     "$DECISION_DIGEST" "$1" "$DECISION_TEXT"
 }
 
-# Reconstruct the actual body text from tasks-axi's show output, where a body
-# containing newlines or quotes prints as one quoted JSON string.
-unescape_shown_body() {  # <shown-body-field>
-  local body=$1
-  case "$body" in
-    \"*\")
-      printf '%s' "$body" | perl -MJSON::PP -e '
-        local $/;
-        my $value = decode_json(<STDIN>);
-        binmode STDOUT, ":raw";
-        utf8::encode($value) if utf8::is_utf8($value);
-        print $value;
-      '
-      ;;
-    *) printf '%s' "$body" ;;
-  esac
-}
-
 # Durable state of one captain call: an active captain hold (annotations
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
@@ -405,7 +403,7 @@ command_hold() {
     [ "$state" != "done" ] \
       || fail "task $id is already closed; a new captain call needs its own task"
     if [ -n "$title" ]; then
-      existing_title=$(show_field "$show" title)
+      existing_title=$(show_field_value "$show" title)
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
     fi
   else
@@ -445,7 +443,7 @@ command_hold() {
 write_resolution_record() {  # <task-id> <mode> <shown-body>
   local id=$1 mode=$2 body=$3 new_body tmp
   new_body=$(resolution_block "$mode")
-  body=$(unescape_shown_body "$body") \
+  body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
@@ -694,7 +692,8 @@ command_answers() {
     legacy_digest=''
     if [ "$id" != "$key" ]; then
       legacy_key=$key
-    elif [ "$origin" = "$BINDING_ANY" ] && [ "${id#*-decision-}" != "$id" ]; then
+    elif { [ -z "$origin" ] || [ "$origin" = "$BINDING_ANY" ]; } \
+      && [ "${id#*-decision-}" != "$id" ]; then
       legacy_key=${id#*-decision-}
     else
       legacy_key=''
