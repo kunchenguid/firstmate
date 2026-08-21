@@ -1219,19 +1219,32 @@ validate_worktree_teardown_safety() {
 # and cannot be asked refuses rather than tearing down on an unread verdict.
 CUSTODY_CHECK_SCRIPT=check:worktree-custody
 CUSTODY_CHECK_TIMEOUT=${FM_TEARDOWN_CUSTODY_TIMEOUT:-120}
-case "$CUSTODY_CHECK_TIMEOUT" in ''|*[!0-9]*) CUSTODY_CHECK_TIMEOUT=120 ;; esac
 
-validate_worktree_custody() {  # <worktree>
-  local wt=$1 out rc=0 declared=0
-  fm_project_script_declared "$wt" "$CUSTODY_CHECK_SCRIPT" || declared=$?
-  if [ "$declared" = "$FM_PROJECT_SCRIPT_ABSENT" ]; then
-    return 0
-  fi
-  if [ "$declared" = "$FM_PROJECT_SCRIPT_UNCONFIRMED" ]; then
-    echo "REFUSED: worktree $wt names a $CUSTODY_CHECK_SCRIPT check but node is unavailable to confirm it." >&2
-    echo "Install node, or get the captain's explicit OK to discard, then --force." >&2
+validate_worktree_custody() {  # <worktree> <project>
+  local wt=$1 project=$2 out rc=0 project_declared=0 wt_declared=0
+  fm_project_script_declared "$project" "$CUSTODY_CHECK_SCRIPT" || project_declared=$?
+  fm_project_script_declared "$wt" "$CUSTODY_CHECK_SCRIPT" || wt_declared=$?
+  if [ "$project_declared" = "$FM_PROJECT_SCRIPT_UNCONFIRMED" ]; then
+    echo "REFUSED: cannot confirm whether project $project publishes a $CUSTODY_CHECK_SCRIPT check." >&2
+    echo "Make its package.json readable and valid, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
+  if [ "$wt_declared" = "$FM_PROJECT_SCRIPT_UNCONFIRMED" ]; then
+    echo "REFUSED: cannot confirm whether worktree $wt publishes a $CUSTODY_CHECK_SCRIPT check." >&2
+    echo "Make its package.json readable and valid, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
+  if [ "$project_declared" = "$FM_PROJECT_SCRIPT_ABSENT" ] \
+     && [ "$wt_declared" = "$FM_PROJECT_SCRIPT_ABSENT" ]; then
+    return 0
+  fi
+  case "$CUSTODY_CHECK_TIMEOUT" in
+    ''|*[!0-9]*|0)
+      echo "REFUSED: $CUSTODY_CHECK_SCRIPT requires a positive integer timeout, not '$CUSTODY_CHECK_TIMEOUT'." >&2
+      echo "Set FM_TEARDOWN_CUSTODY_TIMEOUT correctly, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+      ;;
+  esac
   out=$(fm_project_script_run "$wt" "$CUSTODY_CHECK_SCRIPT" "$CUSTODY_CHECK_TIMEOUT" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] && return 0
   if [ "$rc" -eq 127 ]; then
@@ -2440,7 +2453,7 @@ fi
 # a copy whose work has landed can still be somebody else's copy. Not for
 # kind=secondmate, whose home is not a pooled task working copy.
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ] && [ "$KIND" != secondmate ]; then
-  validate_worktree_custody "$WT" || exit 1
+  validate_worktree_custody "$WT" "$PROJ" || exit 1
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped

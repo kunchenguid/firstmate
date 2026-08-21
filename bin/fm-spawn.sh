@@ -1747,7 +1747,6 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 # would be a worse outage than the one it prevents.
 RELEASE_DELIVERED_SCRIPT=pool:release-delivered
 RELEASE_DELIVERED_TIMEOUT=${FM_SPAWN_RELEASE_DELIVERED_TIMEOUT:-60}
-case "$RELEASE_DELIVERED_TIMEOUT" in ''|*[!0-9]*) RELEASE_DELIVERED_TIMEOUT=60 ;; esac
 
 release_delivered_pool_copies() {  # <project>
   local project=$1 out rc=0 declared=0
@@ -1756,7 +1755,7 @@ release_delivered_pool_copies() {  # <project>
     return 0
   fi
   if [ "$declared" = "$FM_PROJECT_SCRIPT_UNCONFIRMED" ]; then
-    echo "warning: $project names a $RELEASE_DELIVERED_SCRIPT step but node is unavailable to confirm it; leasing without releasing delivered copies" >&2
+    echo "warning: cannot confirm whether $project publishes a $RELEASE_DELIVERED_SCRIPT step; leasing without releasing delivered copies" >&2
     return 0
   fi
   out=$(fm_project_script_run "$project" "$RELEASE_DELIVERED_SCRIPT" \

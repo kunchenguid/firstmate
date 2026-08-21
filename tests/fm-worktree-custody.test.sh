@@ -268,6 +268,21 @@ SH
   chmod +x "$case_dir/fakebin/npm"
 }
 
+add_hanging_release_step() {  # <case-dir>
+  local case_dir=$1
+  printf '{\n  "name": "fixture",\n  "scripts": {\n    "pool:release-delivered": "node release.js"\n  }\n}\n' \
+    > "$case_dir/project/package.json"
+  cat > "$case_dir/fakebin/npm" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = run ] && [ "\${2:-}" = pool:release-delivered ]; then
+  sleep 5
+  touch "$case_dir/release-finished"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/npm"
+}
+
 test_spawn_releases_delivered_copies_before_leasing() {
   local case_dir id out status
   id='custody-release-r1'
@@ -313,6 +328,38 @@ test_spawn_continues_when_the_release_step_fails() {
   assert_contains "$out" "pool:release-delivered failed" "a failed release step was not reported"
   assert_contains "$out" "spawned $id" "the spawn did not continue after the failed release step"
   pass "a failed release step warns loudly and never blocks the dispatch"
+}
+
+test_spawn_bounds_a_hanging_release_step_without_external_timeout() {
+  local case_dir id out status
+  id='custody-release-timeout-r1'
+  case_dir=$(make_spawn_case spawn-release-timeout "$id")
+  add_hanging_release_step "$case_dir"
+
+  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_SPAWN_RELEASE_DELIVERED_TIMEOUT=1 \
+    run_spawn_case "$case_dir" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "timed-out housekeeping must not block a dispatch: $out"
+  assert_contains "$out" "exit 124" "the hanging release step did not hit the shared deadline"
+  assert_contains "$out" "spawned $id" "the spawn did not continue after the release deadline"
+  assert_absent "$case_dir/release-finished" "the hanging release step escaped its deadline"
+  pass "a hanging release step is bounded without timeout or gtimeout and spawn continues"
+}
+
+test_spawn_rejects_a_nonpositive_release_timeout() {
+  local case_dir id out status
+  id='custody-release-zero-timeout-r1'
+  case_dir=$(make_spawn_case spawn-release-zero-timeout "$id")
+  add_release_step "$case_dir" 0
+
+  out=$(FM_SPAWN_RELEASE_DELIVERED_TIMEOUT=0 \
+    run_spawn_case "$case_dir" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "invalid housekeeping configuration must not block a dispatch: $out"
+  assert_contains "$out" "exit 125" "a zero timeout was not rejected"
+  assert_absent "$case_dir/release.log" "the release step ran with a disabled deadline"
+  assert_contains "$out" "spawned $id" "the spawn did not continue after rejecting the zero timeout"
+  pass "a nonpositive release timeout is rejected without blocking spawn"
 }
 
 # --- (c) cleanup refuses when the project says the copy is not ours ----------
@@ -436,6 +483,44 @@ test_teardown_refuses_when_a_published_check_cannot_be_run() {
   pass "a published custody check that cannot be run refuses instead of tearing down"
 }
 
+test_teardown_uses_the_canonical_projects_custody_opt_in() {
+  local case_dir out status
+  case_dir=$(make_teardown_case teardown-custody-canonical)
+  printf '{\n  "name": "fixture",\n  "scripts": {\n    "check:worktree-custody": "node custody.js"\n  }\n}\n' \
+    > "$case_dir/project/package.json"
+  cat > "$case_dir/fakebin/npm" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = run ] && [ "\${2:-}" = check:worktree-custody ]; then
+  printf 'old worktree cannot execute canonical custody check\n'
+  exit 4
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/npm"
+
+  out=$(run_teardown_case "$case_dir")
+  status=$?
+  expect_code 1 "$status" "canonical opt-in must cover an older worktree"
+  assert_contains "$out" "old worktree cannot execute" "cleanup did not attempt the canonical custody check in the old worktree"
+  assert_present "$case_dir/state/task-c1.meta" "a refused cleanup removed the task record"
+  [ -d "$case_dir/wt" ] || fail "a refused cleanup removed the old working copy"
+  pass "canonical custody opt-in protects an older worktree that cannot run the check"
+}
+
+test_teardown_refuses_an_unparseable_canonical_manifest() {
+  local case_dir out status
+  case_dir=$(make_teardown_case teardown-custody-invalid-manifest)
+  printf '{"scripts":{"check:worktree-custody":' > "$case_dir/project/package.json"
+
+  out=$(run_teardown_case "$case_dir")
+  status=$?
+  expect_code 1 "$status" "an unparseable canonical manifest must not be treated as absent"
+  assert_contains "$out" "cannot confirm whether project" "the invalid manifest was not reported as unconfirmable"
+  assert_present "$case_dir/state/task-c1.meta" "a refused cleanup removed the task record"
+  [ -d "$case_dir/wt" ] || fail "a refused cleanup removed the working copy"
+  pass "an unparseable canonical manifest refuses cleanup instead of disabling custody"
+}
+
 test_two_homes_configure_distinct_pool_roots
 test_pool_root_is_idempotent_and_preserves_other_keys
 test_pool_root_refuses_a_tracked_config
@@ -445,7 +530,11 @@ test_spawn_claims_this_homes_pool_root_before_leasing
 test_spawn_releases_delivered_copies_before_leasing
 test_spawn_skips_projects_that_publish_no_release_step
 test_spawn_continues_when_the_release_step_fails
+test_spawn_bounds_a_hanging_release_step_without_external_timeout
+test_spawn_rejects_a_nonpositive_release_timeout
 test_teardown_refuses_a_red_custody_verdict
 test_teardown_proceeds_on_a_green_custody_verdict
 test_teardown_skips_projects_that_publish_no_check
 test_teardown_refuses_when_a_published_check_cannot_be_run
+test_teardown_uses_the_canonical_projects_custody_opt_in
+test_teardown_refuses_an_unparseable_canonical_manifest

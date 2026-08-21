@@ -21,24 +21,29 @@
 #
 # Callers source this file; it defines functions only.
 
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-timeout-lib.sh"
+
 FM_PROJECT_SCRIPT_DECLARED=0
 FM_PROJECT_SCRIPT_ABSENT=1
 FM_PROJECT_SCRIPT_UNCONFIRMED=2
+FM_PROJECT_SCRIPT_INVALID_TIMEOUT=125
 
 # Does <dir> publish <script>? Prints nothing.
-#   0 declared, 1 absent, 2 published-but-unconfirmable (no node to read it).
+#   0 declared, 1 absent, 2 unconfirmable.
 fm_project_script_declared() {  # <dir> <script>
-  local dir=$1 script=$2
+  local dir=$1 script=$2 verdict
   [ -f "$dir/package.json" ] || return "$FM_PROJECT_SCRIPT_ABSENT"
-  # Cheap presence signal first, so a project with no such script never pays
-  # for a node process.
-  grep -Fq "\"$script\"" "$dir/package.json" 2>/dev/null \
-    || return "$FM_PROJECT_SCRIPT_ABSENT"
   command -v node >/dev/null 2>&1 || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
-  node -e 'const p=require(process.argv[1]);process.exit(p.scripts&&p.scripts[process.argv[2]]?0:1)' \
-    "$dir/package.json" "$script" 2>/dev/null \
-    || return "$FM_PROJECT_SCRIPT_ABSENT"
-  return "$FM_PROJECT_SCRIPT_DECLARED"
+  if ! verdict=$(node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(p.scripts && Object.prototype.hasOwnProperty.call(p.scripts, process.argv[2]) ? "declared" : "absent");' \
+    "$dir/package.json" "$script" 2>/dev/null); then
+    return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+  fi
+  case "$verdict" in
+    declared) return "$FM_PROJECT_SCRIPT_DECLARED" ;;
+    absent) return "$FM_PROJECT_SCRIPT_ABSENT" ;;
+    *) return "$FM_PROJECT_SCRIPT_UNCONFIRMED" ;;
+  esac
 }
 
 fm_project_script_manager() {  # <dir>
@@ -53,14 +58,13 @@ fm_project_script_manager() {  # <dir>
 # preserving its stdout, stderr, and exit status. Exit 127 means the selected
 # package manager is not installed, which no caller may read as a verdict.
 fm_project_script_run() {  # <dir> <script> <timeout> [args...]
-  local dir=$1 script=$2 timeout_secs=$3 manager bound
+  local dir=$1 script=$2 timeout_secs=$3 manager
   shift 3
+  case "$timeout_secs" in
+    ''|*[!0-9]*|0) return "$FM_PROJECT_SCRIPT_INVALID_TIMEOUT" ;;
+  esac
   manager=$(fm_project_script_manager "$dir")
   command -v "$manager" >/dev/null 2>&1 || return 127
-  bound=
-  if command -v timeout >/dev/null 2>&1; then bound=timeout
-  elif command -v gtimeout >/dev/null 2>&1; then bound=gtimeout
-  fi
   local -a argv
   argv=("$manager" run "$script")
   if [ "$#" -gt 0 ]; then
@@ -68,9 +72,5 @@ fm_project_script_run() {  # <dir> <script> <timeout> [args...]
     [ "$manager" = pnpm ] || argv+=(--)
     argv+=("$@")
   fi
-  if [ -n "$bound" ]; then
-    ( cd "$dir" && "$bound" "$timeout_secs" "${argv[@]}" )
-  else
-    ( cd "$dir" && "${argv[@]}" )
-  fi
+  ( cd "$dir" && fm_run_timed "$timeout_secs" "${argv[@]}" )
 }
