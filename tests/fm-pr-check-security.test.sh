@@ -76,6 +76,25 @@ SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+# bin/fm-pr-merge.sh reads the forge's check verdict before merging, through
+# bin/fm-pr-checks-lib.sh: the PR head's rollup and the merge-queue Actions runs.
+# The defaults here are a green PR with no queue attempt, so this suite keeps
+# testing recording and derivation rather than the check gate, which
+# tests/fm-pr-merge.test.sh owns.
+case " $* " in
+  *statusCheckRollup*)
+    [ "${FM_TEST_GH_CHECKS_FAIL:-0}" = 0 ] || exit 1
+    printf '{"number":%s,"baseRefName":"main","statusCheckRollup":%s}\n' \
+      "$3" "${FM_TEST_GH_ROLLUP:-[]}"
+    exit 0
+    ;;
+esac
+case "${1:-}" in
+  api)
+    printf '{"workflow_runs":%s}\n' "${FM_TEST_GH_QUEUE_RUNS:-[]}"
+    exit 0
+    ;;
+esac
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)

@@ -248,6 +248,9 @@ Where a no-mistakes pipeline stores evidence in the repo, it publishes that PR-v
 This repo uses that setting, and its own `.no-mistakes/` directory remains local state that stays gitignored and is rejected by CI if tracked; [`configuration.md`](configuration.md) owns the setting.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state; a well-formed GitLab merge request URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) is refused too, explicitly, rather than sent to the wrong forge.
+Before recording anything it reads the forge's check verdict through [`bin/fm-pr-checks-lib.sh`](../bin/fm-pr-checks-lib.sh) and refuses a failing or unreadable verdict, so "never merge a red PR" is enforced by the one merge path instead of by session attention alone.
+That read has two sources because either can be red on its own: the pull request head's status check rollup, and the newest merge-queue attempt, whose checks run again on a combined commit and therefore judge something the branch never did.
+An unreadable verdict refuses exactly like a failing one, and `--allow-failing-checks` is the single deliberate override.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
