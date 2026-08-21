@@ -235,7 +235,7 @@ The CLI matrix was checked directly:
 | --- | --- | --- |
 | Explicit session routing | `herdr <verb> ... --session <name>` | Reached the named session even while another server was running. |
 | Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter. |
-| Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
+| Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c|up --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. `up` was checked separately on 0.8.0 (2026-08-13) against `cat -v`: `up` and `Up` emit the real `^[[A`, while `arrow_up`, `ArrowUp`, and `up_arrow` exit nonzero, so only `Up`/`up` is wired into the adapter's key vocabulary. |
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
 | Native state | `herdr agent get <pane>` | Working and done transitions were visible on some harnesses; live Claude Code 2.1.236 on Herdr 0.8.0 kept `agent_status=idle` for an entire landed turn, including a multi-second tool call, so submit confirmation falls through to the shared composer verdict. Native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |

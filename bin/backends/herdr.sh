@@ -2561,6 +2561,11 @@ fm_backend_herdr_normalize_key() {  # <key>
     # C-u clears a composer line. fm-send.sh's muse interrupt path needs it to
     # drop the prompt muse restores into the composer after Escape.
     C-u|c-u|ctrl+u|Ctrl+U) printf 'ctrl+u' ;;
+    # Up moves a TUI list selection - fm-spawn.sh's kimi workspace-trust
+    # acceptance is the only caller today. Verified live on herdr 0.8.0
+    # against `cat -v`: both `Up` and `up` emit the real `^[[A`, while
+    # `arrow_up`, `ArrowUp` and `up_arrow` are rejected with a nonzero exit.
+    Up|up) printf 'up' ;;
     *) printf '%s' "$1" ;;
   esac
 }

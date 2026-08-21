@@ -2152,13 +2152,67 @@ kimi_composer_is_empty() {
   [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
 }
 
+# Kimi Code 0.36.0 (absent on the verified 0.29.1) shows a workspace-trust
+# dialog on a path it has not stored. The title, the MCP-server consequence,
+# and the Don't-trust exit choice together are the dialog; any one of those
+# strings can appear in a later conversation. The default selection is
+# Don't trust, so a lone Enter exits Kimi rather than accepting. Advance one
+# key per poll so Up can land before Enter. Do not write
+# ~/.kimi-code/workspace-trust/ - that store is vendor-managed.
+kimi_trust_dialog_is_showing() {  # <plain-pane-capture>
+  printf '%s\n' "$1" | grep -Fq 'Trust this folder?' || return 1
+  printf '%s\n' "$1" | grep -Fq 'Enable project MCP servers' || return 1
+  printf '%s\n' "$1" | grep -Fq "Don't trust" || return 1
+  return 0
+}
+
+# Returns 0 when a key was delivered, 1 when neither selection row is
+# recognised, 3 on a first send failure, and 2 once a second consecutive send
+# fails. A backend that cannot carry the key fails identically on every poll
+# and so reaches 2 immediately, while a one-poll transient (a herdr socket
+# hiccup, a tmux display-message race) is retried the way the readiness loop
+# retries everything else.
+#
+# Up is verified on tmux, which passes it through verbatim, and on herdr 0.8.0,
+# which emits the real ^[[A for it. Orca refuses it by construction: its
+# send-key vocabulary is Enter and C-c only. What zellij and cmux do with an
+# unrecognised key name is untested in both directions, so whether they reach
+# status 2 or return a success their selection never saw is not established.
+KIMI_TRUST_SEND_FAILURES=0
+KIMI_TRUST_FAILED_KEY=
+kimi_accept_trust_dialog() {  # <plain-pane-capture>
+  local key
+  if printf '%s\n' "$1" | grep -Fq '❯ Trust this folder'; then
+    key=Enter
+  elif printf '%s\n' "$1" | grep -Fq "❯ Don't trust"; then
+    key=Up
+  else
+    return 1
+  fi
+  if spawn_send_key "$T" "$key"; then
+    KIMI_TRUST_SEND_FAILURES=0
+    return 0
+  fi
+  KIMI_TRUST_FAILED_KEY=$key
+  KIMI_TRUST_SEND_FAILURES=$((KIMI_TRUST_SEND_FAILURES + 1))
+  [ "$KIMI_TRUST_SEND_FAILURES" -ge 2 ] || return 3
+  return 2
+}
+
+# 0 ready, 2 the trust dialog is up and two consecutive attempts to send its
+# acceptance key failed, 1 no ready signal within the window.
 kimi_wait_for_ready() {
-  local pane i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
+  local pane i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5} accepted
   while [ "$i" -lt "$max" ]; do
     pane=$(kimi_capture)
     if printf '%s\n' "$pane" | grep -Fq 'Welcome to Kimi Code!' \
        || kimi_composer_is_empty; then
       return 0
+    fi
+    if kimi_trust_dialog_is_showing "$pane"; then
+      kimi_accept_trust_dialog "$pane"
+      accepted=$?
+      [ "$accepted" -ne 2 ] || return 2
     fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
@@ -2814,7 +2868,13 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
-  if ! kimi_wait_for_ready; then
+  KIMI_READY_STATUS=0
+  kimi_wait_for_ready || KIMI_READY_STATUS=$?
+  if [ "$KIMI_READY_STATUS" -eq 2 ]; then
+    kimi_spawn_fail "kimi is showing its workspace-trust dialog but backend=$BACKEND failed twice in a row to deliver the $KIMI_TRUST_FAILED_KEY key that accepts it"
+    exit 1
+  fi
+  if [ "$KIMI_READY_STATUS" -ne 0 ]; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi

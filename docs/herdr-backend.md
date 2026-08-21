@@ -208,7 +208,7 @@ An environment variable alone is not reliable when another Herdr server is runni
 
 Literal text and Enter are separate operations for ordinary steers.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
-Enter, Escape, and Ctrl-C are supported.
+Enter, Escape, Ctrl-C, Ctrl-U, and Up are supported.
 Slash and dollar-prefixed input uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Text is typed once; only Enter is retried.
 

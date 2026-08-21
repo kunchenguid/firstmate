@@ -429,7 +429,7 @@ Spawn a Cursor scout with an explicit model:
 bin/fm-spawn.sh <task-id> <project> --scout --harness cursor --model cursor-grok-4.5-high
 ```
 
-## kimi (VERIFIED 2026-07-25, kimi 0.29.1)
+## kimi (VERIFIED 2026-07-25, kimi 0.29.1; trust dialog re-verified 2026-08-13 on 0.36.0)
 
 Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back to the executable `$HOME/.kimi-code/bin/kimi`.
 
@@ -443,13 +443,17 @@ Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; firstmate skills are discovered. |
 | Autonomy | `--auto`; `-y` and `--yolo` are weaker and are not used. |
-| Trust dialog | None on a clean first launch in a fresh pooled worktree. |
+| Trust dialog | On 0.36.0, a path not yet in `~/.kimi-code/workspace-trust/` shows `Trust this folder?` with `Don't trust` preselected. Accept by sending Up then Enter so `Trust this folder` is chosen; a lone Enter exits Kimi. Trust is keyed per worktree path (`wd_<basename>_<first 12 hex chars of sha256 of the absolute root>`), so pooled worktrees re-prompt on nearly every spawn. Firstmate accepts the dialog during the spawn readiness window and does not write that vendor store. 0.36.0 has no documented flag, env var, or `config.toml` key that pre-trusts a folder or skips that prompt; `--auto` and `--yolo` do not (checked 2026-08-13 against kimi-cli docs/configuration and docs/reference/kimi-command.md, kimi-code's matching pages, and `kimi --help`). Absent on the originally verified 0.29.1. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; detection relies on process ancestry command name `kimi`. |
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
 | Effort | No reasoning-effort flag exists, so requested effort is recorded in task metadata but omitted from launch. |
 
-`fm-spawn.sh` launches Kimi bare, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
+`fm-spawn.sh` launches Kimi bare, accepts a `Trust this folder?` dialog when that exact screen is showing, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
+Trust acceptance needs an `Up` key, which is verified on exactly two backends: tmux, which passes it through verbatim, and herdr, which moved the selection to `Trust this folder` against kimi 0.36.0; [`docs/verification/runtime-backends.md`](../../../docs/verification/runtime-backends.md#herdr) owns which herdr key names carry it.
+Orca cannot accept the dialog at all - `fm_backend_orca_send_key` supports Enter and C-c only, so it refuses `Up` by construction and the spawn aborts naming the backend and the key rather than timing out on the generic readiness error.
+Zellij and cmux are untested here in both directions: each returns its own CLI's exit status for an unrecognised key name with the output discarded, so whether `Up` is carried, refused loudly, or accepted with a success the selection never saw is simply not established for them.
+Regression coverage: `tests/fm-kimi-harness.test.sh` (`test_kimi_accepts_folder_trust_dialog_then_delivers`, `test_kimi_unrecognized_screen_is_not_treated_as_trust_dialog`, `test_kimi_trust_wording_without_the_dialog_is_not_accepted`, `test_kimi_backend_that_cannot_send_up_fails_by_name`, `test_kimi_transient_key_failure_is_retried_not_blamed_on_the_backend`) and `tests/fm-backend-herdr.test.sh` (`test_normalize_key`).
 This launch-then-send shape is mandatory because Kimi rejects a positional brief as an unknown command.
 Sending before readiness was reproduced as a silent drop with a zero exit status, an empty composer, `context: 0%`, no echoed user message, and a healthy-looking idle pane.
 The brief path must be absolute because the brief lives outside the task worktree, and Kimi reads it there without `--add-dir`.
