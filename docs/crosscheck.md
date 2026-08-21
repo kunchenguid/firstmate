@@ -21,9 +21,9 @@ The file is local and gitignored at `config/crosscheck-reviewer.json`.
   "reviewers": [
     {
       "harness": "pi",
-      "model": "FW-GLM-5.2",
+      "model": "accounts/fireworks/models/glm-5p2",
       "effort": "xhigh",
-      "account_home": "/absolute/path/to/the/glm/pi/agent/home"
+      "account_home": "/absolute/path/to/the/cross-family/pi/agent/home"
     },
     {
       "harness": "codex",
@@ -36,10 +36,15 @@ The file is local and gitignored at `config/crosscheck-reviewer.json`.
 ```
 
 Crosscheck resolves configured reviewer homes in order and keeps entries that satisfy its reviewer-profile and model policies.
-GLM-5.2 is the sole primary review family (R6, docs/azure-requirements.md): the Pi `FW-GLM-5.2` profile runs on the fleet's own Azure AI Foundry deployment through the `azure-glm` custom provider, whose credential is an api-key `models.json` in a dedicated Pi agent dir - never a codex `auth.json`.
-The GLM endpoint is an allowlist of exactly `https://aif-fm7c799d-eus01.cognitiveservices.azure.com/openai/v1` (chat completions only; any other baseUrl, including a Responses API surface, is refused by name), and the recorded reviewer identity binds the Foundry resource + deployment - never the api key or anything derived from it.
+A registered cross-family lane is the primary review family (R6, docs/azure-requirements.md). `bin/fm-crosscheck.py` carries `CROSS_FAMILY_LANES`, a code-side registry of vetted reviewer lanes; each entry pins a model id, a Pi provider slot, the chat-completions api surface, the endpoint host, the one accepted base URL, and the exact model-level `compat` the credential may carry. Today's registry is the single lane `fireworks-glm` (`accounts/fireworks/models/glm-5p2`, GLM-5.2 direct from Fireworks). The roster picks the serving lane by naming the model, so substituting among registered lanes is a config change; admitting a new endpoint is a reviewed code change, because the allowlist is the control.
+Each lane's credential is an api-key `models.json` in a dedicated Pi agent dir declaring exactly that lane's provider slot - never a codex `auth.json`, and never a second provider.
+Each lane's endpoint is an allowlist of exactly its registered base URL, today `https://api.fireworks.ai/inference/v1` (chat completions only; any other baseUrl, including a Responses API surface, is refused by name), and the recorded reviewer identity binds the provider slot + host + model - never the api key or anything derived from it.
+`compat` is the other model-level object pi honors, and some of its keys weaken this gate's own defenses (`supportsFinishReason: false` would blunt the truncated-verdict refusal), so the lane owns it exactly: the registered lane declares no compat, and a credential carrying any is refused.
+A truncated reviewer turn is a FAILED review, never a verdict. The stream parser refuses a final assistant turn whose `stopReason` is not `stop` (pi maps `finish_reason: length` to `stopReason: "length"`). The claim that a truncated verdict "cannot parse either" was FALSE and is corrected: a truncated verdict contributes no complete fenced block, so any complete fence earlier in the same message left the count at one and the gate certified THAT block instead, with `stopReason: stop` and a successful parse. The verdict extractor therefore refuses outright when any fence is left unterminated, and unwraps a single fenced block only when it is the ONLY JSON-bearing content in the message.
+Both rules are load-bearing and neither is redundant: the unterminated-fence rule alone catches a verdict truncated immediately after its opening fence (no braces to detect), and the brace rule alone catches a complete example fence followed by a truncated bare verdict (an even marker count).
+Two availability costs are accepted deliberately, and both FAIL CLOSED as a `tool-failure` that rotates the roster rather than as a wrong verdict: a legitimate verdict whose own string content contains a triple backtick refuses on the marker count, and a verdict accompanied by brace-bearing prose refuses on the remainder check. In a repository whose docs and tests are full of fences that is a real cost, paid to make a superseded block impossible to certify.
 Because pi's provider composer gives model-level `baseUrl`/`api` fields precedence over the provider level, the allowlist also refuses any model entry carrying either field - the pinned provider level must own both, even when an override repeats the pinned values.
-The pi-codex/codex `gpt-5.6-sol` profiles remain only as the dormant fallback family: a run they serve prints a loud `CROSSCHECK DEGRADED` warning naming whether the `crosscheck-same-model` relaxation was required, and its ledger reviewer record carries `review_family_mode: codex-fallback` (GLM runs record `glm-primary`) with the readable report labeling the run `CODEX FALLBACK`.
+The pi-codex/codex `gpt-5.6-sol` profiles remain only as the dormant fallback family: a run they serve prints a loud `CROSSCHECK DEGRADED` warning naming whether the `crosscheck-same-model` relaxation was required, and its ledger reviewer record carries `review_family_mode: codex-fallback` (cross-family runs record `cross-family-primary`; durable ledgers written before the registry landed carry the legacy `glm-primary`, which stays bound to exactly that lane's model) with the readable report labeling the run `CODEX FALLBACK`.
 Firstmate authors also run on codex-family models, so the fallback usually needs that recorded same-model degraded state.
 Claude is never an eligible Crosscheck reviewer; the interim claude lane is retired, and a claude profile is refused with the exact-profile message before any reviewer machinery runs.
 Model separation is mandatory by default.
@@ -56,15 +61,15 @@ The former `config/crosscheck-legacy-author-admissions.json` path existed only t
 Crosscheck then binds the provider's executing credential selector to that exact reviewer path and requires the verdict plus a Bash-created receipt to report the selector and actual private `HOME`.
 That proves which dedicated reviewer home executed the review without comparing it to an author account.
 Every reviewer disables reviewed-repository instruction discovery at launch: Codex sets `project_doc_max_bytes=0`, and Pi uses `--no-context-files`.
-Pi is launched through the resolved installed executable at `xhigh` with JSON event output, an ephemeral session, and only the read and Bash-capable review tools; the model decides the provider slot through an explicit mapping (`FW-GLM-5.2` on `azure-glm`, `gpt-5.6-sol` on `openai-codex`) that refuses an unmapped model rather than guessing.
+Pi is launched through the resolved installed executable at `xhigh` with JSON event output, an ephemeral session, and only the read and Bash-capable review tools; the model decides the provider slot through an explicit mapping derived from the lane registry (each registered model on its own slot, `gpt-5.6-sol` on `openai-codex`) that refuses an unmapped model rather than guessing.
 For the installed npm entrypoint, Crosscheck also resolves Pi's sibling Node runtime before launch instead of allowing the reviewer environment's `PATH` to substitute another interpreter.
 That pin recognizes every `env`-based Node shebang, including `#!/usr/bin/env -S node --flag`, and preserves the flags; an `env` shebang naming no interpreter fails closed rather than silently falling back to `PATH`.
 Its event stream must contain at least one completed turn, end with a successful `stop` assistant turn, and complete the agent before Crosscheck accepts that terminal turn's JSON verdict.
-Pi credential provisioning is a captain-owned prerequisite: the selected `account_home` must contain a usable `openai-codex` OAuth entry in `auth.json`, and Firstmate does not create or copy that credential.
-Because Pi selects only the default `openai-codex` slot and reviewer launches disable extension discovery, a Pi reviewer home holds exactly one account; a multi-slot Pi home reviews as its default slot, not as whichever slot has capacity.
+Pi credential provisioning is a captain-owned prerequisite, and its shape depends on the lane: a codex-family fallback home must contain a usable `openai-codex` OAuth entry in `auth.json`, while a cross-family lane home must instead contain an api-key `models.json` declaring exactly that lane's provider slot and no `auth.json` is required. Firstmate does not create or copy either credential.
+Because reviewer launches disable extension discovery, a Pi reviewer home holds exactly one account and exactly one provider; a multi-provider Pi home is refused for a cross-family lane and reviews as its default slot for the codex fallback, not as whichever slot has capacity.
 
-Pi is a third client, not extra capacity.
-It authenticates against the same upstream OpenAI accounts the Codex reviewer uses, so a Codex account at its usage limit is equally unavailable through Pi, and a Pi reviewer does not route around an exhausted Codex account.
+Pi on the codex-family fallback is a third client, not extra capacity.
+On that lane it authenticates against the same upstream OpenAI accounts the Codex reviewer uses, so a Codex account at its usage limit is equally unavailable through Pi, and a Pi reviewer does not route around an exhausted Codex account. A cross-family lane is a different provider entirely and shares none of that capacity.
 What Pi adds is an independent client path and a reviewer that is separate from a Claude author by construction.
 A usage-limited reviewer account records a `tool-failure`, never a verdict about code, and Crosscheck then advances to the next independent entry rather than refusing the merge.
 Failover is limited to faults that prevented a verdict: a launch failure, an unusable credential, a provider that was never reached, or an exhausted account.
@@ -75,7 +80,8 @@ Every candidate passed the configured reviewer-profile and model policy.
 Reviewer credential inspection still proves that the selected reviewer home can execute its configured client, but it makes no claim about the author.
 Model identity compares the model itself, not the recorded string: Pi records `<provider-slot>/<model>`, so `openai-codex-2/gpt-5.6-sol` is the same model as a Codex reviewer's plain `gpt-5.6-sol`.
 That canonical identity is screened out by default and is what marks a selected review as same-model when the explicit relaxation is on.
-The accepted profiles are Pi `FW-GLM-5.2` xhigh (the primary family) plus Codex `gpt-5.6-sol` xhigh and Pi `gpt-5.6-sol` xhigh (the loud degraded fallback family).
+The accepted profiles are Pi at xhigh on every registered cross-family model (today `accounts/fireworks/models/glm-5p2`) as the primary family, plus Codex `gpt-5.6-sol` xhigh and Pi `gpt-5.6-sol` xhigh as the loud degraded fallback family.
+Reviewer independence is compared on the model FAMILY, not the exact id, so a `gpt-5.5` author is not admitted a `gpt-5.6-sol` reviewer (finding cc-4dcd7873f71a); an unrecognized model remains its own family.
 Absent reviewer configuration, unavailable reviewer credentials, or model-policy mismatch produces `CROSSCHECK TOOL-FAILURE` and a nonzero exit before reviewer launch.
 
 Crosscheck requires Python 3.11 or newer and refuses to run on anything older.
@@ -300,7 +306,7 @@ PR claims are delimited as untrusted data, and the reviewer is directed to ignor
 Later reviewers receive only a bounded projection of finding IDs, lifecycle state, severity, exact-head clearance, and proof digests.
 Finding prose, reproduction output, test output, and lifecycle notes remain durable in the ledger but are never reinjected into a later reviewer prompt.
 The Codex path pins `gpt-5.6-sol`, xhigh reasoning, noninteractive approval, an independent `CODEX_HOME`, the same account-bound `HOME`, and the exact review checkout.
-The Pi path pins the roster model on its mapped provider (`FW-GLM-5.2` on `azure-glm`, `gpt-5.6-sol` on `openai-codex`), xhigh reasoning, an independent `PI_CODING_AGENT_DIR`, a disposable private `HOME`, extension and context isolation, and JSON event output.
+The Pi path pins the roster model on its mapped provider (each registered cross-family model on its own slot, `gpt-5.6-sol` on `openai-codex`), xhigh reasoning, an independent `PI_CODING_AGENT_DIR`, a disposable private `HOME`, extension and context isolation, and JSON event output.
 An unavailable reviewer binary, sandbox, reviewer credential binding, verdict-level execution proof, or exact remote PR head records a `tool-failure` attempt when the live head is already known, and otherwise emits the same tool-failure class without fabricating a ledger run.
 A ledger that cannot be read is the one stop that cannot record itself: appending a run to a file that failed to parse would risk destroying the durable findings it still holds, so the ledger is left exactly as it is and only the readable `crosscheck.md` report is rewritten, naming the parse failure so the cause is on disk rather than only in the exit status of a run nobody kept.
 A reviewer that never reached its provider is also a `tool-failure` rather than an `unreviewed` attempt, and is the case that fails over.
@@ -364,7 +370,7 @@ Most of `tests/fm-crosscheck.test.sh` is hermetic coverage using observed-shape 
 Its `test_installed_sandbox_denies_shared_private_tmp` case is the exception: it invokes the real installed `/usr/bin/sandbox-exec` and verifies the generated proof profile denies shared host temporary state.
 Its `test_pytest_runner_resolves_through_a_uv_aware_ladder` case is the named regression for runner-name resolution: it pins monorepo uv-project discovery, the skipped uv rung outside a project, the unchanged absent-runner refusal, and pytest's retained node-id support.
 Its `test_missing_author_identity_reaches_normal_verdict` case is the named regression for a Pi lane without a captured account identity: the review reaches an ordinary clear verdict without an identity warning or downgrade.
-Its `test_claude_reviewer_profile_is_retired` case proves the standing rule that Claude is not an accepted reviewer profile and never launches, and its `test_glm_reviewer_executes_bound_policy_profile`, `test_glm_credential_binding_is_key_independent`, and `test_codex_fallback_family_is_loud_and_recorded` cases pin the GLM primary lane's provider mapping, key-independent endpoint binding, and the loud durable fallback marker.
+Its `test_claude_reviewer_profile_is_retired` case proves the standing rule that Claude is not an accepted reviewer profile and never launches, and its `test_cross_family_reviewer_executes_bound_policy_profile`, `test_truncated_cross_family_verdict_is_never_a_verdict`, `test_cross_family_credential_binding_is_key_independent`, `test_cross_family_family_marker_is_bound_to_the_reviewer_model`, and `test_codex_fallback_family_is_loud_and_recorded` cases pin every registered lane's provider mapping, the refusal of a truncated verdict, key-independent endpoint binding, model-bound family provenance, and the loud durable fallback marker.
 Its `test_same_model_relaxation_does_not_require_author_identity` case proves the explicit model-policy relaxation does not revive an author-account precondition.
 `tests/fm-spawn-dispatch-profile.test.sh` separately proves a failed Pi identity capture remains nonfatal and the lane still launches.
 Its `test_typescript_jest_mutation_proof_can_clear` and `test_inadequate_typescript_jest_coverage_stays_blocking` cases prove that package-governed Jest coverage can certify a TypeScript fix while a named Jest test that stays green under mutation keeps the finding blocking.

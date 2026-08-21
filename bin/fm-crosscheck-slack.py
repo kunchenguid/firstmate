@@ -714,11 +714,11 @@ def matched_agent_prefix(branch: str, prefixes: tuple[str, ...]) -> str | None:
 def lane_name(reviewer: Any) -> str:
     """Name the lane that produced a ledger run, for the R6/R10 visibility rule.
 
-    Prefers an explicit lane marker recorded by the crosscheck ledger (the
-    sibling GLM/degraded-mode work); when the run predates that marker, the
-    lane is derived from the reviewer profile that ran: a GLM model is the
-    primary lane and the retained pi/codex roster is the recorded degraded
-    fallback.
+    Prefers an explicit lane marker recorded by the crosscheck ledger, then
+    the durable `review_family_mode` provenance the crosscheck gate records on
+    every run; when the run predates both, the lane is derived from the
+    reviewer profile that ran: a GLM model is the primary lane of that era and
+    the retained pi/codex roster is the recorded degraded fallback.
     """
 
     if not isinstance(reviewer, dict):
@@ -731,6 +731,13 @@ def lane_name(reviewer: Any) -> str:
         return name
     model = str(reviewer.get("model") or "")
     harness = str(reviewer.get("harness") or "")
+    family = reviewer.get("review_family_mode")
+    # The crosscheck gate binds this marker to the reviewer model in both
+    # directions, so it names the lane without guessing from the model string.
+    if family in {"cross-family-primary", "glm-primary"}:
+        return f"{model.rsplit('/', 1)[-1]} primary" if model else "cross-family primary"
+    if family == "codex-fallback":
+        return "pi-codex fallback (degraded)"
     lowered = model.lower()
     if "glm" in lowered:
         return "GLM-5.2 primary" if "5.2" in lowered else f"{model} primary"

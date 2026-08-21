@@ -84,20 +84,28 @@ for marker in (
 guest_source = guest.read_text(encoding="utf-8")
 assert "--disable shell_tool" in guest_source
 assert "--no-tools" in guest_source
-# R6: the model decides the Pi provider slot inside the guest too, the GLM
-# credential is the models.json shape bound to the exact Foundry endpoint,
-# and the interim claude launch/boot-copy lane is gone entirely.
-assert "azure-glm" in guest_source
-assert "FW-GLM-5.2" in guest_source
+# R6: the model decides the Pi provider slot inside the guest too, every
+# registered cross-family credential is the models.json shape bound to that
+# lane's exact endpoint, and the interim claude launch/boot-copy lane is gone
+# entirely. The guest is checked against the core registry rather than a
+# hardcoded name, so a lane added in one place and not the other fails here.
+import importlib.util
+
+core_spec = importlib.util.spec_from_file_location("fm_crosscheck_core", core)
+core_module = importlib.util.module_from_spec(core_spec)
+core_spec.loader.exec_module(core_module)
+assert core_module.CROSS_FAMILY_LANES, "the core lane registry is empty"
+for lane in core_module.CROSS_FAMILY_LANES.values():
+    assert lane["slot"] in guest_source, lane
+    assert lane["model"] in guest_source, lane
+    assert lane["base_url"] in guest_source, lane
 assert "models.json" in guest_source
-assert (
-    "https://aif-fm7c799d-eus01.cognitiveservices.azure.com/openai/v1"
-    in guest_source
-)
 assert "no Pi provider mapping for model" in guest_source
 # The guest refuses model-level baseUrl/api overrides, which pi would give
-# precedence over the pinned provider-level endpoint.
+# precedence over the pinned provider-level endpoint, and the model-level
+# compat object, whose keys change how pi frames and reads the response.
 assert "model-level endpoint override" in guest_source
+assert "model-level compat override" in guest_source
 assert "claude" not in guest_source.lower()
 assert "AZURE_CLIENT_SECRET" in guest_source
 assert "DOCKER_HOST" in guest_source
@@ -179,7 +187,196 @@ PY
   pass "Azure selection is explicit, local-default, and unsafe config fails closed"
 }
 
-glm_provider_host_unit() {
+model_guest_executing_account_unit() {
+  python3 - "$MODEL_GUEST" "$CORE" "$ADAPTER" <<'PY' \
+    || fail "model guest credential contract failed"
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+guest_path, core_path, adapter_path = map(Path, sys.argv[1:4])
+core_spec = importlib.util.spec_from_file_location("fm_crosscheck", core_path)
+core = importlib.util.module_from_spec(core_spec)
+core_spec.loader.exec_module(core)
+adapter_spec = importlib.util.spec_from_file_location("azure_crosscheck", adapter_path)
+adapter = importlib.util.module_from_spec(adapter_spec)
+adapter_spec.loader.exec_module(adapter)
+
+# EXECUTE the guest's own credential block, extracted from the shipped bytes
+# rather than reimplemented, so this covers behavior instead of substrings.
+# Substring assertions are why the guest could derive a different executing
+# account from the host for as long as it did.
+source = guest_path.read_text(encoding="utf-8")
+marker = 'python3 - "$CREDENTIAL" "$ACCOUNT" "$INPUT" <<\'PY\'\n'
+start = source.index(marker) + len(marker)
+end = source.index("\nPY\n", start)
+guest_block = source[start:end]
+assert "reviewer_account_digest" in guest_block, "extracted the wrong guest block"
+
+SCHEMA = adapter.SCHEMA
+
+
+def run_guest(harness, model, credential_document, account_identity,
+              manifest_override=None):
+    """Drive the REAL guest block over a real archive, as the VM would."""
+    root = Path(tempfile.mkdtemp())
+    credential_bytes = json.dumps(credential_document).encode()
+    name = "models.json" if core.cross_family_lane_for_model(model) else "auth.json"
+    identity = {"review_generation": "0123456789abcdef01234567"}
+    material = {
+        "schema": SCHEMA,
+        "review_generation": identity["review_generation"],
+        "harness": harness,
+        "model": model,
+        "effort": "xhigh",
+        "credential_name": name,
+        "credential_digest": adapter.digest_bytes(credential_bytes),
+    }
+    material.update(manifest_override or {})
+    payload = {
+        "manifest.json": adapter.canonical_bytes(material) + b"\n",
+        name: credential_bytes,
+    }
+    archive = root / "credential.tar.gz"
+    with tarfile.open(archive, "w:gz", format=tarfile.PAX_FORMAT) as handle:
+        for member_name, content in payload.items():
+            info = tarfile.TarInfo(member_name)
+            info.size = len(content)
+            handle.addfile(info, __import__("io").BytesIO(content))
+    request = {
+        "schema": SCHEMA,
+        "reviewer": {"harness": harness, "model": model, "effort": "xhigh"},
+        "identity": {
+            "review_generation": identity["review_generation"],
+            "credential_archive_digest": adapter.digest_bytes(archive.read_bytes()),
+            "credential_digest": material["credential_digest"],
+            "reviewer_account_digest": adapter.digest_bytes(
+                account_identity.encode("utf-8")
+            ),
+        },
+    }
+    request_path = root / "request.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    destination = root / "account"
+    destination.mkdir()
+    script = root / "guest_block.py"
+    script.write_text(guest_block, encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(script), str(archive), str(destination),
+         str(request_path)],
+        capture_output=True, text=True, timeout=120,
+    )
+    return result, destination / name
+
+
+# The identity the HOST admits, derived by the host's single reader.
+for harness, document, key in (
+    ("codex", {"tokens": {"account_id": "acct_ABC123"}}, "auth.json"),
+    ("pi", {"openai-codex": {"accountId": "acct_ABC123"}}, "auth.json"),
+):
+    home = Path(tempfile.mkdtemp())
+    (home / "auth.json").write_text(json.dumps(document), encoding="utf-8")
+    admitted = core.account_identity(harness, home)
+    assert ":" in admitted, admitted
+
+    # REGRESSION: the guest used to derive the BARE account id while the host
+    # digests the PREFIXED one, so this refused inside a booted, paid VM and
+    # no codex-family compartment review could ever run. Red on that code.
+    result, landed = run_guest(harness, "gpt-5.6-sol", document, admitted)
+    assert result.returncode == 0, (
+        harness, result.returncode, result.stdout, result.stderr
+    )
+    assert landed.is_file(), landed
+    print(f"GUEST ACCEPTED {harness} with the host-admitted identity {admitted}")
+
+    # A different account still refuses, so agreement was not bought by
+    # dropping the check.
+    result, _ = run_guest(harness, "gpt-5.6-sol", document, admitted + "-other")
+    assert result.returncode != 0, (harness, result.stdout)
+    assert "credential executing account mismatch" in (result.stdout + result.stderr)
+    print(f"GUEST REFUSED {harness} with a foreign executing account")
+
+    # A credential carrying no account id refuses rather than landing None.
+    result, _ = run_guest(harness, "gpt-5.6-sol", {}, admitted)
+    assert result.returncode != 0, (harness, result.stdout)
+    print(f"GUEST REFUSED {harness} with no account id in the credential")
+
+# The guest's MANIFEST identity check binds the archive to the REQUEST, not
+# just the credential to the account. Removing it is a real behavior change
+# rather than a no-op: a forged manifest is otherwise admitted, and the
+# reviewer effort or model the compartment actually runs stops matching what
+# the host admitted.
+for label, override in (
+    ("forged effort", {"effort": "low"}),
+    ("forged model", {"model": "gpt-4o-mini"}),
+    ("forged harness", {"harness": "claude"}),
+    ("forged review generation", {"review_generation": "ffffffffffffffffffffffff"}),
+    ("forged credential name", {"credential_name": "models.json"}),
+    ("forged credential digest", {"credential_digest": "sha256:" + "0" * 64}),
+):
+    result, _ = run_guest(
+        "codex",
+        "gpt-5.6-sol",
+        {"tokens": {"account_id": "acct_ABC123"}},
+        core.account_identity(
+            "codex",
+            (lambda h: (h.mkdir(exist_ok=True), (h / "auth.json").write_text(
+                json.dumps({"tokens": {"account_id": "acct_ABC123"}}), encoding="utf-8"
+            ), h)[-1])(Path(tempfile.mkdtemp()) / "home"),
+        ),
+        manifest_override=override,
+    )
+    assert result.returncode != 0, (label, result.stdout)
+    combined = result.stdout + result.stderr
+    assert (
+        "credential manifest identity mismatch" in combined
+        or "credential archive shape mismatch" in combined
+    ), (label, combined)
+    print(f"GUEST REFUSED a manifest with a {label}")
+
+# The cross-family lane keeps its own non-secret identity and still lands.
+lane = next(iter(core.CROSS_FAMILY_LANES.values()))
+lane_document = {"providers": {lane["slot"]: {
+    "baseUrl": lane["base_url"], "api": lane["api"], "apiKey": "k",
+    "models": [{"id": lane["model"], "name": "n"}],
+}}}
+result, landed = run_guest(
+    "pi", lane["model"], lane_document, core.cross_family_account_identity(lane)
+)
+assert result.returncode == 0, (result.stdout, result.stderr)
+assert landed.name == "models.json", landed
+print(f"GUEST ACCEPTED the {lane['slot']} lane credential")
+
+# A foreign endpoint in the archived credential still refuses in the guest.
+foreign = json.loads(json.dumps(lane_document))
+foreign["providers"][lane["slot"]]["baseUrl"] = "https://evil.example/v1"
+result, _ = run_guest(
+    "pi", lane["model"], foreign, core.cross_family_account_identity(lane)
+)
+assert result.returncode != 0, result.stdout
+print("GUEST REFUSED a foreign endpoint in the archived credential")
+
+# REGISTRATION COMPLETENESS: a lane in the registry with no `case "$MODEL"`
+# dispatch arm passes every substring assertion and dies at runtime with exit
+# 125. Registering a lane touches four places; pin all of them.
+for registered in core.CROSS_FAMILY_LANES.values():
+    assert f'{registered["model"]}) PI_PROVIDER={registered["slot"]} ;;' in source, (
+        f"lane {registered['slot']} has no provider dispatch arm in the guest"
+    )
+    assert f'"{registered["model"]}": (' in source, (
+        f"lane {registered['slot']} is absent from the guest lane table"
+    )
+print("GUEST dispatches every registered lane")
+PY
+  pass "the model guest derives the host's executing account, refuses foreign ones, and dispatches every registered lane"
+}
+
+cross_family_provider_host_unit() {
   python3 - "$ADAPTER" "$CORE" <<'PY' || fail "model-aware provider host derivation failed"
 import importlib.util
 import sys
@@ -191,28 +388,46 @@ core_spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[2])
 core = importlib.util.module_from_spec(core_spec)
 core_spec.loader.exec_module(core)
 
-# The adapter and the core pin one identical R6 endpoint binding.
-assert module.GLM_REVIEWER_MODEL == core.GLM_REVIEWER_MODEL == "FW-GLM-5.2"
-assert module.GLM_PROVIDER_HOST == core.GLM_PROVIDER_HOST
-assert module.GLM_ALLOWED_BASE_URL == core.GLM_ALLOWED_BASE_URL
-assert module.GLM_REVIEWER_ACCOUNT_IDENTITY == core.GLM_REVIEWER_ACCOUNT_IDENTITY
-assert module.GLM_PROVIDER_HOST == "aif-fm7c799d-eus01.cognitiveservices.azure.com"
-
-# The model decides the host: a GLM review derives the exact Foundry host,
-# refuses a conflicting configured host, and the codex-family fallback keeps
-# its existing derivation. The retired claude harness derives nothing.
-assert module.effective_provider_host({}, "pi", "FW-GLM-5.2") == module.GLM_PROVIDER_HOST
-assert module.effective_provider_host(
-    {"provider_host": module.GLM_PROVIDER_HOST}, "pi", "FW-GLM-5.2"
-) == module.GLM_PROVIDER_HOST
-try:
-    module.effective_provider_host(
-        {"provider_host": "api.example.com"}, "pi", "FW-GLM-5.2"
+# The adapter and the core pin ONE identical R6 lane registry. Comparing the
+# whole registry rather than a handful of constants means a lane added on one
+# side and not the other is a failure here rather than a divergent allowlist.
+assert module.CROSS_FAMILY_LANES == core.CROSS_FAMILY_LANES, (
+    module.CROSS_FAMILY_LANES,
+    core.CROSS_FAMILY_LANES,
+)
+assert module.CROSS_FAMILY_LANES["fireworks-glm"]["model"] == (
+    "accounts/fireworks/models/glm-5p2"
+)
+for lane in module.CROSS_FAMILY_LANES.values():
+    # Per-lane consistency, NOT one hardcoded host. Asserting a single host for
+    # every lane meant any genuinely new lane failed HERE first, so the
+    # registration-completeness guard in the model-guest unit - the one this
+    # repo advertises for that job - never got to run.
+    assert lane["base_url"].startswith("https://" + lane["host"] + "/"), lane
+    assert "://" not in lane["host"] and "/" not in lane["host"], lane
+    assert module.cross_family_account_identity(lane) == (
+        core.cross_family_account_identity(lane)
     )
-except module.AzureCrosscheckError as exc:
-    assert "bind exactly one provider host" in str(exc), str(exc)
-else:
-    raise AssertionError("a GLM review accepted a foreign provider host")
+
+# The model decides the host: every cross-family review derives its own exact
+# Foundry host, refuses a conflicting configured host, and the codex-family
+# fallback keeps its existing derivation. The retired claude harness derives
+# nothing.
+for lane in module.CROSS_FAMILY_LANES.values():
+    assert module.effective_provider_host({}, "pi", lane["model"]) == lane["host"]
+    assert module.effective_provider_host(
+        {"provider_host": lane["host"]}, "pi", lane["model"]
+    ) == lane["host"]
+    try:
+        module.effective_provider_host(
+            {"provider_host": "api.example.com"}, "pi", lane["model"]
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "bind exactly one provider host" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "a cross-family review accepted a foreign provider host"
+        )
 assert module.effective_provider_host({}, "pi", "gpt-5.6-sol") == "chatgpt.com"
 assert module.effective_provider_host({}, "codex", "gpt-5.6-sol") == "chatgpt.com"
 assert module.effective_provider_host(
@@ -226,7 +441,8 @@ except module.AzureCrosscheckError as exc:
 else:
     raise AssertionError("the retired claude harness still derives a provider host")
 
-# The GLM identity record must carry the pinned host through validation.
+# The cross-family identity record must carry the pinned host through
+# validation.
 import copy
 identity = {
     "home_binding": "sha256:" + "1" * 64,
@@ -242,7 +458,7 @@ identity = {
     "provider_host": "api.example.com",
     "provider_port": "443",
     "reviewer_harness": "pi",
-    "reviewer_model": "FW-GLM-5.2",
+    "reviewer_model": "accounts/fireworks/models/glm-5p2",
     "reviewer_effort": "xhigh",
     "reviewer_account_digest": "sha256:" + "2" * 64,
     "ledger_digest": "sha256:" + "f" * 64,
@@ -261,7 +477,7 @@ identity.update({
 reviewer = {
     "execution_mode": "azure-compartment-v1",
     "harness": "pi",
-    "model": "FW-GLM-5.2",
+    "model": "accounts/fireworks/models/glm-5p2",
     "effort": "xhigh",
     "reviewer_account_identity_sha256": "2" * 64,
     "azure_identity": identity,
@@ -270,15 +486,17 @@ run = {"head_sha": "a" * 40, "base_sha": "b" * 40, "claims_sha256": "c" * 64}
 try:
     module.validate_azure_reviewer_record(reviewer, run, "run")
 except RuntimeError as exc:
-    assert "GLM provider host is not the pinned R6 Foundry endpoint" in str(exc), str(exc)
+    assert "fireworks-glm provider host is not the pinned R6 provider endpoint" in str(exc), str(exc)
 else:
-    raise AssertionError("a GLM ledger record with a foreign provider host validated")
+    raise AssertionError(
+        "a cross-family ledger record with a foreign provider host validated"
+    )
 PY
   pass "the reviewer model derives the exact Foundry host and the claude host lane is retired"
 }
 
-glm_credential_lane_unit() {
-  python3 - "$ADAPTER" "$CORE" <<'PY' || fail "GLM Azure credential lane contract failed"
+cross_family_credential_lane_unit() {
+  python3 - "$ADAPTER" "$CORE" <<'PY' || fail "cross-family Azure credential lane contract failed"
 import importlib.util
 import json
 from pathlib import Path
@@ -293,15 +511,19 @@ core_spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[2])
 core = importlib.util.module_from_spec(core_spec)
 core_spec.loader.exec_module(core)
 
-PINNED = "https://aif-fm7c799d-eus01.cognitiveservices.azure.com/openai/v1"
+PINNED = "https://api.fireworks.ai/inference/v1"
+LANE = module.CROSS_FAMILY_LANES["fireworks-glm"]
+SLOT = LANE["slot"]
+MODEL = LANE["model"]
 
 
-def models_json(base_url=PINNED, api_key="glm-key-material", model_extra=None):
-    model = {"id": "FW-GLM-5.2", "name": "GLM 5.2"}
+def models_json(base_url=PINNED, api_key="lane-key-material", model_extra=None,
+                slot=SLOT, model_id=MODEL):
+    model = {"id": model_id, "name": "cross-family reviewer"}
     model.update(model_extra or {})
     return json.dumps({
         "providers": {
-            "azure-glm": {
+            slot: {
                 "baseUrl": base_url,
                 "api": "openai-completions",
                 "apiKey": api_key,
@@ -313,12 +535,12 @@ def models_json(base_url=PINNED, api_key="glm-key-material", model_extra=None):
 
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
-    home = root / "glm-home"
+    home = root / "lane-home"
     home.mkdir()
     (home / "models.json").write_text(models_json(), encoding="utf-8")
     config = {
         "harness": "pi",
-        "model": "FW-GLM-5.2",
+        "model": MODEL,
         "effort": "xhigh",
         "account_home": str(home),
     }
@@ -326,16 +548,16 @@ with tempfile.TemporaryDirectory() as temporary:
         module.inspect_reviewer_credential(core, config)
     )
     assert credential == home.resolve() / "models.json", credential
-    assert source == "pi-azure-glm-models-file", source
-    assert identifier.startswith("glm-foundry-binding:"), identifier
-    assert account_identity == module.GLM_REVIEWER_ACCOUNT_IDENTITY
+    assert source == "pi-" + SLOT + "-models-file", source
+    assert identifier.startswith("provider-binding:" + SLOT + ":"), identifier
+    assert account_identity == module.cross_family_account_identity(LANE)
 
     # The packaged compartment credential is the models.json under the same
     # allowlist pin, and its archived identity is the non-secret binding.
     identity = {"review_generation": "0123456789abcdef01234567"}
     archive_path = root / "credential.tar.gz"
     archive_digest, credential_digest = module.create_credential_archive(
-        archive_path, credential, identity, config, account_identity
+        archive_path, credential, identity, config, account_identity, core
     )
     assert archive_digest.startswith("sha256:")
     with tarfile.open(archive_path, "r:gz") as archive:
@@ -343,13 +565,13 @@ with tempfile.TemporaryDirectory() as temporary:
         assert names == {"manifest.json", "models.json"}, names
         manifest = json.loads(archive.extractfile("manifest.json").read())
     assert manifest["credential_name"] == "models.json", manifest
-    assert manifest["model"] == "FW-GLM-5.2", manifest
+    assert manifest["model"] == MODEL, manifest
 
     # A credential outside the endpoint allowlist never enters the archive.
     foreign = root / "foreign-home"
     foreign.mkdir()
     (foreign / "models.json").write_text(
-        models_json(base_url="https://aif-other.cognitiveservices.azure.com/openai/v1"),
+        models_json(base_url="https://api.fireworks.ai.evil.example/inference/v1"),
         encoding="utf-8",
     )
     try:
@@ -359,11 +581,100 @@ with tempfile.TemporaryDirectory() as temporary:
             identity,
             config,
             account_identity,
+            core,
         )
     except module.AzureCrosscheckError as exc:
-        assert "pinned R6 Foundry endpoint" in str(exc), str(exc)
+        assert "pinned R6 provider endpoint" in str(exc), str(exc)
     else:
-        raise AssertionError("a foreign-endpoint GLM credential was archived")
+        raise AssertionError(
+            "a foreign-endpoint cross-family credential was archived"
+        )
+
+    # An unexpected provider slot is still the wrong slot for this review: the
+    # lane is keyed on the reviewer model, never on what the credential file
+    # declares about itself.
+    swapped = root / "swapped-slot-home"
+    swapped.mkdir()
+    (swapped / "models.json").write_text(
+        models_json(slot="openai-codex"), encoding="utf-8"
+    )
+    try:
+        module.create_credential_archive(
+            root / "swapped.tar.gz",
+            swapped / "models.json",
+            identity,
+            config,
+            account_identity,
+            core,
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "pinned R6 provider endpoint" in str(exc), str(exc)
+    else:
+        raise AssertionError("a foreign-slot cross-family credential was archived")
+
+    # The archive gate's allowlists come from CORE, not a local copy. A
+    # hardcoded set drifted weaker than the inspector inside one change: no
+    # model-level allowlist and no `api` check, so an archived credential
+    # could carry `openai-responses`, which R6 forbids outright.
+    assert module.__dict__.get("PI_PROVIDER_ALLOWED_KEYS") is None, (
+        "the archive gate must reference core's allowlist, not keep its own"
+    )
+    for label, mutate in (
+        ("responses api", lambda d: d["providers"][SLOT].__setitem__("api", "openai-responses")),
+        ("provider compat", lambda d: d["providers"][SLOT].__setitem__("compat", {"supportsFinishReason": False})),
+        ("modelOverrides", lambda d: d["providers"][SLOT].__setitem__("modelOverrides", {MODEL: {"compat": {}}})),
+        ("provider headers", lambda d: d["providers"][SLOT].__setitem__("headers", {"x": "1"})),
+        ("model-level extra", lambda d: d["providers"][SLOT]["models"][0].__setitem__("headers", {"x": "1"})),
+    ):
+        drifted = json.loads(models_json())
+        mutate(drifted)
+        drift_home = root / ("drift-" + label.replace(" ", "-"))
+        drift_home.mkdir()
+        (drift_home / "models.json").write_text(json.dumps(drifted), encoding="utf-8")
+        try:
+            module.create_credential_archive(
+                root / ("drift-" + label.replace(" ", "-") + ".tar.gz"),
+                drift_home / "models.json",
+                identity,
+                config,
+                account_identity,
+                core,
+            )
+        except module.AzureCrosscheckError:
+            pass
+        else:
+            raise AssertionError(f"the archive gate admitted {label}")
+        # The core inspector refuses the same shape, so the two agree.
+        try:
+            core.inspect_pi_cross_family_credential(drift_home, LANE)
+        except core.CrosscheckToolError:
+            pass
+        else:
+            raise AssertionError(f"the core inspector admitted {label}")
+    print("ARCHIVE GATE and CORE INSPECTOR agree on every drifted credential shape")
+
+    # The archive gate owns the model-level compat pin too, not just the
+    # inspector: a compat that weakens the truncation guard never ships into
+    # a compartment.
+    compat_home = root / "compat-home"
+    compat_home.mkdir()
+    (compat_home / "models.json").write_text(
+        models_json(model_extra={"compat": {"supportsFinishReason": False}}),
+        encoding="utf-8",
+    )
+    try:
+        module.create_credential_archive(
+            root / "compat.tar.gz",
+            compat_home / "models.json",
+            identity,
+            config,
+            account_identity,
+            core,
+        )
+    except module.AzureCrosscheckError as exc:
+        assert "model-level compat" in str(exc), str(exc)
+    else:
+        raise AssertionError("a model-level compat override was archived")
 
     # pi gives MODEL-level baseUrl/api precedence over the provider level, so
     # a credential keeping the pinned endpoint at provider level while
@@ -385,6 +696,7 @@ with tempfile.TemporaryDirectory() as temporary:
             identity,
             config,
             account_identity,
+            core,
         )
     except module.AzureCrosscheckError as exc:
         assert "model-level" in str(exc), str(exc)
@@ -398,6 +710,81 @@ with tempfile.TemporaryDirectory() as temporary:
         assert "model-level baseUrl/api override" in str(exc), str(exc)
     else:
         raise AssertionError("a model-level endpoint override passed inspection")
+
+    # REGRESSION: the codex-family compartment path used to refuse itself.
+    # `account_identity` returned "codex:<id>" / "openai-codex:<id>" while the
+    # archive derived the BARE "<id>" separately, so
+    # `archived_identity != reviewer_account_identity` was structurally always
+    # true and no codex-family compartment review could ever run. Only the
+    # cross-family branch passed, because both sides there read one shared
+    # constant. This drives the REAL readers end to end for BOTH branches:
+    # it fails on the two-derivation code and passes on the shared one.
+    for harness, document in (
+        ("codex", {"tokens": {"account_id": "acct-codex-1"}}),
+        ("pi", {"openai-codex": {"accountId": "acct-pi-1"}}),
+    ):
+        family_home = root / ("family-home-" + harness)
+        family_home.mkdir()
+        (family_home / "auth.json").write_text(json.dumps(document), encoding="utf-8")
+        admitted = core.account_identity(harness, family_home)
+        # The prefix is the whole point: the identity is not a bare account id.
+        assert admitted.split(":", 1)[1] in {"acct-codex-1", "acct-pi-1"}, admitted
+        assert ":" in admitted and not admitted.startswith(":"), admitted
+        family_config = {
+            "harness": harness,
+            "model": "gpt-5.6-sol",
+            "effort": "xhigh",
+            "account_home": str(family_home),
+        }
+        archive_digest, _ = module.create_credential_archive(
+            root / ("family-" + harness + ".tar.gz"),
+            family_home / "auth.json",
+            identity,
+            family_config,
+            admitted,
+            core,
+        )
+        assert archive_digest.startswith("sha256:"), archive_digest
+        # A genuinely different account still refuses, so the fix did not make
+        # the comparison lenient.
+        try:
+            module.create_credential_archive(
+                root / ("family-wrong-" + harness + ".tar.gz"),
+                family_home / "auth.json",
+                identity,
+                family_config,
+                admitted + "-other",
+                core,
+            )
+        except module.AzureCrosscheckError as exc:
+            assert "differs from the admitted executing account" in str(exc), str(exc)
+        else:
+            raise AssertionError("a foreign executing account was archived")
+
+    # TOCTOU: a credential swapped between admission and staging must refuse
+    # as a TOOL FAILURE, not a bare AzureCrosscheckError. The class is the
+    # control: AzureCrosscheckError is a plain RuntimeError that none of the
+    # persisting handlers catch, so raised as that class the swap would leave
+    # no ledger, no report and no data directory at all.
+    assert not issubclass(module.AzureCrosscheckError, core.CrosscheckToolError), (
+        "the two classes must stay distinguishable for this test to mean anything"
+    )
+    stable = module.inspect_reviewer_credential(core, config)
+    module.require_stable_reviewer_credential(core, config, stable)
+    try:
+        module.require_stable_reviewer_credential(
+            core, config, (stable[0], stable[1], stable[2], "openai-codex:swapped")
+        )
+    except core.CrosscheckToolError as exc:
+        assert "identity changed before exact staging" in str(exc), str(exc)
+    except module.AzureCrosscheckError as exc:
+        raise AssertionError(
+            "the TOCTOU refusal raised a class the persisting handlers ignore: "
+            + str(exc)
+        )
+    else:
+        raise AssertionError("a swapped reviewer credential passed the TOCTOU re-proof")
+    print("TOCTOU refusal raises a persisted tool failure, not a vanishing error")
 
     # The retired claude harness has no Azure credential lane at all.
     claude_home = root / "claude-home"
@@ -418,8 +805,8 @@ with tempfile.TemporaryDirectory() as temporary:
     else:
         raise AssertionError("the retired claude credential lane still packages a profile")
 
-    # The GLM preflight accepts the api-key credential without an expiry
-    # reader and still refuses a missing credential loudly.
+    # The cross-family preflight accepts the api-key credential without an
+    # expiry reader and still refuses a missing credential loudly.
     record = module.preflight_reviewer_credential(core, config)
     assert record["state"] == "usable", record
     assert record["credential"] == "models.json", record
@@ -430,11 +817,11 @@ with tempfile.TemporaryDirectory() as temporary:
             core, {**config, "account_home": str(missing)}
         )
     except core.CrosscheckToolError as exc:
-        assert "GLM reviewer credential inspection failed" in str(exc), str(exc)
+        assert SLOT + " reviewer credential inspection failed" in str(exc), str(exc)
     else:
-        raise AssertionError("a missing GLM credential passed preflight")
+        raise AssertionError("a missing cross-family credential passed preflight")
 PY
-  pass "the Azure GLM credential lane packages models.json under the endpoint allowlist and the claude lane is gone"
+  pass "the Azure cross-family credential lane packages models.json under each lane's endpoint allowlist and the claude lane is gone"
 }
 
 identity_outcome_unit() {
@@ -549,7 +936,7 @@ PY
 }
 
 account_and_cleanup_identity_unit() {
-  python3 - "$ADAPTER" <<'PY' || fail "Azure account and cleanup identity contract failed"
+  python3 - "$ADAPTER" "$CORE" <<'PY' || fail "Azure account and cleanup identity contract failed"
 import importlib.util
 import json
 from pathlib import Path
@@ -559,6 +946,9 @@ import tempfile
 spec = importlib.util.spec_from_file_location("azure_crosscheck", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+core_spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[2])
+core = importlib.util.module_from_spec(core_spec)
+core_spec.loader.exec_module(core)
 common = {
     "home": Path("/home/firstmate"),
     "task_id": "review-one",
@@ -584,8 +974,8 @@ common = {
     },
     "ledger": {"schema": "firstmate.crosscheck-ledger.v2", "findings": [], "runs": []},
 }
-first = module.review_identity(**common, reviewer_account_identity="account-one")
-second = module.review_identity(**common, reviewer_account_identity="account-two")
+first = module.review_identity(**common, reviewer_account_identity="openai-codex:account-one")
+second = module.review_identity(**common, reviewer_account_identity="openai-codex:account-two")
 assert first["reviewer_account_digest"] != second["reviewer_account_digest"]
 assert first["review_generation"] != second["review_generation"]
 with tempfile.TemporaryDirectory() as temporary:
@@ -593,12 +983,16 @@ with tempfile.TemporaryDirectory() as temporary:
     credential = root / "auth.json"
     credential.write_text(json.dumps({"openai-codex":{"accountId":"account-one"}}), encoding="utf-8")
     archive_digest, credential_digest = module.create_credential_archive(
-        root / "credential.tar.gz", credential, first, common["config"], "account-one"
+        root / "credential.tar.gz", credential, first, common["config"],
+        "openai-codex:account-one",
+        core,
     )
     assert archive_digest.startswith("sha256:") and credential_digest.startswith("sha256:")
     try:
         module.create_credential_archive(
-            root / "wrong.tar.gz", credential, first, common["config"], "account-two"
+            root / "wrong.tar.gz", credential, first, common["config"],
+            "openai-codex:account-two",
+            core,
         )
     except module.AzureCrosscheckError as exc:
         assert "differs" in str(exc)
@@ -608,7 +1002,9 @@ with tempfile.TemporaryDirectory() as temporary:
     linked.symlink_to(credential)
     try:
         module.create_credential_archive(
-            root / "linked.tar.gz", linked, first, common["config"], "account-one"
+            root / "linked.tar.gz", linked, first, common["config"],
+            "openai-codex:account-one",
+            core,
         )
     except module.AzureCrosscheckError as exc:
         assert "symlink" in str(exc)
@@ -1538,8 +1934,9 @@ PY
 static_contract
 parameter_contract_unit
 adapter_mode_unit
-glm_provider_host_unit
-glm_credential_lane_unit
+cross_family_provider_host_unit
+cross_family_credential_lane_unit
+model_guest_executing_account_unit
 identity_outcome_unit
 account_and_cleanup_identity_unit
 bridge_security_unit

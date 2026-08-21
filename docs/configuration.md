@@ -106,18 +106,18 @@ The gate does not reproduce CI's concurrent shard fan-out because it does not se
 `config/crosscheck-reviewer.json` selects the local dedicated account pool for the PR merge-gate reviewer.
 It is gitignored and is not inferred from lane metadata or ambient provider configuration.
 The current schema has one nonempty `reviewers` array, whose entries require exactly `harness`, `model`, `effort`, and `account_home`.
-The accepted policy profiles are Pi `FW-GLM-5.2` at `xhigh` effort (the sole primary review family, R6) plus Codex `gpt-5.6-sol` and Pi `gpt-5.6-sol` at `xhigh` effort as the loud degraded fallback family; Claude is never an eligible Crosscheck reviewer (the interim claude lane is retired).
+The accepted policy profiles are Pi at `xhigh` effort on every registered cross-family model (today `accounts/fireworks/models/glm-5p2`; the primary review family, R6) plus Codex `gpt-5.6-sol` and Pi `gpt-5.6-sol` at `xhigh` effort as the loud degraded fallback family; Claude is never an eligible Crosscheck reviewer (the interim claude lane is retired).
 Every reviewer `account_home` must be an existing absolute directory.
 
 [`crosscheck.md`](crosscheck.md) owns the reviewer-independence policy, including the removal of author-identity checks and the legacy admission workaround.
 
 The optional local, gitignored `config/crosscheck-same-model` file contains exactly `on` or `off`, defaults to `off` when absent, and is read fresh for every reviewer selection.
-`on` relaxes only the default model-separation screen and makes the weaker mode explicit in the prompt and durable evidence.
+`on` relaxes only the default model-FAMILY separation screen and makes the weaker mode explicit in the prompt and durable evidence. Independence is a family comparison: `gpt-5.5` and `gpt-5.6-sol` are one family, so a version bump never buys independence.
 Invalid values and unsafe file shapes fail closed.
 Crosscheck runs eligible entries in configured order, advancing to the next only when a reviewer could not reach its provider.
 List more than one entry per supported client so a single unavailable account cannot block the gate.
 Codex binds both `CODEX_HOME` and `HOME` to the selected reviewer path and sets `project_doc_max_bytes=0` so reviewed-repository `AGENTS.md` files cannot supply reviewer instructions.
-Pi creates a disposable private `HOME` whose `.pi/agent` resolves to the selected reviewer path, binds `PI_CODING_AGENT_DIR` to it, requires an `openai-codex` OAuth credential in its `auth.json` before launch, resolves an npm-installed Pi entrypoint with its sibling Node runtime before reviewer `PATH` can substitute another interpreter, and uses `--no-context-files` so reviewed-repository context files cannot supply reviewer instructions.
+Pi creates a disposable private `HOME` whose `.pi/agent` resolves to the selected reviewer path, binds `PI_CODING_AGENT_DIR` to it, requires the credential its lane calls for before launch (an `openai-codex` OAuth entry in `auth.json` for the codex-family fallback, or an api-key `models.json` declaring exactly that lane's provider slot for a cross-family lane), resolves an npm-installed Pi entrypoint with its sibling Node runtime before reviewer `PATH` can substitute another interpreter, and uses `--no-context-files` so reviewed-repository context files cannot supply reviewer instructions.
 The verdict and its Bash-created receipt must report the executing reviewer selector and private `HOME`.
 An absent or invalid reviewer file blocks Crosscheck and merge.
 See [`crosscheck.md`](crosscheck.md) for the example file, reviewer capture control, evidence rules, and operator flow.

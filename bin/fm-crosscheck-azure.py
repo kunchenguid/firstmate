@@ -218,12 +218,19 @@ def preflight_reviewer_credential(core: Any, config: dict[str, str]) -> dict[str
     same interval.
     """
 
-    if config["harness"] == "pi" and config["model"] == GLM_REVIEWER_MODEL:
-        # The GLM lane authenticates with a Foundry api-key models.json,
-        # which declares no expiry, so the preflight that matters is the
-        # shape/allowlist inspection itself. A refusal there is already the
-        # core tool failure the roster uses to rotate reviewers.
-        core.inspect_pi_glm_credential(Path(config["account_home"]))
+    preflight_lane = (
+        cross_family_lane_for_model(config["model"])
+        if config["harness"] == "pi"
+        else None
+    )
+    if preflight_lane is not None:
+        # A cross-family lane authenticates with an api-key
+        # models.json, which declares no expiry, so the preflight that matters
+        # is the shape/allowlist inspection itself. A refusal there is already
+        # the core tool failure the roster uses to rotate reviewers.
+        core.inspect_pi_cross_family_credential(
+            Path(config["account_home"]), preflight_lane
+        )
         return {
             "profile": config["account_home"],
             "harness": "pi",
@@ -232,7 +239,10 @@ def preflight_reviewer_credential(core: Any, config: dict[str, str]) -> dict[str
             "expires_at": None,
             "expires_in_seconds": None,
             "refresh_expires_at": None,
-            "detail": "GLM Foundry api-key credential declares no expiry",
+            "detail": (
+                f"{preflight_lane['slot']} api-key credential declares no "
+                "expiry"
+            ),
         }
     expiry = load_credential_expiry()
     record = expiry.inspect_profile(
@@ -571,21 +581,25 @@ def require_model_image_attests_harness(
     return attested
 
 
-# R6 (docs/azure-requirements.md): these pins must equal the constants in
-# bin/fm-crosscheck.py; tests/fm-crosscheck-azure.test.sh enforces the
-# equality. The GLM lane binds exactly one Foundry resource + deployment and
-# exactly one chat-completions endpoint; the interim claude reviewer lane
-# and its provider host are retired.
-GLM_REVIEWER_MODEL = "FW-GLM-5.2"
-GLM_PROVIDER_SLOT = "azure-glm"
-GLM_FOUNDRY_RESOURCE = "aif-fm7c799d-eus01"
-GLM_PROVIDER_HOST = "aif-fm7c799d-eus01.cognitiveservices.azure.com"
-GLM_ALLOWED_BASE_URL = (
-    "https://aif-fm7c799d-eus01.cognitiveservices.azure.com/openai/v1"
-)
-GLM_REVIEWER_ACCOUNT_IDENTITY = (
-    GLM_PROVIDER_SLOT + ":" + GLM_FOUNDRY_RESOURCE + "/" + GLM_REVIEWER_MODEL
-)
+# R6 (docs/azure-requirements.md): this registry must equal
+# `CROSS_FAMILY_LANES` in bin/fm-crosscheck.py;
+# tests/fm-crosscheck-azure.test.sh enforces the equality as a whole, so a lane
+# added on one side and not the other is a test failure rather than a silently
+# divergent allowlist. Each lane binds exactly one provider slot + model and
+# exactly one chat-completions endpoint; the interim claude reviewer lane and
+# its provider host are retired.
+CROSS_FAMILY_LANE_API = "openai-completions"
+CROSS_FAMILY_LANES = {
+    "fireworks-glm": {
+        "slot": "fireworks-glm",
+        "model": "accounts/fireworks/models/glm-5p2",
+        "api": CROSS_FAMILY_LANE_API,
+        "compat": {},
+        "host": "api.fireworks.ai",
+        "base_url": "https://api.fireworks.ai/inference/v1",
+        "family_aliases": frozenset({"glm5p2", "glm52", "glm5point2"}),
+    },
+}
 
 HARNESS_PROVIDER_HOSTS = {
     "codex": "chatgpt.com",
@@ -593,22 +607,50 @@ HARNESS_PROVIDER_HOSTS = {
 }
 
 
+def cross_family_lane_for_model(reviewer_model: Any) -> dict[str, str] | None:
+    """Return the registered cross-family lane one reviewer model belongs to.
+
+    Mirrors `cross_family_lane_for_model` in bin/fm-crosscheck.py, including
+    its exact matching rule: a lane model id can itself contain slashes, so
+    the comparison is against the id or the `<slot>/<model>` form pi records,
+    never a suffix. The lane is keyed on the model, never on anything the
+    credential file supplies.
+    """
+
+    if not isinstance(reviewer_model, str):
+        return None
+    candidate = reviewer_model.strip()
+    for lane in CROSS_FAMILY_LANES.values():
+        if candidate in (lane["model"], lane["slot"] + "/" + lane["model"]):
+            return lane
+    return None
+
+
+def cross_family_account_identity(lane: dict[str, str]) -> str:
+    return lane["slot"] + ":" + lane["host"] + "/" + lane["model"]
+
+
 def effective_provider_host(
     azure: dict[str, Any], reviewer_harness: str, reviewer_model: str
 ) -> str:
     """One exact model-egress host per review, decided by the reviewer model
-    first: a GLM review binds the pinned Foundry host and refuses any other
-    configured host. For the codex-family fallback, explicit config wins,
-    else the reviewer harness names its provider."""
-    if reviewer_harness == "pi" and reviewer_model == GLM_REVIEWER_MODEL:
+    first: a cross-family review binds that lane's pinned provider host and
+    refuses any other configured host. For the codex-family fallback, explicit
+    config wins, else the reviewer harness names its provider."""
+    lane = (
+        cross_family_lane_for_model(reviewer_model)
+        if reviewer_harness == "pi"
+        else None
+    )
+    if lane is not None:
         host = azure.get("provider_host")
-        if host and host != GLM_PROVIDER_HOST:
+        if host and host != lane["host"]:
             raise AzureCrosscheckError(
-                "Azure Crosscheck GLM reviews bind exactly one provider host "
-                f"({GLM_PROVIDER_HOST}); refusing configured provider_host "
-                f"{host!r}"
+                f"Azure Crosscheck {lane['slot']} reviews bind exactly one "
+                f"provider host ({lane['host']}); refusing configured "
+                f"provider_host {host!r}"
             )
-        return GLM_PROVIDER_HOST
+        return lane["host"]
     host = azure.get("provider_host")
     if host:
         return host
@@ -670,13 +712,19 @@ def inspect_reviewer_credential(
         source, identifier = core.inspect_codex_credential(account_home)
         credential = account_home / "auth.json"
         account_identity = core.account_identity(config["harness"], account_home)
-    elif config["harness"] == "pi" and config["model"] == GLM_REVIEWER_MODEL:
-        # R6 GLM lane: the credential is the api-key models.json and the
-        # executing identity is the non-secret Foundry resource/deployment
+    elif (
+        config["harness"] == "pi"
+        and cross_family_lane_for_model(config["model"]) is not None
+    ):
+        # R6 cross-family lane: the credential is the api-key models.json and
+        # the executing identity is the non-secret provider host/model
         # binding, because an api key names no upstream account.
-        source, identifier = core.inspect_pi_glm_credential(account_home)
+        lane = cross_family_lane_for_model(config["model"])
+        source, identifier = core.inspect_pi_cross_family_credential(
+            account_home, lane
+        )
         credential = account_home / "models.json"
-        account_identity = core.GLM_REVIEWER_ACCOUNT_IDENTITY
+        account_identity = core.cross_family_account_identity(lane)
     elif config["harness"] == "pi":
         source, identifier = core.inspect_pi_credential(account_home)
         credential = account_home / "auth.json"
@@ -695,12 +743,35 @@ def inspect_reviewer_credential(
     return credential, source, identifier, account_identity
 
 
+def require_stable_reviewer_credential(
+    core: Any, config: dict[str, str], admitted: tuple[Any, str, str, str]
+) -> None:
+    """Re-prove the reviewer credential has not changed since admission.
+
+    Extracted so it can be DRIVEN by a test. It raises
+    `core.CrosscheckToolError`, not a bare `AzureCrosscheckError`, and the
+    class is the whole point: this is the TOCTOU refusal, the most
+    security-relevant one in the staging region, and `AzureCrosscheckError` is
+    a plain `RuntimeError` that none of the persisting handlers catch. Raised
+    as the bare class, a credential swapped between admission and staging
+    would leave no ledger, no report and no data directory - the fleet would
+    see the swap as nothing at all.
+    """
+
+    reproved = inspect_reviewer_credential(core, config)
+    if reproved != admitted:
+        raise core.CrosscheckToolError(
+            "reviewer credential identity changed before exact staging"
+        )
+
+
 def create_credential_archive(
     destination: Path,
     credential: Path,
     identity: dict[str, str],
     config: dict[str, str],
     reviewer_account_identity: str,
+    core: Any,
 ) -> tuple[str, str]:
     """Package the reviewer credential for one-way copy-in at boot.
 
@@ -726,28 +797,49 @@ def create_credential_archive(
         ) from exc
     if len(credential_bytes) > MAX_CONFIG_BYTES:
         raise AzureCrosscheckError("reviewer credential exceeds its byte bound")
-    glm_profile = (
-        config["harness"] == "pi" and config["model"] == GLM_REVIEWER_MODEL
+    archive_lane = (
+        cross_family_lane_for_model(config["model"])
+        if config["harness"] == "pi"
+        else None
     )
     try:
         parsed = json.loads(credential_bytes)
     except (json.JSONDecodeError, UnicodeError) as exc:
         raise AzureCrosscheckError("reviewer credential is malformed") from exc
-    if glm_profile:
-        # The archived GLM credential must stay inside the R6 endpoint
-        # allowlist, and its executing identity is the non-secret Foundry
-        # resource/deployment binding - never the api key or a digest of it.
+    if archive_lane is not None:
+        # The archived cross-family credential must stay inside that lane's R6
+        # endpoint allowlist, and its executing identity is the non-secret
+        # provider host/model binding - never the api key or a digest of it.
+        slot = archive_lane["slot"]
         providers = parsed.get("providers") if isinstance(parsed, dict) else None
         entry = (
-            providers.get(GLM_PROVIDER_SLOT)
-            if isinstance(providers, dict) and set(providers) == {GLM_PROVIDER_SLOT}
+            providers.get(slot)
+            if isinstance(providers, dict) and set(providers) == {slot}
             else None
         )
-        base_url = entry.get("baseUrl") if isinstance(entry, dict) else None
-        if base_url != GLM_ALLOWED_BASE_URL:
+        # Pi composes provider-level compat/headers and a modelOverrides layer
+        # into the effective model, so the archive gate allowlists the
+        # provider's keys rather than naming fields to refuse
+        # (cc-ca5848b19ac3). The allowlists come from CORE, not a local copy:
+        # a hardcoded set here drifted weaker than the inspector's within one
+        # change - it applied no model-level allowlist and never checked
+        # `api`, so an archived credential could carry `openai-responses`,
+        # which R6 forbids outright.
+        if isinstance(entry, dict) and set(entry) - core.PI_PROVIDER_ALLOWED_KEYS:
             raise AzureCrosscheckError(
-                "archived GLM reviewer credential is not bound to the pinned "
-                f"R6 Foundry endpoint {GLM_ALLOWED_BASE_URL}"
+                f"archived {slot} reviewer credential carries provider-level "
+                "fields the lane does not pin"
+            )
+        if isinstance(entry, dict) and entry.get("api") != archive_lane["api"]:
+            raise AzureCrosscheckError(
+                f"archived {slot} reviewer credential does not pin api "
+                f"{archive_lane['api']!r}"
+            )
+        base_url = entry.get("baseUrl") if isinstance(entry, dict) else None
+        if base_url != archive_lane["base_url"]:
+            raise AzureCrosscheckError(
+                f"archived {slot} reviewer credential is not bound to the "
+                f"pinned R6 provider endpoint {archive_lane['base_url']}"
             )
         # pi gives model-level baseUrl/api precedence over the provider
         # level, so a model entry carrying either field would escape the
@@ -759,17 +851,38 @@ def create_credential_archive(
                 "baseUrl" in model_entry or "api" in model_entry
             ):
                 raise AzureCrosscheckError(
-                    "archived GLM reviewer credential carries a model-level "
-                    "baseUrl/api override that escapes the pinned R6 Foundry "
-                    "endpoint"
+                    f"archived {slot} reviewer credential carries a "
+                    "model-level baseUrl/api override that escapes the pinned "
+                    "R6 provider endpoint"
                 )
-        archived_identity = GLM_REVIEWER_ACCOUNT_IDENTITY
-    elif config["harness"] == "codex":
-        tokens = parsed.get("tokens") if isinstance(parsed, dict) else None
-        archived_identity = tokens.get("account_id") if isinstance(tokens, dict) else None
-    elif config["harness"] == "pi":
-        entry = parsed.get("openai-codex") if isinstance(parsed, dict) else None
-        archived_identity = entry.get("accountId") if isinstance(entry, dict) else None
+            if (
+                isinstance(model_entry, dict)
+                and model_entry.get("compat", {}) != archive_lane["compat"]
+            ):
+                raise AzureCrosscheckError(
+                    f"archived {slot} reviewer credential carries a "
+                    "model-level compat that is not the pinned lane compat"
+                )
+            if isinstance(model_entry, dict) and (
+                set(model_entry) - core.PI_MODEL_ALLOWED_KEYS
+            ):
+                raise AzureCrosscheckError(
+                    f"archived {slot} reviewer credential carries model-level "
+                    "fields the lane does not pin"
+                )
+        archived_identity = cross_family_account_identity(archive_lane)
+    elif config["harness"] in {"codex", "pi"}:
+        # ONE derivation, shared with `account_identity`. Deriving it here a
+        # second time is what broke this lane: this branch returned the bare
+        # account id while the admitted identity carried a `codex:` /
+        # `openai-codex:` prefix, so the comparison below could never be
+        # equal and no codex-family compartment review could ever run.
+        try:
+            archived_identity = core.account_identity_from_credential(
+                config["harness"], parsed, str(credential)
+            )
+        except core.CrosscheckToolError as exc:
+            raise AzureCrosscheckError(str(exc)) from exc
     else:
         raise AzureCrosscheckError(
             "Azure Crosscheck has no credential-archive lane for reviewer "
@@ -785,7 +898,9 @@ def create_credential_archive(
         "harness": config["harness"],
         "model": config["model"],
         "effort": config["effort"],
-        "credential_name": "models.json" if glm_profile else "auth.json",
+        "credential_name": (
+            "models.json" if archive_lane is not None else "auth.json"
+        ),
         "credential_digest": digest_bytes(credential_bytes),
     }
     payload = {
@@ -1902,18 +2017,32 @@ def _run_azure_review_in_lane(
         credential_path = work / "credential.tar.gz"
         result_path = work / "result.json"
         with measured_phase(phase_timer, "stage"):
-            credential_archive_digest, credential_digest = create_credential_archive(
-                credential_path,
-                credential,
-                identity,
-                config,
-                reviewer_account_identity,
-            )
-            reproved = inspect_reviewer_credential(core, config)
-            if reproved != (credential, source, identifier, reviewer_account_identity):
-                raise AzureCrosscheckError(
-                    "reviewer credential identity changed before exact staging"
+            # A raw AzureCrosscheckError here escapes to main()'s catch-all
+            # OUTSIDE the window whose handlers persist a run, so this class of
+            # refusal used to leave no ledger, no report and no data/ directory
+            # at all - the live codex-family identity refusal was invisible
+            # afterwards. Converting it to a tool failure is the same treatment
+            # the model-image attestation refusal above already gets: it is
+            # recorded, and the roster rotates to the next reviewer account.
+            try:
+                (
+                    credential_archive_digest,
+                    credential_digest,
+                ) = create_credential_archive(
+                    credential_path,
+                    credential,
+                    identity,
+                    config,
+                    reviewer_account_identity,
+                    core,
                 )
+            except AzureCrosscheckError as exc:
+                raise core.CrosscheckToolError(str(exc)) from exc
+            require_stable_reviewer_credential(
+                core,
+                config,
+                (credential, source, identifier, reviewer_account_identity),
+            )
             identity.update(
                 {
                     "credential_archive_digest": credential_archive_digest,
@@ -2160,13 +2289,15 @@ def validate_azure_reviewer_record(
         raise RuntimeError(f"{label}.reviewer Azure deployment identity is malformed")
     if not re.fullmatch(r"[0-9a-f]{64}", identity["claims_sha256"]):
         raise RuntimeError(f"{label}.reviewer Azure claims digest is malformed")
-    if (
-        identity["reviewer_harness"] == "pi"
-        and identity["reviewer_model"] == GLM_REVIEWER_MODEL
-        and identity["provider_host"] != GLM_PROVIDER_HOST
-    ):
+    recorded_lane = (
+        cross_family_lane_for_model(identity["reviewer_model"])
+        if identity["reviewer_harness"] == "pi"
+        else None
+    )
+    if recorded_lane is not None and identity["provider_host"] != recorded_lane["host"]:
         raise RuntimeError(
-            f"{label}.reviewer GLM provider host is not the pinned R6 Foundry endpoint"
+            f"{label}.reviewer {recorded_lane['slot']} provider host is not "
+            "the pinned R6 provider endpoint"
         )
     generation = digest_bytes(
         canonical_bytes({field: identity[field] for field in generation_fields})

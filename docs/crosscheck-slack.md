@@ -14,7 +14,7 @@ GitHub pull-request link. The bot validates the repository against the
 allowlist, checks the submitter's daily meter, acks in thread ("Review
 started"), runs `bin/fm-crosscheck.sh run <task-id> <pr-url>` as a bounded
 subprocess, and posts the findings as a thread reply on the engineer's own
-message, naming the lane that produced the review ("GLM-5.2 primary" or
+message, naming the lane that produced the review (the cross-family primary deployment or
 "pi-codex fallback (degraded)"). Tool failures are posted honestly as
 failures, never as verdicts. Cursor Bugbot continues to run for engineers'
 pull requests; this lane complements it.

@@ -511,13 +511,14 @@ test_completed_review_names_the_lane_and_writes_gate_metadata() {
   before=$(fixture_run_count)
   event="$TMP_ROOT/event-clear.json"
   write_event "$event" C0TESTCHAN U0ALICE 1755640004.000100 "$GOOD_PR_TEXT"
-  FM_FIXTURE_REVIEWER_JSON='{"harness":"pi","model":"FW-GLM-5.2","effort":"xhigh","account_home":"/tmp/x"}' \
+  FM_FIXTURE_REVIEWER_JSON='{"harness":"pi","model":"accounts/fireworks/models/glm-5p2","effort":"xhigh","account_home":"/tmp/x","review_family_mode":"cross-family-primary"}' \
     run_mention ev-clear-1 "$CONFIG_MAIN" "$event" clear \
     || fail "clear review errored: $RUN_MENTION_OUTPUT"
   assert_contains "$RUN_MENTION_OUTPUT" "action: completed:clear" "expected completed:clear"
   reply=$(last_post_text)
   assert_contains "$reply" "Crosscheck CLEAR" "verdict reply missing state"
-  assert_contains "$reply" "Lane: GLM-5.2 primary" "verdict reply did not name the GLM lane"
+  assert_contains "$reply" "Lane: glm-5p2 primary" \
+    "verdict reply did not name the cross-family lane"
   assert_contains "$reply" "crosscheck.md" "verdict reply did not point at the full report"
   assert_contains "$reply" "Host report path for the operator:" \
     "report path was not labeled as host-local"
@@ -525,7 +526,7 @@ test_completed_review_names_the_lane_and_writes_gate_metadata() {
   [ "$after" = $((before + 1)) ] || fail "expected exactly one crosscheck invocation"
   assert_grep "Review started" "$POSTS" "review start ack missing"
   assert_grep "hourglass" "$REACTS" "ack reaction missing"
-  pass "a completed review posts threaded findings naming the GLM lane (fixture verified gate metadata)"
+  pass "a completed review posts threaded findings naming the cross-family lane (fixture verified gate metadata)"
 }
 
 test_lane_naming_covers_fallback_and_explicit_marker() {

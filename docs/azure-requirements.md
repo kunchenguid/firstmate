@@ -254,24 +254,150 @@ Acceptance: concurrent crewmates run on distinct pi profiles with no account col
 
 ## R6. Crosscheck reviews outside the author's model family
 
-Status: BUILT 2026-08-20; no GLM review has ever completed. The lane below was built and merged
-(#264) and the deployment is live, but the primary reviewer is 0 for 6. Six GLM attempts are
-recorded against PR #220 in the crosscheck ledger on 2026-08-20, and all six ended in
-`tool-failure` with no citations and no execution proof; a seventh attempt, against PR #266, sits
-in the archived ledger beside it and also failed. GLM has produced no verdict at all. The one
-verdict this lane has produced came from the pi-codex fallback reviewer.
+Status: NOT DONE. **No cross-family review has ever completed, and none completed for this change
+either.** The acceptance is two completed reviews, not correct wiring: a codex-authored change AND
+a claude-authored change each reviewed by a GLM-backed reviewer, with bound reviewer identity and
+the same evidence discipline as the codex lane. Zero of those two exist. What landed is the lane
+being executable at all, which it previously was not, plus the fixes below. Read "Where the lane
+actually stands" before treating any of it as finished.
 
-The roster was GLM-only when those attempts ran. As of 2026-08-20 it is not: the operator restored
-the pi-codex fallback entries alongside GLM with `config/crosscheck-same-model` on, the sanctioned
-degraded mode while GLM cannot finish a review, so crosscheck can return verdicts again. It returns
-them from the fallback, which means codex-authored work is being reviewed by its own family again
-for the duration, exactly the degradation this requirement exists to remove.
+Context: see "The Azure Foundry Fireworks lane is unusable on this subscription" and "The lane is a
+named registry, now serving GLM-5.2 direct from Fireworks" below, both 2026-08-20. GLM never
+completed a review through Azure and on this subscription never can; it now serves through a direct
+Fireworks account instead.
 
-The deployment carries two per-minute limits, not one: 25,000 tokens and 25 requests (`FW-GLM-5.2`,
-DataZoneStandard, capacity 25). The 429 body names neither, reading only that requests to
-`FW-GLM-5.2` in eastus have "exceeded rate limit". Attributing the blocker to the token-per-minute
-limit specifically is therefore inference rather than measurement. Raising either is an owner
-action in the Foundry portal; the Microsoft.Quota API does not cover Cognitive Services.
+The earlier record stands as history: the lane was built and merged (#264), the `FW-GLM-5.2`
+deployment is live, and the primary reviewer went 0 for 6 against PR #220 plus a seventh failed
+attempt against PR #266, all `tool-failure` with no citations and no execution proof. The one
+verdict this requirement's lane had produced before today came from the pi-codex fallback
+reviewer, which is same-family review for codex-authored work and exactly the degradation this
+requirement exists to remove.
+
+The quota reading in the earlier draft was wrong about the cause. The deployment does carry two
+per-minute limits (25,000 tokens and 25 requests, `FW-GLM-5.2`, DataZoneStandard, capacity 25) and
+one attempt did record a 429, but neither limit is what stops this lane. The measured cause is
+below.
+
+### The Azure Foundry Fireworks lane is unusable on this subscription (2026-08-20, root-caused)
+
+This is the durable finding. It is not a quota, a route, a region, a credential, or a vendor
+problem. It is Azure Marketplace billing.
+
+Measured, not inferred:
+
+- Every request to the Foundry deployment `FW-GLM-5.2` returns HTTP 500
+  `invalid_model_endpoint_authentication` ("Failed to authenticate to backend endpoint") in roughly
+  0.2 seconds, at every input size.
+- The credential is fine. A bad key returns 401. These 500s carry fully computed, DECREMENTING
+  `x-ratelimit-*` headers, which only happens after the caller is authenticated and metered. The
+  failure is one hop past us, Foundry to Fireworks.
+- Not a route problem: `services.ai.azure.com/models/chat/completions` and
+  `cognitiveservices.azure.com/openai/v1/chat/completions` fail identically, with both Bearer and
+  api-key auth.
+- Not region- or resource-specific: a brand-new AIServices account in eastus2 with a fresh
+  deployment failed identically.
+- The clean discriminator is the PUBLISHER, not the vendor's models. On the same account, same key,
+  same subscription, `DeepSeek-V4-Pro` (publisher DeepSeek) and `Kimi-K2.7-Code` (publisher
+  MoonshotAI) both returned HTTP 200 on the same endpoint. Every `FW-*` deployment is published by
+  Fireworks AI through Marketplace and fails.
+
+The mechanism, with a citable source. Microsoft Learn, "Foundry Models from partners and
+community"
+(https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-from-partners)
+states that Student, Visual Studio Enterprise and Free-credit subscriptions cannot purchase
+software-as-a-service offers in Marketplace, and lists as unsupported both subscriptions without an
+active pay-as-you-go billing method (student, free trial, startup credit-based) and sponsored
+subscriptions that only use Azure credits. This subscription is named "Microsoft Azure
+Sponsorship". Partner models require Azure Marketplace, meaning a `Microsoft.SaaS` resource plus an
+accepted `Microsoft.MarketplaceOrdering` agreement; BOTH were verified to be ZERO on this
+subscription even after the owner deployed `FW-GLM-5.2` through the Foundry portal. The deployment
+exists, but the marketplace linkage to the publisher backend can never be established, which is
+what `invalid_model_endpoint_authentication` reports.
+
+GLM-5.2 exists only in the Fireworks flavor in the Foundry catalog, which is why GLM specifically
+was unreachable there, and why `FW-Kimi-K2.7-Code` would have failed for the same reason while
+`Kimi-K2.7-Code` worked.
+
+The two remedies were owner-owned: put a payment method on the subscription (the doc notes a card
+on file is charged instead of credits), or reach the model without Azure Marketplace. The owner
+took the second. This section exists so nobody re-litigates the Azure partner lane in three weeks.
+
+### The lane is a named registry, now serving GLM-5.2 direct from Fireworks (2026-08-20)
+
+The owner opened a direct Fireworks account, which bypasses Azure Marketplace entirely, so GLM-5.2
+is the reviewer again on its merits rather than on what Azure would serve.
+
+`bin/fm-crosscheck.py` carries `CROSS_FAMILY_LANES`, a code-side registry of vetted reviewer lanes.
+Each entry is a complete endpoint allowlist entry: deployment/model id, Pi provider slot,
+chat-completions api surface, endpoint host, the one accepted base URL, and the exact model-level
+`compat` the credential may carry. The roster (`$FM_HOME/config/crosscheck-reviewer.json`) selects
+the serving lane by naming the model, so substituting among registered lanes is a config change.
+Admitting a NEW endpoint stays a reviewed code change on purpose: the allowlist is the security
+control, and a credential file must never be able to introduce an endpoint the policy never named.
+
+The registered lane:
+
+| field | value |
+|---|---|
+| provider slot | `fireworks-glm` |
+| model | `accounts/fireworks/models/glm-5p2` |
+| endpoint | `https://api.fireworks.ai/inference/v1` (chat completions only) |
+| api | `openai-completions` |
+| pinned model-level compat | none |
+| declared cost | input 1.45, output 4.69 per MILLION tokens |
+| live check 2026-08-20 | HTTP 200, `finish_reason: stop`, streaming 1.56s with usage |
+
+The PINNED model id, not the `accounts/fireworks/routers/glm-5p2-fast` router. The router is
+faster, but a router may re-point to a different serving variant, and the reviewer identity this
+gate records has to name an exact model. An unattributable reviewer is worth more than a few
+seconds. Latency is not the constraint on a multi-minute review.
+
+Reviewer identity binds the provider slot, the pinned host, and the model
+(`fireworks-glm:api.fireworks.ai/accounts/fireworks/models/glm-5p2`), and the recorded credential
+identifier is a digest of host + model + endpoint. Neither contains nor is derived from the api
+key: two credentials differing only in `apiKey` produce byte-identical identifiers.
+
+The Azure `azure-glm` slot, the `FW-GLM-5.2` deployment, and the two Azure R6 attempt deployments
+(`Kimi-K2.7-Code`, `DeepSeek-V4-Pro`) are retired. Nothing in the code or config points at them.
+The legacy `glm-primary` ledger provenance value stays readable for durable records already
+carrying it, bound to exactly that retired model, which is no longer registered and so can never be
+claimed by a new run.
+
+`config/crosscheck-same-model` is `off`. That relaxation existed only because no cross-family lane
+could finish a review, so the codex fallback had to be allowed to review codex-authored work. With
+a working non-OpenAI primary, leaving it on would mean a transient provider hiccup silently drops
+back to same-family review, which is the exact defect this requirement removes. With it off, the
+fallback still serves any author outside the codex family, and a codex-authored PR whose primary is
+down FAILS CLOSED rather than being self-reviewed. That single-primary risk is accepted
+deliberately; flipping the relaxation back on is an operator act, not a silent degradation.
+
+Reviewer independence is now a FAMILY comparison, not an exact model-id one. The first completed
+cross-family review of this work found that a `gpt-5.5` author admitted a `gpt-5.6-sol` codex
+reviewer with no same-model marker recorded, which is same-family review of exactly the kind this
+requirement exists to prevent (crosscheck finding cc-4dcd7873f71a, reproduced 2026-08-21). A
+registered lane is its own family; `gpt-*`/`o1-`/`o3-`/`o4-`/`codex-*` are one OpenAI family and
+`claude-*` one Anthropic family; an unrecognized model stays its own family, so nothing that
+previously passed starts failing while everything recognized is strictly tightened.
+
+**Truncation is a failed review, not a verdict.** GLM-5.2 is a reasoning model and will spend the
+output budget on reasoning first: measured live at `max_tokens=600`, the response came back
+`finish_reason: length` with EMPTY visible content, while 4000 completed cleanly. The lane
+therefore declares `maxTokens` 32000, and a truncated turn is refused on two independent grounds
+that both already existed: the Pi stream parser refuses any final assistant turn whose `stopReason`
+is not `stop` (pi maps `finish_reason: length` to `stopReason: "length"`), and the verdict must
+then parse as JSON against the review schema, which truncated output cannot. Both are pinned by
+tests, including an end-to-end case that emits a COMPLETE, schema-valid clear verdict with only the
+stop reason set to `length` and requires the run to record `tool-failure` with no citations.
+
+**The USD budget control is inert, and R10 must stop claiming it.** The declared cost is now real
+(1.45 / 4.69 per million; pi's unit convention is per million, confirmed in its own source at
+`@earendil-works/pi-ai/dist/models.js`, `usage.cost.input = (rates.input / 1000000) * usage.input`,
+so the owner-set values are correct as written). But `bin/fm-crosscheck.py` records no token usage
+at all: there is no `prompt_tokens`/`completion_tokens` handling anywhere in it, and the ledger
+reviewer record carries no usage or cost field. A `daily_budget_usd` control therefore has nothing
+to meter regardless of what the cost field says. Fixing that is not in this change; C3's daily
+Cost-Management bound remains the only guard, with its own caveat that it is a backstop on recorded
+spend rather than a real-time meter.
 
 The Work list below is retained as the record of what was asked for; the state of each item is in
 "What landed" or "Still owed" below.
@@ -312,6 +438,9 @@ author fleet consume. The pi-codex roster (which R5 records as proven at the ros
 R9 still owes the live proof) is retained as a dormant fallback behind a config flip, never
 deleted; every review must name the lane that produced it, and a status read must show whether
 GLM is serving or the fallback is active, so a silent fallback is impossible.
+(Correction, 2026-08-21: "behind a config flip" held for the LOCAL fallback only. For the
+Azure-compartment lane it was false - the codex-family path was additionally broken in code and no
+flip would have restored it. See the compartment bullet under "Still owed".)
 Fallback operation is a recorded degradation, not free service restoration: with the fallback
 active, codex-authored work is reviewed by its own family again (the flip therefore includes
 `config/crosscheck-same-model` on for the duration, which the policy screen otherwise refuses),
@@ -382,39 +511,205 @@ What landed, 2026-08-20 (#264, plus #268 for a defect the live runs exposed):
   afterwards; the operator has since restored the fallback entries again, as the status above
   records. This run is still the only verdict this requirement's lane has produced.
 
+### The acceptance sentence is not evidenceable as written, and is amended (2026-08-21)
+
+R6's acceptance says "a codex-authored change AND a claude-authored change are each reviewed by a
+GLM-backed reviewer". **The system cannot evidence that sentence, and this must be said before any
+run is recorded against it.**
+
+What the code actually does, traced rather than assumed:
+
+- Eligibility derives from `model` in the task meta and NEVER from `harness`
+  (`bin/fm-crosscheck.py`, `model_family(meta["model"])`). `parse_meta` requires `harness` to be
+  present and non-empty, then nothing in reviewer selection reads it.
+- The ledger records **no author identity at all**. The one call site passes
+  `author_account_identity=""`, with an inline comment saying task metadata carries no upstream
+  authorship account record.
+- Git carries no harness signal either, by design: the no-self-attribution rule means no trailer
+  ever distinguishes a claude crewmate from a codex one.
+
+So the task meta is the only authorship input, and a task meta is a DECLARATION, not a record.
+Anyone can write `harness=claude` over any change. "A claude-authored change" is therefore not a
+checkable property of any artifact this system produces.
+
+**Amendment, and the reading to use.** The acceptance becomes what the system can actually
+evidence, which is also what the 2026-08-19 amendment's own reasoning needs ("one reviewer family
+outside both author families satisfies the paradigm for EVERY author"):
+
+> The cross-family lane completes a review end to end, and the family screen admits that reviewer
+> against BOTH a codex-model author and a non-codex-model author, with the ledger recording the
+> reviewer model, the review family mode, and whether the `crosscheck-same-model` relaxation was
+> required.
+
+Every clause there is checkable from the ledger. Nothing in it claims to know who wrote the code.
+This is deliberately weaker than the original sentence, and it is weaker in the only direction
+available: the original was never provable, so leaving it in place would have meant marking R6 DONE
+on an assertion.
+
+Making authorship genuinely recordable is the alternative, and it is a real change rather than a
+doc edit: it needs an authorship identity captured at task creation and carried into the ledger,
+which is the same `author_account_identity` field the Azure adapter's same-account refusal is
+already waiting on. Worth doing, out of scope here, and the amendment above does not depend on it.
+
+**Declaring a codex author is the SAFE error; declaring a claude author is the dangerous one.** A
+codex declaration can only narrow eligibility: against a codex-family reviewer it forces the
+`crosscheck-same-model` relaxation to appear in the record, and with the relaxation off it fails
+closed. A claude declaration widens eligibility silently and makes the run print "relaxation was
+not required" and record clean cross-family separation that may never have happened. When the real
+author is unknown, declare codex and take the louder record.
+
+**Correction to this program's own artifacts.** The two runs in
+`$FM_HOME/data/crossfamily-r6-281/` were driven by a hand-written two-line meta asserting
+`harness=claude` / `model=claude-opus-5` over a PR whose real author harness is not recorded
+anywhere. Those runs are real reviews and their findings were real and acted on, but their
+authorship claim is a declaration, and **they must not be counted toward the acceptance above**.
+Later probe runs declare a codex author instead, per the asymmetry.
+
+### Where the lane actually stands, 2026-08-21
+
+Stated plainly, because wiring being right is not the acceptance.
+
+**Has a cross-family review run end to end and produced a verdict? NO.** Not once, on any lane,
+ever. Three attempts against PR #281 on the direct Fireworks lane, each failing FURTHER along than
+the last:
+
+| # | outcome |
+|---|---|
+| 1 | GLM produced a COMPLETE turn; final text was not bare JSON, refused as `malformed verdict artifact`. Fell through to the codex fallback, which reached a real blocking verdict |
+| 2 | `Pi reviewer: bounded command timed out after 1800 seconds` |
+| 3 | GLM produced a real verdict naming the exact head and the exact account home, in BARE JSON, refused as `Unterminated string starting at: line 1 column 3045` |
+| 4 | GLM completed a full 424s review and produced a COMPLETE, SCHEMA-VALID verdict. Refused `UNREVIEWED` because the reviewer's own `executed_reproduction.command` did not name both SHAs |
+| 5 | Identical to 4, same refusal. So attempt 4 was not a lucky run and this failure is not variance |
+
+Attempt 1 was never a hang: the model went through pi, completed a turn, and produced text, and was
+rejected at the LAST step on output SHAPE. That fact also disproved the suspect this document
+previously named. Measured since:
+
+- **`reasoning_content` in streamed deltas is NOT the problem, and that Work item is answered.**
+  Streaming the review-shaped prompt reaches `[DONE]` in 21-24s carrying 390 and 867 reasoning
+  deltas, at default and `high` reasoning effort, with a maximum inter-chunk gap of 3.4s. A large
+  reasoning stream streams fine.
+- **The output shape was a Markdown fence, confirmed byte for byte.** Asked for this gate's exact
+  review instruction and schema, GLM returns ` ```json\n{...}\n``` `, and a bare parse of that fails
+  with `Expecting value: line 1 column 1 (char 0)` - precisely attempt 1's recorded error. The
+  extractor now unwraps exactly one complete fenced block, and attempt 3 duly got past it.
+- **The remaining failure is a TRUNCATED verdict carrying a SUCCESSFUL stop reason.** Attempt 3's
+  JSON breaks mid-string at char 3044 while pi reported `stopReason: stop`, so the stop-reason
+  guard never fired and only the JSON parse caught it. That is the strongest possible argument for
+  keeping BOTH refusal grounds rather than treating either as redundant, and both stay pinned by
+  tests.
+- **It is not the token cap.** Both `max_completion_tokens` (what pi sends for this provider) and
+  `max_tokens` are honored at 20000 and both return complete, parseable verdicts of 3212 and 3775
+  completion tokens; the lane declares `maxTokens` 32000.
+
+Attempt 4 is the milestone: **the lane executes a complete review and produces a schema-valid
+verdict.** The ledger recorded a genuine cross-family reviewer record against a codex-model author
+- `model: accounts/fireworks/models/glm-5p2`, `review_family_mode: cross-family-primary`, NO
+`model_independence` marker (so clean family separation with no relaxation required),
+`credential_source: pi-fireworks-glm-models-file`, and the non-secret
+`credential_identifier: provider-binding:fireworks-glm:d2a164ff...`, over 424s of reviewer time.
+Under the amended acceptance above, the family-screen clause is now EVIDENCED for a codex-model
+author.
+
+What remains is NOT transport, shape, or policy wiring. It is the reviewer obeying the review's own
+evidence discipline: the gate refused the verdict because the model's `executed_reproduction`
+command did not name both the base and head SHAs, which the prompt requires. That is the gate
+working exactly as designed, and it must NOT be relaxed to get a green verdict - a lane that earns
+its first verdict by lowering the evidence bar would be worth less than no lane. Attempt 5 repeated attempt 4 exactly, so this is
+REPRODUCED behavior rather than a flaky run: GLM-5.2 reliably omits the SHAs from its reproduction
+command. The remaining risk is therefore instruction compliance by this model on the evidence
+contract, plus the intermittent truncation attempt 3 showed, and neither is a reason to weaken a
+refusal.
+
+The obvious next step is to strengthen the reproduction-command INSTRUCTION rather than the check,
+which is legitimate prompt work and not a relaxation. It is deliberately NOT done here: that prompt
+is shared with the codex lane, which currently satisfies the clause, and changing a contract that
+every merge depends on to accommodate one model is a decision to take deliberately rather than at
+the end of a long session.
+
+**What #281 closes:**
+
+- The lane is executable at all. `azure-glm` / `FW-GLM-5.2` on main are dead references: the Foundry
+  account `aif-fm7c799d-eus01` has ZERO deployments as of 2026-08-21, so the pre-existing lane could
+  not have served a review under any circumstances.
+- Two reproduced high-severity policy bypasses, both found by a real completed review of the branch
+  (codex-family fallback lane) and both fixed with tests: provider-qualified authors bypassing
+  family separation (cc-4dcd7873f71a and cc-5ec330d3c74d) and the model-level `compat` pin missing
+  the provider and `modelOverrides` layers pi also composes (cc-ca5848b19ac3).
+- Operator documentation that told captains to provision an `openai-codex` `auth.json` for every Pi
+  reviewer, which misprovisions a cross-family lane home (cc-769d7eba2ded).
+- The startup-credit item above, retired as moot.
+
+**What #281 does NOT close, and must not be read as closing:**
+
+- The acceptance itself. Zero completed cross-family reviews; the requirement needs two, over two
+  different author families.
+- The status command answering whether the cross-family lane is serving or the fallback is active.
+  It still does not exist; `bin/fm-crosscheck.py` exposes `run`, `verify`, `merge` and `timings`.
+  This one is substantive rather than cosmetic, and it bites right now: the fallback IS active, and
+  the only thing that says so is a stderr line at run time.
+- Review guards sized to the model's context window. Two of the three the Work list names DO
+  exist and are stronger than asked: the findings schema is strict (`additionalProperties: false`,
+  enum'd severities, `maxItems` caps), and citations are validated before filing by escape check,
+  `git ls-files --error-unmatch` tracked-at-head check, and a line-in-range check. The third, a
+  per-review context cap actually SIZED to the serving model, does not exist:
+  `MAX_LEDGER_PROMPT_BYTES` (64,000) and `MAX_PROJECTED_FINDINGS` (512) are fixed constants, and
+  nothing reads the lane's declared `contextWindow`. This change does not re-size them.
+- A per-review spend meter. The provider slot declares real per-million costs (input 1.45, output
+  4.69) instead of the old slot's zeros, but that number lives in pi's own config and this change
+  does NOT make the crosscheck ledger's cost non-zero, because the ledger records no token usage at
+  all. R10's `daily_budget_usd` therefore still has nothing to bind to.
+
 Still owed, and honestly so:
 
-- The live end-to-end GLM review. The six attempts did not all die of the quota, and the record
-  should not be read as if they did. Attempts 0 and 1 (05:54Z) died before reaching the provider
-  at all, on a local harness fault in an operator-authored instrumentation shim whose `/dev/fd`
-  redirect was refused under the reviewer sandbox. Attempts 2, 3 and 4 (05:55Z to 05:59Z) each
-  recorded only `Pi reviewer emitted a turn after agent completion`, the parser defect #268 then
-  fixed (pi continues a retried attempt after `agent_end` via `auto_retry_start`, and the stream
-  parser read that continuation as a turn after completion, masking whatever the provider had
-  actually returned). Because the parser masked it, no retained artifact records what killed those
-  three. Attempt 6 (06:25Z), two minutes after #268 landed, is the only review run anywhere that
-  records an actual 429. The remaining ledger slot, index 5 at 06:08Z, is not a GLM run at all: it
-  is the pi-codex fallback demonstration. What is measured rather than inferred is the traffic
-  shape: in the deployment's metrics the 06:00Z hour shows 35 model requests and 23 client errors.
-  One real GLM review end to end closes this item, and the quota is the leading suspect for what
-  stands in the way, not an established cause.
-- The startup-credit decrement check. Deployment metrics for `aif-fm7c799d-eus01` record 727,136
-  tokens on 2026-08-20: 515,965 in the 04:00Z hour, 135,911 in 05:00Z, 75,260 in 06:00Z. (An
-  earlier draft of this section reported roughly 510K for the day; that was the 04:00Z hour alone.)
-  Cost Management shows no charge against the resource yet. That absence carries no information
-  either way at this range: C3 records that Cost Management actual lags hours, which is why its
-  own bound is a backstop on recorded spend. This needs the portal's cost view.
-- The Azure-compartment GLM lane, which is switched off rather than unbuildable. The serving lane
+- CLOSED as far as GLM is concerned, and the earlier reading of it was wrong. This item asked for
+  a live end-to-end GLM review; no such review is obtainable on this subscription, for the
+  Marketplace reason root-caused above. The historical detail stands: attempts 0 and 1 (05:54Z)
+  died before reaching the provider at all, on a local harness fault in an operator-authored
+  instrumentation shim whose `/dev/fd` redirect was refused under the reviewer sandbox; attempts
+  2, 3 and 4 (05:55Z to 05:59Z) each recorded only `Pi reviewer emitted a turn after agent
+  completion`, the parser defect #268 then fixed, which masked whatever the provider actually
+  returned; attempt 6 (06:25Z) is the only review run anywhere that records an actual 429; ledger
+  slot 5 at 06:08Z is the pi-codex fallback demonstration, not a GLM run. The quota was named as
+  the leading suspect. It was not the cause. The acceptance now rests on a completed review from a
+  registered, reachable cross-family lane instead.
+- The startup-credit decrement check is MOOT, retired rather than left standing. It asked for a
+  small live spend confirming the charge decrements Azure startup credit. That premise died with
+  the lane move. Fireworks pay-per-token ON FOUNDRY billed as Azure consumption; Fireworks DIRECT
+  bills a Fireworks account and touches no Azure credit at all, so no charge for this lane can ever
+  appear in Azure Cost Management. Nobody should go hunting for one. The historical Azure numbers
+  are kept only as a record of what the dead lane consumed: deployment metrics for
+  `aif-fm7c799d-eus01` recorded 727,136 tokens on 2026-08-20 (515,965 in the 04:00Z hour, 135,911
+  in 05:00Z, 75,260 in 06:00Z; an earlier draft reported roughly 510K for the day, which was the
+  04:00Z hour alone). That resource now has ZERO deployments, verified 2026-08-21, so it can serve
+  nothing. If a spend signal is still wanted it is a Fireworks-side number, and the meter it would
+  need does not exist here either: see the spend bullet below.
+- The Azure-compartment lane. "Switched off rather than unbuildable" was TOO KIND, and this is the
+  second time this requirement has had to retract a merely-disabled claim without anyone reaching
+  the code (the first was the stale `pi`-binary reason). `enabled: false` was MASKING an
+  independent in-code blocker: the compartment archive gate derived the executing-account identity
+  separately from `account_identity` and compared a bare account id against a prefixed one, so the
+  codex-family path refused ITSELF and no codex-family compartment review has ever run. Fixed
+  2026-08-21 with a single shared derivation and a test that is red on the old code; the switch is
+  still off, so the lane still does not run. Recorded because the first fix was itself incomplete:
+  it unified the two HOST derivations while the model guest kept a third, moving the refusal from
+  staging into a booted, paid VM. The guest is covered by an executing test now rather than
+  substring assertions, which is why that was invisible. The serving lane
   today is the local pi reviewer. The reason recorded here previously, that the `fm-ccm` image
   carries no `pi` binary and needs a rebake, is stale and is corrected below.
-- A spend signal for the new primary reviewer. The GLM provider entry declares `cost` as zeros for
-  `input`, `output`, `cacheRead` and `cacheWrite` (`tests/fm-crosscheck.test.sh:1046`), so a GLM
-  review prices at zero and the crosscheck ledger records no per-review cost for it. That is the
-  same ledger R10's `daily_budget_usd` waits on, and the reason it does not bind today. It leaves
-  C3's daily bound as the only guard over this lane's spend, and C3's own caveat is that the bound
-  is a backstop on Cost-Management-recorded spend rather than a real-time meter.
+- A spend signal for the primary reviewer, HALF closed and honestly so. The cost declaration is no
+  longer fake: the Fireworks lane declares input 1.45 and output 4.69 per million, and pi's unit
+  convention is per million (`@earendil-works/pi-ai/dist/models.js`:
+  `usage.cost.input = (rates.input / 1000000) * usage.input`), so those values are correct as
+  written. What is still missing is the meter. `bin/fm-crosscheck.py` records no token usage at
+  all - no `prompt_tokens`/`completion_tokens` handling anywhere in it, and no usage or cost field
+  on the ledger reviewer record - so R10's `daily_budget_usd` has nothing to bind to whatever the
+  cost field says. R10 must stop describing that as a control it has. C3's daily bound remains the
+  only guard over this lane's spend, and C3's own caveat is that the bound is a backstop on
+  Cost-Management-recorded spend rather than a real-time meter.
 - Three items from the Work list above that neither landed nor were separately tracked. The status
-  command that answers whether GLM is serving or the fallback is active does not exist:
+  command that answers whether a cross-family lane is serving or the fallback is active does not
+  exist:
   `bin/fm-crosscheck.py` exposes `run`, `verify` and `merge` and nothing else. This one is
   substantive rather than cosmetic, because the stated reason for it was that a silent fallback
   must be impossible, and the fallback is active right now. Second, that pi tolerates

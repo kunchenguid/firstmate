@@ -99,7 +99,23 @@ reviewer = request["reviewer"]
 identity = request["identity"]
 if "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest() != identity["credential_archive_digest"]:
     raise SystemExit("model guest: credential archive digest mismatch")
-if reviewer["harness"] == "pi" and reviewer["model"] == "FW-GLM-5.2":
+# R6 cross-family lane registry, mirroring CROSS_FAMILY_LANES in
+# bin/fm-crosscheck.py: model -> (provider slot, pinned chat-completions
+# base URL, non-secret executing identity, pinned model-level compat).
+CROSS_FAMILY_LANES = {
+    "accounts/fireworks/models/glm-5p2": (
+        "fireworks-glm",
+        "https://api.fireworks.ai/inference/v1",
+        "fireworks-glm:api.fireworks.ai/accounts/fireworks/models/glm-5p2",
+        {},
+    ),
+}
+lane = (
+    CROSS_FAMILY_LANES.get(reviewer["model"])
+    if reviewer["harness"] == "pi"
+    else None
+)
+if lane is not None:
     expected_name = "models.json"
 elif reviewer["harness"] in {"codex", "pi"}:
     expected_name = "auth.json"
@@ -128,32 +144,56 @@ expected = {
 if manifest != expected or manifest["credential_digest"] != identity["credential_digest"]:
     raise SystemExit("model guest: credential manifest identity mismatch")
 credential = json.loads(credential_bytes)
-if reviewer["harness"] == "pi" and reviewer["model"] == "FW-GLM-5.2":
-    # R6 GLM lane: the api-key credential must stay inside the pinned
-    # chat-completions endpoint allowlist, and the executing identity is
-    # the non-secret Foundry resource/deployment binding.
+if lane is not None:
+    # R6 cross-family lane: the api-key credential must stay inside that
+    # lane's pinned chat-completions endpoint allowlist, and the executing
+    # identity is the non-secret provider host/model binding.
+    slot, allowed_base_url, account, allowed_compat = lane
     providers = credential.get("providers") if isinstance(credential, dict) else None
     entry = (
-        providers.get("azure-glm")
-        if isinstance(providers, dict) and set(providers) == {"azure-glm"}
+        providers.get(slot)
+        if isinstance(providers, dict) and set(providers) == {slot}
         else None
     )
     base_url = entry.get("baseUrl") if isinstance(entry, dict) else None
-    if base_url != "https://aif-fm7c799d-eus01.cognitiveservices.azure.com/openai/v1":
-        raise SystemExit("model guest: GLM credential endpoint allowlist mismatch")
+    if base_url != allowed_base_url:
+        raise SystemExit("model guest: cross-family credential endpoint allowlist mismatch")
+    # pi composes provider-level compat/headers and a modelOverrides layer into
+    # the effective model, so the provider's keys are allowlisted rather than
+    # individually refused.
+    if set(entry) - {"baseUrl", "api", "apiKey", "models"}:
+        raise SystemExit("model guest: cross-family credential provider-level field override")
     # pi gives model-level baseUrl/api precedence over the provider level,
     # so any model entry carrying either field escapes the provider pin.
     models = entry.get("models") if isinstance(entry, dict) else None
     for model_entry in (models if isinstance(models, list) else []):
         if isinstance(model_entry, dict) and ("baseUrl" in model_entry or "api" in model_entry):
-            raise SystemExit("model guest: GLM credential model-level endpoint override")
-    account = "azure-glm:aif-fm7c799d-eus01/FW-GLM-5.2"
+            raise SystemExit("model guest: cross-family credential model-level endpoint override")
+        # `compat` keys change how pi frames the request and reads the
+        # response, so the lane owns them exactly.
+        if isinstance(model_entry, dict) and model_entry.get("compat", {}) != allowed_compat:
+            raise SystemExit("model guest: cross-family credential model-level compat override")
 elif reviewer["harness"] == "codex":
+    # The PREFIXED identity, byte-identical to
+    # `account_identity_from_credential` on the host. This is the third place
+    # that derivation exists (host reader, host archive gate, and here), and
+    # it is the one that cannot import the others because the guest ships as a
+    # self-contained script onto a VM. It disagreed by exactly this prefix
+    # once already: the host digests `codex:<id>` while this derived the bare
+    # `<id>`, so the comparison below could never be equal and the refusal
+    # fired INSIDE a booted, paid VM instead of during staging. Any change to
+    # the host rule must be mirrored here, and
+    # `model_guest_executing_account_unit` in tests/fm-crosscheck-azure.test.sh
+    # executes this exact block against the host readers to prove they agree.
     tokens = credential.get("tokens") if isinstance(credential, dict) else None
-    account = tokens.get("account_id") if isinstance(tokens, dict) else None
+    raw = tokens.get("account_id") if isinstance(tokens, dict) else None
+    account = "codex:" + raw.strip() if isinstance(raw, str) and raw.strip() else None
 else:
     entry = credential.get("openai-codex") if isinstance(credential, dict) else None
-    account = entry.get("accountId") if isinstance(entry, dict) else None
+    raw = entry.get("accountId") if isinstance(entry, dict) else None
+    account = (
+        "openai-codex:" + raw.strip() if isinstance(raw, str) and raw.strip() else None
+    )
 if not isinstance(account, str) or "sha256:" + hashlib.sha256(account.encode()).hexdigest() != identity["reviewer_account_digest"]:
     raise SystemExit("model guest: credential executing account mismatch")
 path = destination / expected_name
@@ -183,11 +223,11 @@ case "$HARNESS" in
     ;;
   pi)
     export PI_CODING_AGENT_DIR="$ACCOUNT"
-    # The model decides the provider slot (R6): the GLM deployment runs on
-    # the azure-glm Foundry provider, the gpt fallback family stays on
+    # The model decides the provider slot (R6): each cross-family deployment
+    # runs on its own provider slot, the gpt fallback family stays on
     # openai-codex, and an unmapped model refuses rather than guessing.
     case "$MODEL" in
-      FW-GLM-5.2) PI_PROVIDER=azure-glm ;;
+      accounts/fireworks/models/glm-5p2) PI_PROVIDER=fireworks-glm ;;
       gpt-5.6-sol) PI_PROVIDER=openai-codex ;;
       *) echo "model guest: no Pi provider mapping for model $MODEL" >&2; exit 125 ;;
     esac
