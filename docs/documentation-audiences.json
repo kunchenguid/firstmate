@@ -149,6 +149,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/pr-description/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/fmx-respond/SKILL.md",
       "audience": "agent-runtime"
     },
