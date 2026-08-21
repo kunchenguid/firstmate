@@ -482,6 +482,9 @@ EOF
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
   git clone --quiet "$url" "$dst"
+  # Pin `gh pr create`'s base to origin so a fork clone's crew never targets the
+  # upstream parent (bin/fm-gh-base.sh); idempotent, worktrees inherit it.
+  "$FM_ROOT/bin/fm-gh-base.sh" "$dst" >/dev/null 2>&1 || true
 }
 
 validate_seed_project() {

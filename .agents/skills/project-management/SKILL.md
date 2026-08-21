@@ -64,6 +64,7 @@ Default it off for every project and every posture, and enable it only on the ca
 
 Confirm the source URL, local project name, delivery posture, autonomy posture, and production branch (plus any staging branch), stating the resolved default for each rather than asking the captain to invent one.
 Clone into `projects/<name>` and add the registry entry through the production-branch registration gate above only after the destination is known to be unused.
+Immediately after cloning, run `bin/fm-gh-base.sh projects/<name>` to pin `gh pr create`'s base to the clone's own origin, so a fork clone's crew never proposes an internal change to the upstream parent (idempotent, harmless for non-forks; worktrees inherit it, and the sync/bootstrap backfill re-applies it).
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.

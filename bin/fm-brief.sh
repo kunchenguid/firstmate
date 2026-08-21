@@ -449,6 +449,13 @@ else
   LOCAL_MERGE_LINE="The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path."
   EPIC_PLAN_SECTION=""
 fi
+
+# Fork-PR-origin guard (both PR modes): a fork's \`gh pr create\` defaults its base
+# to the UPSTREAM parent, so the PR must be opened against this repo's own origin
+# and the reported URL verified to be on origin, never a fork's parent. This is
+# belt-and-suspenders: the clone is already configured to resolve gh's base to
+# origin, but the worker must never rely on gh's implicit base. Empty for local-only.
+PR_ORIGIN_NOTE=" Open the PR against this repo's own \`origin\` (never a fork's upstream parent), and confirm the reported PR URL is on the origin repository before reporting done."
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -458,7 +465,7 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 ${BASE_CONTRACT_LINE}This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.${PR_TARGET_NOTE}
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.${PR_TARGET_NOTE}${PR_ORIGIN_NOTE}
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -497,7 +504,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.${PR_TARGET_NOTE}
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.${PR_TARGET_NOTE}${PR_ORIGIN_NOTE}
 EOF
     ;;
 esac

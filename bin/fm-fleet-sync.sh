@@ -335,6 +335,12 @@ sync_project() {
     return 0
   fi
 
+  # Backfill the fork-PR-origin guard on every existing clone (bin/fm-gh-base.sh):
+  # pin `gh pr create`'s base to origin so a fork clone's crew never proposes an
+  # internal change to the upstream parent. Idempotent; also fixes a main-home
+  # project cloned by hand, since add-time cloning is done by the agent.
+  "$FM_ROOT/bin/fm-gh-base.sh" "$PROJ" >/dev/null 2>&1 || true
+
   if ! fetch_with_packed_refs_lock_guard; then
     reason="fetch failed"
     if [ -n "$FETCH_OUTPUT" ]; then

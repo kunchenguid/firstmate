@@ -230,6 +230,9 @@ EOF
   else
     printf '%s\n' "$NAME" >> "$CREATED_PROJECTS"
     git clone --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
+    # Pin `gh pr create`'s base to origin so a fork clone's crew never targets the
+    # upstream parent (bin/fm-gh-base.sh); idempotent, worktrees inherit it.
+    "$SCRIPT_DIR/fm-gh-base.sh" "$DEST" >/dev/null 2>&1 || true
     if [ "$MODE" = no-mistakes ]; then
       command -v no-mistakes >/dev/null 2>&1 || die "no-mistakes is unavailable for project $NAME"
       (cd "$DEST" && no-mistakes init >/dev/null && no-mistakes doctor >/dev/null) \
