@@ -312,6 +312,18 @@ const OFFICIAL_PROVIDER_MODEL_APIS: Readonly<Record<string, readonly string[]>> 
   xai: ["openai-completions", "openai-responses"],
 };
 
+const NON_ROUTING_MODEL_OVERRIDE_FIELDS = new Set([
+  "name",
+  "reasoning",
+  "thinkingLevelMap",
+  "input",
+  "cost",
+  "contextWindow",
+  "maxTokens",
+  "samplingParams",
+]);
+const WALL_CLOCK_SAMPLE_TOLERANCE_MS = 2;
+
 type QuotaProcessResult =
   | { kind: "ok"; stdout: string }
   | { kind: "failed"; stdout: string; exitCode: number | null }
@@ -602,7 +614,9 @@ function modelsConfigPreservesQuotaProvenance(value: unknown, model: ActiveModel
     const override = value.modelOverrides[model.id];
     if (override !== undefined) {
       if (!isRecord(override)) return false;
-      if (Object.keys(override).some((field) => field !== "name" && field !== "cost")) return false;
+      if (Object.keys(override).some((field) => !NON_ROUTING_MODEL_OVERRIDE_FIELDS.has(field))) {
+        return false;
+      }
     }
   }
   return true;
@@ -650,8 +664,9 @@ function conservativePublicationAgeMs(
     timelineOriginMs > Math.max(processStartedAtWallMs, publishedAtWallMs)
   ) return processElapsedMs;
   const wallAgeMs = Math.max(0, publishedAtWallMs - timelineOriginMs);
-  const backwardAdjustmentMs = Math.max(0, processElapsedMs - wallElapsedMs);
-  return Math.min(processElapsedMs, wallAgeMs + backwardAdjustmentMs);
+  const clockSampleDifferenceMs = Math.abs(processElapsedMs - wallElapsedMs);
+  if (clockSampleDifferenceMs > WALL_CLOCK_SAMPLE_TOLERANCE_MS) return processElapsedMs;
+  return Math.min(processElapsedMs, wallAgeMs + Math.ceil(clockSampleDifferenceMs));
 }
 
 function exactAccountId(value: unknown): string | null {
@@ -1256,23 +1271,40 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           compositionRevision: preflight.compositionRevision,
         };
       }
-      if (!registry.isUsingOAuth?.call(ctx.modelRegistry, model)) {
+      const postCredentialPreflight = preflightTarget(ctx, model);
+      if (postCredentialPreflight.kind === "unsupported") {
+        return { ...postCredentialPreflight, credentialRevision: credentialResult.revision };
+      }
+      if (
+        postCredentialPreflight.modelRevision !== preflight.modelRevision ||
+        postCredentialPreflight.compositionRevision !== preflight.compositionRevision
+      ) {
         return {
           kind: "unsupported",
-          view: unsupportedView(model.provider, "auth-unavailable"),
-          modelRevision: preflight.modelRevision,
-          compositionRevision: preflight.compositionRevision,
+          view: unsupportedView(model.provider, "provider-override"),
+          modelRevision: postCredentialPreflight.modelRevision,
+          compositionRevision: postCredentialPreflight.compositionRevision,
           credentialRevision: credentialResult.revision,
         };
       }
       const provider = registry.getProvider?.call(ctx.modelRegistry, model.provider);
       const oauth = provider?.auth?.oauth;
-      if (!oauth || typeof oauth.toAuth !== "function") {
+      const finalCompositionRevision = providerCompositionRevision(ctx, model);
+      if (
+        finalCompositionRevision !== postCredentialPreflight.compositionRevision ||
+        !oauth ||
+        typeof oauth.toAuth !== "function"
+      ) {
         return {
           kind: "unsupported",
-          view: unsupportedView(model.provider, "auth-inspection"),
-          modelRevision: preflight.modelRevision,
-          compositionRevision: preflight.compositionRevision,
+          view: unsupportedView(
+            model.provider,
+            finalCompositionRevision === postCredentialPreflight.compositionRevision
+              ? "auth-inspection"
+              : "provider-override",
+          ),
+          modelRevision: postCredentialPreflight.modelRevision,
+          compositionRevision: finalCompositionRevision,
           credentialRevision: credentialResult.revision,
         };
       }

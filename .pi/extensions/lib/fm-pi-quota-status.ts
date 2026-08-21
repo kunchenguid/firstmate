@@ -1725,9 +1725,6 @@ export function selectActiveProviderQuota(
     : DEFAULT_QUOTA_FRESHNESS_MS;
   let freshnessTimestampMs = report.generatedAtMs;
   let reportFreshUntilMs = report.generatedAtMs + freshnessMs;
-  if (nowMs >= reportFreshUntilMs + freshnessMs) {
-    return { kind: "stale", provider, label: null };
-  }
 
   const providerMatches = report.providers.filter(
     (entry) => isRecord(entry) && entry.provider === provider,

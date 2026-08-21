@@ -191,8 +191,9 @@ JS
 
 cat > "$TMP_ROOT/quota-fixture.mjs" <<'JS'
 const configuredNow = Number(process.env.FM_QUOTA_TEST_NOW_MS);
-const now = Number.isFinite(configuredNow) && configuredNow > 0 ? configuredNow : Date.now();
-const generatedAt = new Date(now - (process.env.FM_QUOTA_TEST_STALE === "1" ? 60 * 60 * 1000 : 0)).toISOString();
+const observedNow = Number.isFinite(configuredNow) && configuredNow > 0 ? configuredNow : Date.now();
+const now = observedNow - (process.env.FM_QUOTA_TEST_STALE === "1" ? 60 * 60 * 1000 : 0);
+const generatedAt = new Date(now).toISOString();
 const full = process.env.FM_QUOTA_TEST_FULL === "1";
 const requestedProvider = process.env.FM_QUOTA_TEST_PROVIDER || "";
 const reset = (milliseconds) => new Date(now + milliseconds).toISOString();
@@ -2166,7 +2167,7 @@ assert(
 const reportForwardView = selectActiveProviderQuota(
   publicationForwardParsed,
   "openai-codex",
-  { nowMs: now + 7 * 60_000 },
+  { nowMs: now + 13 * 60_000 },
 );
 assert(
   reportForwardView.kind === "stale" && reportForwardView.recoverable,
@@ -2787,7 +2788,14 @@ const cosmeticModelOverlay = makePi(
     modelsConfig: {
       "openai-codex": {
         modelOverrides: {
-          "fixture-model": { name: "Renamed Codex" },
+          "fixture-model": {
+            name: "Renamed Codex",
+            contextWindow: 512_000,
+            maxTokens: 64_000,
+            reasoning: true,
+            input: ["text", "image"],
+            samplingParams: { temperature: 0.5 },
+          },
         },
       },
     },
@@ -2857,6 +2865,28 @@ const callsAfterCommandHeader = (await readFile(process.env.FM_QUOTA_TEST_CALLS,
 assert(commandHeaderOptions.authCalls === undefined, "command-backed headers reached the effective auth resolver");
 assert(callsAfterCommandHeader === callsBeforeCommandHeader, "command-backed headers invoked quota-axi");
 await commandHeaderOverlay.emit("session_shutdown", { reason: "quit" });
+
+const authPreflightRaceOptions = { composedModels: true };
+const authPreflightRace = makePi(
+  createFirstmateQuotaStatusExtension({ refreshMs: 60_000, timeoutMs: 500 }),
+  "openai-codex",
+  "tui",
+  authPreflightRaceOptions,
+);
+await authPreflightRace.emit("session_start", { reason: "startup" });
+authPreflightRaceOptions.modelsConfig = {
+  "openai-codex": { headers: { Authorization: "!sleep 30" } },
+};
+authPreflightRace.replaceProviderComposition();
+await waitFor(
+  () => authPreflightRace.widgetText(240).includes("provider override"),
+  `mid-resolution provider replacement was not rejected: ${authPreflightRace.widgetText(240)}`,
+);
+assert(
+  authPreflightRaceOptions.authCalls === undefined,
+  "mid-resolution command-backed headers reached the effective auth resolver",
+);
+await authPreflightRace.emit("session_shutdown", { reason: "quit" });
 
 const delayedAuthWatcher = new EventEmitter();
 delayedAuthWatcher.close = () => {};
@@ -3432,7 +3462,7 @@ delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
 const reportForwardStart = Date.now();
-const reportForwardClock = new SplitClock(reportForwardStart + 7 * 60_000);
+const reportForwardClock = new SplitClock(reportForwardStart + 13 * 60_000);
 process.env.FM_QUOTA_TEST_NOW_MS = String(reportForwardStart);
 process.env.FM_QUOTA_TEST_FIRST_RESET_MS = String(3 * 60_000);
 await setStoredOAuth(
@@ -3636,6 +3666,51 @@ await waitFor(
   "pre-generation startup time expired a newly generated quota window",
 );
 await postStartupGeneration.emit("session_shutdown", { reason: "quit" });
+delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
+delete process.env.FM_QUOTA_TEST_NOW_MS;
+
+const mixedClockStart = Date.now();
+process.env.FM_QUOTA_TEST_NOW_MS = String(mixedClockStart + 14_000);
+process.env.FM_QUOTA_TEST_FIRST_RESET_MS = String(12_000);
+await setStoredOAuth(
+  "openai-codex",
+  fixtureAccessToken("fixture-codex-account"),
+  mixedClockStart + 24 * 60 * 60 * 1000,
+);
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+const callsBeforeMixedClock = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+  .trim()
+  .split(/\n/)
+  .filter(Boolean).length;
+const mixedClock = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 5 * 60 * 1000,
+  freshnessMs: 6 * 60 * 1000,
+  timeoutMs: 500,
+  now: () => {
+    const calls = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+      .trim()
+      .split(/\n/)
+      .filter(Boolean).length;
+    return mixedClockStart + (calls > callsBeforeMixedClock ? 24_000 : 0);
+  },
+  monotonicNow: () => {
+    const calls = fs.readFileSync(process.env.FM_QUOTA_TEST_CALLS, "utf8")
+      .trim()
+      .split(/\n/)
+      .filter(Boolean).length;
+    return calls > callsBeforeMixedClock ? 19_000 : 0;
+  },
+}));
+await mixedClock.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => mixedClock.widgetText(400).includes("GPT-5.3-Codex-Spark session 100% left"),
+  "mixed-clock fixture did not publish an independently fresh window",
+);
+assert(
+  !mixedClock.widgetText(400).includes("week 94% left"),
+  "mixed forward and backward clock steps under-aged expired quota",
+);
+await mixedClock.emit("session_shutdown", { reason: "quit" });
 delete process.env.FM_QUOTA_TEST_FIRST_RESET_MS;
 delete process.env.FM_QUOTA_TEST_NOW_MS;
 
