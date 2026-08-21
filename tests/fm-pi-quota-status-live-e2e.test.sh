@@ -85,6 +85,7 @@ JS
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
+# shellcheck disable=SC2016 # ${payload} is an intentional JavaScript template expression.
 LIVE_ACCESS=$(node -e '
 const payload = Buffer.from(JSON.stringify({
   "https://api.openai.com/auth": { chatgpt_account_id: "live-codex-account" },
@@ -117,7 +118,7 @@ trap cleanup EXIT
 
 run_harness() {
   local harness=$1 binary=$2 version project calls stdin_log capture_log launch_script
-  local pane session launch_command attempt pane_dead pane_status
+  local pane session launch_command pane_dead pane_status
   version=$($binary --version 2>/dev/null) || fail "$harness version probe failed"
   project="$LAB/project-$harness"
   calls="$LIVE_CALLS"
@@ -163,7 +164,7 @@ EOF
   tmux set-window-option -t "$session:0" remain-on-exit on >/dev/null \
     || fail "$harness live tmux session could not retain its final screen"
   pane=
-  for attempt in $(seq 1 450); do
+  for _ in $(seq 1 450); do
     pane=$(tmux capture-pane -p -t "$session:0.0" 2>/dev/null | tr -d '\r')
     case "$pane" in
       *"GPT-5.3-Codex-Spark week"*) break ;;
@@ -209,7 +210,7 @@ EOF
   tmux send-keys -t "$session:0.0" Enter \
     || fail "$harness live Pi process did not accept quit submission"
   pane_dead=0
-  for attempt in $(seq 1 200); do
+  for _ in $(seq 1 200); do
     pane_dead=$(tmux display-message -p -t "$session:0.0" '#{pane_dead}' 2>/dev/null || printf 1)
     [ "$pane_dead" != 1 ] || break
     sleep 0.1
