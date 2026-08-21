@@ -77,7 +77,8 @@ task_show() {
 
 # One record from either file, set as globals so the caller can also tell WHERE
 # it came from; a command substitution could not carry that back out.
-#   0 - found, 1 - no record in either file, 2 - unreadable archive
+#   0 - found, 1 - no record in either file, 2 - unreadable archive,
+#   3 - no readable copy of the archive could be staged
 RECORD_SHOW=''
 RECORD_ARCHIVED=0
 load_record() {  # <task-id>
@@ -96,13 +97,17 @@ load_record() {  # <task-id>
   return "$rc"
 }
 
-# load_record, turning both failures into one plain diagnostic that names what
-# was searched instead of reporting an archived record as missing.
+# load_record, turning each failure into a plain diagnostic that names what was
+# searched instead of reporting an archived record as missing. A layout the parser
+# rejects and a copy that could never be staged are separate answers, because the
+# archive is only implicated in the first.
 require_record() {  # <label> <task-id>
   local label=$1 id=$2 rc=0
   load_record "$id" || rc=$?
   [ "$rc" -ne 2 ] \
     || fail "$label $id is archived in $ARCHIVE_FILE but tasks-axi could not read that record; the archive layout changed"
+  [ "$rc" -ne 3 ] \
+    || fail "$label $id is archived in $ARCHIVE_FILE but no readable copy of that archive could be staged; nothing was read"
   [ "$rc" -eq 0 ] \
     || fail "$label $id has no record: no task $id in $BACKLOG_FILE and none in $ARCHIVE_FILE"
 }

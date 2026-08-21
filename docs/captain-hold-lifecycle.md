@@ -101,8 +101,9 @@ It proves: the reconstructed silent-divergence case is signalled - a status reso
 It also proves the retention read scope, in both directions.
 An answered captain call that retention moved into the archive keeps the captain's exact words, passes the completion gate with the archived count named, passes it through the retired shim spelling too, and lets the finished investigation be cleaned up.
 The gate is not looser for it: an inventory entry with no record in either file, a recorded entry closed with no recorded answer, and that same entry after retention archives it all still fail, the three messages are asserted to differ from one another, and cleanup is refused by the gate itself while any of them stands.
+An archive that still carries the entry is refused in its own words in each of the two ways the read can fail, a section heading the parser no longer accepts and a copy that could not be staged at all, and each of those messages is asserted to be neither the no-record wording nor any of the other refusals, which is what keeps an archive that cannot be read from ever collapsing back into a false "absent".
 On the write side, an archived record takes an exact `answer` replay and a replayed keyed delivery while leaving both files byte-identical, and refuses a drifted answer, a `--release`, and a `hold` that would mint a second row for the same call.
-Every archive fixture is built by running `tasks-axi prune --keep 0 --state done` inside the throwaway home, never by hand-editing a backlog or archive file.
+Every archive fixture is built by running `tasks-axi prune --keep 0 --state done` inside the throwaway home, never by hand-editing a backlog or archive file; the unreadable case then damages only that disposable archive's own section heading.
 
 `tests/fm-classify-decision-key.test.sh` pins `status_key_closing_verb` itself: it separates a resolution from the durable-transfer close and from a still-open key, reports the last real transition across re-openings and both key positions, and treats a prose mention as no transition.
 

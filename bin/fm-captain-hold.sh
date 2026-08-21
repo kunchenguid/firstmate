@@ -284,6 +284,7 @@ show_field_value() {  # <show-output> <field>
 #   0 - found; DURABLE_SHOW is the record and DURABLE_SOURCE the file it came from
 #   1 - no record in either file
 #   2 - the archive carries the entry but it could not be read back
+#   3 - the archive carries the entry but no readable copy of it could be staged
 DURABLE_SHOW=''
 DURABLE_SOURCE=''
 load_durable_record() {  # <task-id>
@@ -307,6 +308,20 @@ unreadable_archive() {  # <task-id>
   fail "captain call $1 is archived in $ARCHIVE_FILE but tasks-axi could not read that record; the archive layout changed, so this cannot confirm what the captain answered"
 }
 
+# Failing to stage the copy is not the archive's fault and must not borrow its
+# diagnosis: nothing was read, so the layout is unexamined and the repair is on
+# this machine's temp space rather than on the archive.
+unstageable_archive() {  # <task-id>
+  fail "captain call $1 is archived in $ARCHIVE_FILE but no readable copy of that archive could be staged; nothing was read, so this cannot confirm what the captain answered"
+}
+
+# The two archive-read failures, each said in its own words. Neither may degrade
+# into "no record": a record that exists is never reported as absent.
+archive_read_failed() {  # <status> <task-id>
+  [ "$1" -ne 2 ] || unreadable_archive "$2"
+  [ "$1" -ne 3 ] || unstageable_archive "$2"
+}
+
 # The single "no record in either file" message. It names both files on purpose:
 # the wording it replaced said only "absent", which reads as a lost captain
 # answer and sends the reader hunting for one instead of at the inventory entry
@@ -316,12 +331,12 @@ no_durable_record() {  # <task-id>
 }
 
 # load_durable_record for a caller that must not proceed on a guess: an archive
-# it cannot read is a hard stop, never reported as an absent record.
+# read that failed either way is a hard stop, never reported as an absent record.
 #   0 - found, 1 - no record in either file
 require_durable_record() {  # <task-id>
   local rc=0
   load_durable_record "$1" || rc=$?
-  [ "$rc" -ne 2 ] || unreadable_archive "$1"
+  archive_read_failed "$rc" "$1"
   return "$rc"
 }
 
@@ -424,10 +439,16 @@ resolution_block() {  # <mode>
 # captain hold is not the captain's item at all. An answered record passes from
 # either file, and DURABLE_ARCHIVED counts the archived ones so the caller can
 # report the reason it passed.
+#
+# The verdict rules on the record the caller ALREADY loaded, so one entry costs
+# one lookup and the resolution and the verdict cannot disagree: a prune or an
+# answer landing between two reads can no longer produce a refusal that names an
+# id the second read no longer sees. Callers reach it through
+# require_resolved_record or require_durable_record, which load that record and
+# stop on anything they cannot read.
 DURABLE_ARCHIVED=0
-verify_hold_durable() {  # <task-id>
+verify_loaded_durable() {  # <task-id>
   local id=$1 state hold_kind body
-  require_durable_record "$id" || no_durable_record "$id"
   state=$(show_field "$DURABLE_SHOW" state)
   hold_kind=$(show_field_value "$DURABLE_SHOW" hold_kind)
   body=$(show_field "$DURABLE_SHOW" body)
@@ -458,13 +479,17 @@ verify_hold_durable() {  # <task-id>
 #   1 - no record for the entry or its legacy identity in either file
 #   2 - the archive carries the entry but it could not be read back; RESOLVED_ID
 #       names the id that was probed
+#   3 - the archive carries the entry but no readable copy of it could be staged;
+#       RESOLVED_ID names the id that was probed
 RESOLVED_ID=''
 resolve_and_load() {  # <origin-or-empty> <entry>
   local origin=$1 entry=$2 legacy rc=0
   RESOLVED_ID=$entry
   load_durable_record "$entry" || rc=$?
   [ "$rc" -ne 0 ] || return 0
-  [ "$rc" -ne 2 ] || return 2
+  # Only a genuine miss falls through to the legacy identity. An archive read
+  # that failed either way is a hard stop, so a second lookup cannot bury it.
+  [ "$rc" -eq 1 ] || return "$rc"
   [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] || return 1
   legacy=$(legacy_hold_id "$origin" "$entry")
   RESOLVED_ID=$legacy
@@ -475,16 +500,16 @@ resolve_and_load() {  # <origin-or-empty> <entry>
 }
 
 # resolve_and_load for a caller that must stop rather than proceed on a guess.
-# `fail` here exits only this function's command substitution, so every caller
-# assigns the result and propagates the status instead of calling through `$( )`.
-resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
+# It reports through the same globals instead of printing the id, because `fail`
+# inside a `$( )` exits only the substitution: the caller carried on with an
+# empty task id and printed a second diagnostic naming nothing at all.
+# On return RESOLVED_ID names the task and DURABLE_SHOW/DURABLE_SOURCE carry its
+# record, so the caller needs no second lookup to rule on it.
+require_resolved_record() {  # <origin-or-empty> <entry>
   local origin=$1 entry=$2 legacy rc=0
   resolve_and_load "$origin" "$entry" || rc=$?
-  if [ "$rc" -eq 0 ]; then
-    printf '%s' "$RESOLVED_ID"
-    return 0
-  fi
-  [ "$rc" -ne 2 ] || unreadable_archive "$RESOLVED_ID"
+  [ "$rc" -ne 0 ] || return 0
+  archive_read_failed "$rc" "$RESOLVED_ID"
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
     fail "captain call $entry has no record: neither $entry nor its legacy identity $legacy is in $BACKLOG_FILE or $ARCHIVE_FILE"
@@ -854,14 +879,21 @@ command_answers() {
         continue
         ;;
     esac
-    # One resolution, one record, three distinguishable skips: a key that names
-    # nothing, an archive whose layout moved, and (below) a record that exists
-    # but cannot take this answer. A key whose answer was recorded and later
-    # trimmed out of the backlog resolves here like any other.
+    # One resolution, one record, four distinguishable skips: a key that names
+    # nothing, an archive whose layout moved, an archive no copy could be staged
+    # from, and (below) a record that exists but cannot take this answer. A key
+    # whose answer was recorded and later trimmed out of the backlog resolves
+    # here like any other.
     resolve_rc=0
     resolve_and_load "$origin" "$key" || resolve_rc=$?
     if [ "$resolve_rc" -eq 2 ]; then
       printf 'skipped: %s (archived in %s but that record could not be read)\n' "$key" "$ARCHIVE_FILE"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if [ "$resolve_rc" -eq 3 ]; then
+      printf 'skipped: %s (archived in %s but no readable copy of that archive could be staged)\n' \
+        "$key" "$ARCHIVE_FILE"
       skipped=$((skipped + 1))
       continue
     fi
@@ -935,7 +967,7 @@ command_answers() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' entry entry_id key status_file open raw_open has_meta=0 transfer_rc
+  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -966,11 +998,11 @@ command_complete() {
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      # Assigned first: resolve_entry's own `fail` cannot stop the parent from
-      # inside a command substitution, and passing its empty output straight
-      # through printed a second diagnostic naming no task at all.
-      entry_id=$(resolve_entry "$origin" "$entry") || exit 1
-      verify_hold_durable "$entry_id"
+      # One lookup per entry, and the verdict rules on exactly the record the
+      # resolution found: no command substitution to swallow a refusal, and no
+      # second read that a concurrent prune or answer could disagree with.
+      require_resolved_record "$origin" "$entry"
+      verify_loaded_durable "$RESOLVED_ID"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -1012,7 +1044,7 @@ EOF
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys entry entry_id key open
+  local origin=${1:-} meta reviewed keys entry key open
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
@@ -1024,9 +1056,9 @@ command_verify() {
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      # See command_complete: assigned first so one failure prints one message.
-      entry_id=$(resolve_entry "$origin" "$entry") || exit 1
-      verify_hold_durable "$entry_id"
+      # See command_complete: one lookup, one record, one message per failure.
+      require_resolved_record "$origin" "$entry"
+      verify_loaded_durable "$RESOLVED_ID"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF

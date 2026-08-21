@@ -1225,11 +1225,13 @@ test_archived_captain_answer_still_completes_the_investigation() {
 
 # The gate must not get looser in exchange. Reading the archive adds one place a
 # record can legitimately live; it changes nothing about what counts as answered.
-# All three failing shapes must still fail, and each must say which one it is:
-# the wording that said only "absent" is what sent a reader hunting for a lost
-# captain answer instead of at the record right in front of them.
+# Every failing shape must still fail, and each must say which one it is: the
+# wording that said only "absent" is what sent a reader hunting for a lost
+# captain answer instead of at the record right in front of them. That includes
+# the two ways the archive read itself can fail, because reporting either as "no
+# record" would restore exactly the false absent this change removes.
 test_unanswered_and_absent_captain_calls_still_fail_distinguishably() {
-  local home id absent_err closed_err archived_err out
+  local home id absent_err closed_err archived_err unstaged_err unreadable_err out
   home=$(make_home retention-gate-guard)
   id=sample-guarded-review
   mkdir -p "$home/data/$id"
@@ -1318,7 +1320,68 @@ test_unanswered_and_absent_captain_calls_still_fail_distinguishably() {
   case "$out" in
     *archived*) fail "the answered call is in the active backlog; the pass must not claim otherwise: $out" ;;
   esac
-  pass "no-record, recorded-but-unanswered, and archived-but-unanswered captain calls all still fail, distinguishably"
+
+  # (4) Retention moves that answered record into the archive, and then the copy
+  # the read needs cannot be staged at all. Nothing was read, so the archive is
+  # unexamined: this must blame the staging rather than the layout, and above all
+  # must not read as an absent record.
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  assert_grep "sample-answered-call" "$home/data/done-archive.md" \
+    "setup error: retention should have moved the answered call into the archive"
+  assert_no_grep "sample-answered-call" "$home/data/backlog.md" \
+    "setup error: the archive read is only reached once retention has emptied the active backlog of that row"
+  if (TMPDIR="$home/no-such-tmp"; export TMPDIR; run_captain "$home" verify "$id") \
+    > "$home/unstaged.out" 2> "$home/unstaged.err"; then
+    fail "verification passed a record it never managed to read"
+  fi
+  unstaged_err=$(cat "$home/unstaged.err")
+  assert_contains "$unstaged_err" "$home/data/done-archive.md" \
+    "the staging-failure refusal must name the archive it was trying to copy"
+  assert_contains "$unstaged_err" "could be staged" \
+    "the staging-failure refusal must say the copy could not be staged"
+  assert_not_contains "$unstaged_err" "has no record" \
+    "a record that could not be copied must never be reported as no record at all"
+  assert_not_contains "$unstaged_err" "layout changed" \
+    "nothing was read, so the staging failure must not be blamed on the archive layout"
+
+  # (5) The archive still carries the entry, but its own section heading is no
+  # longer one tasks-axi accepts, so the record cannot be read back. Only this
+  # throwaway fixture is damaged, and only its heading: the entry line is left
+  # intact so the read reaches the parse instead of stopping at "no entry".
+  assert_grep "## Archived " "$home/data/done-archive.md" \
+    "setup error: retention should have written a dated archive heading to damage"
+  sed 's/^## Archived /## Retired /' "$home/data/done-archive.md" > "$home/damaged-archive.md" \
+    || fail "could not write the damaged archive fixture"
+  mv "$home/damaged-archive.md" "$home/data/done-archive.md"
+  assert_no_grep "## Archived " "$home/data/done-archive.md" \
+    "setup error: the damaged archive must carry no heading the read can still rewrite"
+  grep -Eq "^- \[[ x]\] sample-answered-call - " "$home/data/done-archive.md" \
+    || fail "setup error: the damaged archive must still carry the task entry, or nothing is proven about the parse"
+  if run_captain "$home" verify "$id" > "$home/unreadable.out" 2> "$home/unreadable.err"; then
+    fail "verification passed a record it could not read back out of the archive"
+  fi
+  unreadable_err=$(cat "$home/unreadable.err")
+  assert_contains "$unreadable_err" "$home/data/done-archive.md" \
+    "the unreadable-archive refusal must name the archive it could not read"
+  assert_contains "$unreadable_err" "could not read that record" \
+    "the unreadable-archive refusal must say the record could not be read back"
+  assert_not_contains "$unreadable_err" "has no record" \
+    "an archive that still holds the entry must never be reported as no record at all"
+
+  # Both archive-read failures must also be tellable apart from each other and
+  # from the three gate refusals, for the same reason those three are.
+  [ "$unstaged_err" != "$absent_err" ] \
+    || fail "a record that could not be copied reads as no record: $unstaged_err"
+  [ "$unstaged_err" != "$closed_err" ] && [ "$unstaged_err" != "$archived_err" ] \
+    || fail "a record that could not be copied reads as a recorded-but-unanswered call: $unstaged_err"
+  [ "$unreadable_err" != "$absent_err" ] \
+    || fail "an unreadable archive reads as no record: $unreadable_err"
+  [ "$unreadable_err" != "$unstaged_err" ] \
+    || fail "a layout the parser rejects and a copy that could not be staged read identically: $unreadable_err"
+  [ "$unreadable_err" != "$closed_err" ] && [ "$unreadable_err" != "$archived_err" ] \
+    || fail "an unreadable archive reads as a recorded-but-unanswered call: $unreadable_err"
+  pass "no-record, recorded-but-unanswered, archived-but-unanswered, unstageable, and unreadable captain-call records all still fail, distinguishably"
 }
 
 # The siblings that share the same lookup. Reading the archive is not permission

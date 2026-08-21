@@ -136,21 +136,49 @@ fm_tasks_axi_backend_available() {
 #
 # tasks-axi exposes no archive-aware read, and `--file <archive>` is refused
 # while that same path is the configured archive, so an archived row is read from
-# a private copy whose `## Archived <date>` headings are rewritten to the
-# `## Done` heading the parser accepts. tasks-axi stays the single owner of the
-# backlog format; the copy only makes the archive's own section headings legible
-# to it, and fm_tasks_axi_archive_show reports a copy it cannot parse as a
-# distinct failure rather than as an absent record.
+# a private copy whose `## Archived <date>` headings become the one `## Done`
+# heading the parser accepts: the first dated heading is rewritten and the rest
+# are dropped, so every archived row lands under a single section and the read
+# never depends on the parser tolerating a repeated section heading. tasks-axi
+# stays the single owner of the backlog format; the copy only makes the archive's
+# own section headings legible to it, and fm_tasks_axi_archive_show keeps a copy
+# it cannot parse, a copy it could not stage, and an absent record as three
+# separate answers.
 
 # One `[markdown]` file path from <home>'s own tasks-axi config, resolved the way
 # tasks-axi resolves it: the configured value when present, else the default the
 # tracked .tasks.toml pins. A relative value resolves against <home>, because
 # that is the directory tasks-axi runs in.
+# Only the `[markdown]` table is read. `backend =` is a top-level key, so another
+# backend may carry its own `path`/`archive`, and an unscoped scan would hand
+# back that other backend's file: the archive lookup would read the wrong file
+# and report an archived record as absent, which is the failure this whole read
+# exists to remove.
 fm_tasks_axi_markdown_path() {  # <home> <key> <default-relative>
   local home=$1 key=$2 default=$3 config="$1/.tasks.toml" value=''
   if [ -f "$config" ] && [ ! -L "$config" ]; then
-    value=$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
-      "$config" 2>/dev/null | head -1)
+    value=$(awk -v key="$key" '
+      /^[ \t]*\[/ {
+        section = $0
+        sub(/^[ \t]+/, "", section)
+        sub(/[ \t]+$/, "", section)
+        in_markdown = (section == "[markdown]")
+        next
+      }
+      !in_markdown { next }
+      {
+        eq = index($0, "=")
+        if (eq == 0) next
+        name = substr($0, 1, eq - 1)
+        sub(/^[ \t]+/, "", name)
+        sub(/[ \t]+$/, "", name)
+        if (name != key) next
+        value = substr($0, eq + 1)
+        if (match(value, /"[^"]*"/) == 0) next
+        print substr(value, RSTART + 1, RLENGTH - 2)
+        exit
+      }
+    ' "$config" 2>/dev/null)
   fi
   [ -n "$value" ] || value=$default
   case "$value" in
@@ -185,14 +213,29 @@ fm_tasks_axi_archive_has_entry() {  # <archive-file> <id>
 #   2 - the archive carries the entry but it could not be read back through
 #       tasks-axi; the archive layout moved, and a caller must say so loudly
 #       rather than treat a record that exists as absent
+#   3 - the archive carries the entry but no readable copy of it could be staged,
+#       so nothing was read at all; the repair is this machine's temp space
+#       rather than the archive, and a caller must blame neither the layout nor
+#       an absent record
 fm_tasks_axi_archive_show() {  # <home> <id>
   local home=$1 id=$2 archive view out rc=0
   archive=$(fm_tasks_axi_archive_file "$home")
   fm_tasks_axi_archive_has_entry "$archive" "$id" || return 1
-  view=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-archive-view.XXXXXX") || return 2
-  if ! sed 's/^## Archived .*/## Done/' "$archive" > "$view" 2>/dev/null; then
+  view=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-archive-view.XXXXXX") || return 3
+  # Every archived row under ONE section: the first dated heading becomes the
+  # `## Done` heading the parser accepts and the later ones are dropped, so their
+  # rows join that same section.
+  if ! awk '
+    /^## Archived / {
+      if (done_heading) next
+      done_heading = 1
+      print "## Done"
+      next
+    }
+    { print }
+  ' "$archive" > "$view" 2>/dev/null; then
     rm -f -- "$view"
-    return 2
+    return 3
   fi
   out=$( (cd "$home" && tasks-axi show "$id" --full --file "$view") 2>/dev/null ) || rc=$?
   rm -f -- "$view"
