@@ -3527,22 +3527,27 @@ JS
   "$chrome" \
     --headless=new \
     --disable-gpu \
+    --disable-dev-shm-usage \
     --no-sandbox \
     --user-data-dir="$TMP_ROOT/chrome-profile" \
     --virtual-time-budget=2000 \
     --dump-dom \
-    "file://$export_file" >"$export_dom" 2>/dev/null &
+    "file://$export_file" >"$export_dom" 2>"$TMP_ROOT/chrome-stderr" &
   chrome_pid=$!
   chrome_wait=0
-  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_wait" -lt 100 ]; do
+  # A cold Chrome can take longer than ten seconds on a loaded CI runner. Keep
+  # the render bounded, but allow startup enough headroom to reach the DOM.
+  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_wait" -lt 300 ]; do
     grep -Fq '</html>' "$export_dom" 2>/dev/null && break
     sleep 0.1
     chrome_wait=$((chrome_wait + 1))
   done
   kill "$chrome_pid" 2>/dev/null || true
   wait "$chrome_pid" 2>/dev/null || true
-  grep -Fq '</html>' "$export_dom" 2>/dev/null \
-    || fail "could not render calm-mode HTML export DOM"
+  if ! grep -Fq '</html>' "$export_dom" 2>/dev/null; then
+    [ ! -s "$TMP_ROOT/chrome-stderr" ] || cat "$TMP_ROOT/chrome-stderr" >&2
+    fail "could not render calm-mode HTML export DOM"
+  fi
   node - "$export_dom" <<'JS' || fail "rendered export DOM violated the Calm conversation boundary"
 const dom = require("node:fs").readFileSync(process.argv[2], "utf8");
 const messages = dom.match(/<div id="messages">([\s\S]*?)<\/main>/)?.[1];
