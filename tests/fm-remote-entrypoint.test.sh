@@ -36,7 +36,7 @@ test_symlink_invocation_resolves_sibling_lib() {
   assert_no_grep 'No such file or directory' "$err" \
     "invoking fm-remote-entrypoint.sh through a symlink failed to source its sibling lib"
   expect_code 64 "$code" "symlink invocation exit code"
-  assert_grep 'remote entrypoint expects protocol, root, home, and argv' "$err" \
+  assert_grep 'remote entrypoint expects protocol, root, home, routes, and argv' "$err" \
     "symlink invocation did not reach argument validation past sibling-lib sourcing"
   pass "fm-remote-entrypoint.sh invoked via a PATH symlink resolves SCRIPT_DIR to the real bin/ directory"
 }
@@ -50,7 +50,7 @@ test_direct_invocation_still_works() {
   code=$(run_entrypoint "$REAL_BIN/fm-remote-entrypoint.sh" "$out" "$err")
 
   expect_code 64 "$code" "direct invocation exit code"
-  assert_grep 'remote entrypoint expects protocol, root, home, and argv' "$err" \
+  assert_grep 'remote entrypoint expects protocol, root, home, routes, and argv' "$err" \
     "direct invocation did not reach argument validation"
   pass "fm-remote-entrypoint.sh invoked directly still resolves SCRIPT_DIR correctly"
 }

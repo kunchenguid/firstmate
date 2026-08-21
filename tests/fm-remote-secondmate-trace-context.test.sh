@@ -123,6 +123,7 @@ chmod +x "$FAKEBIN/fake-ssh"
 printf 'codex\n' > "$PARENT/config/secondmate-harness"
 printf 'tmux\n' > "$PARENT/config/backend"
 printf 'codex\n' > "$PARENT/config/crew-harness"
+printf '1\n' > "$PARENT/config/max-active-workers"
 printf '## In flight\n\n## Queued\n\n## Done\n' > "$PARENT/data/backlog.md"
 
 remote_env() {
@@ -169,6 +170,8 @@ freeze_parent_session
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
   || fail "default-off remote secondmate spawn failed"
 assert_present "$PARENT/state/ios.meta" "default-off remote spawn published no parent metadata"
+[ "$(<"$REMOTE_HOME/config/max-active-workers")" = 1 ] \
+  || fail "remote launch did not retain the configured worker capacity"
 ! grep -q '^traceparent=' "$PARENT/state/ios.meta" \
   || fail "default-off remote spawn must not record a traceparent= line"
 ! grep -q 'export TRACEPARENT=' "$HERDR_LOG" \

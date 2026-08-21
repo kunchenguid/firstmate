@@ -163,6 +163,20 @@ An inherited `data/captain-shared.md` counts in a secondmate's total but remains
 The internal [`/stow` skill](../.agents/skills/stow/SKILL.md) owns curation and its automatic secondmate cascade, which accounts every home against this same per-home allowance separately rather than against a fleet total.
 The helper's header owns exact parsing, publication, and report output mechanics.
 
+## Worker capacity (config/max-active-workers)
+
+`config/max-active-workers` is a primary-authoritative admission limit for concurrently live direct-report endpoints on each FirstMate host.
+It prevents a burst of otherwise independent agent work from exhausting a small host's memory.
+When absent, the effective limit is `1`.
+To select another limit, write one positive base-10 integer from `1` through `999`, followed by one newline, in a regular single-linked file beneath a non-symlinked `config/` directory.
+`fm-spawn.sh` reads the value while it holds the host admission lock, before it creates a new endpoint.
+It keeps a pending reservation after it submits a launch command, until the endpoint is not proven `dead` or `missing`.
+Local secondmate homes share the primary host's count, and remote secondmate homes on the same remote account share that remote host's count.
+The count includes every recorded endpoint except those proven `dead` or `missing`; an `alive`, `ambiguous`, `unreadable`, or unverified endpoint consumes a slot.
+A malformed file or an unprovable count refuses the new spawn rather than treating the host as unlimited.
+The setting is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+A full limit makes the spawn return an actionable queue-or-wait error; it does not terminate work already running.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
@@ -327,7 +341,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `max-active-workers`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.

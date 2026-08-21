@@ -69,6 +69,10 @@ while IFS= read -r rel; do
     config/*) source="$CONFIG/${rel#config/}" ;;
     data/*) source="$DATA/${rel#data/}" ;;
   esac
+  if [ "$rel" = config/max-active-workers ] \
+     && ! fm_worker_capacity_limit "$CONFIG" >/dev/null; then
+    die "worker capacity source is unsafe or invalid: $source"
+  fi
   if [ -e "$source" ] || [ -L "$source" ]; then
     [ -f "$source" ] && [ ! -L "$source" ] || die "inherited source is unsafe: $source"
     [ "$(file_link_count "$source")" = 1 ] || die "inherited source is hardlinked: $source"

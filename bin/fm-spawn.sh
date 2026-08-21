@@ -95,9 +95,8 @@
 #   focus-sensitive presentation mutation.
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
-#   even when they select different backends. A fresh spawn first takes the
-#   per-home task-set lock and refuses rather than waits when forced teardown owns
-#   it; relaunch is exempt because the existing task's control lock covers it.
+#   even when they select different backends. A spawn first takes the per-home
+#   task-set lock and refuses rather than waits when forced teardown owns it.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -236,16 +235,21 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-worker-capacity-lib.sh
+. "$SCRIPT_DIR/fm-worker-capacity-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -665,6 +669,10 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
+SPAWN_WORKER_CAPACITY_LOCK=
+SPAWN_WORKER_CAPACITY_LOCK_HELD=0
+SPAWN_CAPACITY_RESERVATION=
+SPAWN_CAPACITY_LAUNCH_SUBMITTED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -672,6 +680,130 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+
+worker_capacity_parent_meta_matches_home() {
+  local state=$1 id=$2 home=$3 meta meta_home
+  meta="$state/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] \
+    && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || return 1
+  meta_home=$(fm_meta_get "$meta" home)
+  meta_home=$(CDPATH='' cd -- "$meta_home" 2>/dev/null && pwd -P) || return 1
+  [ "$meta_home" = "$home" ]
+}
+
+worker_capacity_remote_host_state() {
+  local home=$1 id=$2 route_state remote_job_state remote_capacity_state account_home
+  route_state="$home/state/parent-route"
+  [ -d "$route_state" ] && [ ! -L "$route_state" ] \
+    && worker_capacity_parent_meta_matches_home "$route_state" "$id" "$home" || {
+      echo "error: remote secondmate parent route is invalid; cannot resolve host worker capacity" >&2
+      return 1
+    }
+  remote_job_state=${FM_REMOTE_JOB_STATE_ROOT:-}
+  if [ -z "$remote_job_state" ]; then
+    account_home=${HOME:-}
+    account_home=$(CDPATH='' cd -- "$account_home" 2>/dev/null && pwd -P) || {
+      echo "error: remote account home is unavailable; cannot resolve host worker capacity" >&2
+      return 1
+    }
+    remote_job_state="$account_home/.firstmate/remote-job"
+  fi
+  remote_job_state=$(resolve_directory_input FM_REMOTE_JOB_STATE_ROOT "$remote_job_state") || return 1
+  [ -d "$remote_job_state" ] && [ ! -L "$remote_job_state" ] || {
+    echo "error: remote job state is unavailable or unsafe; cannot resolve host worker capacity" >&2
+    return 1
+  }
+  remote_capacity_state="$remote_job_state/worker-capacity"
+  fm_worker_capacity_remote_route_register "$remote_capacity_state" "$route_state" "$id" "$home" || {
+    echo "error: remote secondmate capacity route is invalid; cannot resolve host worker capacity" >&2
+    return 1
+  }
+  printf '%s\n' "$remote_capacity_state"
+}
+
+worker_capacity_host_state() {
+  local host_state=${FM_WORKER_CAPACITY_HOST_STATE:-} marker home parent_home parent_state id
+  local climbed=0 visited=$'\n'
+  if [ -n "$host_state" ]; then
+    home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+    marker="$home/$SUB_HOME_MARKER"
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      [ -f "$marker" ] && [ ! -L "$marker" ] \
+        && fm_secondmate_parent_record_parse "$home/$SUB_HOME_PARENT_MARKER" || {
+          echo "error: secondmate parent binding is invalid; cannot resolve host worker capacity" >&2
+          return 1
+        }
+      if [ "$FM_SECONDMATE_PARENT_ROUTE" = remote ]; then
+        id=$(<"$marker")
+        fm_task_id_creation_valid "$id" || {
+          echo "error: secondmate identity is invalid; cannot resolve host worker capacity" >&2
+          return 1
+        }
+        host_state=$(worker_capacity_remote_host_state "$home" "$id") || return 1
+      fi
+    fi
+  fi
+  if [ -z "$host_state" ]; then
+    home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+    while :; do
+      case "$visited" in *$'\n'"$home"$'\n'*)
+        echo "error: secondmate parent binding loops; cannot resolve host worker capacity" >&2
+        return 1
+        ;;
+      esac
+      visited="$visited$home"$'\n'
+      marker="$home/$SUB_HOME_MARKER"
+      if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+        if [ "$climbed" = 1 ]; then
+          host_state="$home/state"
+        else
+          host_state=$STATE
+        fi
+        break
+      fi
+      [ -f "$marker" ] && [ ! -L "$marker" ] || {
+        echo "error: secondmate identity marker is unsafe; cannot resolve host worker capacity" >&2
+        return 1
+      }
+      fm_secondmate_parent_record_parse "$home/$SUB_HOME_PARENT_MARKER" || {
+        echo "error: secondmate has no valid parent binding; cannot resolve host worker capacity" >&2
+        return 1
+      }
+      id=$(<"$marker")
+      fm_task_id_creation_valid "$id" || {
+        echo "error: secondmate identity is invalid; cannot resolve host worker capacity" >&2
+        return 1
+      }
+      case "$FM_SECONDMATE_PARENT_ROUTE" in
+        remote)
+          host_state=$(worker_capacity_remote_host_state "$home" "$id") || return 1
+          break
+          ;;
+        local)
+          parent_home=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || {
+            echo "error: local secondmate parent home is unavailable; cannot resolve host worker capacity" >&2
+            return 1
+          }
+          parent_state="$parent_home/state"
+          [ -d "$parent_state" ] && [ ! -L "$parent_state" ] \
+            && worker_capacity_parent_meta_matches_home "$parent_state" "$id" "$home" || {
+              echo "error: local secondmate parent record is invalid; cannot resolve host worker capacity" >&2
+              return 1
+          }
+          home=$parent_home
+          climbed=1
+          ;;
+        *) return 1 ;;
+      esac
+    done
+  fi
+  host_state=$(resolve_directory_input FM_WORKER_CAPACITY_HOST_STATE "$host_state") || return 1
+  [ -d "$host_state" ] && [ ! -L "$host_state" ] || {
+    echo "error: worker capacity host state directory is unsafe or unavailable" >&2
+    return 1
+  }
+  printf '%s\n' "$host_state"
+}
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -773,6 +905,15 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_SET_LOCK" || true
+  fi
+  if [ "$SPAWN_WORKER_CAPACITY_LOCK_HELD" = 1 ]; then
+    SPAWN_WORKER_CAPACITY_LOCK_HELD=0
+    fm_lock_release "$SPAWN_WORKER_CAPACITY_LOCK" || true
+  fi
+  if [ -n "$SPAWN_CAPACITY_RESERVATION" ] \
+     && [ "$SPAWN_CAPACITY_LAUNCH_SUBMITTED" != 1 ]; then
+    fm_worker_capacity_pending_release "$STATE" "$SPAWN_CAPACITY_RESERVATION" || true
+    SPAWN_CAPACITY_RESERVATION=
   fi
   if [ "$SPAWN_CONTROL_LOCK_HELD" = 1 ]; then
     SPAWN_CONTROL_LOCK_HELD=0
@@ -899,38 +1040,76 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
 fi
-if [ "$RELAUNCH" -eq 0 ]; then
-  mkdir -p "$STATE" || {
-    echo "error: could not create parent state directory" >&2
-    exit 1
-  }
-  # A FRESH spawn changes which tasks this home has, so it must not interleave
-  # with a forced teardown that has already enumerated that set: a record
-  # published inside the enumerate-then-remove window is invisible to the
-  # teardown's per-task preflight but visible to its cleanup, and gets mutated
-  # while never lifecycle-locked (bin/fm-wake-lib.sh's fm_task_set_lock_path
-  # owns the evidence; bin/fm-teardown.sh holds the same lock from enumeration
-  # through cleanup). Taken before this task's own locks, matching the
-  # acquisition order documented there, and held through publication.
-  #
-  # A relaunch is exempt: it republishes a task that already exists, so it is
-  # already covered by that task's control lock, which the teardown preflight
-  # tests.
-  #
-  # Refusing rather than waiting is the fail-closed direction: the home may be
-  # moments from removal, so there is nothing worth waiting for.
-  SPAWN_TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
-    echo "error: could not resolve the task-set lock for $STATE" >&2
-    exit 1
-  }
-  if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
-    echo "error: this home's task set is locked by another operation (a forced teardown is enumerating or removing its tasks); refusing to create task $ID rather than racing it" >&2
-    exit 1
+mkdir -p "$STATE" || {
+  echo "error: could not create parent state directory" >&2
+  exit 1
+}
+WORKER_CAPACITY_STATE=$STATE
+# A spawn that publishes task metadata must not interleave
+# with a forced teardown that has already enumerated that set: a record
+# published inside the enumerate-then-remove window is invisible to the
+# teardown's per-task preflight but visible to its cleanup, and gets mutated
+# while never lifecycle-locked (bin/fm-wake-lib.sh's fm_task_set_lock_path
+# owns the evidence; bin/fm-teardown.sh holds the same lock from enumeration
+# through cleanup). Taken before this task's own locks, matching the
+# acquisition order documented there, and held through publication.
+#
+# Refusing rather than waiting is the fail-closed direction: the home may be
+# moments from removal, so there is nothing worth waiting for.
+SPAWN_TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
+  echo "error: could not resolve the task-set lock for $STATE" >&2
+  exit 1
+}
+if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
+  echo "error: this home's task set is locked by another operation (a forced teardown is enumerating or removing its tasks); refusing to create task $ID rather than racing it" >&2
+  exit 1
+fi
+SPAWN_TASK_SET_LOCK_HELD=1
+# This lock serializes spawns, so the active count and the later launch
+# submission form one admission decision.
+WORKER_CAPACITY=$(fm_worker_capacity_limit "$CONFIG") || {
+  echo "error: unsafe config/max-active-workers; use one positive base-10 integer in a regular single-linked file" >&2
+  exit 1
+}
+if [ "$WORKER_CAPACITY" -gt 0 ]; then
+  REMOTE_SECONDMATE=0
+  if [ "$KIND" = secondmate ] && [ "$RELAUNCH" -eq 0 ] \
+     && [ "$(secondmate_registry_field "$DATA/secondmates.md" "$ID" remote 2>/dev/null || true)" = 1 ]; then
+    REMOTE_SECONDMATE=1
   fi
-  SPAWN_TASK_SET_LOCK_HELD=1
+  if [ "$REMOTE_SECONDMATE" = 0 ]; then
+    WORKER_CAPACITY_STATE=$(worker_capacity_host_state) || exit 1
+    SPAWN_WORKER_CAPACITY_LOCK="$WORKER_CAPACITY_STATE/.worker-capacity.lock"
+    if ! fm_lock_try_acquire "$SPAWN_WORKER_CAPACITY_LOCK"; then
+      echo "error: worker capacity admission is in progress; retry this spawn" >&2
+      exit 1
+    fi
+    SPAWN_WORKER_CAPACITY_LOCK_HELD=1
+    if [ "$RELAUNCH" -eq 0 ]; then
+      WORKER_ACTIVE=$(FM_WORKER_CAPACITY_RECONCILE=1 fm_worker_capacity_active_host "$WORKER_CAPACITY_STATE") || {
+        echo "error: could not prove the current active-worker count; refusing a new worker rather than risking host memory exhaustion" >&2
+        exit 1
+      }
+      if [ "$WORKER_ACTIVE" -ge "$WORKER_CAPACITY" ]; then
+        echo "error: worker capacity reached ($WORKER_ACTIVE/$WORKER_CAPACITY active); queue this task or wait for a worker to finish" >&2
+        exit 1
+      fi
+      if ! fm_worker_capacity_pending_reserve "$STATE" "$ID"; then
+        echo "error: could not reserve worker capacity for $ID; refusing a new worker rather than risking host memory exhaustion" >&2
+        exit 1
+      fi
+      SPAWN_CAPACITY_RESERVATION=$ID
+    fi
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
+    if [ -n "$SPAWN_CAPACITY_RESERVATION" ] \
+       && ! fm_worker_capacity_pending_release "$STATE" "$SPAWN_CAPACITY_RESERVATION"; then
+      echo "error: could not release the worker capacity reservation for $ID" >&2
+      exit 1
+    fi
+    SPAWN_CAPACITY_RESERVATION=
     exit 0
   else
     remote_spawn_rc=$?
@@ -1007,6 +1186,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
   }
+  if [ "$WORKER_CAPACITY" -gt 0 ]; then
+    WORKER_ACTIVE=$(FM_WORKER_CAPACITY_RECONCILE=1 fm_worker_capacity_active_host "$WORKER_CAPACITY_STATE") || {
+      echo "error: could not prove the current active-worker count; refusing a new worker rather than risking host memory exhaustion" >&2
+      exit 1
+    }
+    if [ "$WORKER_ACTIVE" -ge "$WORKER_CAPACITY" ]; then
+      echo "error: worker capacity reached ($WORKER_ACTIVE/$WORKER_CAPACITY active); queue this task or wait for a worker to finish" >&2
+      exit 1
+    fi
+    if ! fm_worker_capacity_pending_reserve "$STATE" "$ID"; then
+      echo "error: could not reserve worker capacity for $ID; refusing a new worker rather than risking host memory exhaustion" >&2
+      exit 1
+    fi
+    SPAWN_CAPACITY_RESERVATION=$ID
+  fi
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -1630,6 +1824,29 @@ if [ "$KIND" = secondmate ]; then
     FM_CONFIG_INHERIT_LIVE=1 \
       propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
       || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
+  fi
+  if [ "${WORKER_CAPACITY:-0}" -gt 0 ]; then
+    if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" = 1 ] \
+       && [ "$CONFIG" != "$PROJ_ABS/config" ]; then
+      echo "error: secondmate $ID cannot skip capacity inheritance outside its pre-inherited config" >&2
+      exit 1
+    fi
+    SECONDMATE_WORKER_CAPACITY=$(fm_worker_capacity_limit "$PROJ_ABS/config") || {
+      echo "error: secondmate $ID inherited an unsafe worker capacity setting" >&2
+      exit 1
+    }
+    if [ -e "$CONFIG/max-active-workers" ] || [ -L "$CONFIG/max-active-workers" ]; then
+      [ -f "$PROJ_ABS/config/max-active-workers" ] \
+        && [ ! -L "$PROJ_ABS/config/max-active-workers" ] \
+        && fm_worker_capacity_file_valid "$PROJ_ABS/config/max-active-workers" || {
+          echo "error: secondmate $ID did not inherit an explicit max-active-workers setting; refusing launch" >&2
+          exit 1
+        }
+    fi
+    if [ "$SECONDMATE_WORKER_CAPACITY" != "$WORKER_CAPACITY" ]; then
+      echo "error: secondmate $ID did not inherit max-active-workers=$WORKER_CAPACITY; refusing launch" >&2
+      exit 1
+    fi
   fi
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
@@ -2696,12 +2913,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
 fi
-if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
-  # The record is published, so this task is now part of the set a teardown
-  # enumerates and locks per task. The set lock is only needed across that
-  # publication.
+if [ -z "$SPAWN_CAPACITY_RESERVATION" ] && [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
+fi
+if [ -z "$SPAWN_CAPACITY_RESERVATION" ] && [ "$SPAWN_WORKER_CAPACITY_LOCK_HELD" = 1 ]; then
+  SPAWN_WORKER_CAPACITY_LOCK_HELD=0
+  fm_lock_release "$SPAWN_WORKER_CAPACITY_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
@@ -2748,6 +2966,16 @@ if [ "$KIND" = secondmate ]; then
   # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): Claude's
   # Stop auto-arm and Cursor's stop-hook park both run the watcher only BETWEEN
   # turns, so a fresh beacon with no live watcher is their healthy mid-turn state.
+  capacity_state_env=
+  remote_job_state_env=
+  if [ "$WORKER_CAPACITY" -gt 0 ]; then
+    sq_capacity_state=$(shell_quote "$WORKER_CAPACITY_STATE")
+    capacity_state_env="FM_WORKER_CAPACITY_HOST_STATE=$sq_capacity_state"
+  fi
+  if [ -n "${FM_REMOTE_JOB_STATE_ROOT:-}" ]; then
+    sq_remote_job_state=$(shell_quote "$FM_REMOTE_JOB_STATE_ROOT")
+    remote_job_state_env="FM_REMOTE_JOB_STATE_ROOT=$sq_remote_job_state"
+  fi
   case "$HARNESS" in
     claude|cursor) supervision_model=autoarm ;;
     *) supervision_model=persistent ;;
@@ -2759,7 +2987,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home $capacity_state_env $remote_job_state_env FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
@@ -2806,13 +3034,39 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
+if ! spawn_send_literal "$T" "$LAUNCH"; then
+  echo "error: could not send the launch command to $W" >&2
+  exit 1
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+SPAWN_CAPACITY_LAUNCH_SUBMITTED=1
+if ! spawn_send_key "$T" Enter; then
+  echo "error: could not confirm launch command submission to $W; its capacity reservation is retained" >&2
+  exit 1
+fi
+if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
+  SPAWN_TASK_SET_LOCK_HELD=0
+  fm_lock_release "$SPAWN_TASK_SET_LOCK"
+fi
+if [ "$SPAWN_WORKER_CAPACITY_LOCK_HELD" = 1 ]; then
+  SPAWN_WORKER_CAPACITY_LOCK_HELD=0
+  fm_lock_release "$SPAWN_WORKER_CAPACITY_LOCK"
+fi
+if [ -n "$SPAWN_CAPACITY_RESERVATION" ]; then
+  if ! fm_worker_capacity_pending_until_started "$STATE" "$SPAWN_CAPACITY_RESERVATION"; then
+    echo "error: worker launch did not become active; its capacity reservation is retained to prevent host memory exhaustion" >&2
+    exit 1
+  fi
+  if ! fm_worker_capacity_pending_release "$STATE" "$SPAWN_CAPACITY_RESERVATION"; then
+    echo "error: could not release the worker capacity reservation for $ID" >&2
+    exit 1
+  fi
+  SPAWN_CAPACITY_RESERVATION=
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

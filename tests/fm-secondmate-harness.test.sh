@@ -15,7 +15,7 @@
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
 #      config/backlog-backend, config/backend, config/herdr-presentation-spaces,
-#      config/startup-memory-budget, and config/trace-context -
+#      config/startup-memory-budget, config/max-active-workers, and config/trace-context -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
 #      dispatch profiles, backlog backend, runtime-backend default, Herdr
 #      presentation choice, startup-memory budget, and trace context inherit the
@@ -423,6 +423,17 @@ make_noop_tmux() {
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+case "$*" in
+  *'#{pane_current_command}'*) printf 'codex\n'; exit 0 ;;
+esac
+case "${1:-}" in
+  list-windows)
+    for meta in "${FM_FAKE_STATE:-/nonexistent}"/*.meta; do
+      [ -f "$meta" ] || continue
+      printf 'fm-%s\n' "$(basename "$meta" .meta)"
+    done
+    ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -458,8 +469,8 @@ spawn_secondmate() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
-    FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" "${spawn_args[@]}" >/dev/null 2>&1 || true
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_STATE="$world/home/state" \
+    "$ROOT/bin/fm-spawn.sh" "${spawn_args[@]}" >/dev/null 2>&1
 }
 
 meta_harness() { grep '^harness=' "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
@@ -477,6 +488,7 @@ test_spawn_split_and_inherit() {
   printf 'codex\n' > "$w/home/config/secondmate-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'zellij\n' > "$w/home/config/backend"
+  printf '1\n' > "$w/home/config/max-active-workers"
   make_seeded_home "$sm" sm
 
   spawn_secondmate "$w" sm "$sm"
@@ -493,9 +505,28 @@ test_spawn_split_and_inherit() {
     || fail "split: home backlog-backend not inherited as manual"
   [ "$(cat "$sm/config/backend" 2>/dev/null)" = zellij ] \
     || fail "split: home backend not inherited as zellij"
+  [ "$(cat "$sm/config/max-active-workers" 2>/dev/null)" = 1 ] \
+    || fail "split: home worker capacity was not inherited as one"
   [ -e "$sm/config/secondmate-harness" ] \
     && fail "split: secondmate-harness leaked into the secondmate home"
   pass "B2 spawn: secondmate runs the secondmate harness; its home inherits declared config"
+}
+
+test_spawn_requires_worker_capacity_inheritance() {
+  local w sm status
+  w="$TMP_ROOT/spawn-capacity-required"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  printf '1\n' > "$w/home/config/max-active-workers"
+  make_seeded_home "$sm" sm
+  git init -q -b main "$sm"
+
+  status=0
+  spawn_secondmate "$w" sm "$sm" || status=$?
+  [ "$status" -ne 0 ] || fail "secondmate launched without inherited worker capacity"
+  [ ! -e "$w/home/state/sm.meta" ] \
+    || fail "secondmate metadata was published without inherited worker capacity"
+  pass "B2 spawn: secondmate requires worker capacity inheritance"
 }
 
 # Backward-compat: secondmate-harness absent -> the secondmate launches on the
@@ -639,10 +670,17 @@ make_launch_capturing_tmux() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf 'codex\n'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    for meta in "${FM_FAKE_STATE:-/nonexistent}"/*.meta; do
+      [ -f "$meta" ] || continue
+      printf 'fm-%s\n' "$(basename "$meta" .meta)"
+    done
+    exit 0
+    ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
@@ -677,7 +715,7 @@ spawn_secondmate_capture() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_STATE="$world/home/state" FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "$@" --secondmate
 }
 
@@ -939,6 +977,9 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   launchlog="$w/launch.log"
   mkdir -p "$w/home/config"
   printf 'codex\n' > "$w/home/config/crew-harness"
+  # This fixture starts a secondmate and then an ordinary ship on one host.
+  # The production default is one, so make the intended two-endpoint scenario explicit.
+  printf '2\n' > "$w/home/config/max-active-workers"
   make_seeded_home "$sm" sm
 
   spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
@@ -965,7 +1006,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_STATE="$home/state" FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off >/dev/null 2>&1
   meta="$home/state/$id.meta"
   [ "$(meta_field "$meta" kind)" = ship ] || fail "crew-unaffected: expected an ordinary ship task"
@@ -2488,7 +2529,7 @@ SH
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_STATE="$w/home/state" FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate 2>&1); status=$?
   expect_code 0 "$status" "spawn should remain available after reread cleanup failure"
   assert_contains "$out" "CONFIG_REREAD: secondmate sm: quarantined pre-relaunch generations" \
@@ -2527,6 +2568,7 @@ test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
 test_spawn_split_and_inherit
+test_spawn_requires_worker_capacity_inheritance
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins

@@ -15,6 +15,7 @@ trap 'if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/
 LOCAL_HOME="$TMP_ROOT/local-home"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
+LEGACY_REMOTE_HOME="$TMP_ROOT/legacy-remote-home"
 TOOL_PROBE_LOG="$TMP_ROOT/tool-probe.log"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
 SSH_LOG="$TMP_ROOT/ssh.log"
@@ -186,6 +187,17 @@ assert_contains "$out" 'secret=absent' "the primary ambient environment crossed 
 assert_contains "$out" 'worker=1' "the fixed entrypoint executed outside the remote job worker"
 pass "the fixed entrypoint runs every command in the worker's explicit environment"
 
+mkdir -p "$LEGACY_REMOTE_HOME/state/parent-route"
+printf 'legacy\n' > "$LEGACY_REMOTE_HOME/.fm-secondmate-home"
+cat >> "$LOCAL_HOME/data/secondmates.md" <<EOF
+- legacy - legacy delivery (host: remote-mac; root: $REMOTE_ROOT; home: $LEGACY_REMOTE_HOME; scope: legacy work; projects: beta; added 2026-08-02)
+EOF
+fm_on ios fm-probe-two.sh >/dev/null
+[ "$(<"$TMP_ROOT/remote-jobs/worker-capacity/routes/legacy.home")" = "$LEGACY_REMOTE_HOME" ] \
+  || fail "remote admission did not register the configured legacy route"
+write_registry
+pass "remote admission registers configured legacy routes"
+
 # The child PATH is the entrypoint's own composition, so it is asserted on the
 # PATH a real child receives rather than on the script that builds it. The
 # expectation is rebuilt here from the documented contract - fixed head, the
@@ -308,6 +320,8 @@ cat > "$DOCTOR_BIN/uname" <<'SH'
 printf 'Linux\n'
 SH
 chmod +x "$DOCTOR_BIN/uname"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/jq"
+chmod +x "$DOCTOR_BIN/jq"
 set +e
 out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
 rc=$?
@@ -321,7 +335,6 @@ ln -sf "$(command -v git)" "$DOCTOR_BIN/git"
 # The direct doctor fixture needs the complete required tool set. These stubs
 # exercise resolution only; the dedicated doctor suite owns worker and Herdr
 # lifecycle behavior against controlled launchctl fixtures.
-printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/jq"
 printf '#!/usr/bin/env bash\nprintf "{\\\"server\\\":{\\\"running\\\":false}}\\n"\n' > "$DOCTOR_BIN/herdr"
 cat > "$DOCTOR_BIN/tasks-axi" <<'SH'
 #!/usr/bin/env bash
@@ -385,11 +398,12 @@ FM_GIT_SHADOW_LOG="$GIT_SHADOW_LOG" "$REMOTE_ROOT/bin/git" -C "$REMOTE_ROOT" ls-
   || fail "the checkout-local git shim did not demonstrate that it would authorize the untracked command"
 untracked_root_b64=$(printf '%s' "$REMOTE_ROOT" | base64 | tr -d '\n')
 untracked_home_b64=$(printf '%s' "$REMOTE_HOME" | base64 | tr -d '\n')
+untracked_routes_b64=$(printf 'ios\t%s\n' "$REMOTE_HOME" | base64 | tr -d '\n')
 untracked_argv_b64=$(printf '%s\0' fm-untracked.sh | base64 | tr -d '\n')
 set +e
 out=$(FM_GIT_SHADOW_LOG="$GIT_SHADOW_LOG" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
   FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
-  1 "$untracked_root_b64" "$untracked_home_b64" "$untracked_argv_b64" 2>&1)
+  2 "$untracked_root_b64" "$untracked_home_b64" "$untracked_routes_b64" "$untracked_argv_b64" 2>&1)
 rc=$?
 set -e
 if [ "$rc" -eq 0 ]; then
@@ -449,12 +463,13 @@ pass "transport rejects shell escape, traversal, symlink, and option-injection s
 
 root_b64=$(printf '%s' "$REMOTE_ROOT" | base64 | tr -d '\n')
 home_b64=$(printf '%s' "$REMOTE_HOME" | base64 | tr -d '\n')
+routes_b64=$(printf 'ios\t%s\n' "$REMOTE_HOME" | base64 | tr -d '\n')
 argv_b64=$(printf '%s\0' fm-probe-two.sh | base64 | tr -d '\n')
-if "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" 2 "$root_b64" "$home_b64" "$argv_b64" >/dev/null 2>&1; then
+if "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" 3 "$root_b64" "$home_b64" "$routes_b64" "$argv_b64" >/dev/null 2>&1; then
   fail "an incompatible transport protocol was accepted"
 fi
 traversal_root_b64=$(printf '%s' "$REMOTE_ROOT/../remote-root" | base64 | tr -d '\n')
-if "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" 1 "$traversal_root_b64" "$home_b64" "$argv_b64" >/dev/null 2>&1; then
+if "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" 2 "$traversal_root_b64" "$home_b64" "$routes_b64" "$argv_b64" >/dev/null 2>&1; then
   fail "the fixed entrypoint accepted traversal in the configured root"
 fi
 pass "the fixed entrypoint refuses incompatible protocols and unsafe roots"

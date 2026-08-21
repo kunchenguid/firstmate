@@ -36,7 +36,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/secondmates.md"
-PROTOCOL=1
+PROTOCOL=2
 
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
@@ -70,10 +70,16 @@ MATCHES=0
 HOST=
 ROOT=
 HOME_PATH=
+ROUTE_INDEX=
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in '- '*) ;; *) continue ;; esac
   secondmate_registry_parse_line "$line" || die "malformed secondmate registry entry: $line"
   [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] || continue
+  case "$SECONDMATE_REGISTRY_HOME" in /*) ;; *) die "configured remote home is not absolute: $SECONDMATE_REGISTRY_HOME" ;; esac
+  case "$SECONDMATE_REGISTRY_HOME" in *$'\n'*|*$'\r'*|*$'\t'*) die "configured remote home contains control characters" ;; esac
+  case "/$SECONDMATE_REGISTRY_HOME/" in */../*|*/./*) die "configured remote home contains traversal components" ;; esac
+  case "$SECONDMATE_REGISTRY_HOME" in *'//'*) die "configured remote home contains an empty path component" ;; esac
+  ROUTE_INDEX+="$SECONDMATE_REGISTRY_ID"$'\t'"$SECONDMATE_REGISTRY_HOME"$'\n'
   if [ "$SECONDMATE_REGISTRY_ID" = "$ROUTE" ] || [ "$SECONDMATE_REGISTRY_HOST" = "$ROUTE" ]; then
     MATCHES=$((MATCHES + 1))
     HOST=$SECONDMATE_REGISTRY_HOST
@@ -94,6 +100,7 @@ done
 
 ROOT_B64=$(printf '%s' "$ROOT" | encode_base64)
 HOME_B64=$(printf '%s' "$HOME_PATH" | encode_base64)
+ROUTE_INDEX_B64=$(printf '%s' "$ROUTE_INDEX" | encode_base64)
 ARGV_B64=$(printf '%s\0' "$COMMAND" "$@" | encode_base64)
 SSH_BIN=${FM_SSH_BIN:-ssh}
 ALIVE_INTERVAL=${FM_SSH_ALIVE_INTERVAL:-15}
@@ -109,4 +116,4 @@ case "$ALIVE_COUNT_MAX" in ''|*[!0-9]*) die "FM_SSH_ALIVE_COUNT_MAX must be a po
   -o 'SendEnv=-*' \
   -o "ServerAliveInterval=$ALIVE_INTERVAL" \
   -o "ServerAliveCountMax=$ALIVE_COUNT_MAX" \
-  -- "$HOST" fm-remote-entrypoint.sh "$PROTOCOL" "$ROOT_B64" "$HOME_B64" "$ARGV_B64"
+  -- "$HOST" fm-remote-entrypoint.sh "$PROTOCOL" "$ROOT_B64" "$HOME_B64" "$ROUTE_INDEX_B64" "$ARGV_B64"

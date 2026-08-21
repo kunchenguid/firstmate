@@ -21,8 +21,9 @@
 # LaunchAgent contract, and worker environment.
 set -eu
 
-PROTOCOL=1
+PROTOCOL=2
 DOCTOR_SHA256=7bb13d9fad8455978bf109d4681a3aa3cb170565c8a74be4ec7b520427db14c2
+ROUTE_INDEX_MAX_BYTES=1048576
 REAL_SOURCE=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}" 2>/dev/null) ||
   REAL_SOURCE=$(realpath "${BASH_SOURCE[0]}" 2>/dev/null) ||
   REAL_SOURCE=${BASH_SOURCE[0]}
@@ -49,6 +50,16 @@ decode_text() { # <label> <encoded> <destination>
   [ "$controls" -eq 0 ] || die "$label contains forbidden control bytes"
 }
 
+decode_route_index() { # <encoded> <destination>
+  local encoded=$1 destination=$2 bytes controls
+  base64_decode_to "$encoded" "$destination" || die "invalid base64 for remote route index"
+  bytes=$(LC_ALL=C wc -c < "$destination" | tr -d ' ')
+  [ "$bytes" -gt 0 ] && [ "$bytes" -le "$ROUTE_INDEX_MAX_BYTES" ] \
+    || die "remote route index exceeds its byte bound"
+  controls=$(LC_ALL=C tr -cd '\000\015' < "$destination" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$controls" -eq 0 ] || die "remote route index contains forbidden control bytes"
+}
+
 path_is_ancestor() { # <ancestor> <path>
   [ "$1" != "$2" ] || return 1
   case "$2" in "$1"/*) return 0 ;; esac
@@ -71,14 +82,15 @@ sha256_file() { # <path>
   printf '%s\n' "$digest"
 }
 
-[ "$#" -eq 4 ] || die "remote entrypoint expects protocol, root, home, and argv"
+[ "$#" -eq 5 ] || die "remote entrypoint expects protocol, root, home, routes, and argv"
 [ "$1" = "$PROTOCOL" ] || die "incompatible remote protocol: local=$1 remote=$PROTOCOL"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-entrypoint.XXXXXX") || die "cannot create protocol staging directory" 70
 trap 'rm -rf -- "$TMP"' EXIT
 
 decode_text "remote root" "$2" "$TMP/root"
 decode_text "remote home" "$3" "$TMP/home"
-base64_decode_to "$4" "$TMP/argv" || die "invalid base64 for argv"
+decode_route_index "$4" "$TMP/routes"
+base64_decode_to "$5" "$TMP/argv" || die "invalid base64 for argv"
 ROOT=$(<"$TMP/root")
 HOME_PATH=$(<"$TMP/home")
 ROOT=$(fm_remote_job_canonical_existing_dir "$ROOT") || die "remote root is not a safe existing directory"
@@ -136,6 +148,9 @@ fi
 
 if ! fm_remote_job_ensure_worker "$ROOT" "$ACCOUNT_HOME"; then
   die "${FM_REMOTE_JOB_ERROR:-remote job worker is unavailable; run fm-on.sh <route> fm-remote-doctor.sh --fix}"
+fi
+if ! fm_remote_job_register_capacity_routes "$TMP/routes"; then
+  die "remote worker capacity route index is unavailable or unsafe"
 fi
 if ! JOB_ID=$(fm_remote_job_stage "$ACCOUNT_HOME" "$ROOT" "$HOME_PATH" "$COMMAND" "${ARGV[@]:1}"); then
   die "${FM_REMOTE_JOB_ERROR:-cannot stage remote job}" 70

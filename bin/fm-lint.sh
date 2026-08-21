@@ -58,7 +58,7 @@ fm_lint_worker_stop() {
 }
 
 fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
-  local manifest=$1 output_dir=$2 shard_index=$3 tab index path output rc=0
+  local manifest=$1 output_dir=$2 shard_index=$3 tab index path output rc=0 root_rc
   local -a roots
   roots=()
   tab=$(printf '\t')
@@ -71,10 +71,18 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
     trap 'fm_lint_worker_stop; exit 129' HUP
     trap 'fm_lint_worker_stop; exit 130' INT
     trap 'fm_lint_worker_stop; exit 143' TERM
-    "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${roots[@]}" > "$output.out" 2>&1 &
-    FM_LINT_WORKER_SHELLCHECK_PID=$!
-    wait "$FM_LINT_WORKER_SHELLCHECK_PID" || rc=$?
-    FM_LINT_WORKER_SHELLCHECK_PID=
+    : > "$output.out"
+    # ShellCheck's source graph can retain several GiB when given a whole
+    # shard. Run each canonical root in stable order so one lint worker stays
+    # within the VPS memory budget while preserving deterministic diagnostics.
+    for path in "${roots[@]}"; do
+      "$FM_LINT_SHELLCHECK" --norc --external-sources -- "$path" >> "$output.out" 2>&1 &
+      FM_LINT_WORKER_SHELLCHECK_PID=$!
+      wait "$FM_LINT_WORKER_SHELLCHECK_PID" || root_rc=$?
+      FM_LINT_WORKER_SHELLCHECK_PID=
+      [ "${root_rc:-0}" -eq 0 ] || rc=${root_rc:-0}
+      root_rc=0
+    done
     trap - HUP INT TERM
   else
     : > "$output.out"
@@ -409,6 +417,20 @@ fm_lint_wait_workers() {
   done
 }
 
+fm_lint_replay_unique_diagnostics() {  # <output>
+  "$PERL_BIN" -0 -e '
+    $output = do { local $/; <> };
+    @parts = split(/(\n{2,})/, $output, -1);
+    for ($i = 0; $i < @parts; $i += 2) {
+      ($block, $separator) = @parts[$i, $i + 1];
+      @keys = $block =~ /^.*:\d+:\d+: (?:error|warning|info|style): .* \[SC\d+\]$/mg;
+      $key = $keys[-1] // q{};
+      next if length $key && $seen{$key}++;
+      print $block, ($separator // q{});
+    }
+  ' "$1"
+}
+
 if [ "$JOBS" -eq 1 ]; then
   worker=0
   while [ "$worker" -lt "$SHARD_COUNT" ]; do
@@ -428,10 +450,12 @@ fi
 # Replay both stable shards in deterministic order and select the first nonzero
 # shard status. ShellCheck processes every root in a shard after earlier findings.
 overall_rc=0
+REPLAY_OUTPUT="$TMP_ROOT/replay.out"
+: > "$REPLAY_OUTPUT"
 worker=0
 while [ "$worker" -lt "$SHARD_COUNT" ]; do
   output="$OUTPUT_DIR/shard.$worker"
-  [ ! -f "$output.out" ] || cat "$output.out"
+  [ ! -f "$output.out" ] || cat "$output.out" >> "$REPLAY_OUTPUT"
   if [ -f "$output.rc" ]; then
     rc=$(cat "$output.rc" 2>/dev/null || printf '2')
     case "$rc" in ''|*[!0-9]*) rc=2 ;; esac
@@ -444,6 +468,7 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
   fi
   worker=$((worker + 1))
 done
+fm_lint_replay_unique_diagnostics "$REPLAY_OUTPUT"
 
 if [ -n "$TELEMETRY" ]; then
   TELEMETRY_END_EPOCH=$(date +%s)

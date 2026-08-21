@@ -459,6 +459,74 @@ fm_remote_job_read_deadline() { # <job-dir>
   fm_remote_job_read_number "$1" deadline
 }
 
+fm_remote_job_register_capacity_route() { # <home> [expected-id]
+  local home=$1 expected_id=${2:-} marker id capacity routes record tmp existing
+  [ -z "$expected_id" ] || fm_remote_job_safe_id "$expected_id" || return 1
+  marker="$home/.fm-secondmate-home"
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    [ -z "$expected_id" ] && return 0
+    return 2
+  fi
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  id=$(<"$marker")
+  fm_remote_job_safe_id "$id" || return 1
+  [ -z "$expected_id" ] || [ "$id" = "$expected_id" ] || return 2
+  case "$home" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  capacity="$FM_REMOTE_JOB_STATE/worker-capacity"
+  if [ -e "$capacity" ] || [ -L "$capacity" ]; then
+    [ -d "$capacity" ] && [ ! -L "$capacity" ] || return 1
+  else
+    mkdir "$capacity" 2>/dev/null || true
+    [ -d "$capacity" ] && [ ! -L "$capacity" ] || return 1
+  fi
+  routes="$capacity/routes"
+  if [ -e "$routes" ] || [ -L "$routes" ]; then
+    [ -d "$routes" ] && [ ! -L "$routes" ] || return 1
+  else
+    mkdir "$routes" 2>/dev/null || true
+    [ -d "$routes" ] && [ ! -L "$routes" ] || return 1
+  fi
+  record="$routes/$id.home"
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    [ -f "$record" ] && [ ! -L "$record" ] || return 1
+    existing=$(<"$record")
+    [ "$existing" = "$home" ]
+    return
+  fi
+  tmp=$(umask 077; mktemp "$routes/.route-$id.XXXXXX") || return 1
+  printf '%s\n' "$home" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! mv -n -- "$tmp" "$record" 2>/dev/null; then
+    rm -f -- "$tmp"
+    [ -f "$record" ] && [ ! -L "$record" ] && [ "$(<"$record")" = "$home" ] || return 1
+  fi
+}
+
+fm_remote_job_register_capacity_routes() { # <route-index>
+  local index=$1 record id home status seen_ids=$'\n' seen_homes=$'\n'
+  [ -f "$index" ] && [ ! -L "$index" ] || return 1
+  while IFS= read -r record || [ -n "$record" ]; do
+    case "$record" in *$'\t'*) ;; *) return 1 ;; esac
+    id=${record%%$'\t'*}
+    home=${record#*$'\t'}
+    case "$home" in *$'\t'*) return 1 ;; esac
+    fm_remote_job_safe_id "$id" || return 1
+    home=$(fm_remote_job_normalize_absolute_path "$home") || return 1
+    case "$seen_ids" in *$'\n'"$id"$'\n'*) return 1 ;; esac
+    case "$seen_homes" in *$'\n'"$home"$'\n'*) return 1 ;; esac
+    seen_ids+="$id"$'\n'
+    seen_homes+="$home"$'\n'
+    [ -e "$home" ] || [ -L "$home" ] || continue
+    home=$(fm_remote_job_canonical_existing_dir "$home") || return 1
+    fm_remote_job_register_capacity_route "$home" "$id" || status=$?
+    case "${status:-0}" in
+      0) ;;
+      2) unset status ;;
+      *) return 1 ;;
+    esac
+  done < "$index"
+}
+
 fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdin is captured
   local account_home=$1 root=$2 home=$3 command=$4 stage id destination bytes queue_deadline
   shift 4
@@ -469,6 +537,10 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
   }
   home=$(fm_remote_job_canonical_home "$home") || {
     FM_REMOTE_JOB_ERROR="remote job home is unavailable or unsafe"
+    return 1
+  }
+  fm_remote_job_register_capacity_route "$home" || {
+    FM_REMOTE_JOB_ERROR="remote worker capacity route is unavailable or unsafe"
     return 1
   }
   case "$command" in fm-*.sh) ;; *) FM_REMOTE_JOB_ERROR="remote job command is outside the fm-*.sh namespace"; return 1 ;; esac

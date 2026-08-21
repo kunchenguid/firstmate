@@ -858,6 +858,73 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+test_replayed_source_diagnostics_are_unique() {
+  local tmp fakebin importer source out rc
+  tmp=$(fm_test_tmproot fm-lint-diagnostic-parity)
+  fakebin=$(fm_fakebin "$tmp")
+  importer="$tmp/importer.sh"
+  source="$tmp/source.sh"
+  printf '#!/usr/bin/env bash\n' > "$importer"
+  printf '#!/usr/bin/env bash\n' > "$source"
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+printf 'shared-source.sh:1:1: info: duplicate source diagnostic [SC2086]\n\n'
+exit 1
+SH
+  chmod +x "$fakebin/shellcheck"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=2 "$LINT" "$importer" "$source" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "duplicate diagnostic fixture unexpectedly passed"
+  [ "$(printf '%s\n' "$out" | grep -Fc '[SC2086]')" -eq 1 ] \
+    || fail "replayed source diagnostic appeared more than once"
+  pass "replayed source diagnostics remain unique"
+}
+
+test_replay_preserves_diagnostic_bytes() {
+  local tmp fakebin alpha beta gamma expected actual jobs rc
+  tmp=$(fm_test_tmproot fm-lint-replay-byte-parity)
+  fakebin=$(fm_fakebin "$tmp")
+  alpha="$tmp/alpha.sh"
+  beta="$tmp/beta.sh"
+  gamma="$tmp/gamma.sh"
+  expected="$tmp/expected.out"
+  printf '#!/usr/bin/env bash\n' > "$alpha"
+  printf '#!/usr/bin/env bash\n' > "$beta"
+  printf '#!/usr/bin/env bash\n' > "$gamma"
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+for argument in "$@"; do
+  case "$argument" in
+    *.sh) printf '%s:1:1: warning: fixture diagnostic [SC9008]\n' "$(basename "$argument")" ;;
+  esac
+done
+exit 1
+SH
+  chmod +x "$fakebin/shellcheck"
+  {
+    printf 'fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)\n'
+    "$fakebin/shellcheck" --norc --external-sources -- "$alpha" "$gamma" "$beta" || true
+  } > "$expected"
+
+  for jobs in 1 2; do
+    actual="$tmp/actual-$jobs.out"
+    rc=0
+    PATH="$fakebin:$PATH" FM_LINT_JOBS="$jobs" "$LINT" "$alpha" "$beta" "$gamma" > "$actual" 2>&1 || rc=$?
+    [ "$rc" -eq 1 ] || fail "diagnostic byte-parity fixture exited $rc for jobs=$jobs"
+    cmp -s "$expected" "$actual" \
+      || fail "replayed diagnostics changed bytes for jobs=$jobs"
+  done
+  pass "replayed diagnostics preserve exact ShellCheck bytes for both worker bounds"
+}
+
 test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
@@ -873,6 +940,8 @@ test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
 test_seeded_module_boundary_parity
+test_replayed_source_diagnostics_are_unique
+test_replay_preserves_diagnostic_bytes
 test_changed_mode_lints_only_the_changed_file
 test_ci_forces_full_lint_even_with_empty_diff
 test_main_branch_forces_full_lint

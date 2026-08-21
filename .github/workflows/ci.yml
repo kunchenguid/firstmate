@@ -9,6 +9,14 @@ on:
 permissions:
   contents: read
 
+# Several behavior fixtures make temporary commits. GitHub runners do not set
+# an author identity, so provide a fixed CI-only identity for every job.
+env:
+  GIT_AUTHOR_NAME: FirstMate CI
+  GIT_AUTHOR_EMAIL: firstmate-ci@users.noreply.github.com
+  GIT_COMMITTER_NAME: FirstMate CI
+  GIT_COMMITTER_EMAIL: firstmate-ci@users.noreply.github.com
+
 jobs:
   lint:
     name: Lint
