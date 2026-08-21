@@ -79,9 +79,15 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          The inbound WhatsApp channel is OPTIONAL and inert unless
+#          config/whatsapp.env names a captain. When it does, bootstrap re-arms
+#          the generated check shim and 30s cadence if either has gone missing,
+#          and prints a WA line; it never disarms, because switching the channel
+#          off is owned by the poll cycle and by fm-wa-setup.sh disarm.
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          secondmate_handoff_resume, x_mode_setup, wa_mode_converge,
+#          fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
@@ -102,7 +108,8 @@
 #                 secondmate_handoff_resume, and fleet_sync.
 #            only - ONLY those network steps and nothing else. No tool detection,
 #                 no version floors, no tangle check, no PR-check migration, no
-#                 x_mode_setup: those already ran on the local pass.
+#                 x_mode_setup, no wa_mode_converge: those already ran on the
+#                 local pass.
 #          FM_BOOTSTRAP_DETECT_ONLY composes with it unchanged, so `only` plus
 #          detect-only is the read-only `gh auth status` probe on its own.
 #          bin/fm-startup-network.sh owns the deferral: it runs the `only` phase
@@ -987,6 +994,57 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# Whether the channel's OWN reader makes this home's configuration usable.
+#
+# Asked through fm_wa_load_config rather than re-derived here, because a second
+# parse of the same line is how one entry point accepts what another refuses:
+# a digit filter over a raw read keeps `FM_WA_CAPTAIN= # was 447700900999` and
+# arms a home whose channel reports itself off, which then sweeps every thirty
+# seconds for a message it could never deliver. Read in a separate process so
+# the library's own defaults cannot leak into this run or into anything else it
+# spawns.
+wa_channel_names_captain() {
+  FM_WA_ENV_FILE="$1" FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" \
+    FM_STATE_OVERRIDE="$STATE" \
+    bash -c '. "$1/fm-wa-lib.sh" && fm_wa_load_config' bootstrap-wa "$SCRIPT_DIR" \
+    >/dev/null 2>&1
+}
+
+# Inbound WhatsApp channel (opt-in): converge the generated arming artifacts on
+# what config/whatsapp.env says, the same way x_mode_setup above converges
+# Relay's on FMX_PAIRING_TOKEN.
+#
+# The channel's own poll retires those artifacts when the configuration is
+# confirmed gone, and bin/fm-wa-setup.sh disarm removes them on request, so
+# something has to put them back. Without that, a home that lost them for any
+# reason - a half-finished arm, a state directory restored from a backup, an
+# operator who disarmed and then forgot - sits there silently dead with the
+# configuration still in place, and the captain goes on messaging a home that
+# can no longer hear him and cannot tell him so. Relay survives that because
+# bootstrap re-runs its setup every session start; this does the same.
+#
+# Deliberately one-directional: this only ever ARMS. Switching the channel off
+# is owned by the poll cycle and by disarm, both of which stop the listener and
+# clear the captain's messages as part of it, and neither belongs here.
+# Idempotent and silent - with the artifacts already in place it changes nothing
+# and prints nothing, so a home that never opted in sees no change at all.
+wa_mode_converge() {
+  local env_file
+  env_file="$CONFIG/whatsapp.env"
+  [ -f "$env_file" ] || return 0
+  wa_channel_names_captain "$env_file" || return 0
+  if [ -f "$STATE/wa-watch.check.sh" ] \
+    && [ -f "$STATE/wa-watch.check-trust" ] \
+    && [ -f "$CONFIG/wa-mode.env" ]; then
+    return 0
+  fi
+  if FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-wa-setup.sh" arm >/dev/null 2>&1; then
+    echo "WA: inbound WhatsApp channel re-armed - state/wa-watch.check.sh and the 30s cadence in config/wa-mode.env were missing while config/whatsapp.env still names a captain"
+  else
+    echo "WA: inbound WhatsApp channel is configured but could not be armed; the captain's messages will not reach this home until 'bin/fm-wa-setup.sh arm' succeeds"
+  fi
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -1233,8 +1291,10 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
       fm_timing_record phase handoff-delivery "$__fm_timing_stamp"
     fi
   fi
-  # x_mode_setup writes local Relay artifacts only and never leaves the machine.
+  # x_mode_setup writes local Relay artifacts only and never leaves the machine,
+  # and wa_mode_converge does the same for the inbound WhatsApp channel.
   local_phase && x_mode_setup
+  local_phase && wa_mode_converge
   if network_phase && network_sweep_authorized 'project clone refresh'; then
     __fm_timing_stamp=$(fm_timing_now_ms)
     fleet_sync

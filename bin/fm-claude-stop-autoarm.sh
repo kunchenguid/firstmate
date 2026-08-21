@@ -18,8 +18,10 @@
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
-#   - Need: arms only while work is in flight (state/*.meta) or X mode has a
-#     relay poll to run (state/x-watch.check.sh); an idle home exits 0.
+#   - Need: arms only while the shared fm_supervision_needed predicate says this
+#     home still needs a watcher - work in flight, a relay poll, an armed
+#     inbound message channel, or a registered event source; a home with none of
+#     them exits 0. bin/fm-supervision-lib.sh is the single owner of that set.
 #   - Single-flight: Claude does not dedupe async hooks, so a home-scoped owner
 #     lock (state/.claude-autoarm.lock) admits exactly one owner; every other
 #     concurrent firing exits 0 without translating, which keeps one event
@@ -158,10 +160,14 @@ write_epoch() {  # <outcome>
 
 write_epoch arming
 
-# X mode cadence: source the generated config so an X instance polls at its
-# 30s cadence (fm-bootstrap.sh x_mode_setup contract).
+# Generated watcher cadence: source it so an X instance polls at its 30s cadence
+# (fm-bootstrap.sh x_mode_setup contract), and so does a home with an armed
+# inbound message channel (bin/fm-wa-setup.sh). Both export the same interval,
+# and a home with neither file keeps the default cadence.
 # shellcheck source=/dev/null
 [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+# shellcheck source=/dev/null
+[ -f "$CONFIG/wa-mode.env" ] && . "$CONFIG/wa-mode.env"
 
 # --- foreground the real arm wrapper ------------------------------------------
 # NO shell &: this hook process tree is the harness-owned lifecycle. The arm

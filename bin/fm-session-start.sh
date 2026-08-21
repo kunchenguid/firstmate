@@ -30,12 +30,13 @@
 #                       mutating step runs.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
-#                       diagnostics always run. Bootstrap's six MUTATING sweeps
-#                       (legacy PR-check migration, secondmate convergence,
-#                       secondmate liveness, pending remote handoff retry,
-#                       X-mode artifact writes, fleet sync) also run only when
-#                       locked; the four network sweeps run in the deferred
-#                       stage rather than this synchronous bootstrap section.
+#                       diagnostics always run. Bootstrap's seven MUTATING
+#                       sweeps (legacy PR-check migration, secondmate
+#                       convergence, secondmate liveness, pending remote handoff
+#                       retry, X-mode artifact writes, inbound WhatsApp channel
+#                       convergence, fleet sync) also run only when locked; the
+#                       four network sweeps run in the deferred stage rather
+#                       than this synchronous bootstrap section.
 #   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
 #                       reconciliation before presenting durable wakes and advancing
 #                       recovery handling state, so both only run when locked.
@@ -903,10 +904,13 @@ load /afk and ensure the daemon is running, because the daemon owns watcher
 supervision.
 
 EOF
-elif [ -f "$CONFIG/x-mode.env" ]; then
+elif [ -f "$CONFIG/x-mode.env" ] || [ -f "$CONFIG/wa-mode.env" ]; then
+  # Either generated cadence file means this home sweeps at 30s rather than the
+  # default, and the emitted block already named the one to source, so both
+  # belong here: an inbound-message home with Relay off needs the same emphasis.
   cat <<EOF
 Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
-X mode is active, so the emitted block's cadence instruction applies.
+A faster watcher cadence is configured for this home, so the emitted block's cadence instruction applies.
 This script never starts supervision itself.
 
 EOF

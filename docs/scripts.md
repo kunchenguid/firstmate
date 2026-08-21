@@ -121,3 +121,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-public-followup-lib.sh` | Shared relay-activation gate, O(1) presence checks, and private transport paths for promised public replies |
 | `fm-public-followup.sh`  | Reconcile typed terminal work results into a public commitment and deliver its final reply once |
 | `fm-public-followup-emit.sh` | Report one typed terminal work result into the home that owes the public reply    |
+| `fm-wa-lib.sh`           | Shared inbound WhatsApp channel config parsing and private-artifact helpers          |
+| `fm-wa-setup.sh`         | Arm or disarm the inbound WhatsApp check shim, its registration, and the watcher cadence |
+| `fm-wa-listen.sh`        | Supervise this home's inbound WhatsApp listener: start, stop, status, pair, unpair, logs |
+| `fm-wa-listen.mjs`       | The baileys listener, pairer, and status reader behind `fm-wa-listen.sh`             |
+| `fm-wa-poll.sh`          | One bounded inbound WhatsApp poll: local inbox read, listener nudge, and channel janitor |
+| `fm-wa-send.sh`          | Send one WhatsApp reply through mudslide, with dry-run and echo markers              |

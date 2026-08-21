@@ -268,9 +268,12 @@ if ! fm_supervision_needed "$STATE" "$GRACE"; then
   exit 0
 fi
 
-# X mode cadence: an opted-in home polls Relay at its generated cadence.
+# Generated watcher cadence: an opted-in home polls Relay, or its armed inbound
+# message channel, at the generated cadence. Both files export the same interval.
 # shellcheck source=/dev/null
 [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+# shellcheck source=/dev/null
+[ -f "$CONFIG/wa-mode.env" ] && . "$CONFIG/wa-mode.env"
 
 # --- the park ----------------------------------------------------------------
 # The arm runs as a tracked child of THIS hook process, which stays alive and

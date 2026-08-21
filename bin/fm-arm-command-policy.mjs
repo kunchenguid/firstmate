@@ -854,10 +854,16 @@ function analyzeProgram(command, context, depth = 0) {
   return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
+// The generated watcher-cadence files: Relay's, and the inbound message
+// channel's. Both are written by firstmate itself into the home's own config,
+// and sourcing one is the only setup step the arm protocols ask for.
+const CADENCE_CONFIGS = ["config/x-mode.env", "config/wa-mode.env"];
+
 function xModePathAllowed(value, home) {
-  if (value === "config/x-mode.env" || value === "./config/x-mode.env") return true;
+  if (CADENCE_CONFIGS.some((rel) => value === rel || value === `./${rel}`)) return true;
   if (!path.isAbsolute(value)) return false;
-  return path.normalize(value) === path.join(path.normalize(home), "config/x-mode.env");
+  const normalized = path.normalize(value);
+  return CADENCE_CONFIGS.some((rel) => normalized === path.join(path.normalize(home), rel));
 }
 
 function ordinaryWordsOnly(tokens) {

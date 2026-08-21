@@ -11,7 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
-`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay and inbound WhatsApp channel artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
@@ -359,7 +359,8 @@ The dashboard owns account creation, identity linking, bot installation, and tok
 The locked session-start bootstrap step turns the token into local generated state.
 It writes `state/x-watch.check.sh`, a byte-static identity shim for `bin/fm-x-poll.sh`, and `config/x-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.
 The watcher accepts the shim only when its bytes match the expected generated content, then invokes the trusted repository poll script directly instead of executing state-file source.
-This section is the single owner of the Relay cadence contract: a Relay instance polls every 30 seconds instead of the default 300, only a Relay instance speeds up because a non-Relay home has no `config/x-mode.env`, and the session-start supervision operating block includes the cadence instruction when that file exists.
+This section is the single owner of the Relay cadence contract: a Relay instance polls every 30 seconds instead of the default 300, a home speeds up only when it has a generated cadence file, and the session-start supervision operating block includes the cadence instruction when one exists.
+The inbound WhatsApp channel below writes the second such file, `config/wa-mode.env`, with the identical interval, so a home running neither keeps the default 300.
 The active primary-harness supervision protocol owns how that sourced cadence reaches the watcher process.
 Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, a cadence transition - opt-in while a watcher is already running, or opt-out - is applied by restarting the home-scoped watcher through the emitted harness protocol; bootstrap deliberately never restarts the watcher itself.
 While away mode is active the daemon owns the watcher and its default cadence applies; away-mode Relay cadence is a deferred follow-up.
@@ -443,6 +444,36 @@ The session-start digest separately prints an "Public commitments awaiting deliv
 `bin/fm-teardown.sh` refuses to clean up a task while this home still owes a public reply for exactly that work, unless `--force` carries explicit discard approval.
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
 See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind the restart end-to-end and the relay-disabled zero-overhead guarantee.
+
+## Inbound WhatsApp channel (config/whatsapp.env / config/wa-mode.env)
+
+The captain's inbound WhatsApp channel is off unless the firstmate home's gitignored `config/whatsapp.env` holds a non-empty `FM_WA_CAPTAIN`.
+That single value is the whole switch, exactly as `FMX_PAIRING_TOKEN` is for Relay: with it absent every WhatsApp entry point is a hard no-op that polls nothing, writes nothing, and changes no behavior.
+The file is parsed key by key as data and never sourced, so nothing written in it is ever executed.
+It is still read the way the shell would read it: an unquoted trailing `# ...` is a note and is dropped, and a `#` inside quotes belongs to the value.
+A line that cannot be parsed, or a value that is not valid for its key, is reported as a channel fault naming that key rather than silently taking the default below.
+It is captain-private and is **not** inherited by secondmate homes.
+
+| key | default | meaning |
+| --- | --- | --- |
+| `FM_WA_CAPTAIN` | *(none)* | captain's number, or a comma-separated list when he carries more than one phone; the channel is on while the file names one, and blanking or commenting the key does not switch it off. Parsing rules and the security property are in [docs/whatsapp-channel.md](whatsapp-channel.md) |
+| `FM_WA_ALLOW_DEVICES` | `0` | comma-separated accepted sender-device numbers, or `*` for any |
+| `FM_WA_DRY_RUN` | *(off)* | `1` records replies to `state/wa-outbox/` and transmits nothing |
+| `FM_WA_HISTORY_HORIZON` | `0` | seconds of backlog accepted on first run |
+| `FM_WA_REANNOUNCE` | `1800` | seconds before an undrained inbox is announced again |
+| `FM_WA_BAILEYS_DIR` | *(auto)* | baileys package directory, when auto-discovery misses it; a path holding no baileys package is reported as a configuration fault and auto-discovery is used |
+
+`bin/fm-wa-setup.sh arm` turns that configuration into generated local state: `state/wa-watch.check.sh`, an identity shim for `bin/fm-wa-poll.sh` bound through `bin/fm-check-register.sh`, and `config/wa-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.
+The cadence contract is the Relay one above, and the value is deliberately identical so a home running both channels cannot end up with two cadences that disagree.
+An armed `state/wa-watch.check.sh` counts as a reason to supervise the home in `bin/fm-supervision-lib.sh`, the same way `state/x-watch.check.sh` does, because the captain messages precisely when nothing else is running.
+`bin/fm-wa-setup.sh disarm` removes those artifacts and stops the listener this home started, and the first poll cycle after `config/whatsapp.env` disappears retires the artifacts itself, stops that listener, and clears this home's stashed WhatsApp messages and records, so whichever way the channel is switched off, whatever runs next cleans it up.
+Only a *confirmed absent* `config/whatsapp.env` counts as that opt-out.
+A file that is still there but yields no captain - unreadable, truncated, blanked, or with the key commented out - is indeterminate, so the channel stays armed and the listener keeps running, and the poll reports that no captain could be read instead.
+That is deliberate and settled: staying armed when the captain wanted it off is a mistake he can see and correct in one command, while going silently dead is the exact failure this channel exists to prevent.
+The two deliberate off switches are removing the file and `bin/fm-wa-setup.sh disarm`; blanking a value is never one.
+In the other direction, `bin/fm-bootstrap.sh` re-arms the shim and cadence at every session start while the file still names a captain, exactly as it re-arms Relay's artifacts while `FMX_PAIRING_TOKEN` is present, so a home cannot end up configured but silently unable to hear him.
+
+[whatsapp-channel.md](whatsapp-channel.md) owns everything else about this channel: the one-connection-per-credential-folder constraint and the second-linked-device decision it forced, pairing and re-pairing, the two captain identities the listener accepts, the accepted-device and echo-suppression guards, the dry-run switch, the listener health and restart contract, and the full turn-off procedure.
 
 ## Process-to-event sources (state/procevent)
 
@@ -561,6 +592,7 @@ FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies an
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
+FM_WA_DRY_RUN=          # 1 previews WhatsApp replies to state/wa-outbox/ without sending; also a config/whatsapp.env key for the whole home
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
