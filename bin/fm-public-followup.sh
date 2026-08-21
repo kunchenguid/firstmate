@@ -1057,16 +1057,59 @@ cmd_rechain() {
     '{relation_id:"rel-1", work_ref:{home_id:$h, task_id:$w},
       role:"fulfills", required:true, generation:1}' > "$relation_file"
 
-  tx public-followup add "$new_id" --request-context-file "$ctx_file" \
-    --purpose promised-final --expected-final-file "$expected_file" \
-    --expires-at "$expires" >/dev/null \
-    || die "tasks-axi refused to add '$new_id' on the retained thread binding" 1
-  tx public-followup bind-work "$new_id" --relation-file "$relation_file" >/dev/null \
-    || die "tasks-axi refused to bind '$new_id' to $work_home/$work_id" 1
+  local existing relation_count new_registry
+  existing=$(obligation_json "$new_id") \
+    || die "could not read the backlog through tasks-axi" 1
+  if [ -n "$existing" ]; then
+    printf '%s' "$existing" | jq -e \
+      --slurpfile request "$ctx_file" --slurpfile expected "$expected_file" \
+      --arg expires "$expires" \
+      '.public_followup as $pf
+       | $pf.request == $request[0]
+         and $pf.purpose == "promised-final"
+         and $pf.expected_final == $expected[0]
+         and $pf.obligation_expires_at == $expires' >/dev/null 2>&1 \
+      || die "'$new_id' already exists with different public-followup data; choose another id" 1
+  else
+    tx public-followup add "$new_id" --request-context-file "$ctx_file" \
+      --purpose promised-final --expected-final-file "$expected_file" \
+      --expires-at "$expires" >/dev/null \
+      || die "tasks-axi refused to add '$new_id' on the retained thread binding" 1
+    existing=$(obligation_json "$new_id") \
+      || die "added '$new_id' but could not read it back through tasks-axi; retry this same rechain command" 1
+  fi
 
-  cmd_register "$new_id" --relation rel-1 --work-home "$work_home" \
-    --work-id "$work_id" --generation 1 >/dev/null \
-    || die "could not register '$new_id'" 1
+  relation_count=$(printf '%s' "$existing" \
+    | jq -r '(.public_followup.work_relations // []) | length' 2>/dev/null) \
+    || die "could not inspect work bindings for '$new_id'" 1
+  if [ "$relation_count" -eq 0 ]; then
+    tx public-followup bind-work "$new_id" --relation-file "$relation_file" >/dev/null \
+      || die "tasks-axi refused to bind '$new_id' to $work_home/$work_id; retry this same rechain command" 1
+  else
+    printf '%s' "$existing" | jq -e --arg h "$work_home" --arg w "$work_id" \
+      '(.public_followup.work_relations // []) as $relations
+       | ($relations | length) == 1
+         and $relations[0].relation_id == "rel-1"
+         and $relations[0].work_ref.home_id == $h
+         and $relations[0].work_ref.task_id == $w
+         and $relations[0].role == "fulfills"
+         and $relations[0].required == true
+         and $relations[0].generation == 1' >/dev/null 2>&1 \
+      || die "'$new_id' already has a different work binding; choose another id" 1
+  fi
+
+  new_registry="$(fm_pf_registry_dir "$STATE")/$new_id"
+  if [ -f "$new_registry" ] && [ ! -L "$new_registry" ]; then
+    [ "$(fm_pf_registry_get "$STATE" "$new_id" relation_id)" = rel-1 ] \
+      && [ "$(fm_pf_registry_get "$STATE" "$new_id" work_home)" = "$work_home" ] \
+      && [ "$(fm_pf_registry_get "$STATE" "$new_id" work_id)" = "$work_id" ] \
+      && [ "$(fm_pf_registry_get "$STATE" "$new_id" generation)" = 1 ] \
+      || die "registration '$new_id' already names different work; choose another id" 1
+  else
+    cmd_register "$new_id" --relation rel-1 --work-home "$work_home" \
+      --work-id "$work_id" --generation 1 >/dev/null \
+      || die "could not register '$new_id'; retry this same rechain command" 1
+  fi
 
   cmd_retire "$from" --reason "handed on to $new_id" \
     || die "registered '$new_id' but could not retire '$from'; both loops are open until '$from' is retired" 1

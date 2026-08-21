@@ -1475,6 +1475,62 @@ test_rechain_delivers_second_post_on_same_thread() {
   pass "rechain posts the shipped follow-on into the same thread"
 }
 
+test_rechain_resumes_after_partial_add() {
+  local home log real_tasks marker out count
+  home=$(make_home rechain-resume)
+  log="$home/curl.log"; : > "$log"
+  seed_repro_commitment "$home" public-final-resume-a req-resume main scout-resume
+  "$EMIT" --home "$home" --obligation public-final-resume-a --relation rel-code \
+    --source-home main --work-id scout-resume --generation 1 \
+    --outcome report-ready --deliverable report_path=data/scout-resume/report.md \
+    --outcome-text 'Reproduced. A fix is waiting.' >/dev/null || fail "emit failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" deliver public-final-resume-a >/dev/null \
+    || fail "deliver failed"
+
+  real_tasks=$(command -v tasks-axi)
+  marker="$home/rechain-bind-failed"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = public-followup ] && [ "$2" = bind-work ] \
+    && [ "$3" = public-final-resume-b ] && [ ! -e "$RECHAIN_FAIL_MARKER" ]; then
+  : > "$RECHAIN_FAIL_MARKER"
+  exit 73
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+
+  REAL_TASKS_AXI="$real_tasks" RECHAIN_FAIL_MARKER="$marker" \
+    expect_failure "rechain must expose a resumable partial add" \
+    run_pf "$home" rechain public-final-resume-b --from public-final-resume-a \
+      --work-home main --work-id ship-resume --expected pr-merged
+  assert_contains "$EXPECT_OUT" "retry this same rechain command" \
+    "a partial add must direct the caller to the resumable path"
+  count=$(tasks_in "$home" public-followup list --json \
+    | jq '[.public_followups[] | select(.id == "public-final-resume-b")] | length')
+  [ "$count" = 1 ] || fail "the interrupted rechain must leave exactly one recoverable obligation"
+  assert_present "$home/state/public-followup/registry/public-final-resume-a" \
+    "a partial rechain must retain the source loop"
+  assert_absent "$home/state/public-followup/registry/public-final-resume-b" \
+    "a failed bind must not publish a registration"
+
+  out=$(REAL_TASKS_AXI="$real_tasks" RECHAIN_FAIL_MARKER="$marker" \
+    run_pf "$home" rechain public-final-resume-b --from public-final-resume-a \
+      --work-home main --work-id ship-resume --expected pr-merged) \
+    || fail "retrying the same rechain command must resume: $out"
+  assert_contains "$out" "retired public-final-resume-a" \
+    "the resumed rechain must retire its source"
+  count=$(tasks_in "$home" public-followup list --json \
+    | jq '[.public_followups[] | select(.id == "public-final-resume-b")] | length')
+  [ "$count" = 1 ] || fail "the resumed rechain must not duplicate the obligation"
+  assert_present "$home/state/public-followup/registry/public-final-resume-b" \
+    "the resumed rechain must publish the destination registration"
+  assert_absent "$home/state/public-followup/registry/public-final-resume-a" \
+    "the resumed rechain must close the source registration"
+  pass "rechain resumes the same obligation after an interrupted bind"
+}
+
 test_retire_reason_closes_the_open_loop() {
   local home log out registry_file receipt_mode
   home=$(make_home retire-reason)
@@ -1723,6 +1779,7 @@ test_typed_records_exclude_raw_public_material
 test_dropped_baton_now_surfaces_open_loop
 test_control_registered_followon_is_guarded
 test_rechain_delivers_second_post_on_same_thread
+test_rechain_resumes_after_partial_add
 test_retire_reason_closes_the_open_loop
 test_retention_creates_no_false_teardown_refusal
 test_expiry_escalation_uses_now_override
