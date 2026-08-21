@@ -23,11 +23,11 @@
 #
 # `answers` is this adapter's half of the generic keyed-answer contract in
 # bin/fm-procevent.sh. It reports what the captain actually chose, as
-# `<decision-key>\t<answer>\t<label>` lines, and stops there. It maps nothing to a
-# hold, records no decision, and closes nothing: a captain answer is not special to
-# Lavish, so every rule about what a keyed answer DOES belongs to the one intake in
-# bin/fm-decision-hold.sh, which the runner feeds. A Lavish review is just an
-# ephemeral discussion format that happens to carry answers.
+# `<task-id>\t<answer>\t<label>` lines, and stops there. It maps nothing to a
+# task, records no decision, and closes nothing: a captain answer is not special
+# to Lavish, so every rule about what a keyed answer DOES belongs to the one
+# intake in bin/fm-captain-hold.sh, which the runner feeds. A Lavish review is
+# just an ephemeral discussion format that happens to carry answers.
 #
 # Only rows tagged `choice` are read. A freeform captain message is prose that may
 # contain anything, and must never be able to forge a decision key.
@@ -158,8 +158,9 @@ cmd_terminal() {
   return 1
 }
 
-# Print `key<TAB>answer<TAB>label` for every structured choice the captain
-# submitted in a captured result. The published response frames queued feedback as
+# Print `key<TAB>answer<TAB>label[<TAB>mode]` for every structured choice the
+# captain submitted in a captured result; the optional mode column relays the
+# card's declared close mode (`done` or `release`) to the keyed-answer intake. The published response frames queued feedback as
 # a `prompts[N]{field,...}:` header followed by exactly N indented CSV rows whose
 # quoted fields carry JSON-style escapes, so this reads the declared field ORDER
 # rather than assuming a fixed column, and takes only rows whose `tag` field is
@@ -167,9 +168,9 @@ cmd_terminal() {
 # source of decision keys. A row that does not carry both a slug-shaped `question`
 # and an `answer` inside its `Context data:` block is skipped, so a deck that does
 # not key its forms by decision key simply yields nothing.
-# The question cap is 128 so a FULL hold identity (<origin>-decision-<key>) fits
-# for an any-origin bound deck such as the bearings board; the security property
-# is the slug SHAPE, which is unchanged.
+# The question cap is 128 so any task id fits, including the long legacy
+# `<origin>-decision-<key>` identities pre-collapse decks still carry; the
+# security property is the slug SHAPE, which is unchanged.
 cmd_answers() {
   local file=${1-}
   [ -n "$file" ] || usage
@@ -217,6 +218,10 @@ cmd_answers() {
       my $key = $1;
       next unless $ctx =~ /"answer"\s*:\s*"((?:[^"\\]|\\.)*)"/;
       my $answer = $1;
+      # The optional close mode a card declared; only the two published values
+      # survive, so freeform prose can never smuggle a mode in.
+      my $mode = "";
+      $mode = $1 if $ctx =~ /"close"\s*:\s*"(done|release)"/;
       $_ =~ s/\\(.)/$1/g for ($key, $answer);
       next unless $key =~ /\A[A-Za-z0-9._-]{1,128}\z/;
       next unless length $answer && length($answer) <= 512;
@@ -226,7 +231,7 @@ cmd_answers() {
       # A re-answered form appears again later in the queue; the last submission wins.
       if (defined $seen{$key}) { $out[$seen{$key}] = undef }
       $seen{$key} = scalar @out;
-      push @out, "$key\t$answer\t$label";
+      push @out, length $mode ? "$key\t$answer\t$label\t$mode" : "$key\t$answer\t$label";
     }
     print "$_\n" for grep { defined } @out;
   ' "$file"

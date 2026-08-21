@@ -143,7 +143,7 @@ require_tools() {
 }
 
 # Every tasks-axi call runs from the home whose backlog owns the obligation, the
-# same convention bin/fm-decision-hold.sh uses for typed backlog state.
+# same convention bin/fm-captain-hold.sh uses for typed backlog state.
 tx() { (cd "$FM_HOME" && tasks-axi "$@"); }
 
 # obligation_json <id>: the complete typed obligation payload on stdout, empty
