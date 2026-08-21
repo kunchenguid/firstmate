@@ -91,9 +91,9 @@ Never run `lavish-axi poll` for the board yourself: the armed source's supervise
 A board answer arrives as an ordinary `procevent lavish <source-id> <sequence>` check wake. Identify it by comparing the wake source id with `bin/fm-procevent-lavish.sh source-id "$(bin/fm-bearings-board.sh path)"`, regardless of which answer kinds the result contains; then load `process-event-sources` and follow its contract for the result read, adapter classification, and the handled acknowledgement.
 Decision answers need no routing from you: the runner feeds the board's any-origin binding into `bin/fm-decision-hold.sh`'s one keyed-answer intake, which closes each full-identity hold at answer time.
 A reserved `__drop__` answer is the captain closing or dropping that hold, not a substantive choice and not a merge.
-The intake declines it through `bin/fm-decision-hold.sh` decline with a "dropped by captain" decision record, so the hold leaves Captain's Call on the next rebuild.
-Reconcile any `skipped:` key yourself, using `resolve` when routed work exists.
-A skipped drop that still blocks routed work is reported, never forced closed and never treated as an implementable answer.
+The intake declines it through `bin/fm-decision-hold.sh` with a "dropped by captain" decision record, so the hold leaves Captain's Call on the next rebuild.
+Existing work routed behind that hold remains independent queued work; dropping does not close those dependents.
+Reconcile any other `skipped:` key yourself, using `resolve` when routed work exists.
 Route the non-decision keys yourself:
 
 - `merge.<task-id>` is the captain's explicit merge order; follow the merge ruling below.

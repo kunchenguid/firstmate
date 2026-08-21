@@ -201,6 +201,22 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   pass "build refuses malformed payloads before touching the board"
 }
 
+test_build_accepts_a_freeform_only_credential_card() {
+  local home data board
+  home=$(make_home credential)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  jq '.captains_call[0].type = "credential"
+    | .captains_call[0].options = []
+    | .captains_call[0].allow_freeform = true' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  run_board "$home" build "$data" >/dev/null \
+    || fail "a freeform-only credential card was refused"
+  [ -f "$board" ] || fail "a valid freeform-only credential card did not build a board"
+  pass "build keeps freeform-only credential cards valid"
+}
+
 test_build_injects_binds_then_arms() {
   local home data board out sid
   home=$(make_home build)
@@ -477,17 +493,29 @@ EOF
       --source "the captured result board-drop sequence 2" 2>&1)
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "a close/drop on routed work reported success: $out"
-  assert_contains "$out" "skipped: $routed_hold" \
-    "a close/drop on routed work was not reported as skipped: $out"
+  [ "$rc" -eq 0 ] || fail "a close/drop did not close a hold with existing routed work: $out"
+  assert_contains "$out" "closed: $routed_hold" \
+    "a close/drop on routed work was not reported as closed: $out"
   show=$(cd "$home" && tasks-axi show "$routed_hold" --full)
+  assert_contains "$show" "state: done" \
+    "a close/drop left the routed hold open"
+  show=$(cd "$home" && tasks-axi show sample-routed-drop --full)
   assert_contains "$show" "state: queued" \
-    "a close/drop closed a hold that still blocks routed work"
+    "a close/drop cascaded into the existing dependent work"
+  assert_contains "$show" "blocked: no" \
+    "existing dependent work did not become independent after the hold closed"
+  json=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-08-20T12:00:00Z \
+    "$ROOT/bin/fm-bearings-snapshot.sh" --json) \
+    || fail "Bearings failed after dropping a hold with routed work"
+  printf '%s' "$json" | jq -e --arg hold "$routed_hold" '
+    (.decisions_open | any(.id == $hold) | not)
+  ' >/dev/null || fail "a dropped routed decision remained in Captain's Call: $json"
   pass "a reserved close/drop answer declines the hold and leaves Captain's Call"
 }
 
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
+test_build_accepts_a_freeform_only_credential_card
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails

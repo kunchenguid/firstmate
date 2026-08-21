@@ -90,7 +90,7 @@ validate_payload() {  # <data.json>
       and repo_marker
       and (.title | nonempty_string)
       and (.options | type == "array")
-      and ((.options | length) > 0)
+      and (if .type == "decision" then (.options | length) > 0 else true end)
       and ([.options[]
         | type == "object"
           and (.value | slug(128))

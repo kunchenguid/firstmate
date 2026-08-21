@@ -71,9 +71,10 @@
 # `<decision-key>\t<answer>\t<label>` lines on stdin, maps each key to this
 # origin's `<origin-id>-decision-<key>` hold, and closes it through the very same
 # `answer` path above, except that the exact reserved answer `__drop__` closes
-# through `decline` with a "dropped by captain" decision record rather than as a
-# substantive choice. Every other guard applies identically no matter which
-# channel the answer arrived on. With `--any-origin` in place of an origin id, each key
+# with a declined "dropped by captain" decision record rather than as a
+# substantive choice. Drop closes only the hold; existing dependent tasks remain
+# queued as independent work. Every other guard applies identically no matter which channel
+# the answer arrived on. With `--any-origin` in place of an origin id, each key
 # is instead a FULL hold identity `<origin>-decision-<key>`, split at its first
 # `-decision-`, so one source can carry answers for holds across origins - the
 # aggregation a bearings board needs. An origin id that itself contains
@@ -93,10 +94,10 @@
 #
 # The decision text is a pure function of (source, key, answer, label), which is
 # what makes a replayed delivery an idempotent no-op rather than a rejected
-# "different captain decision". A key whose hold is absent, already closed, or
-# still blocking routed work is reported as `skipped:` and left for `resolve`;
-# skipping is never forced closure, and the command exits nonzero when any key
-# was skipped.
+# "different captain decision". A key whose hold is absent or already closed is
+# reported as `skipped:`; a substantive answer whose hold still blocks routed
+# work is also skipped and left for `resolve`. A reserved drop still closes only
+# that hold, and the command exits nonzero when any key was skipped.
 #
 # `bind`, `unbind`, and `binding` record whether a captured-answer SOURCE belongs
 # to one origin or uses the any-origin intake, for any channel whose answers arrive detached from the origin (a
@@ -636,14 +637,12 @@ parse_decision_only_flags() {  # <args...>; prints the --decision-file value
   printf '%s' "$decision_file"
 }
 
-# The one unrouted close path, shared by `answer` and `decline`. They differ only
-# in the resolution mode they record and the outcome word they print; every
-# guard - the captain decision file, the active-hold requirement, the retry
-# identity, and the refusal to release still-routed work - is identical, so
-# neither can drift into a weaker close than the other.
-close_unrouted_hold() {  # <mode> <outcome-word> <origin-id> <decision-key> <flag-args...>
-  local mode=$1 outcome=$2 origin=$3 key=$4 decision_file id body hold_show hold_body state dependents
-  shift 4
+# The one non-routing close path, shared by `answer`, `decline`, and the reserved
+# drop intake. Answer and decline refuse still-routed work. Drop closes only the
+# stale hold, leaving existing dependent tasks as independent work.
+close_unrouted_hold() {  # <mode> <outcome-word> <preserve-routed> <origin-id> <decision-key> <flag-args...>
+  local mode=$1 outcome=$2 preserve_routed=$3 origin=$4 key=$5 decision_file id body hold_show hold_body state dependents
+  shift 5
   decision_file=$(parse_decision_only_flags "$@") || exit 2
   validate_slug origin-id "$origin"
   validate_slug decision-key "$key"
@@ -669,7 +668,7 @@ close_unrouted_hold() {  # <mode> <outcome-word> <origin-id> <decision-key> <fla
       ;;
   esac
   dependents=$(tasks_blocked_by "$id") || exit 1
-  [ -z "$dependents" ] \
+  [ -z "$dependents" ] || [ "$preserve_routed" = yes ] \
     || fail "captain hold $id still blocks routed work ($dependents); use resolve to record that work"
   body=$(resolution_body "$mode" "$ROUTED_NONE")
   tasks_axi update "$id" --body "$body" >/dev/null \
@@ -681,7 +680,7 @@ close_unrouted_hold() {  # <mode> <outcome-word> <origin-id> <decision-key> <fla
 
 command_answer() {
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
-  close_unrouted_hold answered answered "$@"
+  close_unrouted_hold answered answered no "$@"
 }
 
 # --- the one keyed-answer intake, and the source bindings that feed it --------
@@ -846,7 +845,7 @@ command_answers() {
     if [ "$answer" = "$DROP_ANSWER" ]; then
       keyed_drop_decision_text "$source" "$k_key" "$label" > "$tmp" \
         || fail "cannot stage the captain decision for $hold"
-      if "$0" decline "$k_origin" "$k_key" --decision-file "$tmp" >/dev/null 2>"$err"; then
+      if "$0" decline "$k_origin" "$k_key" --decision-file "$tmp" --drop >/dev/null 2>"$err"; then
         printf 'closed: %s\n' "$hold"
         closed=$((closed + 1))
       else
@@ -873,8 +872,14 @@ command_answers() {
 }
 
 command_decline() {
+  local preserve_routed=no last
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
-  close_unrouted_hold declined declined "$@"
+  if [ "${!#}" = --drop ]; then
+    preserve_routed=yes
+    last=$(($# - 1))
+    set -- "${@:1:last}"
+  fi
+  close_unrouted_hold declined declined "$preserve_routed" "$@"
 }
 
 command_repair() {

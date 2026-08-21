@@ -46,13 +46,13 @@ The live status-log decision ledger has always had answer-time closure through `
 The durable hold ledger did not, so an answer could be captured, believed, and even implemented while its hold stayed open, and the captain could then be asked to re-answer a decision already on disk.
 
 "A keyed answer closes its matching hold" is now one capability with one owner.
-`answers` is its channel-agnostic entry point: it reads a key, answer, and label on each input line and closes the matching hold through the same `answer` path, except that the exact reserved answer `__drop__` closes through `decline` with a "dropped by captain" decision record rather than as a substantive choice.
+`answers` is its channel-agnostic entry point: it reads a key, answer, and label on each input line and closes the matching hold through the same `answer` path, except that the exact reserved answer `__drop__` closes with a declined, "dropped by captain" decision record rather than as a substantive choice.
 For a single-origin intake the key is the decision key mapped under that bound origin; for the cross-origin intake it is the full hold identity, while keys that do not name a full decision hold feed nothing.
 `--source` is provenance text recorded in the durable decision, never a behavior switch, and the command carries no per-channel branch and no knowledge of chat, review decks, or any transport.
 A channel's only job is to turn whatever it received into those keyed lines and pipe them in; it never maps keys to holds, builds decision records, chooses between the close paths, or closes a hold itself.
 Emitting `__drop__` is how a channel reports that the captain dropped the decision; the intake, not the channel, chooses `decline`.
 The decision text is a pure function of source, key, answer, and label, which is what makes a replayed delivery an idempotent no-op rather than a rejected different decision.
-A key whose hold is absent, already closed, or still blocking routed work is reported as skipped and left for `resolve`, and the command exits nonzero when any key was skipped.
+A key whose hold is absent or already closed is reported as skipped, as is a substantive answer whose hold still blocks routed work; a reserved drop instead closes only that hold while existing dependents remain independent queued work. The command exits nonzero when any key was skipped.
 
 `bind`, `unbind`, and `binding` record whether a captured-answer source belongs to one origin or uses the cross-origin intake, for a channel whose answers arrive detached from the origin.
 The binding is a private record under `state/decision-bindings/`, and a source with no binding feeds nothing, so the path is opt-in per source.
@@ -110,7 +110,7 @@ The capture is left unacknowledged throughout, so the wake firstmate needs in or
 A replayed delivery closes nothing new and is not rejected as a different decision, a source with no binding closes nothing at all, and the `answer` subcommand itself refuses an empty or missing decision file, an absent hold, and a drifted retry.
 A separate regression drives the real `fm-send` over a stubbed transport to prove the chat channel reaches the same intake for a decision already transferred to its hold, which the status ledger alone can no longer close.
 The cross-origin regression drives a bound source through the real runner and adapter interface, closes full-identity holds from different origins, and proves that over-limit, malformed, non-decision, routed-work, absent-hold, and replayed answers all fail or skip without weakening the existing guards.
-A reserved `__drop__` answer through that same published poll shape declines the matching hold with a dropped-by-captain record, leaves Bearings' Captain's Call, and still skips a hold that blocks routed work.
+A reserved `__drop__` answer through that same published poll shape declines the matching hold with a dropped-by-captain record and leaves Bearings' Captain's Call even when existing independent work is routed behind it; that dependent work remains queued and is not closed.
 
 The final verification commands and their exact summarized outputs follow.
 
