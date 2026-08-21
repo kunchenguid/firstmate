@@ -360,6 +360,44 @@ class MicCapture:
             pass
 
 
+# ------------------------------------------------------------------- audio setup
+
+
+def open_file_end(flag, path, build):
+    """Open a file-backed end of the audio, naming the path and the flag for it.
+
+    The file ends are the ones this host can run, and they are what every figure
+    in docs/voice-relay.md was measured with, so their refusal is the one most
+    likely to be read. It stays an OSError, which main prints as it stands, and it
+    names the path and the flag that chose it. Reporting a mistyped path as a
+    device failure would send the reader to the device flags instead of to the
+    path.
+    """
+    try:
+        return build()
+    except OSError as exc:
+        raise OSError("could not open {}, given as {}: {}".format(
+            path, flag, exc))
+
+
+def open_device_end(flag, build):
+    """Open a device-backed end of the audio, or refuse in one line with a next step.
+
+    sounddevice raises its own error types and is an optional import, so neither
+    shape reaches main as an OSError on its own and a traceback is what the
+    captain would otherwise get. Whether this refusal ever fires, and what a real
+    device says when it does, is unverified for the reason the module docstring
+    gives.
+    """
+    try:
+        return build()
+    except Exception as exc:                       # noqa: BLE001
+        raise DeviceError(
+            "could not open the audio device ({}: {}). Name another one with {}, "
+            "or run without a device using --in-file and --out-file".format(
+                type(exc).__name__, exc, flag))
+
+
 # ------------------------------------------------------------------------ client
 
 
@@ -410,25 +448,23 @@ class Client:
         self.reader = frame.Reader(self.proc.stdout)
         self.uplink = Uplink(self.proc.stdin)
 
-        try:
-            if self.options.out_file:
-                self.playback = FilePlayback(self.options.out_file)
-            else:
-                self.playback = SpeakerPlayback(self.options.output_device)
+        if self.options.out_file:
+            self.playback = open_file_end(
+                "--out-file", self.options.out_file,
+                lambda: FilePlayback(self.options.out_file))
+        else:
+            self.playback = open_device_end(
+                "--output-device",
+                lambda: SpeakerPlayback(self.options.output_device))
 
-            if self.options.in_file:
-                self.capture = FileCapture(self.options.in_file)
-            else:
-                self.capture = MicCapture(self.options.input_device)
-        except Exception as exc:                   # noqa: BLE001
-            # A named refusal with a next step, like every other refusal here.
-            # sounddevice raises its own error types and is an optional import,
-            # so neither shape reaches main as an OSError on its own.
-            raise DeviceError(
-                "could not open the audio devices ({}: {}). Name another device "
-                "with --input-device or --output-device, or run without them "
-                "using --in-file and --out-file".format(
-                    type(exc).__name__, exc))
+        if self.options.in_file:
+            self.capture = open_file_end(
+                "--in-file", self.options.in_file,
+                lambda: FileCapture(self.options.in_file))
+        else:
+            self.capture = open_device_end(
+                "--input-device",
+                lambda: MicCapture(self.options.input_device))
         self.capture.start(self.up_q, self.talking)
 
         threading.Thread(target=self._downlink, daemon=True).start()

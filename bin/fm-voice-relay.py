@@ -499,8 +499,12 @@ class Session:
         # deliver; see serve() for why a second turn gets a new session.
         self.replies = 0
         # Set when a call into the model raised, which makes this session spent
-        # whether or not it ever answered. handle_uplink_frame owns it.
+        # whether or not it ever answered. fail_turn owns it.
         self.failed = False
+        # Set while close() is deliberately tearing this session down, so the
+        # reader can tell a stream that went away because we ended it from one
+        # that went away on its own.
+        self.closing = False
         # Which tools ran, in order. The handover boundary is the whole point of
         # this relay, so "it called hand_over_to_firstmate and did not answer
         # for firstmate" has to be evidence in the run record, not an inference
@@ -570,6 +574,7 @@ class Session:
             self.connect_seconds, self.scope))
 
     async def close(self):
+        self.closing = True
         if self.stream is None:
             return
         try:
@@ -697,23 +702,35 @@ class Session:
             log(True, "event {}{}".format(name, detail))
 
     async def _read_model(self):
-        """Read the model's events until the stream ends, then say the session is over.
+        """Read the model's events until the stream ends or fails, and report which.
 
         Handling an event reaches back into the model, to answer a tool call, so
         it can fail on its own rather than only the read can. Either way this
-        session is finished, and the one thing that must still happen is the
-        finally below: a turn waiting on turn_done, and a serve loop watching
-        ended, are how the relay recovers. Leaving them clear is what turned one
-        dropped stream into a relay that never answered again.
+        session is finished, and the finally below is the one thing that must
+        still happen: --self-test waits on turn_done for the length of a turn,
+        and both the serve loop and the next talk key read ended to decide
+        whether this session can still be used. Leaving them clear is what turned
+        one dropped stream into a relay that never answered again.
+
+        The two ways out are not the same event and are not reported the same
+        way. A stream that simply ends is the end of a session and nothing more.
+        A stream that raises, here or under an event handler, is this turn
+        failing, so it goes through fail_turn and reaches the captain.
+
+        Neither is a stream that went away because close() asked it to: renew
+        closes the old session on every single turn, so announcing that would put
+        a failure notice in front of the captain on every ordinary turn.
         """
+        broke = None
         try:
             while True:
                 try:
                     out = await self.stream.await_output()
                     result = await out[1].receive()
                 except Exception as exc:               # noqa: BLE001
-                    log(self.verbose, "model stream ended: {}: {}".format(
+                    log(self.verbose, "model stream dropped: {}: {}".format(
                         type(exc).__name__, exc))
+                    broke = exc
                     break
                 if result is None:
                     break
@@ -729,8 +746,14 @@ class Session:
                 except Exception as exc:               # noqa: BLE001
                     log(self.verbose, "handling {} failed: {}: {}".format(
                         ", ".join(event) or "an event", type(exc).__name__, exc))
+                    broke = exc
                     break
         finally:
+            # Not when the uplink has already named this turn: the frame that
+            # broke the model usually breaks the reader an instant later, and the
+            # captain hears about one turn once.
+            if broke is not None and not self.closing and not self.failed:
+                fail_turn(self, self.down, broke)
             self.ended.set()
             self.turn_done.set()
 
@@ -834,6 +857,25 @@ class Session:
         self._mark("tool_answered")
 
 
+def fail_turn(session, down, exc):
+    """Mark a session spent and name this turn's failure to the client.
+
+    One place, because both ends of the relay can break a turn and the captain
+    should not be able to tell which by whether they heard anything. Every part
+    of it is for a different reader. The mark is what the next talk key reads to
+    build a replacement instead of talking into a session that is already gone.
+    The notice is what the captain gets, and it is the only thing that releases a
+    client waiting for a reply, so a failure that is merely marked costs them
+    their whole timeout and leaves a record saying the turn went unanswered
+    without saying why. The reason on the turn is for --self-test, which has no
+    client to notice anything.
+    """
+    reason = "{}: {}".format(type(exc).__name__, exc)
+    session.failed = True
+    session.turn["failed"] = reason
+    down.send_json(frame.NOTICE, {"event": "turn-failed", "error": reason})
+
+
 async def renew(session, options, down):
     """Replace a session that has already answered once, and return the new one.
 
@@ -922,12 +964,9 @@ async def handle_uplink_frame(kind, payload, session, options, down):
         else:
             log(options.verbose, "ignoring uplink kind {!r}".format(kind))
     except Exception as exc:                       # noqa: BLE001
-        session.failed = True
         log(options.verbose, "turn failed: {}: {}".format(
             type(exc).__name__, exc))
-        down.send_json(frame.NOTICE, {
-            "event": "turn-failed",
-            "error": "{}: {}".format(type(exc).__name__, exc)})
+        fail_turn(session, down, exc)
     return session, True
 
 
@@ -1086,6 +1125,11 @@ async def self_test(options):
         "reply_audio_seconds": round(sink.bytes / float(OUT_RATE * 2), 3),
         "answered": sink.bytes > 0,
         "timed_out": bool(session.turn.get("timeout")),
+        # Named the same as the client's turn record, and here for the same
+        # reason: a record that says only that the turn was not answered invites
+        # someone who was not here to average an infrastructure failure into a
+        # latency figure.
+        "relay_error": session.turn.get("failed"),
         "clock_unusable": early,
         "heard": " ".join(sink.heard),
         "said": " ".join(sink.said),

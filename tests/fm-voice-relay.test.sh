@@ -800,6 +800,7 @@ class Stub:
         self.replies = 0
         self.failed = False
         self.ended = asyncio.Event()
+        self.turn = {}
         self.calls = []
 
     async def _step(self, name):
@@ -1024,10 +1025,18 @@ pass "audio that arrives with no turn open is dropped, not turned into a turn"
 # kept its exception, close() re-raised it on every await, renew never reached
 # the line that builds a replacement, and the captain heard the same failure
 # forever with no way back short of restarting the relay.
+#
+# Releasing the waiting turn is only half of it. The client waits for a reply end
+# or a notice, so a reader failure that says nothing costs the captain their whole
+# timeout and leaves a record that says the turn was not answered without saying
+# why. It has to be named, once, and only when it really is a failure: a stream
+# that simply ends, and a stream that went away because close() asked it to, are
+# both ordinary and neither may look like one.
 
 python3 - "$ROOT/bin" "$TMP_ROOT/reader-home" <<'PY' || fail "reader failure"
 import asyncio, json, os, sys
 sys.path.insert(0, sys.argv[1])
+import fm_voice_frame as frame
 import importlib.util, pathlib
 spec = importlib.util.spec_from_file_location(
     "relay", str(pathlib.Path(sys.argv[1]) / "fm-voice-relay.py"))
@@ -1078,40 +1087,68 @@ class Receiver:
         self._raw = raw
 
     async def receive(self):
-        return Result(self._raw)
+        return None if self._raw is None else Result(self._raw)
 
 class Stream:
-    """One model event, then a stream that has gone away."""
+    """The scripted events, and then either a clean end or a stream that is gone."""
 
-    def __init__(self, raws):
+    def __init__(self, raws, clean=False):
         self._raws = list(raws)
+        self._clean = clean
         self.input_stream = Input()
 
     async def await_output(self):
         if not self._raws:
+            if self._clean:
+                return (None, Receiver(None))
             raise RuntimeError("the model stream is gone")
         return (None, Receiver(self._raws.pop(0)))
 
 TOOL_EVENT = json.dumps({"event": {"toolUse": {
     "toolName": "no_such_tool", "toolUseId": "t-1", "content": "{}"}}}).encode()
 
-async def one_case(fail_in_handler):
-    """Poison a session the way the finding describes, then try the next turn."""
-    session = relay.Session(options, Down(), None)
+def failures(down):
+    return [n for n in down.notices if n.get("event") == "turn-failed"]
+
+async def poison(how):
+    """Break a session one of the ways the model side can break it."""
+    down = Down()
+    session = relay.Session(options, down, None)
     session.stream = Stream([TOOL_EVENT])
-    if fail_in_handler:
+    # A turn is open and waiting for a reply, which is when this costs the most.
+    session.turn["talk_end"] = 0.0
+    if how == "handler":
         async def boom(event):
             raise RuntimeError("handling blew up")
         session._handle = boom
-    else:
+    elif how == "tool-result":
         # The real _handle and _run_tool, with the tool-result send failing: the
         # shape a dropped stream takes while the relay answers a tool call.
         async def refuse(obj):
             raise RuntimeError("the model stream is gone")
         session._send = refuse
+    elif how == "drop":
+        # Nothing to read and no clean end: the stream simply goes away, which is
+        # what a network blip looks like from here.
+        session.stream = Stream([])
     session.reader_task = asyncio.create_task(session._read_model())
     await asyncio.wait_for(session.ended.wait(), timeout=5)
-    check(session.turn_done.is_set(), "a waiting turn must be released")
+    return down, session
+
+async def one_case(how):
+    """Break a session, then take the next turn over the same relay."""
+    down, session = await poison(how)
+    check(session.turn_done.is_set(),
+          "%s: a waiting turn must be released" % how)
+    check(session.failed, "%s: the session must be marked spent" % how)
+    named = failures(down)
+    check(len(named) == 1,
+          "%s: the captain must be told once, not never and not twice: %r"
+          % (how, down.notices))
+    check(named[0].get("error"),
+          "%s: the notice must carry the cause: %r" % (how, named[0]))
+    check(session.turn.get("failed") == named[0]["error"],
+          "%s: the run record must carry the same cause: %r" % (how, session.turn))
 
     # close() absorbs the stored failure however many times it is asked, which is
     # what lets the next turn get as far as building a replacement.
@@ -1123,28 +1160,98 @@ async def one_case(fail_in_handler):
     class Fresh:
         def __init__(self, *args):
             self.connect_seconds = 0.02
+            self.failed = False
+            self.replies = 0
+            self.ended = asyncio.Event()
+            self.turns = 0
             built.append(self)
 
         async def start(self):
             pass
 
+        async def talk_start(self):
+            self.turns += 1
+
     real, relay.Session = relay.Session, Fresh
     try:
-        replacement = await relay.renew(session, options, Down())
+        used, serving = await relay.handle_uplink_frame(
+            frame.TALK_START, b"", session, options, down)
     finally:
         relay.Session = real
-    return replacement, built
-
-for fails_in_handler in (True, False):
-    where = "the event handler" if fails_in_handler else "the tool result send"
-    replacement, built = asyncio.run(one_case(fails_in_handler))
     check(len(built) == 1,
-          "after a failure in %s the next turn must build a session: %r"
-          % (where, built))
-    check(replacement is built[0],
-          "and renew must hand that replacement back for %s" % where)
+          "%s: the next talk key must build a session: %r" % (how, built))
+    check(used is built[0] and serving,
+          "%s: the relay must go on serving with it: %r %r" % (how, used, serving))
+    check(used.turns == 1, "%s: and give it the new turn: %r" % (how, used.turns))
+    check(len(failures(down)) == 1,
+          "%s: recovering must not name the turn again: %r" % (how, down.notices))
+
+for how in ("handler", "tool-result", "drop"):
+    asyncio.run(one_case(how))
+
+# A stream that simply ends is the end of a session, not a failed turn, and the
+# relay reads the two differently: serve treats a clean end as its own reason to
+# stop, so calling one a failure would change what a model-initiated end means.
+async def clean_end():
+    down = Down()
+    session = relay.Session(options, down, None)
+    session.stream = Stream([], clean=True)
+    session.reader_task = asyncio.create_task(session._read_model())
+    await asyncio.wait_for(session.ended.wait(), timeout=5)
+    return down, session
+
+down, ended = asyncio.run(clean_end())
+check(ended.turn_done.is_set(), "a clean end must release a waiting turn too")
+check(not ended.failed, "a clean end of stream is not a turn failure")
+check(not failures(down),
+      "and nothing should be named to the captain: %r" % (down.notices,))
+
+# Nor is a stream that went away because close() asked it to. renew closes the
+# old session on every single turn, so announcing that would put a failure notice
+# in front of the captain on every ordinary turn.
+async def torn_down():
+    down = Down()
+    session = relay.Session(options, down, None)
+    gone = asyncio.Event()
+
+    class Closer:
+        async def send(self, chunk):
+            pass
+
+        async def close(self):
+            # The stream goes away exactly when close() closes the input half,
+            # which is the ordering every renewed turn goes through.
+            gone.set()
+
+    class Blocking:
+        def __init__(self):
+            self.input_stream = Closer()
+
+        async def await_output(self):
+            await gone.wait()
+            raise RuntimeError("the model stream is gone")
+
+    async def quiet(obj):
+        pass
+
+    session.stream = Blocking()
+    # The real one builds an SDK event, and the SDK is deliberately not installed
+    # here; what this case needs is close() getting as far as the input half.
+    session._send = quiet
+    session.reader_task = asyncio.create_task(session._read_model())
+    await asyncio.sleep(0)
+    await session.close()
+    await asyncio.wait_for(session.ended.wait(), timeout=5)
+    return down, session
+
+down, closed = asyncio.run(torn_down())
+check(closed.ended.is_set(), "the reader must still report the session over")
+check(not closed.failed, "a deliberate close is not a turn failure")
+check(not failures(down),
+      "and an ordinary renew must not look like a failure: %r" % (down.notices,))
 PY
 pass "a failure inside the model reader costs one turn, not every later one"
+pass "a reader failure is named to the captain, a clean end and a close are not"
 
 # --- the laptop end ---------------------------------------------------------
 #
@@ -1155,7 +1262,10 @@ pass "a failure inside the model reader costs one turn, not every later one"
 # banner-printing login shell desynchronises the stream in a way that looks like a
 # protocol bug and is not.
 
-python3 - "$ROOT/bin" <<'PY' || fail "laptop client"
+mkdir -p "$TMP_ROOT/client-files"
+printf '\0\0\0\0' > "$TMP_ROOT/client-files/clip.pcm"
+
+python3 - "$ROOT/bin" "$TMP_ROOT/client-files" <<'PY' || fail "laptop client"
 import io, os, sys
 sys.path.insert(0, sys.argv[1])
 import importlib.util, pathlib
@@ -1164,6 +1274,8 @@ spec = importlib.util.spec_from_file_location(
 client = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(client)
 import fm_voice_frame as frame
+
+TMP = sys.argv[2]
 
 def check(cond, label):
     if not cond:
@@ -1354,20 +1466,50 @@ real_sync = client.sync_magic
 client.SpeakerPlayback = Boom
 client.subprocess.Popen = FakeProc
 client.sync_magic = lambda stream, verbose=False: None
-named = None
+
+def refusal_for(argv):
+    """Return how open() refuses, as (exception type name, message)."""
+    try:
+        client.Client(client.parse_args(["--host", "desk"] + argv)).open()
+    except BaseException as exc:               # noqa: BLE001
+        return type(exc).__name__, str(exc)
+    return None, "open() did not refuse"
+
+kind, named = refusal_for([])
 try:
-    client.Client(client.parse_args(["--host", "desk"])).open()
-except client.DeviceError as exc:
-    named = str(exc)
-except Exception as exc:                       # noqa: BLE001
-    named = "wrong type: %s: %s" % (type(exc).__name__, exc)
+    check(kind == "DeviceError",
+          "a device failure should be a named refusal, got %s: %s" % (kind, named))
+    check("could not open the audio device" in named,
+          "and should say what it could not open: %s" % named)
+    check("--output-device" in named,
+          "and should name the flag for that end: %s" % named)
+    check("--in-file" in named,
+          "and should name a way to run without a device: %s" % named)
+
+    # The file ends are the ones this host runs and the ones every measured
+    # figure was taken with, so a path that cannot be opened must say so and name
+    # the flag that chose it. Calling it a device failure sends the reader to
+    # --input-device when the thing to fix is the path.
+    missing = os.path.join(TMP, "no-such-clip.pcm")
+    kind, named = refusal_for(["--in-file", missing, "--out-file",
+                               os.path.join(TMP, "reply.pcm")])
+    check(kind in ("OSError", "FileNotFoundError"),
+          "a missing clip is not a device failure, got %s: %s" % (kind, named))
+    check(missing in named, "the refusal must name the path: %s" % named)
+    check("--in-file" in named and "--output-device" not in named,
+          "and the flag that named it, and no device advice: %s" % named)
+
+    nowhere = os.path.join(TMP, "no-such-dir", "reply.pcm")
+    kind, named = refusal_for(["--in-file", os.path.join(TMP, "clip.pcm"),
+                               "--out-file", nowhere])
+    check(kind in ("OSError", "FileNotFoundError"),
+          "an unwritable reply file is not a device failure either: %s" % named)
+    check(nowhere in named and "--out-file" in named,
+          "and must name the path and its flag: %s" % named)
 finally:
     client.SpeakerPlayback = real_speaker
     client.subprocess.Popen = real_popen
     client.sync_magic = real_sync
-check(named is not None and "could not open the audio devices" in named,
-      "a device failure should be a named refusal: %s" % named)
-check("--in-file" in named, "and should name a way to run without them: %s" % named)
 
 # A login shell banner is discarded with a warning naming it, not an error.
 noise = b"You have mail.\n"
