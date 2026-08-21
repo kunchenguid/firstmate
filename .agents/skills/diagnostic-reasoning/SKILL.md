@@ -2,7 +2,7 @@
 name: diagnostic-reasoning
 description: >-
   Agent-only procedure for diagnosing reported bugs.
-  Use before scoping a reported bug, before acting on a diagnostic report, and before reporting that something is absent, empty, missing, or not found.
+  Use before scoping a reported bug, before acting on a diagnostic report, and before reporting that a search, query, or scan found nothing.
   Owns end-user-aligned reproduction, causal separation, divergent-path and history inspection, counterfactual testing, disconfirming evidence, and when a negative result may be trusted.
 user-invocable: false
 metadata:
@@ -11,7 +11,7 @@ metadata:
 
 # diagnostic-reasoning
 
-Use this procedure before scoping a reported bug, before acting on a diagnostic report, and before reporting that something is absent, empty, missing, or not found.
+Use this procedure before scoping a reported bug, before acting on a diagnostic report, and before reporting that a search, query, or scan found nothing.
 This skill is the single owner of Firstmate's bug-diagnosis reasoning procedure.
 Firstmate applies it when briefing delegated investigation and evaluating the resulting evidence, without taking over project-specific investigation itself.
 
@@ -47,6 +47,8 @@ Compare the final explanation against the proven path and show why the proposed 
 
 A zero, an empty result, or a "not found" is a claim about the method as much as about the world.
 Before reporting absence, run the same method against data known to exist; if it cannot find that, it has established nothing about the target.
+When the target itself holds nothing to validate against, run that control against the nearest comparable populated location: a sibling path, the same shape in another environment, anywhere the method should succeed.
+If even that is impossible, state the missing control explicitly rather than presenting the empty result as confirmed absent.
 
 Distinguish three outcomes, never two:
 
