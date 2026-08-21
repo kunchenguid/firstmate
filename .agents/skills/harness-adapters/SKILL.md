@@ -113,9 +113,13 @@ When changing any primary watcher adapter, update `docs/supervision-protocols/`,
 `bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake.
 Do not make the shell scripts parse or match natural-language dispatch rules.
 
-Effort precedence is an explicit per-task captain instruction first, then any applicable standing dispatch profile or secondmate pin, then the generic fallback below.
-Never replace an effort value supplied by either higher-precedence source.
-Use the fallback only when neither the captain nor applicable standing configuration specifies effort.
+Model and effort precedence is an explicit per-task captain instruction first, then any applicable standing dispatch profile or secondmate pin, then harness-specific standing configuration, then the generic effort fallback below.
+Never replace a model or effort value supplied by a higher-precedence source.
+For a Codex crewmate or scout, inspect the live Codex `[agents]` settings at intake and treat `default_subagent_model` and `default_subagent_reasoning_effort` as harness-specific standing configuration, even though Firstmate launches an isolated CLI process rather than a Codex-native subagent.
+Pass each configured value explicitly to `fm-spawn` so the separate worker launch matches the captain's Codex subagent preference instead of inheriting unrelated top-level Codex session defaults.
+When either `[agents]` value is absent, continue down this precedence independently for that axis.
+Selecting `gpt-5.6-sol` with `high`, `xhigh`, `max`, or an equivalent high-or-higher effort requires explicit captain approval for the current task, regardless of standing configuration; Firstmate may recommend that profile with its expected benefit, but must not launch it from a standing preference alone.
+Use the generic effort fallback only when neither the captain nor applicable standing or harness-specific configuration specifies effort.
 Use `low` for well-understood work with an explicit bounded path and `xhigh` for ambiguous investigation or design.
 Choose intermediate levels proportionally as complexity, uncertainty, blast radius, or open-ended reasoning increases.
 When a verified adapter lacks `xhigh`, cap the choice at its highest supported non-`max` level rather than omitting the intended effort silently.
