@@ -5156,6 +5156,11 @@ EOF
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
+    # A cloud-placed child of a secondmate home staged its provider credential
+    # in THAT home's state directory. This reaping loop is the only teardown
+    # that ever ends such a child's life when the parent goes first, so it owns
+    # the removal; without it the credential outlived the whole home.
+    fm_cloud_state_remove "$sub_state" "$child_id"
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.provision.log"
     [ -z "$child_account_lock" ] || fm_account_lifecycle_lock_release "$child_account_lock" >/dev/null 2>&1 || true
   done <<EOF

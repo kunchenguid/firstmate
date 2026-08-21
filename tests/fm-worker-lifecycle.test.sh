@@ -2745,10 +2745,38 @@ except controller.LifecycleError as exc:
 else:
     raise AssertionError("the ordinary release validator accepted a surrendered verdict")
 
+# The compartment-child shape of this same lane. A compartment child's task
+# home is the SECONDMATE's home, while surrender necessarily runs with FM_HOME
+# on the primary - the controller document has exactly one home. Resolving the
+# primary's state here removed a path that never existed and left the plaintext
+# credential in the compartment home with nothing left to remove it.
+compartment = Path(env["FM_HOME"]).parent / "compartment"
+(compartment / "state").mkdir(parents=True, exist_ok=True)
+(compartment / ".fm-secondmate-home").write_text("smc-1\n")
+child_staged = compartment / "state" / "task-1.cloud-account"
+child_staged.mkdir(parents=True, exist_ok=True)
+(child_staged / "auth.json").write_text("{}")
+# The controller is what tells the wrapper where a compartment child lives.
+# The real admission shape, not a convenient one: parent_task and task_home
+# land on the QUEUE ITEM, and only task_home is copied onto the worker record.
+# Sourcing the receipt from the worker therefore emitted nothing at all, and
+# this case caught exactly that.
+_state = controller_state()
+_state["queue"]["task-1@gen-1"]["parent_task"] = "smc-1"
+_state["queue"]["task-1@gen-1"]["parent_task_generation"] = "gen-s1"
+_state["queue"]["task-1@gen-1"]["task_home"] = str(compartment)
+_state["workers"][slot]["task_home"] = str(compartment)
+(Path(env["FM_HOME"]) / "state/azure-workers/controller.json").write_text(
+    json.dumps(_state, sort_keys=True, separators=(",", ":")) + "\n")
+
 # Re-running is idempotent and re-issues the receipt without a second proof.
 (Path(env["FM_HOME"]) / "surrender-1.json").unlink()
 again = run(*surrender, "--confirm-surrender", *confirm)
 assert "already recorded" in again.stdout and "FM-SURRENDERED task-1 gen-1" in again.stdout
+assert not (child_staged / "auth.json").exists(), (
+    "surrender left a compartment child's staged provider credential in its task home")
+assert not child_staged.exists(), (
+    "surrender left a compartment child's account staging directory behind")
 assert controller_state()["workers"][slot]["release_proof"] == proof
 rewritten = json.loads((Path(env["FM_HOME"]) / "surrender-1.json").read_text())
 assert rewritten == proof, "the idempotent rerun did not re-issue the exact stored proof"

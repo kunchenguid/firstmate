@@ -1285,6 +1285,204 @@ test_task_home_refusals_are_exact() {
   pass "every unsafe task home refuses before the spawn writes anything"
 }
 
+run_child_lifecycle() {  # <case> <fakebin> <primary> <lifecycle args...>
+  # The controller document is the PRIMARY's, so every lifecycle command for a
+  # compartment child runs with FM_HOME on the primary. That is exactly the
+  # condition under which a primary-resolved remover misses the credential.
+  local case_dir=$1 fakebin=$2 primary=$3
+  shift 3
+  # The fakebin goes first on PATH like every other helper here. Nothing in
+  # this lane shells a stubbed tool today; the moment one does, a helper that
+  # omitted this would reach the real one.
+  PATH="$fakebin:$PATH" \
+  FM_HOME="$primary" \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+    FM_AZURE_OWNER_TAG=owner \
+    FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0 \
+    FM_WORKER_PROVIDER_COMMAND="python3 $case_dir/provider.py" \
+    FIXTURE_STATE="$case_dir/provider-state.json" \
+    "$ROOT/bin/fm-worker-lifecycle.sh" "$@" 2>&1
+}
+
+child_queue_generation() {  # <controller> <task>
+  python3 - "$1" "$2" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+controller, task = sys.argv[1:]
+state = json.loads(Path(controller).read_text())
+for item in state.get("queue", {}).values():
+    if item.get("task") == task:
+        print(item["task_generation"])
+        break
+PY
+}
+
+raise_fixture_actual_cost() {  # <case> <usd>
+  # The fixture provider seeds its cost metrics on the FIRST call and then
+  # reloads them from its own state file, so FM_TEST_ACTUAL_USD on a later
+  # command changes nothing. Rewriting the persisted metric is what actually
+  # steers a subsequent admission past policy, which is how a compartment
+  # child is held in `queued` - withdraw's one legal input.
+  python3 - "$1/provider-state.json" "$2" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, usd = Path(sys.argv[1]), float(sys.argv[2])
+state = json.loads(path.read_text())
+state["metrics"]["actual_usd"] = usd
+path.write_text(json.dumps(state))
+PY
+}
+
+assert_fixture_provider_drove_the_lane() {  # <case>
+  # Safety, not decoration: with an operator environment present the real
+  # provider would be selected and a test believing it drives a fake would
+  # create billable compute. The fixture provider records every call it
+  # served, so this proves the lane ran against the fixture.
+  local case_dir=$1
+  assert_present "$case_dir/provider-state.json" \
+    "the fixture provider never ran; this lane may have reached a real provider"
+  assert_grep '"calls"' "$case_dir/provider-state.json" \
+    "the fixture provider recorded no calls; this lane may have reached a real provider"
+}
+
+controller_task_state_dir() {  # <controller> <task> <fallback>
+  python3 - "$1" "$2" "$3" <<'CTRL'
+import json
+import sys
+from pathlib import Path
+
+controller, task, fallback = sys.argv[1:]
+state = json.loads(Path(controller).read_text())
+for item in state.get("queue", {}).values():
+    if item.get("task") == task:
+        home = item.get("task_home")
+        print("{}/state".format(home) if home else fallback)
+        break
+CTRL
+}
+
+test_compartment_child_staging_and_removal_resolve_the_same_home() {
+  # THE STRUCTURAL INVARIANT, not a comment about it: whatever directory the
+  # real spawn stages the credential into is the directory the remover
+  # resolves. This fails the moment those two answers diverge, which is exactly
+  # the shape of the defect it replaces - the stager followed the task home
+  # while every remover re-derived the controller's.
+  local record id parent out status staged resolved
+  id=child-c4
+  parent=smc-resolve
+  record=$(make_child_case child-resolve "$id" "$parent")
+  read_child_case "$record"
+  stand_up_compartment "$CASE_DIR" "$PRIMARY_DIR" "$parent" gen-parent \
+    || fail "the parent compartment could not be stood up in the primary's controller"
+  assert_fixture_provider_drove_the_lane "$CASE_DIR"
+  out=$(FM_SPAWN_PARENT_TASK="$parent" FM_SPAWN_PARENT_TASK_GENERATION=gen-parent \
+    run_child_spawn "$CASE_DIR" "$PRIMARY_DIR" "$SUB_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 0 "$status" "a compartment child spawn should succeed: $out"
+  # Found, not assumed: ask the filesystem which home actually holds it.
+  staged=
+  for candidate in "$SUB_DIR/state" "$PRIMARY_DIR/state"; do
+    [ -f "$candidate/$id.cloud-account/auth.json" ] || continue
+    staged=$candidate
+    break
+  done
+  [ -n "$staged" ] || fail "the compartment child spawn staged no provider credential anywhere"
+  # The remover's answer, taken the way a lifecycle command running in the
+  # CONTROLLER's home actually takes it: from the authorized task home the
+  # controller durably recorded for this exact task generation.
+  resolved=$(controller_task_state_dir "$PRIMARY_DIR/state/azure-workers/controller.json" \
+    "$id" "$PRIMARY_DIR/state")
+  [ "$resolved" = "$staged" ] || fail \
+    "the credential is staged in $staged but the controller resolves $resolved"
+  pass "the staged cloud-account path and its remover resolve the same home"
+}
+
+test_compartment_child_refused_request_leaves_no_credential() {
+  # The rollback lane: the payload and account staging happen BEFORE the
+  # controller sees the request, so a refusal after staging must take them with
+  # it, in the COMPARTMENT's home rather than the primary's. The refusal here
+  # is a real controller refusal, the named parent compartment holding no
+  # assignment. Scope, precisely: since #280 the credential itself is written
+  # after the request succeeds, by the narrowing step, so what this lane proves
+  # is the transport removal. The credential-bearing failure that comes after a
+  # SUCCESSFUL request is #280's own bind-failure path, and it exits through
+  # the same wrapper withdraw the lane above drives end to end.
+  local record id parent out status
+  id=child-c5
+  parent=smc-rollback
+  record=$(make_child_case child-rollback "$id" "$parent")
+  read_child_case "$record"
+  out=$(FM_SPAWN_PARENT_TASK="$parent" FM_SPAWN_PARENT_TASK_GENERATION=gen-parent \
+    run_child_spawn "$CASE_DIR" "$PRIMARY_DIR" "$SUB_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "a compartment child whose request is refused should fail: $out"
+  assert_contains "$out" "cloud worker request was refused" \
+    "the refusal did not surface the request failure: $out"
+  assert_absent "$SUB_DIR/state/$id.cloud-account/auth.json" \
+    "a refused compartment child left its staged provider credential behind"
+  assert_absent "$SUB_DIR/state/$id.cloud-account" \
+    "a refused compartment child left its account staging directory behind"
+  assert_absent "$SUB_DIR/state/$id.cloud-payload" \
+    "a refused compartment child left its payload staging directory behind"
+  assert_absent "$SUB_DIR/state/$id.cloud-entrypoint" \
+    "a refused compartment child left its persisted entrypoint behind"
+  assert_absent "$SUB_DIR/state/$id.cloud-worktree" \
+    "a refused compartment child left its leased worktree pointer behind"
+  assert_absent "$SUB_DIR/state/$id.meta" "a refused compartment child left task metadata behind"
+  pass "a compartment child request refused after staging takes its credential with it"
+}
+
+test_compartment_child_withdraw_removes_the_staged_credential() {
+  # THE DEFECT. bin/fm-spawn.sh stages a PLAINTEXT provider credential at
+  # <task home>/state/<id>.cloud-account/auth.json, and since the task-home
+  # split the compartment child's task home is the SECONDMATE's home. withdraw
+  # owns that removal for a request that never reached assignment, and it
+  # resolved the PRIMARY's state, so the credential outlived the task in the
+  # compartment home with nothing left that would ever remove it.
+  local record id parent out status generation credential
+  id=child-c3
+  parent=smc-withdraw
+  record=$(make_child_case child-withdraw "$id" "$parent")
+  read_child_case "$record"
+  stand_up_compartment "$CASE_DIR" "$PRIMARY_DIR" "$parent" gen-parent \
+    || fail "the parent compartment could not be stood up in the primary's controller"
+  assert_fixture_provider_drove_the_lane "$CASE_DIR"
+  # Past-policy spend steers the child's admission to a refusal, so it is
+  # admitted to the queue and never assigned: withdraw's exact input.
+  raise_fixture_actual_cost "$CASE_DIR" 2000
+  out=$(FM_SPAWN_PARENT_TASK="$parent" \
+    FM_SPAWN_PARENT_TASK_GENERATION=gen-parent \
+    run_child_spawn "$CASE_DIR" "$PRIMARY_DIR" "$SUB_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 0 "$status" "a queued compartment child spawn should succeed: $out"
+  credential="$SUB_DIR/state/$id.cloud-account/auth.json"
+  assert_present "$credential" "the child spawn staged no credential in the compartment home"
+  assert_absent "$PRIMARY_DIR/state/$id.cloud-account/auth.json" \
+    "the child's credential was staged in the primary home instead of the task home"
+  generation=$(child_queue_generation "$PRIMARY_DIR/state/azure-workers/controller.json" "$id")
+  [ -n "$generation" ] || fail "the queued child has no controller generation to withdraw"
+  out=$(run_child_lifecycle "$CASE_DIR" "$FAKEBIN_DIR" "$PRIMARY_DIR" withdraw \
+    --task "$id" --task-generation "$generation" \
+    --confirm-withdraw --confirm-subscription "$SUB")
+  status=$?
+  expect_code 0 "$status" "withdrawing the queued compartment child should succeed: $out"
+  assert_contains "$out" "FM-WITHDREW $id" "withdraw emitted no receipt for the child: $out"
+  assert_absent "$credential" \
+    "withdraw left the child's staged provider credential in the compartment home"
+  assert_absent "$SUB_DIR/state/$id.cloud-account" \
+    "withdraw left the child's account staging directory in the compartment home"
+  pass "withdrawing a compartment child removes the credential from the home it staged it in"
+}
+
 test_cloud_switch_off_keeps_the_local_path_and_metadata_shape
 test_cloud_spawn_places_worker_and_runs_the_entrypoint
 test_monitor_lands_the_outcome_bundle
@@ -1306,6 +1504,9 @@ test_cloud_switch_refuses_non_pi_harness
 test_cloud_switch_refuses_explicit_backend
 test_compartment_child_spawn_splits_the_task_home_from_the_money_document
 test_task_home_refusals_are_exact
+test_compartment_child_withdraw_removes_the_staged_credential
+test_compartment_child_refused_request_leaves_no_credential
+test_compartment_child_staging_and_removal_resolve_the_same_home
 
 test_cloud_switch_off_and_on_share_the_same_base_metadata
 

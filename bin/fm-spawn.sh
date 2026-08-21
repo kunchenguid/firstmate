@@ -239,6 +239,8 @@ CHECKOUT_STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.
 # shellcheck source=bin/fm-checkout-lock-lib.sh
 . "$SCRIPT_DIR/fm-checkout-lock-lib.sh"
 CHECKOUT_LOCK_ROOT=$(fm_checkout_lock_root "$CHECKOUT_STATE_BASE")
+# shellcheck source=bin/fm-cloud-state-lib.sh
+. "$SCRIPT_DIR/fm-cloud-state-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
@@ -4081,11 +4083,14 @@ if [ "$SPAWN_CLOUD" = azure ]; then
   # marker (both owners would stand down and the new worker would never
   # execute), or logs. Swept HERE, before the tracking pane exists, so the
   # new monitor can never observe them.
-  rm -f "$STATE/$ID.cloud-entrypoint" "$STATE/$ID.cloud-env" \
-    "$STATE/$ID.cloud-execute-dispatched" "$STATE/$ID.cloud-worktree" \
-    "$STATE/$ID.worker-request.out" \
-    "$STATE/$ID.worker-result.json" "$STATE/$ID.worker-execute.log"
-  rm -rf "$STATE/$ID.cloud-payload" "$STATE/$ID.cloud-account"
+  # Through the one owner (bin/fm-cloud-state-lib.sh), never a second spelling
+  # of the file set: this sweep and the library used to enumerate the names
+  # separately, so a name added to one was invisible to the other. The rebase
+  # onto #280 is that exact case caught in the act: it added
+  # <id>.worker-request.out to this sweep only, so nothing removed it at the
+  # END of a task's life. It is in the library's enumeration now, which is why
+  # the task-end remover covers it too.
+  fm_cloud_state_remove_generation "$STATE" "$ID"
   if [ "$KIND" = secondmate ]; then
     # Compartment monitor state is generation-scoped the same way: a re-spawn
     # must not inherit leg dispatch markers (the new monitor would think legs
@@ -4673,9 +4678,10 @@ spawn_cloud_dispatch() {
     rm -f "$request_report"
     # No durable queue entry exists, so the convergence artifacts have no
     # owner; remove them (including the copied provider credential) with the
-    # rolled-back spawn.
-    rm -f "$STATE/$ID.cloud-entrypoint" "$STATE/$ID.cloud-env" "$STATE/$ID.cloud-worktree"
-    rm -rf "$STATE/$ID.cloud-payload" "$STATE/$ID.cloud-account"
+    # rolled-back spawn. $STATE is the directory this spawn just staged into,
+    # which on the compartment-child lane is the secondmate's and not the
+    # primary's, so the rollback needs no resolution of its own.
+    fm_cloud_state_remove_generation "$STATE" "$ID"
   # The outcome directory is NOT transport. When the monitor cannot
   # fast-forward it tells the operator the bundle is "kept for manual
   # landing", and by then the guest copy is usually gone with the VM, so a
