@@ -534,6 +534,215 @@ test_single_flight_admits_exactly_one_owner() {
   pass "auto-arm: concurrent firings admit one owner and one rewake translation"
 }
 
+# --- abandoned single-flight claim recovery -----------------------------------
+# The 2026-08-14 lapse: one cycle armed, beat its beacon, delivered a single
+# rewake, and exited, leaving its owner lock behind with a live pid. The single
+# flight gate then turned every later firing into exit 0, so with two tasks in
+# flight and a beacon 40 minutes cold nothing re-armed and both workers' reports
+# sat unread until an operator drained the queue by hand. The lock alone is not
+# enough to prove that: the ledger naming that same pid with a finished outcome,
+# or a recorded pid-identity the live pid no longer matches, is what distinguishes
+# an abandoned claim from one still deciding.
+
+# Fabricate a held owner lock: <dir> <pid> <role>. Plain-dir shape on purpose -
+# the hook must reclaim whatever a crashed or blocked owner left behind.
+record_autoarm_owner() {
+  local dir=$1 pid=$2 role=${3:-autoarm}
+  mkdir -p "$dir/state/.claude-autoarm.lock"
+  printf '%s\n' "$pid" > "$dir/state/.claude-autoarm.lock/pid"
+  printf '%s\n' "$role" > "$dir/state/.claude-autoarm.lock/role"
+}
+
+# Record the pid-identity a claim leaves inside its own lock: <dir> <pid>. The
+# claim writes the identity of the process that took the lock, so passing a pid
+# OTHER than the lock's own reproduces pid reuse - the recorded claimant is gone
+# and an unrelated live process now answers to its number.
+record_autoarm_owner_identity() {
+  local dir=$1 pid=$2 identity
+  identity=$(fm_test_pid_identity "$pid") || return 1
+  [ -n "$identity" ] || return 1
+  printf '%s\n' "$identity" > "$dir/state/.claude-autoarm.lock/pid-identity"
+}
+
+# <dir> <epoch-seq> <owner-pid> <outcome>, aged well past any freshness window.
+record_autoarm_epoch() {
+  local dir=$1 seq=$2 owner=$3 outcome=$4
+  printf 'epoch=%s owner_pid=%s outcome=%s updated_at=1\n' "$seq" "$owner" "$outcome" \
+    > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+}
+
+epoch_field() {
+  local dir=$1 field=$2
+  sed -n "s/^.*[[:space:]]\{0,1\}$field=\([A-Za-z0-9_-]*\).*\$/\1/p" \
+    "$dir/state/.claude-autoarm-epoch" 2>/dev/null || true
+}
+
+test_abandoned_owner_claim_is_reclaimed_and_rearms() {
+  local dir out status pid
+  dir=$(make_primary_dir "$TMP_ROOT/abandoned-claim")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/task2.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  record_autoarm_epoch "$dir" 464 "$pid" rewake
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a claim whose ledger outcome is already terminal must be reclaimed, not deferred to forever"
+  [ -e "$dir/state/arm-ran" ] || fail "abandoned claim left the home unarmed with work in flight"
+  assert_contains "$out" "firstmate watcher wake" "the reclaimed cycle must still translate its wake"
+  [ "$(epoch_field "$dir" epoch)" -gt 464 ] || fail "reclaimed cycle did not advance the frozen ledger: $(epoch_field "$dir" epoch)"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "reclaimed cycle did not record its own outcome: $(epoch_outcome "$dir")"
+  [ "$(epoch_field "$dir" owner_pid)" != "$pid" ] || fail "reclaimed ledger still names the abandoned owner"
+  assert_absent "$dir/state/.claude-autoarm.lock" "reclaimed cycle left an owner lock behind"
+  assert_absent "$dir/state/.claude-autoarm.lock.steal" "reclaim left its serialization mutex behind"
+  pass "auto-arm: an abandoned owner claim is reclaimed so a lapsed cycle re-arms"
+}
+
+test_arming_claim_is_never_reclaimed() {
+  local dir out status pid
+  dir=$(make_primary_dir "$TMP_ROOT/arming-claim")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  # An owner foregrounds the arm for the whole watcher cycle, so "arming" is in
+  # progress no matter how old its ledger entry is.
+  record_autoarm_epoch "$dir" 464 "$pid" arming
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a claim still arming must keep the single-flight gate closed"
+  [ -z "$out" ] || fail "deferring to an arming claim produced output: $out"
+  assert_absent "$dir/state/arm-ran" "an arming claim was stolen and double-armed"
+  [ "$(epoch_field "$dir" epoch)" = 464 ] || fail "deferred firing rewrote the arming ledger entry"
+  assert_present "$dir/state/.claude-autoarm.lock" "an arming claim lost its owner lock"
+  pass "auto-arm: an owner still arming is never reclaimed, however long the cycle runs"
+}
+
+test_claim_not_named_by_the_ledger_is_never_reclaimed() {
+  local dir out status pid
+  dir=$(make_primary_dir "$TMP_ROOT/unnamed-claim")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  # A fresh claimant holds the lock before it writes "arming", so until it does
+  # the ledger still names the PREVIOUS owner. Requiring the two pids to match is
+  # what keeps that window from being mistaken for abandonment.
+  record_autoarm_epoch "$dir" 464 999 rewake
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a live claim the ledger does not name is unproven and must be left alone"
+  [ -z "$out" ] || fail "deferring to an unnamed claim produced output: $out"
+  assert_absent "$dir/state/arm-ran" "a claim the ledger does not name was stolen and double-armed"
+  assert_present "$dir/state/.claude-autoarm.lock" "an unproven claim lost its owner lock"
+  pass "auto-arm: a live claim the ledger does not name is never reclaimed"
+}
+
+# The same unrecoverable lapse, reached where the ledger cannot prove it: a session
+# teardown kills the claim's whole process group before it records any outcome, so
+# the entry still reads "arming" (in flight however old, by contract) while the
+# recorded pid is later handed to an unrelated live process. Only the identity the
+# claim recorded inside its own lock separates that from a real arm in progress.
+test_pid_reused_arming_claim_is_reclaimed_and_rearms() {
+  local dir out status pid
+  dir=$(make_primary_dir "$TMP_ROOT/reused-pid-arming")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/task2.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  record_autoarm_owner_identity "$dir" "$$" || fail "could not record a claim pid-identity"
+  record_autoarm_epoch "$dir" 464 "$pid" arming
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a claim whose recorded identity no longer matches its live pid must be reclaimed, arming entry or not"
+  [ -e "$dir/state/arm-ran" ] || fail "a reused-pid claim left the home unarmed with work in flight"
+  assert_contains "$out" "firstmate watcher wake" "the reclaimed cycle must still translate its wake"
+  [ "$(epoch_field "$dir" epoch)" -gt 464 ] || fail "reclaimed cycle did not advance the frozen ledger: $(epoch_field "$dir" epoch)"
+  assert_absent "$dir/state/.claude-autoarm.lock" "reclaimed cycle left an owner lock behind"
+  assert_absent "$dir/state/.claude-autoarm.lock.steal" "reclaim left its serialization mutex behind"
+  pass "auto-arm: a claim whose pid was reused is reclaimed even while its ledger entry still reads arming"
+}
+
+# The other ledger-blind shape: no ledger at all (a fresh or hand-cleared home)
+# plus a reused pid. Without the recorded identity nothing proves abandonment, so
+# every later firing exits at the lock and the home never re-arms.
+test_pid_reused_claim_with_no_ledger_is_reclaimed_and_rearms() {
+  local dir out status pid
+  dir=$(make_primary_dir "$TMP_ROOT/reused-pid-no-ledger")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  record_autoarm_owner_identity "$dir" "$$" || fail "could not record a claim pid-identity"
+  assert_absent "$dir/state/.claude-autoarm-epoch" "this case must start with no ledger at all"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a reused-pid claim with no ledger to consult must still be reclaimed"
+  [ -e "$dir/state/arm-ran" ] || fail "a reused-pid claim with no ledger left the home unarmed"
+  assert_contains "$out" "firstmate watcher wake" "the reclaimed cycle must still translate its wake"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "reclaimed cycle did not record its own outcome: $(epoch_outcome "$dir")"
+  assert_absent "$dir/state/.claude-autoarm.lock" "reclaimed cycle left an owner lock behind"
+  pass "auto-arm: a reused-pid claim is reclaimed even with no ledger entry to prove it"
+}
+
+# The negative control for the identity leg: a claim whose recorded identity still
+# matches the process holding the lock is genuinely in flight, so an arm that has
+# legitimately been running for hours must keep the single-flight gate closed.
+test_identity_matched_arming_claim_is_never_reclaimed() {
+  local dir out status pid
+  dir=$(make_primary_dir "$TMP_ROOT/identity-matched-arming")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  record_autoarm_owner_identity "$dir" "$pid" || fail "could not record a claim pid-identity"
+  record_autoarm_epoch "$dir" 464 "$pid" arming
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "an identity-matched claim still arming must keep the single-flight gate closed"
+  [ -z "$out" ] || fail "deferring to an identity-matched arming claim produced output: $out"
+  assert_absent "$dir/state/arm-ran" "an identity-matched arming claim was stolen and double-armed"
+  [ "$(epoch_field "$dir" epoch)" = 464 ] || fail "deferred firing rewrote the arming ledger entry"
+  assert_present "$dir/state/.claude-autoarm.lock" "an identity-matched arming claim lost its owner lock"
+  pass "auto-arm: an identity-matched owner still arming is never reclaimed"
+}
+
+test_terminal_check_claim_is_never_reclaimed() {
+  local dir out status pid
+  dir=$(make_primary_dir "$TMP_ROOT/terminal-check-claim")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  pid=$!
+  # The synchronous guard takes the same lock under its own role while it decides
+  # the attended fail-open. Reclaiming that would race the guard's own decision.
+  record_autoarm_owner "$dir" "$pid" terminal-check
+  record_autoarm_epoch "$dir" 464 "$pid" failed-suppressed
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "the guard's own terminal-check claim must never be reclaimed by the arm hook"
+  [ -z "$out" ] || fail "deferring to a terminal-check claim produced output: $out"
+  assert_absent "$dir/state/arm-ran" "a terminal-check claim was stolen and double-armed"
+  assert_present "$dir/state/.claude-autoarm.lock" "a terminal-check claim lost its owner lock"
+  pass "auto-arm: the guard's terminal-check claim is never reclaimed"
+}
+
 test_need_vanished_mid_cycle_closes_quietly() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/vanished")
@@ -595,6 +804,13 @@ test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner
+test_abandoned_owner_claim_is_reclaimed_and_rearms
+test_arming_claim_is_never_reclaimed
+test_claim_not_named_by_the_ledger_is_never_reclaimed
+test_pid_reused_arming_claim_is_reclaimed_and_rearms
+test_pid_reused_claim_with_no_ledger_is_reclaimed_and_rearms
+test_identity_matched_arming_claim_is_never_reclaimed
+test_terminal_check_claim_is_never_reclaimed
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home

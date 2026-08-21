@@ -551,10 +551,14 @@ __FM_BEARINGS_BOARD_DATA__
         return;
       }
       if (window.lavish && window.lavish.queuePrompt) {
+        /* close carries the composer-declared close mode: "release" frees a
+           captain-gated work item instead of completing a question task */
+        var ctxData = { question: item.key, answer: answer };
+        if (item.close) ctxData.close = item.close;
         window.lavish.queuePrompt(
           "Captain's Call answer - " + item.title + ": " + answer,
           { tag: "choice", text: item.title + " -> " + answer, element: form,
-            data: { question: item.key, answer: answer } }
+            data: ctxData }
         );
       }
       card.classList.add("is-queued");
