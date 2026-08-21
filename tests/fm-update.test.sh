@@ -45,6 +45,9 @@ new_world() {
 
   printf 'v1\n' > "$w/seed/AGENTS.md"
   printf 'r1\n' > "$w/seed/README.md"
+  # Mirror production: config/ is gitignored, so a home-local config/update-remote
+  # never makes the working tree read as dirty and never blocks a fast-forward.
+  printf 'config/\n' > "$w/seed/.gitignore"
   mkdir -p "$w/seed/bin" "$w/seed/.agents/skills"
   printf 'echo a\n' > "$w/seed/bin/tool.sh"
   printf 's1\n' > "$w/seed/.agents/skills/note.md"
@@ -90,6 +93,37 @@ bump_origin() {
 run_update() {
   local w=$1
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
+}
+
+# Create a second bare repo forked from origin's current tip and register it as
+# a `fork` remote on the firstmate checkout (shared by its worktrees, matching a
+# re-pointed home that added the fork alongside origin). The fork starts equal to
+# origin; bump_fork advances it independently so a fetch-from-fork test can prove
+# the home landed the FORK's tip, not origin's.
+add_fork() {
+  local w=$1
+  git clone -q --bare "$w/origin.git" "$w/fork.git"
+  git -C "$w/main" remote add fork "$w/fork.git"
+}
+
+# Advance the fork by one clean commit (a descendant of origin's tip), changing
+# the instruction surface so an advance implies a reread/nudge.
+bump_fork() {
+  local w=$1
+  rm -rf "$w/forkseed"
+  git clone -q "$w/fork.git" "$w/forkseed" 2>/dev/null
+  printf 'v-fork\n' > "$w/forkseed/AGENTS.md"
+  printf 'echo fork\n' > "$w/forkseed/bin/tool.sh"
+  git -C "$w/forkseed" add -A
+  git -C "$w/forkseed" commit -qm bump-fork
+  git -C "$w/forkseed" push -q origin main   # this clone's origin == fork.git
+}
+
+# Point a home's update source at the `fork` remote via its own gitignored config.
+point_at_fork() {
+  local home=$1
+  mkdir -p "$home/config"
+  printf 'fork\n' > "$home/config/update-remote"
 }
 
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
@@ -291,7 +325,76 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+# --- T12: config/update-remote redirects the fetch to the fork -------------
+# The fork-as-source switch: a home whose config/update-remote says `fork`
+# fast-forwards to the FORK's tip, not origin's. origin is left behind on
+# purpose (only the fork is bumped), so landing the fork tip proves the source
+# actually moved. Same guards, different remote: the advance still flips
+# reread/nudge because the instruction surface changed.
+test_config_remote_redirects_to_fork() {
+  local w out
+  w=$(new_world t12)
+  add_sm "$w" sm1
+  add_fork "$w"
+  bump_fork "$w"                 # fork advances; origin stays at the seed commit
+  point_at_fork "$w/main"
+  point_at_fork "$w/sm1"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "firstmate fast-forwarded from the fork"
+  assert_contains "$out" "secondmate sm1: updated " "secondmate fast-forwarded from the fork"
+  assert_contains "$out" "reread-firstmate: yes" "fork advance changed instructions"
+  assert_contains "$out" "nudge-secondmates: fm-sm1" "advanced secondmate nudged"
+  # Landed the FORK tip, not origin's.
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse fork/main)" ] \
+    || fail "firstmate did not land the fork tip"
+  [ "$(git -C "$w/main" rev-parse HEAD)" != "$(git -C "$w/main" rev-parse origin/main)" ] \
+    || fail "firstmate landed origin's tip, the source did not switch"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$(git -C "$w/sm1" rev-parse fork/main)" ] \
+    || fail "secondmate did not land the fork tip"
+  grep -qx 'v-fork' "$w/main/AGENTS.md" || fail "fork content not present after update"
+  pass "T12 config/update-remote fetches the fork, not origin"
+}
+
+# --- T13: configured remote missing is skipped, nothing forced -------------
+test_config_remote_missing_skipped() {
+  local w out before
+  w=$(new_world t13)
+  bump_origin "$w" instr
+  point_at_fork "$w/main"        # asks for `fork` but no fork remote exists
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: no fork remote" "missing configured remote skipped"
+  assert_contains "$out" "reread-firstmate: no" "no reread when the home was skipped"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "home advanced despite its configured remote being absent"
+  pass "T13 a missing configured update remote is skipped, not silently retried on origin"
+}
+
+# --- T14: guards still hold on the fork source (dirty home skipped) ---------
+test_config_remote_preserves_guards() {
+  local w out
+  w=$(new_world t14)
+  add_sm "$w" sm1
+  add_fork "$w"
+  bump_fork "$w"
+  point_at_fork "$w/sm1"
+  printf 'uncommitted local edit\n' >> "$w/sm1/AGENTS.md"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "secondmate sm1: skipped: dirty working tree" "dirty fork-sourced home skipped"
+  grep -q 'uncommitted local edit' "$w/sm1/AGENTS.md" || fail "dirty edit discarded on fork source"
+  pass "T14 fast-forward guards are preserved when the source is the fork"
+}
+
 test_updates_main_and_secondmate
+test_config_remote_redirects_to_fork
+test_config_remote_missing_skipped
+test_config_remote_preserves_guards
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped

@@ -76,6 +76,25 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
+# Seconds a status stream may stay SILENT after declaring work before that
+# silence is worth reconciling. The measured quantity is the status log's own
+# quiet, not an endpoint reading: a live worker writes status events, and one
+# that declared work and stopped quits writing them. That keeps the decision on
+# a durable record the parent already holds, with nothing to wire at launch and
+# no rendered surface to misread.
+# The default is deliberately generous because AGENTS.md's status contract makes
+# appends SPARSE supervisor-actionable events rather than routine progress, so a
+# working mate is legitimately quiet for long stretches; that is why this sits
+# far above the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), which
+# bounds a pane that should be changing, and below the declared-pause cadence
+# (FM_PAUSE_RESURFACE_SECS, default 3600s), because a declared external wait is
+# a stated reason to go quiet while unresumed declared work is not. It lives
+# beside the decision it bounds so the threshold has one owner: the watcher reads
+# FM_DECLARED_WORK_SILENCE_SECS with this default, and any later consumer reads
+# the same pair rather than restating the number.
+# shellcheck disable=SC2034 # Read by the watcher (fm-watch.sh), not this lib.
+FM_DECLARED_WORK_SILENCE_SECS_DEFAULT=1500
+
 # Bounded re-surface cadence for a declared pause or a dead-agent captain hold.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
 # avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
@@ -144,6 +163,69 @@ status_is_paused() {  # <status-line>
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
+}
+
+# 0 if a status line's leading verb declares work (working: <what>). A pure read
+# of the line, matching only the verb before the first colon, so a blocker or
+# note that merely mentions "working" does not false-match.
+# A worker (or a secondmate reporting to its parent) appends
+#   working: <the phase it has started or is about to start>
+# to state what it is doing. Unlike `paused:` - a KNOWN external wait that is
+# expected to idle and owns its own bounded re-surface cadence - and unlike the
+# terminal verbs, this line is an INTENTION: it proves what the worker said it
+# would do, never that the work is running. When it is the last event in a stream
+# and the endpoint has gone idle, the declared work was never resumed.
+status_declares_work() {  # <status-line>
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = working ]
+}
+
+# 0 if declared work has gone SILENT: the stream's last event still declares
+# work that nothing has followed AND that stream has been quiet for at least
+# <threshold> seconds.
+# Neither half means anything alone - a declared-work line is the healthy state
+# of any worker mid-task, and a quiet stream is the healthy state of a worker
+# with nothing supervisor-actionable to report - which is exactly why every
+# existing detector let the combination through: the stale path exempts a
+# secondmate's idle endpoint by design, and a working: line is not
+# captain-relevant, so the heartbeat backstop correctly absorbs it.
+# UNRESUMED IS READ OFF THE LAST EVENT. The line handed in is the stream's last
+# non-blank one (last_status_line above), so a declaration still standing there
+# is one no later event of any kind - a terminal verb, a resolution, a
+# captain-held transfer, a declared pause, an informational note, or a newer
+# declared phase - superseded.
+# Deliberately the LAST event rather than the keyed activity fold
+# (status_open_activities): a `working` phase has no contract requiring a keyed
+# terminal event to close it, so an open keyed phase routinely outlives the work
+# itself.
+# The last-event rule NARROWS the false signal the registered-secondmate
+# current-state section of docs/architecture.md records; it does not eliminate
+# it. A mate that finished a phase and never closed its record still ends its
+# stream on a declaration, and from outside that is INDISTINGUISHABLE from work
+# nothing resumed. Both readings mean the same thing about the record - the
+# mate's own stream disagrees with reality - so the consumer states both in the
+# wake and bounds it to exactly one wake per mate. Suppressing the finished-but-
+# unclosed reading was deliberately NOT built: it would take a cross-home backlog
+# read this decision has no business making, and the fold it would replace this
+# rule with is the wider false signal, not a narrower one.
+# Any later event, keyed or not, is evidence the worker is still reporting, and
+# that is the honest boundary here.
+# Takes the caller's ALREADY-READ last line, not the file, so ONE read both
+# decides the verdict and supplies the line the caller quotes back; a second read
+# could disagree with the first if the worker appends between them.
+# The caller measures <silence-age-secs> so this stays a pure decision both
+# supervisors share; status files are append-only (see the cursor contract
+# below), so the file's own age IS the time since its last event. A caller that
+# cannot measure the age, or has no threshold, passes a non-numeric value and
+# gets no verdict rather than a guess.
+status_declared_work_stalled() {  # <last-status-line> <silence-age-secs> <threshold-secs>
+  local line=$1 age=$2 threshold=$3
+  case "$age" in ''|*[!0-9]*) return 1 ;; esac
+  case "$threshold" in ''|*[!0-9]*) return 1 ;; esac
+  status_declares_work "$line" || return 1
+  [ "$age" -ge "$threshold" ]
 }
 
 # 0 if a status line declares either an external-wait pause or a verified

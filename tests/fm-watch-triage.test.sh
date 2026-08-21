@@ -165,6 +165,15 @@ record_pi_busy() {  # <state-dir> <id>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
+# Durable-queue row count, 0 when the queue does not exist yet. Compared across
+# two watcher runs it states "this run enqueued nothing" without assuming how a
+# preceding acknowledgement compacted the queue.
+queue_lines() {  # <state>
+  local n
+  n=$(wc -l < "$1/.wake-queue" 2>/dev/null | tr -d '[:space:]') || n=
+  printf '%s' "${n:-0}"
+}
+
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
 test_signal_reason_is_actionable_classifier() {
@@ -281,6 +290,77 @@ EOF
   [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
     || fail "a legacy terminal event did not supersede the default working phase"
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
+}
+
+# status_declares_work / status_declared_work_stalled: the shared decision the
+# always-on watcher and the away-mode daemon both read, so neither hardcodes the
+# verb or the threshold. A declared-work line states an intention; only pairing it
+# with a measured idle age turns it into a stall.
+test_declared_work_stall_classifier() {
+  local dir state open_line closed_line held_line
+  dir=$(make_case classify-declared-work); state="$dir/state"
+  status_declares_work 'working: relaunching the remaining six one by one' \
+    || fail "the declared-work verb was not recognized"
+  status_declares_work 'working [key=aterrizaje-nueve]: uno a uno' \
+    || fail "a keyed declared-work line was not recognized"
+  status_declares_work '   working:   leading space' \
+    || fail "a leading-space declared-work line was not recognized"
+  status_declares_work 'paused: awaiting the upstream release' \
+    && fail "a declared external wait was classed as declared work"
+  status_declares_work 'blocked: the build is still working upstream' \
+    && fail "a blocker mentioning working false-matched the declared-work verb"
+  status_declares_work 'done: shipped' && fail "done classed as declared work"
+  status_declares_work 'failed: rc 2' && fail "failed classed as declared work"
+  status_declares_work 'needs-decision: pick one' && fail "needs-decision classed as declared work"
+  status_declares_work 'note: FYI' && fail "an informational note classed as declared work"
+  status_declares_work '' && fail "an empty line classed as declared work"
+
+  # A later event of ANY kind supersedes the declaration, so the stream no longer
+  # declares unresumed work. Resolved the way the poll resolves it - the stream's
+  # last line, read ONCE, then handed to the decision - so these cases cover the
+  # composition production actually runs rather than a separate entry point.
+  printf 'working: relaunching the remaining six\n' > "$state/open.status"
+  printf 'working: relaunching the six\ndone: all six landed\n' > "$state/closed.status"
+  printf 'working: relaunching the six\npaused: awaiting upstream\n' > "$state/held.status"
+  open_line=$(last_status_line "$state/open.status")
+  closed_line=$(last_status_line "$state/closed.status")
+  held_line=$(last_status_line "$state/held.status")
+  status_declares_work "$open_line" \
+    || fail "a stream whose last event declares work was not classed unresumed"
+  status_declares_work "$closed_line" \
+    && fail "a later terminal event did not supersede the declaration"
+  status_declares_work "$held_line" \
+    && fail "a later declared pause did not supersede the declaration"
+  status_declares_work "$(last_status_line "$state/absent.status")" \
+    && fail "a missing status file was classed as declaring unresumed work"
+
+  # The stall verdict is taken on the line the caller ALREADY holds, so one read
+  # both decides it and supplies the line the wake quotes back. These cases feed
+  # it the same three streams above.
+  status_declared_work_stalled "$open_line" 500 240 \
+    || fail "declared work idle past the threshold was not classed stalled"
+  status_declared_work_stalled "$open_line" 239 240 \
+    && fail "declared work inside the threshold was classed stalled"
+  status_declared_work_stalled "$open_line" 240 240 \
+    || fail "declared work exactly at the threshold was not classed stalled"
+  status_declared_work_stalled "$closed_line" 5000 240 \
+    && fail "a superseded terminal event was classed stalled"
+  status_declared_work_stalled "$held_line" 5000 240 \
+    && fail "a declared external wait was classed stalled"
+  status_declared_work_stalled '' 5000 240 \
+    && fail "an empty last line was treated as a proven stall"
+  status_declared_work_stalled "$open_line" '' 240 \
+    && fail "an unreadable idle age was treated as a proven stall"
+  status_declared_work_stalled "$open_line" 500 '' \
+    && fail "an unreadable threshold was treated as a proven stall"
+  status_declared_work_stalled "$open_line" 500 later \
+    && fail "a non-numeric threshold was treated as a proven stall"
+  [ "$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT" -gt "${FM_STALE_ESCALATE_SECS:-240}" ] \
+    || fail "the stall threshold is not more generous than the ordinary wedge threshold"
+  [ "$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT" -lt "$FM_PAUSE_RESURFACE_SECS_DEFAULT" ] \
+    || fail "unresumed declared work waits as long as a legitimately declared pause"
+
+  pass "status_declares_work and status_declared_work_stalled: a declaration plus measured silence, never either alone"
 }
 
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
@@ -1151,6 +1231,373 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
   [ ! -s "$out" ] || { reap "$pid"; fail "ordinary secondmate stale pane printed a wake reason: $(cat "$out")"; }
   reap "$pid"
   pass "a non-paused secondmate retains normal stale suppression"
+}
+
+# --- a secondmate that DECLARED work and then went idle ----------------------
+# The 2026-08-16 fleet-wide stall. A secondmate appended
+#   working [key=aterrizaje-nueve]: ... the remaining six relaunch ONE BY ONE as
+#   the earlier ones land ...
+# and ended its turn. Nothing relaunched anything. Its endpoint stayed healthy
+# and idle, so the stale loop skipped it exactly as the idle-by-default contract
+# requires; the working: line is not captain-relevant and had already been
+# presented, so the heartbeat backstop absorbed it correctly too. Twenty-one
+# panes, zero active workers, five frozen PRs, and the captain found it by
+# looking at the screen - which is what supervision exists to prevent.
+#
+# A declared-work line is an INTENTION, never proof the work was launched. These
+# cases pin the separation the fix rests on: a quiet mate with nothing declared
+# stays silent, while a declaration followed by silence past the threshold
+# surfaces for reconciliation.
+#
+# The fixture writes NO state/<task>.turn-ended and no busy record, because
+# bin/fm-spawn.sh never produces either for kind=secondmate - it excludes them so
+# the parent cannot disturb the mate's own primary supervision. Building the case
+# any other way would assert a state production cannot reach. The stall is built
+# purely by backdating the status file, which is exactly what the detector reads.
+# A case needing a different endpoint shape (a remote mate, say) records its own
+# meta over this one, so there is no metadata parameter here to fall out of step
+# with what that case actually writes.
+make_secondmate_work_case() {  # <case-name> <task> <last-status-line> <silence-secs>
+  local name=$1 task=$2 line=$3 silence=$4 dir state window back
+  dir=$(make_case "$name"); state="$dir/state"
+  window="test:fm-$task"
+  printf 'idle prompt, nothing running\n' > "$dir/pane.txt"
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/$task.meta"
+  printf '%s\n' "$line" > "$state/$task.status"
+  back=$(( $(date +%s) - silence ))
+  set_mtime "$back" "$state/$task.status"
+  prime_status_seen "$state" "$state/$task.status" || return 1
+  printf '%s\n' "$dir"
+}
+
+# Run a watcher over a make_secondmate_work_case fixture and echo nothing; the
+# caller inspects <out>, the durable queue, and the process outcome.
+watch_secondmate_case() {  # <dir> <task> <stall-secs> [extra env...]
+  local dir=$1 task=$2 stall=$3
+  shift 3
+  # env, not a bare assignment prefix: an assignment that arrives through "$@"
+  # is a word after expansion, so only env consumes it as an assignment.
+  env PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-$task" \
+    FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_STATE_OVERRIDE="$dir/state" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_DECLARED_WORK_SILENCE_SECS="$stall" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" \
+    > "$dir/watch.out" 2> "$dir/watch.err" &
+}
+
+test_secondmate_declared_work_stall_surfaces() {
+  local dir state task out drain_out pid
+  task=secondmate-aterrizaje
+  dir=$(make_secondmate_work_case secondmate-declared-work-stall "$task" \
+    'working [key=aterrizaje-nueve]: los seis restantes se relanzan UNO A UNO conforme aterricen los anteriores' 500) \
+    || fail "could not build the declared-work stall fixture"
+  state="$dir/state"; out="$dir/watch.out"; drain_out="$dir/drain.out"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle secondmate endpoint'
+  watch_secondmate_case "$dir" "$task" 240
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "watcher never surfaced a secondmate whose declared work went silent past the threshold"
+  grep -F "check: secondmate-stalled $task" "$out" >/dev/null \
+    || fail "the declared-work stall did not surface under its own reason: $(cat "$out")"
+  grep -F "stale:" "$out" >/dev/null \
+    && fail "the declared-work stall was reported as a stale pane, breaking the idle-by-default contract"
+  grep -F "signal:" "$out" >/dev/null \
+    && fail "the declared-work stall was reported as an ordinary status signal"
+  grep -F "aterrizaje-nueve" "$out" >/dev/null \
+    || fail "the stall wake did not carry the declared work it is about"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the declared-work stall failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "secondmate-stalled:$task" >/dev/null \
+    || fail "the declared-work stall was not queued durably"
+  unset FM_FAKE_CREW_STATE
+  pass "a secondmate whose last event declares work wakes firstmate once its own status stream goes silent past the threshold"
+}
+
+test_secondmate_declared_work_below_threshold_is_silent() {
+  local dir task pid
+  task=secondmate-thinking
+  dir=$(make_secondmate_work_case secondmate-declared-work-fresh "$task" \
+    'working: reading the six open PRs before deciding the order' 60) \
+    || fail "could not build the below-threshold fixture"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle secondmate endpoint'
+  watch_secondmate_case "$dir" "$task" 900
+  pid=$!
+  if ! wait_live "$pid" 25; then
+    reap "$pid"; fail "a secondmate still inside its thinking window was surfaced: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || { reap "$pid"; fail "a below-threshold secondmate printed a wake: $(cat "$dir/watch.out")"; }
+  [ ! -s "$dir/state/.wake-queue" ] || { reap "$pid"; fail "a below-threshold secondmate enqueued a wake"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "declared work inside the threshold stays silent, so a mate that is legitimately thinking is never nagged"
+}
+
+# An unusable threshold must never be able to switch this detector off. The
+# decision refuses to guess a verdict from a non-numeric threshold, so an operator
+# typing a duration ("20m") instead of seconds would otherwise leave the mate that
+# declared work permanently unwatched - silently, and in the one path whose whole
+# purpose is to end that blindness. The watcher rejects the value loudly and keeps
+# supervising on the default, which BOTH halves below pin: past the default the
+# stall still surfaces, and inside the default it still stays quiet, so the
+# fallback is the real default and not a degenerate "always fire".
+test_secondmate_declared_work_malformed_threshold_falls_back() {
+  local dir state task pid err
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle secondmate endpoint'
+
+  task=secondmate-misconfigurado
+  dir=$(make_secondmate_work_case secondmate-declared-work-bad-knob "$task" \
+    'working: relaunching the remaining six one by one' 5000) \
+    || fail "could not build the malformed-threshold stall fixture"
+  state="$dir/state"; err="$dir/watch.err"
+  watch_secondmate_case "$dir" "$task" 20m
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "a malformed threshold silently disabled the declared-work detector"
+  grep -F "check: secondmate-stalled $task" "$dir/watch.out" >/dev/null \
+    || fail "the stall did not surface on the default threshold: $(cat "$dir/watch.out")"
+  grep -F "FM_DECLARED_WORK_SILENCE_SECS=20m" "$err" >/dev/null \
+    || fail "the rejected threshold was not reported on stderr: $(cat "$err")"
+  grep -F "$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT" "$err" >/dev/null \
+    || fail "the diagnostic did not name the default it fell back to: $(cat "$err")"
+  [ "$(grep -c -F "FM_DECLARED_WORK_SILENCE_SECS" "$err")" -eq 1 ] \
+    || fail "the rejected threshold was reported more than once: $(cat "$err")"
+  grep -F "FM_DECLARED_WORK_SILENCE_SECS=20m" "$state/.watch-triage.log" >/dev/null \
+    || fail "the rejected threshold left no triage record"
+
+  task=secondmate-misconfigurado-fresco
+  dir=$(make_secondmate_work_case secondmate-declared-work-bad-knob-fresh "$task" \
+    'working: reading the six open PRs before deciding the order' 60) \
+    || fail "could not build the malformed-threshold below-default fixture"
+  err="$dir/watch.err"
+  watch_secondmate_case "$dir" "$task" 20m
+  pid=$!
+  if ! wait_live "$pid" 25; then
+    reap "$pid"; fail "the rejected threshold fell back to firing immediately: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || { reap "$pid"; fail "a mate inside the default window was surfaced: $(cat "$dir/watch.out")"; }
+  [ ! -s "$dir/state/.wake-queue" ] || { reap "$pid"; fail "a mate inside the default window enqueued a wake"; }
+  [ "$(grep -c -F "FM_DECLARED_WORK_SILENCE_SECS" "$err")" -eq 1 ] \
+    || { reap "$pid"; fail "the rejected threshold was re-reported per poll: $(cat "$err")"; }
+  reap "$pid"
+
+  unset FM_FAKE_CREW_STATE
+  pass "a malformed silence threshold is rejected loudly and supervision continues on the default, never disabled"
+}
+
+test_secondmate_declared_pause_never_stalls() {
+  local dir task pid
+  task=secondmate-awaiting
+  dir=$(make_secondmate_work_case secondmate-declared-pause-not-stall "$task" \
+    'paused: awaiting the upstream release before the remaining six can land' 5000) \
+    || fail "could not build the declared-pause fixture"
+  # crew_absorb_class must read the declared pause, so the pause path owns this
+  # pane on its own long cadence. The stall detector must not claim it.
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+  watch_secondmate_case "$dir" "$task" 240 FM_PAUSE_RESURFACE_SECS=999999
+  pid=$!
+  if ! wait_live "$pid" 25; then
+    reap "$pid"; fail "a declared external wait was reported as a declared-work stall: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || { reap "$pid"; fail "a declared pause printed a stall wake: $(cat "$dir/watch.out")"; }
+  [ ! -s "$dir/state/.wake-queue" ] || { reap "$pid"; fail "a declared pause enqueued a stall wake"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "paused: keeps its meaning - a declared external wait never becomes a declared-work stall"
+}
+
+test_secondmate_terminal_status_never_stalls() {
+  local dir task pid verb line
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle secondmate endpoint'
+  for verb in 'done' failed needs-decision blocked; do
+    task="secondmate-${verb//-/}"
+    case "$verb" in
+      done)           line='done: report filed in the routed document' ;;
+      failed)         line='failed: the relaunch script exited 2' ;;
+      needs-decision) line='needs-decision: land the six serially or in parallel?' ;;
+      blocked)        line='blocked: no credential for the second host' ;;
+    esac
+    dir=$(make_secondmate_work_case "secondmate-terminal-$verb" "$task" "$line" 5000) \
+      || fail "could not build the $verb fixture"
+    watch_secondmate_case "$dir" "$task" 240
+    pid=$!
+    if ! wait_live "$pid" 25; then
+      reap "$pid"; fail "an idle secondmate on a $verb: status was reported as a declared-work stall: $(cat "$dir/watch.out")"
+    fi
+    [ ! -s "$dir/watch.out" ] || { reap "$pid"; fail "a $verb: secondmate printed a stall wake: $(cat "$dir/watch.out")"; }
+    [ ! -s "$dir/state/.wake-queue" ] || { reap "$pid"; fail "a $verb: secondmate enqueued a stall wake"; }
+    reap "$pid"
+  done
+  unset FM_FAKE_CREW_STATE
+  pass "an idle secondmate whose last event is terminal is healthy and never surfaces as a stall"
+}
+
+# There is deliberately NO busy-endpoint case here. An earlier revision had one,
+# but it had to arm a busy record by hand: bin/fm-spawn.sh excludes kind=secondmate
+# from busy-state arming (and from turn-end wiring) so the parent cannot disturb
+# the mate's own primary supervision, so no secondmate ever has one in production
+# and the case asserted an unreachable state. This detector reads the status log
+# only and never the endpoint, so the case has nothing left to prove.
+
+# A REMOTE mate is covered by exactly the same rule, with no remote branch in the
+# detector and nothing wired at launch. Its escalations are ingested into this
+# same parent state directory, so its stream goes quiet the same way a local
+# mate's does. This is the case that proves the detector needs no locally
+# readable endpoint at all: the meta records a remote endpoint this host cannot
+# capture, there is no turn marker and no busy record, and it still surfaces.
+test_secondmate_remote_declared_work_stall_surfaces() {
+  local dir state task drain_out pid
+  task=secondmate-remoto
+  dir=$(make_secondmate_work_case secondmate-remote-declared-work "$task" \
+    'working [key=aterrizaje]: los seis restantes se relanzan uno a uno' 5000) \
+    || fail "could not build the remote declared-work fixture"
+  state="$dir/state"; drain_out="$dir/drain.out"
+  # Overwrite the endpoint with the shape a remote spawn records: window=remote:<id>,
+  # no backend= key, remote_host=/remote_root=. Nothing here is locally capturable.
+  printf 'window=remote:%s\nkind=secondmate\nremote_host=mate.example.test\nremote_root=/srv/fm\n' \
+    "$task" > "$state/$task.meta"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · remote endpoint not readable here'
+  watch_secondmate_case "$dir" "$task" 240
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "a remote secondmate's declared work went silent and never surfaced"
+  grep -F "check: secondmate-stalled $task" "$dir/watch.out" >/dev/null \
+    || fail "the remote stall did not surface under the shared reason: $(cat "$dir/watch.out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the remote stall failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "secondmate-stalled:$task" >/dev/null \
+    || fail "the remote stall was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a remote secondmate is detected by the same status-silence rule, with no locally readable endpoint"
+}
+
+# A declared-work stall is SINGLE-FIRE, not a periodic nag. The wake it queues is
+# durable and is acknowledged only after the handling turn, so one wake cannot be
+# lost and repetition buys nothing. It is also the honest bound: from outside, a
+# phase the mate finished without closing its record looks exactly like work
+# nothing resumed, and re-waking on that reading every window would fill the
+# captain's console with false alarms the fix exists to prevent. Only the mate
+# acting - a later status event or a completed turn - ends the episode and rearms
+# the detector.
+test_secondmate_declared_work_stall_fires_once_per_episode() {
+  local dir state task key pid queued
+  task=secondmate-repeat
+  dir=$(make_secondmate_work_case secondmate-declared-work-single-fire "$task" \
+    'working: relaunching the remaining six one by one' 500) \
+    || fail "could not build the single-fire fixture"
+  state="$dir/state"; key=$(printf '%s' "test:fm-$task" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle secondmate endpoint'
+  watch_secondmate_case "$dir" "$task" 240
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the first declared-work stall never surfaced"
+  [ -e "$state/.stalled-$key" ] || fail "the stall did not latch after surfacing"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first stall wake"
+  queued=$(queue_lines "$state")
+
+  # Unchanged state, and now aged far PAST the threshold window: the latch holds,
+  # so a stall the supervisor is still working through never becomes a repeating
+  # wake.
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/.stalled-$key"
+  : > "$dir/watch.out"
+  watch_secondmate_case "$dir" "$task" 240
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "an already-surfaced stall fired again past its threshold window: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || { reap "$pid"; fail "a latched stall printed a second wake: $(cat "$dir/watch.out")"; }
+  [ "$(queue_lines "$state")" -eq "$queued" ] \
+    || { reap "$pid"; fail "a latched stall enqueued a second wake"; }
+  [ -e "$state/.stalled-$key" ] || { reap "$pid"; fail "the latch cleared while the episode was still open"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional latch-phase watcher stop"
+
+  # The episode ends when the mate speaks again: a later status event resets the
+  # silence, the gate stops holding, and the latch clears so a future declaration
+  # can surface on its own merits. A status event is the ONLY thing that ends it,
+  # because the status log is the only signal this detector reads.
+  printf 'working: relaunched two of the six, four to go\n' >> "$state/$task.status"
+  prime_status_seen "$state" "$state/$task.status" \
+    || fail "could not prime the follow-up report"
+  : > "$dir/watch.out"
+  watch_secondmate_case "$dir" "$task" 240
+  pid=$!
+  if ! wait_live "$pid" 25; then
+    reap "$pid"; fail "a mate that reported again was still reported as stalled: $(cat "$dir/watch.out")"
+  fi
+  [ ! -e "$state/.stalled-$key" ] \
+    || { reap "$pid"; fail "a later status event ended the episode but left the latch behind"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a declared-work stall fires exactly once per episode: latched past its window, rearmed only when the mate reports again"
+}
+
+# The latch is bounded by the mate's own EVENT, not by watcher uptime. A poll
+# only clears it by observing the stream inside its sub-threshold window, so if
+# the mate declares again and goes quiet while no watcher is running - a restart,
+# a slept host, the downtime .watcher-down already models - nothing observes that
+# window. A latch keyed on mere existence would then suppress forever: both of
+# its clearing paths need an append, and a genuinely stalled mate never appends
+# again, so the detector would be permanently dead for exactly the mate it exists
+# to catch. Keying it on the status log's signature makes the new declaration
+# itself the episode boundary, which is the same rule scan_signals uses so that
+# signals landing with no watcher running are caught by the next one.
+test_secondmate_declared_work_stall_rearms_after_watcher_downtime() {
+  local dir state task key pid queued
+  task=secondmate-downtime
+  dir=$(make_secondmate_work_case secondmate-declared-work-downtime "$task" \
+    'working: relaunching the remaining six one by one' 500) \
+    || fail "could not build the downtime fixture"
+  state="$dir/state"; key=$(printf '%s' "test:fm-$task" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle secondmate endpoint'
+  watch_secondmate_case "$dir" "$task" 240
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the first declared-work stall never surfaced"
+  [ -e "$state/.stalled-$key" ] || fail "the stall did not latch after surfacing"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first stall wake"
+  queued=$(queue_lines "$state")
+
+  # The mate declared a NEW phase and went silent past the threshold again, all
+  # while no watcher was running: no poll ever saw the stream inside its window,
+  # so nothing cleared the latch by observation.
+  printf 'working: relaunched two of the six, four to go\n' >> "$state/$task.status"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/$task.status"
+  prime_status_seen "$state" "$state/$task.status" \
+    || fail "could not prime the report that landed during the downtime"
+  : > "$dir/watch.out"
+  watch_secondmate_case "$dir" "$task" 240
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "a declaration that went silent across watcher downtime stayed latched forever"
+  grep -F "check: secondmate-stalled $task" "$dir/watch.out" >/dev/null \
+    || fail "the rearmed stall lost its reason: $(cat "$dir/watch.out")"
+  [ "$(queue_lines "$state")" -gt "$queued" ] \
+    || fail "the rearmed stall was not queued"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the rearmed stall wake"
+  unset FM_FAKE_CREW_STATE
+  pass "a new declaration that goes silent while no watcher runs ends the old episode and surfaces on its own"
+}
+
+test_secondmate_declared_work_stall_surfaces_in_afk() {
+  local dir state task pid drain_out
+  task=secondmate-away
+  dir=$(make_secondmate_work_case secondmate-declared-work-afk "$task" \
+    'working: relaunching the remaining six one by one' 500) \
+    || fail "could not build the away-mode fixture"
+  state="$dir/state"; drain_out="$dir/drain.out"
+  # Away mode: the daemon owns triage, so the watcher must still enqueue this
+  # for the daemon's classifier rather than absorbing it as a quiet secondmate.
+  : > "$state/.afk"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle secondmate endpoint'
+  watch_secondmate_case "$dir" "$task" 240
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "away mode swallowed a declared-work stall"
+  grep -F "check: secondmate-stalled $task" "$dir/watch.out" >/dev/null \
+    || fail "the away-mode stall lost its reason: $(cat "$dir/watch.out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the away-mode stall failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "secondmate-stalled:$task" >/dev/null \
+    || fail "the away-mode stall was not queued for the daemon"
+  unset FM_FAKE_CREW_STATE
+  pass "away mode receives the declared-work stall through the same single supervision cycle"
 }
 
 test_secondmate_unpause_clears_pause_tracking() {
@@ -2565,6 +3012,7 @@ test_crew_worktree_written_since_classifier
 test_empty_write_prune_widens_the_probe
 test_empty_write_prune_from_the_environment_widens_the_probe
 test_worktree_write_probe_is_wall_clock_bounded
+test_declared_work_stall_classifier
 test_signal_crew_provably_working_classifier
 test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
@@ -2591,6 +3039,15 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
+test_secondmate_declared_work_stall_surfaces
+test_secondmate_declared_work_below_threshold_is_silent
+test_secondmate_declared_work_malformed_threshold_falls_back
+test_secondmate_declared_pause_never_stalls
+test_secondmate_terminal_status_never_stalls
+test_secondmate_remote_declared_work_stall_surfaces
+test_secondmate_declared_work_stall_fires_once_per_episode
+test_secondmate_declared_work_stall_rearms_after_watcher_downtime
+test_secondmate_declared_work_stall_surfaces_in_afk
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
