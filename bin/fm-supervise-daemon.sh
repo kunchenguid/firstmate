@@ -5,11 +5,11 @@
 # durable wake after an actionable close, acknowledges only after routing, and
 # either SELF-HANDLES the routine majority in bash (no firstmate turn) or
 # ESCALATES a batched, distilled digest to the supervisor pane on
-# captain-relevant events plus bounded declared-pause rechecks. This is the
+# captain-relevant events plus bounded declared-wait rechecks. This is the
 # token-efficient replacement for the prior always-inject daemon: routine
 # signal/stale/heartbeat wakes cost zero firstmate context; only done/
 # needs-decision/blocked/failed/persistent-wedge/check-output events and a
-# declared-pause recheck reach the LLM, and even then as one pre-read digest per
+# declared-wait recheck reach the LLM, and even then as one pre-read digest per
 # batch window.
 #
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
@@ -41,11 +41,13 @@
 #     drain and acknowledges it only after routing completes.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane without a declared external wait is
-#     escalated only after it has been idle for STALE_ESCALATE_SECS
+#   - Bounded wedge latency: a stale pane without a declared wait is escalated
+#     only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
-#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
+#     paused: external wait or a verified captain-held transfer, per
+#     fm-classify-lib.sh's combined predicate - instead gets its own longer
+#     PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -89,8 +91,9 @@
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
-#          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
-#                                   re-surfaces as a recheck (default 3600)
+#          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared wait (external
+#                                   or captain-held) re-surfaces as a recheck
+#                                   (default 3600)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -447,10 +450,11 @@ stale_marker_remove() {  # <window> <state>
   rm -f "$state/.subsuper-stale-$key"
 }
 
-# Pause marker: state/.subsuper-paused-<key> holds the epoch a declared pause was
-# first observed idle. Housekeeping ages it against PAUSE_RESURFACE_SECS (much
-# longer than a wedge) and re-surfaces the pause once per window. Recording is
-# create-if-absent so the timestamp is stable across a churny idle pane (many
+# Pause marker: state/.subsuper-paused-<key> holds the epoch a declared wait (a
+# paused: external wait or a verified captain-held transfer) was first observed
+# idle. Housekeeping ages it against PAUSE_RESURFACE_SECS (much longer than a
+# wedge) and re-surfaces the wait once per window. Recording is create-if-absent
+# so the timestamp is stable across a churny idle pane (many
 # distinct stale hashes map to one marker), keeping the cadence hash-immune.
 pause_marker_record() {  # <window> <state> - create if absent
   local win=$1 state=$2 key marker
@@ -955,9 +959,10 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
-#  2b) pause re-surface: for each declared-pause marker past PAUSE_RESURFACE_SECS,
-#     re-peek; busy/gone -> clear; still idle + still paused -> escalate a recheck
-#     digest and reset the window (repeating bounded re-surface, never a wedge).
+#  2b) pause re-surface: for each declared-wait marker past PAUSE_RESURFACE_SECS,
+#     re-peek; busy/gone -> clear; still idle + still declaring the wait -> escalate
+#     a recheck digest naming which human the wait is on, and reset the window
+#     (repeating bounded re-surface, never a wedge).
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
@@ -1244,10 +1249,10 @@ handle_wake() {  # <reason> <state>
       [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
       ;;
     pause)
-      # Declared external-wait pause: record a pause marker (long re-surface
-      # cadence in housekeeping) and drop any wedge stale marker, so a pane that
-      # transitioned working->paused is not still wedge-aged. Only stale produces
-      # this action.
+      # Declared wait, an external-wait pause or a verified captain-held transfer:
+      # record a pause marker (long re-surface cadence in housekeeping) and drop any
+      # wedge stale marker, so a pane that transitioned working->declared-wait is not
+      # still wedge-aged. Only stale produces this action.
       if [ "$kind" = "stale" ]; then
         stale_marker_remove "$arg" "$state"
         pause_marker_record "$arg" "$state"

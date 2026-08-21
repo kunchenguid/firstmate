@@ -6,9 +6,10 @@
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
-# working signal is never silently swallowed. A declared external-wait pause is
-# the separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# working signal is never silently swallowed. A declared wait, either a paused:
+# external wait or a verified captain-held transfer, is the separate idle absorb
+# case and re-surfaces only on its long bounded cadence, although its initial
+# no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -19,9 +20,11 @@
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
-#                          absorb class applies does the log's last line decide:
+#                          external-wait pause or verified captain-held transfer is
+#                          absorbed instead with its own long re-surface cadence,
+#                          never as a wedge, and that recheck reason names which
+#                          human the wait is on. Only when neither absorb class
+#                          applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
@@ -174,7 +177,9 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once.
+# bounded cadence, while a live or ambiguously read agent still surfaces once; a
+# secondmate earns the cadence on its declaration alone, because its endpoint
+# liveness is deliberately never read (pause_state_class owns that split).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -1220,10 +1225,10 @@ EOF
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
           #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
-          #   - paused: the crew declared an external wait, or a declared pause or
-          #     captain hold is paired with a confidently dead agent, so absorb on
-          #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
-          #   - none: no running pipeline, no exact busy verdict, no declared pause.
+          #   - paused: a declared wait pause_state_class admits (its header owns which
+          #     liveness evidence each kind of crew must supply), so absorb on the long
+          #     PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
+          #   - none: no running pipeline, no exact busy verdict, no admitted declared wait.
           #     Surface immediately so firstmate inspects the inconclusive state
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to

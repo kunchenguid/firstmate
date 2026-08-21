@@ -136,8 +136,8 @@ The daemon still clears its buffer only on the backend's `empty` success verdict
 
 The daemon wraps `fm-watch.sh`, runs the watcher as a child, presents every durable wake after each actionable watcher close, classifies each presented record in bash, and acknowledges the presented generation only after routing completes.
 It self-handles the routine majority without consuming a firstmate turn.
-Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
-The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
+Captain-relevant events, plus a bounded recheck of a declared wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
+The classification predicates (the captain-relevant verb set, declared-wait vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
 While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
 
 Classify each wake this way:
@@ -145,8 +145,9 @@ Classify each wake this way:
 - `signal` with a terminal captain verb (`done:`, `needs-decision:`, `blocked:`, or `failed:`) -> escalate.
   A nonterminal progress verb remains nonterminal even when its prose contains a legacy free-text token such as `PR ready`, `checks green`, `ready in branch`, or `merged`; only a bare legacy line with such a token escalates.
   Other signals with no captain-relevant status -> self-handle.
-- `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
-  If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
+- `signal` or `stale` for a declared wait, either a `paused:` external wait or a verified `captain-held` transfer -> self-handle and track the pause rather than a wedge.
+  If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one recheck and resets the pause window.
+  That recheck names which human the wait is on: the external dependency for `paused:`, and the captain themself for a `captain-held` transfer, who can answer the held decision or release the hold.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
