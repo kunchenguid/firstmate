@@ -320,6 +320,12 @@ run_spawn() {
     "$SPAWN" "$@" 2>&1
 }
 
+run_spawn_stdin() {
+  local home=$1 fakebin=$2 snapshot=$3
+  shift 3
+  printf '%s\n' "$snapshot" | run_spawn "$home" "$fakebin" "$@"
+}
+
 run_promote() {
   local home=$1
   shift
@@ -629,6 +635,37 @@ test_batch_refuses_foreign_wayfinder_snapshot() {
   pass "batch dispatch refuses a Wayfinder snapshot shared across gated projects"
 }
 
+test_batch_reuses_stdin_wayfinder_snapshot() {
+  local home project fakebin snap snapshot first_id second_id out rc handoff_count
+  home=$(make_home batch-wayfinder-stdin)
+  project=$(make_gated_project "$home" shop)
+  fakebin=$(fakebin_for "$home")
+  snap="$TMP_ROOT/batch-stdin-resolved.json"
+  write_snapshot "$snap" resolved
+  snapshot=$(cat "$snap")
+  first_id=batch-wayfinder-stdin-first
+  second_id=batch-wayfinder-stdin-second
+  write_ship_brief "$home" "$first_id"
+  write_ship_brief "$home" "$second_id"
+
+  set +e
+  out=$(run_spawn_stdin "$home" "$fakebin" "$snapshot" "$first_id=$project" "$second_id=$project" \
+    --harness claude --mode no-mistakes --yolo off --wayfinder-state -)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "fixture batch should stop before creating endpoints"
+  handoff_count=$(printf '%s\n' "$out" | grep -Fxc 'OK handoff: Wayfinder: plan' || true)
+  [ "$handoff_count" = 2 ] \
+    || fail "a stdin snapshot must pass the project handoff for every same-project child: $out"
+  assert_contains "$out" "batch: FAILED to spawn $first_id ($project)" \
+    "first same-project child did not reach the post-handoff fixture refusal"
+  assert_contains "$out" "batch: FAILED to spawn $second_id ($project)" \
+    "second same-project child did not reach the post-handoff fixture refusal"
+  assert_absent "$home/state/$first_id.meta" "fixture batch wrote first task metadata"
+  assert_absent "$home/state/$second_id.meta" "fixture batch wrote second task metadata"
+  pass "batch dispatch reuses a stdin Wayfinder snapshot for every same-project child"
+}
+
 test_missing_project_command_is_loud() {
   local home project snap out rc
   home=$(make_home missing-gate)
@@ -651,4 +688,5 @@ test_resolved_research_and_decision_children_pass
 test_complete_none_alone_remains_insufficient
 test_map_dependent_spawn_and_promote
 test_batch_refuses_foreign_wayfinder_snapshot
+test_batch_reuses_stdin_wayfinder_snapshot
 test_missing_project_command_is_loud

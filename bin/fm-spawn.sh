@@ -285,6 +285,7 @@ MODE=
 YOLO=
 TRACEPARENT_ARG=
 WAYFINDER_STATE=
+WAYFINDER_STATE_TEMP=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -814,6 +815,7 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  [ -z "$WAYFINDER_STATE_TEMP" ] || rm -f "$WAYFINDER_STATE_TEMP" 2>/dev/null || true
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -922,6 +924,21 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       fi
       batch_wayfinder_project=$batch_project
     done
+    if [ "$WAYFINDER_STATE" = - ]; then
+      mkdir -p "$STATE" || {
+        echo "error: could not create parent state directory for the Wayfinder snapshot" >&2
+        exit 1
+      }
+      WAYFINDER_STATE_TEMP=$(mktemp "$STATE/.wayfinder-state.XXXXXX") || {
+        echo "error: could not materialize the Wayfinder snapshot for batch dispatch" >&2
+        exit 1
+      }
+      cat > "$WAYFINDER_STATE_TEMP" || {
+        echo "error: could not read the Wayfinder snapshot for batch dispatch" >&2
+        exit 1
+      }
+      WAYFINDER_STATE=$WAYFINDER_STATE_TEMP
+    fi
     shared_args+=(--wayfinder-state "$WAYFINDER_STATE")
   fi
   [ "$WAYFINDER_INDEPENDENT" -eq 0 ] || shared_args+=(--wayfinder-independent)
