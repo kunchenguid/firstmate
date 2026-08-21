@@ -349,6 +349,38 @@ test_housekeeping_paused_resurfaces_and_resets() {
   pass "housekeeping re-surfaces a stale declared pause on the long cadence and resets its window"
 }
 
+test_delivered_pause_recheck_stays_retired_until_next_cadence() {
+  local dir state fakebin win pane key sent composer
+  dir=$(make_supercase paused-delivery-retirement)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-w11-retire"; pane="$dir/pane.txt"; sent="$dir/sent.log"; composer="$dir/composer.txt"
+  printf 'window=%s\nbackend=tmux\nharness=claude\n' "$win" > "$state/held-w11-retire.meta"
+  printf 'paused: holding for the upstream tool release\n' > "$state/held-w11-retire.status"
+  printf 'idle prompt $\n' > "$pane"
+  printf '❯ \n' > "$composer"
+  : > "$sent"
+  key=$(printf '%s' "held-w11-retire" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 FM_ESCALATE_BATCH_SECS=99999 housekeeping "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "pause recheck did not buffer exactly once"
+
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$composer" escalate_flush "$state" \
+    || fail "confirmed pause recheck delivery did not flush"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "confirmed pause recheck delivery remained buffered"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 FM_ESCALATE_BATCH_SECS=99999 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "delivered pause recheck was reconstructed before its next cadence"
+  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "pause recheck delivery submitted more than once"
+  pass "confirmed pause recheck delivery stays retired until the next pause cadence"
+}
+
 # A pause whose pane became busy again (the crew resumed) drops its marker without
 # escalating, exactly like a resumed wedge.
 test_housekeeping_paused_resumed_cleared() {
@@ -724,6 +756,76 @@ test_collapse_newlines_pure() {
   out=$(_collapse_newlines $'a\nb')
   [ "$out" = "a - b" ] || fail "collapse two lines failed: '$out'"
   pass "_collapse_newlines replaces newlines with literal separator"
+}
+
+test_shutdown_request_preserves_pending_without_new_submit() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase shutdown-no-new-submit)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '❯ \n' > "$capture"
+  escalate_add "$state" "needs-decision: preserve me"
+  afk_enter "$state"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" SHUTDOWN_REQUESTED=1 escalate_flush "$state"; then
+    fail "shutdown-requested flush unexpectedly reported delivery"
+  fi
+  [ ! -s "$sent" ] || fail "shutdown request started a new submit"
+  [ -s "$state/.subsuper-escalations" ] || fail "shutdown request discarded the pending buffer"
+  pass "shutdown request starts no new submit and preserves the pending buffer"
+}
+
+test_daemon_shutdown_reaps_watcher_after_exec_identity_change() {
+  local dir state fakebin capture daemon_pid watcher_pid watcher_ppid watcher_pgid i=0
+  dir=$(make_supercase shutdown-watcher-exec)
+  state="$dir/state"; fakebin="$dir/fakebin"; capture="$dir/pane.txt"
+  printf '❯ \n' > "$capture"
+  cat > "$fakebin/env" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -u ] && [ "${2:-}" = FM_BACKEND_HERDR_CLI_TIMEOUT_SECS ]; then
+  sleep 0.5
+fi
+exec /usr/bin/env "$@"
+SH
+  chmod +x "$fakebin/env"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=tmux \
+    FM_SUPERVISOR_TARGET=fakepane FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_POLL=30 FM_HOUSEKEEPING_TICK=999999 "$DAEMON" >"$dir/daemon.out" 2>"$dir/daemon.err" &
+  daemon_pid=$!
+  while [ "$i" -lt 100 ]; do
+    watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    case "$watcher_pid" in ''|*[!0-9]*) ;; *) break ;; esac
+    kill -0 "$daemon_pid" 2>/dev/null || fail "daemon exited before its watcher published a pid"
+    sleep 0.05
+    i=$((i + 1))
+  done
+  case "$watcher_pid" in ''|*[!0-9]*) fail "watcher did not publish a pid" ;; esac
+  sleep 0.6
+  kill -TERM "$daemon_pid" 2>/dev/null || fail "could not request daemon shutdown"
+  i=0
+  while kill -0 "$daemon_pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$daemon_pid" 2>/dev/null; then
+    watcher_ppid=$(ps -p "$watcher_pid" -o ppid= 2>/dev/null | tr -d '[:space:]')
+    watcher_pgid=$(ps -p "$watcher_pid" -o pgid= 2>/dev/null | tr -d '[:space:]')
+    if [ "$watcher_ppid" = "$daemon_pid" ] && [ "$watcher_pgid" = "$watcher_pid" ]; then
+      kill -TERM -- "-$watcher_pgid" 2>/dev/null || true
+    elif [ "$watcher_ppid" = "$daemon_pid" ]; then
+      kill -TERM "$watcher_pid" 2>/dev/null || true
+    fi
+    kill -TERM "$daemon_pid" 2>/dev/null || true
+    sleep 0.1
+    kill -0 "$daemon_pid" 2>/dev/null && kill -KILL "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    fail "daemon shutdown hung after its watcher exec changed process identity"
+  fi
+  wait "$daemon_pid" 2>/dev/null || true
+  [ ! -e "$state/.supervise-daemon.pid" ] || fail "daemon pidfile remained after watcher cleanup"
+  [ ! -e "$state/.supervise-daemon.lock" ] || fail "daemon lock remained after watcher cleanup"
+  pass "daemon shutdown reaps its exact watcher group across the env-to-script exec boundary"
 }
 
 test_afk_absent_daemon_does_not_inject() {
@@ -1803,6 +1905,43 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
 }
 
+test_herdr_timeout_is_scoped_to_supervisor_transport() {
+  local dir state log
+  dir=$(make_supercase herdr-timeout-scope)
+  state="$dir/state"
+  log="$dir/timeout-scope.log"
+  afk_enter "$state"
+  (
+    unset FM_BACKEND_HERDR_CLI_TIMEOUT_SECS
+    fm_backend_target_exists() { printf 'target %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"; return 0; }
+    pane_is_busy() { printf 'busy %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"; return 1; }
+    fm_backend_composer_state() { printf 'composer %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"; printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'submit %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"; printf 'empty'; }
+    record_zero_timeout() { printf 'zero %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"; }
+    FM_AFK_HERDR_CLI_TIMEOUT_SECS=7 FM_SUPERVISOR_BACKEND=herdr \
+      FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
+      || fail "scoped-timeout inject_msg failed"
+    FM_AFK_HERDR_CLI_TIMEOUT_SECS=00 fm_daemon_supervisor_transport herdr record_zero_timeout
+    task_window_backend() { printf 'herdr'; }
+    task_window_harness() { printf 'claude'; }
+    window_to_task() { printf 'worker'; }
+    fm_backend_capture() {
+      printf 'worker %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"
+      printf 'idle\n'
+    }
+    fm_busy_classify() { printf 'idle\n'; }
+    stale_window_is_busy "lab:worker" "$state" || [ "$?" -eq 1 ] \
+      || fail "worker timeout-scope probe returned unreadable"
+  ) || fail "Herdr timeout-scope subshell failed"
+  [ "$(sed -n '1p' "$log")" = "target 7" ] || fail "target probe missed the supervisor timeout"
+  [ "$(sed -n '2p' "$log")" = "busy unset" ] || fail "busy probe inherited the supervisor transport timeout"
+  [ "$(sed -n '3p' "$log")" = "composer 7" ] || fail "composer probe missed the supervisor timeout"
+  [ "$(sed -n '4p' "$log")" = "submit 7" ] || fail "submit probe missed the supervisor timeout"
+  [ "$(sed -n '5p' "$log")" = "zero 2" ] || fail "numeric zero timeout did not use the default"
+  [ "$(sed -n '6p' "$log")" = "worker unset" ] || fail "supervisor timeout leaked into a worker read"
+  pass "Herdr timeout applies to supervisor transport without changing worker reads"
+}
+
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
 # must NEVER type an escalation into a dead-shell pane. A bare shell prompt
 # classifies `unknown` (not `pending`), and inject_msg now defers on anything
@@ -1862,6 +2001,7 @@ test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
+test_delivered_pause_recheck_stays_retired_until_next_cadence
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_stale_marker_transitions_to_pause
@@ -1879,6 +2019,8 @@ test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
 test_signal_escalate_marks_seen_no_catchall_refire
 test_collapse_newlines_pure
+test_shutdown_request_preserves_pending_without_new_submit
+test_daemon_shutdown_reaps_watcher_after_exec_identity_change
 test_afk_absent_daemon_does_not_inject
 test_busy_guard_defers_when_supervisor_busy
 test_marker_detection
@@ -1939,5 +2081,6 @@ test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
+test_herdr_timeout_is_scoped_to_supervisor_transport
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state

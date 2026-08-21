@@ -4,32 +4,30 @@
 # counterpart of tests/fm-afk-inject-e2e.test.sh's private-socket tmux e2e.
 # Mirrors tests/fm-backend-herdr-smoke.test.sh and tests/herdr-test-safety.sh's
 # isolation patterns: everything runs on a throwaway, named, NEVER-default
-# HERDR_SESSION, torn down with herdr_safe_stop_and_delete. Skips cleanly when
-# herdr or jq is not installed.
+# HERDR_SESSION, torn down with herdr_safe_stop_and_delete unless the caller
+# supplied an already-provisioned HERDR_LAB_SESSION and owns teardown. Skips
+# cleanly when herdr or jq is not installed.
 #
 # Unlike the tmux e2e (which redirects a bare `tmux` PATH shim to a private
 # socket), herdr already supports named-session isolation via --session, so no
 # PATH redirection is needed for the happy path - the daemon is simply pointed
 # at FM_SUPERVISOR_BACKEND=herdr, FM_SUPERVISOR_TARGET="<session>:<pane-id>",
-# and HERDR_SESSION="<the isolated session>". A thin herdr SHIM is still used,
-# but only to simulate a swallowed Enter (Scenario B) - herdr's real CLI has no
-# built-in way to drop a keystroke, so the shim intercepts exactly one
-# `pane send-keys <pane> enter` call and forwards everything else to the real
-# binary untouched.
+# and HERDR_SESSION="<the isolated session>". A thin herdr SHIM simulates one
+# swallowed Enter and can hold one already-observed native working response so
+# SIGTERM lands exactly between backend confirmation and buffer retirement.
+# Every other call is forwarded to the real binary unchanged.
 #
 # The "supervisor pane" is a tiny deterministic bash loop (not a real harness
-# binary): it draws a bordered composer row ("│ > <buf> │") that exercises the
-# bordered branch of fm_backend_herdr_composer_state, and logs every submitted
+# binary): it draws a structurally recognized bare agent composer row and logs every submitted
 # line (hex + text + injection/user classification) - the same technique
 # tests/fm-afk-inject-e2e.test.sh uses for its tmux supervisor pane, so this
 # test asserts on submitted CONTENT, not pane appearance. It ALSO registers
 # itself as a real herdr agent via `herdr pane report-agent` and reports an
 # idle/working/idle cycle around each submission, because
-# fm_backend_herdr_send_text_submit's confirmation is native agent-state
-# (agent get), not composer content, since the 2026-07-07 incident fix
-# (docs/herdr-backend.md "Native agent-state submit confirmation") - a pane
-# that only draws composer text without being a registered agent would read
-# agent_not_found forever and never confirm a submission.
+# fm_backend_herdr_send_text_submit first confirms through native agent state
+# (agent get), as documented in docs/herdr-backend.md "Current transport
+# behavior". A pane without an agent registration would read agent_not_found
+# and could not exercise that confirmation path.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -49,7 +47,9 @@ herdr_forget_inherited_pane
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-SESSION="fm-lab-afk-herdr-e2e-$$"
+SESSION="${HERDR_LAB_SESSION:-fm-lab-afk-herdr-e2e-$$}"
+EXTERNAL_LAB=0
+[ -z "${HERDR_LAB_SESSION:-}" ] || EXTERNAL_LAB=1
 export HERDR_SESSION="$SESSION"
 STATE_DIR=
 HERDR_SHIM_DIR=
@@ -65,12 +65,16 @@ cleanup_all() {
     kill "$DAEMON_PID" 2>/dev/null || true
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
-  herdr_safe_stop_and_delete "$SESSION" 2>/dev/null || true
+  [ "$EXTERNAL_LAB" -eq 1 ] || herdr_safe_stop_and_delete "$SESSION" 2>/dev/null || true
   rm -rf "${HERDR_SHIM_DIR:-}" 2>/dev/null || true
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+if [ "$EXTERNAL_LAB" -eq 0 ]; then
+  fm_herdr_lab_provision "$SESSION" || fail "could not provision isolated Herdr lab session"
+fi
+fm_herdr_lab_require_running_owned "$SESSION" \
+  || fail "Herdr lab is not affirmatively running with helper provenance"
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
 # shellcheck source=/dev/null
@@ -138,9 +142,9 @@ EOF
 # one side-bordered row is a complete composer box. ALSO registers itself as a
 # real herdr agent via `herdr pane report-agent` and reports idle/working
 # transitions around each
-# submission: fm_backend_herdr_send_text_submit's confirmation is now native
-# agent-state (agent get), not composer content (docs/herdr-backend.md
-# "Native agent-state submit confirmation"), so a synthetic pane that only
+# submission: fm_backend_herdr_send_text_submit first confirms through native
+# agent state (agent get), as documented in docs/herdr-backend.md "Current
+# transport behavior", so a synthetic pane that only
 # draws composer TEXT but is never registered as an agent would report
 # agent_not_found forever - every confirmation attempt would read 'unknown',
 # never 'empty', and the daemon would treat every injection as unconfirmed and
@@ -194,11 +198,10 @@ redraw() {
 }
 submit_line() {
   local _line=$_buf _c _hex
-  if [ "${_line:0:1}" = "$MARK" ]; then
-    _c="injection"
-  else
-    _c="user"
-  fi
+  case "$_line" in
+    "$MARK"*) _c="injection" ;;
+    *) _c="user" ;;
+  esac
   _hex=$(printf '%s' "$_line" | od -An -tx1 | tr -d ' \n')
   printf '%s\t%s\t%s\n' "$_hex" "$_line" "$_c" >> "$LOG"
   _buf=
@@ -246,6 +249,17 @@ if [ "\${1:-}" = "pane" ] && [ "\${2:-}" = "send-keys" ] && [ -f "$STATE_DIR/.sw
     exit 0
   fi
 fi
+if [ "\${1:-}" = "agent" ] && [ "\${2:-}" = "get" ] && [ -f "$STATE_DIR/.hold-working-response" ]; then
+  _out=\$("$REAL_HERDR" "\$@")
+  _status=\$?
+  if printf '%s' "\$_out" | jq -e '.result.agent.agent_status == "working"' >/dev/null 2>&1; then
+    rm -f "$STATE_DIR/.hold-working-response"
+    : > "$STATE_DIR/.working-response-held"
+    sleep "\${FM_HERDR_CONFIRM_HOLD_SECS:-1}"
+  fi
+  printf '%s' "\$_out"
+  exit "\$_status"
+fi
 exec "$REAL_HERDR" "\$@"
 SHIM
 chmod +x "$HERDR_SHIM_DIR/herdr"
@@ -280,6 +294,7 @@ start_daemon() {
   FM_SUPERVISOR_TARGET="$SUPERVISOR_TARGET" \
   FM_ESCALATE_BATCH_SECS=0 \
   FM_HOUSEKEEPING_TICK=1 \
+  FM_HEARTBEAT_SCAN_SECS="${FM_HEARTBEAT_SCAN_SECS:-15}" \
   FM_POLL=1 \
   FM_SIGNAL_GRACE=1 \
   FM_HEARTBEAT=999999 \
@@ -301,6 +316,35 @@ stop_daemon() {
   sleep 1
 }
 
+wait_for_file() {  # <path> <description>
+  local path=$1 description=$2 i=0
+  while [ "$i" -lt 100 ]; do
+    [ -e "$path" ] && return 0
+    kill -0 "$DAEMON_PID" 2>/dev/null || fail "$description: daemon exited before the marker appeared"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "$description: marker did not appear within 10s"
+}
+
+wait_for_daemon_exit() {  # <description>
+  local description=$1 i=0 pid=$DAEMON_PID
+  while [ "$i" -lt 100 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    fail "$description: daemon did not exit within 10s"
+  fi
+  wait "$pid" 2>/dev/null || true
+  DAEMON_PID=""
+}
+
+injection_marker_count() {
+  awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE"
+}
+
 reset_state() {
   rm -f "$STATE_DIR"/*.status \
          "$STATE_DIR"/.subsuper-* \
@@ -314,6 +358,8 @@ reset_state() {
          "$STATE_DIR"/.seen-* \
          "$STATE_DIR"/.heartbeat-streak \
          "$STATE_DIR"/.swallow-enter \
+         "$STATE_DIR"/.hold-working-response \
+         "$STATE_DIR"/.working-response-held \
          2>/dev/null || true
   : > "$LOG_FILE"
 }
@@ -391,6 +437,9 @@ test_scenario_a() {
     *) fail "Scenario A: digest misclassified (expected injection): $digest_line" ;;
   esac
 
+  printf 'evidence - scenario=A human_submissions=%s injection_submissions=%s merged_lines=0\n' \
+    "$(grep -c $'\tuser$' "$LOG_FILE" || true)" \
+    "$(grep -c $'\tinjection$' "$LOG_FILE" || true)"
   stop_daemon
   pass "real herdr Scenario A: partial input defers injection; digest arrives clean after idle"
 }
@@ -427,6 +476,8 @@ test_scenario_b() {
   [ "$user_count" -eq 0 ] \
     || fail "Scenario B: expected 0 user lines, got $user_count (spurious Enter submitted an empty line?)"
 
+  printf 'evidence - scenario=B injection_count=%s user_submissions=%s swallowed_enter_retried=true\n' \
+    "$marker_count" "$user_count"
   stop_daemon
   pass "real herdr Scenario B: swallowed Enter (via the herdr shim) produces exactly one clean digest"
 }
@@ -436,7 +487,7 @@ test_scenario_b() {
 test_scenario_c() {
   reset_state
   afk_enter "$STATE_DIR"
-  start_daemon
+  FM_HEARTBEAT_SCAN_SECS=1 start_daemon
 
   echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
   sleep 8
@@ -463,8 +514,24 @@ test_scenario_c() {
   [ "$user_count" -eq 0 ] \
     || fail "Scenario C: expected 0 user lines, got $user_count (spurious submission?)"
 
+  [ ! -s "$STATE_DIR/.subsuper-escalations" ] \
+    || fail "Scenario C: confirmed delivery left a stale buffered digest"
+  [ ! -e "$STATE_DIR/.subsuper-escalations.since" ] \
+    || fail "Scenario C: confirmed delivery left the buffer age sidecar"
+  sleep 4
+  kill -0 "$DAEMON_PID" 2>/dev/null \
+    || fail "Scenario C: daemon exited before repeated scan cycles completed"
+  [ ! -s "$STATE_DIR/.subsuper-escalations" ] \
+    || fail "Scenario C: repeated catch-all scans re-buffered a delivered status"
+  [ "$(injection_marker_count)" -eq 1 ] \
+    || fail "Scenario C: repeated catch-all scans changed the delivered injection count"
+
+  printf 'evidence - scenario=C injection_count=%s buffer_bytes=%s age_sidecar=%s repeated_scan_reinjection=false\n' \
+    "$(injection_marker_count)" \
+    "$(wc -c < "$STATE_DIR/.subsuper-escalations" 2>/dev/null | tr -d ' ')" \
+    "$([ -e "$STATE_DIR/.subsuper-escalations.since" ] && printf present || printf absent)"
   stop_daemon
-  pass "real herdr Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
+  pass "real herdr Scenario C: confirmed delivery retires its buffer and repeated catch-all scans cannot re-buffer it"
 }
 
 # --- Scenario D: max-defer alarm on a persistently non-clearing composer -----
@@ -517,18 +584,102 @@ test_scenario_d_max_defer() {
   kill -0 "$DAEMON_PID" 2>/dev/null || fail "Scenario D: the daemon process died instead of alarming and continuing"
   grep -F 'stuck-in-the-box' "$STATE_DIR/daemon.err" >/dev/null 2>&1 && : # not fatal either way
 
-  stop_daemon
-  # Clean up the stuck composer text for a tidy teardown (best-effort).
-  fm_backend_herdr_send_key "$SUPERVISOR_TARGET" C-c >/dev/null 2>&1 || true
-  pass "real herdr Scenario D: a persistently pending composer raises the max-defer wedge alarm, preserves the buffer, and never crashes the daemon"
+  kill -TERM "$DAEMON_PID" 2>/dev/null || fail "Scenario D: could not request daemon shutdown"
+  wait_for_daemon_exit "Scenario D unconfirmed-delivery shutdown"
+  afk_exit "$STATE_DIR"
+  [ -s "$STATE_DIR/.subsuper-escalations" ] \
+    || fail "Scenario D: shutdown discarded an unconfirmed delivery"
+  # Submit the synthetic stuck draft after the daemon is gone so the fixture's
+  # composer returns empty without terminating the loop used by later scenarios.
+  fm_backend_herdr_send_key "$SUPERVISOR_TARGET" Enter >/dev/null 2>&1 || true
+  sleep 1
+  printf 'evidence - scenario=D buffer_bytes=%s wedge_marker=%s daemon_exited=true\n' \
+    "$(wc -c < "$STATE_DIR/.subsuper-escalations" 2>/dev/null | tr -d ' ')" \
+    "$([ -s "$STATE_DIR/.subsuper-inject-wedged" ] && printf present || printf absent)"
+  pass "real herdr Scenario D: an unconfirmed delivery remains durable across daemon shutdown"
 }
 
-test_scenario_a
-test_scenario_b
-test_scenario_c
-test_scenario_d_max_defer
+# --- Scenario E: SIGTERM after native confirmation, before buffer retirement -
+# Hold the first real `agent get -> working` response after Herdr has observed
+# the submitted turn. TERM then lands in the parent shell while its command
+# substitution is still returning confirmation. The daemon must let that
+# confirmed flush retire normally before cleanup; a cleanup-time recursive
+# flush would inject the same still-buffered digest a second time.
 
-echo "all real-herdr afk injection e2e tests passed"
+test_scenario_e_shutdown_during_confirmed_flush() {
+  reset_state
+  afk_enter "$STATE_DIR"
+  touch "$STATE_DIR/.hold-working-response"
+  start_daemon
+
+  echo "done: PR https://example.test/pr/400" > "$STATE_DIR/fake-c1.status"
+  wait_for_file "$STATE_DIR/.working-response-held" "Scenario E confirmation hold"
+  kill -TERM "$DAEMON_PID" 2>/dev/null || fail "Scenario E: could not request daemon shutdown"
+  wait_for_daemon_exit "Scenario E confirmed-delivery shutdown"
+  afk_exit "$STATE_DIR"
+
+  [ "$(injection_marker_count)" -eq 1 ] \
+    || fail "Scenario E: shutdown re-injected a delivery after Herdr had confirmed it"
+  [ ! -s "$STATE_DIR/.subsuper-escalations" ] \
+    || fail "Scenario E: confirmed delivery remained buffered after shutdown"
+  [ ! -e "$STATE_DIR/.subsuper-escalations.since" ] \
+    || fail "Scenario E: confirmed delivery retained its age sidecar after shutdown"
+  [ ! -e "$STATE_DIR/.subsuper-inject-wedged" ] \
+    || fail "Scenario E: confirmed delivery produced a false wedge marker"
+  printf 'evidence - scenario=E injection_count=%s buffer_bytes=%s age_sidecar=%s wedge_marker=%s daemon_exited=true\n' \
+    "$(injection_marker_count)" \
+    "$(wc -c < "$STATE_DIR/.subsuper-escalations" 2>/dev/null | tr -d ' ')" \
+    "$([ -e "$STATE_DIR/.subsuper-escalations.since" ] && printf present || printf absent)" \
+    "$([ -e "$STATE_DIR/.subsuper-inject-wedged" ] && printf present || printf absent)"
+  pass "real herdr Scenario E: SIGTERM during confirmed submit retires once and exits without re-injection"
+}
+
+# --- Scenario F: SIGTERM after confirmed retirement -------------------------
+
+test_scenario_f_shutdown_after_flush() {
+  reset_state
+  afk_enter "$STATE_DIR"
+  start_daemon
+
+  echo "needs-decision: choose the safe option" > "$STATE_DIR/fake-c1.status"
+  local i=0
+  while [ "$i" -lt 100 ]; do
+    if [ "$(injection_marker_count)" -eq 1 ] && [ ! -s "$STATE_DIR/.subsuper-escalations" ]; then
+      break
+    fi
+    kill -0 "$DAEMON_PID" 2>/dev/null || fail "Scenario F: daemon exited before delivery retirement"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$i" -lt 100 ] || fail "Scenario F: confirmed delivery did not retire within 10s"
+
+  kill -TERM "$DAEMON_PID" 2>/dev/null || fail "Scenario F: could not request daemon shutdown"
+  wait_for_daemon_exit "Scenario F post-flush shutdown"
+  afk_exit "$STATE_DIR"
+
+  [ "$(injection_marker_count)" -eq 1 ] \
+    || fail "Scenario F: shutdown re-injected an already-retired delivery"
+  [ ! -s "$STATE_DIR/.subsuper-escalations" ] \
+    || fail "Scenario F: shutdown restored an already-retired buffer"
+  printf 'evidence - scenario=F injection_count=%s buffer_bytes=%s daemon_exited=true\n' \
+    "$(injection_marker_count)" \
+    "$(wc -c < "$STATE_DIR/.subsuper-escalations" 2>/dev/null | tr -d ' ')"
+  pass "real herdr Scenario F: shutdown after retirement exits with one delivered digest"
+}
+
+for scenario in ${FM_AFK_HERDR_SCENARIOS:-a b c d e f}; do
+  case "$scenario" in
+    a) test_scenario_a ;;
+    b) test_scenario_b ;;
+    c) test_scenario_c ;;
+    d) test_scenario_d_max_defer ;;
+    e) test_scenario_e_shutdown_during_confirmed_flush ;;
+    f) test_scenario_f_shutdown_after_flush ;;
+    *) fail "unknown FM_AFK_HERDR_SCENARIOS entry: $scenario" ;;
+  esac
+done
+
+echo "selected real-herdr afk injection e2e tests passed"
 
 fm_backend_herdr_kill "$SUPERVISOR_TARGET" 2>/dev/null || true
 fm_backend_herdr_kill "$SESSION:$FAKE_CREW_PANE_ID" 2>/dev/null || true

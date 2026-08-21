@@ -149,7 +149,8 @@ unit_fresh_vs_refresh() {
 
 # ---------------------------------------------------------------------------
 # UNIT 3: exit ordering - fm_afk_launch_stop SIGTERMs the daemon WHILE .afk is
-# still present (so its flush is not a no-op), and clears .afk last.
+# still present (so an active delivery can settle and retire), and clears .afk
+# last.
 # ---------------------------------------------------------------------------
 unit_stop_ordering() {
   local st lock marker daemon_pid
@@ -171,7 +172,7 @@ unit_stop_ordering() {
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
   # shellcheck disable=SC2031 # The background daemon writes this shared file; no shell variable is reassigned.
   if [ "$(cat "$marker" 2>/dev/null || echo missing)" = present ]; then
-    pass "stop-ordering: daemon SIGTERM'd while .afk still present (flush is not a no-op)"
+    pass "stop-ordering: daemon SIGTERM'd while .afk still present (active delivery may settle)"
   else
     fail "stop-ordering: .afk was already cleared when the daemon got SIGTERM"
   fi
@@ -729,6 +730,13 @@ unit_stop_confirms_daemon_exit() {
   fi
   kill -KILL "$daemon_pid" 2>/dev/null || true
   wait "$daemon_pid" 2>/dev/null || true
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 \
+    && [ ! -e "$st/state/.afk" ] \
+    && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "stop reconciliation: a later retry cleans lifecycle state only after daemon absence is exact"
+  else
+    fail "stop reconciliation: retry did not converge after the preserved daemon became absent"
+  fi
   rm -rf "$st"
 }
 
@@ -836,21 +844,26 @@ e2e_herdr() {
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
 
-  local SESSION home_tmp cap_ws cap_tab cap_pane target
+  local SESSION home_tmp cap_ws cap_tab cap_pane target external_lab=0
   local before during after ws_before ws_during ws_after out dtgt dtab
-  SESSION="fm-lab-afk-launch-e2e-$$"
+  SESSION="${HERDR_LAB_SESSION:-fm-lab-afk-launch-e2e-$$}"
+  [ -z "${HERDR_LAB_SESSION:-}" ] || external_lab=1
   export HERDR_SESSION="$SESSION"
   home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-e2e-home.XXXXXX")
   E2E_HERDR_CLEANUP() {
     # shellcheck disable=SC2031 # Cleanup reads the caller's resolved target; it does not reassign it.
     FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
       FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr "$LAUNCH" stop >/dev/null 2>&1 || true
-    herdr_safe_stop_and_delete "$SESSION" >/dev/null 2>&1 || true
+    [ "$external_lab" -eq 1 ] || herdr_safe_stop_and_delete "$SESSION" >/dev/null 2>&1 || true
     rm -rf "$home_tmp" 2>/dev/null || true
   }
-  fm_herdr_lab_prepare "$SESSION" || { fail "herdr e2e: could not prepare isolated lab session"; return 0; }
+  if [ "$external_lab" -eq 0 ]; then
+    fm_herdr_lab_provision "$SESSION" \
+      || { fail "herdr e2e: could not provision isolated lab session"; return 0; }
+  fi
+  fm_herdr_lab_require_running_owned "$SESSION" \
+    || { fail "herdr e2e: lab is not affirmatively running with helper provenance"; return 0; }
   fm_backend_source herdr || { E2E_HERDR_CLEANUP; fail "herdr e2e: fm_backend_source herdr failed"; return 0; }
-  fm_backend_herdr_server_ensure "$SESSION" || { E2E_HERDR_CLEANUP; fail "herdr e2e: lab server did not start"; return 0; }
 
   out=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$ROOT" --label captain --no-focus 2>/dev/null)
   cap_ws=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty')

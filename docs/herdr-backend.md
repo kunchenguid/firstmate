@@ -205,6 +205,8 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
+The away-mode daemon gives its adapter-routed supervisor target existence, composer state, and submit calls a hard deadline, while ordinary adapter callers retain their existing command lifetime.
+A deadline is an unconfirmed transport result, so the injection buffer remains durable and that submit attempt does not retype the message text.
 
 Literal text and Enter are separate operations for ordinary steers.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
@@ -296,7 +298,9 @@ Pi has no such mechanism.
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
 
-On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the recorded terminal is closed, and the AFK flag is removed last.
+On stop, the daemon receives termination while `state/.afk` still exists so any active submit can settle through its original confirmation and retirement path.
+Shutdown starts no second submit: the original path retires a confirmed batch, while an unconfirmed batch remains available to return catch-up.
+The recorded terminal is then closed, and the AFK flag is removed last.
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
 
 ## Destructive lab safety

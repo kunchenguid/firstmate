@@ -483,8 +483,8 @@ test_backend_source_shell_portable() {
   # zsh does not word-split unquoted expansions; sourcing fm-backend.sh from
   # an interactive zsh session must still recognize known backend names.
   if command -v zsh >/dev/null 2>&1; then
-    zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source herdr && whence -w fm_backend_herdr_capture >/dev/null" 2>/dev/null \
-      || fail "zsh: fm_backend_source herdr should load the adapter when sourced"
+    zsh -c "unsetopt nounset; cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source herdr && [[ ! -o nounset ]] && whence -w fm_backend_herdr_capture >/dev/null" 2>/dev/null \
+      || fail "zsh: fm_backend_source herdr should load the adapter without changing nounset"
     out=$(zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source bogus" 2>&1) \
       && fail "zsh: fm_backend_source bogus should fail"
     assert_contains "$out" "unknown backend 'bogus'" \
@@ -494,8 +494,8 @@ test_backend_source_shell_portable() {
     pass "zsh: shell-portable backend matching skipped (zsh not found)"
   fi
 
-  bash -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source herdr && declare -F fm_backend_herdr_capture >/dev/null" 2>/dev/null \
-    || fail "bash: fm_backend_source herdr should load the adapter when sourced"
+  bash -c "set +u; cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source herdr && case \$- in *u*) exit 1 ;; esac && declare -F fm_backend_herdr_capture >/dev/null" 2>/dev/null \
+    || fail "bash: fm_backend_source herdr should load the adapter without changing nounset"
   out=$(bash -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source bogus" 2>&1) \
     && fail "bash: fm_backend_source bogus should fail"
   assert_contains "$out" "unknown backend 'bogus'" \

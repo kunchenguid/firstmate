@@ -234,6 +234,19 @@ fm_herdr_lab_check_tripwire() { # <session>
   }
 }
 
+fm_herdr_lab_require_running_owned() { # <session>
+  local name=$1 running
+  fm_herdr_lab_validate_name "$name" || return 1
+  fm_herdr_lab_check_tripwire "$name" || return 1
+  fm_herdr_lab_refuse_if_default "$name" || return 1
+  running=$(fm_herdr_lab_cli "$name" status --json 2>/dev/null \
+    | jq -r '.server.running // false' 2>/dev/null) || running=false
+  [ "$running" = true ] || {
+    fm_herdr_lab_error "helper-owned lab session '$name' is not running"
+    return 1
+  }
+}
+
 fm_herdr_lab_verify_tripwire() { # <session>
   local name=$1 tripwire
   fm_herdr_lab_check_tripwire "$name" || return 1

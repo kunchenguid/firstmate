@@ -208,6 +208,23 @@ test_failed_delete_retains_tripwire() {
   pass "fm-herdr-lab: failed deletion retains ownership until absence is confirmed"
 }
 
+test_running_owned_guard_requires_provenance_and_liveness() {
+  local name="fm-lab-running-owned-$$" status=0
+  printf '%s\n' running > "$FAKE_STATE/$name"
+  run_with_fake fm_herdr_lab_require_running_owned "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "running lab without a helper tripwire must be refused"
+  rm -f "$FAKE_STATE/$name"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "running-owned fixture provision failed"
+  run_with_fake fm_herdr_lab_require_running_owned "$name" \
+    || fail "helper-provisioned running lab was refused"
+  run_with_fake fm_herdr_lab_stop "$name" >/dev/null || fail "running-owned fixture stop failed"
+  status=0
+  run_with_fake fm_herdr_lab_require_running_owned "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "helper-owned stopped lab must be refused"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "running-owned fixture teardown failed"
+  pass "fm-herdr-lab: running-owned guard requires helper provenance and live server state"
+}
+
 test_timed_out_provision_cancels_late_launch() {
   local name="fm-lab-late-launch-$$" status=0
   cat > "$FAKEBIN/sleep" <<'SH'
@@ -240,4 +257,5 @@ test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
 test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
+test_running_owned_guard_requires_provenance_and_liveness
 test_timed_out_provision_cancels_late_launch

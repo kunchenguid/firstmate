@@ -78,6 +78,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
 
+# Shared hard-bound command runner. Normal Herdr operations remain unbounded
+# unless their caller explicitly sets FM_BACKEND_HERDR_CLI_TIMEOUT_SECS; the
+# away-mode daemon does so because its lifecycle stop has a bounded wait.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-timeout-lib.sh"
+
 # Shared, backend-neutral normalized-transition shape and the single-owner
 # status->action policy table (bin/fm-transition-lib.sh). This adapter's event
 # subscriber (fm_backend_herdr_wait_transition) normalizes every
@@ -378,9 +384,12 @@ fm_backend_herdr_workspace_label() {
 # fm_backend_herdr_version_check, which is intentionally session-independent
 # (reads only .client.* fields).
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
-  local session=$1
+  local session=$1 timeout=${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-0}
   shift
-  HERDR_SESSION="$session" herdr "$@" --session "$session"
+  case "$timeout" in
+    ''|*[!0-9]*|0) HERDR_SESSION="$session" herdr "$@" --session "$session" ;;
+    *) fm_run_timed "$timeout" env HERDR_SESSION="$session" herdr "$@" --session "$session" ;;
+  esac
 }
 
 # fm_backend_herdr_tool_check: refuse loudly if herdr or jq is missing.
