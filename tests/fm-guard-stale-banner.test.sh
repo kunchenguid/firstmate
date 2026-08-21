@@ -383,6 +383,87 @@ test_autoarm_stale_episode_is_stable() {
   pass "fm-guard stale banner: auto-arm stale episode stays one episode across calls"
 }
 
+# The away model: while state/.afk exists the away daemon owns supervision for
+# every harness and runs the watcher one cycle at a time, so the daemon's own
+# liveness and tick answer this question and no long-lived watcher is expected.
+# The harness model is deliberately left unpinned here: away mode must win over
+# whatever primary harness the host runner looks like.
+run_guard_case_away() {
+  local dir=$1
+  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE=999 \
+    "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
+# Record a live, identity-matched away daemon and a fresh tick for it.
+record_live_away_daemon() {
+  local dir=$1 pid=$2 home identity
+  home=$(case_home "$dir")
+  identity=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid") || return 1
+  mkdir -p "$home/state/.supervise-daemon.lock"
+  printf '%s\n' "$pid" > "$home/state/.supervise-daemon.lock/pid"
+  printf '%s\n' "$identity" > "$home/state/.supervise-daemon.lock/pid-identity"
+  printf '%s\n' "$pid" > "$home/state/.supervise-daemon.pid"
+  touch "$home/state/.subsuper-last-housekeep"
+}
+
+test_away_model_live_daemon_without_watcher_is_healthy() {
+  local dir out pid
+  dir=$(make_guard_case away-live-daemon)
+  : > "$(case_home "$dir")/state/.afk"
+  sleep 60 &
+  pid=$!
+  record_live_away_daemon "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not record the live away daemon"
+  }
+  out=$(run_guard_case_away "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ -z "$out" ] \
+    || fail "away mode with a live ticking daemon and no watcher must stay silent, got: $out"
+  pass "fm-guard stale banner: away mode with a live daemon and no watcher is healthy"
+}
+
+test_away_model_outranks_a_pinned_harness_model() {
+  local dir out home
+  dir=$(make_guard_case away-outranks-pin)
+  home=$(case_home "$dir")
+  : > "$home/state/.afk"
+  touch "$home/state/.last-watcher-beat"
+  touch "$home/state/.subsuper-last-housekeep"
+  # bin/fm-spawn.sh bakes a pinned harness model into every secondmate launch, so
+  # away mode must not be suppressed by one: the pinned autoarm model would call
+  # this fresh beacon healthy while away supervision is genuinely dead.
+  out=$(FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$home" \
+    FM_GUARD_GRACE=999 \
+    FM_SUPERVISION_MODEL=autoarm \
+    "$ROOT/bin/fm-guard.sh" 2>&1)
+  assert_contains "$out" "away mode owns supervision but its daemon is not running" \
+    "a pinned harness model must not suppress away-mode detection"
+  pass "fm-guard stale banner: away mode outranks a pinned harness supervision model"
+}
+
+test_away_model_dead_daemon_alarms_with_daemon_reason() {
+  local dir out home
+  dir=$(make_guard_case away-dead-daemon)
+  home=$(case_home "$dir")
+  : > "$home/state/.afk"
+  # A fresh watcher beacon and a fresh daemon tick, but no daemon process at all:
+  # away supervision is genuinely off and must still alarm.
+  touch "$home/state/.last-watcher-beat"
+  touch "$home/state/.subsuper-last-housekeep"
+  out=$(run_guard_case_away "$dir")
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "away mode with no daemon must alarm: $out"
+  assert_contains "$out" "away mode owns supervision but its daemon is not running or has stopped ticking" \
+    "the away banner must name the daemon as the failing condition"
+  pass "fm-guard stale banner: away mode alarms on a dead daemon and names it"
+}
+
 test_persistent_no_watcher_banner_names_missing_process() {
   local dir out
   dir=$(make_guard_case persistent-no-watcher-reason)
@@ -695,6 +776,9 @@ test_extension_live_watcher_is_healthy_without_ownership_evidence
 test_autoarm_fresh_beacon_without_watcher_is_healthy
 test_autoarm_stale_beacon_alarms_with_correct_reason
 test_autoarm_stale_episode_is_stable
+test_away_model_live_daemon_without_watcher_is_healthy
+test_away_model_dead_daemon_alarms_with_daemon_reason
+test_away_model_outranks_a_pinned_harness_model
 test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
 test_fresh_beacon_without_live_watcher_stays_alarm

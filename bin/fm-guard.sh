@@ -10,16 +10,18 @@
 # healthy, prints a loud, clearly delimited banner so the agent cannot skim past
 # it in the tool output of whatever it was doing - the one channel every harness
 # has. Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
-# bin/fm-wake-lib.sh): under the Claude Stop auto-arm model the watcher runs only
-# between turns, so mid-turn a fresh beacon with no live watcher is healthy and
-# only a stale beacon (beyond FM_GUARD_GRACE) is a genuine lapse; under the Pi
-# extension model the extension tears the watcher down and respawns it on every
-# actionable wake, so a fresh beacon with a genuinely unheld lock is healthy
-# while that live Pi session provably owns continuity; any held but unhealthy
-# lock is down; under every
+# bin/fm-wake-lib.sh): while away mode is active its daemon owns supervision for
+# every harness and runs the watcher one cycle at a time, so the daemon's own
+# liveness and tick are the health signal and no long-lived watcher is expected;
+# under the Claude Stop auto-arm model the watcher runs only between turns, so
+# mid-turn a fresh beacon with no live watcher is healthy and only a stale beacon
+# (beyond FM_GUARD_GRACE) is a genuine lapse; under the Pi extension model the
+# extension tears the watcher down and respawns it on every actionable wake, so a
+# fresh beacon with a genuinely unheld lock is healthy while that live Pi session
+# provably owns continuity; any held but unhealthy lock is down; under every
 # persistent-watcher harness a live identity-matched watcher with a fresh beacon
-# is required. The banner names the true failing condition (a missing live
-# watcher process vs a genuinely stale beacon). The full banner is emitted once
+# is required. The banner names the true failing condition (a stopped away
+# daemon vs a missing live watcher process vs a genuinely stale beacon). The full banner is emitted once
 # per distinct down-episode in this FM_HOME (keyed to the failing condition, not
 # the beacon mtime, which a healthy between-turns watcher advances every poll);
 # later guarded commands in the same episode print a one-line reminder instead.
@@ -198,7 +200,11 @@ if [ "$watcher_healthy" = false ]; then
     {
       printf '●%s\n' "$rule"
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-      if [ "$watcher_down_reason" = no-watcher ]; then
+      if [ "$watcher_down_reason" = away-daemon-down ]; then
+        away_tick=$(fm_away_daemon_tick_age "$STATE")
+        [ "$away_tick" -lt 999999 ] && away_tick="${away_tick}s ago" || away_tick=never
+        watcher_cause=$(printf 'away mode owns supervision but its daemon is not running or has stopped ticking (last supervision tick: %s)' "$away_tick")
+      elif [ "$watcher_down_reason" = no-watcher ]; then
         watcher_cause=$(printf 'no live watcher process holds this home lock (last beat: %s)' "$beacon_desc")
       else
         watcher_cause=$(printf 'no watcher has a fresh beacon (last beat: %s, grace %ss)' "$beacon_desc" "$GRACE")

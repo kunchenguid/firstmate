@@ -132,14 +132,22 @@ fm_watcher_healthy() {
 # identity-matched watcher PROCESS holds this home's lock with a fresh beacon. The
 # arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) needs exactly
 # that - it decides whether to start, attach to, or replace a real watcher
-# process, so a leftover beacon must never satisfy it. bin/fm-turnend-guard.sh
-# also keeps this strict check because it fires at the turn boundary where the
-# auto-arm brings a fresh watcher up. The pull warning (bin/fm-guard.sh) fires
-# mid-turn, where the auto-arm model runs no watcher at all, so it wants a
-# different, model-aware question:
+# process, so a leftover beacon must never satisfy it. Outside away mode
+# bin/fm-turnend-guard.sh also keeps this strict check, because it fires at the
+# turn boundary where the auto-arm brings a fresh watcher up. The pull warning
+# (bin/fm-guard.sh) fires mid-turn, where the auto-arm model runs no watcher at
+# all, so it wants a different, model-aware question:
 
-# fm_supervision_model
-# Print the supervision model of this home's PRIMARY harness:
+# fm_supervision_model [state]
+# Print the supervision model in force for this home:
+#   away        state/.afk exists: the away-mode daemon
+#               (bin/fm-supervise-daemon.sh) owns supervision for EVERY primary
+#               harness, and runs the watcher as its own child that exits on each
+#               wake so the daemon can handle it. Between those cycles the
+#               singleton lock is genuinely unheld BY DESIGN, so no watcher
+#               process is the healthy state and the daemon itself is what must be
+#               tested (fm_away_daemon_healthy). Checked before the harness because
+#               away mode replaces the harness's own supervision, whatever it is.
 #   autoarm     Claude's Stop-hook auto-arm and Cursor's stop-hook park: the
 #               watcher is armed at each turn end and exits on its wake, so it
 #               runs only BETWEEN turns. Mid-turn a fresh beacon with no live
@@ -152,11 +160,19 @@ fm_watcher_healthy() {
 #   persistent  every other harness (codex foreground checkpoint, opencode/grok
 #               background arm, tmux, unknown): the watcher runs as a tracked live
 #               process, so a live identity-matched pid is the real liveness signal.
-# FM_SUPERVISION_MODEL overrides detection (tests, and callers that already know
-# the harness). Otherwise bin/fm-harness.sh is the single detection owner, so this
-# stays consistent with the harness-specific repair line the guards already emit.
+# state defaults to $STATE. FM_SUPERVISION_MODEL overrides HARNESS detection (tests,
+# and callers that already know the harness, such as the pinned model bin/fm-spawn.sh
+# bakes into a secondmate launch); otherwise bin/fm-harness.sh is the single
+# detection owner, so this stays consistent with the harness-specific repair line
+# the guards already emit. Away mode outranks that override because it is a runtime
+# state of the home rather than a harness fact: knowing the harness does not tell a
+# caller whether the away daemon has taken supervision over.
 fm_supervision_model() {
-  local harness
+  local state=${1:-$STATE} harness
+  if fm_supervision_away "$state"; then
+    printf 'away\n'
+    return 0
+  fi
   case "${FM_SUPERVISION_MODEL:-}" in
     autoarm|extension|persistent) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
   esac
@@ -166,6 +182,115 @@ fm_supervision_model() {
     pi|pi-signed) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac
+}
+
+# fm_supervision_away [state]
+# True when the away model is in force for this home. This is the ONE test for it:
+# fm_supervision_model reports it as the model, and the hot turn-end path calls it
+# directly so the non-away path never pays a harness-detection fork. Only an
+# explicit FM_SUPERVISION_MODEL=away forces it on; a pinned harness model never
+# forces it off.
+fm_supervision_away() {
+  local state=${1:-$STATE}
+  [ "${FM_SUPERVISION_MODEL:-}" = away ] && return 0
+  [ -e "$state/.afk" ]
+}
+
+# Away-mode supervision evidence. Under the away model the question "is this home
+# supervised" is answered by the DAEMON, not by a watcher process: a live daemon
+# plus a turning loop, i.e. exactly the two ways away supervision can stop (the
+# daemon exited, or it is wedged and no longer ticking).
+#
+# FM_AWAY_TICK_GRACE is how stale that loop may get before away supervision counts
+# as stopped, taken from the daemon's own cadence rather than guessed: its main
+# loop sleeps 1s per pass and runs housekeeping every FM_HOUSEKEEPING_TICK seconds
+# (default 15), and the longest quiet stretch a HEALTHY loop can take is the
+# crash-spin backoff (FM_CRASH_BACKOFF, default 60) plus the following
+# housekeeping gate, about 75s. 180s clears that worst case with margin for one
+# slow wake-handling pass, while still catching a stopped daemon well inside the
+# 300s watcher-beacon grace, so away supervision is held to a STRICTER freshness
+# bound than an ordinary watcher. A home that raises FM_HOUSEKEEPING_TICK or
+# FM_CRASH_BACKOFF far above their defaults must raise this with them; the failure
+# direction is a loud false alarm, never silence.
+FM_AWAY_TICK_GRACE="${FM_AWAY_TICK_GRACE:-180}"
+
+# fm_away_daemon_lock_alive <state>
+# True when this home's away-daemon lock is held by a LIVE, identity-matched
+# bin/fm-supervise-daemon.sh process. Identity comes from the pid-identity the
+# daemon writes into its own lock at startup, so a recycled pid is a mismatch. A
+# lock written by an older daemon that recorded no identity falls back to matching
+# the process command. Single owner of "a live away daemon holds this home":
+# bin/fm-afk-start.sh's already-running check calls this too.
+fm_away_daemon_lock_alive() {
+  local state=$1 lock pid identity current command
+  lock="$state/.supervise-daemon.lock"
+  pid=$(cat "$lock/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || return 1
+  identity=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  if [ -n "$identity" ]; then
+    current=$(fm_pid_identity "$pid") || return 1
+    [ "$current" = "$identity" ]
+    return
+  fi
+  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  case "$command" in
+    *fm-supervise-daemon.sh*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_away_daemon_tick_age <state>
+# Seconds since the freshest evidence that the away daemon's loop is turning:
+#   state/.subsuper-last-housekeep  its own housekeeping tick
+#   state/.last-watcher-beat        the beat of the watcher child it runs
+#   state/.supervise-daemon.pid     its startup stamp, which covers the window
+#                                   before a just-started daemon's first tick
+# 999999 when none of them is readable. The FRESHEST of the three is the correct
+# reading: the watcher is deliberately down while the daemon handles a wake, and
+# housekeeping is skipped while the daemon backs off, so requiring them together
+# would re-create the very false alarm this exists to prevent.
+fm_away_daemon_tick_age() {
+  local state=$1 best=999999 path age
+  for path in \
+    "$state/.subsuper-last-housekeep" \
+    "$state/.last-watcher-beat" \
+    "$state/.supervise-daemon.pid"
+  do
+    [ -e "$path" ] || continue
+    age=$(fm_path_age "$path")
+    case "$age" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ "$age" -lt "$best" ] && best=$age
+  done
+  printf '%s\n' "$best"
+}
+
+# fm_away_daemon_healthy <state> [tick-grace]
+# True when away supervision is genuinely running: a live identity-matched daemon
+# AND a tick inside the grace window. A stale pid file, a pid whose process is
+# gone, a recycled pid, or a daemon that stopped ticking all stay false, so a dead
+# away daemon still raises every alarm a missing watcher would.
+fm_away_daemon_healthy() {
+  local state=$1 grace=${2:-$FM_AWAY_TICK_GRACE} age
+  fm_away_daemon_lock_alive "$state" || return 1
+  age=$(fm_away_daemon_tick_age "$state")
+  [ "$age" -lt "$grace" ]
+}
+
+# fm_turnend_supervision_healthy <state> <watch-path> [grace] [home]
+# The turn-end guard's model-aware "is this home supervised right now" test. Away
+# mode is the only model whose healthy shape differs AT THE TURN BOUNDARY: the
+# auto-arm and Pi extension models both bring a real watcher up as the turn ends,
+# so the PID-strict primitive stays exactly right for them, while away mode
+# deliberately runs no long-lived watcher at all.
+fm_turnend_supervision_healthy() {
+  local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
+  if fm_supervision_away "$state"; then
+    fm_away_daemon_healthy "$state"
+    return
+  fi
+  fm_watcher_healthy "$state" "$watch" "$grace" "$home"
 }
 
 # Pi primary supervision evidence. The Pi extensions record, in their state
@@ -236,6 +361,13 @@ fm_pi_extension_owns_supervision() {
 #                                             the lock (the beacon is still fresh)
 #                              stale-beacon - the beacon is stale beyond grace or
 #                                             absent (a genuine supervision lapse)
+#                              away-daemon-down - away mode owns supervision but
+#                                             its daemon is not running or has
+#                                             stopped ticking
+# away: the away daemon owns supervision, so the watcher lock and the beacon say
+# nothing about health; only a live identity-matched daemon with a turning loop
+# (fm_away_daemon_healthy) is healthy, and this is checked first because away mode
+# replaces whatever the primary harness would otherwise do.
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
 # because the watcher only runs between turns; only a stale beacon is a lapse.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
@@ -264,7 +396,17 @@ fm_watcher_supervision_verdict() {
     ''|*[!0-9]*) ;;
     *) [ "$age" -lt "$grace" ] && fresh=true ;;
   esac
-  model=$(fm_supervision_model)
+  if fm_supervision_away "$state"; then
+    if fm_away_daemon_healthy "$state"; then
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_OK=true
+    else
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_REASON=away-daemon-down
+    fi
+    return 0
+  fi
+  model=$(fm_supervision_model "$state")
   if [ "$model" = autoarm ]; then
     [ "$fresh" = true ] && FM_WATCHER_VERDICT_OK=true
     return 0

@@ -81,33 +81,17 @@ daemon_lock_owner() {
   printf '%s\n' "$FM_AFK_LOCK"
 }
 
-daemon_pid_matches() {
-  local pid=$1 owner=$2 identity current command
-  identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
-  if [ -n "$identity" ]; then
-    current=$(fm_pid_identity "$pid") || return 1
-    [ "$current" = "$identity" ]
-    return
-  fi
-  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-  case "$command" in
-    *"$FM_AFK_DAEMON"*|*"fm-supervise-daemon.sh"*) return 0 ;;
-  esac
-  return 1
-}
-
 daemon_lock_pid() {
   local owner
   owner=$(daemon_lock_owner) || return 1
   cat "$owner/pid" 2>/dev/null || true
 }
 
+# "A live away daemon holds this home" has exactly one definition, in
+# bin/fm-wake-lib.sh, shared with the supervision guards that must agree with this
+# script about whether away supervision is running.
 daemon_lock_held_by_live_daemon() {
-  local owner pid
-  owner=$(daemon_lock_owner) || return 1
-  pid=$(cat "$owner/pid" 2>/dev/null || true)
-  fm_pid_alive "$pid" || return 1
-  daemon_pid_matches "$pid" "$owner"
+  fm_away_daemon_lock_alive "$FM_AFK_STATE"
 }
 
 fm_afk_flag_write() {  # <state-dir>

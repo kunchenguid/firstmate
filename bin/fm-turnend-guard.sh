@@ -42,6 +42,15 @@
 # never a wedged, un-endable session - while still nagging again on a later turn
 # if the problem persists.
 #
+# Away mode: while state/.afk exists the away daemon (bin/fm-supervise-daemon.sh)
+# owns supervision for EVERY primary harness and runs the watcher as its own child
+# one cycle at a time, so between cycles this home has no watcher process by
+# design and the PID-strict check would call a perfectly supervised fleet blind.
+# The predicate is model-aware (fm_turnend_supervision_healthy in
+# bin/fm-wake-lib.sh): under away mode it requires a live identity-matched daemon
+# with a turning loop instead, so a dead, stale-pid or wedged daemon still blocks
+# with a banner naming the daemon. Outside away mode nothing here changes.
+#
 # Loop-guard, --claude mode (Stop-owned auto-arm cooperation): Claude Code
 # marks EVERY stop after ANY stop-hook-driven continuation stop_hook_active=true,
 # including turns started by the asyncRewake auto-arm, so the one-shot allow
@@ -158,37 +167,56 @@ budget_reset() {
   fm_lock_release "$BUDGET_LOCK"
 }
 
+# Away mode replaces the primary harness's own supervision: the away daemon owns
+# the watcher and runs it one cycle at a time, so between cycles this home has no
+# watcher process BY DESIGN. fm_turnend_supervision_healthy asks the daemon
+# question there and the unchanged PID-strict question everywhere else.
+AWAY_MODE=0
+fm_supervision_away "$STATE" && AWAY_MODE=1
+
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
   exit 0
 fi
-if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+if fm_turnend_supervision_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
   fm_failure_episode_reset "$STATE" && exit 0
   exit 2
 fi
 
 block_stop() {
-  local afk x_mode reason rule
-  afk=0
-  [ -e "$STATE/.afk" ] && afk=1
+  local afk x_mode reason rule cause tick
+  afk=$AWAY_MODE
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
   reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
     || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
+  # Under away mode the missing thing is the daemon, never a watcher to arm: name
+  # what actually stopped, and which of its two failure shapes this is.
+  if [ "$afk" -eq 1 ]; then
+    tick=$(fm_away_daemon_tick_age "$STATE")
+    [ "$tick" -lt 999999 ] && tick="${tick}s ago" || tick=never
+    if fm_away_daemon_lock_alive "$STATE"; then
+      cause=$(printf 'the away-mode supervision daemon is alive but has stopped ticking (last supervision tick: %s, grace %ss)' "$tick" "$FM_AWAY_TICK_GRACE")
+    else
+      cause=$(printf 'no live away-mode supervision daemon holds this home (last supervision tick: %s)' "$tick")
+    fi
+  else
+    cause=$(printf 'no live watcher holds this home lock (last beat: %s)' "$FM_SUP_BEACON_DESC")
+  fi
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
     printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
     if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
-      printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+      printf '●  %s task(s) in flight, but %s.\n' "$FM_SUP_IN_FLIGHT" "$cause"
     elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
-      printf '●  %s process-event source(s) registered, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SOURCES" "$FM_SUP_BEACON_DESC"
+      printf '●  %s process-event source(s) registered, but %s.\n' "$FM_SUP_SOURCES" "$cause"
     else
-      printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
+      printf '●  X-mode relay polling needs supervision, but %s.\n' "$cause"
     fi
-    if [ "$CLAUDE_MODE" -eq 1 ]; then
+    if [ "$CLAUDE_MODE" -eq 1 ] && [ "$afk" -eq 0 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
     fi
     printf '●  %s\n' "$reason"
@@ -197,7 +225,10 @@ block_stop() {
   exit 2
 }
 
-if [ "$CLAUDE_MODE" -eq 0 ]; then
+# The Stop-owned auto-arm stands down entirely while state/.afk exists
+# (bin/fm-claude-stop-autoarm.sh), so under away mode there is no claim to wait
+# for and no bounded continuation worth spending: block on the daemon directly.
+if [ "$CLAUDE_MODE" -eq 0 ] || [ "$AWAY_MODE" -eq 1 ]; then
   block_stop
 fi
 

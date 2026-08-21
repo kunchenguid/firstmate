@@ -387,6 +387,36 @@ Observed output, before and after the model correction, then with the recorded P
 ●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 0s ago).
 ```
 
+The away-model turn-end correction (`bin/fm-turnend-guard.sh` no longer reports a false blind turn end while away mode is active, where the away daemon owns supervision and runs the watcher one cycle at a time) was verified on 2026-08-18 against a real `bin/fm-supervise-daemon.sh` in a throwaway `FM_HOME` with its own tmux socket, never the live home.
+The fixture ran one in-flight task with a status line appended every 4 seconds so the daemon handled wakes throughout, and sampled `bin/fm-turnend-guard.sh --claude` 200 times at 0.4-second intervals.
+Before the correction, 3 of 200 samples blocked with the blind banner while the daemon was alive and its housekeeping tick was 1 to 4 seconds old; every one of those samples fell in a window where the watcher child had exited between cycles.
+After the correction the same construction blocked 0 of 200 times, with the watcher lock genuinely absent in 10 of those samples, and the two genuine-failure directions still blocked: the daemon killed with `SIGKILL` (leaving its pid file and a 7-second-old tick behind) and the daemon left alive but stopped with `SIGSTOP` and its tick evidence aged out.
+
+```text
+before: === blind=3 quiet=197 (daemon alive: yes) ===
+after:  A: blocked=0 quiet=200  (watcher-lock genuinely absent in 10 of 200 samples)
+after, daemon SIGKILLed:
+●  1 task(s) in flight, but no live away-mode supervision daemon holds this home (last supervision tick: 7s ago).
+after, daemon alive but wedged:
+●  1 task(s) in flight, but the away-mode supervision daemon is alive but has stopped ticking (last supervision tick: 3601s ago, grace 180s).
+```
+
+The portable suites are the enforcing evidence, since the predicate reads only state files and process liveness.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-guard-stale-banner.test.sh tests/fm-turnend-guard.test.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-afk-launch.test.sh tests/fm-afk-return.test.sh
+```
+
+Observed output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-doc-audience-check: ok surfaces=68 local_links=252
+FM_TEST_SUMMARY total=5 failed=0 skipped_gate=0 duration_ms=174265
+```
+
 The broader relevant regression pass was rerun on 2026-08-02 without live-home or daemon mutation.
 
 ```sh

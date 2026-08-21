@@ -1531,6 +1531,246 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open() {
   pass "fm-turnend-guard --claude: away ownership excludes the Stop-autoarm fail-open"
 }
 
+# --- away mode: the away daemon, not a watcher process, is the supervisor ----
+#
+# While state/.afk exists bin/fm-supervise-daemon.sh owns supervision and runs the
+# watcher one cycle at a time, so an unheld state/.watch.lock is the HEALTHY state
+# between cycles. These fixtures therefore never record a watcher lock at all: the
+# only supervision evidence is the daemon lock, its identity, and its tick.
+
+# Record an away-daemon lock exactly as bin/fm-supervise-daemon.sh does at
+# startup: the portable lock dir with its pid, the pid-identity it writes itself,
+# and the startup pid file.
+record_daemon_lock() {
+  local dir=$1 pid=$2 identity=$3
+  mkdir -p "$dir/state/.supervise-daemon.lock"
+  printf '%s\n' "$pid" > "$dir/state/.supervise-daemon.lock/pid"
+  [ -z "$identity" ] || printf '%s\n' "$identity" > "$dir/state/.supervise-daemon.lock/pid-identity"
+  printf '%s\n' "$pid" > "$dir/state/.supervise-daemon.pid"
+}
+
+# A live stand-in for the away daemon, with the daemon's own identity recorded.
+# Sets AWAY_DAEMON_PID rather than printing it: a command substitution would run
+# the suite's EXIT cleanup trap in its subshell and reap the process.
+AWAY_DAEMON_PID=
+start_away_daemon_stand_in() {
+  local dir=$1 identity
+  sleep 60 &
+  AWAY_DAEMON_PID=$!
+  identity=$(watcher_identity "$dir" "$AWAY_DAEMON_PID") || {
+    kill "$AWAY_DAEMON_PID" 2>/dev/null || true
+    wait "$AWAY_DAEMON_PID" 2>/dev/null || true
+    fail "could not identify the away daemon stand-in"
+  }
+  record_daemon_lock "$dir" "$AWAY_DAEMON_PID" "$identity"
+}
+
+stop_away_daemon_stand_in() {
+  local pid=$1
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+# The daemon ticks two ways and either one proves the loop is turning: its own
+# housekeeping pass, and the beat of the watcher child it runs.
+touch_daemon_tick() {
+  local dir=$1
+  touch "$dir/state/.subsuper-last-housekeep"
+}
+
+test_hook_away_mode_silent_with_live_daemon_and_no_watcher() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-healthy")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  start_away_daemon_stand_in "$dir"
+  pid=$AWAY_DAEMON_PID
+  touch_daemon_tick "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  stop_away_daemon_stand_in "$pid"
+  expect_code 0 "$status" "away mode with a live ticking daemon and no watcher must not block"
+  [ -z "$out" ] || fail "away mode with a live ticking daemon produced output: $out"
+  [ ! -e "$dir/state/.watch.lock" ] || fail "fixture must not record a watcher lock"
+  pass "fm-turnend-guard: away mode is quiet with a live daemon and no watcher process"
+}
+
+test_hook_claude_mode_away_mode_silent_with_live_daemon() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-healthy-claude")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  start_away_daemon_stand_in "$dir"
+  pid=$AWAY_DAEMON_PID
+  touch_daemon_tick "$dir"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  stop_away_daemon_stand_in "$pid"
+  expect_code 0 "$status" "--claude away mode with a live ticking daemon must not block"
+  [ -z "$out" ] || fail "--claude away mode with a live ticking daemon produced output: $out"
+  [ ! -f "$dir/state/.turnend-claude-blocks" ] || fail "a quiet away turn must not consume the Claude block budget"
+  pass "fm-turnend-guard --claude: away mode is quiet with a live daemon and no watcher process"
+}
+
+test_hook_away_mode_silent_on_watcher_beat_alone() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-beat-only")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  start_away_daemon_stand_in "$dir"
+  pid=$AWAY_DAEMON_PID
+  # No housekeeping tick at all: the watcher child's beat alone still proves the
+  # daemon's loop is turning (housekeeping is skipped while it backs off), so
+  # requiring both signals together would re-create the false alarm.
+  rm -f "$dir/state/.subsuper-last-housekeep"
+  touch -t 202001010000 "$dir/state/.supervise-daemon.pid"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  stop_away_daemon_stand_in "$pid"
+  expect_code 0 "$status" "the watcher child's beat alone must satisfy the away tick"
+  [ -z "$out" ] || fail "away mode blocked on a fresh watcher beat: $out"
+  pass "fm-turnend-guard: away mode accepts the watcher beat as the daemon's tick"
+}
+
+test_hook_away_mode_silent_before_first_tick() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-just-started")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  start_away_daemon_stand_in "$dir"
+  pid=$AWAY_DAEMON_PID
+  # A daemon that started seconds ago has not run housekeeping yet and its
+  # watcher child has not beaten yet; its startup stamp is the tick.
+  rm -f "$dir/state/.subsuper-last-housekeep" "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  stop_away_daemon_stand_in "$pid"
+  expect_code 0 "$status" "a just-started away daemon must not read as dead before its first tick"
+  [ -z "$out" ] || fail "away mode blocked a just-started daemon: $out"
+  pass "fm-turnend-guard: away mode tolerates the window before the daemon's first tick"
+}
+
+test_hook_away_mode_blocks_when_daemon_pid_is_dead() {
+  local dir dead out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-dead-daemon")
+  dead=$(nonexistent_pid)
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  record_daemon_lock "$dir" "$dead" "dead daemon identity"
+  # Every freshness signal is fresh: only the dead PROCESS makes this unhealthy,
+  # which is exactly the case a freshness-only check would miss.
+  touch_daemon_tick "$dir"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "a dead away daemon must still block even with fresh ticks"
+  assert_contains "$out" "TURN WOULD END BLIND" "a dead away daemon must raise the blind alarm"
+  assert_contains "$out" "no live away-mode supervision daemon holds this home" \
+    "the away banner must name the daemon, not a missing watcher"
+  assert_contains "$out" 'Away mode owns watcher supervision' "the away block must point at the daemon repair path"
+  pass "fm-turnend-guard: away mode still blocks when the daemon pid is dead"
+}
+
+test_hook_away_mode_blocks_on_recycled_daemon_pid() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-recycled-pid")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  sleep 60 &
+  pid=$!
+  # A live pid whose recorded identity belongs to the daemon that held that pid
+  # before it was recycled: liveness alone must not satisfy the check.
+  record_daemon_lock "$dir" "$pid" "some other process identity"
+  touch_daemon_tick "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  stop_away_daemon_stand_in "$pid"
+  expect_code 2 "$status" "a recycled daemon pid must still block"
+  assert_contains "$out" "no live away-mode supervision daemon holds this home" \
+    "a recycled pid must read as no daemon at all"
+  pass "fm-turnend-guard: away mode blocks when the daemon pid was recycled"
+}
+
+test_hook_away_mode_blocks_when_daemon_stopped_ticking() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-stalled-daemon")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  start_away_daemon_stand_in "$dir"
+  pid=$AWAY_DAEMON_PID
+  # The process is alive and identity-matched, but nothing in its loop has moved
+  # for an hour: a wedged daemon supervises nothing.
+  touch -t 202001010000 "$dir/state/.subsuper-last-housekeep"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  touch -t 202001010000 "$dir/state/.supervise-daemon.pid"
+  out=$(run_hook "$dir" false); status=$?
+  stop_away_daemon_stand_in "$pid"
+  expect_code 2 "$status" "a live but wedged away daemon must still block"
+  assert_contains "$out" "is alive but has stopped ticking" \
+    "the stalled-daemon banner must distinguish itself from a missing daemon"
+  pass "fm-turnend-guard: away mode still blocks when the daemon stopped ticking"
+}
+
+test_hook_claude_mode_away_mode_blocks_dead_daemon() {
+  local dir dead out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-dead-daemon-claude")
+  dead=$(nonexistent_pid)
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  record_daemon_lock "$dir" "$dead" "dead daemon identity"
+  touch_daemon_tick "$dir"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "--claude away mode must block a dead daemon even after a prior continuation"
+  assert_contains "$out" "no live away-mode supervision daemon holds this home" \
+    "the --claude away banner must name the daemon"
+  case "$out" in
+    *"Stop-owned auto-arm did not claim"*)
+      fail "the away banner must not blame the Stop-owned auto-arm, which stands down under away mode" ;;
+  esac
+  pass "fm-turnend-guard --claude: away mode blocks a dead daemon and never blames the auto-arm"
+}
+
+test_hook_away_mode_daemon_lock_without_identity_matches_command() {
+  local dir out status fake pid
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-no-identity")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  # A lock written by an older daemon records no pid-identity; the fallback must
+  # accept a real fm-supervise-daemon.sh process and nothing else.
+  fake="$dir/bin/fm-supervise-daemon.sh"
+  printf '#!/usr/bin/env bash\nsleep 60\n' > "$fake"
+  chmod +x "$fake"
+  "$fake" &
+  pid=$!
+  record_daemon_lock "$dir" "$pid" ""
+  touch_daemon_tick "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  stop_away_daemon_stand_in "$pid"
+  expect_code 0 "$status" "an identity-less lock held by a real daemon process must stay healthy"
+  [ -z "$out" ] || fail "identity-less daemon lock produced output: $out"
+
+  sleep 60 &
+  pid=$!
+  record_daemon_lock "$dir" "$pid" ""
+  out=$(run_hook "$dir" false); status=$?
+  stop_away_daemon_stand_in "$pid"
+  expect_code 2 "$status" "an identity-less lock held by an unrelated process must still block"
+  pass "fm-turnend-guard: away mode's identity-less fallback matches the daemon command only"
+}
+
+test_hook_non_away_behaviour_is_unchanged_by_daemon_state() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-no-afk-daemon-ignored")
+  : > "$dir/state/task1.meta"
+  # A live, ticking away daemon with NO state/.afk must not rescue a home whose
+  # watcher is genuinely gone: outside away mode the watcher is still the answer.
+  start_away_daemon_stand_in "$dir"
+  pid=$AWAY_DAEMON_PID
+  touch_daemon_tick "$dir"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  stop_away_daemon_stand_in "$pid"
+  expect_code 2 "$status" "without state/.afk a daemon must not satisfy the watcher requirement"
+  assert_contains "$out" "no live watcher holds this home lock" \
+    "the non-away banner must keep its watcher wording"
+  pass "fm-turnend-guard: a live daemon outside away mode changes nothing"
+}
+
 test_hook_claude_mode_allow_resets_budget() {
   local dir pid identity out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-reset")
@@ -1662,6 +1902,16 @@ test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
 test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
+test_hook_away_mode_silent_with_live_daemon_and_no_watcher
+test_hook_claude_mode_away_mode_silent_with_live_daemon
+test_hook_away_mode_silent_on_watcher_beat_alone
+test_hook_away_mode_silent_before_first_tick
+test_hook_away_mode_blocks_when_daemon_pid_is_dead
+test_hook_away_mode_blocks_on_recycled_daemon_pid
+test_hook_away_mode_blocks_when_daemon_stopped_ticking
+test_hook_claude_mode_away_mode_blocks_dead_daemon
+test_hook_away_mode_daemon_lock_without_identity_matches_command
+test_hook_non_away_behaviour_is_unchanged_by_daemon_state
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
