@@ -2,11 +2,12 @@
 # Shared fork-main primitives.
 # Usage: . bin/fm-fork-lib.sh
 #
-# Eight facts are read by more than one fork script and must mean exactly the
+# Nine facts are read by more than one fork script and must mean exactly the
 # same thing in each, so they live here rather than being copied:
 #   - which branch a remote's default is (origin/upstream default resolution);
 #   - which ref is a divergence's canonical topic (published fork branch first,
 #     then a local branch);
+#   - which GitHub pull-request and issue URL shapes count as upstream routes;
 #   - whether a manifest path spec owns an actual changed path;
 #   - what one commit's patch identity is;
 #   - which first-parent commits arrived through direct or regular PR delivery;
@@ -26,6 +27,12 @@
 # the evidence that upstream accepted a divergence, and fm-fork-status.sh
 # re-proves that recorded evidence. Both must compute the identity the same way
 # or the merge would write proof the health owner cannot verify.
+
+# GitHub's owner and repository length caps are real-URL constraints rather than
+# route-shape constraints, so this shared pattern deliberately does not enforce them.
+fm_fork_upstream_route_pattern() {
+  printf '%s\n' '^https://github\.com/[A-Za-z0-9](-?[A-Za-z0-9])*/[A-Za-z0-9._-]+/(pull|issues)/[0-9]+$'
+}
 
 fm_fork_remote_branch() { # <repo> <remote>
   local repo=$1 remote=$2 ref branch
@@ -122,7 +129,7 @@ fm_fork_gh_axi_scalar() { # current gh-axi API TOON envelope on stdin
   #     body: <value>
   #     truncated: false
   # Accept only that complete, untruncated one-body shape. A serializer change
-  # then stops refresh instead of turning envelope text into a PR disposition.
+  # then stops refresh instead of turning envelope text into an upstream review disposition.
   local line body='' body_count=0 root_count=0 truncated=''
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in

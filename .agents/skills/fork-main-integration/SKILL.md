@@ -37,6 +37,8 @@ This file keeps what binds you at the point of action - the prohibitions, the or
 
 ## New divergence intake
 
+Follow the issue-first contribution order and its current validation-lane limit in [`docs/fork-main.md`](../../../docs/fork-main.md) before beginning this pull-request-producing intake.
+
 1. Scaffold the Firstmate ship brief with `--start-ref upstream/main` so unrelated fork divergences cannot enter the upstream pull request.
    That generated brief loads this procedure for the worker and directly carries the no-rewrite, no-routine-merge, and official-upstream validation rules through the typed launch input.
 2. Run the ordinary no-mistakes path against the official-upstream registration.
@@ -58,8 +60,10 @@ Use a falsifiable statement such as "Upstream ships equivalent endpoint identity
 
 ## Upstream review disposition
 
-A pending divergence whose PR closes without merge must not remain pending.
-Choose one of two outcomes in the next validated fork integration:
+Only a genuine upstream decline permits reclassifying a pending divergence to `rejected-but-retained`.
+A duplicate issue closure means review moved, so repoint the recorded route without reclassifying it.
+Follow the full outcome mapping and operator actions in [`docs/fork-main.md`](../../../docs/fork-main.md#upstream-review-after-local-adoption).
+For a genuine decline, choose one of two outcomes in the next validated fork integration:
 
 - Reclassify it to `rejected-but-retained` through `bin/fm-fork-topic.sh disposition` because current evidence still justifies the behavior.
 - Discard it because its retirement condition is true or the evidence no longer supports carrying it.
@@ -93,7 +97,7 @@ A replayed rerere result supplies only the previously accepted file resolution, 
 
 ## Health and relevance
 
-Use `bin/fm-fork-status.sh` for the local answer and add `--refresh` only when live remote and PR evidence is needed.
+Use `bin/fm-fork-status.sh` for the local answer and add `--refresh` only when live remote and upstream review evidence is needed.
 After no-mistakes, use the post-pipeline candidate command in [`docs/fork-main.md`](../../../docs/fork-main.md); a bare invocation reads the fork remote rather than proving candidate `HEAD`.
 Its own errors, signals, and exit status are the machine verdict, and [`docs/fork-main.md`](../../../docs/fork-main.md) states how it classifies raw `git cherry` facts and what makes it unhealthy.
 

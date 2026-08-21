@@ -64,6 +64,10 @@ bin/fm-brief.sh <task-id> firstmate --mode no-mistakes --start-ref upstream/main
 The exact `upstream/main` start ref also makes the generator place the fork worker contract in the brief that `fm-spawn.sh` delivers as its typed launch input.
 That delivered contract loads `fork-main-integration`, forbids rewriting a published topic or pull-request branch, forbids routine upstream or fork-main merges into the topic, and keeps topic validation on the ordinary official-upstream registration.
 The focused regression for this delivered contract is [`tests/fm-fork-main.test.sh`](../tests/fm-fork-main.test.sh).
+Fork-only work validated through that ordinary registration skips the no-mistakes rebase step and records that the step was skipped, that its comparison base was official upstream rather than fork main, and the branch's actual commit and file delta against fork main.
+The registration correctly measures the branch against official upstream, which does not carry the fork divergences and therefore reports those fork-only commits as unrelated bundled work.
+This skip is safe because the detector is not blind: it is correctly measuring a different base, and refreshing the mirror cannot add the fork divergences to official upstream.
+The recorded comparison lets a later reader distinguish the intentional skip from a clean rebase.
 
 A canonical new topic has one aggregate non-merge patch commit before its first fork integration.
 This constraint matters because `git cherry` compares patches one commit at a time.
@@ -82,6 +86,7 @@ The captain's 2026-08-14 ruling requires DAILY official-upstream synchronization
 
 Prepare a divergence integration only in an isolated worktree of the private integration clone.
 The helper requires fetched fork main as the exact starting point, one `git cherry` non-equivalent commit on the canonical topic, complete manifest path coverage, and a concrete retirement condition.
+`--pr-url` accepts the divergence's upstream pull request or its upstream issue.
 
 ```sh
 bin/fm-fork-topic.sh integrate \
@@ -136,14 +141,30 @@ Every divergence records:
 - exactly one class: `pending`, `rejected-but-retained`, `private`, or `superseded`;
 - its canonical topic branch;
 - introduction date;
-- upstream pull request and recorded disposition when it is not private;
+- one upstream review and its recorded disposition when it is not private, either a pull request or an issue;
 - the concrete falsifiable condition that retires it;
 - every exact path or directory prefix its patch touches.
 
-`pending` means upstream review remains open and therefore pairs only with pull-request disposition `open`.
-`rejected-but-retained` means upstream declined it but current evidence still justifies carrying it, so it pairs only with pull-request disposition `rejected`.
-`private` means it is intentionally not proposed upstream, carries no pull-request record, and should remain small.
+`pending` means upstream review remains open and therefore pairs only with disposition `open`.
+`rejected-but-retained` means upstream declined it but current evidence still justifies carrying it, so it pairs only with disposition `rejected`.
+`private` means the fork has decided never to propose it upstream, so it carries no upstream review of any kind and should remain small.
 `superseded` is immediate removal debt and must be empty after an upstream integration.
+
+The upstream review is a pull request or an issue, and the class does not depend on which.
+The fork's contribution order is to state the problem in an issue, discuss it, and open a pull request only after the problem is confirmed.
+Stating the problem as an issue and waiting for it to be confirmed is a real upstream route, so a divergence raised that way is `pending` exactly as one carrying a pull request is.
+The accepted forms are exactly two, `https://github.com/<owner>/<repo>/pull/<number>` and `https://github.com/<owner>/<repo>/issues/<number>`, and nothing else is treated as a route.
+An absent or malformed route is refused for every class but `private`, which is the check that stops a divergence being registered with no upstream story at all.
+
+Classification and validation remain separate.
+The ordinary no-mistakes upstream registration still opens a pull request in its `pr` step, so supporting validation and local adoption while upstream review remains issue-only requires its own change.
+
+`private` is not the place to park work that is merely unraised.
+It records a decision never to propose, so classifying an intended-but-unraised divergence as private would assert an intent the fork does not hold, and the manifest is later read as though it were true.
+An otherwise integration-ready divergence the fork means to raise is registered once its issue exists, which is the order the contribution model asks for anyway.
+
+The legacy field `upstream_pr` and flag `--pr-url` now carry either route.
+Renaming them requires a coordinated [`fork-divergences.json`](../fork-divergences.json) migration, so read both as the upstream review route and trust the URL rather than the legacy name.
 
 An upstream-sync record keeps the pre-merge fork SHA, previous and incoming upstream SHA, date, touched divergence IDs, and an optional validation pull-request URL.
 Counts are derived from Git rather than copied into the manifest.
@@ -166,8 +187,10 @@ Run the local network-free report with:
 bin/fm-fork-status.sh
 ```
 
-Add `--refresh` to fetch both remotes and compare recorded GitHub pull-request dispositions through `gh-axi`.
+Add `--refresh` to fetch both remotes and compare recorded GitHub upstream review dispositions through `gh-axi`.
 Refresh fails closed when live disposition evidence is incomplete or its response shape is unsupported.
+For issue routes, [Upstream review after local adoption](#upstream-review-after-local-adoption) owns the complete closure-reason mapping and required operator action.
+These live labels check manifest freshness only; `merged` does not retire a patch without the independent Git proof described below.
 Add `--json` for schema `firstmate.fork-health.v1`.
 
 The report uses `git cherry upstream/main origin/main` for one fact only: which commits have no equivalent upstream patch.
@@ -196,7 +219,7 @@ Only that independent proof excludes the patch, and the report names every retir
 A record that is stale, contradictory, unproved, or missing leaves its patch counted and reported, never silently excluded.
 PR state, commit messages, branch names, ancestry, and stated intent never retire a patch.
 
-The report is unhealthy when one canonical patch has multiple manifest owners, one canonical topic has several non-equivalent commits, a topic or integration merge is missing, declared paths omit a changed file, a pull-request disposition is stale, a recorded retirement no longer re-proves, any superseded unit remains, or retained canonical patches trend up.
+The report is unhealthy when one canonical patch has multiple manifest owners, one canonical topic has several non-equivalent commits, a topic or integration merge is missing, declared paths omit a changed file, an upstream review disposition is stale, a recorded retirement no longer re-proves, any superseded unit remains, or retained canonical patches trend up.
 A manifest unit whose topic has become equivalent upstream is signaled for retirement review rather than misreported as a raw-patch ownership failure.
 An unrepresented non-upstream commit is likewise a signal until an operator classifies its meaning.
 The signal remains named and counted, so this distinction does not hide the Git fact.
@@ -279,7 +302,20 @@ After the fork pull request lands, `/updatefirstmate` performs only safe fast-fo
 Upstream review is evidence, not the local shipping gate.
 A change enters use only after its topic validation, fork merge candidate validation, green fork CI, captain-approved fork pull request, and safe fleet update.
 
-If upstream rejects a useful running change, reclassify it from `pending` to `rejected-but-retained` in the next validated fork integration through the supported interface:
+The upstream review outcome controls what may be recorded:
+
+- A pull request closed unmerged is a decline and permits `rejected-but-retained`.
+- An issue closed as `not_planned` is a decline and permits `rejected-but-retained`.
+  It is the only issue closure that does.
+- An issue closed as `duplicate` is not a decline.
+  Review moved to a canonical issue, so repoint the recorded route at that issue and do not reclassify the divergence as rejected.
+  Determining the canonical issue is a person's job because GitHub does not expose it on the issue response.
+- An issue closed as `completed` means upstream acted on it.
+  That result is retirement territory governed by the unit's `retire_when`, not a rejection.
+- A closure whose reason is unavailable settles nothing.
+  Find out what happened before recording any disposition, and do not infer a decline from the absence of a reason.
+
+When a useful running change receives a genuine decline, reclassify it from `pending` to `rejected-but-retained` in the next validated fork integration through the supported interface:
 
 ```sh
 bin/fm-fork-topic.sh disposition \
@@ -289,7 +325,7 @@ bin/fm-fork-topic.sh disposition \
   --repo <isolated-worktree>
 ```
 
-The helper changes the class and recorded pull-request disposition together, commits the governance transition, and validates candidate health.
+The helper changes the class and recorded upstream review disposition together, commits the governance transition, and validates candidate health.
 Keep or sharpen its falsifiable retirement condition.
 Do not roll it back merely because upstream declined it, and do not leave it mislabeled.
 

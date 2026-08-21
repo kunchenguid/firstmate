@@ -713,7 +713,7 @@ test_health_attributes_pipeline_fixes_and_supports_disposition_transition() {
 }
 
 # Active manifest states are the three states produced by supported topic
-# flows: pending/open, rejected-but-retained/rejected, and private without a PR.
+# flows: pending/open, rejected-but-retained/rejected, and private without an upstream review.
 # The integration CLI and tracked-manifest health boundary both reject crossed
 # class/disposition pairs rather than preserving an impossible active state.
 test_manifest_class_disposition_pairs_are_enforced() {
@@ -771,7 +771,7 @@ test_manifest_class_disposition_pairs_are_enforced() {
     --pr-url https://github.com/example/firstmate/pull/10 --pr-disposition rejected 2>&1); rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "topic integration accepted pending/rejected"
-  assert_contains "$out" 'pending requires pull-request disposition open' \
+  assert_contains "$out" 'pending requires upstream review disposition open' \
     "topic integration did not name the valid pending pair"
   set +e
   out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id pair \
@@ -780,7 +780,7 @@ test_manifest_class_disposition_pairs_are_enforced() {
     --pr-url https://github.com/example/firstmate/pull/10 --pr-disposition open 2>&1); rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "topic integration accepted rejected-but-retained/open"
-  assert_contains "$out" 'rejected-but-retained requires pull-request disposition rejected' \
+  assert_contains "$out" 'rejected-but-retained requires upstream review disposition rejected' \
     "topic integration did not name the valid rejected pair"
   [ "$(git -C "$candidate" rev-parse HEAD)" = "$before" ] || fail "refused class/disposition pairs moved the candidate"
   [ -z "$(git -C "$candidate" status --porcelain)" ] || fail "refused class/disposition pairs dirtied the candidate"
@@ -790,23 +790,77 @@ test_manifest_class_disposition_pairs_are_enforced() {
 # gh-axi 0.1.29 wraps a selected scalar in an api_response TOON envelope.
 # Refresh parses that current real shape and rejects the old fake-scalar assumption.
 test_refresh_parses_current_gh_axi_scalar_envelope() {
-  local w repo fakebin out
+  local w repo fakebin out log tmp rc
   w=$(new_world refresh-envelope)
-  add_topic_and_merge "$w" refresh refresh.txt current
+  add_topic_and_merge "$w" repo-issues repo-issues.txt current
+  add_topic_and_merge "$w" owner-issues owner-issues.txt current
+  add_topic_and_merge "$w" genuine-issue genuine-issue.txt current
+  add_topic_and_merge "$w" completed-issue completed-issue.txt current rejected-but-retained
+  add_topic_and_merge "$w" declined-issue declined-issue.txt current rejected-but-retained
+  add_topic_and_merge "$w" unknown-issue unknown-issue.txt current rejected-but-retained
+  add_topic_and_merge "$w" duplicate-rejected-issue duplicate-rejected-issue.txt current rejected-but-retained
+  add_topic_and_merge "$w" duplicate-pending-issue duplicate-pending-issue.txt current
   repo="$w/admin"
+  tmp="$w/manifest-routes"
+  jq '
+    (.divergences[] | select(.id == "repo-issues") | .upstream_pr.url) = "https://github.com/acme/issues/pull/7" |
+    (.divergences[] | select(.id == "owner-issues") | .upstream_pr.url) = "https://github.com/issues/repo/pull/7" |
+    (.divergences[] | select(.id == "genuine-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/7" |
+    (.divergences[] | select(.id == "completed-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/8" |
+    (.divergences[] | select(.id == "declined-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/9" |
+    (.divergences[] | select(.id == "unknown-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/10" |
+    (.divergences[] | select(.id == "duplicate-rejected-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/11" |
+    (.divergences[] | select(.id == "duplicate-pending-issue") | .upstream_pr.url) = "https://github.com/acme/repo/issues/12"
+  ' "$repo/fork-divergences.json" > "$tmp" || fail "could not build refresh route fixtures"
+  mv "$tmp" "$repo/fork-divergences.json"
+  git -C "$repo" add fork-divergences.json
+  git -C "$repo" commit -qm 'Record refresh route fixtures'
+  git -C "$repo" push -q origin main
   fakebin="$w/fakebin"
+  log="$w/gh-api-paths"
   mkdir -p "$fakebin"
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' 'api_response:' '  body: open' '  truncated: false'
+: "${FAKE_GH_LOG:?}"
+printf '%s\n' "${2:-}" >> "$FAKE_GH_LOG"
+case "${2:-}" in
+  /repos/acme/repo/issues/8) payload='{"state":"closed","state_reason":"completed"}' ;;
+  /repos/acme/repo/issues/9) payload='{"state":"closed","state_reason":"not_planned"}' ;;
+  /repos/acme/repo/issues/10) payload='{"state":"closed","state_reason":null}' ;;
+  /repos/acme/repo/issues/11|/repos/acme/repo/issues/12) payload='{"state":"closed","state_reason":"duplicate"}' ;;
+  /repos/*/*/issues/*) payload='{"state":"open","state_reason":null}' ;;
+  /repos/*/*/pulls/*) payload='{"state":"open","merged_at":null}' ;;
+  *) exit 1 ;;
+esac
+body=$(printf '%s\n' "$payload" | jq -r "${4:?}") || exit 1
+printf '%s\n' 'api_response:' "  body: $body" '  truncated: false'
 SH
   chmod +x "$fakebin/gh-axi"
-  out=$(PATH="$fakebin:$PATH" "$STATUS" --repo "$repo" --refresh 2>&1) \
-    || fail "refresh rejected gh-axi's current scalar envelope: $out"
-  assert_not_contains "$out" 'records pull request open but live pull request is api_response' \
+  set +e
+  out=$(PATH="$fakebin:$PATH" FAKE_GH_LOG="$log" "$STATUS" --repo "$repo" --refresh 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "refresh accepted an issue closed as completed or with an unavailable closure reason"
+  assert_not_contains "$out" 'records open but its live upstream review is api_response' \
     "refresh compared the serializer envelope as the live disposition"
-  assert_contains "$out" 'errors=0' "current gh-axi scalar envelope created a refresh error"
-  pass "fork health refresh parses gh-axi's current untruncated scalar envelope"
+  grep -Fxq -- '/repos/acme/issues/pulls/7' "$log" \
+    || fail "a repository named issues routed a pull request through the issue endpoint"
+  grep -Fxq -- '/repos/issues/repo/pulls/7' "$log" \
+    || fail "an owner named issues routed a pull request through the issue endpoint"
+  grep -Fxq -- '/repos/acme/repo/issues/7' "$log" \
+    || fail "a genuine issue route did not use the issue endpoint"
+  assert_contains "$out" 'manifest unit completed-issue records rejected but its upstream issue was closed as COMPLETED' \
+    "an issue closed as completed satisfied a recorded rejection"
+  assert_not_contains "$out" 'manifest unit declined-issue' \
+    "an issue closed as not planned did not refresh cleanly"
+  assert_contains "$out" "manifest unit unknown-issue upstream issue's closure REASON IS UNAVAILABLE, so the closure cannot be read as a decline" \
+    "an issue with no closure reason was accepted as a decline"
+  assert_contains "$out" 'manifest unit duplicate-rejected-issue upstream issue was closed as DUPLICATE; this is not a decline because review continues at the canonical issue, and its recorded route must be repointed at that canonical issue by a person' \
+    "an issue closed as duplicate satisfied a recorded rejection"
+  assert_contains "$out" 'manifest unit duplicate-pending-issue upstream issue was closed as DUPLICATE; this is not a decline because review continues at the canonical issue, and its recorded route must be repointed at that canonical issue by a person' \
+    "an issue closed as duplicate left a pending route looking healthy"
+  [ "$(wc -l < "$log" | tr -d ' ')" -eq 8 ] || fail "refresh queried an unexpected number of API paths"
+  assert_contains "$out" 'errors=4' "refresh did not isolate the four invalid issue closure outcomes"
+  pass "fork health refresh parses envelopes, routes structurally, and distinguishes issue closure reasons"
 }
 
 # Two canonical topics integrate as separate merge units, and discarding one
@@ -1559,6 +1613,106 @@ SH
   pass "fork integration: isolated no-mistakes registration is proven without reconfiguring the live one"
 }
 
+# Stating a problem upstream as an issue is a real upstream route, so a
+# divergence raised that way registers as `pending` exactly as one carrying a
+# pull request does. Widening the accepted value must not widen it to anything:
+# an absent or malformed route is still refused, and these cases exercise that
+# refusal rather than reading it off the source.
+test_upstream_route_accepts_an_issue_and_still_refuses_a_missing_one() {
+  local w admin candidate before out rc bad spec id url
+  w=$(new_world upstream-route)
+  admin="$w/admin"
+  git clone -q "$w/fork.git" "$admin"
+  configure_fork_clone "$admin" "$w"
+  for id in raised declined owner-hyphen repo-dot repo-underscore repo-hyphen; do
+    git -C "$admin" switch -qC "fm/divergence/$id" upstream/main
+    printf '%s\n' "$id" > "$admin/$id.txt"
+    git -C "$admin" add -- "$id.txt"
+    git -C "$admin" commit -qm "$id"
+    git -C "$admin" push -q origin "fm/divergence/$id"
+  done
+
+  candidate=$(new_candidate "$w" route-refusals)
+  before=$(git -C "$candidate" rev-parse HEAD)
+
+  # No upstream route at all stays refused. This is the check the widening must
+  # not dissolve, so it is proven here rather than assumed.
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id raised \
+    --summary 'Carries raised behavior.' --class pending --topic fm/divergence/raised \
+    --retire-when 'Upstream ships equivalent raised behavior.' --path raised.txt 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a divergence with no upstream route was registered"
+  assert_contains "$out" "requires a full GitHub upstream pull-request or issue URL" \
+    "the empty-route refusal did not name what is missing"
+
+  # Only the two named forms count as a route.
+  for bad in \
+    https://github.com/example/firstmate/discussions/5 \
+    https://github.com/example/firstmate/issues/abc \
+    https://github.com/example/firstmate/issues \
+    https://evil.example/example/firstmate/issues/7 \
+    'https://github.com/a b/repo/pull/1' \
+    'https://github.com/acme?x/repo/issues/7' \
+    https://github.com/example/firstmate/pull/10/files; do
+    set +e
+    out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id raised \
+      --summary 'Carries raised behavior.' --class pending --topic fm/divergence/raised \
+      --retire-when 'Upstream ships equivalent raised behavior.' --path raised.txt \
+      --pr-url "$bad" --pr-disposition open 2>&1); rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "a malformed upstream route was accepted: $bad"
+  done
+  [ "$(git -C "$candidate" rev-parse HEAD)" = "$before" ] || fail "refused routes moved the candidate"
+  [ -z "$(git -C "$candidate" status --porcelain)" ] || fail "refused routes dirtied the candidate"
+
+  # Tight owner and repository segment rules still accept legitimate GitHub
+  # names, including every punctuation form GitHub permits for repositories.
+  for spec in \
+    'owner-hyphen|https://github.com/acme-org/repo/pull/1' \
+    'repo-dot|https://github.com/acme/my.repo/pull/1' \
+    'repo-underscore|https://github.com/acme/my_repo/pull/1' \
+    'repo-hyphen|https://github.com/acme/my-repo/pull/1'; do
+    id=${spec%%|*}
+    url=${spec#*|}
+    candidate=$(new_candidate "$w" "route-$id")
+    out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id "$id" \
+      --summary "Carries $id behavior." --class pending --topic "fm/divergence/$id" \
+      --retire-when "Upstream ships equivalent $id behavior." --path "$id.txt" \
+      --pr-url "$url" --pr-disposition open 2>&1) \
+      || fail "a legitimate upstream route was refused: $url: $out"
+    assert_contains "$out" "errors=0" "a legitimate upstream route failed manifest validation: $url"
+    jq -e --arg url "$url" '.divergences[0].upstream_pr.url == $url' \
+      "$candidate/fork-divergences.json" >/dev/null \
+      || fail "manifest did not retain a legitimate upstream route: $url"
+  done
+
+  # An issue is accepted as the upstream route of a pending divergence.
+  candidate=$(new_candidate "$w" route-issue)
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id raised \
+    --summary 'Carries raised behavior.' --class pending --topic fm/divergence/raised \
+    --retire-when 'Upstream confirms and ships equivalent raised behavior.' --path raised.txt \
+    --pr-url https://github.com/example/firstmate/issues/77 --pr-disposition open 2>&1) \
+    || fail "an issue-routed divergence was refused: $out"
+  assert_contains "$out" "branch-level merge" "issue-routed divergence was not integrated as a merge unit"
+  assert_contains "$out" "pending=1" "issue-routed divergence was not counted as pending"
+  assert_contains "$out" "errors=0" "issue-routed divergence created a health error"
+  jq -e '.divergences[0].upstream_pr.url == "https://github.com/example/firstmate/issues/77"
+    and .divergences[0].class == "pending"' "$candidate/fork-divergences.json" >/dev/null \
+    || fail "manifest did not record the issue as the upstream route"
+  land_candidate_as_regular_pr "$w" "$candidate" route-issue
+
+  # An issue upstream closed without action still reaches the retained class.
+  candidate=$(new_candidate "$w" route-issue-declined)
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id declined \
+    --summary 'Carries declined behavior.' --class rejected-but-retained --topic fm/divergence/declined \
+    --retire-when 'Upstream ships equivalent declined behavior.' --path declined.txt \
+    --pr-url https://github.com/example/firstmate/issues/78 --pr-disposition rejected 2>&1) \
+    || fail "an issue-routed rejection was refused: $out"
+  assert_contains "$out" "rejected-but-retained=1" "issue-routed rejection was not counted"
+  pass "fork manifest: an issue is a real upstream route and a missing one is still refused"
+}
+
 test_startup_upstream_probe_requires_validated_topology
 test_remote_topology_is_explicit_and_reversible
 test_remote_topology_inheritance_refuses_unrelated_clones
@@ -1572,6 +1726,7 @@ test_health_requires_declared_paths_to_cover_the_canonical_patch
 test_health_attributes_pipeline_fixes_and_supports_disposition_transition
 test_manifest_class_disposition_pairs_are_enforced
 test_refresh_parses_current_gh_axi_scalar_envelope
+test_upstream_route_accepts_an_issue_and_still_refuses_a_missing_one
 test_topics_are_independently_revertible_units
 test_topic_integration_conflict_has_receipt_bound_continuation
 test_topic_continue_refuses_unbound_continuation

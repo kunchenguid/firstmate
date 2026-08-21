@@ -6,13 +6,16 @@
 #   fm-fork-topic.sh integrate --id <id> --summary <sentence>
 #     --class <pending|rejected-but-retained|private> --topic <ref>
 #     --retire-when <falsifiable-condition> --path <path-or-prefix>...
-#     [--pr-url <github-pr-url> --pr-disposition <open|rejected>]
+#     [--pr-url <github-pr-or-issue-url> --pr-disposition <open|rejected>]
 #     [--repo <isolated-worktree>]
 #   fm-fork-topic.sh disposition --id <id>
 #     --class rejected-but-retained --pr-disposition rejected
 #     [--repo <isolated-worktree>]
 #   fm-fork-topic.sh discard --id <id> [--repo <isolated-worktree>]
 #   fm-fork-topic.sh continue --decisions <json> [--repo <isolated-worktree>]
+#
+# docs/fork-main.md owns the upstream-route requirement, class meanings, and the
+# legacy `upstream_pr` and `--pr-url` naming caveat.
 #
 # integrate requires a clean named candidate branch at fetched origin/main and a
 # canonical topic whose `git cherry upstream/main <topic>` result contains
@@ -22,7 +25,7 @@
 # commits, and validates the candidate against HEAD.
 #
 # disposition is the supported governance-only pending-to-rejected transition.
-# It updates the class and recorded pull-request disposition atomically in one
+# It updates the class and recorded upstream review disposition atomically in one
 # candidate commit, then validates that actual HEAD. The commit is reported by
 # health as a manifest-governance artifact, never as a carried divergence.
 #
@@ -163,15 +166,16 @@ validate_integrate_inputs() {
   jq -en --argjson paths "$PATHS_JSON" '$paths | length > 0 and all(.[]; (test("[[:cntrl:]]") | not) and (startswith("/") | not) and (contains("..") | not))' >/dev/null \
     || die "owned paths must be safe non-empty repository-relative paths or prefixes"
   if [ "$CLASS" = private ]; then
-    [ -z "$PR_URL$PR_DISPOSITION" ] || die "private divergence must not carry an upstream pull-request record"
+    [ -z "$PR_URL$PR_DISPOSITION" ] || die "private divergence must not carry an upstream review record of any kind"
     return 0
   fi
-  jq -en --arg url "$PR_URL" '$url | test("^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+$")' >/dev/null \
-    || die "non-private divergence requires a full GitHub upstream PR URL"
+  jq -en --arg url "$PR_URL" --arg pattern "$(fm_fork_upstream_route_pattern)" \
+    '$url | test($pattern)' >/dev/null \
+    || die "non-private divergence requires a full GitHub upstream pull-request or issue URL"
   case "$CLASS:$PR_DISPOSITION" in
     pending:open|rejected-but-retained:rejected) ;;
-    pending:*) die "pending requires pull-request disposition open" ;;
-    rejected-but-retained:*) die "rejected-but-retained requires pull-request disposition rejected" ;;
+    pending:*) die "pending requires upstream review disposition open" ;;
+    rejected-but-retained:*) die "rejected-but-retained requires upstream review disposition rejected" ;;
   esac
 }
 
@@ -267,11 +271,11 @@ cmd_disposition() {
   [ "$CLASS" = rejected-but-retained ] || die "disposition transition requires --class rejected-but-retained"
   [ "$PR_DISPOSITION" = rejected ] || die "disposition transition requires --pr-disposition rejected"
   [ -z "$SUMMARY$TOPIC$RETIRE_WHEN$PR_URL" ] && [ "${#PATHS[@]}" -eq 0 ] \
-    || die "disposition transition accepts only id, class, and pull-request disposition"
+    || die "disposition transition accepts only id, class, and the upstream review disposition"
   current_class=$(jq -r --arg id "$ID" '.divergences[] | select(.id == $id) | .class' "$MANIFEST")
   [ "$current_class" = pending ] || die "divergence $ID is not pending"
   current_disposition=$(jq -r --arg id "$ID" '.divergences[] | select(.id == $id) | .upstream_pr.disposition // empty' "$MANIFEST")
-  [ -n "$current_disposition" ] || die "pending divergence $ID has no upstream pull-request record"
+  [ -n "$current_disposition" ] || die "pending divergence $ID has no upstream review record"
   "$SCRIPT_DIR/fm-fork-status.sh" --repo "$REPO" --fork-ref "$ORIGIN_REF" --upstream-ref "$BASELINE_UPSTREAM" --facts-only >/dev/null \
     || die "existing divergence manifest facts are inconsistent"
   tmp=$(mktemp "$MANIFEST.XXXXXX") || die "cannot create manifest update"
