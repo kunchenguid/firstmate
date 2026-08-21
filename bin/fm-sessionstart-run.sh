@@ -57,12 +57,6 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
-# Session identity can refresh a reparented lock, so it shares fm-lock.sh's
-# portable acquisition lock.
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-session-lock-lib.sh
-. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-hook-host-lib.sh
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
@@ -85,6 +79,17 @@ done
 # they do not own.
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+
+# Session identity can refresh a reparented lock, so it shares fm-lock.sh's
+# portable acquisition lock, and fm-wake-lib.sh comes first for that reason.
+# Both are sourced only AFTER the eligibility gates above, because
+# fm-wake-lib.sh materializes the state directory on source: sourcing them
+# earlier would both write into a checkout this wrapper does not own and
+# satisfy the state-directory component of the primary-scope gate itself.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 # True when the session that owns the lock right now is the one that recorded a
 # completed full startup.

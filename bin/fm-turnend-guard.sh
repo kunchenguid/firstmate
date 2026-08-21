@@ -221,6 +221,25 @@ fi
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
+
+# Snapshot of the epoch this session's block budget had already consumed BEFORE
+# this Stop accounted anything, so a later decision can tell an epoch a previous
+# Stop already spent from one published during this Stop.
+PRE_ACCOUNTED_EPOCH=
+if [ "$(sed -n '1s/^session=//p' "$BUDGET_FILE" 2>/dev/null || true)" = "$SESSION_ID" ]; then
+  PRE_ACCOUNTED_EPOCH=$(sed -n '3s/^epoch=//p' "$BUDGET_FILE" 2>/dev/null || true)
+fi
+
+# True when the recorded episode epoch is the one this session's budget already
+# consumed on an earlier Stop, so no new continuation or block has been produced
+# for it since.
+episode_epoch_already_spent() {
+  local current
+  [ -n "$PRE_ACCOUNTED_EPOCH" ] || return 1
+  current=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  [ -n "$current" ] && [ "$current" = "$PRE_ACCOUNTED_EPOCH" ]
+}
+
 budget_account_current_epoch() {
   local current_epoch outcome old_session old_count old_epoch tmp initialized
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
@@ -386,10 +405,16 @@ record_structurally_unclaimed_failure() {
   local seq tmp prior_outcome
   if failure_episode_verified; then
     prior_outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
-    # A real auto-arm failure already supplies one new epoch per Stop cycle.
-    # A structural failure has no producer other than this guard, so each later
-    # Stop must advance its epoch before budget accounting can advance once.
-    [ "$prior_outcome" = failed-unclaimed ] || return 0
+    # A real auto-arm failure that still produces one new epoch per Stop cycle
+    # owns its own progression, so leave it alone.
+    # A structural failure has no producer other than this guard, and an arm
+    # that turns inert AFTER a real failure stops publishing epochs entirely, so
+    # each later Stop must advance the epoch here before budget accounting can
+    # advance once - otherwise the bounded progression freezes on the epoch the
+    # previous Stop already spent and the attended fail-open is never reached.
+    if [ "$prior_outcome" != failed-unclaimed ] && ! episode_epoch_already_spent; then
+      return 0
+    fi
   fi
   [ ! -e "$STATE/.afk" ] || return 1
   fm_lock_try_acquire "$OWNER_LOCK" || return 1

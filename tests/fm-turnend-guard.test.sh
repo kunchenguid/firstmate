@@ -1558,6 +1558,56 @@ test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
 # Regression: the guard's structurally unclaimed record must not consume the
 # auto-arm's single loud failure notice. An arm that claims after the guard's
 # sync wait and then genuinely fails still owes the operator that notice.
+# Regression: an auto-arm that turns structurally inert AFTER one real failure
+# stops publishing epochs entirely, so the guard must advance the episode itself
+# instead of freezing the bounded progression on the epoch a previous Stop
+# already spent - otherwise the attended fail-open is never reached and the
+# session blocks until Claude Code's own consecutive-block override fires.
+test_hook_claude_mode_inert_arm_after_real_failure_stays_bounded() {
+  local dir out status guard_out guard_status i count owner
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-inert-after-failure")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_integrated_failed_arm "$dir"
+
+  out=$(run_integrated_autoarm "$dir"); status=$?
+  expect_code 2 "$status" "the first exhausted auto-arm cycle must hand back a continuation"
+  assert_contains "$out" "automatic supervision mechanism is broken" "the first real failure notice is missing"
+  guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
+  expect_code 0 "$guard_status" "the first failed epoch must own its Stop handoff"
+  count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+  [ "$count" = 0 ] || fail "the first owned failure epoch must preserve a zero blocked-stop count, got $count"
+
+  # A second live Claude session now holds the home lock, so from here every arm
+  # exits inert without recording an epoch of its own.
+  "$dir/fake-claude" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\nharness=claude\nsession=other-live-session\n' "$owner" > "$dir/state/.lock"
+
+  for i in 1 2 3; do
+    # shellcheck disable=SC2016 # FM_HOME expands inside the fake harness child.
+    out=$(printf '{"session_id":"sess-claude-mode","stop_hook_active":false}\n' \
+      | FM_HOME="$dir" "$dir/fake-claude" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
+    expect_code 0 "$status" "the inert auto-arm must stand down silently at inert Stop $i"
+    [ -z "$out" ] || fail "the inert auto-arm produced output at inert Stop $i: $out"
+    guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
+    expect_code 2 "$guard_status" "inert Stop $i must consume exactly one bounded blocked stop"
+    assert_not_contains "$guard_out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' \
+      "the attended fail-open fired before the bounded progression ended"
+    count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+    [ "$count" = "$i" ] || fail "inert Stop $i left the bounded progression at count $count"
+  done
+
+  guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  expect_code 0 "$guard_status" "the bounded inert progression must reach the attended fail-open"
+  assert_contains "$guard_out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' \
+    "an arm that turned inert after a real failure never reached its loud attended fail-open"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the inert-after-failure fail-open did not consume its episode alarm"
+  pass "fm-turnend-guard --claude: an arm that turns inert after a real failure stays bounded to three blocks"
+}
+
 test_hook_claude_mode_structural_record_preserves_late_arm_failure_notice() {
   local dir guard_out guard_status out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-structural-notice")
@@ -1755,6 +1805,7 @@ test_hook_claude_mode_structurally_unclaimed_recovery_is_bounded
 test_hook_claude_mode_late_claim_after_structural_record_does_not_block
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
 test_hook_claude_mode_structural_record_preserves_late_arm_failure_notice
+test_hook_claude_mode_inert_arm_after_real_failure_stays_bounded
 test_hook_claude_mode_partial_failure_records_converge_to_structural_episode
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget

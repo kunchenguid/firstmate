@@ -696,6 +696,24 @@ test_run_gate_and_scope_are_silent() {
   pass "run wrapper: a gate agent and an unmarked task worktree never run a session start"
 }
 
+# The run wrapper must leave a checkout it does not own byte-for-byte untouched,
+# and must not satisfy the state-directory component of its own scope gate by
+# materializing that directory before the gate runs.
+test_run_unowned_checkout_is_silent_and_untouched() {
+  local root="$TMP_ROOT/run-missing-state" base="$TMP_ROOT/run-inert-base" linked="$TMP_ROOT/run-inert-linked"
+  make_run_primary "$root"
+  rmdir "$root/state"
+  expect_silent_zero "missing state run" run_hook "$root" --source startup
+  [ ! -e "$root/state" ] || fail "a checkout without state was made eligible by materializing state/"
+
+  fm_git_worktree "$base" "$linked" fm/run-inert
+  mkdir -p "$linked/bin"
+  : > "$linked/AGENTS.md"
+  expect_silent_zero "unmarked task worktree run" run_hook "$linked" --source startup
+  [ ! -e "$linked/state" ] || fail "an unmarked task worktree had state/ created before the wrapper stood down"
+  pass "run wrapper: an unowned checkout stays silent and byte-for-byte untouched"
+}
+
 test_run_reports_a_failed_session_start_as_digest_text() {
   local root="$TMP_ROOT/run-unwritable" out status=0
   make_run_primary "$root"
@@ -729,6 +747,7 @@ test_run_clear_reemits_after_a_reparented_pid_refresh
 test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
+test_run_unowned_checkout_is_silent_and_untouched
 test_run_reports_a_failed_session_start_as_digest_text
 test_pi_startup_classifies_cli_continuations
 test_pi_large_sessionstart_digest_is_delivered_loudly

@@ -61,7 +61,7 @@ The Ahoy skill owns the rule that this marked operational input is never a capta
 
 Before printing, the nudge wrapper asks `fm_session_lock_owned_by_self()` in `bin/fm-session-lock-lib.sh` - the same single ownership owner `bin/fm-lock.sh` and the Stop auto-arm use - rather than deciding ownership itself, so an owner whose pid moved under an identity-matched reparenting is never told to take a helm it already holds.
 If that predicate says this session owns the lock, session start already ran in this harness session and the wrapper stays silent.
-The shared libraries are sourced only after the gate-agent and primary-scope gates, because `bin/fm-wake-lib.sh` materializes the state directory on source and this wrapper must leave a checkout it does not own untouched.
+Both wrappers source the shared libraries only after the gate-agent and primary-scope gates, because `bin/fm-wake-lib.sh` materializes the state directory on source: sourcing it earlier would write into a checkout the wrapper does not own and would also satisfy the state-directory component of the primary-scope gate itself.
 Every path in both wrappers exits 0, including malformed state and adapter errors, because a Claude SessionStart exit 2 blocks session initialization.
 A lock another session holds and a truncated digest therefore surface as digest text, while broken GitHub auth surfaces through the deferred network result inline or as a wake; none becomes a refusal to open the session.
 
@@ -94,7 +94,7 @@ That alternative expands trust and writes outside this repository, so Firstmate 
 ## Regression coverage
 
 `tests/fm-sessionstart-nudge.test.sh` proves the nudge wrapper's silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock, plus its exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output.
-It separately proves the run wrapper's silence for the gate environment and an unmarked linked worktree.
+It separately proves the run wrapper's silence for the gate environment and an unmarked linked worktree, and that neither an unbootstrapped checkout nor an unmarked task worktree has its state directory created before the wrapper stands down.
 It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including completion-gated `--reemit` selection, resume delegation, Pi CLI continuation classification, an unrecognized source falling through to the full digest, and bounded loud delivery of an oversized Pi digest.
 `tests/fm-session-start.test.sh` proves the runtime bound through the forced pure-Bash fallback: a TERM-resistant digest that exceeds its budget is force-killed with its grandchild, still emits its completed stages, names the incomplete stage and every stage it never reached, leaves no completion proof, and exits 0.
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` exercise native startup paths with first-message and later-message Ahoy regressions.
