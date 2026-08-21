@@ -10,29 +10,38 @@ just documented, so a card cannot silently carry a link that fails them:
 
 A third rule enforced here: `needs_attention` is the loudest status on the
 board and means the work is blocked on him. A card set to that status with
-no reason, or with a reason that only reports progress, spends his
-attention for nothing - see `validate_needs_attention_reason`.
+no reason, or with a reason that only opens or closes as a progress
+report, spends his attention for nothing - see
+`validate_needs_attention_reason`.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import re
 from urllib.parse import urlparse
 
 LOCAL_HOSTNAMES = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
 # Phrases that mark a needs_attention reason as a progress report rather
-# than an ask. Matched as a case-insensitive substring anywhere in the
-# reason, not just at the start, because the failure mode this guards
-# against is exactly a report clause tacked onto the end of a sentence
-# ("You reported flares not changing the lights - being chased now").
+# than an ask. A phrase only counts when it sits at an *edge* of the
+# reason - the start or the end of the leading or trailing clause - not
+# when it is buried inside one. That is the shape the failure this guards
+# against actually takes: a report clause tacked onto a sentence ("You
+# reported flares not changing the lights - being chased now"), or a
+# reason that simply opens as a status update ("Still investigating the
+# checkout timeout"). Matching anywhere instead refused genuine asks that
+# merely contain the words ("approve the $400 monitoring subscription
+# renewal", "pick which contractor keeps working on the deck"), which
+# leaves the card silently stuck in `working` - the inverse of the failure
+# this guard exists to prevent.
 #
 # This is deliberately a small, fixed list, not a language model: it
 # catches only the plainest report-shaped language and says nothing about
 # whether a reason that dodges every phrase here is actually a real ask.
 # See docs/dashboard.md "The needs-attention reason guard" for the
-# reviewed false-negative rate and the fleet auditor's complementary,
-# non-mechanical check.
+# reviewed catch and false-positive rates and the fleet auditor's
+# complementary, non-mechanical check.
 REPORT_SHAPED_PHRASES = (
     "being chased",
     "in progress",
@@ -40,7 +49,8 @@ REPORT_SHAPED_PHRASES = (
     "looking into",
     "working on",
     "keeping an eye on",
-    "monitoring",
+    "monitoring the",
+    "monitoring it",
     "no update yet",
     "will update",
     "update to follow",
@@ -50,6 +60,86 @@ REPORT_SHAPED_PHRASES = (
     "under investigation",
     "still chasing",
 )
+
+# A clause boundary: sentence punctuation, or a dash used as a separator
+# (spaced, so "follow-up" stays one word).
+_CLAUSE_SEPARATORS = re.compile(r"\s+[-\u2013\u2014]+\s+|[,;:.!?()\[\]/\n]+")
+
+# Hedges that can sit in front of a report phrase without changing that the
+# clause opens as a report ("Still investigating...", "We're looking into...").
+_LEADING_FILLER = frozenset(
+    {"still", "currently", "now", "just", "already", "we", "we're", "i", "i'm", "im"}
+)
+
+# Trailers that can sit behind a report phrase without changing that the
+# clause closes as a report ("being chased now", "looking into it").
+_TRAILING_FILLER = frozenset(
+    {
+        "now",
+        "today",
+        "tonight",
+        "yet",
+        "again",
+        "here",
+        "it",
+        "this",
+        "that",
+        "them",
+        "these",
+        "those",
+        "still",
+        "currently",
+        "already",
+        "though",
+    }
+)
+
+
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def _edge_clauses(text: str) -> list[str]:
+    parts = [part.strip() for part in _CLAUSE_SEPARATORS.split(text)]
+    parts = [part for part in parts if part]
+    if len(parts) <= 1:
+        return parts
+    return [parts[0], parts[-1]]
+
+
+def _sits_at_an_edge(clause: list[str], phrase: list[str]) -> bool:
+    """True if phrase opens or closes clause, ignoring hedge words at that edge."""
+    size = len(phrase)
+    start = 0
+    while start + size <= len(clause):
+        if clause[start : start + size] == phrase:
+            return True
+        if clause[start] in _LEADING_FILLER:
+            start += 1
+            continue
+        break
+    end = len(clause)
+    while end - size >= 0:
+        if clause[end - size : end] == phrase:
+            return True
+        if clause[end - 1] in _TRAILING_FILLER:
+            end -= 1
+            continue
+        break
+    return False
+
+
+def find_report_shaped_phrase(reason: str) -> str | None:
+    """Return the report-shaped phrase sitting at an edge of reason, if any."""
+    clauses = [_tokens(clause) for clause in _edge_clauses(reason)]
+    for phrase in REPORT_SHAPED_PHRASES:
+        phrase_tokens = _tokens(phrase)
+        if not phrase_tokens:
+            continue
+        for clause in clauses:
+            if _sits_at_an_edge(clause, phrase_tokens):
+                return phrase
+    return None
 
 
 class InvalidLinkError(ValueError):
@@ -65,11 +155,12 @@ def validate_needs_attention_reason(reason: str | None) -> None:
 
     Empty is always rejected: needs_attention is the loudest status on the
     board, and a card with no stated ask is exactly how it becomes noise.
-    A non-empty reason is further rejected if it contains one of
-    REPORT_SHAPED_PHRASES, on the theory that a real ask ("pick red or
-    blue for the trim") essentially never contains one of these phrases,
-    while a status update dropped into the field ("being chased now")
-    reliably does.
+    A non-empty reason is further rejected if one of REPORT_SHAPED_PHRASES
+    opens or closes its leading or trailing clause, on the theory that a
+    real ask ("pick red or blue for the trim") essentially never starts or
+    ends that way, while a status update dropped into the field ("being
+    chased now") reliably does. A phrase buried mid-clause is left alone -
+    "approve the $400 monitoring subscription renewal" is a real ask.
     """
     text = (reason or "").strip()
     if not text:
@@ -77,13 +168,13 @@ def validate_needs_attention_reason(reason: str | None) -> None:
             "needs-attention requires --reason - say what he needs to decide, "
             "approve, or supply, not what happened"
         )
-    lowered = text.lower()
-    for phrase in REPORT_SHAPED_PHRASES:
-        if phrase in lowered:
-            raise InvalidReasonError(
-                f"that reason reads as a progress report, not something he can act on "
-                f"(matched {phrase!r}) - say what he needs to decide, approve, or supply: {text!r}"
-            )
+    phrase = find_report_shaped_phrase(text)
+    if phrase is not None:
+        raise InvalidReasonError(
+            f"that reason reads as a progress report, not something he can act on "
+            f"(matched {phrase!r} at the start or end of a clause) - say what he needs "
+            f"to decide, approve, or supply: {text!r}"
+        )
 
 
 def _is_private_literal(host: str) -> bool:

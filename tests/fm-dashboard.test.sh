@@ -150,6 +150,23 @@ test_needs_attention_requires_a_real_ask() {
   [ "$rc" -ne 0 ] || fail "add --status needs-attention with no --reason was accepted"
   assert_contains "$out" "requires --reason" "add's missing-reason rejection did not explain the requirement"
 
+  out=$("$DASH" add --title "Reporty create" --captain firstmate --prompt "x" \
+    --status needs-attention --reason "looking into the checkout timeout" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "add --status needs-attention with a report-shaped reason was accepted"
+  assert_contains "$out" "reads as a progress report" "add's report-shaped rejection did not explain why"
+
+  # And the create path is enforced by the server itself, not only by the
+  # CLI's local pre-check - the same treatment the status path gets above.
+  raw_code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+    "http://127.0.0.1:$PORT/api/tasks" -H 'Content-Type: application/json' \
+    -d '{"title":"Direct bad create","captain":"firstmate","initial_prompt":"x","status":"needs_attention"}')
+  [ "$raw_code" = "400" ] || fail "the API accepted a created needs_attention card with no reason (got HTTP $raw_code)"
+
+  raw_code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+    "http://127.0.0.1:$PORT/api/tasks" -H 'Content-Type: application/json' \
+    -d '{"title":"Direct reporty create","captain":"firstmate","initial_prompt":"x","status":"needs_attention","reason":"still chasing the supplier"}')
+  [ "$raw_code" = "400" ] || fail "the API accepted a created needs_attention card with a report-shaped reason (got HTTP $raw_code)"
+
   local created
   created=$("$DASH" add --title "Good create" --captain firstmate --prompt "x" \
     --status needs-attention --reason "sign the updated contractor agreement" | awk '{print $1}')
@@ -157,7 +174,125 @@ test_needs_attention_requires_a_real_ask() {
   assert_contains "$("$DASH" show "$created")" "needs attention: sign the updated contractor agreement" \
     "a card created straight into needs-attention did not carry its reason"
 
-  pass "needs-attention refuses a missing or report-shaped reason, on both status and add, and the server enforces it independently of the CLI"
+  pass "needs-attention refuses a missing or report-shaped reason, on both status and add, and the server enforces both independently of the CLI"
+}
+
+# A genuine ask that merely mentions one of the report phrases mid-sentence
+# ("approve the $400 monitoring subscription renewal") must still reach the
+# board: refusing it leaves the card stuck in `working` and never asks him,
+# which is the inverse of the failure the guard exists to prevent.
+test_a_genuine_ask_mentioning_a_report_word_is_accepted() {
+  local id
+  id=$("$DASH" add --title "Mid-sentence report word" --captain firstmate --prompt "checking edge anchoring" | awk '{print $1}')
+
+  "$DASH" status "$id" needs-attention --reason "approve the \$400 monitoring subscription renewal" >/dev/null \
+    || fail "a genuine ask containing 'monitoring' mid-sentence was refused"
+  assert_contains "$("$DASH" show "$id")" "monitoring subscription renewal" \
+    "the accepted mid-sentence ask did not persist"
+
+  "$DASH" status "$id" working >/dev/null || fail "leaving needs-attention failed"
+  "$DASH" status "$id" needs-attention --reason "pick which contractor keeps working on the deck" >/dev/null \
+    || fail "a genuine ask containing 'working on' mid-sentence was refused"
+
+  "$DASH" status "$id" working >/dev/null || fail "leaving needs-attention failed"
+  "$DASH" status "$id" needs-attention --reason "approve the invoice for the in progress work" >/dev/null \
+    || fail "a genuine ask containing 'in progress' mid-sentence was refused"
+
+  pass "a report phrase buried mid-clause does not refuse a genuine ask"
+}
+
+# docs/dashboard.md publishes exact catch/miss/false-positive counts for this
+# guard, and the fleet auditor is told to compensate for precisely that
+# documented blind spot. Pin the numbers to executed behaviour so narrowing or
+# extending REPORT_SHAPED_PHRASES cannot silently make the prose false.
+test_documented_guard_rates_still_hold() {
+  python3 - "$ROOT/bin/fleet-dashboard/server" <<'GUARD_RATES' || fail "the documented needs-attention guard rates no longer hold"
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from validation import InvalidReasonError, validate_needs_attention_reason
+
+# The three corpora documented in docs/dashboard.md, "The needs-attention
+# reason guard". Keep these in step with the counts stated there.
+REPORT_SHAPED = [
+    "You reported flares not changing the lights - being chased now",
+    "Migration is in progress",
+    "Still investigating the checkout timeout",
+    "Looking into the failed backup",
+    "Currently working on the invoice import",
+    "Keeping an eye on the disk usage",
+    "Monitoring the alert queue overnight",
+    "No update yet",
+    "Will update once the vendor replies",
+    "Rebuild kicked off - update to follow",
+    "Tracking down the duplicate charge",
+    "Digging into the log spike",
+    "Emails bouncing since Tuesday - following up on it",
+    "The permit is under investigation",
+    "Still chasing the supplier",
+]
+REWORDED_REPORTS = [
+    "No change since last time",
+    "Still on it",
+    "Checked again, same result",
+    "Reproduced it, cause unclear",
+    "Nothing new to report",
+    "Same as yesterday",
+    "Waiting on the vendor to call back",
+    "Ran the script twice, both failed",
+    "It is not fixed yet",
+    "Heard back from the supplier, no news",
+]
+GENUINE_ASKS = [
+    "Pick red or blue for the trim",
+    "Approve the $400 hosting renewal",
+    "Confirm the domain transfer by Friday",
+    "Approve the $400 monitoring subscription renewal",
+    "Pick which contractor keeps working on the deck",
+    "Approve the invoice for the in progress work",
+    "Decide whether to keep the monitoring alerts on overnight",
+    "Sign the updated contractor agreement",
+    "Tell me which of the two quotes to accept",
+    "Send me the router password so the install can finish",
+    "Choose a delivery date for the countertops",
+    "Confirm you want the old server decommissioned",
+]
+
+
+def refused(reason):
+    try:
+        validate_needs_attention_reason(reason)
+    except InvalidReasonError:
+        return True
+    return False
+
+
+failures = []
+for corpus, name, want in (
+    (REPORT_SHAPED, "report-shaped", True),
+    (REWORDED_REPORTS, "reworded report", False),
+    (GENUINE_ASKS, "genuine ask", False),
+):
+    for reason in corpus:
+        if refused(reason) is not want:
+            failures.append(f"{name} {reason!r} was {'accepted' if want else 'refused'}")
+
+counts = (
+    sum(refused(r) for r in REPORT_SHAPED),
+    sum(refused(r) for r in REWORDED_REPORTS),
+    sum(refused(r) for r in GENUINE_ASKS),
+)
+if counts != (15, 0, 0):
+    failures.append(
+        f"documented rates drifted: caught/missed/false-positive counts are {counts}, "
+        "docs/dashboard.md says 15/15 caught, 0/10 reworded caught, 0/12 false positives"
+    )
+
+for line in failures:
+    print(line, file=sys.stderr)
+sys.exit(1 if failures else 0)
+GUARD_RATES
+  pass "the catch, miss, and false-positive rates documented for the reason guard are the ones it actually achieves"
 }
 
 test_star_and_delete() {
@@ -339,6 +474,8 @@ test_notes_tabs_and_empty_tab_semantics
 test_link_policy_rejects_github_and_localhost
 test_needs_attention_status_carries_reason_and_sorts_first
 test_needs_attention_requires_a_real_ask
+test_a_genuine_ask_mentioning_a_report_word_is_accepted
+test_documented_guard_rates_still_hold
 test_audit_log_run_and_interval
 test_bad_input_fails_with_nonzero_exit
 test_calls_are_bounded_against_a_board_that_never_answers
