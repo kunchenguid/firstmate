@@ -162,18 +162,21 @@ fm_tasks_axi_backend_available() {
 # back that other backend's file: the archive lookup would read the wrong file
 # and report an archived record as absent, which is the failure this whole read
 # exists to remove.
-# Recognizing the table has to be generous for the same reason. Missing a header
-# tasks-axi itself honors falls back to the default, which for a home that
-# configured its own paths names a file that does not exist and reports an
-# archived record as absent all over again, so a trailing comment, a carriage
-# return, and whitespace inside the brackets all still name this table.
-# tasks-axi is the file's real reader, so it also bounds that scope: a quoted
-# `["markdown"]` key is NOT a header it honors (0.2.4, the FM_TASKS_AXI_MIN
-# floor, and 0.2.5 both fall back to the tracked default paths under it), so a
-# home spelling it that way has no configured archive for retention to write.
-# The unquoting below still matches that header, which for such a home would
-# name a configured archive tasks-axi never writes, so that spelling is
-# unsupported here exactly as it is there.
+# tasks-axi is this file's real reader, so what tasks-axi accepts is what this
+# resolver accepts, and that bounds it in BOTH directions. Missing a form
+# tasks-axi honors falls back to the default, which for a home that configured
+# its own paths names a file that does not exist; honoring a form tasks-axi
+# ignores resolves a configured path retention never writes. Either way the
+# lookup searches a file that is never written and reports an archived record as
+# absent, which is the failure this whole read exists to remove.
+# So, measured against 0.2.4 (the FM_TASKS_AXI_MIN floor) and 0.2.5: a trailing
+# comment, a carriage return, and whitespace inside the brackets all still name
+# this table; a quoted `["markdown"]` key does NOT, because tasks-axi falls back
+# to its own defaults under it; and a value may be a double-quoted basic string
+# or a single-quoted literal string, because tasks-axi honors both. An
+# `[[markdown]]` array-of-tables header needs no carve-out: tasks-axi rejects
+# that whole config, so such a home has no backlog for a record to be archived
+# from in the first place.
 fm_tasks_axi_markdown_path() {  # <home> <key> <default-relative>
   local home=$1 key=$2 default=$3 config="$1/.tasks.toml" value='' quotes="\"'"
   if [ -f "$config" ] && [ ! -L "$config" ]; then
@@ -184,11 +187,6 @@ fm_tasks_axi_markdown_path() {  # <home> <key> <default-relative>
         sub(/#.*$/, "", section)
         sub(/^[ \t]*\[+[ \t]*/, "", section)
         sub(/[ \t]*\]+[ \t]*$/, "", section)
-        edge = substr(section, 1, 1)
-        if (length(section) > 1 && index(quotes, edge) > 0 &&
-            substr(section, length(section), 1) == edge) {
-          section = substr(section, 2, length(section) - 2)
-        }
         in_markdown = (section == "markdown")
         next
       }
@@ -201,8 +199,14 @@ fm_tasks_axi_markdown_path() {  # <home> <key> <default-relative>
         sub(/[ \t]+$/, "", name)
         if (name != key) next
         value = substr($0, eq + 1)
-        if (match(value, /"[^"]*"/) == 0) next
-        print substr(value, RSTART + 1, RLENGTH - 2)
+        sub(/^[ \t]+/, "", value)
+        if (length(value) < 2) next
+        quote = substr(value, 1, 1)
+        if (index(quotes, quote) == 0) next
+        value = substr(value, 2)
+        endq = index(value, quote)
+        if (endq == 0) next
+        print substr(value, 1, endq - 1)
         exit
       }
     ' "$config" 2>/dev/null)

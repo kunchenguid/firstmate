@@ -1592,8 +1592,10 @@ test_unopenable_archive_refuses_instead_of_reading_as_absent() {
   run_captain "$home" complete "$id" sample-unopenable-call >/dev/null \
     || fail "completion failed on the answered inventory"
 
-  # Nothing has been trimmed yet, so there is no archive file at all. That is the
-  # normal healthy state of a young home and must not be a failure of any kind.
+  # Nothing has been trimmed yet, so the record is still in the live backlog and
+  # there is no archive file at all. A young home like that must not be refused.
+  # On its own this does not reach the archive read, because the backlog answers
+  # first; the genuine no-archive-file case is driven a few lines below.
   assert_absent "$home/data/done-archive.md" \
     "setup error: retention has not run, so no archive file should exist yet"
   run_captain "$home" verify "$id" >/dev/null 2> "$home/no-archive.err" \
@@ -1604,6 +1606,23 @@ test_unopenable_archive_refuses_instead_of_reading_as_absent() {
   out=$(run_captain "$home" verify "$id") || fail "verification failed on the archived answer"
   assert_contains "$out" "1 answered and archived" \
     "setup error: the record should now be read out of the archive"
+
+  # The record now lives ONLY in the archive, so the archive read is genuinely on
+  # the path. Take the archive file away and an archive that does not exist has
+  # to stay QUIET: "no record", never "the archive could not be read", because a
+  # home that has simply never had a row trimmed has no archive file either. This
+  # is the boundary the symlink case below contrasts with, and it is the
+  # assertion a change making an absent archive loud has to fail.
+  mv "$home/data/done-archive.md" "$home/archive-taken-away.md"
+  if run_captain "$home" verify "$id" > "$home/absent.out" 2> "$home/absent.err"; then
+    fail "verification passed while the answered record was in neither file"
+  fi
+  err=$(cat "$home/absent.err")
+  assert_contains "$err" "has no record" \
+    "an archive file that does not exist must read as no record at all"
+  assert_not_contains "$err" "not a readable regular file" \
+    "a missing archive file must stay quiet rather than being called unreadable"
+  mv "$home/archive-taken-away.md" "$home/data/done-archive.md"
 
   # The archive path becomes a symlink, which this read deliberately refuses to
   # follow. The record is still in there, which is exactly why the refusal must
@@ -1643,27 +1662,32 @@ test_unopenable_archive_refuses_instead_of_reading_as_absent() {
 }
 
 # The archive is only found through this home's own `[markdown]` table, so every
-# spelling of that table header tasks-axi itself honors has to be recognized. Each
-# home here configures a NON-default archive, so a header form this read failed to
-# match would fall back to the tracked default, find no archive there, and report
-# the answered record as absent all over again.
-# tasks-axi is the file's real reader, so it decides which spellings are in scope:
-# a quoted `["markdown"]` key is NOT one of them (checked against 0.2.4, the
-# FM_TASKS_AXI_MIN floor, and 0.2.5 - retention writes the tracked default archive
-# under that header instead of the configured one), so a home spelling it that way
-# has no configured-archive fixture to build and is out of scope here.
-test_markdown_table_header_forms_all_locate_the_archive() {
+# spelling of that table tasks-axi itself honors has to be recognized. Each home
+# here configures a NON-default archive, so a form this read failed to match would
+# fall back to the tracked default, find no archive there, and report the answered
+# record as absent all over again.
+# tasks-axi is the file's real reader, so it decides which spellings are in scope,
+# and it honors a single-quoted TOML literal string for the value as readily as a
+# double-quoted one, so both value forms belong here too. The spellings tasks-axi
+# ignores get the opposite guarantee, in
+# test_config_forms_tasks_axi_ignores_fall_back_the_same_way below.
+test_markdown_config_forms_all_locate_the_archive() {
   local home form archive=data/retired-rows.md out index=0
   while IFS= read -r form; do
     [ -n "$form" ] || continue
     index=$((index + 1))
-    home=$(make_home "markdown-header-$index")
+    home=$(make_home "markdown-config-$index")
     case "$form" in
       CRLF)
         form='[markdown]'
         printf 'backend = "markdown"\r\n\r\n%s\r\npath = "data/backlog.md"\r\narchive = "%s"\r\ndone_keep = 10\r\n' \
           "$form" "$archive" > "$home/.tasks.toml"
         form='[markdown] with carriage returns'
+        ;;
+      SINGLE_QUOTED_VALUES)
+        printf "backend = \"markdown\"\n\n[markdown]\npath = 'data/backlog.md'\narchive = '%s'\ndone_keep = 10\n" \
+          "$archive" > "$home/.tasks.toml"
+        form="[markdown] with single-quoted literal values"
         ;;
       *)
         printf 'backend = "markdown"\n\n%s\npath = "data/backlog.md"\narchive = "%s"\ndone_keep = 10\n' \
@@ -1695,9 +1719,53 @@ test_markdown_table_header_forms_all_locate_the_archive() {
 [markdown] # the markdown backend
 [ markdown ]
 CRLF
+SINGLE_QUOTED_VALUES
 EOF
-  [ "$index" = 4 ] || fail "not every header form was exercised: $index"
-  pass "every [markdown] table header form tasks-axi honors still locates the configured archive"
+  [ "$index" = 5 ] || fail "not every config form was exercised: $index"
+  pass "every [markdown] config form tasks-axi honors still locates the configured archive"
+}
+
+# The mirror of the test above, and the guarantee that keeps this read from
+# resolving a path retention never writes. tasks-axi does NOT honor a quoted
+# `["markdown"]` table key: it ignores that table entirely and falls back to its
+# own defaults. This read has to fall back too. If it honored the quoted key it
+# would resolve the CONFIGURED archive while retention wrote somewhere else, so
+# the lookup would search a file that is never written and an answered record
+# would read as absent again - the exact failure this whole change removes,
+# restored for one config spelling.
+test_config_forms_tasks_axi_ignores_fall_back_the_same_way() {
+  local home out
+  home=$(make_home markdown-config-quoted-key)
+  printf 'backend = "markdown"\n\n["markdown"]\npath = "data/live-rows.md"\narchive = "data/retired-rows.md"\ndone_keep = 0\n' \
+    > "$home/.tasks.toml"
+
+  tasks_in "$home" add sample-quoted-call "Choose the quoted option" --repo sample >/dev/null \
+    || fail "could not create the call under a quoted table key"
+  run_captain "$home" hold sample-quoted-call --reason "captain quoted choice pending" >/dev/null \
+    || fail "could not hold the call under a quoted table key"
+  printf 'Take the quoted option.\n' > "$home/answer.txt"
+  run_captain "$home" answer sample-quoted-call --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the answer under a quoted table key"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention under a quoted table key"
+
+  # tasks-axi ignored the quoted table, so neither configured file was ever
+  # written; it fell back and archived into this home's default archive instead.
+  assert_absent "$home/data/live-rows.md" \
+    "setup error: tasks-axi is expected to ignore a quoted table key, so the configured backlog must stay unwritten"
+  assert_absent "$home/data/retired-rows.md" \
+    "setup error: tasks-axi is expected to ignore a quoted table key, so the configured archive must stay unwritten"
+  assert_grep "sample-quoted-call" "$home/data/done-archive.md" \
+    "setup error: retention should have fallen back to this home's default archive"
+
+  # So this read has to fall back to that same file. Honoring the quoted key would
+  # point it at the configured archive instead, which retention never wrote, and
+  # the exact replay below would then find no record at all.
+  out=$(run_captain "$home" answer sample-quoted-call --decision-file "$home/answer.txt" 2>&1) \
+    || fail "the fallback archive tasks-axi actually wrote was not the file this read searched: $out"
+  assert_contains "$out" "answered: sample-quoted-call" \
+    "an archived answer must replay out of the same fallback archive tasks-axi wrote"
+  pass "a config form tasks-axi ignores falls back here exactly as it does there"
 }
 
 test_uninventoried_report_decision_refuses_completion
@@ -1722,4 +1790,5 @@ test_unanswered_and_absent_captain_calls_still_fail_distinguishably
 test_archived_records_are_readable_but_never_written
 test_archived_origin_still_owns_a_later_review_pass
 test_unopenable_archive_refuses_instead_of_reading_as_absent
-test_markdown_table_header_forms_all_locate_the_archive
+test_markdown_config_forms_all_locate_the_archive
+test_config_forms_tasks_axi_ignores_fall_back_the_same_way
