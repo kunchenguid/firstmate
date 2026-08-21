@@ -30,6 +30,7 @@ jobs:
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
@@ -74,6 +75,20 @@ jobs:
                 echo "Re-run the pipeline with 'git push no-mistakes' using no-mistakes >= 1.46.0."
                 echo "See CONTRIBUTING.md for setup and the full workflow."
                 echo
+                echo "PR author: ${PR_AUTHOR}"
+              } >&2
+              exit 1
+            fi
+            attested_head=$(printf '%s' "$json" | jq -r \
+              'if ((.head_sha // null) | type) == "string" then .head_sha else empty end')
+            if [ "$attested_head" != "$PR_HEAD" ]; then
+              {
+                echo "::error::The no-mistakes pipeline attestation does not match the current PR head."
+                echo
+                echo "Current PR head: ${PR_HEAD}"
+                echo "Attested head: ${attested_head:-missing}"
+                echo
+                echo "Re-run the pipeline with 'git push no-mistakes' at the current head."
                 echo "PR author: ${PR_AUTHOR}"
               } >&2
               exit 1

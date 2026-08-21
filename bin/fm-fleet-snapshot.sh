@@ -279,6 +279,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   # shellcheck disable=SC2094
   jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
+    def explicit_deferred_marker:
+      test("^(SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED)([[:space:]:-]|$)"; "i");
     def section_state:
       if . == "In flight" then "in_flight"
       elif . == "Queued" then "queued"
@@ -417,8 +419,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
                and .hold_reason != null and (.unresolved_blocker_ids | length) == 0
                and (.hold_until == null or .hold_until <= $today))
           | .deferred_marker =
-              ((((.hold_reason // "") + " " + (.body_excerpt // ""))
-                | test("SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED"; "i")))
+              (((.hold_reason // "") | explicit_deferred_marker)
+               or (.body_lines | any(explicit_deferred_marker)))
         else . end)
     | del(.section,.order)
   ' < "$backlog"

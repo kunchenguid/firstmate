@@ -1103,6 +1103,29 @@ EOF
   pass "a status resolution over a still-open captain-held task is signalled, not closed"
 }
 
+# Legacy keyless decisions fold to the shared `default` key.
+# Their pre-collapse structured identity therefore ends in `-decision-default`,
+# and the divergence report must not require a literal key token that this
+# status format never carried.
+test_keyless_status_resolution_over_an_open_hold_is_signalled() {
+  local home id out
+  home=$(make_home keyless-divergence-signalled)
+  id=sample-keyless-review
+  run_captain "$home" hold "$id-decision-default" \
+    --title "Choose the default sample route" --reason "captain route choice pending" \
+    --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the legacy keyless captain call"
+  cat > "$home/state/$id.status" <<'EOF'
+needs-decision: choose route north or route south
+resolved: answered: north
+EOF
+
+  out=$(run_captain "$home" diverged) || fail "diverged failed on the keyless reconstructed loss"
+  printf '%s\n' "$out" | grep -F "$id-decision-default	$id	default" >/dev/null \
+    || fail "the keyless legacy-identity divergence was not signalled: $out"
+  pass "a keyless status resolution over a legacy default hold is signalled"
+}
+
 # The false-signal boundary, driven by the shapes that are genuinely fine. A
 # captain call whose deliverable IS the decision has no routed work item at all,
 # and that is legitimate: routed work must never be part of the test. Nor may a
@@ -1181,4 +1204,5 @@ test_legacy_identities_keep_working
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
+test_keyless_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal

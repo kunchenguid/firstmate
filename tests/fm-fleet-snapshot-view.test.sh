@@ -582,6 +582,33 @@ EOF
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 
+test_deferred_marker_requires_dedicated_marker() {
+  local home out
+  home=$(make_home deferred-marker-boundary)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] reason-prose - Choose loading strategy (repo: sample) (kind: ship) (hold: choose eager or deferred loading) (hold-kind: captain)
+- [ ] body-prose - Choose rendering strategy (repo: sample) (kind: ship) (hold: captain choice pending) (hold-kind: captain)
+  Compare eager or deferred rendering before answering.
+- [ ] reason-marker - Parked captain call (repo: sample) (kind: ship) (hold: DEFERRED by captain) (hold-kind: captain)
+- [ ] body-marker - Obsolete captain call (repo: sample) (kind: ship) (hold: captain choice pending) (hold-kind: captain)
+  NOT REQUIRED - the replacement call owns this choice.
+
+## Done
+EOF
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.backlog.records[] | select(.id == "reason-prose") | .deferred_marker == false)
+      and (.backlog.records[] | select(.id == "body-prose") | .deferred_marker == false)
+      and (.backlog.records[] | select(.id == "reason-marker") | .deferred_marker == true)
+      and (.backlog.records[] | select(.id == "body-marker") | .deferred_marker == true)
+  ' >/dev/null || fail "ordinary deferred prose and dedicated markers were not distinguished: $out"
+  pass "only dedicated deferred or superseded markers suppress captain-held rows"
+}
+
 test_view_renders_snapshot() {
   local home fakebin view
   home=$(make_home view)
@@ -812,5 +839,6 @@ test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
+test_deferred_marker_requires_dedicated_marker
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
