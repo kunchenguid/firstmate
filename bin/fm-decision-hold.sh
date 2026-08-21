@@ -151,6 +151,15 @@ load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
   DECISION_DIGEST=$(sha256_text "$decision")
 }
 
+# Best-effort push of the just-recorded captain decision into this home's fleet
+# memory so recall accumulates every decision automatically (memval-04).
+# fm-remember.sh owns all fail-open guards (memory unwired, node missing, hub
+# slow); it never blocks or changes this command's outcome, so a failure here
+# never leaves a decision unrecorded in the backlog.
+remember_decision() {  # <decision-text>
+  "$SCRIPT_DIR/fm-remember.sh" "$1" >/dev/null 2>&1 || true
+}
+
 tasks_axi() {
   (cd "$FM_HOME" && tasks-axi "$@")
 }
@@ -558,6 +567,7 @@ command_resolve() {
   done
   tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
   verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
+  remember_decision "$DECISION_TEXT"
   printf 'resolved: %s -> %s\n' "$id" "$routed"
 }
 
@@ -609,6 +619,7 @@ command_decline() {
     || fail "could not record the captain decision on $id"
   tasks_axi "done" "$id" >/dev/null || fail "could not close declined captain hold $id"
   verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
+  remember_decision "$DECISION_TEXT"
   printf 'declined: %s\n' "$id"
 }
 
@@ -646,6 +657,7 @@ command_repair() {
   show=$(task_show "$id") || fail "captain decision $id disappeared while recording the repair"
   [ "$(show_field "$show" state)" = "done" ] || fail "repairing $id reopened a closed captain decision"
   verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
+  remember_decision "$DECISION_TEXT"
   printf 'repaired: %s\n' "$id"
 }
 
