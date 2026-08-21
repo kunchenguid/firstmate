@@ -38,8 +38,9 @@
 #   1  a refusal: a missing or ambiguous target, an invalid argument, an
 #      unfinished handback found by guard-work, or a delivery Linear rejected
 #   2  usage
-#   3  a hold: Linear is not configured or not reachable, so the handback is
-#      preserved untouched and must be retried. Never a completion.
+#   3  a hold: Linear is not configured or not reachable, or a would-be refusal
+#      could not be recorded, so the handback is preserved untouched and must
+#      be retried. Never a completion.
 #
 # `hook` is the passive integration surface. It is scoped to a genuine firstmate
 # primary home (bin/fm-primary-scope-lib.sh) and prints nothing at all in an
@@ -537,6 +538,10 @@ hold_delivery() {  # <delivery-id> <reason>
   } | fmx_private_artifact_publish_stdin "$(fm_linear_attempts_dir "$STATE")" "$id" 600 || true
 }
 
+# refuse_delivery <delivery-id> <reason>: returns 0 once the refusal is durably
+# recorded (or there was nothing left to quarantine). Returns 1 when the
+# quarantine write itself failed - the caller must treat this as a hold, not a
+# refusal, since the record is neither delivered nor safely marked refused.
 refuse_delivery() {  # <delivery-id> <reason>
   local id=$1 reason=$2 outbox refused_dir clean_reason
   outbox="$(fm_linear_outbox_dir "$STATE")/$id.json"
