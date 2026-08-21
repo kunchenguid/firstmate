@@ -2723,6 +2723,14 @@ preserve_relaunch_meta() {
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+fi
+# The published record now owns the slot through its teardown's
+# `treehouse return --force`, so an abort here must NOT release the lease -
+# that would hand a recorded live task's worktree back to the pool (#2754).
+TREEHOUSE_LEASE_ABORT_CLEANUP=0
+WT_LEASED=
+[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
@@ -2736,12 +2744,6 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
-# The published record now owns the slot through its teardown's
-# `treehouse return --force`, so an abort here must NOT release the lease -
-# that would hand a recorded live task's worktree back to the pool (#2754).
-TREEHOUSE_LEASE_ABORT_CLEANUP=0
-WT_LEASED=
-[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
