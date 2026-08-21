@@ -13,12 +13,15 @@
 #                                          -> hold <origin>-decision-<key> --origin <origin> ...
 #   complete <origin> (--none | <key>...)  -> complete <origin> (--none | <origin>-decision-<key>...)
 #   verify <origin>                        -> verify <origin>
-#   resolve <origin> <key> --decision-file <f> --routed-to <id>...
+#   resolve <origin> <key> --decision-file <f> (--routed-to <id>... | --no-action)
 #                                          -> answer <origin>-decision-<key> with the routed ids
 #                                             appended to the decision text, then clear the
 #                                             recorded blocked-by edges through tasks-axi; an
 #                                             exact replay of a pre-collapse routed record reuses
-#                                             its historical digest and text before clearing edges
+#                                             its historical digest and text before clearing edges.
+#                                             --no-action (alias --none) records a captain decision
+#                                             that routes no follow-up work; it is mutually exclusive
+#                                             with --routed-to and requires no blocked dependent
 #   answer|decline|repair <origin> <key> --decision-file <f>
 #                                          -> answer <origin>-decision-<key> --decision-file <f>
 #   answers (<origin> | --any-origin) --source <p>
@@ -69,9 +72,11 @@ show_field() {
 
 normalized_blocked_by() {
   local blocked
+  # tasks-axi quotes a multi-entry blocked_by as "a,b,c"; a validated task-id
+  # slug can never itself contain a double quote, so stripping every quote
+  # character is safe regardless of where in the list an id sits.
   blocked=$(show_field "$1" blocked_by | tr -d '[:space:]')
-  blocked=${blocked#\"}
-  blocked=${blocked%\"}
+  blocked=${blocked//\"/}
   [ "$blocked" != - ] || blocked=''
   printf '%s' "$blocked"
 }
@@ -106,13 +111,14 @@ recorded_field() {
 
 command_resolve() {
   local origin=${1:-} key=${2:-} decision_file='' routed='' routed_csv id dep tmp answer_file show state blocked hold_show hold_body
-  local resolution_recorded=0 legacy_replay=0 decision_text decision_digest recorded_digest recorded_routes
+  local resolution_recorded=0 legacy_replay=0 no_action=0 decision_text decision_digest recorded_digest recorded_routes
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
       --routed-to) shift; validate_slug routed-task "${1:-}"; routed="${routed}${routed:+ }${1:-}" ;;
+      --no-action|--none) no_action=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -120,7 +126,11 @@ command_resolve() {
   id=$(compose "$origin" "$key")
   [ -n "$decision_file" ] || fail "--decision-file is required"
   [ -f "$decision_file" ] || fail "decision file does not exist: $decision_file"
-  [ -n "$routed" ] || fail "at least one --routed-to task is required; use answer when the captain's answer routes no work"
+  if [ "$no_action" = 1 ]; then
+    [ -z "$routed" ] || fail "--no-action cannot be combined with --routed-to"
+  else
+    [ -n "$routed" ] || fail "at least one --routed-to task is required; pass --no-action to record a decision that routes no work"
+  fi
   routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
   routed_csv=$(printf '%s' "$routed" | tr ' ' ',')
   decision_text=$(cat "$decision_file")
@@ -154,7 +164,12 @@ command_resolve() {
   done
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-decision-hold-resolve.XXXXXX") \
     || fail "cannot stage the captain decision"
-  if ! { cat "$decision_file" && printf '\n\nRouted work:\n' \
+  if [ "$no_action" = 1 ]; then
+    if ! { cat "$decision_file" && printf '\n\nRouted work:\n(none)\n'; } > "$tmp"; then
+      rm -f -- "$tmp"
+      fail "cannot stage the captain decision for $id"
+    fi
+  elif ! { cat "$decision_file" && printf '\n\nRouted work:\n' \
     && printf '%s\n' "$routed" | tr ' ' '\n' | sed 's/^/- /'; } > "$tmp"; then
     rm -f -- "$tmp"
     fail "cannot stage the captain decision for $id"
@@ -173,7 +188,11 @@ command_resolve() {
         || fail "could not route the recorded decision to $dep"
     fi
   done
-  printf 'resolved: %s -> %s\n' "$id" "$routed"
+  if [ "$no_action" = 1 ]; then
+    printf 'resolved: %s -> (no action)\n' "$id"
+  else
+    printf 'resolved: %s -> %s\n' "$id" "$routed"
+  fi
 }
 
 command_complete() {
