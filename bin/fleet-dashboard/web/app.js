@@ -326,6 +326,9 @@ function Overlay({ task, allTasks, onClose, onPatch, onStatus, onAddNote, onTogg
   const [waitingTarget, setWaitingTarget] = useState(task.waiting_on_id || "");
   const [waitingReason, setWaitingReason] = useState(task.waiting_reason || "");
   const [showWaitingForm, setShowWaitingForm] = useState(false);
+  const [naReason, setNaReason] = useState(task.needs_attention_reason || "");
+  const [showNAForm, setShowNAForm] = useState(false);
+  const [naErr, setNaErr] = useState("");
 
   useEffect(() => { setTitle(task.title); setAgent(task.agent); }, [task.id]);
 
@@ -337,12 +340,27 @@ function Overlay({ task, allTasks, onClose, onPatch, onStatus, onAddNote, onTogg
       setShowWaitingForm(true);
       return;
     }
+    if (next === "needs_attention") {
+      setNaErr("");
+      setShowNAForm(true);
+      return;
+    }
     onStatus(task.id, next);
   };
 
   const confirmWaiting = () => {
     onStatus(task.id, "waiting", waitingTarget || null, waitingReason || null);
     setShowWaitingForm(false);
+  };
+
+  const confirmNeedsAttention = async () => {
+    setNaErr("");
+    try {
+      await onStatus(task.id, "needs_attention", null, naReason || null);
+      setShowNAForm(false);
+    } catch (e) {
+      setNaErr(e.message);
+    }
   };
 
   return html`
@@ -407,6 +425,31 @@ function Overlay({ task, allTasks, onClose, onPatch, onStatus, onAddNote, onTogg
               <button onClick=${confirmWaiting}>Set Waiting</button>
               <button
                 onClick=${() => setShowWaitingForm(false)}
+                style=${{ background: "var(--surface2)", color: "var(--text)" }}
+              >Cancel</button>
+            </div>
+          </div>
+        ` : null}
+
+        ${showNAForm ? html`
+          <div class="note-item" style=${{ marginTop: 8 }}>
+            <div class="field-label" style=${{ marginBottom: 6 }}>
+              What does he need to decide, approve, or supply?
+            </div>
+            <input
+              type="text" placeholder="Reason (shown on the card - an ask, not a status update)"
+              value=${naReason} onInput=${(e) => setNaReason(e.target.value)}
+              style=${{
+                width: "100%", background: "var(--surface2)", border: "1px solid var(--border)",
+                color: "var(--text)", borderRadius: "6px", padding: "8px 10px",
+                fontFamily: "var(--font)", fontSize: "13px", marginBottom: 8,
+              }}
+            />
+            ${naErr ? html`<div style=${{ color: "var(--danger)", fontSize: "12.5px", marginBottom: 8 }}>${naErr}</div>` : null}
+            <div class="compose-actions">
+              <button disabled=${!naReason.trim()} onClick=${confirmNeedsAttention}>Set Needs Attention</button>
+              <button
+                onClick=${() => { setShowNAForm(false); setNaErr(""); }}
                 style=${{ background: "var(--surface2)", color: "var(--text)" }}
               >Cancel</button>
             </div>

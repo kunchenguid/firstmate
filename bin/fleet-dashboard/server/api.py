@@ -20,7 +20,12 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from store import CAPTAINS, NOTE_AUTHORS, NOTE_TABS, STATUSES, Store
-from validation import InvalidLinkError, validate_review_link
+from validation import (
+    InvalidLinkError,
+    InvalidReasonError,
+    validate_needs_attention_reason,
+    validate_review_link,
+)
 
 FLEET_DASHBOARD_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(FLEET_DASHBOARD_DIR, "web")
@@ -102,6 +107,12 @@ def create_task(store: Store, match, query, body):
     status = body.get("status", "not_started")
     if status not in STATUSES:
         raise ApiError(400, f"unknown status: {status!r}. Valid: {', '.join(STATUSES)}")
+    reason = body.get("reason") or None
+    if status == "needs_attention":
+        try:
+            validate_needs_attention_reason(reason)
+        except InvalidReasonError as exc:
+            raise ApiError(400, str(exc)) from exc
     task = store.add_task(
         title=title,
         captain=captain,
@@ -109,6 +120,7 @@ def create_task(store: Store, match, query, body):
         agent=body.get("agent", "") or "",
         status=status,
         backlog_ref=body.get("backlog_ref") or None,
+        needs_attention_reason=reason,
     )
     return 201, task
 
@@ -154,12 +166,18 @@ def set_status(store: Store, match, query, body):
     status = body.get("status")
     if status not in STATUSES:
         raise ApiError(400, f"unknown status: {status!r}. Valid: {', '.join(STATUSES)}")
+    reason = body.get("reason") or None
+    if status == "needs_attention":
+        try:
+            validate_needs_attention_reason(reason)
+        except InvalidReasonError as exc:
+            raise ApiError(400, str(exc)) from exc
     try:
         task = store.set_status(
             task_id,
             status,
             waiting_on_id=body.get("waiting_on_id") or None,
-            reason=body.get("reason") or None,
+            reason=reason,
         )
     except KeyError as exc:
         raise ApiError(404, f"no such task: {task_id!r}") from exc

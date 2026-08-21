@@ -87,6 +87,29 @@ The two are opposite on the one axis that matters: whether the work still needs 
 `needs-attention` is stuck without him - a decision, an answer, or a physical action only he can supply.
 That asymmetry is why `needs-attention` sorts first and renders loudest on the page, and why the fleet auditor treats its age as a finding in a way it never does for `testing` (see the [`fleet-dashboard`](../.agents/skills/fleet-dashboard/SKILL.md) skill for the exact status definitions and the auditor's per-status procedure).
 
+## The needs-attention reason guard
+
+A card that reaches `needs-attention` with no stated ask, or with a reason that is really only a progress report, spends the Admiral's attention for nothing and teaches him that the loudest status on the board does not always mean him - the same failure that already made one always-red marker into noise he learned to skip.
+Two things are enforced server-side (`POST /api/tasks/{id}/status` and `POST /api/tasks` alike, both routed through `bin/fleet-dashboard/server/validation.py`), not left to an agent remembering to write good text:
+
+1. **A reason is required.** The API refuses to set `needs_attention` - whether on an existing card or a card created straight into that status - with an empty or missing `reason`, rather than substituting placeholder text.
+   `bin/fm-dashboard.sh status` and `add` both also refuse locally before making the call.
+2. **An obviously report-shaped reason is refused.** The reason is rejected if it contains, anywhere, one of a small fixed list of report-shaped phrases (`REPORT_SHAPED_PHRASES` in `validation.py` - things like "being chased", "in progress", "investigating", "working on").
+   The match is a case-insensitive substring anywhere in the text, not just at the start, because the motivating failure was a reason of the form "*You reported flares not changing the lights - being chased now*" - a status update tacked onto the end of a sentence, not one that opens with the report phrase.
+
+This is a narrow, mechanical guard, deliberately not a language model: it is a fixed list, and it is written down as such so its limits are known rather than discovered.
+Tested against 15 realistic report-shaped reasons built from `REPORT_SHAPED_PHRASES` (e.g. "Still investigating the checkout timeout", the "being chased" example above), it caught all 15.
+Tested against 10 report-shaped reasons deliberately reworded to avoid every listed phrase ("No change since last time", "Still on it", "Checked again, same result", "Reproduced it, cause unclear", "Nothing new to report", and similar), it caught none of them - a 100% miss rate on phrasing the list was never meant to cover, and the expected shape of its blind spot: it recognizes specific report vocabulary, not the general concept of "this is a report."
+Against 10 genuine asks ("Pick red or blue for the trim", "Approve the $400 hosting renewal", "Confirm the domain transfer by Friday", and similar), it produced zero false positives.
+What the guard buys is catching the plainest, most common form of carelessness - a progress update dropped straight into the field using ordinary report language - for effectively no cost to real asks, not comprehension of every way a reason can fail to be one.
+
+**This guard does not replace the fleet auditor's judgment, and the auditor's judgment does not replace this guard.**
+The server checks words; the auditor checks whether the ask is real.
+The auditor's sweep separately reads every `needs-attention` card's reason and judges it against "what would he DO" - if the honest answer is "read it" or "know it," it is a discrepancy regardless of whether it happens to dodge the fixed phrase list (see the [`fleet-dashboard`](../.agents/skills/fleet-dashboard/SKILL.md) skill, fleet auditor's sweep, step 4).
+Retiring either check on the assumption the other one covers it would reopen the exact gap this section exists to close.
+
+Existing `needs-attention` cards set before this guard existed are not migrated or rewritten - the guard governs what can be set from now on, not what already sits on the board.
+
 ## Link policy (standing order 17)
 
 `bin/fm-dashboard.sh link` and the underlying `POST /api/tasks/{id}/notes` endpoint reject, structurally, any link whose host contains `github`, any link that is not a full `http(s)://` URL, and any link whose host is local-only and will not resolve from the Admiral's phone (`bin/fleet-dashboard/server/validation.py`).

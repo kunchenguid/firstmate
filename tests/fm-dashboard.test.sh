@@ -115,6 +115,51 @@ test_needs_attention_status_carries_reason_and_sorts_first() {
   pass "needs-attention status carries a reason and sorts above every other status"
 }
 
+test_needs_attention_requires_a_real_ask() {
+  local id out rc
+  id=$("$DASH" add --title "Reason guard coverage" --captain firstmate --prompt "checking the needs-attention guard" | awk '{print $1}')
+
+  # The CLI refuses locally, before any network round-trip, on the obvious
+  # missing-reason case.
+  out=$("$DASH" status "$id" needs-attention 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "needs-attention with no --reason was accepted"
+  assert_contains "$out" "requires --reason" "missing-reason rejection did not explain the requirement"
+
+  # The server enforces the same rule structurally, not just the CLI's
+  # local check: a direct call with an empty reason must also be refused.
+  local raw_code
+  raw_code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+    "http://127.0.0.1:$PORT/api/tasks/$id/status" \
+    -H 'Content-Type: application/json' -d '{"status":"needs_attention"}')
+  [ "$raw_code" = "400" ] || fail "the API accepted needs_attention with no reason (got HTTP $raw_code)"
+
+  # A reason that only reports progress is refused too, even though it is
+  # non-empty.
+  out=$("$DASH" status "$id" needs-attention --reason "You reported flares not changing the lights - being chased now" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a report-shaped needs-attention reason was accepted"
+  assert_contains "$out" "reads as a progress report" "report-shaped rejection did not explain why"
+
+  # A genuine ask is accepted and persists.
+  "$DASH" status "$id" needs-attention --reason "approve the trim color before the install" >/dev/null \
+    || fail "a genuine ask was rejected as report-shaped"
+  assert_contains "$("$DASH" show "$id")" "needs attention: approve the trim color before the install" \
+    "a genuine ask did not persist after the guard ran"
+
+  # Creating a card straight into needs-attention is governed the same way.
+  out=$("$DASH" add --title "Bad create" --captain firstmate --prompt "x" --status needs-attention 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "add --status needs-attention with no --reason was accepted"
+  assert_contains "$out" "requires --reason" "add's missing-reason rejection did not explain the requirement"
+
+  local created
+  created=$("$DASH" add --title "Good create" --captain firstmate --prompt "x" \
+    --status needs-attention --reason "sign the updated contractor agreement" | awk '{print $1}')
+  [ -n "$created" ] || fail "add --status needs-attention with a real ask should have succeeded"
+  assert_contains "$("$DASH" show "$created")" "needs attention: sign the updated contractor agreement" \
+    "a card created straight into needs-attention did not carry its reason"
+
+  pass "needs-attention refuses a missing or report-shaped reason, on both status and add, and the server enforces it independently of the CLI"
+}
+
 test_star_and_delete() {
   local id
   id=$(cat "$FM_HOME/task-id")
@@ -293,6 +338,7 @@ test_waiting_status_carries_target_and_reason
 test_notes_tabs_and_empty_tab_semantics
 test_link_policy_rejects_github_and_localhost
 test_needs_attention_status_carries_reason_and_sorts_first
+test_needs_attention_requires_a_real_ask
 test_audit_log_run_and_interval
 test_bad_input_fails_with_nonzero_exit
 test_calls_are_bounded_against_a_board_that_never_answers

@@ -15,7 +15,10 @@
 # Usage:
 #   fm-dashboard.sh add --title <t> --captain <firstmate|dj|river> \
 #       (--prompt <text> | --prompt-file <path>) [--agent <name>] \
-#       [--status <status>] [--ref <backlog-ref>]
+#       [--status <status>] [--ref <backlog-ref>] [--reason <text>]
+#       --reason is REQUIRED when --status is needs-attention (same rule and
+#       same server-side guard as the `status` subcommand below); ignored
+#       for every other starting status.
 #   fm-dashboard.sh list [--status <status>] [--captain <c>] [--starred] \
 #       [--sort updated|date|status|title] [--json]
 #   fm-dashboard.sh show <id> [--json]
@@ -26,6 +29,10 @@
 #   fm-dashboard.sh status <id> <status> [--waiting-on <id>] [--reason <text>]
 #       --reason is what the card is waiting on for `waiting`, or what is
 #       being asked of him for `needs-attention`; ignored for other statuses.
+#       needs-attention REQUIRES --reason: the server refuses the status
+#       change with no reason, and refuses a reason it can mechanically
+#       tell is only a progress report rather than an ask (see
+#       bin/fleet-dashboard/server/validation.py's REPORT_SHAPED_PHRASES).
 #   fm-dashboard.sh star <id>
 #   fm-dashboard.sh unstar <id>
 #   fm-dashboard.sh note <id> --tab <interpretation|communication|needs> \
@@ -187,7 +194,7 @@ row_line() {
 }
 
 cmd_add() {
-  local title="" captain="" prompt="" prompt_file="" agent="" status="not_started" ref=""
+  local title="" captain="" prompt="" prompt_file="" agent="" status="not_started" ref="" reason=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --title) title=$2; shift 2 ;;
@@ -197,6 +204,7 @@ cmd_add() {
       --agent) agent=$2; shift 2 ;;
       --status) status=$(canon_status "$2") || return 1; shift 2 ;;
       --ref) ref=$2; shift 2 ;;
+      --reason) reason=$2; shift 2 ;;
       *) die "add: unknown argument '$1'" ;;
     esac
   done
@@ -207,10 +215,17 @@ cmd_add() {
     prompt=$(cat "$prompt_file")
   fi
   [ -n "$prompt" ] || die "add: --prompt or --prompt-file is required - his own words, verbatim"
+  # See cmd_status's matching check: the server enforces this too, but fail
+  # here rather than spend a round-trip on the obvious case.
+  if [ "$status" = needs_attention ] && [ -z "$reason" ]; then
+    die "add: --status needs-attention requires --reason - say what he needs to decide, approve, or supply"
+  fi
   local body
   body=$(jq -n --arg t "$title" --arg c "$captain" --arg p "$prompt" --arg a "$agent" \
-              --arg s "$status" --arg r "$ref" \
-    '{title:$t, captain:$c, initial_prompt:$p, agent:$a, status:$s} + (if $r=="" then {} else {backlog_ref:$r} end)')
+              --arg s "$status" --arg r "$ref" --arg rs "$reason" \
+    '{title:$t, captain:$c, initial_prompt:$p, agent:$a, status:$s}
+     + (if $r=="" then {} else {backlog_ref:$r} end)
+     + (if $rs=="" then {} else {reason:$rs} end)')
   dash_call POST /api/tasks "$body" | row_line
 }
 
@@ -316,6 +331,12 @@ cmd_status() {
       *) die "status: unknown argument '$1'" ;;
     esac
   done
+  # needs_attention is the loudest status on the board and claims him; the
+  # server also enforces this (and further refuses a report-shaped reason),
+  # but fail here too rather than spend a round-trip on the obvious case.
+  if [ "$status" = needs_attention ] && [ -z "$reason" ]; then
+    die "status: needs-attention requires --reason - say what he needs to decide, approve, or supply"
+  fi
   local body
   body=$(jq -n --arg s "$status" --arg w "$waiting_on" --arg r "$reason" \
     '{status:$s} + (if $w=="" then {} else {waiting_on_id:$w} end) + (if $r=="" then {} else {reason:$r} end)')

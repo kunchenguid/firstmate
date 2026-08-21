@@ -199,20 +199,26 @@ class Store:
         agent: str = "",
         status: str = "not_started",
         backlog_ref: str | None = None,
+        needs_attention_reason: str | None = None,
     ) -> dict:
         if captain not in CAPTAINS:
             raise ValueError(f"unknown captain: {captain!r}")
         if status not in STATUSES:
             raise ValueError(f"unknown status: {status!r}")
+        # Mirrors set_status: the reason column is only ever populated for
+        # the status it belongs to, so a later transition away from
+        # needs_attention can't leave a stale reason rendering on the card.
+        needs_attention_reason = needs_attention_reason if status == "needs_attention" else None
         ts = now_iso()
         with self._cursor(write=True) as cur:
             task_id = self._new_id(cur, title)
             cur.execute(
                 """INSERT INTO tasks
                    (id, title, agent, captain, status, waiting_on_id, waiting_reason,
-                    starred, backlog_ref, initial_prompt, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, NULL, NULL, 0, ?, ?, ?, ?)""",
-                (task_id, title, agent, captain, status, backlog_ref, initial_prompt, ts, ts),
+                    needs_attention_reason, starred, backlog_ref, initial_prompt, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, 0, ?, ?, ?, ?)""",
+                (task_id, title, agent, captain, status, needs_attention_reason,
+                 backlog_ref, initial_prompt, ts, ts),
             )
             cur.execute(
                 """INSERT INTO status_history (task_id, from_status, to_status, changed_at, note)
