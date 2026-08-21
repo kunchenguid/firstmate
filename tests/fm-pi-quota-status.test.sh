@@ -796,6 +796,18 @@ for (const field of ["error", "retryAfter", "remedyCommand"]) {
     `fresh provider with ${field} was accepted as fresh`,
   );
 }
+const codexWithApiSource = structuredClone(schema5Full);
+codexWithApiSource.providers[1].source = "api";
+codexWithApiSource.providers[1].state.sourcesTried = ["api"];
+codexWithApiSource.providers[1].attempts = [{ source: "api", status: "success" }];
+const codexWithApiSourceParsed = parseQuotaAxiJson(
+  JSON.stringify(codexWithApiSource),
+  { projection: "full" },
+);
+assert(
+  selectActiveProviderQuota(codexWithApiSourceParsed, "openai-codex", { nowMs: now }).kind === "malformed",
+  "producer-impossible Codex API source was accepted as fresh",
+);
 const scopedCodexReport = structuredClone(schema5Full);
 scopedCodexReport.providers = [scopedCodexReport.providers[1]];
 assert(
@@ -2344,6 +2356,25 @@ assert(
   "models.json API overlay invoked quota-axi",
 );
 await modelsJsonOverlay.emit("session_shutdown", { reason: "quit" });
+
+await writeFile(`${process.env.PI_CODING_AGENT_DIR}/models.json`, `{
+  // Pi models.json accepts line comments and trailing commas.
+  "providers": {
+    "unrelated-provider": {
+      "baseUrl": "https://example.invalid/api",
+    },
+  },
+}`);
+const commentedModelsJson = makePi(createFirstmateQuotaStatusExtension({
+  refreshMs: 60_000,
+  timeoutMs: 500,
+}));
+await commentedModelsJson.emit("session_start", { reason: "startup" });
+await waitFor(
+  () => commentedModelsJson.widgetText(400).includes("week 94% left"),
+  `valid commented models.json suppressed quota: ${commentedModelsJson.widgetText(400)}`,
+);
+await commentedModelsJson.emit("session_shutdown", { reason: "quit" });
 
 const commandHeaderOptions = {};
 await writeFile(`${process.env.PI_CODING_AGENT_DIR}/models.json`, JSON.stringify({

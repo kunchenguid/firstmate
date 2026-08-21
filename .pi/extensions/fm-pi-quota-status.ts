@@ -893,7 +893,19 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
     | { kind: "ok"; value: unknown }
     | { kind: "missing" | "failed" | "timeout" | "cancelled" | "overflow" };
 
-  function readBoundedJson(path: string, signal: AbortSignal): Promise<BoundedJsonResult> {
+  function normalizeModelsJson(input: string): string {
+    return input
+      .replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (match) => (match.startsWith("\"") ? match : ""))
+      .replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (match, tail: string | undefined) => (
+        tail ?? (match.startsWith("\"") ? match : "")
+      ));
+  }
+
+  function readBoundedJson(
+    path: string,
+    signal: AbortSignal,
+    allowModelsJsonSyntax = false,
+  ): Promise<BoundedJsonResult> {
     return new Promise((resolve) => {
       let settled = false;
       let timer: unknown | null = null;
@@ -931,9 +943,10 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           }
           if (bytesRead > maxAuthBytes) return { kind: "overflow" };
           if (bytesRead !== stats.size) return { kind: "failed" };
+          const input = buffer.subarray(0, bytesRead).toString("utf8");
           return {
             kind: "ok",
-            value: JSON.parse(buffer.subarray(0, bytesRead).toString("utf8")) as unknown,
+            value: JSON.parse(allowModelsJsonSyntax ? normalizeModelsJson(input) : input) as unknown,
           };
         } catch (error) {
           return (error as NodeJS.ErrnoException).code === "ENOENT"
@@ -1191,7 +1204,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
           credentialRevision: credentialResult.revision,
         };
       }
-      const modelsResult = await readBoundedJson(modelsFile, signal);
+      const modelsResult = await readBoundedJson(modelsFile, signal, true);
       if (modelsResult.kind === "ok" && modelsProviderHasAuthOverride(
         modelsResult.value,
         model.provider,

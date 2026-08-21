@@ -562,6 +562,10 @@ function validFreshAttemptSource(
       successes[0]?.source === "kimi-code-cli"
     );
   }
+  if (provider === "codex") {
+    return (source === "oauth" || source === "cli-rpc") &&
+      successes.length === 1 && successes[0]?.source === source;
+  }
   return successes.length === 1 && successes[0]?.source === source;
 }
 
@@ -1375,7 +1379,8 @@ function validProviderFields(
     source !== null &&
     status !== null &&
     (status === "fresh"
-      ? !QUOTA_FRESH_PROVIDER_SOURCES.includes(source as (typeof QUOTA_FRESH_PROVIDER_SOURCES)[number])
+      ? !QUOTA_FRESH_PROVIDER_SOURCES.includes(source as (typeof QUOTA_FRESH_PROVIDER_SOURCES)[number]) ||
+        (value.provider === "codex" && source !== "oauth" && source !== "cli-rpc")
       : status === "stale"
         ? source !== "cache"
         : source !== "unavailable")
