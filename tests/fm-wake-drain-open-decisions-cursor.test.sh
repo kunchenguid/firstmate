@@ -347,10 +347,52 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
   pass "an old fold cache is rebuilt once before same-version incremental reads resume"
 }
 
+test_pre_fix_v4_cursor_ghost_default_is_refolded_closed() {
+  local dir state status cursor out probe status_bytes ident probe_bytes
+  dir=$(make_case cursor-v4-ghost-default)
+  state="$dir/state"
+  status="$state/task8.status"
+  cursor="$state/.task8.open-decisions-cursor"
+  out="$dir/drain.out"
+  probe="$dir/probe.tsv"
+
+  # The maxisport journal shape: a bare-corr open whose stated key a later
+  # resolved closes. Under current semantics nothing is open.
+  printf 'blocked: corr=9c91ae0ff46cdca1 [key=instructions-non-parvenues] cause\n' > "$status"
+  printf 'resolved [key=instructions-non-parvenues]: corr=b4085b6e7dee032e corrigee\n' >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "bootstrap drain over the resolved bare-corr journal failed"
+  [ ! -s "$out" ] || fail "current semantics still show an open decision: $(cat "$out")"
+  ident=$(sed -n 's/^ident=//p' "$cursor")
+  [ -n "$ident" ] || fail "bootstrap drain did not persist a file identity"
+  status_bytes=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
+
+  # A version=4 cursor written before the bare-corr fix: the open line folded
+  # under "default" (the stated key was masked by the corr token) and the
+  # resolved was a no-op, so the persisted set carries the ghost forever.
+  {
+    printf 'version=4\n'
+    printf 'offset=%s\n' "$status_bytes"
+    printf 'ident=%s\n' "$ident"
+    printf 'default\tblocked\tcorr=9c91ae0ff46cdca1 [key=instructions-non-parvenues] cause\n'
+  } > "$cursor"
+  : > "$probe"
+
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+    || fail "drain failed while migrating the pre-fix v4 cursor"
+  [ ! -s "$out" ] || fail "the pre-fix v4 cursor kept its ghost default decision open: $(cat "$out")"
+  probe_bytes=$(last_probe_bytes "$probe" "$status")
+  [ "$probe_bytes" = "$status_bytes" ] \
+    || fail "the v4 cursor read $probe_bytes bytes instead of refolding all $status_bytes authoritative bytes"
+
+  pass "a pre-fix v4 cursor's ghost default decision is refolded closed"
+}
+
 test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
 test_same_size_rewrite_is_detected_via_inode_identity
 test_read_failure_preserves_state_for_retry
 test_cursor_cache_read_failure_refolds_without_replaying_unread_status
 test_pre_fix_cursor_refolds_corr_tagged_decision
 test_previous_fold_cache_is_refolded_under_current_semantics
+test_pre_fix_v4_cursor_ghost_default_is_refolded_closed
 test_buried_decision_survives_many_growing_drains_and_resolution_clears_it

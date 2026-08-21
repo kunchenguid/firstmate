@@ -200,6 +200,43 @@ _fm_key_before_colon() {  # <status-line>
 # the line has no colon or no complete token there; slug charset validity is
 # the caller's check via _fm_decision_slug_ok, exactly as for the before-colon
 # position.
+# A bare (no brackets) "corr=<hex>" correlation token may lead the note ahead
+# of the stated "[key=...]" token: bin/fm-brief.sh tells workers to prepend a
+# "corr=<id>" token to a parent status reply, and a worker that states a key
+# in the same colon-first line writes "blocked: corr=<hex> [key=x] note". The
+# corr token would otherwise read as the note head, masking the stated key so
+# the line opens "default" instead of x - and a later "resolved [key=x]: ..."
+# becomes a no-op that leaves "default" open forever, the divergence between
+# the OPEN DECISIONS drain (a decision still open) and "fm-send --resolve-key x"
+# (no open decision with that key). _fm_note_skip_leading_corr drops that one
+# leading corr token so the stated key is honored; it is shared with
+# status_line_note so the note strips the same metadata, keeping the colon-first
+# note identical to the before-colon form.
+_fm_note_skip_leading_corr() {  # <note> -> note with a leading corr=<hex> dropped iff [key= follows
+  local note=$1 first rest
+  first=${note%%[[:space:]]*}
+  case "$first" in
+    corr=[0-9A-Fa-f]*)
+      # Only a hex-only corr value is a real correlation token; a non-hex
+      # value like "corr=xyz" is prose and is left in place.
+      case "${first#corr=}" in
+        ''|*[!0-9A-Fa-f]*) : ;;
+        *)
+          # And only when "[key=" is the very next token, so a [key=x] mentioned
+          # deeper in the note stays prose
+          # (test_mid_note_prose_mention_is_not_a_stated_key) and a corr-only
+          # note keeps its correlation value in the displayed text.
+          rest=${note#"$first"}
+          rest=${rest#"${rest%%[![:space:]]*}"}
+          case "$rest" in
+            \[key=*) note=$rest ;;
+          esac
+          ;;
+      esac
+      ;;
+  esac
+  printf '%s' "$note"
+}
 _fm_key_at_note_head() {  # <status-line> -> raw slug
   local rest
   case "$1" in
@@ -207,6 +244,7 @@ _fm_key_at_note_head() {  # <status-line> -> raw slug
     *) return 1 ;;
   esac
   rest=${rest#"${rest%%[![:space:]]*}"}
+  rest=$(_fm_note_skip_leading_corr "$rest")
   case "$rest" in
     \[key=*\]*) rest=${rest#\[key=}; printf '%s' "${rest%%\]*}" ;;
     *) return 1 ;;
@@ -227,9 +265,13 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   esac
   # A note-head token that states this line's key (no before-colon token, valid
   # slug) is key metadata, not note text: strip it so both stated-key positions
-  # yield the same note.
+  # yield the same note. A leading bare corr=<hex> correlation token preceding
+  # that note-head key is the same metadata and is stripped through the same
+  # helper, so the colon-first note matches the before-colon form and a
+  # reserved-key vocabulary check reaches its "pending-reply...:" token.
   if ! _fm_key_before_colon "$1" && k=$(_fm_key_at_note_head "$1") \
     && _fm_decision_slug_ok "$k"; then
+    n=$(_fm_note_skip_leading_corr "$n")
     n=${n#"[key=$k]"}
     n=${n#"${n%%[![:space:]]*}"}
   fi
@@ -437,7 +479,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=4
+FM_OPEN_DECISIONS_FOLD_VERSION=5
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure

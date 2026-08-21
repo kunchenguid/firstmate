@@ -259,6 +259,117 @@ test_incremental_agrees_with_full_fold_across_appends() {
   pass "the incremental fold matches the full fold across appends in both key positions"
 }
 
+# A bare (no brackets) "corr=<hex>" correlation token is what bin/fm-brief.sh
+# tells workers to prepend to a parent status reply, and a worker may state the
+# decision key right after it: "blocked: corr=<hex> [key=x] note". The corr
+# token lands AFTER the colon, ahead of the "[key=...]" note-head token. Before
+# the fix, the fold read "corr=..." as the note head and missed the stated key,
+# so the line opened "default" instead of x; a later "resolved [key=x]: ..."
+# then closed a key that was never opened, leaving "default" open forever - the
+# divergence between the OPEN DECISIONS drain (showing a decision still open)
+# and "fm-send --resolve-key x" (refusing: no open decision with that key).
+# These cases pin the fix: the leading corr token is skipped, the stated key is
+# honored, and a matching resolution closes it regardless of either line's corr.
+test_bare_corr_prefix_then_key_opens_under_stated_key() {
+  local dir expected
+  dir=$(case_dir bare-corr-open)
+  # The exact maxisport shape: bare corr=<hex> after the colon, [key=...] next,
+ # then the note. Must open under the stated key, NOT "default".
+  printf 'blocked: corr=9c91ae0ff46cdca1 [key=instructions-non-parvenues] AGENTS.md relu\n' \
+    > "$dir/t.status"
+  expected=$(printf 'instructions-non-parvenues\tblocked\tAGENTS.md relu\n')
+  assert_fold "$dir/t.status" "$expected" "bare corr prefix opens under the stated key"
+  pass "a leading bare corr=<hex> token no longer masks the stated [key=...]"
+}
+
+test_bare_corr_prefix_open_closed_by_resolved() {
+  local dir
+  dir=$(case_dir bare-corr-close)
+  # The reproduction: open with a bare corr prefix + [key=...], close with a
+  # documented before-colon "resolved [key=...]:" carrying a DIFFERENT corr.
+  # The two readers must agree: CLOSED (empty fold), regardless of corr.
+  printf 'blocked: corr=9c91ae0ff46cdca1 [key=instructions-non-parvenues] cause\n' > "$dir/t.status"
+  printf 'resolved [key=instructions-non-parvenues]: corr=b4085b6e7dee032e cause corrigee\n' >> "$dir/t.status"
+  assert_fold "$dir/t.status" "" "bare-corr open closed by a different-corr resolved"
+
+  # Mirror: open documented, close colon-first with a bare corr prefix ahead of
+  # the stated key - the close must still take effect.
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$dir/m.status"
+  printf 'resolved: corr=abcdef0123456789 [key=api-shape] went with REST\n' >> "$dir/m.status"
+  assert_fold "$dir/m.status" "" "colon-first resolved with bare corr prefix closes"
+  pass "a decision closed by a later resolved is CLOSED regardless of either corr"
+}
+
+test_bare_corr_prefix_key_stays_open_when_unresolved() {
+  local dir expected
+  dir=$(case_dir bare-corr-unresolved)
+  # No behavior change for a genuinely open decision: the stated key is surfaced
+  # as open (under its real key, not "default") so fm-send --resolve-key can
+  # close it, and the drain lists the real key.
+  printf 'blocked: corr=9c91ae0ff46cdca1 [key=instructions-non-parvenues] cause\n' > "$dir/t.status"
+  printf 'working: routine progress note\n' >> "$dir/t.status"
+  expected=$(printf 'instructions-non-parvenues\tblocked\tcause\n')
+  assert_fold "$dir/t.status" "$expected" "unresolved bare-corr decision stays open under its key"
+  pass "a truly open bare-corr decision is still surfaced as open under the stated key"
+}
+
+test_bare_corr_prefix_does_not_swallow_mid_note_prose() {
+  local dir
+  dir=$(case_dir bare-corr-prose)
+  # The corr skip is narrow: only a leading corr=<hex> token IMMEDIATELY
+  # followed by "[key=" is dropped. A [key=x] mentioned deeper in the note is
+  # still prose, so the line opens "default" exactly like a bare keyless line.
+  printf 'needs-decision: corr=9c91ae0ff46cdca1 pick a [key=red] or [key=blue] theme\n' \
+    > "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'default\tneeds-decision\tcorr=9c91ae0ff46cdca1 pick a [key=red] or [key=blue] theme\n')" \
+    "mid-note prose mention after a corr prefix"
+
+  # A corr token whose value is not hex (corr=xyz) is not a recognized
+  # correlation token, so it is not skipped even when [key=...] follows it:
+  # the line opens "default", and the corr text stays note text.
+  printf 'needs-decision: corr=xyz [key=red] which shade\n' > "$dir/bad.status"
+  assert_fold "$dir/bad.status" \
+    "$(printf 'default\tneeds-decision\tcorr=xyz [key=red] which shade\n')" \
+    "non-hex corr value is not skipped"
+  pass "the corr skip stays narrow: mid-note prose and non-hex corr are not keys"
+}
+
+test_bare_corr_prefix_reserved_key_vocabulary_passes() {
+  local dir
+  dir=$(case_dir bare-corr-reserved)
+  # A reserved pending-reply-<id> key whose line carries a bare corr prefix
+  # before its stated [key=...] must still open AND close under that key: the
+  # corr skip lets status_line_note reach the "pending-reply...:" vocabulary
+  # the reserved-key guard requires, so a correlated pending-reply resolution
+  # is not silently rejected as an unrelated transition.
+  printf 'blocked: corr=abcdef0123456789 [key=pending-reply-24b00d3d6a6fe5d1] pending-reply-resolved: task=t via=status\n' \
+    > "$dir/t.status"
+  printf 'resolved [key=pending-reply-24b00d3d6a6fe5d1]: pending-reply-resolved: task=t via=status\n' \
+    >> "$dir/t.status"
+  assert_fold "$dir/t.status" "" "bare-corr reserved key opens and closes"
+  pass "a bare corr prefix does not block a reserved pending-reply key's vocabulary"
+}
+
+test_bare_corr_prefix_tolerates_a_whitespace_run_before_key() {
+  local dir expected
+  dir=$(case_dir bare-corr-spacing)
+  # The gap between the corr token and "[key=" is a whitespace RUN, exactly as
+  # the keyless head trim tolerates: two spaces (or tab+space) must not mask
+  # the stated key one space away from the single-space form.
+  printf 'blocked: corr=9c91ae0ff46cdca1  [key=instructions-non-parvenues] cause\n' \
+    > "$dir/two.status"
+  expected=$(printf 'instructions-non-parvenues\tblocked\tcause\n')
+  assert_fold "$dir/two.status" "$expected" "two spaces between corr and the stated key"
+  printf 'resolved [key=instructions-non-parvenues]: corrigee\n' >> "$dir/two.status"
+  assert_fold "$dir/two.status" "" "two-space bare-corr open closed by resolved"
+
+  printf 'blocked: corr=9c91ae0ff46cdca1\t [key=instructions-non-parvenues] cause\n' \
+    > "$dir/tab.status"
+  assert_fold "$dir/tab.status" "$expected" "tab+space between corr and the stated key"
+  pass "a whitespace run between corr and the stated [key=...] is still skipped"
+}
+
 test_stated_key_is_honored_in_both_positions
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
@@ -272,3 +383,9 @@ test_corr_only_tag_opens_as_default_like_a_bare_line
 test_key_only_before_colon_still_opens_no_regression
 test_blocked_and_resolved_are_tag_order_independent
 test_incremental_agrees_with_full_fold_across_appends
+test_bare_corr_prefix_then_key_opens_under_stated_key
+test_bare_corr_prefix_open_closed_by_resolved
+test_bare_corr_prefix_key_stays_open_when_unresolved
+test_bare_corr_prefix_does_not_swallow_mid_note_prose
+test_bare_corr_prefix_reserved_key_vocabulary_passes
+test_bare_corr_prefix_tolerates_a_whitespace_run_before_key
