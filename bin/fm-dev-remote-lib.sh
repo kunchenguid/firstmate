@@ -26,12 +26,22 @@
 # %(upstream:short) on the first "/": a short upstream is only "<remote>/<branch>"
 # for a remote-tracking upstream fetched under the default refspec. A branch
 # tracking a LOCAL branch (branch.<name>.remote = ".") prints a bare branch
-# name, and a non-default fetch refspec prints a tracking path whose first
-# component is not a remote name at all - both of which would otherwise hand
+# name there, and a non-default fetch refspec prints the mapped tracking path,
+# whose first component is not a remote name - either would otherwise hand
 # every caller a remote that does not exist, and callers treat that as
 # authoritative (fast-forward and pooled-worktree provisioning both refuse
-# outright on an unknown remote). Neither is an upstream this resolver can
-# fetch from, so both take the announced origin fallback. Sets:
+# outright on an unknown remote).
+#
+# The two atoms are exact where the split was not: remotename is the real
+# remote regardless of fetch refspec, and remoteref is always the upstream's
+# refs/heads/<branch> on it. Only two shapes take the announced origin
+# fallback: no upstream at all, and a local-branch upstream (remotename "."),
+# which names no remote to fetch from. A non-default fetch refspec resolves
+# normally to <remote>/<branch>; note that RESOLVE_BASE_REF then names the ref
+# a caller's own explicit-refspec fetch creates, NOT the path that remote's
+# refspec maps to, so a caller that instead runs a plain `git fetch <remote>`
+# finds the ref absent and skips (safe, and visible as "does not exist").
+# Sets:
 #   RESOLVE_BASE_REMOTE = remote to fetch (e.g. "fork" or "origin")
 #   RESOLVE_BASE_BRANCH = branch name on that remote (usually <default>)
 #   RESOLVE_BASE_REF    = "<remote>/<branch>", the fast-forward/diff base

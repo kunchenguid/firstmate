@@ -204,6 +204,7 @@ family_for_basename() {
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
+    fm-spawn-pool-base-freshen.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
@@ -1008,7 +1009,19 @@ families_for_changed_path() {
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
     bin/fm-vendor-auth-probe.sh|\
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
-    bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
+    bin/fm-gotmp*|bin/*pretool*)
+      printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-ff-lib.sh)
+      # The shared guarded fast-forward. Its owning suites are the ones that
+      # drive ff_target and default_branch for real - the self-update and
+      # bootstrap paths, the secondmate stow cascade and config push, spawn's
+      # pooled worktree base, and the fleet snapshot - not merely whichever
+      # suites happen to name the file.
+      printf '%s\n' session-bootstrap
+      printf '%s\n' secondmate
+      printf '%s\n' backend-dispatch
+      printf '%s\n' snapshot-bearings
       printf '%s\n' pure-contract-unit
       ;;
     .agents/skills/quota-array-dispatch/SKILL.md)
