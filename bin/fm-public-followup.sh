@@ -1131,6 +1131,7 @@ cmd_rechain() {
 
 cmd_retire() {
   local id=${1:-} force=0 reason='' payload delivery task_state registry_file retired_dir retired_at
+  local retirement_rc=0
   [ -n "$id" ] || { usage; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1165,14 +1166,23 @@ cmd_retire() {
   fi
   retired_dir="$STATE/$FM_PF_DIRNAME/retired"
   retired_at=$(now_rfc3339)
+  registry_file="$(fm_pf_registry_dir "$STATE")/$id"
+  fm_pf_registry_lock_acquire "$STATE" "$id" \
+    || die "could not lock registration '$id' for retirement" 1
   printf 'reason=%s\nretired_at=%s\n' "$reason" "$retired_at" \
     | fmx_private_artifact_publish_stdin "$retired_dir" "$id" 600 \
-    || die "could not record the retirement reason for '$id'; the public loop remains open" 1
-  registry_file="$(fm_pf_registry_dir "$STATE")/$id"
-  if ! rm -f -- "$registry_file" 2>/dev/null \
-      || [ -e "$registry_file" ] || [ -L "$registry_file" ]; then
-    die "could not remove registration for '$id'; the public loop remains open" 1
+    || retirement_rc=1
+  if [ "$retirement_rc" -eq 0 ]; then
+    if ! rm -f -- "$registry_file" 2>/dev/null \
+        || [ -e "$registry_file" ] || [ -L "$registry_file" ]; then
+      retirement_rc=2
+    fi
   fi
+  fm_pf_registry_lock_release "$STATE" "$id"
+  case "$retirement_rc" in
+    1) die "could not record the retirement reason for '$id'; the public loop remains open" 1 ;;
+    2) die "could not remove registration for '$id'; the public loop remains open" 1 ;;
+  esac
   printf 'retired %s reason=%s\n' "$id" "$reason"
 }
 

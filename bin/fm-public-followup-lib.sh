@@ -320,19 +320,45 @@ EOF
   return 1
 }
 
+fm_pf_registry_lock_path() {
+  printf '%s/.registry-%s.lock\n' "$(fm_pf_root "$1")" "$2"
+}
+
+fm_pf_registry_lock_acquire() {
+  local state=$1 id=$2
+  fm_pf_slug_valid "$id" || return 1
+  fmx_private_artifact_dir_prepare "$(fm_pf_root "$state")" >/dev/null || return 1
+  if ! command -v fm_lock_acquire_wait >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$_FM_PF_LIB_DIR/fm-wake-lib.sh"
+  fi
+  fm_lock_acquire_wait "$(fm_pf_registry_lock_path "$state" "$id")"
+}
+
+fm_pf_registry_lock_release() {
+  fm_lock_release "$(fm_pf_registry_lock_path "$1" "$2")"
+}
+
 # fm_pf_registry_stamp_delivered <state> <id> <rfc3339>: rewrite one record
 # with state=delivered and delivered_at, keeping every other field. The record
 # stays; only retire removes it.
 fm_pf_registry_stamp_delivered() {
-  local state=$1 id=$2 delivered_at=$3 file rest
+  local state=$1 id=$2 delivered_at=$3 file rest rc=0
   fm_pf_slug_valid "$id" || return 1
   [ -n "$delivered_at" ] || return 1
+  fm_pf_registry_lock_acquire "$state" "$id" || return 1
   file="$(fm_pf_registry_dir "$state")/$id"
-  [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  rest=$(grep -v -E '^(state|delivered_at|delivered_obligation)=' "$file" 2>/dev/null || true)
-  printf '%s\nstate=delivered\ndelivered_at=%s\ndelivered_obligation=%s\n' \
-    "$rest" "$delivered_at" "$id" \
-    | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$state")" "$id" 600
+  if [ -f "$file" ] && [ ! -L "$file" ]; then
+    rest=$(grep -v -E '^(state|delivered_at|delivered_obligation)=' "$file" 2>/dev/null || true)
+    printf '%s\nstate=delivered\ndelivered_at=%s\ndelivered_obligation=%s\n' \
+      "$rest" "$delivered_at" "$id" \
+      | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$state")" "$id" 600 \
+      || rc=$?
+  else
+    rc=1
+  fi
+  fm_pf_registry_lock_release "$state" "$id"
+  return "$rc"
 }
 
 # --- pending-event signature ------------------------------------------------
