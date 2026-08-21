@@ -54,9 +54,12 @@ REQUEST_SCHEMA = "fm.worker-provider-request/v1"
 RESPONSE_SCHEMA = "fm.worker-provider-response/v1"
 INVENTORY_SCHEMA = "fm.worker-provider-inventory/v1"
 EXECUTION_TERMINAL_SCHEMA = "fm.worker-execution-terminal/v1"
+EXECUTION_RESULT_SCHEMA = "fm.worker-execution-result/v1"
 EXECUTE_DISPOSITION_SUBMIT = "submit"
 EXECUTE_DISPOSITION_TERMINAL = "terminal"
 EXECUTE_DISPOSITION_RECOVERED = "recovered"
+EXECUTION_REQUEST_TAG = "execution-request-digest"
+EXECUTION_IDEMPOTENCY_TAG = "execution-idempotency-key"
 MAX_INPUT_BYTES = 2 * 1024 * 1024
 # The one blob name the guest may create, and the ceiling the supervisor
 # enforces before it uploads; both sides bound the same transfer. The name
@@ -2602,25 +2605,134 @@ printf 'FM-WORKER-RESULT:%s\\n' "$(cat /var/lib/firstmate-worker/result.json)"
     )
 
 
-def execute_terminal_disposition(controller, action, task_command_resource):
+def initial_execute_staging_pair(action):
+    try:
+        supervisor_bytes = (ROOT / "bin" / "fm-worker-supervisor.py").read_bytes()
+    except OSError as exc:
+        raise ProviderError(
+            "exact initial worker supervisor is unreadable: {}".format(str(exc)[:300])
+        ) from None
+    supervisor_digest = hashlib.sha256(supervisor_bytes).hexdigest()
+    return {
+        "staging-request": {
+            "schema": "fm.worker-staging-request/v1",
+            "status": "assigned",
+            "slot": action["slot"],
+            "bindings": action["bindings"],
+            "supervisor_sha256": supervisor_digest,
+        },
+        "staging-result": {
+            "schema": "fm.worker-staging-result/v1",
+            "status": "pending",
+            "assignment_generation": action["bindings"]["assignment_generation"],
+        },
+    }
+
+
+def initial_execute_staging_is_exact(action, resources):
+    for kind, value in initial_execute_staging_pair(action).items():
+        payload = canonical_bytes(value) + b"\n"
+        resource = resources.get(kind) or {}
+        if (
+            resource.get("digest") != hashlib.sha256(payload).hexdigest()
+            or resource.get("length") != len(payload)
+        ):
+            return False
+    return True
+
+
+def run_command_execution_binding(live):
+    properties = live.get("properties") or {}
+    tags = live.get("tags") or properties.get("tags") or {}
+    request_digest = tags.get(EXECUTION_REQUEST_TAG)
+    idempotency_key = tags.get(EXECUTION_IDEMPOTENCY_TAG)
+    if request_digest is None and idempotency_key is None:
+        return None
+    if (
+        not isinstance(request_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", request_digest)
+        or not isinstance(idempotency_key, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", idempotency_key)
+    ):
+        raise ProviderError("worker task Run Command execution binding tags are malformed")
+    return request_digest, idempotency_key
+
+
+def exact_execution_marker(view):
+    execution = marker_payload(
+        "{}\n{}".format(view.get("output", ""), view.get("error", "")),
+        "FM-WORKER-RESULT:",
+    )
+    if execution is None:
+        return None
+    if not isinstance(execution, dict) or execution.get("schema") != EXECUTION_RESULT_SCHEMA:
+        raise ProviderError("worker task Run Command result marker schema is not exact")
+    supplied = execution.get("result_digest")
+    unsigned = dict(execution)
+    unsigned.pop("result_digest", None)
+    if supplied != hashlib.sha256(canonical_bytes(unsigned)).hexdigest():
+        raise ProviderError("recovered private worker result digest is not exact")
+    return execution
+
+
+def execute_terminal_disposition(controller, action, resources):
+    task_command_resource = resources.get("task-command") if isinstance(resources, dict) else None
     if not isinstance(task_command_resource, dict) or not task_command_resource.get("id"):
         return EXECUTE_DISPOSITION_SUBMIT, None
     live = show_full(controller, task_command_resource["id"])
     properties = live.get("properties") or {}
     source = properties.get("source") or live.get("source") or {}
     stored_script = source.get("script") if isinstance(source, dict) else None
-    if not isinstance(stored_script, str) or not stored_script.strip():
-        raise ProviderError("existing worker task Run Command source script is unreadable")
     expected_script = build_execute_script(action)
     request_digest = action.get("request_digest")
-    exact_script = stored_script == expected_script
+    idempotency_key = action.get("idempotency_key")
+    binding = run_command_execution_binding(live)
+    current_binding = (request_digest, idempotency_key)
+    substantive_script = isinstance(stored_script, str) and bool(stored_script.strip())
+    exact_script = substantive_script and stored_script == expected_script
     fallback_bound = (
-        isinstance(request_digest, str)
+        substantive_script
+        and isinstance(request_digest, str)
         and re.fullmatch(r"[0-9a-f]{64}", request_digest)
         and request_digest in stored_script
         and execute_generation_line(action) in stored_script.splitlines()
     )
-    if not exact_script and not fallback_bound:
+    view = None
+    if binding is not None and binding != current_binding:
+        if exact_script or fallback_bound:
+            raise ProviderError("worker task Run Command script and execution binding tags disagree")
+        view = run_command_instance_view(
+            controller, expected_names(controller, action["slot"])["vm"],
+            expected_names(controller, action["slot"])["task-command"],
+        )
+        previous = exact_execution_marker(view)
+        if (
+            view.get("executionState") == "Succeeded"
+            and isinstance(previous, dict)
+            and previous.get("request_digest") == binding[0]
+        ):
+            return EXECUTE_DISPOSITION_SUBMIT, None
+        raise ProviderError("worker task Run Command has an ambiguous prior execution binding")
+    if not substantive_script:
+        if binding is None:
+            if not initial_execute_staging_is_exact(action, resources):
+                raise ProviderError(
+                    "existing worker task Run Command source is unreadable outside the exact initial staging state"
+                )
+            view = run_command_instance_view(
+                controller, expected_names(controller, action["slot"])["vm"],
+                expected_names(controller, action["slot"])["task-command"],
+            )
+            if (
+                view.get("executionState") == "Failed"
+                and str(view.get("exitCode")) == "-202"
+                and exact_execution_marker(view) is None
+            ):
+                return EXECUTE_DISPOSITION_SUBMIT, None
+            raise ProviderError("worker task Run Command does not prove the exact initial preflight stub")
+    elif not exact_script and not fallback_bound:
+        if binding == current_binding:
+            raise ProviderError("worker task Run Command source disagrees with its exact execution binding")
         return EXECUTE_DISPOSITION_SUBMIT, None
     provisioning_state = properties.get("provisioningState") or live.get("provisioningState")
     if str(provisioning_state).lower() in ("failed", "canceled"):
@@ -2639,24 +2751,16 @@ def execute_terminal_disposition(controller, action, task_command_resource):
             )
         )
     names = expected_names(controller, action["slot"])
-    view = run_command_instance_view(controller, names["vm"], names["task-command"])
+    view = view or run_command_instance_view(controller, names["vm"], names["task-command"])
     if view.get("executionState") != "Succeeded":
         raise ProviderError(
             "exact worker execution has no recoverable terminal result: state={}".format(
                 view.get("executionState")
             )
         )
-    execution = marker_payload(
-        "{}\n{}".format(view.get("output", ""), view.get("error", "")),
-        "FM-WORKER-RESULT:",
-    )
+    execution = exact_execution_marker(view)
     if not isinstance(execution, dict) or execution.get("request_digest") != request_digest:
         raise ProviderError("exact worker execution has no request-bound result marker")
-    supplied = execution.get("result_digest")
-    unsigned = dict(execution)
-    unsigned.pop("result_digest", None)
-    if supplied != hashlib.sha256(canonical_bytes(unsigned)).hexdigest():
-        raise ProviderError("recovered private worker result digest is not exact")
     return EXECUTE_DISPOSITION_RECOVERED, execution
 
 
@@ -2703,7 +2807,7 @@ def mutate_execute(controller, action):
     names = expected_names(controller, action["slot"])
     tags = action_tags(controller, action)
     disposition, recovered = execute_terminal_disposition(
-        controller, action, resources.get("task-command")
+        controller, action, resources
     )
     if disposition in (EXECUTE_DISPOSITION_TERMINAL, EXECUTE_DISPOSITION_RECOVERED):
         if disposition == EXECUTE_DISPOSITION_RECOVERED:
@@ -2721,9 +2825,9 @@ def mutate_execute(controller, action):
     # the archives ride private blobs and reach the guest over short-lived
     # read-only user-delegation SAS bounded to the wall plus collection slack.
     # The SAS URLs travel as PROTECTED run-command parameters: ARM GET and
-    # az vm run-command show return source.script but never protected
-    # parameters, so the account-archive SAS is not readable off the control
-    # plane for its validity window. The managed run-command agent delivers
+    # az vm run-command show expose the ordinary resource and binding tags but
+    # never protected parameters, so the account-archive SAS is not readable
+    # off the control plane for its validity window. The managed agent delivers
     # parameters as environment variables for the script process, which the
     # supervisor inherits.
     protected_parameters = []
@@ -2766,6 +2870,11 @@ def mutate_execute(controller, action):
             raise ProviderError("outcome staging SAS carries unsupported characters")
         protected_parameters.append("FM_WORKER_OUTCOME_URL=" + outcome_sas)
     script = build_execute_script(action)
+    execution_tags = dict(tags)
+    execution_tags.update({
+        EXECUTION_REQUEST_TAG: action["request_digest"],
+        EXECUTION_IDEMPOTENCY_TAG: action["idempotency_key"],
+    })
     update_command = [
         "vm", "run-command", "update", "--resource-group", controller["resource_group"],
         "--vm-name", names["vm"], "--name", names["task-command"],
@@ -2775,6 +2884,9 @@ def mutate_execute(controller, action):
         # the client still blocked. bin/fm-azure-runner.py and
         # bin/fm-azure-validation.py both set it for the same reason.
         "--timeout-in-seconds", str(int(request["wall_seconds"]) + GUEST_RUN_SLACK_SECONDS),
+        "--tags",
+    ] + [
+        "{}={}".format(key, value) for key, value in sorted(execution_tags.items())
     ]
     if protected_parameters:
         update_command += ["--protected-parameters"] + protected_parameters
@@ -2795,16 +2907,9 @@ def mutate_execute(controller, action):
         raise ProviderError("private worker execution did not complete in the guest: state={} error={}".format(
             view.get("executionState"), str(view.get("error", ""))[:500]
         ))
-    execution = marker_payload(
-        "{}\n{}".format(view.get("output", ""), view.get("error", "")), "FM-WORKER-RESULT:"
-    )
+    execution = exact_execution_marker(view)
     if execution is None:
         raise ProviderError("private worker execution returned no exact result")
-    supplied = execution.get("result_digest")
-    unsigned = dict(execution)
-    unsigned.pop("result_digest", None)
-    if supplied != hashlib.sha256(canonical_bytes(unsigned)).hexdigest():
-        raise ProviderError("private worker result digest is not exact")
     persist_execute_result(controller, action, names, tags, execution)
     return worker_by_slot(inventory(controller, include_metrics=False), action["slot"]), execution
 

@@ -569,7 +569,7 @@ module.show_full = lambda *_args, **_kwargs: {
     "properties": {"source": {"script": script}, "provisioningState": "Failed"}
 }
 terminal_kind, terminal = module.execute_terminal_disposition(
-    controller, execute_action, task_command
+    controller, execute_action, worker["resources"]
 )
 assert terminal_kind == module.EXECUTE_DISPOSITION_TERMINAL, terminal_kind
 assert terminal == {
@@ -585,7 +585,7 @@ module.show_full = lambda *_args, **_kwargs: {
                    "provisioningState": "Canceled"}
 }
 fallback_kind, fallback_terminal = module.execute_terminal_disposition(
-    controller, execute_action, task_command
+    controller, execute_action, worker["resources"]
 )
 assert fallback_kind == module.EXECUTE_DISPOSITION_TERMINAL, fallback_kind
 assert fallback_terminal["disposition"] == "provider-terminal", fallback_terminal
@@ -593,13 +593,13 @@ stale_script = script.replace(execute_action["request_digest"], "9" * 64)
 module.show_full = lambda *_args, **_kwargs: {
     "properties": {"source": {"script": stale_script}, "provisioningState": "Failed"}
 }
-assert module.execute_terminal_disposition(controller, execute_action, task_command) == (
+assert module.execute_terminal_disposition(controller, execute_action, worker["resources"]) == (
     module.EXECUTE_DISPOSITION_SUBMIT, None
 )
 module.show_full = lambda *_args, **_kwargs: {
     "properties": {"source": {"script": "echo unrelated"}, "provisioningState": "Failed"}
 }
-assert module.execute_terminal_disposition(controller, execute_action, task_command) == (
+assert module.execute_terminal_disposition(controller, execute_action, worker["resources"]) == (
     module.EXECUTE_DISPOSITION_SUBMIT, None
 )
 execution = {
@@ -622,7 +622,7 @@ module.run_command_instance_view = lambda *_args, **_kwargs: {
     "error": "",
 }
 recovered_kind, recovered_execution = module.execute_terminal_disposition(
-    controller, execute_action, task_command
+    controller, execute_action, worker["resources"]
 )
 assert recovered_kind == module.EXECUTE_DISPOSITION_RECOVERED, recovered_kind
 assert recovered_execution == execution, recovered_execution
@@ -638,7 +638,8 @@ real_upload_json_blob = module.upload_json_blob
 real_az = module.az
 module.inventory = lambda *_args, **_kwargs: {"workers": [worker]}
 module.worker_by_slot = lambda _snapshot, _slot: worker
-module.recorded_exact = lambda _action, _worker: worker["resources"]
+active_resources = {"value": worker["resources"]}
+module.recorded_exact = lambda _action, _worker: active_resources["value"]
 updates = []
 def forbidden_update(*_args, **_kwargs):
     updates.append("update")
@@ -661,6 +662,58 @@ retained_execute({"provisioningState": "Succeeded"})
 retained_execute({"source": {"script": None}, "provisioningState": "Succeeded"})
 retained_execute({"source": {"script": ""}, "provisioningState": "Succeeded"})
 retained_execute({"source": {"script": " \n\t"}, "provisioningState": "Succeeded"})
+retained_execute(
+    {
+        "tags": {
+            module.EXECUTION_REQUEST_TAG: execute_action["request_digest"],
+            module.EXECUTION_IDEMPOTENCY_TAG: execute_action["idempotency_key"],
+        },
+        "provisioningState": "Succeeded",
+    },
+    {"executionState": "Succeeded", "output": "", "error": ""},
+)
+retained_execute(
+    {
+        "source": {"script": "echo prior execution"},
+        "tags": {
+            module.EXECUTION_REQUEST_TAG: "9" * 64,
+            module.EXECUTION_IDEMPOTENCY_TAG: "8" * 64,
+        },
+        "provisioningState": "Succeeded",
+    },
+    {"executionState": "Succeeded", "output": "", "error": ""},
+)
+prior_execution = dict(execution, request_digest="9" * 64)
+prior_execution.pop("result_digest", None)
+prior_execution["result_digest"] = hashlib.sha256(
+    module.canonical_bytes(prior_execution)
+).hexdigest()
+module.show_full = lambda *_args, **_kwargs: {
+    "properties": {
+        "source": {"script": "echo prior execution"},
+        "provisioningState": "Succeeded",
+    },
+    "tags": {
+        module.EXECUTION_REQUEST_TAG: "9" * 64,
+        module.EXECUTION_IDEMPOTENCY_TAG: "8" * 64,
+    },
+}
+module.run_command_instance_view = lambda *_args, **_kwargs: {
+    "executionState": "Succeeded",
+    "output": "FM-WORKER-RESULT:" + json.dumps(
+        prior_execution, sort_keys=True, separators=(",", ":")
+    ),
+    "error": "",
+}
+assert module.execute_terminal_disposition(
+    controller, execute_action, active_resources["value"]
+) == (module.EXECUTE_DISPOSITION_SUBMIT, None)
+retained_execute(
+    {
+        "tags": {module.EXECUTION_REQUEST_TAG: execute_action["request_digest"]},
+        "provisioningState": "Succeeded",
+    }
+)
 retained_execute({"source": {"script": script}, "provisioningState": "Updating"})
 retained_execute(
     {"source": {"script": script}, "provisioningState": "Succeeded"},
@@ -681,6 +734,137 @@ retained_execute(
         "error": "",
     },
 )
+
+# The exact initial sentinel depends on the same pinned supervisor bytes used
+# at worker creation. A missing or unreadable local copy is a bounded provider
+# refusal, never an unhandled filesystem exception.
+real_root = module.ROOT
+class UnreadableRoot:
+    def __truediv__(self, _component):
+        return self
+
+    def read_bytes(self):
+        raise OSError("unreadable-" + "x" * 1000)
+
+module.ROOT = UnreadableRoot()
+try:
+    module.initial_execute_staging_pair(execute_action)
+except module.ProviderError as exc:
+    assert str(exc).startswith("exact initial worker supervisor is unreadable: "), exc
+    assert len(str(exc)) <= 350, len(str(exc))
+else:
+    raise AssertionError("unreadable worker supervisor escaped the provider refusal boundary")
+finally:
+    module.ROOT = real_root
+
+# Azure's actual fresh managed Run Command omits source entirely and exposes
+# the async preflight stub as Failed/-202. The exact untouched staging pair is
+# the run-owned proof that this is the one initial submission. Any other exit
+# remains ambiguous. The accepted update atomically carries both execution
+# bindings in its tags, so a replay cannot pass through this initial gate.
+fresh_resources = copy.deepcopy(worker["resources"])
+for kind, value in module.initial_execute_staging_pair(execute_action).items():
+    body = module.canonical_bytes(value) + b"\n"
+    fresh_resources[kind]["digest"] = hashlib.sha256(body).hexdigest()
+    fresh_resources[kind]["length"] = len(body)
+crashed_resources = copy.deepcopy(fresh_resources)
+crashed_resources["staging-request"]["digest"] = "0" * 64
+active_resources["value"] = crashed_resources
+retained_execute(
+    {"provisioningState": "Succeeded"},
+    {"executionState": "Failed", "exitCode": -202, "output": "", "error": ""},
+)
+active_resources["value"] = fresh_resources
+retained_execute(
+    {"provisioningState": "Succeeded"},
+    {"executionState": "Failed", "exitCode": -201, "output": "", "error": ""},
+)
+
+uploaded_json_blobs = []
+def record_json_upload(_controller, _storage, _container, blob_name, *_args, **_kwargs):
+    uploaded_json_blobs.append(blob_name)
+module.upload_json_blob = record_json_upload
+views = iter([
+    {"executionState": "Failed", "exitCode": -202, "output": "", "error": ""},
+    {
+        "executionState": "Succeeded", "exitCode": 0,
+        "output": "FM-WORKER-RESULT:" + json.dumps(
+            execution, sort_keys=True, separators=(",", ":")
+        ),
+        "error": "",
+    },
+])
+module.show_full = lambda *_args, **_kwargs: {
+    "properties": {"provisioningState": "Succeeded"},
+    "tags": dict(tags),
+}
+update_commands = []
+def accept_initial_update(_controller, command, **_kwargs):
+    update_commands.append(command)
+    return {}, 0, ""
+module.az = accept_initial_update
+
+# A just-submitted command is held to the same exact schema and digest parser
+# used during recovery. A self-digested foreign schema must not be persisted.
+wrong_schema_execution = dict(execution, schema="fm.worker-execution-result/v2")
+wrong_schema_execution.pop("result_digest", None)
+wrong_schema_execution["result_digest"] = hashlib.sha256(
+    module.canonical_bytes(wrong_schema_execution)
+).hexdigest()
+wrong_schema_views = iter([
+    {"executionState": "Failed", "exitCode": -202, "output": "", "error": ""},
+    {
+        "executionState": "Succeeded", "exitCode": 0,
+        "output": "FM-WORKER-RESULT:" + json.dumps(
+            wrong_schema_execution, sort_keys=True, separators=(",", ":")
+        ),
+        "error": "",
+    },
+])
+module.run_command_instance_view = lambda *_args, **_kwargs: next(wrong_schema_views)
+try:
+    module.mutate_execute(controller, execute_action)
+except module.ProviderError as exc:
+    assert "result marker schema is not exact" in str(exc), exc
+else:
+    raise AssertionError("wrong-schema submitted execution result was accepted")
+assert len(update_commands) == 1, update_commands
+assert uploaded_json_blobs == [
+    module.expected_names(controller, execute_action["slot"])["staging-request"]
+], uploaded_json_blobs
+
+update_commands.clear()
+uploaded_json_blobs.clear()
+module.run_command_instance_view = lambda *_args, **_kwargs: next(views)
+_, admitted_execution = module.mutate_execute(controller, execute_action)
+assert admitted_execution == execution, admitted_execution
+assert len(update_commands) == 1, update_commands
+assert uploaded_json_blobs == [
+    module.expected_names(controller, execute_action["slot"])["staging-request"],
+    module.expected_names(controller, execute_action["slot"])["staging-result"],
+], uploaded_json_blobs
+submitted = update_commands[0]
+assert "{}={}".format(
+    module.EXECUTION_REQUEST_TAG, execute_action["request_digest"]
+) in submitted, submitted
+assert "{}={}".format(
+    module.EXECUTION_IDEMPOTENCY_TAG, execute_action["idempotency_key"]
+) in submitted, submitted
+
+updates.clear()
+module.upload_json_blob = forbidden_update
+module.az = forbidden_update
+retained_execute(
+    {
+        "tags": {
+            module.EXECUTION_REQUEST_TAG: execute_action["request_digest"],
+            module.EXECUTION_IDEMPOTENCY_TAG: execute_action["idempotency_key"],
+        },
+        "provisioningState": "Succeeded",
+    },
+    {"executionState": "Succeeded", "output": "", "error": ""},
+)
+active_resources["value"] = worker["resources"]
 module.inventory = real_inventory
 module.worker_by_slot = real_worker_by_slot
 module.recorded_exact = real_recorded_exact
@@ -1071,7 +1255,7 @@ if path.exists():
 else:
     state = {
         "workers": {}, "seen": {}, "calls": [], "execute_updates": 0,
-        "execute_terminal_probes": 0,
+        "execute_terminal_probes": 0, "initial_stub_admissions": 0,
         "metrics": {"actual_usd": 100.0, "forecast_usd": 150.0},
     }
 
@@ -1182,6 +1366,11 @@ if request["operation"] == "mutate":
                 )
                 raise SystemExit(3)
     task_command = (live_worker or {}).get("resources", {}).get("task-command", {})
+    if kind == "execute" and os.environ.get("FIXTURE_INITIAL_EXECUTE_STUB"):
+        if task_command.get("execution_request_digest") or task_command.get("execution_idempotency_key"):
+            sys.stderr.write("FIXTURE PROVIDER REFUSED: initial execute stub is already bound\n")
+            raise SystemExit(2)
+        state["initial_stub_admissions"] = state.get("initial_stub_admissions", 0) + 1
     if kind == "execute" and os.environ.get("FIXTURE_UNREADABLE_EXECUTE_SCRIPT"):
         state["execute_terminal_probes"] = state.get("execute_terminal_probes", 0) + 1
         save()
@@ -1278,6 +1467,8 @@ if request["operation"] == "mutate":
             task_command["immutable_id"] = "task-command-execute-{}".format(key[:8])
             task_command["provisioning_state"] = "Succeeded"
             task_command["request_digest"] = action["request_digest"]
+            task_command["execution_request_digest"] = action["request_digest"]
+            task_command["execution_idempotency_key"] = key
             execution = {
                 "schema": "fm.worker-execution-result/v1",
                 "request_digest": action["request_digest"],
@@ -1557,13 +1748,18 @@ old_assignment = state["workers"][str(old_slot)]["assignment_generation"]
 
 # The private one-task execution path returns an exact result and replays the
 # same request from durable state without a second provider execution.
-execution = json.loads(run(
-    "execute", "--task", "task-1", "--task-generation", "gen-1",
-    "--assignment-generation", old_assignment, "--wall-seconds", "60",
-    "--confirm-execute", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"],
-    "--", "/usr/bin/true",
-).stdout)
+initial_stub_run = subprocess.run(
+    [wrapper, "execute", "--task", "task-1", "--task-generation", "gen-1",
+     "--assignment-generation", old_assignment, "--wall-seconds", "60",
+     "--confirm-execute", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"],
+     "--", "/usr/bin/true"],
+    env=dict(env, FIXTURE_INITIAL_EXECUTE_STUB="1"), text=True,
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+)
+assert initial_stub_run.returncode == 0, initial_stub_run.stderr
+execution = json.loads(initial_stub_run.stdout)
 assert execution["schema"] == "fm.worker-execution-result/v1" and execution["exit_code"] == 0
+assert fixture_state().get("initial_stub_admissions") == 1, fixture_state()
 call_count = len(fixture_state()["calls"])
 repeat = json.loads(run(
     "execute", "--task", "task-1", "--task-generation", "gen-1",
