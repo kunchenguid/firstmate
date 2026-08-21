@@ -57,7 +57,9 @@ WORKER STATE. This module reports the last recorded event verb, which is
 history rather than a live check, and labels it that way in its own output so
 the model cannot present it as current truth. bin/fm-crew-state.sh remains the
 owner of real current-state reconciliation and is far too slow for a spoken
-answer.
+answer. The verb is folded through the closed STATE_VERBS vocabulary below, and
+anything outside it becomes "note": a status line is free text, and this verb is
+the only thing derived from a record that a counts-scope answer says out loud.
 
 bin/fm-inbox.sh `status` is the human rendering of the same records and stays
 the owner of that. This module exists because a spoken answer needs a machine
@@ -103,6 +105,26 @@ DATE_TAG = re.compile(r"\((?:since|done) [0-9-]+\)")
 # accident. See "WHAT IS NEVER READ" above.
 READ_SECTIONS = ("in flight", "queued")
 
+# The states a worker is asked to report, and the two more that close a decision.
+# bin/fm-brief.sh states the first six to every crewmate and bin/fm-classify-lib.sh
+# owns resolved and captain-held; this module only recognises them.
+#
+# A CLOSED set, not a shape. A status line is free text appended by a crewmate,
+# and the verb taken off the front of it is the one record-derived string that
+# reaches a counts-scope answer, where there are no titles or links for a deny
+# list to filter. So an unrecognised token is reported as a note instead of being
+# spoken, exactly as a malformed one already was; otherwise a crewmate writing
+# "acmecorp-migration: waiting on their review" would put that word in front of a
+# model in another region, with nothing in config/voice-read-deny able to stop it.
+STATE_VERBS = ("working", "needs-decision", "blocked", "paused", "done",
+               "failed", "resolved", "captain-held")
+NOTE_VERB = "note"
+
+# Enough tail to hold the last line of a status log. These logs are append-only
+# and grow for the life of a task, while every spoken question reads one per
+# worker, so the read is bounded and seeks rather than scanning from the top.
+STATUS_TAIL_BYTES = 8192
+
 
 class RecordError(Exception):
     """The records or the read-scope configuration cannot be used as asked."""
@@ -123,13 +145,28 @@ def state_dir(home):
     below queues through fm-inbox.sh with the ambient environment. A reader that
     ignored the override would count notes in one directory while the queue wrote
     them to another, so the agent would tell the captain their request was queued
-    and then, asked what is waiting, report nothing. Only state moves with the
-    override; data stays under the home, again as fm-inbox.sh has it.
+    and then, asked what is waiting, report nothing.
     """
     override = os.environ.get("FM_STATE_OVERRIDE")
     if override:
         return override
     return os.path.join(home, "state")
+
+
+def data_dir(home):
+    """Return the durable records directory, the other half of the same pair.
+
+    Every script that sets FM_DATA_OVERRIDE for a child sets FM_STATE_OVERRIDE
+    beside it, so resolving one and not the other would answer one question from
+    two different homes: counts of workers and notes from the overridden state
+    directory, counts of in-flight and queued work from the home's own backlog.
+    A spliced answer is worse than a wrong one, because nothing about it looks
+    wrong.
+    """
+    override = os.environ.get("FM_DATA_OVERRIDE")
+    if override:
+        return override
+    return os.path.join(home, "data")
 
 
 def config_dir(home):
@@ -253,23 +290,34 @@ def _last_event(state_dir, task_id):
     that remains the owner of the format. The bracket matters: status metadata
     sits between the verb and the colon, as in "done [token]: shipped it" and
     "needs-decision [key=api-shape]: which shape". A line carrying no colon is
-    not a status line, and anything that does not read as a single state word is
-    reported as a note rather than spoken aloud as a state.
+    not a status line, and any token outside STATE_VERBS is reported as a note
+    rather than spoken aloud as a state.
+
+    Only the tail of the log is read; see STATUS_TAIL_BYTES.
     """
     path = os.path.join(state_dir, task_id + ".status")
     try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            lines = [text.strip() for text in handle if text.strip()]
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - STATUS_TAIL_BYTES))
+            window = handle.read()
     except OSError:
         return None, None
+    lines = [text.strip() for text in
+             window.decode("utf-8", errors="replace").splitlines() if text.strip()]
+    if size > STATUS_TAIL_BYTES and len(lines) > 1:
+        # The window can open part way through a line, and a fragment is not an
+        # event. It is kept only when it is all there is.
+        lines = lines[1:]
     if not lines:
         return None, None
     line = lines[-1]
-    verb = "note"
+    verb = NOTE_VERB
     if ":" in line:
         verb = line.split(":", 1)[0].split("[", 1)[0].strip().lower()
-    if not re.fullmatch(r"[a-z-]+", verb or ""):
-        verb = "note"
+    if verb not in STATE_VERBS:
+        verb = NOTE_VERB
     return verb, line
 
 
@@ -313,7 +361,7 @@ def fleet_status(home=None, scope=None):
 
     state = state_dir(home)
     workers = _workers(state)
-    items = _parse_backlog(os.path.join(home, "data", "backlog.md"))
+    items = _parse_backlog(os.path.join(data_dir(home), "backlog.md"))
 
     open_items = [i for i in items if not i["done"]]
     in_flight = [i for i in open_items if i["section"] == "in flight"]

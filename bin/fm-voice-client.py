@@ -398,14 +398,34 @@ class Client:
         threading.Thread(target=self._downlink, daemon=True).start()
         threading.Thread(target=self._sender, daemon=True).start()
 
-        if not self.ready.wait(timeout=self.options.timeout):
-            raise SystemExit(
-                "fm-voice-client: the relay never reported ready; run it by hand "
-                "over SSH to see why")
+        self._wait_ready()
         notice = self.ready_notice
         say("client: relay ready, {} in {}, read scope {}, connected in {}s".format(
             notice.get("model", "?"), notice.get("region", "?"),
             notice.get("read_scope", "?"), notice.get("connect_seconds", "?")))
+
+    def _wait_ready(self):
+        """Wait for the relay's ready notice, or for the connection to close first.
+
+        A relay that dies after the handshake is the likely first-run failure:
+        the Bedrock SDK is imported inside the model session, so a forgotten
+        --relay-python exits the relay after the handshake and before ready. Its
+        own one-line error is already on the captain's terminal, because stderr is
+        inherited rather than piped, so waiting out the full timeout after that
+        just leaves them watching nothing.
+        """
+        deadline = time.monotonic() + self.options.timeout
+        while not self.ready.is_set():
+            if self.closed.is_set():
+                raise SystemExit(
+                    "fm-voice-client: the relay closed the connection before it "
+                    "was ready; run the relay command by hand over SSH to see "
+                    "its error")
+            if time.monotonic() >= deadline:
+                raise SystemExit(
+                    "fm-voice-client: the relay never reported ready; run it by "
+                    "hand over SSH to see why")
+            self.ready.wait(0.2)
 
     def close(self):
         try:

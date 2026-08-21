@@ -285,6 +285,39 @@ options = relay.resolve_settings(
     relay.parse_args(["--serve", "--home", home, "--region", "eu-flag-3"]))
 check(options.region == "eu-flag-3", "a flag should win: %r" % options.region)
 
+os.environ.pop("FM_VOICE_REGION", None)
+os.environ.pop("FM_VOICE_ID", None)
+
+# THE PROFILE IS READ BY PRESENCE, NOT BY TRUTHINESS. An empty FM_VOICE_PROFILE is
+# the captain saying "use the credentials I already have", so it must not fall
+# through to a configured profile and spend a second exporting from an account
+# they just opted out of. fm-inbox.sh reads its own equivalent that way and
+# docs/configuration.md promises it for both.
+with open(os.path.join(home, "config", "voice-profile"), "w") as handle:
+    handle.write("a-configured-profile\n")
+options = relay.resolve_settings(relay.parse_args(["--serve", "--home", home]))
+check(options.profile == "a-configured-profile",
+      "a configured profile should be used: %r" % options.profile)
+
+os.environ["FM_VOICE_PROFILE"] = ""
+options = relay.resolve_settings(relay.parse_args(["--serve", "--home", home]))
+check(options.profile == "",
+      "an empty FM_VOICE_PROFILE must force ambient credentials: %r" % options.profile)
+
+os.environ["FM_VOICE_PROFILE"] = "another-profile"
+options = relay.resolve_settings(relay.parse_args(["--serve", "--home", home]))
+check(options.profile == "another-profile",
+      "a set FM_VOICE_PROFILE should override the file: %r" % options.profile)
+os.environ.pop("FM_VOICE_PROFILE", None)
+
+# An empty region, by contrast, is not a choice about anything, so it still falls
+# through to the file rather than refusing.
+os.environ["FM_VOICE_REGION"] = ""
+options = relay.resolve_settings(relay.parse_args(["--serve", "--home", home]))
+check(options.region == "eu-somewhere-1",
+      "an empty region variable should fall through to the file: %r" % options.region)
+os.environ.pop("FM_VOICE_REGION", None)
+
 # --help must work in a home that has configured nothing, or the captain cannot
 # read how to configure it.
 PY
@@ -337,6 +370,24 @@ unconfigured_note=$(env "${inbox_env[@]}" \
   || fail "note should not need any configuration"
 assert_contains "$unconfigured_note" 'queued ' "note should still queue a record"
 pass "the model-backed subcommands refuse by name while note keeps working"
+
+# --help prints the whole header block, and finds where that block ends rather
+# than counting lines to it, so growing the header cannot silently truncate the
+# help again. The PRIVACY paragraph is the part that matters: it is the only place
+# a new operator is told which subcommands send audio or text off this host, and a
+# fixed line range had already dropped it.
+inbox_help=$("$ROOT/bin/fm-inbox.sh" --help) || fail "fm-inbox.sh --help failed"
+assert_contains "$inbox_help" 'PRIVACY:' \
+  "the help must say which subcommands send anything to a model"
+assert_contains "$inbox_help" 'make no network call at all' \
+  "the help must name the subcommands that stay on this host"
+assert_contains "$inbox_help" 'FM_HOME' \
+  "the help must keep its environment section"
+assert_contains "$inbox_help" 'inbox-ask-model' \
+  "the help must name the files a home has to write"
+assert_contains "$inbox_help" 'fm-inbox.sh note' \
+  "the help must still open with the usage it always had"
+pass "fm-inbox.sh --help prints its whole header, privacy paragraph included"
 
 # --- the tool surface the two sides share -----------------------------------
 #
@@ -873,6 +924,44 @@ check("/opt/venv/bin/python" in argv, "the relay interpreter must be passed: %s"
 check(argv[-2:] == ["--scope", "counts"],
       "relay arguments must reach the relay: %s" % argv)
 
+# A relay that dies after the handshake must be reported at once rather than at
+# the end of the timeout. Its own one-line error is already on the captain's
+# terminal, because the relay's stderr is inherited rather than piped, so the only
+# thing a full timeout adds is thirty seconds of watching nothing. This is the
+# likely first-run shape: the Bedrock SDK is imported inside the model session, so
+# a forgotten --relay-python exits the relay after the handshake.
+import time as clock
+waiting = client.Client(client.parse_args(["--host", "desk", "--timeout", "5"]))
+waiting.closed.set()
+began = clock.monotonic()
+refused = None
+try:
+    waiting._wait_ready()
+except SystemExit as exc:
+    refused = str(exc)
+check(refused is not None, "a closed relay was treated as ready")
+check("closed the connection" in refused,
+      "the refusal should name the closed connection: %s" % refused)
+check("by hand" in refused, "and should give the next step: %s" % refused)
+took = clock.monotonic() - began
+check(took < 2, "a closed relay should be reported at once, waited %.1fs" % took)
+
+# Ready still wins, and a relay that says nothing at all still times out with the
+# message that fits that case instead.
+ready = client.Client(client.parse_args(["--host", "desk", "--timeout", "5"]))
+ready.ready.set()
+ready._wait_ready()
+
+silent = client.Client(client.parse_args(["--host", "desk", "--timeout", "0.3"]))
+timed_out = None
+try:
+    silent._wait_ready()
+except SystemExit as exc:
+    timed_out = str(exc)
+check(timed_out is not None, "a silent relay was treated as ready")
+check("never reported ready" in timed_out,
+      "a silent relay should time out with its own message: %s" % timed_out)
+
 # A login shell banner is discarded with a warning naming it, not an error.
 noise = b"You have mail.\n"
 stream = io.BytesIO(noise + frame.MAGIC + frame.encode(frame.BYE))
@@ -1185,6 +1274,85 @@ assert_contains "$by_queued" '"queued": 1' \
 assert_contains "$by_queued" 'pull/11' "the other pull requests should still be named"
 assert_contains "$by_queued" 'pull/12' "the other pull requests should still be named"
 pass "one deny decision per item covers every list that item could appear in"
+
+# --- what a status line may say ---------------------------------------------
+#
+# A status line is free text a crewmate appended, and the verb taken off the
+# front of it is the ONE record-derived string a counts-scope answer says out
+# loud. At that scope there is no title and no link, so there is nothing for the
+# deny list to filter and no scope setting that makes it safe. The vocabulary is
+# therefore closed to the states bin/fm-brief.sh gives every crewmate plus the two
+# bin/fm-classify-lib.sh adds when a decision closes, and anything else is a note.
+VERB_HOME="$TMP_ROOT/status-verbs"
+CUSTOMER_TOKEN=ACMECORPMIGRATION
+mkdir -p "$VERB_HOME/data" "$VERB_HOME/state"
+cat > "$VERB_HOME/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] one - First thing (repo: a) (kind: ship)
+- [ ] two - Second thing (repo: b) (kind: ship)
+- [ ] three - Third thing (repo: c) (kind: ship)
+EOF
+fm_write_meta "$VERB_HOME/state/one.meta" kind=ship
+fm_write_meta "$VERB_HOME/state/two.meta" kind=ship
+fm_write_meta "$VERB_HOME/state/three.meta" kind=ship
+printf 'needs-decision [key=shape]: which shape\n' > "$VERB_HOME/state/one.status"
+printf '%s: waiting on their security review\n' "$CUSTOMER_TOKEN" \
+  > "$VERB_HOME/state/two.status"
+# A log past the tail window, so the read is proven to end at the last line
+# rather than at the start of whatever window it happened to open.
+{
+  verb_line=0
+  while [ "$verb_line" -lt 400 ]; do
+    printf 'working: step %s of a long task with a wordy status line\n' "$verb_line"
+    verb_line=$((verb_line + 1))
+  done
+  printf 'done: shipped it\n'
+} > "$VERB_HOME/state/three.status"
+[ "$(wc -c < "$VERB_HOME/state/three.status")" -gt 8192 ] \
+  || fail "fixture: the long status log should exceed the tail window"
+
+verb_status() {
+  python3 "$ROOT/bin/fm_voice_records.py" status --home "$VERB_HOME" "$@"
+}
+
+verbs=$(verb_status --scope counts) || fail "counts scope with odd verbs failed"
+assert_not_contains "$verbs" "$CUSTOMER_TOKEN" \
+  "a word outside the vocabulary must not be spoken, at the default scope least of all"
+assert_contains "$verbs" '"note": 1' \
+  "an unrecognised verb should be counted as a note instead"
+assert_contains "$verbs" '"needs-decision": 1' \
+  "a canonical verb, brackets and all, should survive the fold"
+assert_contains "$verbs" '"done": 1' \
+  "the last line of a long log is the line that counts"
+assert_not_contains "$verbs" '"working"' \
+  "an earlier line in the same log must not be reported as the state"
+pass "the state verb is a closed vocabulary, so free text cannot ride out on it"
+
+# The two halves of one answer must come from one home. Every script that sets
+# FM_DATA_OVERRIDE sets FM_STATE_OVERRIDE beside it, so a reader that resolved one
+# and not the other would count workers and notes from one home while counting
+# in-flight work from another, which reads exactly like an ordinary answer.
+alt_data="$TMP_ROOT/data-elsewhere"
+mkdir -p "$alt_data"
+cat > "$alt_data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] moved-one - Work recorded in the overridden data directory (repo: m) (kind: ship)
+EOF
+moved=$(FM_DATA_OVERRIDE="$alt_data" verb_status --scope full) \
+  || fail "status with an overridden data directory failed"
+assert_contains "$moved" 'moved-one' \
+  "the reader must take the backlog from the overridden data directory"
+assert_contains "$moved" '"in_flight": 1' "and count only what that backlog holds"
+inbox_moved=$(FM_HOME="$VERB_HOME" FM_STATE_OVERRIDE="$VERB_HOME/state" \
+  FM_DATA_OVERRIDE="$alt_data" "$ROOT/bin/fm-inbox.sh" status) \
+  || fail "fm-inbox status with an overridden data directory failed"
+assert_contains "$inbox_moved" 'moved-one' \
+  "the human rendering of the same records must read the same backlog"
+pass "the backlog and the state directory always come from the same home"
 
 # --- refusals ---------------------------------------------------------------
 #

@@ -78,7 +78,7 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-DATA="$FM_HOME/data"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 INBOX="$STATE/inbox"
 
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
@@ -387,6 +387,13 @@ case "${1:-}" in
   list)   shift; cmd_list ;;
   drain)  shift; cmd_drain "$@" ;;
   ''|-h|--help|help)
-    sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+    # The whole header block, found rather than counted: everything after the
+    # shebang up to the first line that is not a comment. A fixed line range
+    # silently truncates this help the next time the header grows, and the last
+    # thing to fall off the end is the PRIVACY paragraph, which is the one place
+    # a new operator is told which subcommands send anything off this host.
+    awk 'NR == 1 { next }
+         /^#/ { sub(/^# ?/, ""); print; next }
+         { exit }' "${BASH_SOURCE[0]}" ;;
   *) die "unknown subcommand: $1 (try --help)" ;;
 esac

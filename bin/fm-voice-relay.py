@@ -52,7 +52,8 @@ an unconfigured home cannot start this relay at all.
   config/voice-id       FM_VOICE_ID       output voice.          default matthew
 
 An absent profile means the relay uses only credentials that are already in its
-environment, which is what `--profile ""` forces when a config file exists.
+environment. An empty FM_VOICE_PROFILE, or an empty `--profile ""`, forces that
+even when config/voice-profile exists.
 
 On the model: amazon.nova-sonic-v1:0 is marked legacy by AWS and measured 25
 percent slower on the tool-backed path, which is the path this interface actually
@@ -1051,7 +1052,16 @@ def resolve_settings(options):
     if not options.model:
         options.model = records.require_setting(home, *SETTINGS["model"])
     if options.profile is None:
-        options.profile = records.read_setting(home, *SETTINGS["profile"][:2]) or ""
+        # Presence, not truthiness: an empty FM_VOICE_PROFILE is the captain
+        # saying "use the credentials I already have" and must not fall through
+        # to a configured profile, which is how fm-inbox.sh reads its own
+        # equivalent and what docs/configuration.md promises for both. An empty
+        # region or model is still nothing, so those keep falling through.
+        name, env = SETTINGS["profile"][:2]
+        chosen = os.environ.get(env)
+        if chosen is None:
+            chosen = records.read_setting(home, name)
+        options.profile = (chosen or "").strip()
     if not options.voice:
         options.voice = records.read_setting(home, *SETTINGS["voice"][:2]) or VOICE
     return options
