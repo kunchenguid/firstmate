@@ -686,7 +686,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
 }
 
 test_wayfinder_scout_teardown_requires_accept_child() {
-  local case_dir promoted_case legacy_case untracked_case rejected resolved out rc
+  local case_dir promoted_case legacy_case historic_case historic_no_child_case untracked_case rejected resolved out rc
   case_dir=$(make_case wayfinder-scout-archive)
   prepare_spawn_endpoint "$case_dir"
   mkdir -p "$case_dir/data/task-x1"
@@ -832,6 +832,79 @@ test_wayfinder_scout_teardown_requires_accept_child() {
   expect_code 0 "$rc" "classified legacy Wayfinder ship should archive after accept-child succeeds"$'\n'"$out"
   assert_absent "$legacy_case/state/task-x1.meta" \
     "Wayfinder-resolved classified legacy teardown did not archive task metadata"
+
+  historic_case=$(make_case wayfinder-historic-promoted-scout)
+  prepare_spawn_endpoint "$historic_case"
+  mkdir -p "$historic_case/data/task-x1"
+  printf '%s\n' 'Research the Wayfinder child.' > "$historic_case/data/task-x1/brief.md"
+  install_teardown_wayfinder_gate "$historic_case/project"
+  out=$(run_scout_spawn "$historic_case" --wayfinder-child 5 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "named Wayfinder scout should spawn before historic promotion"$'\n'"$out"
+  printf '%s\n' '# Research report' > "$historic_case/data/task-x1/report.md"
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$historic_case/state/task-x1.meta"
+  sed -i.bak -e 's/^kind=scout$/kind=ship/' -e '/^wayfinder_child=/d' \
+    "$historic_case/state/task-x1.meta"
+  rm -f "$historic_case/state/task-x1.meta.bak"
+  add_compatible_tasks_axi "$historic_case"
+  rejected="$historic_case/rejected.json"
+  resolved="$historic_case/resolved.json"
+  printf '%s\n' '{"children":[{"number":5,"state":"open"}]}' > "$rejected"
+  printf '%s\n' '{"children":[{"number":5,"state":"closed"}]}' > "$resolved"
+
+  set +e
+  out=$(FM_DATA_OVERRIDE="$historic_case/data" run_teardown "$historic_case" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unclassified historic promoted scout must not archive"$'\n'"$out"
+  assert_contains "$out" "ship task task-x1 has no Wayfinder classification" \
+    "historic promoted scout teardown did not require Wayfinder migration"
+  assert_present "$historic_case/state/task-x1.meta" \
+    "unclassified historic promoted scout teardown removed task metadata"
+  assert_present "$historic_case/data/task-x1/report.md" \
+    "unclassified historic promoted scout teardown removed the report"
+
+  set +e
+  out=$(FM_DATA_OVERRIDE="$historic_case/data" run_teardown "$historic_case" \
+    --wayfinder-child 5 --wayfinder-state "$rejected" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "historic promoted scout must not archive while accept-child rejects"$'\n'"$out"
+  assert_contains "$out" "accept-child rejected" \
+    "historic promoted scout teardown did not invoke accept-child"
+  assert_present "$historic_case/state/task-x1.meta" \
+    "Wayfinder-rejected historic teardown removed task metadata"
+  assert_grep 'wayfinder_child=5' "$historic_case/state/task-x1.meta" \
+    "historic Wayfinder migration did not persist the named child"
+
+  out=$(FM_DATA_OVERRIDE="$historic_case/data" run_teardown "$historic_case" \
+    --wayfinder-child 5 --wayfinder-state "$resolved" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "historic promoted scout should archive after accept-child succeeds"$'\n'"$out"
+  assert_absent "$historic_case/state/task-x1.meta" \
+    "Wayfinder-resolved historic teardown did not archive task metadata"
+
+  historic_no_child_case=$(make_case wayfinder-historic-no-child-ship)
+  prepare_spawn_endpoint "$historic_no_child_case"
+  install_teardown_wayfinder_gate "$historic_no_child_case/project"
+  write_meta "$historic_no_child_case" no-mistakes ship
+  add_compatible_tasks_axi "$historic_no_child_case"
+
+  set +e
+  out=$(run_teardown "$historic_no_child_case" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unclassified historic ship must not archive"$'\n'"$out"
+  assert_contains "$out" "ship task task-x1 has no Wayfinder classification" \
+    "historic ship teardown did not require Wayfinder migration"
+  assert_present "$historic_no_child_case/state/task-x1.meta" \
+    "unclassified historic ship teardown removed task metadata"
+
+  out=$(run_teardown "$historic_no_child_case" --wayfinder-no-child 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "explicit no-child historic ship should archive"$'\n'"$out"
+  assert_absent "$historic_no_child_case/state/task-x1.meta" \
+    "explicit no-child historic ship teardown did not archive task metadata"
 
   untracked_case=$(make_case wayfinder-untracked-scout)
   prepare_spawn_endpoint "$untracked_case"

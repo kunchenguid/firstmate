@@ -67,9 +67,9 @@
 #   A scout against a project that publishes bin/wayfinder-lifecycle-gate must
 #   record --wayfinder-child or --wayfinder-no-child for teardown.
 #   Wayfinder task metadata records wayfinder_independent=1 for a ship exempt
-#   from relaunch handoff, or exactly one scout classification:
+#   from relaunch handoff, or exactly one child classification:
 #   wayfinder_child=<number-or-title>, which teardown verifies with accept-child,
-#   or wayfinder_no_child=1, which records ordinary scout teardown.
+#   or wayfinder_no_child=1, which records a task with no named child.
 #   The project command owns the resolution policy;
 #   Firstmate only invokes it.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
@@ -1820,6 +1820,10 @@ if [ "$KIND" = ship ] && [ -f "$PROJ_ABS/bin/wayfinder-lifecycle-gate" ]; then
     echo "error: $ID is recorded map-independent; --wayfinder-state does not apply to its relaunch" >&2
     exit 1
   fi
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ] \
+   && [ -f "$PROJ_ABS/bin/wayfinder-lifecycle-gate" ]; then
+  WAYFINDER_NO_CHILD=1
 fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)

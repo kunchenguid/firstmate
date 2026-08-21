@@ -571,6 +571,8 @@ test_map_dependent_spawn_and_promote() {
   assert_contains "$out" "spawned $id harness=claude kind=ship" \
     "passing handoff did not launch the ship"
   assert_present "$home/state/$id.meta" "passing handoff did not publish task metadata"
+  assert_grep "wayfinder_no_child=1" "$home/state/$id.meta" \
+    "gated direct ship did not record its no-child classification"
   assert_grep "worktree=$worktree" "$home/state/$id.meta" \
     "passing handoff recorded the wrong isolated worktree"
 

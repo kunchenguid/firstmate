@@ -59,8 +59,8 @@
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
 #   --wayfinder-state verifies accept-child for a recorded named Wayfinder child.
-#   It pairs with --wayfinder-child only to classify a legacy named scout.
-#   --wayfinder-no-child classifies a legacy scout without a Wayfinder child.
+#   It pairs with --wayfinder-child only to classify an unrecorded named scout or ship.
+#   --wayfinder-no-child classifies an unrecorded scout or ship without a Wayfinder child.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -244,6 +244,7 @@ CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
+WAYFINDER_CLASSIFICATION_TMP=
 DESCENDANT_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
@@ -262,6 +263,7 @@ teardown_release_locks() {
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
   fi
+  [ -z "$WAYFINDER_CLASSIFICATION_TMP" ] || rm -f -- "$WAYFINDER_CLASSIFICATION_TMP" 2>/dev/null || true
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CONTROL_LOCK" || true
     CONTROL_LOCK_HELD=0
@@ -538,6 +540,8 @@ if [ -n "$RECORDED_WAYFINDER_CHILD" ] && [ "$RECORDED_WAYFINDER_NO_CHILD" = 1 ];
   exit 1
 fi
 WAYFINDER_CHILD=
+WAYFINDER_CLASSIFICATION_MIGRATED=0
+WAYFINDER_CLASSIFICATION_NO_CHILD=0
 if [ "$FORCE" != "--force" ] && [ -n "$RECORDED_WAYFINDER_CHILD" ]; then
   if [ ! -f "$PROJ/bin/wayfinder-lifecycle-gate" ]; then
     echo "REFUSED: task $ID records Wayfinder child '$RECORDED_WAYFINDER_CHILD' but its project has no bin/wayfinder-lifecycle-gate." >&2
@@ -548,7 +552,9 @@ if [ "$FORCE" != "--force" ] && [ -n "$RECORDED_WAYFINDER_CHILD" ]; then
     exit 2
   }
   WAYFINDER_CHILD=$RECORDED_WAYFINDER_CHILD
-elif [ "$FORCE" != "--force" ] && [ "$KIND" = scout ] && [ -f "$PROJ/bin/wayfinder-lifecycle-gate" ]; then
+elif [ "$FORCE" != "--force" ] \
+   && { [ "$KIND" = scout ] || [ "$KIND" = ship ]; } \
+   && [ -f "$PROJ/bin/wayfinder-lifecycle-gate" ]; then
   if [ "$RECORDED_WAYFINDER_NO_CHILD" = 1 ]; then
     [ "$WAYFINDER_CHILD_ARG_SET" -eq 0 ] && [ "$WAYFINDER_NO_CHILD" -eq 0 ] || {
       echo "error: task $ID already records no Wayfinder child; do not override its classification at teardown" >&2
@@ -556,13 +562,21 @@ elif [ "$FORCE" != "--force" ] && [ "$KIND" = scout ] && [ -f "$PROJ/bin/wayfind
     }
   elif [ "$WAYFINDER_CHILD_ARG_SET" -eq 1 ]; then
     WAYFINDER_CHILD=$WAYFINDER_CHILD_ARG
-  elif [ "$WAYFINDER_NO_CHILD" -eq 0 ]; then
+    WAYFINDER_CLASSIFICATION_MIGRATED=1
+  elif [ "$WAYFINDER_NO_CHILD" -eq 1 ]; then
+    WAYFINDER_CLASSIFICATION_MIGRATED=1
+    WAYFINDER_CLASSIFICATION_NO_CHILD=1
+  elif [ "$KIND" = scout ]; then
     echo "REFUSED: scout task $ID has no Wayfinder classification." >&2
+    echo "Pass --wayfinder-child <number-or-title> with --wayfinder-state <snapshot>, or --wayfinder-no-child before teardown." >&2
+    exit 1
+  else
+    echo "REFUSED: ship task $ID has no Wayfinder classification." >&2
     echo "Pass --wayfinder-child <number-or-title> with --wayfinder-state <snapshot>, or --wayfinder-no-child before teardown." >&2
     exit 1
   fi
 elif [ "$WAYFINDER_CHILD_ARG_SET" -eq 1 ] || [ "$WAYFINDER_NO_CHILD" -eq 1 ] || [ "$WAYFINDER_STATE_SET" -eq 1 ]; then
-  echo "error: Wayfinder classification flags apply only to a non-forced scout against a project with bin/wayfinder-lifecycle-gate; --wayfinder-state requires a recorded named child" >&2
+  echo "error: Wayfinder classification flags apply only to a non-forced scout or unclassified ship against a project with bin/wayfinder-lifecycle-gate; --wayfinder-state requires a named child" >&2
   exit 2
 fi
 if [ -n "$WAYFINDER_CHILD" ] && [ "$WAYFINDER_STATE_SET" -eq 0 ]; then
@@ -573,6 +587,17 @@ fi
 if [ -z "$WAYFINDER_CHILD" ] && [ "$WAYFINDER_STATE_SET" -eq 1 ]; then
   echo "error: --wayfinder-state requires a Wayfinder child" >&2
   exit 2
+fi
+if [ "$WAYFINDER_CLASSIFICATION_MIGRATED" -eq 1 ]; then
+  WAYFINDER_CLASSIFICATION_TMP="$STATE/.$ID.meta.wayfinder.${BASHPID:-$$}"
+  grep -v -e '^wayfinder_child=' -e '^wayfinder_no_child=' "$META" > "$WAYFINDER_CLASSIFICATION_TMP"
+  if [ "$WAYFINDER_CLASSIFICATION_NO_CHILD" -eq 1 ]; then
+    echo "wayfinder_no_child=1" >> "$WAYFINDER_CLASSIFICATION_TMP"
+  else
+    echo "wayfinder_child=$WAYFINDER_CHILD" >> "$WAYFINDER_CLASSIFICATION_TMP"
+  fi
+  mv "$WAYFINDER_CLASSIFICATION_TMP" "$META"
+  WAYFINDER_CLASSIFICATION_TMP=
 fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
