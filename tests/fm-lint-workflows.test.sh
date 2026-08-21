@@ -13,7 +13,9 @@ set -u
 LINT_WF="$ROOT/bin/fm-lint-workflows.sh"
 LINT="$ROOT/bin/fm-lint.sh"
 INSTALLER="$ROOT/bin/fm-install-actionlint.sh"
+NO_MISTAKES_REQUIRED="$ROOT/.github/workflows/no-mistakes-required.yml"
 REQUIRED=$("$LINT_WF" --required-version)
+PRE_ATTESTATION_BASE=83b5181391f6745108d72db5c2e23a5162be13f7
 
 # Official sha256 values from actionlint_1.7.12_checksums.txt on the v1.7.12
 # release (https://github.com/rhysd/actionlint/releases/tag/v1.7.12). Tests
@@ -166,6 +168,24 @@ EOF
 YAML
 }
 
+extract_no_mistakes_required_run() {
+  awk '
+    /- name: Verify no-mistakes signature in PR body/ { step = 1; next }
+    step && /^[[:space:]]*run: \|[[:space:]]*$/ { run = 1; next }
+    run && /^          / { sub(/^          /, ""); print; next }
+    run { exit }
+  ' "$NO_MISTAKES_REQUIRED"
+}
+
+run_no_mistakes_required() {
+  local base=$1 head=$2 body=$3 tmp script
+  tmp=$(fm_test_tmproot fm-no-mistakes-required)
+  script="$tmp/check.sh"
+  extract_no_mistakes_required_run > "$script"
+  PR_AUTHOR=test-author PR_BASE="$base" PR_HEAD="$head" PR_NUMBER=25 \
+    PR_BODY="$body" bash "$script"
+}
+
 test_current_workflows_pass() {
   local out rc
   rc=0
@@ -174,6 +194,25 @@ test_current_workflows_pass() {
   assert_contains "$out" "workflow files valid" \
     "current-workflow lint did not report a valid count"
   pass "current .github/workflows YAML files parse"
+}
+
+test_legacy_signature_bootstraps_only_from_pre_attestation_base() {
+  local marker head out rc
+  marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+  head=8c02504a4ed03caa4c8b532174c075358a9fe675
+
+  rc=0
+  out=$(run_no_mistakes_required "$PRE_ATTESTATION_BASE" "$head" "$marker" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "legacy signature from the pre-attestation base did not bootstrap"$'\n'"$out"
+  assert_contains "$out" "pre-attestation base" \
+    "legacy bootstrap did not disclose why structured attestation was waived"
+
+  rc=0
+  out=$(run_no_mistakes_required "${PRE_ATTESTATION_BASE%?}0" "$head" "$marker" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "legacy signature remained valid after the bootstrap base"$'\n'"$out"
+  assert_contains "$out" "structured pipeline step attestation is missing" \
+    "post-bootstrap rejection did not name the missing attestation"
+  pass "legacy no-mistakes signatures bootstrap only from the pre-attestation base"
 }
 
 test_col0_heredoc_fails_with_clear_error() {
@@ -514,6 +553,7 @@ SH
 
 test_pins_an_explicit_version
 test_current_workflows_pass
+test_legacy_signature_bootstraps_only_from_pre_attestation_base
 test_col0_heredoc_fails_with_clear_error
 test_valid_fixture_passes
 test_empty_workflows_dir_fails
