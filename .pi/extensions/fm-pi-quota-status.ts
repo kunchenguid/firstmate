@@ -26,6 +26,55 @@ const DEFAULT_MAX_AUTH_BYTES = 1024 * 1024;
 const DEFAULT_REVISION_CHECK_MS = 1000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const WINDOWS_TREE_KILL_TIMEOUT_MS = 5000;
+const WINDOWS_PROCESS_SUPERVISOR = String.raw`
+const { spawn } = require("node:child_process");
+const [command, ...args] = process.argv.slice(1);
+let outcome = null;
+let outcomeSent = false;
+let stdoutEnded = false;
+let stderrEnded = false;
+const keepAlive = setInterval(() => {}, 60_000);
+const send = (message) => {
+  if (typeof process.send !== "function" || !process.connected) process.exit(70);
+  try {
+    process.send(message);
+  } catch {
+    process.exit(70);
+  }
+};
+const sendOutcome = () => {
+  if (outcomeSent || outcome === null) return;
+  outcomeSent = true;
+  send(outcome);
+};
+const finish = (message) => {
+  if (outcome !== null) return;
+  outcome = message;
+  if (stdoutEnded && stderrEnded) sendOutcome();
+  else setTimeout(sendOutcome, 50);
+};
+const child = spawn(command, args, {
+  shell: false,
+  windowsHide: true,
+  stdio: ["ignore", "pipe", "pipe"],
+});
+child.stdout.on("data", (chunk) => send({ kind: "stdout", data: chunk.toString("base64") }));
+child.stdout.on("end", () => {
+  stdoutEnded = true;
+  if (stderrEnded) sendOutcome();
+});
+child.stderr.on("data", (chunk) => send({ kind: "stderr", data: chunk.toString("base64") }));
+child.stderr.on("end", () => {
+  stderrEnded = true;
+  if (stdoutEnded) sendOutcome();
+});
+child.on("error", (error) => finish({ kind: "spawn-error", code: error.code }));
+child.on("exit", (code, signal) => finish({ kind: "exit", code, signal }));
+process.on("disconnect", () => {
+  clearInterval(keepAlive);
+  process.exit(0);
+});
+`;
 
 const OFFICIAL_PROVIDER_BASE_URLS: Readonly<Record<string, string>> = {
   anthropic: "https://api.anthropic.com",
@@ -180,6 +229,7 @@ type ActiveSession = {
   refreshTimer: unknown | null;
   expiryTimer: unknown | null;
   modelRefreshTimer: unknown | null;
+  recoveryTimer: unknown | null;
   revisionTimer: unknown | null;
 };
 
@@ -336,7 +386,6 @@ function killProcess(child: ChildProcess, processGroupId: number | null): void {
     } catch {
     }
   }
-  if (child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === "win32" && child.pid) {
     const result = spawnSync(
       "taskkill",
@@ -349,6 +398,7 @@ function killProcess(child: ChildProcess, processGroupId: number | null): void {
     );
     if (!result.error && result.status === 0) return;
   }
+  if (child.exitCode !== null || child.signalCode !== null) return;
   try {
     child.kill("SIGKILL");
   } catch {
@@ -370,12 +420,19 @@ export function runQuotaAxiJson(options: {
     ...(options.full ? ["--full"] : []),
     ...(options.provider ? ["--provider", options.provider] : []),
   ];
-  const child = spawn(command, args, {
-    detached: process.platform !== "win32",
-    shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  const processGroupId = process.platform !== "win32" && child.pid ? child.pid : null;
+  const useWindowsSupervisor = process.platform === "win32";
+  const child = useWindowsSupervisor
+    ? spawn(process.execPath, ["-e", WINDOWS_PROCESS_SUPERVISOR, "--", command, ...args], {
+        shell: false,
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+        windowsHide: true,
+      })
+    : spawn(command, args, {
+        detached: true,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+  const processGroupId = !useWindowsSupervisor && child.pid ? child.pid : null;
 
   let settled = false;
   let stdoutBytes = 0;
@@ -399,22 +456,53 @@ export function runQuotaAxiJson(options: {
     resolveResult(result);
   }
 
-  child.stdout?.on("data", (chunk: Buffer) => {
+  const receiveStdout = (chunk: Buffer) => {
     stdoutBytes += chunk.length;
     if (stdoutBytes > maxOutputBytes) {
       finish({ kind: "overflow" });
       return;
     }
     stdoutChunks.push(chunk);
-  });
-  child.stderr?.on("data", (chunk: Buffer) => {
+  };
+  const receiveStderr = (chunk: Buffer) => {
     stderrBytes += chunk.length;
     if (stderrBytes > maxOutputBytes) finish({ kind: "overflow" });
-  });
+  };
+
+  if (useWindowsSupervisor) {
+    child.on("message", (message: unknown) => {
+      if (!isRecord(message) || typeof message.kind !== "string") return;
+      if (
+        (message.kind === "stdout" || message.kind === "stderr") &&
+        typeof message.data === "string"
+      ) {
+        const chunk = Buffer.from(message.data, "base64");
+        if (message.kind === "stdout") receiveStdout(chunk);
+        else receiveStderr(chunk);
+        return;
+      }
+      if (message.kind === "spawn-error") {
+        finish({ kind: message.code === "ENOENT" ? "missing" : "failed" });
+        return;
+      }
+      if (message.kind === "exit") {
+        finish(message.code === 0
+          ? { kind: "ok", stdout: Buffer.concat(stdoutChunks).toString("utf8") }
+          : { kind: "failed" });
+      }
+    });
+  } else {
+    child.stdout?.on("data", receiveStdout);
+    child.stderr?.on("data", receiveStderr);
+  }
   child.on("error", (error: NodeJS.ErrnoException) => {
     finish({ kind: error.code === "ENOENT" ? "missing" : "failed" });
   });
   child.on("close", (code) => {
+    if (useWindowsSupervisor) {
+      if (!settled) finish({ kind: "failed" });
+      return;
+    }
     if (code === 0) {
       finish({ kind: "ok", stdout: Buffer.concat(stdoutChunks).toString("utf8") });
     } else {
@@ -1007,8 +1095,22 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       }
     }
 
+    function scheduleRecoveredView(session: ActiveSession): void {
+      if (active !== session || session.recoveryTimer !== null) return;
+      let timer: unknown;
+      timer = timers.setTimeout(() => {
+        if (active !== session || session.recoveryTimer !== timer) return;
+        session.recoveryTimer = null;
+        render(session);
+      }, 0);
+      session.recoveryTimer = timer;
+      unrefTimer(timer);
+    }
+
     function render(session: ActiveSession, override?: QuotaView): void {
       if (active !== session) return;
+      if (session.recoveryTimer !== null) timers.clearTimeout(session.recoveryTimer);
+      session.recoveryTimer = null;
       const view = override ?? currentView(session);
       clearExpiry(session);
       const renderScheduledAtMs = now();
@@ -1049,6 +1151,11 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
               ? currentView(session, renderNowMs)
               : view
           );
+          if (
+            view.kind !== "fresh" &&
+            recoverableSkewView !== null &&
+            renderView.kind === "fresh"
+          ) scheduleRecoveredView(session);
           const plain = formatStatus(renderView, availableWidth, renderNowMs);
           return plain ? [theme.fg("dim", plain)] : [];
         },
@@ -1243,6 +1350,8 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
       session.modelRefreshTimer = null;
       if (session.revisionTimer !== null) timers.clearInterval(session.revisionTimer);
       session.revisionTimer = null;
+      if (session.recoveryTimer !== null) timers.clearTimeout(session.recoveryTimer);
+      session.recoveryTimer = null;
       clearExpiry(session);
       session.refreshPending = false;
       const watcher = session.credentialWatcher;
@@ -1274,6 +1383,7 @@ export function createFirstmateQuotaStatusExtension(options: FirstmateQuotaStatu
         refreshTimer: null,
         expiryTimer: null,
         modelRefreshTimer: null,
+        recoveryTimer: null,
         revisionTimer: null,
       };
       active = session;

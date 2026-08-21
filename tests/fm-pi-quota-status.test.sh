@@ -125,8 +125,10 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 [ -n "$pid" ] || exit 2
+kill -0 "$pid" 2>/dev/null || exit 3
 children=$(ps -eo pid=,ppid= | awk -v parent="$pid" '$2 == parent { print $1 }')
-for child in $children; do
+known_descendants=$(cat "${FM_QUOTA_TEST_DESCENDANT_PIDS:?}" 2>/dev/null || true)
+for child in $children $known_descendants; do
   kill -KILL "$child" 2>/dev/null || true
 done
 kill -KILL "$pid" 2>/dev/null || true
@@ -1146,8 +1148,8 @@ const schema5RunwayWithoutConfidenceParsed = parseQuotaAxiJson(
   { projection: "full" },
 );
 assert(
-  selectActiveProviderQuota(schema5RunwayWithoutConfidenceParsed, "openai-codex", { nowMs: now }).kind === "malformed",
-  "schema-5 through-reset runway accepted missing projection confidence",
+  selectActiveProviderQuota(schema5RunwayWithoutConfidenceParsed, "openai-codex", { nowMs: now }).kind === "fresh",
+  "valid schema-5 through-reset runway without projection confidence was rejected",
 );
 const schema5RunwayWithRemovedField = structuredClone(schema5Populated);
 schema5RunwayWithRemovedField.providers[1].quotaSemantics.effectiveAvailability[0].runway.projectionBasis = "cycle_average";
@@ -1371,6 +1373,9 @@ const invalidAuthStatus = structuredClone(fullyPopulated);
 invalidAuthStatus.providers[1].state.authStatus = "invalid";
 const freshUnusableAuth = structuredClone(fullyPopulated);
 freshUnusableAuth.providers[1].state.authStatus = "unusable";
+const freshCredentialExpiryReason = structuredClone(fullyPopulated);
+freshCredentialExpiryReason.providers[1].state.reason = "credentials_expired";
+freshCredentialExpiryReason.providers[1].state.authStatus = "usable";
 const falseUnknownSelectionParsed = parseQuotaAxiJson(
   JSON.stringify(falseUnknownSelection),
   { projection: "full" },
@@ -1424,6 +1429,7 @@ for (const [malformedReport, description] of [
   [duplicateAvailabilityScope, "duplicate availability scope"],
   [invalidAuthStatus, "invalid auth status"],
   [freshUnusableAuth, "fresh state with unusable auth"],
+  [freshCredentialExpiryReason, "fresh state with expired-credential reason"],
 ]) {
   const structurallyParsed = parseQuotaAxiJson(JSON.stringify(malformedReport));
   assert(structurallyParsed, `${description} fixture should remain structurally parseable`);
@@ -1554,6 +1560,47 @@ assert(taskkillCalls.length === 1, `Windows timeout did not invoke one process-t
 assert(
   /^\/PID [1-9][0-9]* \/T \/F$/.test(taskkillCalls[0]),
   `Windows timeout did not request bounded tree termination: ${taskkillCalls[0]}`,
+);
+const windowsDescendantsBefore = (await readFile(process.env.FM_QUOTA_TEST_DESCENDANT_PIDS, "utf8"))
+  .trim()
+  .split(/\s+/)
+  .filter(Boolean).length;
+const windowsSurvivorsBefore = (await readFile(process.env.FM_QUOTA_TEST_SURVIVORS, "utf8"))
+  .trim()
+  .split(/\s+/)
+  .filter(Boolean).length;
+let windowsLeaderExitResult;
+await writeFile(process.env.FM_QUOTA_TEST_MODE, "leader_exit\n");
+try {
+  Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+  const windowsLeaderExit = runQuotaAxiJson({ timeoutMs: 500, maxOutputBytes: 1024 * 1024 });
+  windowsLeaderExitResult = await windowsLeaderExit.promise;
+} finally {
+  Object.defineProperty(process, "platform", platformDescriptor);
+  await writeFile(process.env.FM_QUOTA_TEST_MODE, "success\n");
+}
+assert(windowsLeaderExitResult?.kind === "ok", "Windows supervisor lost the exited leader result");
+const windowsDescendantsAfter = (await readFile(process.env.FM_QUOTA_TEST_DESCENDANT_PIDS, "utf8"))
+  .trim()
+  .split(/\s+/)
+  .filter(Boolean).length;
+assert(windowsDescendantsAfter > windowsDescendantsBefore, "Windows leader-exit fixture did not launch a descendant");
+await sleep(1100);
+const windowsSurvivorsAfter = (await readFile(process.env.FM_QUOTA_TEST_SURVIVORS, "utf8"))
+  .trim()
+  .split(/\s+/)
+  .filter(Boolean).length;
+assert(
+  windowsSurvivorsAfter === windowsSurvivorsBefore,
+  "Windows quota descendant survived after its leader exited",
+);
+const leaderTaskkillCalls = (await readFile(process.env.FM_QUOTA_TEST_TASKKILL_CALLS, "utf8"))
+  .trim()
+  .split(/\n/)
+  .filter(Boolean);
+assert(
+  leaderTaskkillCalls.length === 2,
+  `Windows leader exit did not terminate its live supervisor tree: ${leaderTaskkillCalls}`,
 );
 const grokProcess = runQuotaAxiJson({
   timeoutMs: 1000,
@@ -2292,6 +2339,27 @@ overflowSkewClock.advanceTimers(1);
 assert(
   overflowSkew.widgetWriteCount === writesAfterLargeSkew,
   "oversized expiry delay collapsed into a one-millisecond render loop",
+);
+overflowSkewClock.wallNowMs = overflowSkewStart;
+assert(
+  overflowSkew.widgetText(400).includes("week 94% left"),
+  "large-skew clock recovery did not restore recoverable fresh quota",
+);
+const writesBeforeRecoveredPublication = overflowSkew.widgetWriteCount;
+overflowSkewClock.advanceTimers(0);
+assert(
+  overflowSkew.widgetWriteCount > writesBeforeRecoveredPublication,
+  "large-skew recovery did not republish its fresh expiry deadline",
+);
+overflowSkewClock.wallNowMs += 60_000;
+overflowSkewClock.advanceTimers(60_000);
+assert(
+  !overflowSkew.widgetText(400).includes("week 94% left"),
+  "large-skew recovery retained a quota window past reset",
+);
+assert(
+  overflowSkew.widgetText(400).includes("GPT-5.3-Codex-Spark session 100% left"),
+  "large-skew recovery hid a still-fresh sibling window",
 );
 await overflowSkew.emit("session_shutdown", { reason: "quit" });
 assert(overflowSkewClock.tasks.size === 0, "large-skew expiry leaked a timer");

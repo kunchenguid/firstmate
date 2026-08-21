@@ -740,17 +740,24 @@ function expectedEffectiveRunway(
 function matchesExpectedRunway(
   value: Record<string, unknown>,
   expected: Record<string, unknown>,
+  schemaVersion: number,
 ): boolean {
   for (const field of [
     "status",
     "usableRunwaySeconds",
     "projectedExhaustedAt",
     "limitingWindowId",
-    "projectionConfidence",
     "projectionBasis",
   ] as const) {
     if (value[field] !== expected[field]) return false;
   }
+  const optionalConfidence = schemaVersion === 5 && expected.status === "through_reset";
+  if (
+    optionalConfidence
+      ? value.projectionConfidence !== undefined &&
+        value.projectionConfidence !== expected.projectionConfidence
+      : value.projectionConfidence !== expected.projectionConfidence
+  ) return false;
   const expectedBlockers = expected.unmeasurableWindowIds;
   return Array.isArray(expectedBlockers)
     ? exactTextArray(value.unmeasurableWindowIds, expectedBlockers as string[])
@@ -799,7 +806,7 @@ function validRunway(
           unmeasurableWindowIds: [...boundedBy, ...unresolvedWindowIds],
         }
       : expectedEffectiveRunway(boundedBy, rawWindowsById, generatedAtMs, schemaVersion);
-    return matchesExpectedRunway(value, expected);
+    return matchesExpectedRunway(value, expected, schemaVersion);
   }
 
   if (status === "unknown") {
@@ -846,7 +853,7 @@ function validRunway(
     value.projectedExhaustedAt !== undefined ||
     value.limitingWindowId !== undefined
   ) return false;
-  return projectionConfidence !== null && (schemaVersion === 3
+  return (schemaVersion === 5 || projectionConfidence !== null) && (schemaVersion === 3
     ? value.projectionBasis === "cycle_average"
     : value.projectionBasis === undefined);
 }
@@ -1268,7 +1275,12 @@ function validProviderState(value: unknown, requireSourcesTried: boolean): boole
     : exactEnum(value.authStatus, QUOTA_AUTH_STATUSES);
   if (value.authStatus !== undefined && authStatus === null) return false;
   if (status === "fresh" && authStatus !== null && authStatus !== "usable") return false;
-  if (value.reason !== undefined && !exactEnum(value.reason, QUOTA_STATE_REASONS)) return false;
+  const reason = value.reason === undefined
+    ? null
+    : exactEnum(value.reason, QUOTA_STATE_REASONS);
+  if (value.reason !== undefined && reason === null) return false;
+  if (status === "fresh" && reason !== null) return false;
+  if (reason === "credentials_expired" && authStatus !== "expired_refreshable") return false;
   if (!validOptionalTextArray(value.untrustedWindowIds)) return false;
   if (requireSourcesTried && !validTextArray(value.sourcesTried)) return false;
   return validOptionalTextArray(value.sourcesTried);
