@@ -690,6 +690,32 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_every_crewmate_scaffold_forbids_agent_co_authors() {
+  local home kind id brief
+  home="$TMP_ROOT/co-author-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    id="brief-co-author-$kind"
+    case "$kind" in
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --scout >/dev/null 2>&1 \
+          || fail "fm-brief.sh scout scaffold exited non-zero"
+        ;;
+      *)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode "$kind" >/dev/null 2>&1 \
+          || fail "fm-brief.sh $kind scaffold exited non-zero"
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_grep "Never add an agent name as a commit co-author" "$brief" \
+      "$kind brief did not carry the no-agent-co-author commit rule"
+    assert_grep "Co-Authored-By:" "$brief" \
+      "$kind brief did not name the trailer the rule forbids"
+  done
+  pass "fm-brief.sh: every crewmate scaffold forbids agent commit co-authors"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -732,3 +758,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_every_crewmate_scaffold_forbids_agent_co_authors
