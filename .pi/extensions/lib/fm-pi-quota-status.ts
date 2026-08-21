@@ -831,8 +831,9 @@ function validRunway(
   generatedAtMs: number,
   schemaVersion: number,
   requireAuditFields: boolean,
+  requireDerivedFields: boolean,
 ): boolean {
-  if (value === undefined) return schemaVersion !== 5;
+  if (value === undefined) return !requireDerivedFields;
   if (!isRecord(value)) return false;
   const status = exactEnum(value.status, QUOTA_RUNWAY_STATUSES);
   if (!status) return false;
@@ -1019,6 +1020,7 @@ function validSelection(
 function validEffectiveAvailability(
   value: unknown,
   requireAuditFields: boolean,
+  requireDerivedFields: boolean,
   provider: string,
   providerIsStale: boolean,
   unresolvedWindowIds: string[],
@@ -1073,7 +1075,7 @@ function validEffectiveAvailability(
   return validEffectivePace(
     value.pace,
     requireAuditFields,
-    schemaVersion === 5,
+    requireDerivedFields,
     value.boundedBy,
     rawWindowsById,
   ) &&
@@ -1087,6 +1089,7 @@ function validEffectiveAvailability(
       generatedAtMs,
       schemaVersion,
       requireAuditFields,
+      requireDerivedFields,
     ) &&
     validSelection(
       value.selection,
@@ -1244,6 +1247,7 @@ function validQuotaSemantics(
   value: unknown,
   requireDescription: boolean,
   requireAuditFields: boolean,
+  requireDerivedFields: boolean,
   provider: string,
   windows: QuotaWindowView[],
   rawWindows: Record<string, unknown>[],
@@ -1304,6 +1308,7 @@ function validQuotaSemantics(
       !validEffectiveAvailability(
         entry,
         requireAuditFields,
+        requireDerivedFields,
         provider,
         providerIsStale,
         unresolvedWindowIds,
@@ -1394,6 +1399,7 @@ function validProviderFields(
     value.quotaSemantics,
     requireFullFields,
     requireFullFields && !providerIsStale,
+    schemaVersion === 5 || projection === "full",
     exactText(value.provider) ?? "",
     parsedWindows as QuotaWindowView[],
     rawWindows,

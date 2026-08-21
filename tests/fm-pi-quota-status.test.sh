@@ -1239,15 +1239,20 @@ assert(
   selectActiveProviderQuota(fullyPopulatedParsed, "openai-codex", { nowMs: now }).kind === "fresh",
   "valid schema-3 through-reset runway was rejected",
 );
+const schema3Full = structuredClone(fullyPopulated);
+schema3Full.providers[1].windows = [schema3Full.providers[1].windows[0]];
+schema3Full.providers[1].quotaSemantics.effectiveAvailability = [
+  schema3Full.providers[1].quotaSemantics.effectiveAvailability[0],
+];
 const schema3FullParsed = parseQuotaAxiJson(
-  JSON.stringify(fullyPopulated),
+  JSON.stringify(schema3Full),
   { projection: "full" },
 );
 assert(
   selectActiveProviderQuota(schema3FullParsed, "openai-codex", { nowMs: now }).kind === "fresh",
   "valid schema-3 full projection was rejected",
 );
-const schema3FullWithoutSemantics = structuredClone(fullyPopulated);
+const schema3FullWithoutSemantics = structuredClone(schema3Full);
 delete schema3FullWithoutSemantics.providers[1].quotaSemantics;
 const schema3FullWithoutSemanticsParsed = parseQuotaAxiJson(
   JSON.stringify(schema3FullWithoutSemantics),
@@ -1257,6 +1262,18 @@ assert(
   selectActiveProviderQuota(schema3FullWithoutSemanticsParsed, "openai-codex", { nowMs: now }).kind === "malformed",
   "schema-3 full output without quota semantics was accepted as fresh",
 );
+for (const field of ["pace", "runway"]) {
+  const schema3FullWithoutDerivedField = structuredClone(schema3Full);
+  delete schema3FullWithoutDerivedField.providers[1].quotaSemantics.effectiveAvailability[0][field];
+  const parsedWithoutDerivedField = parseQuotaAxiJson(
+    JSON.stringify(schema3FullWithoutDerivedField),
+    { projection: "full" },
+  );
+  assert(
+    selectActiveProviderQuota(parsedWithoutDerivedField, "openai-codex", { nowMs: now }).kind === "malformed",
+    `schema-3 full output without availability ${field} was accepted as fresh`,
+  );
+}
 const schema5Populated = structuredClone(fullyPopulated);
 schema5Populated.schemaVersion = 5;
 delete schema5Populated.providers[1].windows[0].pace.projectionBasis;
@@ -2633,9 +2650,24 @@ assert(transientCredentialWatcherCloses === 1, "credential watcher was not close
 
 const silentCredentialWatcher = new EventEmitter();
 silentCredentialWatcher.close = () => {};
+let runMissedCredentialRevisionCheck;
+const missedCredentialTimers = {
+  setTimeout(callback, delayMs) {
+    return setTimeout(callback, delayMs);
+  },
+  clearTimeout(timer) {
+    clearTimeout(timer);
+  },
+  setInterval(callback, delayMs) {
+    if (delayMs === 1000) runMissedCredentialRevisionCheck = callback;
+    return { delayMs };
+  },
+  clearInterval() {},
+};
 const missedCredentialEvent = makePi(createFirstmateQuotaStatusExtension({
   refreshMs: 60_000,
   timeoutMs: 500,
+  timers: missedCredentialTimers,
   watchAuthDirectory() {
     return silentCredentialWatcher;
   },
@@ -2645,7 +2677,9 @@ await waitFor(
   () => missedCredentialEvent.widgetText(400).includes("week 94% left"),
   "missed-event fixture did not publish initial account quota",
 );
+assert(runMissedCredentialRevisionCheck, "missed-event fixture did not schedule revision checks");
 await setStoredOAuth("openai-codex", fixtureAccessToken("replacement-codex-account"));
+runMissedCredentialRevisionCheck();
 await waitFor(
   () => !missedCredentialEvent.widgetText(400).includes("94%"),
   "periodic credential revision check retained old-account quota after a missed watch event",

@@ -10,6 +10,7 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 - Verified 2026-08-20 against Pi 0.84.2 through an isolated credential-free pseudo-terminal and fake provider-scoped `quota-axi --json --full` producer.
 - The live footer retained Pi's cwd, branch, context, model rows, and unrelated extension status while the auto-discovered Firstmate extension correlated the active fake Codex account and rendered all three windows, resets, plan, and credits in a separate width-aware row below the editor.
+- Credential write notifications quarantine cached account quota before bounded revalidation. One-second revision polling plus a bounded credential read contains missed filesystem notifications, so no zero-latency credential-transition guarantee is claimed.
 - Pi and `pi-signed` share this Pi extension surface; Claude, Grok, Codex, OpenCode, and Cursor do not discover `.pi/extensions`, so their primary UI paths remain unchanged.
 - tmux, Herdr, Zellij, Orca, and cmux only host the selected process and need no quota-specific branch, so the Pi-family behavior is backend-independent and non-Pi processes remain unchanged.
 
