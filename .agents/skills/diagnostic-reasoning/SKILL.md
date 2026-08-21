@@ -46,13 +46,13 @@ Compare the final explanation against the proven path and show why the proposed 
 ## Trust a negative only after the method has produced a positive
 
 A zero, an empty result, or a "not found" is a claim about the method as much as about the world.
-Before reporting absence, run the same method against data known to exist; if it cannot find that, it has established nothing about the target.
+Before reporting absence, run the same method against data known to exist; the control passes only when it returns that known data itself, so a merely non-empty result establishes nothing about the target.
 When the target itself holds nothing to validate against, run that control against the nearest comparable populated location: a sibling path, the same shape in another environment, anywhere the method should succeed.
 If even that is impossible, state the missing control explicitly rather than presenting the empty result as confirmed absent.
 
 Distinguish three outcomes, never two:
 
-- **Found** is a positive the method demonstrably can produce.
+- **Found** is a positive whose matches were checked to be the thing asked about, because an overmatching pattern or a colliding key returns a wrong set or a wrong count while still reading as a hit.
 - **Confirmed absent** is a negative from a method already shown to find what is there.
 - **The query failed** is everything else: a subcommand that does not exist, a malformed request, an endpoint that cannot see what was asked about, a pattern that matches the wrong shape, or a key collision that silently drops rows.
 
