@@ -573,6 +573,11 @@ class Client:
                 return
 
     def _downlink(self):
+        # Why the loop stopped, for a turn that was still waiting for its reply
+        # when it did. Neither of the quiet exits below raises, and they are
+        # different faults, so each names itself rather than leaving the tail to
+        # guess or to say nothing.
+        why = None
         while True:
             try:
                 got = self.reader.read()
@@ -595,6 +600,7 @@ class Client:
                     self.closed.set()
                 break
             if got is None:
+                why = "the connection ended before this turn was answered"
                 break
             kind, payload = got
             if kind == frame.AUDIO:
@@ -635,6 +641,17 @@ class Client:
                     self.reply_done.set()
                 elif event == "session-ended":
                     say("client: the relay ended the session")
+                    # An ordinary session end is not a turn failure at the relay,
+                    # and the next talk key still gets a working one. A turn
+                    # released by it nevertheless has no answer, and relay_error
+                    # is where the reason for that is read from later, so it
+                    # carries what the captain was just told. The test and the
+                    # setdefault are the tail's, for the tail's reasons.
+                    with self.lock:
+                        if not self.reply_done.is_set():
+                            self.turn.setdefault(
+                                "failed", "the relay ended the session before "
+                                          "this turn was answered")
                     self.reply_done.set()
                 else:
                     log(self.verbose, "notice {}".format(obj))
@@ -647,13 +664,25 @@ class Client:
                 if obj.get("mark") == "reply_end":
                     self.reply_done.set()
             elif kind == frame.BYE:
+                why = "the relay said goodbye before this turn was answered"
                 break
         # Under the turn lock for the same reason the failure above is: a clean
         # end of file and a goodbye leave the connection just as unusable as a
         # dropped one, and take_turn reads this under that lock to decide whether
         # a turn can still be opened. Already set on the failure path; setting an
         # event twice costs nothing.
+        #
+        # A turn still waiting for its reply is named in the same critical
+        # section, and before the event that releases it, so the turn reading the
+        # record finds the reason rather than racing it. reply_done is the test:
+        # take_turn clears it under this lock when it opens a turn and it is set
+        # at every other moment, so an answered turn whose connection then ends
+        # cleanly keeps its record and stays reason-free. setdefault, because a
+        # relay that named the failure first said it more precisely than this end
+        # can infer it.
         with self.lock:
+            if why is not None and not self.reply_done.is_set():
+                self.turn.setdefault("failed", why)
             self.closed.set()
         self.reply_done.set()
 
@@ -677,8 +706,14 @@ class Client:
             if self.closed.is_set():
                 return None
             self.turn = {}
+            # In the same critical section as the closure mark, because this
+            # event is how the downlink tells a turn waiting for a reply from the
+            # space between turns. Cleared outside the lock it leaves a window
+            # where the connection has already gone, the downlink has read the
+            # event as nobody waiting and named nothing, and this turn then waits
+            # out its whole timeout to be recorded with no reason at all.
+            self.reply_done.clear()
         self.playback.turn_reset()
-        self.reply_done.clear()
         before = self.playback.bytes
         self.up_q.put(START)
 

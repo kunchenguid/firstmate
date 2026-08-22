@@ -1012,6 +1012,11 @@ async def serve(options):
         "connect_seconds": session.connect_seconds})
 
     status = 0
+    # A fault the client cannot see for itself, held so the teardown can name it
+    # down the connection as well as on this stderr. Nothing is captured on the
+    # branch above it: there the client is the end that went away, and there is
+    # nobody left to tell.
+    reason = None
     try:
         while True:
             kind, payload = await read_uplink_frame(reader)
@@ -1025,8 +1030,17 @@ async def serve(options):
         sys.stderr.write(
             "fm-voice-relay: the uplink is not a frame stream any more: {}\n"
             .format(exc))
+        reason = "{}: {}".format(type(exc).__name__, exc)
         status = 2
     finally:
+        # On fail_turn's shape and before close(), which awaits the model stream
+        # and can be slow or raise. session.close() also sets closing, which
+        # silences the reader's own notice, so a goodbye on its own would leave
+        # the captain's turn record saying only that the turn went unanswered
+        # while the reason for it sat on a stderr no run file quotes.
+        if reason is not None:
+            down.send_json(frame.NOTICE, {"event": "turn-failed",
+                                          "error": reason})
         await session.close()
         down.send(frame.BYE)
         down.close()

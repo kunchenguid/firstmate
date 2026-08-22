@@ -1754,6 +1754,127 @@ check(ending_code != 0,
 check("run 2 of 3" in ending_said.getvalue(),
       "and it should name the run it stopped at: %r" % ending_said.getvalue())
 
+# The case above is the connection ending AFTER a turn was answered, which is the
+# negative case: nothing broke inside a turn, so nothing is named. The three
+# below are the same three endings landing INSIDE a turn, while it is still
+# waiting for its reply, and there each of them has to name itself.
+#
+# None of them raises. frame.Writer sends whole frames and the relay spends
+# almost all of a turn awaiting the model, so a relay killed mid-turn - SIGKILL,
+# the host going, the SSH connection dropping between frames - ends its stdout on
+# a frame boundary. Reader then reads nothing at all where a header should start
+# and reports end of input by design. A goodbye is the same shape by another
+# route: the relay sends one from its own teardown after a fault. Released with
+# no reason recorded, both come back as answered: false with relay_error: null,
+# which in runs.jsonl is the shape of a turn the model declined, and runs.jsonl
+# is the file docs/voice-relay.md computes its published latency spread from. An
+# infrastructure failure averaged into that number is the whole thing being kept
+# out of it.
+class SilentEndStream:
+    """Ends the stream at a frame boundary once the turn is under way."""
+
+    def __init__(self, gate):
+        self._gate = gate
+
+    def read(self, count):
+        check(self._gate.wait(10), "the turn never opened, so nothing ended")
+        return b""
+
+
+class GoodbyeStream:
+    """Says goodbye once the turn is under way, without answering it."""
+
+    def __init__(self, gate):
+        self._gate = gate
+        self._bytes = frame.encode(frame.BYE)
+        self._at = 0
+
+    def read(self, count):
+        check(self._gate.wait(10), "the turn never opened, so nothing was said")
+        chunk = self._bytes[self._at:self._at + count]
+        self._at += len(chunk)
+        return chunk
+
+
+class NamedFaultStream:
+    """Names the fault the relay saw, then says goodbye, with the turn open."""
+
+    def __init__(self, gate, reason):
+        self._gate = gate
+        self._bytes = (
+            frame.encode_json(frame.NOTICE,
+                              {"event": "turn-failed", "error": reason})
+            + frame.encode(frame.BYE))
+        self._at = 0
+
+    def read(self, count):
+        check(self._gate.wait(10), "the turn never opened, so nothing was named")
+        chunk = self._bytes[self._at:self._at + count]
+        self._at += len(chunk)
+        return chunk
+
+
+RELAY_REASON = "FrameError: unknown frame kind: b'\\xff'"
+
+
+def turn_lost(label, make_stream, out_name):
+    """Take one turn against a downlink that ends during it, and return its run."""
+    gate = thread_lib.Event()
+    lost = client.Client(client.parse_args(
+        ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+         "--out-file", os.path.join(TMP, out_name), "--timeout", "2",
+         "--audio-idle", "0.05"]))
+    lost.reader = frame.Reader(make_stream(gate))
+    lost.uplink = StartGate(gate)
+    lost.playback = client.FilePlayback(os.path.join(TMP, out_name))
+    lost.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
+    lost.capture.start(lost.up_q, lost.talking)
+    thread_lib.Thread(target=lost._sender, daemon=True).start()
+    thread_lib.Thread(target=lost._downlink, daemon=True).start()
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+        code = lost.run()
+    lost.up_q.put(None)
+    lost.playback.close()
+    runs = [json_lib.loads(line) for line in out.getvalue().splitlines()
+            if line.strip()]
+    # The record is still emitted: the turn was taken and it really did go
+    # unanswered, so dropping it would hide the failure instead of naming it.
+    check(len(runs) == 1,
+          "%s: the turn was taken, so its run belongs in the file: %d, %r"
+          % (label, len(runs), runs))
+    check(not runs[0]["answered"],
+          "%s: fixture is wrong, the turn was answered after all: %r"
+          % (label, runs[0]))
+    check(code != 0, "%s: an unanswered turn must not exit 0, got %r"
+          % (label, code))
+    check(runs[0]["relay_error"],
+          "%s: a turn lost to the connection must say so rather than reading in "
+          "runs.jsonl exactly like a turn the model declined: %r"
+          % (label, runs[0]))
+    return runs[0]
+
+
+eof_run = turn_lost("end of stream", SilentEndStream, "reply-eof.pcm")
+check("ended" in eof_run["relay_error"],
+      "an end of stream should say the connection ended: %r"
+      % eof_run["relay_error"])
+
+bye_run = turn_lost("goodbye", GoodbyeStream, "reply-bye.pcm")
+check("goodbye" in bye_run["relay_error"],
+      "a goodbye mid-turn should say so, because it is the relay deciding to "
+      "stop rather than the connection dying: %r" % bye_run["relay_error"])
+
+# And when the relay does name the fault, its words are what the record carries.
+# This end can only infer that a goodbye arrived; the relay knows what happened,
+# so a reason it sent is never replaced by one inferred here.
+named_run = turn_lost(
+    "named fault", lambda gate: NamedFaultStream(gate, RELAY_REASON),
+    "reply-named.pcm")
+check(named_run["relay_error"] == RELAY_REASON,
+      "the relay's own reason must reach the record unchanged rather than being "
+      "overwritten by the goodbye behind it: %r" % named_run["relay_error"])
+
 # A startup that refuses part way through releases what it already started, and
 # close() therefore has to survive a half-built client. The real devices cannot be
 # opened on this host, so these stand in for them; what is tested here is the
@@ -3197,8 +3318,20 @@ check(len(runs) == 2,
 check(len(sessions) == 2,
       "the next talk key did not get a session: %d opened" % len(sessions))
 check(not runs[0]["answered"], "the lost turn should be the first one: %r" % runs[0])
-check(runs[0]["relay_error"] is None,
-      "an ordinary session end is not a turn failure: %r" % runs[0]["relay_error"])
+# An ordinary session end is not a turn FAILURE - the relay names none, marks the
+# session spent for nobody, and the next talk key gets a working one - but the
+# turn it landed in still has no answer, and the record has to say why. Left null
+# there, the only turn in this whole file that went unanswered for a knowable
+# reason reads in runs.jsonl exactly like a turn the model declined, and that file
+# is where the published latency spread comes from.
+check(runs[0]["relay_error"],
+      "a turn released by the session ending must name why it has no answer: %r"
+      % runs[0])
+check("session" in runs[0]["relay_error"],
+      "and it should name the session ending rather than some other fault: %r"
+      % runs[0]["relay_error"])
+check("could not finish that turn" not in transcript,
+      "the relay must not have called this a failed turn: %r" % transcript)
 
 # And it was a working session rather than a closed pipe: a real answer, composed
 # from a real read of the records, spoken to the captain over the same connection.
@@ -3242,6 +3375,104 @@ check("connection lost" not in transcript,
       "the connection should have outlived the session: %r" % transcript)
 PY
 pass "a model session that ends mid-conversation costs one turn, not the relay"
+
+# --- an uplink that stops being a frame stream --------------------------------
+#
+# One of the three things that ends the relay, and the only one it diagnoses: the
+# captain's uplink desynchronises, so the relay can no longer tell a header from
+# audio. It writes what it saw on its own stderr and exits 2, which is honest,
+# and it used to tell the client only goodbye. Everything the relay knew stayed
+# on a stderr no run file quotes, while the turn the captain was in the middle of
+# came back as answered: false with nothing in relay_error - the reason existed
+# and was thrown away.
+#
+# Worse, the teardown closes the model session first, and that sets the flag which
+# silences the session reader's own notice, so this path really did send the client
+# nothing at all but the goodbye.
+#
+# The relay is driven directly here rather than through the client, because no
+# client sends a bad frame: the desync is the transport corrupting one, and the
+# only way to put one on the wire is to be the other end. The model is the same
+# stand-in the round trip above uses, and it is never asked to answer.
+
+set +e
+env -i PATH="$PATH" HOME="$E2E/desktop-home" PYTHONPATH="$E2E/fakesdk" \
+  PYTHONDONTWRITEBYTECODE=1 FM_HOME="$E2E/home" \
+  AWS_ACCESS_KEY_ID="$E2E_KEY" \
+  AWS_SECRET_ACCESS_KEY=desktop-secret-not-a-real-key \
+  python3 - "$ROOT/bin" <<'PY'
+import os, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+import fm_voice_frame as frame
+
+relay = os.path.join(sys.argv[1], "fm-voice-relay.py")
+
+
+def check(cond, label):
+    if not cond:
+        sys.exit("desync: " + label)
+
+
+proc = subprocess.Popen(
+    [sys.executable, relay, "--serve"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+try:
+    magic = proc.stdout.read(len(frame.MAGIC))
+    check(magic == frame.MAGIC, "the relay did not open the stream: %r" % magic)
+    reader = frame.Reader(proc.stdout)
+    kind, payload = reader.read()
+    check(kind == frame.NOTICE
+          and frame.decode_json(payload).get("event") == "ready",
+          "the relay was never ready: %r %r" % (kind, payload))
+
+    # A turn is open when the uplink goes, which is when it goes in practice: the
+    # captain is holding the talk key, so that is when there are frames on the
+    # wire to be corrupted at all.
+    proc.stdin.write(frame.encode(frame.TALK_START))
+    proc.stdin.write(b"\xff\x00\x00\x00\x00")
+    proc.stdin.flush()
+
+    frames = []
+    while True:
+        got = reader.read()
+        if got is None:
+            break
+        frames.append(got)
+        if got[0] == frame.BYE:
+            break
+finally:
+    proc.stdin.close()
+    said = proc.stderr.read().decode("utf-8", "replace")
+    code = proc.wait(timeout=30)
+
+kinds = [k for k, _ in frames]
+check(frame.BYE in kinds, "the relay never said goodbye: %r" % kinds)
+named = [n for n in (frame.decode_json(p) for k, p in frames if k == frame.NOTICE)
+         if n.get("event") == "turn-failed"]
+check(named,
+      "the relay diagnosed the fault and told the client only goodbye: %r" % kinds)
+check("FrameError" in named[0].get("error", ""),
+      "the notice should carry what the relay saw: %r" % named[0])
+# Before the goodbye, and before the model session is closed: closing it awaits
+# the model stream, which can be slow or raise, and the client must learn the
+# reason either way.
+failed_at = next(i for i, (k, p) in enumerate(frames)
+                 if k == frame.NOTICE
+                 and frame.decode_json(p).get("event") == "turn-failed")
+check(failed_at < kinds.index(frame.BYE),
+      "the reason must reach the client ahead of the goodbye: %r" % kinds)
+
+# Still said on the relay's own stderr, which the captain reads over SSH, and
+# still the unhappy exit code: naming the fault down the connection does not make
+# it a turn the relay recovered from.
+check("not a frame stream any more" in said,
+      "the relay should still name the desync on its stderr: %r" % said)
+check(code == 2, "a desynchronised uplink must exit 2, got %r" % code)
+PY
+desync_code=$?
+set -e
+[ "$desync_code" = 0 ] || fail "a desynchronised uplink was not named to the client"
+pass "a desynchronised uplink is named to the client before the goodbye, not only to stderr"
 
 # --- the desktop's own check, and the clock it refuses to lie about ----------
 #
