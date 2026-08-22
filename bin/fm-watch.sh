@@ -730,6 +730,39 @@ surface_nonterminal_stale() {  # <window> <hash>
   wake "stale: $win"
 }
 
+# watcher_beat: refresh the liveness beacon (state/.last-watcher-beat) for
+# fm-guard.sh and the arm chain. The beacon must reflect "this watcher process
+# is alive and progressing", so it is touched at the top of every cycle AND
+# between the bounded backend reads inside a cycle: on 2026-08-22 a wedged
+# herdr server stretched single cycles past FM_GUARD_GRACE (each per-window
+# control-socket read blocked for minutes) while the loop was still absorbing
+# wakes correctly, and every guard read the live watcher as dead off the one
+# stale top-of-loop touch. Refreshes only while this process still holds the
+# singleton lock, so an evicted watcher cannot freshen a successor's beacon.
+# A beacon that cannot be written exits the cycle instead of holding the lock
+# beatlessly: the arm chain then replaces this watcher rather than leaving a
+# lock-holder whose beat can never resume.
+# Every production reader (fm-guard.sh, fm-wake-lib.sh, fm-supervision-lib.sh,
+# fm-watch-arm.sh) consumes only the beacon's MTIME. Its CONTENT is a cycle
+# counter advanced only at the top of each poll cycle ("cycle" argument), so a
+# consumer that needs an exact completed-cycle boundary (the triage test
+# helper) reads content, while mid-cycle refreshes move only the mtime.
+watcher_beat() {  # [cycle]
+  if [ -n "${WATCHER_PID:-}" ]; then
+    [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$WATCHER_PID" ] || return 0
+  fi
+  if [ "${1:-}" = cycle ]; then
+    WATCHER_CYCLE_SEQ=$((${WATCHER_CYCLE_SEQ:-0} + 1))
+    if printf '%s\n' "$WATCHER_CYCLE_SEQ" > "$STATE/.last-watcher-beat" 2>/dev/null; then
+      return 0
+    fi
+  elif touch "$STATE/.last-watcher-beat" 2>/dev/null; then
+    return 0
+  fi
+  echo "watcher: liveness beacon unwritable; ending this cycle so the arm chain replaces it" >&2
+  exit 1
+}
+
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
@@ -1140,7 +1173,9 @@ while :; do
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  # watcher_beat also fires between the backend reads below, so one slow
+  # window cannot age the beacon past grace while the cycle is progressing.
+  watcher_beat cycle
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
@@ -1195,6 +1230,7 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      watcher_beat
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -1273,6 +1309,7 @@ while :; do
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
+    watcher_beat
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
@@ -1327,6 +1364,7 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
   while IFS= read -r w; do
+    watcher_beat
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale

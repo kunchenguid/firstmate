@@ -94,6 +94,8 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
+The watcher refreshes the beacon at the top of every cycle and again between the bounded backend reads inside a cycle, so a slow backend cannot age the beacon past grace while the cycle is still progressing; a beacon the watcher cannot write ends that cycle instead of leaving a lock-holder whose beat can never resume.
+The backend reads on the watcher path are themselves time-bounded (for Herdr, see [`herdr-backend.md`](herdr-backend.md) "Current transport behavior"), which is what keeps a wedged backend - for example a Herdr server left unresponsive after machine sleep - from stretching one cycle past grace in the first place.
 
 ## Regression coverage
 

@@ -205,6 +205,8 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
+Every control-socket RPC is time-bounded (`FM_BACKEND_HERDR_CLI_TIMEOUT`, default 20 seconds), because a wedged server that accepts connections but never responds otherwise blocks callers - peek reads, teardown chains, and the watcher's supervision cycle - for unbounded time; only the long-lived backgrounded server launch bypasses the bound.
+The bound's mechanics are owned by `fm_backend_herdr_bounded` in `bin/backends/herdr.sh`.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
@@ -281,6 +283,7 @@ The watcher maps the pane back to the task and skips secondmate endpoints, decla
 The push path only shortens latency.
 Polling runs every cycle and remains the permanent fallback when protocol 16, the event schema, Python, connection, subscription, or repeated reader execution is unavailable.
 There is still one watcher process; the event reader is a bounded child of that watcher.
+The watcher's reads from that child are themselves bounded to the reader's budget plus slack, so a reader wedged past its own deadlines classifies the event path unusable instead of hanging the supervision cycle.
 
 `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
 

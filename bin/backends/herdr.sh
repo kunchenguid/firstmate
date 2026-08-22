@@ -362,6 +362,34 @@ fm_backend_herdr_workspace_label() {
   printf 'firstmate'
 }
 
+# Every herdr control-socket RPC is time-bounded. A wedged herdr server (seen
+# after a machine-sleep window, 2026-08-22) accepts connections but responds
+# after minutes or never, and an unbounded CLI call then blocks its caller for
+# that whole time: fm-peek hung >120s, and the watcher's per-window reads
+# stretched one supervision cycle past FM_GUARD_GRACE so every guard read a
+# live, still-processing watcher as dead. FM_BACKEND_HERDR_CLI_TIMEOUT bounds
+# each RPC in seconds (default 20 - generous against normal millisecond RPCs);
+# 0 disables the bound. Only genuinely long-lived invocations (the server
+# launch) bypass it, via fm_backend_herdr_cli_unbounded.
+FM_BACKEND_HERDR_CLI_TIMEOUT=${FM_BACKEND_HERDR_CLI_TIMEOUT:-20}
+
+# fm_backend_herdr_bounded: run <command...> under FM_BACKEND_HERDR_CLI_TIMEOUT.
+# Prefers timeout(1)/gtimeout(1); falls back to a perl alarm wrapper (perl
+# ships on macOS, which lacks coreutils timeout by default). Exit 124 on a
+# killed run, mirroring timeout(1).
+fm_backend_herdr_bounded() {  # <command...>
+  local t=$FM_BACKEND_HERDR_CLI_TIMEOUT
+  case "$t" in ''|*[!0-9]*|0) "$@"; return $? ;; esac
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$t" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$t" "$@"
+  else
+    # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV or exit 127 } my $stop = sub { kill "TERM", $pid; select undef, undef, undef, 0.2; kill "KILL", $pid; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$t" "$@"
+  fi
+}
+
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
 # BOTH the HERDR_SESSION env var AND appending a trailing `--session <name>`
 # CLI flag. Verified empirically (docs/herdr-backend.md "Session targeting: the
@@ -376,8 +404,19 @@ fm_backend_herdr_workspace_label() {
 # var is kept alongside it - harmless, self-documenting, and forward-
 # compatible if a future herdr build honors it. Never used by
 # fm_backend_herdr_version_check, which is intentionally session-independent
-# (reads only .client.* fields).
+# (reads only .client.* fields). Every call through here is an RPC that
+# completes in well under a second on a healthy server, so all of them run
+# under the FM_BACKEND_HERDR_CLI_TIMEOUT bound.
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
+  local session=$1
+  shift
+  HERDR_SESSION="$session" fm_backend_herdr_bounded herdr "$@" --session "$session"
+}
+
+# fm_backend_herdr_cli_unbounded: identical routing without the RPC bound, for
+# the ONE legitimately long-lived invocation - the backgrounded server launch
+# in fm_backend_herdr_server_ensure, which the bound would kill mid-life.
+fm_backend_herdr_cli_unbounded() {  # <session> <herdr-subcommand-and-args...>
   local session=$1
   shift
   HERDR_SESSION="$session" herdr "$@" --session "$session"
@@ -396,7 +435,7 @@ fm_backend_herdr_tool_check() {
 fm_backend_herdr_version_check() {
   fm_backend_herdr_tool_check || return 1
   local status protocol version
-  status=$(herdr status --json 2>/dev/null) || { echo "error: 'herdr status --json' failed; is herdr installed correctly?" >&2; return 1; }
+  status=$(fm_backend_herdr_bounded herdr status --json 2>/dev/null) || { echo "error: 'herdr status --json' failed; is herdr installed correctly?" >&2; return 1; }
   protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null)
   version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null)
   case "$protocol" in
@@ -1448,13 +1487,29 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # NOT auto-start the server, so this must run before any workspace/tab/pane
 # call. Bounded poll for the server to report running.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i
+  local session=$1 running out i fails=0
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
-  ( fm_backend_herdr_cli "$session" server >/dev/null 2>&1 & ) || return 1
+  ( fm_backend_herdr_cli_unbounded "$session" server >/dev/null 2>&1 & ) || return 1
   for i in $(seq 1 20); do
-    running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
-    [ "$running" = "true" ] && return 0
+    # A status RPC that FAILS (as opposed to answering running=false) is a
+    # socket that cannot even be read - a wedged server, not one still coming
+    # up - and each such failure already costs a full RPC bound. Bail after a
+    # few consecutive failures rather than multiplying the bound by the whole
+    # poll budget: pre-bound, exactly that multiplication turned one wedged
+    # server into multi-minute hangs in every caller of the capture path
+    # (fm-peek, teardown chains, the watcher's stale scan; 2026-08-22).
+    if out=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null); then
+      fails=0
+      running=$(printf '%s' "$out" | jq -r '.server.running // false' 2>/dev/null)
+      [ "$running" = "true" ] && return 0
+    else
+      fails=$((fails + 1))
+      if [ "$fails" -ge 3 ]; then
+        echo "error: herdr status for session '$session' failed $fails times in a row while waiting for the server; giving up instead of polling a wedged socket" >&2
+        return 1
+      fi
+    fi
     sleep 0.5
   done
   echo "error: herdr server for session '$session' did not report running within 10s" >&2
@@ -3085,7 +3140,7 @@ fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
 # normally carry meta), best-effort.
 fm_backend_herdr_resolve_bare_selector() {  # <name>
   local name=$1 sessions session tabs tab_id wsid pane_id
-  sessions=$(herdr session list --json 2>/dev/null | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null)
+  sessions=$(fm_backend_herdr_bounded herdr session list --json 2>/dev/null | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null)
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || continue
@@ -3149,7 +3204,7 @@ fm_backend_herdr_list_live() {  # <session>
 # ~/.config/herdr/sessions/<name>/herdr.sock). Empty on any failure.
 fm_backend_herdr_socket_path() {  # <session>
   local session=$1
-  herdr session list --json 2>/dev/null \
+  fm_backend_herdr_bounded herdr session list --json 2>/dev/null \
     | jq -r --arg name "$session" '.sessions[]? | select(.name == $name) | .socket_path // empty' 2>/dev/null \
     | head -1
 }
@@ -3173,12 +3228,18 @@ fm_backend_herdr_events_capable() {  # <session>
   if [ -z "${FM_BACKEND_HERDR_EVENT_READER:-}" ]; then
     command -v python3 >/dev/null 2>&1 || return 1
   fi
-  protocol=$(herdr status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
+  protocol=$(fm_backend_herdr_bounded herdr status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
-  schema=$(herdr api schema --json 2>/dev/null) || return 1
-  printf '%s' "$schema" | grep -Fq 'events.subscribe' || return 1
-  printf '%s' "$schema" | grep -Fq 'pane.agent_status_changed' || return 1
+  schema=$(fm_backend_herdr_bounded herdr api schema --json 2>/dev/null) || return 1
+  # Substring checks via case, not `printf | grep -Fq`: grep -q exits on the
+  # first match, and with SIGPIPE ignored (the watcher inherits SIG_IGN from a
+  # Node-based arm chain) the ~220KB schema printf then reports
+  # "printf: write error: Broken pipe" into the arm output - harmless to the
+  # verdict, but alarming noise (observed 2026-08-22). A pipeline-free match
+  # cannot produce it.
+  case "$schema" in *'events.subscribe'*) ;; *) return 1 ;; esac
+  case "$schema" in *'pane.agent_status_changed'*) ;; *) return 1 ;; esac
   return 0
 }
 
@@ -3305,7 +3366,21 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   done < <(fm_backend_herdr_event_reader_cmd)
   [ "${#reader[@]}" -gt 0 ] || return 2
 
-  local fifo_dir fifo reader_pid line ws status agent raw record hit rc=1 reader_rc=0
+  # Every FIFO read below is itself bounded: the python reader enforces its own
+  # deadlines, but a reader wedged past them (a hung socket write, a clock
+  # anomaly around machine sleep) must not hang this caller - the watcher's
+  # whole supervision cycle - on an fd that will never deliver EOF. A read that
+  # exceeds the reader's budget plus slack classifies the event path unusable
+  # (return 2), the same fail-closed fallback as a connect failure.
+  # FM_BACKEND_HERDR_EVENT_READ_SLACK (default 15s) is the allowance past the
+  # reader's own budget; tests shrink it to exercise the bound quickly.
+  local read_bound slack=${FM_BACKEND_HERDR_EVENT_READ_SLACK:-15}
+  case "$slack" in ''|*[!0-9]*) slack=15 ;; esac
+  case "$timeout" in
+    ''|*[!0-9]*) read_bound=$((15 + slack)) ;;
+    *) read_bound=$((timeout + slack)) ;;
+  esac
+  local fifo_dir fifo reader_pid line ws status agent raw record hit rc=1 reader_rc=0 read_rc
   fifo_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-eventwait.XXXXXX") || return 2
   fifo="$fifo_dir/events"
   if ! mkfifo "$fifo" 2>/dev/null; then
@@ -3320,7 +3395,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
     rm -rf "$fifo_dir" 2>/dev/null || true
     return 2
   fi
-  if ! IFS= read -r -u 9 line || [ "$line" != "@subscribed" ]; then
+  if ! IFS= read -t "$read_bound" -r -u 9 line || [ "$line" != "@subscribed" ]; then
     rc=2
   fi
 
@@ -3352,7 +3427,20 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   # with `cut`, NOT `IFS=$'\t' read`: a tab is IFS-whitespace, so `read` would
   # collapse an empty middle field (e.g. an absent workspace_id) and shift the
   # status into the wrong column. `cut` preserves empty fields.
-  while [ "$rc" -eq 1 ] && IFS= read -r line <&9; do
+  while [ "$rc" -eq 1 ]; do
+    IFS= read -t "$read_bound" -r line <&9
+    read_rc=$?
+    if [ "$read_rc" -ne 0 ]; then
+      # Timeout versus EOF cannot be told apart by status alone (macOS Bash 3.2
+      # returns 1 for both), but the reader is the stream's only writer, so EOF
+      # is only possible once it is gone: a reader still alive after a failed
+      # read outlived its own budget without closing the stream, and the event
+      # path is classified unusable rather than blocking this cycle on it.
+      if kill -0 "$reader_pid" 2>/dev/null; then
+        rc=2
+      fi
+      break
+    fi
     [ -n "$line" ] || continue
     pane_id=$(printf '%s' "$line" | cut -f1)
     ws=$(printf '%s' "$line" | cut -f2)
@@ -3366,11 +3454,15 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
       break
     fi
   done
-  if [ "$rc" -eq 0 ]; then
+  # A stopped reader (rc 0 or 2) is TERM-killed with an immediate KILL
+  # follow-up, so a reader wedged past TERM (a hung socket write) cannot turn
+  # the reaping wait below into a new unbounded hang. Both kills land before
+  # the wait reaps, which keeps the shell's asynchronous job-termination
+  # notice from leaking into the caller's stderr. The reader needs no
+  # graceful-shutdown window: this caller owns and removes the FIFO itself.
+  if [ "$rc" -ne 1 ]; then
     kill "$reader_pid" 2>/dev/null || true
-  fi
-  if [ "$rc" -eq 2 ]; then
-    kill "$reader_pid" 2>/dev/null || true
+    kill -KILL "$reader_pid" 2>/dev/null || true
   fi
   # No actionable edge: distinguish a clean full-budget wait (reader exit 0 ->
   # return 1, caller already waited) from a reader error (connect/subscribe

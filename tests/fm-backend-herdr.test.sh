@@ -4420,6 +4420,88 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+test_cli_bound_kills_hung_rpc() {
+  local dir fb start rc elapsed out
+  dir="$TMP_ROOT/cli-bound"; fb="$dir/fakebin"; mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+exec sleep 60
+SH
+  chmod +x "$fb/herdr"
+  start=$(date +%s)
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_CLI_TIMEOUT=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_cli sess status --json' "$ROOT" >/dev/null 2>&1
+  rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  [ "$rc" -ne 0 ] || fail "a hung herdr RPC must fail under the CLI bound, got success"
+  [ "$elapsed" -lt 15 ] || fail "the CLI bound must kill a hung herdr RPC promptly, took ${elapsed}s"
+  # 0 disables the bound: a fast RPC still passes through untouched.
+  printf '#!/usr/bin/env bash\nprintf "ok\\n"\n' > "$fb/herdr"
+  chmod +x "$fb/herdr"
+  out=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_CLI_TIMEOUT=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_cli sess status --json' "$ROOT" 2>/dev/null) \
+    || fail "FM_BACKEND_HERDR_CLI_TIMEOUT=0 must disable the bound, not fail the call"
+  [ "$out" = ok ] || fail "unbounded passthrough lost the RPC output, got '$out'"
+  pass "fm_backend_herdr_cli: a hung control-socket RPC dies at FM_BACKEND_HERDR_CLI_TIMEOUT (${elapsed}s), 0 disables the bound"
+}
+
+test_events_capable_large_schema_is_pipe_noise_free() {
+  local dir fb err rc
+  dir="$TMP_ROOT/cap-schema"; fb="$dir/fakebin"; mkdir -p "$fb"
+  # The schema fake pads well past the 64KiB pipe buffer with both needles at
+  # the very front, the shape that made the old `printf | grep -Fq` chain take
+  # EPIPE mid-write when grep exited on its first match under ignored SIGPIPE
+  # (the watcher inherits SIG_IGN from a Node-based arm chain).
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.7.3","protocol":16},"server":{"running":true}}\n' ;;
+  "api schema")
+    printf '{"methods":["events.subscribe","pane.agent_status_changed"'
+    i=0
+    while [ "$i" -lt 20000 ]; do printf ',"padding-entry-%s"' "$i"; i=$((i + 1)); done
+    printf ']}\n'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  err="$dir/err"
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENT_READER=/bin/cat \
+    bash -c 'trap "" PIPE; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable sess' "$ROOT" 2> "$err"
+  rc=$?
+  [ "$rc" = 0 ] || fail "events_capable must accept a large schema carrying both needles, got rc $rc"
+  if grep -qi "broken pipe" "$err"; then
+    fail "events_capable emitted broken-pipe noise: $(cat "$err")"
+  fi
+  pass "fm_backend_herdr_events_capable: large-schema capability read stays capable with no broken-pipe noise under ignored SIGPIPE"
+}
+
+test_wait_transition_hung_reader_bounded() {
+  local dir state agent temp fb reader start rc elapsed
+  dir="$TMP_ROOT/wt-hung-reader"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  # A reader that acknowledges, then wedges far past its own budget without
+  # ever closing the stream - the fd shape a hung socket write leaves behind.
+  reader="$dir/hung-reader.sh"
+  cat > "$reader" <<'SH'
+#!/usr/bin/env bash
+printf '@subscribed\n'
+exec sleep 120
+SH
+  chmod +x "$reader"
+  start=$(date +%s)
+  PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_BACKEND_HERDR_EVENT_READ_SLACK=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ' "$ROOT" "$state" >/dev/null
+  rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  [ "$rc" = 2 ] || fail "a reader wedged past its budget must classify the event path unusable (rc 2), got $rc"
+  [ "$elapsed" -lt 30 ] || fail "a wedged reader must not hang the wait; took ${elapsed}s"
+  pass "fm_backend_herdr_wait_transition: a reader wedged past its budget is killed and classified unusable (rc 2 after ${elapsed}s)"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4604,3 +4686,6 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_cli_bound_kills_hung_rpc
+test_events_capable_large_schema_is_pipe_noise_free
+test_wait_transition_hung_reader_bounded
