@@ -138,6 +138,9 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
+#   A project with no origin remote at all (a local-only project registered
+#   with none) skips this freshen step silently, mirroring the same no-origin
+#   tolerance bin/fm-fleet-sync.sh already applies.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1729,6 +1732,9 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
+  if ! git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
+    return 0
+  fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
