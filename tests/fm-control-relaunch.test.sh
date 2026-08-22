@@ -1509,6 +1509,11 @@ case "\$cmd \$sub" in
   "session list")
     printf '{"sessions":[{"name":"hses","running":true,"socket_path":"/tmp/fm-herdr-hses.sock"}]}\n' ;;
   "workspace list")
+    if [ -f "\$D/reappear-live-on-workspace-read" ]; then
+      : > "\$D/old-present"
+      : > "\$D/launched"
+      rm -f "\$D/reappear-live-on-workspace-read"
+    fi
     if [ -f "\$D/home-workspace" ]; then
       printf '{"result":{"workspaces":[{"workspace_id":"hws-home","label":"firstmate"},{"workspace_id":"hws-launch","label":"captain"}]}}\n'
     elif [ -f "\$D/ws-ok" ]; then
@@ -1625,6 +1630,22 @@ test_recover_missing_uses_the_homes_flat_workspace_when_recorded_workspace_is_go
   pass "fm-control relaunch: gone-workspace recovery uses the home's flat workspace"
 }
 
+test_recover_missing_refuses_a_reappeared_live_endpoint() {
+  local dir out rc
+  dir=$(new_case recov-race rl56)
+  add_herdr_ship_task "$dir" rl56 claude
+  make_herdr_stub "$dir" "hp-rl56-old" "hws-rl56"
+  : > "$dir/fake/home-workspace"
+  : > "$dir/fake/reappear-live-on-workspace-read"
+  out=$(run_control "$dir" rl56 relaunch --note "endpoint race"); rc=$?
+  expect_code 1 "$rc" "a live endpoint reappearing during recovery should refuse"$'\n'"$out"
+  assert_contains "$out" "became live during recovery" \
+    "the refusal should identify the reappeared live endpoint"
+  [ ! -e "$dir/fake/create-label" ] \
+    || fail "a reappeared live endpoint must not get a replacement pane"
+  pass "fm-control relaunch: a Herdr endpoint that reappears live during recovery is refused"
+}
+
 test_recovery_marker_cleanup_failure_is_incomplete() {
   local dir out rc marker real_rm
   dir=$(new_case recov-marker-rm rl51)
@@ -1715,6 +1736,24 @@ test_recover_missing_rebuilds_a_dead_endpoint_only_with_the_marker() {
   [ ! -e "$marker" ] \
     || fail "the confirmed recovery must remove its recovery-attempt marker"
   pass "fm-control relaunch: a dead endpoint recovers through a rebuilt pane only when the recovery-attempt marker proves a failed recovery"
+}
+
+test_direct_marker_recovery_clears_marker_after_confirmation() {
+  local dir out rc marker
+  dir=$(new_case recov-direct-marker rl57)
+  add_herdr_ship_task "$dir" rl57 claude
+  make_herdr_stub "$dir" "hp-rl57-old" "hws-rl57"
+  : > "$dir/fake/ws-ok"
+  : > "$dir/fake/old-present"
+  printf '%s' "$dir/wt" > "$dir/fake/cwd-hp-rl57-old"
+  marker="$dir/home/state/rl57.control-relaunch.recovery-attempt"
+  : > "$marker"
+  out=$(FM_RECOVER_MISSING_WAIT=1 run_spawn "$dir" rl57 --relaunch --recover-missing --harness claude); rc=$?
+  expect_code 0 "$rc" "a direct marker-authorized recovery should confirm and complete"$'\n'"$out"
+  [ ! -e "$marker" ] || fail "a confirmed direct recovery must clear its recovery-attempt marker"
+  [ "$(meta_field "$dir" rl57 window)" = "hses:hp-new" ] \
+    || fail "the direct recovery should publish the replacement endpoint"
+  pass "fm-spawn --recover-missing: direct marker recovery clears provenance after liveness confirmation"
 }
 
 test_dead_endpoint_without_a_marker_stays_on_the_ordinary_path() {
@@ -1891,10 +1930,12 @@ test_recover_missing_refuses_without_relaunch
 test_recover_missing_refuses_secondmate_kind
 test_recover_missing_recovers_a_missing_herdr_endpoint
 test_recover_missing_uses_the_homes_flat_workspace_when_recorded_workspace_is_gone
+test_recover_missing_refuses_a_reappeared_live_endpoint
 test_recovery_marker_cleanup_failure_is_incomplete
 test_live_endpoint_retires_a_stale_recovery_marker_before_ordinary_relaunch
 test_recover_missing_refuses_an_ambiguous_herdr_workspace
 test_recover_missing_rebuilds_a_dead_endpoint_only_with_the_marker
+test_direct_marker_recovery_clears_marker_after_confirmation
 test_recovery_pane_survives_an_empty_first_cwd_read
 test_dead_endpoint_without_a_marker_stays_on_the_ordinary_path
 test_ordinary_relaunch_failure_retry_stays_on_the_same_path

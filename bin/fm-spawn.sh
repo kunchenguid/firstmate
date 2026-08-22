@@ -296,6 +296,7 @@ YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
 RECOVER_MISSING=0
+RECOVER_MISSING_MARKER_ONLY=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -1037,12 +1038,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
     [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ] && [ "$recorded_tx" = "$FM_CONTROL_RELAUNCH_TX" ]
   }
   RECOVER_MISSING_AUTHORIZED=0
+  RECOVER_MISSING_MARKER_ONLY=0
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] \
      && [ "$(fm_lock_role "$SPAWN_CONTROL_LOCK" 2>/dev/null || true)" = control-relaunch ] \
      && control_relaunch_tx_matches; then
     RECOVER_MISSING_AUTHORIZED=1
   elif [ -f "$STATE/$ID.control-relaunch.recovery-attempt" ]; then
     RECOVER_MISSING_AUTHORIZED=1
+    RECOVER_MISSING_MARKER_ONLY=1
   fi
   if [ "$RECOVER_MISSING" = 1 ] && [ "$RECOVER_MISSING_AUTHORIZED" != 1 ]; then
     echo "error: --recover-missing is reserved for bin/fm-control.sh $ID relaunch; run the relaunch through the control plane so its live transaction or recorded recovery-attempt marker proves this recovery is fm-control's" >&2
@@ -1932,6 +1935,25 @@ if [ "$RELAUNCH" -eq 1 ]; then
       echo "error: task $ID has incomplete Herdr recovery identity; preserving its record" >&2
       exit 1
     }
+    herdr_recovery_endpoint_recheck() {
+      local recovery_state
+      recovery_state=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+      case "$recovery_state" in
+        missing|dead) return 0 ;;
+        alive)
+          echo "error: task $ID's recorded Herdr endpoint became live during recovery; refusing duplicate recovery" >&2
+          ;;
+        *)
+          echo "error: task $ID's recorded Herdr endpoint became '$recovery_state' during recovery; refusing ambiguous recovery" >&2
+          ;;
+      esac
+      return 1
+    }
+    spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+      echo "error: task $ID's Herdr recovery could not acquire its session lock; refusing a concurrent recovery" >&2
+      exit 1
+    }
+    herdr_recovery_endpoint_recheck || exit 1
     HERDR_CONTAINER="$HERDR_SES:$HERDR_WORKSPACE_ID"
     # The ordinary relaunch setup assigns WT from the recorded copy only after
     # this endpoint-adoption block; use the checkpointed path directly here so
@@ -1956,6 +1978,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
         exit 1
         ;;
     esac
+    herdr_recovery_endpoint_recheck || exit 1
     HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$HERDR_CONTAINER" "fm-$ID" "$HERDR_CREATE_CWD" "${HERDR_SEEDED_DEFAULT_TAB_ID:-}") || exit 1
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
@@ -2990,6 +3013,28 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
     else
       echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
     fi
+  fi
+fi
+
+if [ "$RECOVER_MISSING_MARKER_ONLY" = 1 ]; then
+  recovery_state=
+  recovery_polls=${FM_RECOVER_MISSING_WAIT:-90}
+  case "$recovery_polls" in
+    ''|*[!0-9]*) recovery_polls=90 ;;
+  esac
+  while [ "$recovery_polls" -gt 0 ]; do
+    recovery_state=$(fm_backend_agent_state "$BACKEND" "$T")
+    [ "$recovery_state" = alive ] && break
+    sleep 1
+    recovery_polls=$((recovery_polls - 1))
+  done
+  if [ "$recovery_state" != alive ]; then
+    echo "error: marker-authorized recovery of $ID did not confirm a live replacement endpoint (state: ${recovery_state:-unknown}); preserving the recovery-attempt marker" >&2
+    exit 1
+  fi
+  if ! rm -f "$STATE/$ID.control-relaunch.recovery-attempt"; then
+    echo "error: marker-authorized recovery of $ID is live, but its recovery-attempt marker could not be cleared" >&2
+    exit 1
   fi
 fi
 
