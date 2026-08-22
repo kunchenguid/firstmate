@@ -177,10 +177,9 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
-# A declared pause uses the bounded cadence unless an authoritative active run
-# proves work resumed.
-# A captain-held crew uses that cadence only after its agent confidently exits,
-# while a live or ambiguously read captain-held agent still surfaces once; a
+# A declared pause or captain-held crew uses that cadence only after its agent
+# confidently exits, while a live or ambiguously read agent still surfaces once;
+# an authoritative active run overrides either declaration as working. A
 # secondmate earns the cadence on its declaration alone, because its endpoint
 # liveness is deliberately never read (pause_state_class owns that split).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
@@ -528,29 +527,14 @@ clear_pause_tracking() {  # <window-key>
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # The latest explicit paused event remains authoritative while the endpoint idles,
 # but an active run overrides it as working and a later status event clears it.
-# After fm-crew-state has fallen back to stopped or unknown, captain-held classification
-# is recovered only for a confidently dead ordinary crew, or for a secondmate, whose
-# endpoint liveness this function deliberately never reads.
+# After fm-crew-state has fallen back to stopped or unknown, paused and captain-held
+# classification is recovered only for a confidently dead ordinary crew, or for a
+# secondmate, whose endpoint liveness this function deliberately never reads.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive kind
   key=$(window_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
-  if status_is_paused "$last"; then
-    if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-      printf 'paused'
-      return
-    fi
-    class=$(crew_absorb_class "$task")
-    if [ "$class" = working ]; then
-      rm -f "$recheck_file"
-      printf 'working'
-      return
-    fi
-    date +%s > "$recheck_file"
-    printf 'paused'
-    return
-  fi
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
     class=$(crew_absorb_class "$task")
