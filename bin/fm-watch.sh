@@ -159,9 +159,9 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # emit_stale_wake), after whichever owner classified the window. It is bounded rather
 # than permanent silence, passing one reminder through per PAUSE_RESURFACE_SECS;
 # merge_wait_absorbs_alarm's header owns which alarm attempts that reminder reaches and
-# the accepted limit that follows, and is the only place either is stated.
-# It absorbs the idle-pane stale class ONLY, never the busy-pane completed-turn bound
-# below, which reports a possible hung foreground call rather than a pending merge.
+# the accepted limit that follows. It absorbs the idle-pane stale class ONLY, never the
+# busy-pane completed-turn bound below, which reports a possible hung foreground call
+# rather than a pending merge.
 # An ACTIONABLE wake (a captain-relevant
 # signal, a no-verb signal whose crew is not provably working, any check, a stale
 # pane whose crew is not provably working, a provably-working stale past the
@@ -422,13 +422,15 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 # (bin/fm-crew-state.sh), so no verdict can report a pull request that later goes red
 # or is closed at the same head, and the merge poll only ever reports `merged`.
 #
-# THE ACCEPTED LIMIT, stated once and in full, because every other place that touches it
-# points here rather than restating it. The pass-through below fires only where an owner
-# attempts an alarm, so it reaches a pane whose hash keeps changing and the non-terminal
-# wedge window. A byte-static pane on the terminal branch attempts no alarm at all once
-# its hash is recorded, so nothing calls this function there: no reminder can fire, and a
-# WITHDRAWN declaration is likewise honored only at the next alarm attempt, which such a
-# pane never makes. Those are two faces of one limit, not two separate gaps.
+# THE ACCEPTED LIMIT. This header is its owner and states it in full below, so a reader who
+# reaches here needs to look nowhere else. DO NOT restate any of it elsewhere, in code or in
+# docs: point here instead, because two statements of one contract drift apart the moment
+# only one of them is edited. The pass-through below fires only where an owner attempts an
+# alarm, so it reaches a pane whose hash keeps changing and the non-terminal wedge window.
+# A byte-static pane on the terminal branch attempts no alarm at all once its hash is
+# recorded, so nothing calls this function there: no reminder can fire, and a WITHDRAWN
+# declaration is likewise honored only at the next alarm attempt, which such a pane never
+# makes. Those are two faces of one limit, not two separate gaps.
 #
 # The single cover is the merge poll: it stays armed and is what reports the merge, and
 # bin/fm-merge-wait.sh declare refuses outright without it. That is why the gate above
