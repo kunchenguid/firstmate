@@ -673,9 +673,9 @@ test_terminal_passed() {
 
 test_terminal_passed_does_not_claim_landing() {
   # Regression for issue #2421: a pipeline `passed` outcome is a claim about
-  # the run's own steps, not about the forge. The PR is typically still open
-  # awaiting a human merge decision, and rendering "PR merged/closed" invents
-  # landing the helper never established.
+  # the run's own steps, not about the forge. The PR may be open, already
+  # merged, or absent; rendering "PR merged/closed" (the old wording) or any
+  # other forge state invents landing the helper never established.
   reset_fakes
   local d; d=$(new_case passed-open-pr)
   make_repo_on_branch "$d/wt" fm/feat-landing
@@ -684,13 +684,13 @@ test_terminal_passed_does_not_claim_landing() {
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-landing)"
   local out; out=$(run_crew_state "$d" feat-landing)
   assert_contains "$out" "run passed" "passed run keeps its run claim"
-  assert_contains "$out" "awaiting review/merge" "detail names the PR as awaiting, not landed"
+  assert_contains "$out" "pipeline complete" "detail stays neutral about the forge"
   case "$out" in
-    *merged/closed*)
-      fail "passed run must not render a forge landing claim"
+    *merged/closed*|*awaiting*review*)
+      fail "passed run must not render any forge claim about the PR"
       ;;
     *)
-      pass "no landing claim for an outcome=passed run"
+      pass "no forge claim for an outcome=passed run"
       ;;
   esac
 }
