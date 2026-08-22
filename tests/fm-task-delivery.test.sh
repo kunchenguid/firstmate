@@ -54,7 +54,7 @@ run_spawn() {  # <home> <fakebin> <spawn-args...>
   shift 2
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$(dirname "$home")/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -166,8 +166,16 @@ EOF
       notice)
         assert_contains "$out" "less rigor than the captain's standing posture" \
           "$label: no deviation notice for a rigor downgrade"
-        assert_contains "$out" "the standing posture for proj is $registered" \
-          "$label: notice did not name the standing posture it compared against" ;;
+        case "$label" in
+          unregistered*)
+            assert_contains "$out" "(unregistered) is $registered" \
+              "$label: notice did not identify the unregistered project path"
+            ;;
+          *)
+            assert_contains "$out" "the standing posture for proj is $registered" \
+              "$label: notice did not name the standing posture it compared against"
+            ;;
+        esac ;;
       quiet)
         assert_not_contains "$out" "less rigor than the captain's standing posture" \
           "$label: printed a deviation notice that is not a downgrade" ;;
@@ -196,6 +204,27 @@ EOF
   assert_not_contains "$out" "less rigor" "a scout spawn consulted the registered delivery posture"
   assert_not_contains "$out" "delivery mismatch" "a scout spawn checked a delivery contract it does not carry"
   pass "fm-spawn: a scout spawn resolves no delivery posture from the registry"
+}
+
+# A project's identifier is independent from its directory basename, so the
+# spawn's advisory lookup must use the registered identifier/path pair.
+test_spawn_uses_registered_project_identifier() {
+  local home path fakebin out
+  home="$TMP_ROOT/spawn-registered-id/home"
+  path="$TMP_ROOT/spawn-registered-id/solar-pa/sisat"
+  fakebin="$TMP_ROOT/spawn-registered-id/bin"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$path" "$fakebin"
+  printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "- solar [no-mistakes] - fixture (added 2026-01-01) [path=$path]" > "$home/data/projects.md"
+  write_brief "$home" spawn-registered-id-a1 direct-PR
+
+  out=$(run_spawn "$home" "$fakebin" spawn-registered-id-a1 "$path" claude --mode direct-PR --yolo off)
+  assert_contains "$out" "the standing posture for solar is no-mistakes" \
+    "spawn did not use the registered project identifier"
+  assert_not_contains "$out" "standing posture for sisat" \
+    "spawn derived the project identity from the path basename"
+  pass "fm-spawn: registry posture lookup uses the explicit identifier/path pair"
 }
 
 # Promotion is where a scout's ship contract is finally decided, so it requires the
@@ -280,8 +309,7 @@ test_project_mode_resolves_registered_project_path() {
   mkdir -p "$home/data"
   cat > "$home/data/projects.md" <<'EOF'
 - legacy [direct-PR] - fixture (added 2026-01-01)
-- declared [direct-PR] - fixture (path: diaria/api-v2; added 2026-01-01)
-- invalid-path [direct-PR] - fixture (path: bad path; added 2026-01-01)
+- declared [direct-PR] - fixture (added 2026-01-01) [path=diaria/api-v2]
 EOF
 
   out=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path/home-dir" "$PROJECT_MODE" --path legacy)
@@ -291,6 +319,13 @@ EOF
   [ "$out" = "$TMP_ROOT/project-path/home-dir/dpe/diaria/api-v2" ] \
     || fail "declared project path was not resolved from the declared value (got '$out')"
 
+  out=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path/home-dir" "$PROJECT_MODE" --list-paths)
+  assert_contains "$out" $'legacy\t'"$home/projects/legacy" "list operation did not expose the legacy identifier and path pair"
+  assert_contains "$out" $'declared\t' "list operation did not expose the declared identifier and path pair"
+
+  cat > "$home/data/projects.md" <<'EOF'
+- invalid-path [direct-PR] - fixture (added 2026-01-01) [path=bad path]
+EOF
   set +e
   err=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path/home-dir" "$PROJECT_MODE" --path invalid-path 2>&1 >/dev/null)
   status=$?
@@ -304,15 +339,71 @@ EOF
   set -e
   [ "$status" -ne 0 ] || fail "an invalid project path was accepted by the default API"
   assert_contains "$err" 'invalid path' "default project lookup hid an invalid path"
-  pass "fm-project-mode: legacy and declared project paths resolve through --path, malformed paths fail"
+  pass "fm-project-mode: legacy and declared project paths resolve through explicit APIs"
+}
+
+# Path lookup is identifier-only, never a filesystem search, and the registry
+# cannot contain malformed path variants or two identifiers for one clone.
+test_project_mode_rejects_ambiguous_and_duplicate_paths() {
+  local home err status
+  home="$TMP_ROOT/project-path-validation/home"
+  mkdir -p "$home/data" "$home/projects/ambiguous"
+
+  cat > "$home/data/projects.md" <<'EOF'
+- alpha [direct-PR] - fixture (added 2026-01-01) [path=shared]
+- beta [direct-PR] - fixture (added 2026-01-01) [path=shared]
+EOF
+  set +e
+  err=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path-validation/home-dir" "$PROJECT_MODE" --list-paths 2>&1 >/dev/null)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "two identifiers resolving to one path were accepted"
+  assert_contains "$err" 'same path' "duplicate resolved paths did not fail visibly"
+
+  cat > "$home/data/projects.md" <<'EOF'
+- alpha [direct-PR] - fixture (added 2026-01-01) [path=shared]
+EOF
+  set +e
+  err=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path-validation/home-dir" "$PROJECT_MODE" --path "$home/projects/ambiguous" 2>&1 >/dev/null)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "--path accepted a filesystem path instead of an identifier"
+  assert_contains "$err" 'identifier' "ambiguous --path input did not fail as an identifier error"
+
+  set +e
+  err=$(cd "$home/projects" && FM_HOME="$home" HOME="$TMP_ROOT/project-path-validation/home-dir" "$PROJECT_MODE" --path ambiguous 2>&1 >/dev/null)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "an unregistered identifier was inferred from the filesystem"
+  assert_contains "$err" 'not registered' "unregistered identifier did not fail visibly"
+
+  for variant in \
+    '- alpha [direct-PR] - fixture (added 2026-01-01) [path=foo] trailing' \
+    '- alpha [direct-PR] - fixture (added 2026-01-01) [path:foo]' \
+    '- alpha [direct-PR] - fixture (added 2026-01-01) [path=]' \
+    '- alpha [direct-PR] - fixture (added 2026-01-01) [path=foo/../bar]'; do
+    printf '%s\n' "$variant" > "$home/data/projects.md"
+    set +e
+    err=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path-validation/home-dir" "$PROJECT_MODE" --list-paths 2>&1 >/dev/null)
+    status=$?
+    set -e
+    [ "$status" -ne 0 ] || fail "malformed path variant was accepted: $variant"
+    case "$err" in
+      *malformed*|*'invalid path'*) ;;
+      *) fail "malformed path variant failed without a visible explanation: $variant" ;;
+    esac
+  done
+  pass "fm-project-mode: ambiguous input, unregistered clones, duplicate paths, and malformed path variants fail visibly"
 }
 
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
+test_spawn_uses_registered_project_identifier
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_project_mode_maps_the_conditional_policy
 test_project_mode_resolves_registered_project_path
+test_project_mode_rejects_ambiguous_and_duplicate_paths
 echo "# all fm-task-delivery tests passed"

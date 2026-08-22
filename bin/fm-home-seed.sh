@@ -457,18 +457,10 @@ EOF
 }
 
 project_path_in_home() {
-  local home=$1 project=$2 path
-  path=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
-    "$FM_ROOT/bin/fm-project-mode.sh" --path "$project" 2>/dev/null) || {
-    echo "error: project $project has an invalid registered path" >&2
-    return 1
-  }
-  # An older FM_ROOT may not know --path and returns its historical two-word
-  # posture output. Keep mixed-version homes on the legacy projects/<name> path.
-  case "$path" in
-    ''|*[[:space:]]*) path="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}/$project" ;;
-  esac
-  printf '%s\n' "$path"
+  local home=$1 project=$2
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    "$FM_ROOT/bin/fm-project-mode.sh" --path "$project"
 }
 
 clone_project() {
@@ -716,7 +708,10 @@ sync_project_registry() {
     if [ -z "$line" ]; then
       line="- $project - cloned project (added $today)"
     fi
-    printf '%s\n' "$line" >> "$tmp"
+    # The child clone is deliberately local to the child home. Never copy a
+    # parent path into its registry, or the child would point back at the source.
+    line=$(printf '%s\n' "$line" | sed -E 's/[[:space:]]\[path=[^]]+\][[:space:]]*$//')
+    printf '%s [path=projects/%s]\n' "$line" "$project" >> "$tmp"
   done
   mv "$tmp" "$sub_reg"
 }

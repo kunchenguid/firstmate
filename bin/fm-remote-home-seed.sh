@@ -155,15 +155,9 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < "$BRIEF" > "$TMP/charter.remote"
 
 project_path_in_home() {
-  local project=$1 path
-  path=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
-    "$SCRIPT_DIR/fm-project-mode.sh" --path "$project" 2>/dev/null) || {
-    die "project $project has an invalid registered path"
-  }
-  case "$path" in
-    ''|*[[:space:]]*) path="$PROJECTS/$project" ;;
-  esac
-  printf '%s\n' "$path"
+  local project=$1
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    "$SCRIPT_DIR/fm-project-mode.sh" --path "$project"
 }
 
 PROJECTS_CSV=
@@ -172,6 +166,8 @@ PROJECT_INDEX=0
 for project in "${PROJECT_NAMES[@]}"; do
   ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
+  REGISTRY_LINE=$(awk -v p="$project" '$1 == "-" && $2 == p { print; exit }' "$DATA/projects.md" 2>/dev/null || true)
+  [ -n "$REGISTRY_LINE" ] || die "project $project has no registry record"
   MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")
   read -r MODE _ <<EOF
 $MODE_LINE
@@ -192,8 +188,6 @@ EOF
     || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"
   fm_project_origin_safe "$ORIGIN" \
     || die "project $project origin is not an accepted clone URL: $ORIGIN"
-  REGISTRY_LINE=$(awk -v p="$project" '$1 == "-" && $2 == p { print; exit }' "$DATA/projects.md" 2>/dev/null || true)
-  [ -n "$REGISTRY_LINE" ] || die "project $project has no registry record"
   NAME_B64=$(printf '%s' "$project" | encode)
   ORIGIN_B64=$(printf '%s' "$ORIGIN" | encode)
   PROJECT_REG_B64=$(printf '%s' "$REGISTRY_LINE" | encode)

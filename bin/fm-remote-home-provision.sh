@@ -236,7 +236,8 @@ EOF
         || die "no-mistakes initialization failed for project $NAME"
     fi
   fi
-  printf '%s\n' "$REGISTRY_LINE" >> "$PROJECT_REG"
+  REGISTRY_LINE=$(printf '%s\n' "$REGISTRY_LINE" | sed -E 's/[[:space:]]\[path=[^]]+\][[:space:]]*$//')
+  printf '%s [path=projects/%s]\n' "$REGISTRY_LINE" "$NAME" >> "$PROJECT_REG"
 done < <(grep '^project=' "$TMP/manifest")
 
 cp "$TMP/charter" "$FM_HOME/data/charter.md.tmp.$$"

@@ -44,7 +44,7 @@ HOME_N=0
 new_home() {
   HOME_N=$((HOME_N + 1))
   local h="$TMP_ROOT/home-$HOME_N"
-  mkdir -p "$h/projects"
+  mkdir -p "$h/projects" "$h/data"
   printf '%s\n' "$h"
 }
 
@@ -75,6 +75,7 @@ build_pair() {
   git -C "$work" push -q -u origin main
 
   git clone --quiet "file://$remote_abs" "$clone"
+  printf -- '- %s [direct-PR] - test project (added 2026-06-27) [path=projects/%s]\n' "$name" "$name" >> "$home/data/projects.md"
   printf '%s\n' "$clone"
 }
 
@@ -93,6 +94,9 @@ head_sha() { git -C "$1" rev-parse HEAD; }
 run_sync() {
   local home=$1
   shift
+  if [ "$#" -gt 0 ] && [ "${1#/}" != "$1" ]; then
+    set -- --path "$@"
+  fi
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
 }
 
@@ -159,6 +163,7 @@ build_packed_prunable() {
   git -C "$work" push -q origin main
   git -C "$work" push -q origin --delete feature
   git -C "$clone" pack-refs --all
+  printf -- '- %s [direct-PR] - test project (added 2026-06-27) [path=projects/%s]\n' "$name" "$name" >> "$home/data/projects.md"
   printf '%s\n' "$clone"
 }
 
@@ -387,6 +392,7 @@ test_no_origin_skipped() {
   git init -q "$clone"
   git -C "$clone" symbolic-ref HEAD refs/heads/main
   commit_file "$clone" file.txt v0 C0
+  printf -- '- theta [direct-PR] - test project (added 2026-06-27) [path=projects/theta]\n' >> "$home/data/projects.md"
 
   out=$(run_sync "$home" "$clone")
 
@@ -445,7 +451,7 @@ test_single_project_by_registered_path_resolves() {
   mkdir -p "$home/diaria"
   mv "$clone" "$home/diaria/api-v2"
   mkdir -p "$home/data"
-  printf -- '- solar [direct-PR] - test project (path: %s; added 2026-06-27)\n' \
+  printf -- '- solar [direct-PR] - test project (added 2026-06-27) [path=%s]\n' \
     "$home/diaria/api-v2" > "$home/data/projects.md"
 
   out=$(run_sync "$home" solar)
@@ -460,10 +466,10 @@ test_single_project_by_projects_relative_name_resolves() {
   build_pair "$home" lambda >/dev/null
   advance_origin "$home" lambda C1
 
-  out=$(run_sync "$home" "projects/lambda")
+  out=$(run_sync "$home" lambda)
 
   assert_contains "$out" "lambda: synced" "projects/<name> form resolves against the home's projects dir"
-  pass "single-project form accepts a projects/<name> relative name"
+  pass "single-project form accepts a registered project identifier"
 }
 
 test_single_project_by_projects_relative_name_ignores_cwd_shadow() {
@@ -474,21 +480,24 @@ test_single_project_by_projects_relative_name_ignores_cwd_shadow() {
   cwd="$home/shadow"
   mkdir -p "$cwd/projects/nu"
 
-  out=$(cd "$cwd" && run_sync "$home" "projects/nu")
+  out=$(cd "$cwd" && run_sync "$home" --path "$home/projects/nu")
 
   assert_contains "$out" "nu: synced" "projects/<name> form prefers the home's projects dir"
   assert_not_contains "$out" "skipped: not a git repo" "projects/<name> form ignores a cwd shadow directory"
-  pass "single-project projects/<name> resolution is not cwd-sensitive"
+  pass "explicit project paths are not cwd-sensitive"
 }
 
-test_single_project_unresolvable_name_still_skips() {
-  local home out
+test_single_project_unregistered_name_fails() {
+  local home status
   home=$(new_home)
 
-  out=$(run_sync "$home" "does-not-exist")
+  set +e
+  run_sync "$home" "does-not-exist" >/dev/null
+  status=$?
+  set -e
 
-  assert_contains "$out" "skipped: not a directory" "an unresolvable name still hits the existing not-a-directory skip"
-  pass "single-project form leaves a genuinely bad name unresolved"
+  [ "$status" -ne 0 ] || fail "an unregistered project identifier was guessed from the filesystem"
+  pass "single-project form refuses an unregistered identifier"
 }
 
 test_whole_fleet_form() {
@@ -504,7 +513,7 @@ test_whole_fleet_form() {
   assert_contains "$out" "fleet-behind: synced" "whole-fleet form syncs a behind clone"
   assert_contains "$out" "fleet-current: already current" "whole-fleet form reports a current clone"
   : "$behind $current"
-  pass "whole-fleet form processes every clone under projects/"
+  pass "whole-fleet form processes every registered project path"
 }
 
 test_bootstrap_relays_recovered_and_stuck() {
@@ -726,7 +735,7 @@ test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_registered_path_resolves
 test_single_project_by_projects_relative_name_resolves
 test_single_project_by_projects_relative_name_ignores_cwd_shadow
-test_single_project_unresolvable_name_still_skips
+test_single_project_unregistered_name_fails
 test_whole_fleet_form
 test_bootstrap_relays_recovered_and_stuck
 test_orphaned_stale_packed_refs_lock_recovers

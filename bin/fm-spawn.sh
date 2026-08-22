@@ -1490,6 +1490,27 @@ resolve_project_dir_arg() {
   esac
 }
 
+registered_project_id_for_path() {
+  local requested=$1 target id path candidate found='' pairs
+  target=$(cd "$requested" 2>/dev/null && pwd -P) || return 1
+  pairs=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    "$FM_ROOT/bin/fm-project-mode.sh" --list-paths) || return 2
+  while IFS=$'\t' read -r id path; do
+    [ -n "$id" ] || continue
+    if [ -d "$path" ]; then
+      candidate=$(cd "$path" 2>/dev/null && pwd -P) || continue
+    else
+      candidate=$path
+    fi
+    if [ "$candidate" = "$target" ]; then
+      [ -z "$found" ] || return 2
+      found=$id
+    fi
+  done <<< "$pairs"
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
   [ -n "$ancestor" ] || return 1
@@ -1672,7 +1693,20 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
-  PROJ_NAME=$(basename "$PROJ_ABS")
+  PROJECT_REGISTRY_ID=
+  if PROJECT_REGISTRY_ID=$(registered_project_id_for_path "$PROJ_ABS"); then
+    PROJ_NAME=$PROJECT_REGISTRY_ID
+    STANDING_MODE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
+      "$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
+  else
+    project_registry_status=$?
+    [ "$project_registry_status" -eq 1 ] || {
+      echo "error: cannot resolve the project's registered identity for $PROJ_ABS" >&2
+      exit 1
+    }
+    PROJ_NAME="$PROJ_ABS (unregistered)"
+    STANDING_MODE=no-mistakes
+  fi
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_MODE" ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
@@ -1685,7 +1719,6 @@ if [ "$KIND" = ship ]; then
   # unregistered project resolves to the same no-mistakes standing default, which
   # is why the notice names the standing posture rather than the registry line. A
   # conditional policy is excluded: both of its legs are legitimate classifications.
-  STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2

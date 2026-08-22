@@ -24,22 +24,21 @@
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
 # fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
-# Usage: fm-fleet-sync.sh [<project-dir-or-name>]
-# The single-project form accepts either a path (absolute, or relative to the
-# caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
-# this home's projects dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE).
-# Bare names use fm-project-mode.sh --path, so a declared path wins while
-# legacy entries still resolve to this home's projects dir. "projects/<name>"
-# keeps its explicit firstmate-home meaning. Example: from anywhere,
-# `fm-fleet-sync.sh dotfiles-private` syncs just that one clone, same as
-# passing its resolved project path.
+# Usage: fm-fleet-sync.sh [<project-id>]
+#        fm-fleet-sync.sh --path <absolute-project-dir>
+# The identifier form resolves only through fm-project-mode.sh --path.
+# The explicit path form matches the path against fm-project-mode.sh --list-paths
+# and refuses an unregistered clone. The no-argument form syncs only the pairs
+# listed by --list-paths, so it never guesses from the filesystem or caller cwd.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
-PROJECT_ARG_LABEL=
+PROJECT_ID=
+PROJECT_PATH=
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
@@ -65,68 +64,57 @@ if ! [[ "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS" =~ ^([0-9]+([.][0-9]*)?|[
 fi
 
 usage() {
-  echo "usage: fm-fleet-sync.sh [<project-dir-or-name>]" >&2
+  echo "usage: fm-fleet-sync.sh [<project-id>]" >&2
+  echo "       fm-fleet-sync.sh --path <absolute-project-dir>" >&2
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   usage
   exit 0
 fi
-[ $# -le 1 ] || { usage; exit 1; }
+if [ "$#" -gt 0 ] && [ "$1" = --path ]; then
+  [ "$#" -eq 2 ] || { usage; exit 1; }
+elif [ "$#" -gt 1 ]; then
+  usage
+  exit 1
+fi
 
-project_label() {
-  if [ -n "${PROJECT_ARG_LABEL:-}" ]; then
-    printf '%s\n' "$PROJECT_ARG_LABEL"
-    return 0
-  fi
-  case "$PROJ" in
-    "$PROJECTS"/*) basename "$PROJ" ;;
-    projects/*) basename "$PROJ" ;;
-    *) printf '%s\n' "$PROJ" ;;
-  esac
+project_path_for_id() {
+  local id=$1
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    "$FM_ROOT/bin/fm-project-mode.sh" --path "$id"
 }
 
-# resolve_project_arg <arg>: accept a path (used as-is when it already exists)
-# or a bare/"projects/<name>" project name, resolved through the registry path
-# API before falling back to this home's projects dir. A malformed declared path
-# is reported instead of being silently treated as a legacy projects/<name> path.
-resolve_project_arg() {
-  local arg=$1 candidate
-  PROJECT_ARG_LABEL=
-  case "$arg" in
-    projects/*)
-      PROJECT_ARG_LABEL=$(basename "$arg")
-      candidate="$PROJECTS/${arg#projects/}"
-      if [ -d "$candidate" ]; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
-      ;;
-    */*)
-      PROJECT_ARG_LABEL=$(basename "$arg")
-      if [ -d "$arg" ]; then
-        printf '%s\n' "$arg"
-        return 0
-      fi
-      ;;
-    *)
-      PROJECT_ARG_LABEL=$arg
-      candidate=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-$FM_HOME/data}" \
-        "$FM_ROOT/bin/fm-project-mode.sh" --path "$arg" 2>/dev/null) || {
-        echo "error: registered path for project \"$arg\" is invalid" >&2
+project_id_for_path() {
+  local requested=$1 target id path candidate found=
+  case "$requested" in
+    /*) ;;
+    *) echo "error: --path requires an absolute project directory" >&2; return 1 ;;
+  esac
+  [ -d "$requested" ] || { echo "error: project directory does not exist: $requested" >&2; return 1; }
+  target=$(cd "$requested" && pwd -P) || return 1
+  pairs=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    "$FM_ROOT/bin/fm-project-mode.sh" --list-paths) || return 1
+  while IFS=$'\t' read -r id path; do
+    [ -n "$id" ] || continue
+    if [ -d "$path" ]; then
+      candidate=$(cd "$path" && pwd -P) || continue
+    else
+      candidate=$path
+    fi
+    if [ "$candidate" = "$target" ]; then
+      [ -z "$found" ] || {
+        echo "error: project directory $requested matches multiple registered identifiers" >&2
         return 1
       }
-      if [ -d "$candidate" ]; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
-      if [ -d "$arg" ]; then
-        printf '%s\n' "$arg"
-        return 0
-      fi
-      ;;
-  esac
-  printf '%s\n' "${candidate:-$arg}"
+      found=$id
+    fi
+  done <<< "$pairs"
+  [ -n "$found" ] || {
+    echo "error: project directory $requested is not registered; refusing to infer its identifier" >&2
+    return 1
+  }
+  printf '%s\n' "$found"
 }
 
 default_branch() {
@@ -313,8 +301,7 @@ report_stuck() {
 
 sync_project() {
   PROJ=$1
-  PROJECT_ARG_LABEL=${2:-${PROJECT_ARG_LABEL:-}}
-  label=$(project_label)
+  label=$2
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
@@ -339,7 +326,11 @@ sync_project() {
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
     return 0
   fi
-  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
+  mode_line=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    "$FM_ROOT/bin/fm-project-mode.sh" "$label") || {
+    echo "$label: skipped: cannot read registered project posture" >&2
+    return 0
+  }
   mode=${mode_line%% *}
   if [ "$mode" = "local-only" ]; then
     echo "$label: skipped: local-only project"
@@ -455,24 +446,29 @@ sync_project() {
   return 0
 }
 
-if [ $# -eq 1 ]; then
-  case "$1" in
-    */*) PROJECT_ARG_LABEL=$(basename "$1") ;;
-    *) PROJECT_ARG_LABEL=$1 ;;
-  esac
-  resolved_project=$(resolve_project_arg "$1")
-  sync_project "$resolved_project" "$PROJECT_ARG_LABEL"
+if [ "$#" -eq 2 ] && [ "$1" = --path ]; then
+  PROJECT_PATH=$2
+  PROJECT_ID=$(project_id_for_path "$PROJECT_PATH") || exit 1
+  sync_project "$PROJECT_PATH" "$PROJECT_ID"
   exit 0
 fi
 
-[ -d "$PROJECTS" ] || exit 0
-for proj in "$PROJECTS"/*; do
-  [ -e "$proj" ] || continue
-  [ -d "$proj" ] || continue
-  # Per-clone elapsed, so a fleet refresh that runs long names WHICH clone cost
-  # the time instead of only its total. Recording is a no-op unless the deferred
-  # network stage asked for it.
+if [ "$#" -eq 1 ]; then
+  PROJECT_ID=$1
+  PROJECT_PATH=$(project_path_for_id "$PROJECT_ID") || exit 1
+  sync_project "$PROJECT_PATH" "$PROJECT_ID"
+  exit 0
+fi
+
+[ "$#" -eq 0 ] || { usage; exit 1; }
+project_pairs=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
+  "$FM_ROOT/bin/fm-project-mode.sh" --list-paths) || exit 1
+while IFS=$'\t' read -r PROJECT_ID PROJECT_PATH; do
+  [ -n "$PROJECT_ID" ] || continue
+  # Per-project elapsed, so a fleet refresh that runs long names WHICH project
+  # cost the time instead of only its total. Recording is a no-op unless the
+  # deferred network stage asked for it.
   __fm_timing_stamp=$(fm_timing_now_ms)
-  sync_project "$proj"
-  fm_timing_record clone sync "$__fm_timing_stamp" "$(basename "$proj")"
-done
+  sync_project "$PROJECT_PATH" "$PROJECT_ID"
+  fm_timing_record clone sync "$__fm_timing_stamp" "$PROJECT_ID"
+done <<< "$project_pairs"
