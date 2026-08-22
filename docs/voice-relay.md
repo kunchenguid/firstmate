@@ -153,8 +153,10 @@ the timings for each turn as JSON on stdout and everything human on stderr, so
 above.
 
 Every record carries `relay_error`, which is null when nothing broke and otherwise names what did.
-It tells the two mid-turn failures apart, because they are not the same fault: a turn that got no reply audio at all says the connection ended, or was lost, or the relay stopped, or the session ended, before that turn was answered, while a turn whose answer had already started playing says the same thing happened before the reply finished.
+Where this end is left to infer what happened, it tells the two mid-turn failures apart, because they are not the same fault: a turn that got no reply audio at all says the connection ended, or was lost, or the relay stopped, or the session ended, before that turn was answered, while a turn whose answer had already started playing says the same thing happened before the reply finished.
 The second still reads `answered: true`, because sound did reach you and `first_audio_s` is a real measurement of when.
+Two other shapes carry neither clause, so do not read the pair above as the whole list: a fault the relay names itself arrives as the relay's own words, which point at the desktop and are kept unaltered because it knows what this end can only guess at.
+A reason opening `this end could not handle the relay's reply` is the one that points at your laptop instead, so a healthy relay is not where to look for it.
 
 The exit code is non-zero if any turn went unanswered, if any record carries a `relay_error`, or if the session stopped before it had taken the runs you asked for.
 A truncated answer therefore fails the run rather than passing it, so a spread computed from `runs.jsonl` cannot quietly average an infrastructure failure into a latency figure.

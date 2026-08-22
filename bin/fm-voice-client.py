@@ -838,7 +838,8 @@ class Client:
                     self.closed.set()
                 break
             if got is None:
-                say("client: the connection ended")
+                if not self.quitting.is_set():
+                    say("client: the connection ended")
                 # The subject only. Whether it ended before the turn was answered
                 # or partway through the answer is decided by _unfinished at the
                 # tail, where the audio count is read.
@@ -1062,6 +1063,7 @@ class Client:
             turn = dict(self.turn)
         marks = turn.get("marks", {})
         played = self.playback.first_played
+        reply_bytes = self.playback.turn_bytes
         first_frame = turn.get("first_frame")
 
         def since(at):
@@ -1103,8 +1105,8 @@ class Client:
             # cannot tell a reply from the previous reply's tail arriving late, and
             # counting that tail here reports a turn nobody answered as answered.
             "reply_audio_seconds": round(
-                self.playback.turn_bytes / float(OUT_RATE * 2), 3),
-            "answered": self.playback.turn_bytes > 0,
+                reply_bytes / float(OUT_RATE * 2), 3),
+            "answered": reply_bytes > 0,
         }
         if release is None:
             record["first_audio_note"] = (
