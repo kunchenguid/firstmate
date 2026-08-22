@@ -31,7 +31,7 @@ It tells you four useful things:
 - Any setup problem it found, such as a missing tool or a GitHub login that has expired.
 
 If it asks to install something, that is intentional: it detects, asks, and only installs after you approve.
-If it reports a GitHub authentication problem, fix that before dispatching work, because everything downstream depends on it.
+If it reports a GitHub authentication problem, fix that before dispatching work on any project that pushes to a remote.
 
 On a fresh clone the digest is mostly empty, and that is correct.
 You have no projects and no work yet.
@@ -45,8 +45,8 @@ At that point it will settle two things with you, and it helps to know what they
 
 **Delivery mode** is how finished work reaches you:
 
-- `no-mistakes` runs the full validation pipeline, which owns the review, the tests, the documentation, and the pull request and its checks.
-  What reaches you is already reviewed and green, so this is the right choice for anything product-facing.
+- `no-mistakes` runs the full validation pipeline before the pull request is opened.
+  What reaches you is already validated and reports green checks, so this is the right choice for anything product-facing.
 - `direct-PR` skips that pipeline and simply opens a pull request.
   Good for small, low-risk, or internal work where the extra rigor is not worth the wait.
 - `local-only` never pushes anywhere.
@@ -128,7 +128,7 @@ You mostly talk in plain language, but these are the commands you type directly.
 
 | Command            | Reach for it when                                                                              |
 | ------------------ | ---------------------------------------------------------------------------------------------- |
-| `/bearings`        | You want a status picture: what is running, what is waiting on you, what landed.                 |
+| `/bearings`        | You want a status picture: what needs you, what landed, what is running, what is queued.         |
 | `/ahoy`            | You lost the thread of this conversation and want a recap plus a walkthrough of open decisions.  |
 | `/afk`             | You are stepping away and want routine matters handled quietly and real escalations batched.     |
 | `/stow`            | You are about to reset or compact the session and want what was learned written down first.      |
@@ -143,7 +143,7 @@ Nothing here needs you to debug internals; point at the owner and let the first 
 
 - Ask it plainly: "what is the state of that work?" or "why has nothing happened?" is a legitimate instruction, and it will reconcile and report.
 - Setup, tool, and authentication problems surface in the startup summary; [docs/configuration.md](configuration.md) owns every setting behind them.
-- Runtime problems specific to how workers are launched belong to your backend's page, linked from the README's Documentation section.
+- If the trouble is with the tool that opens and runs those worker sessions, its own setup page is linked from the README's Documentation section.
 - If you want to understand a behavior rather than fix it, [docs/architecture.md](architecture.md) explains how the parts fit together, and [`AGENTS.md`](../AGENTS.md) is the contract the first mate itself follows.
 
 If the first mate is stuck rather than merely quiet, restarting the session is safe.
