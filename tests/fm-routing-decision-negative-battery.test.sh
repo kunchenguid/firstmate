@@ -9,6 +9,7 @@ set -u
 
 REAL_JQ=$(command -v jq)
 REAL_PERL=$(command -v perl)
+REAL_CMP=$(command -v cmp)
 SPAWN="$ROOT/bin/fm-spawn.sh"
 POST_BINDING_RECEIPT_FILTER=
 POST_SNAPSHOT_SOURCE_FILTER=
@@ -17,6 +18,23 @@ POST_FINAL_DIRECTORY=0
 POST_BRIEF_LINK_DIRECTORY=0
 POST_FINAL_LINK_DIRECTORY=0
 POST_PENDING_DIRECTORY=0
+POST_CONSUMED_INPLACE_MUTATION=0
+
+cmp() {
+  local status arg
+  "$REAL_CMP" "$@"
+  status=$?
+  if [ "$status" -eq 0 ] && [ "$POST_CONSUMED_INPLACE_MUTATION" -eq 1 ] \
+    && [[ "$*" == *pending.consumed.json* ]]; then
+    for arg in "$@"; do
+      case "$arg" in
+        */pending.consumed.json) printf '\n' >> "$arg" ;;
+      esac
+    done
+    POST_CONSUMED_INPLACE_MUTATION=0
+  fi
+  return "$status"
+}
 
 chmod() {
   local target=${!#}
@@ -415,6 +433,7 @@ write_fixture() {
   POST_BRIEF_LINK_DIRECTORY=0
   POST_FINAL_LINK_DIRECTORY=0
   POST_PENDING_DIRECTORY=0
+  POST_CONSUMED_INPLACE_MUTATION=0
   RUN_CWD=
 }
 
@@ -670,6 +689,7 @@ setup_pending_replaced_after_snapshot() {
   POST_SNAPSHOT_SOURCE_FILTER='.rationale = "replacement after validation began"'
 }
 setup_pending_directory_after_snapshot() { POST_PENDING_DIRECTORY=1; }
+setup_pending_mutated_in_place_after_compare() { POST_CONSUMED_INPLACE_MUTATION=1; }
 
 assert_pending_directory_preserved() {
   [ -d "$TASK_DIR/routing-decision.pending.json" ] \
@@ -1078,6 +1098,9 @@ exercise_negative "64 brief target raced to directory symlink" PERSISTENCE_REFUS
   "validated brief snapshot could not be published at its hash-addressed path" assert_brief_link_directory_race
 exercise_negative "65 receipt target raced to directory symlink" PERSISTENCE_REFUSED setup_final_link_directory_race \
   "validated receipt could not be persisted atomically" assert_final_link_directory_race
+exercise_negative "66 pending receipt mutated in place after comparison" PERSISTENCE_REFUSED \
+  setup_pending_mutated_in_place_after_compare \
+  "validated receipt was not published as the exact regular-file target"
 
 write_fixture
 setup_final_directory
@@ -1102,7 +1125,7 @@ run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement
   || fail "canonical config replacement counterexample did not fire"
 pass "canonical config replacement cannot change snapshotted candidate resolution"
 
-expected_count=$((125 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((126 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

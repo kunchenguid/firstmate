@@ -1973,14 +1973,16 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 
 if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
   fm_routing_decision_persist_prepared || exit 1
-  fm_routing_decision_seal_prepared || {
-    echo "error: validated routing transaction could not be sealed" >&2
-    exit 1
-  }
 fi
 if [ -n "${KIMI_BIN:-}" ]; then
   "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
     echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
+    exit 1
+  }
+fi
+if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
+  fm_routing_decision_seal_prepared || {
+    echo "error: validated routing transaction could not be sealed" >&2
     exit 1
   }
 fi

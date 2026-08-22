@@ -920,6 +920,10 @@ fm_routing_decision_persist_prepared() {
     fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt permissions could not be restricted"
     return 1
   }
+  chmod 0600 "$pending" || {
+    fm_routing_refuse "PERSISTENCE_REFUSED" "validated receipt snapshot permissions could not be restricted"
+    return 1
+  }
   consumed_pending="$snapshot_dir/pending.consumed.json"
   fm_routing_consume_regular_exact "$source_pending" "$validated_pending" "$consumed_pending" 2>/dev/null
   status=$?
@@ -933,20 +937,23 @@ fm_routing_decision_persist_prepared() {
     fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt changed after its validation snapshot"
     return 1
   fi
-  fm_routing_link_exact "$validated_pending" "$final" 2>/dev/null || {
+  fm_routing_link_exact "$pending" "$final" 2>/dev/null || {
     fm_routing_restore_consumed_pending "$consumed_pending" "$source_pending"
     fm_routing_refuse "PERSISTENCE_REFUSED" "validated receipt could not be persisted atomically"
     return 1
   }
-  if [ ! -f "$final" ] || [ -L "$final" ] || [[ ! "$final" -ef "$validated_pending" ]] \
+  if [ ! -f "$final" ] || [ -L "$final" ] || [[ ! "$final" -ef "$pending" ]] \
     || ! cmp -s "$final" "$consumed_pending"; then
-    fm_routing_restore_consumed_pending "$consumed_pending" "$source_pending"
+    fm_routing_rollback_exact "$final" "$pending" "$consumed_pending" "$source_pending" || {
+      fm_routing_refuse "PERSISTENCE_REFUSED" "validated routing transaction could not be rolled back safely"
+      return 1
+    }
     fm_routing_refuse "PERSISTENCE_REFUSED" "validated receipt was not published as the exact regular-file target"
     return 1
   fi
   if [ ! -f "$brief_final" ] || [ -L "$brief_final" ] || [[ ! "$brief_final" -ef "$brief_anchor" ]] \
     || ! cmp -s "$brief_final" "$brief"; then
-    fm_routing_rollback_exact "$final" "$validated_pending" "$consumed_pending" "$source_pending" || {
+    fm_routing_rollback_exact "$final" "$pending" "$consumed_pending" "$source_pending" || {
       fm_routing_refuse "PERSISTENCE_REFUSED" "validated routing transaction could not be rolled back safely"
       return 1
     }
@@ -959,14 +966,14 @@ fm_routing_decision_persist_prepared() {
 }
 
 fm_routing_decision_discard_prepared() {
-  local validated consumed final
+  local pending consumed final
   [ -n "$FM_ROUTING_PREPARED_DIR" ] || return 0
   [ "$FM_ROUTING_PREPARED_UNSAFE" -eq 0 ] || return 1
-  validated="$FM_ROUTING_PREPARED_DIR/pending.validated.json"
+  pending="$FM_ROUTING_PREPARED_DATA/$FM_ROUTING_PREPARED_ID/routing-decision.pending.json"
   consumed="$FM_ROUTING_PREPARED_DIR/pending.consumed.json"
   final="${FM_ROUTING_PREPARED_SOURCE_PENDING%.pending.json}.json"
   if [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 1 ]; then
-    fm_routing_rollback_exact "$final" "$validated" "$consumed" "$FM_ROUTING_PREPARED_SOURCE_PENDING" || return 1
+    fm_routing_rollback_exact "$final" "$pending" "$consumed" "$FM_ROUTING_PREPARED_SOURCE_PENDING" || return 1
   fi
   rm -rf -- "$FM_ROUTING_PREPARED_DIR"
   FM_ROUTING_PREPARED_DIR=

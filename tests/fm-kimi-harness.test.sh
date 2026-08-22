@@ -19,6 +19,7 @@ KIMI_RUNTIME_TASK_TMP=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
+CHMOD_BIN=$(command -v chmod) || fail "test needs chmod"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 cleanup_kimi_harness() {
@@ -134,6 +135,17 @@ SH
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
+  cat > "$fakebin/chmod" <<'SH'
+#!/usr/bin/env bash
+set -u
+"$FM_REAL_CHMOD" "$@" || exit 1
+target=${!#}
+if [ "${FM_FAKE_KIMI_INSTALL_FAIL:-no}" = yes ] \
+  && [[ "$target" == */pending.validated.json ]]; then
+  : > "$HOME/.kimi-code/fm-turn-end.d"
+fi
+SH
+  chmod +x "$fakebin/chmod"
   printf '%s\n' "$fakebin"
 }
 
@@ -183,6 +195,8 @@ run_spawn() {
     FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
+    FM_FAKE_KIMI_INSTALL_FAIL="${FM_FAKE_KIMI_INSTALL_FAIL:-no}" \
+    FM_REAL_CHMOD="$CHMOD_BIN" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
@@ -447,6 +461,27 @@ test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation() {
   pass "fm-spawn: unsafe Kimi global config refuses before pane creation"
 }
 
+test_kimi_install_failure_restores_pending_receipt() {
+  local id rec out rc
+  id=kimi-install-rollback-z9
+  rec=$(make_spawn_case install-rollback "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_INSTALL_FAIL=yes run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "Kimi spawn accepted a failed hook installation"
+  assert_contains "$out" "Firstmate registry is not a regular directory" \
+    "Kimi hook installation failure omitted its concrete refusal"
+  assert_present "$HOME_DIR/data/$id/routing-decision.pending.json" \
+    "Kimi hook installation failure burned the retryable pending receipt"
+  assert_absent "$HOME_DIR/data/$id/routing-decision.json" \
+    "Kimi hook installation failure left a committed final receipt"
+  if grep -Eq '(^| )new-(session|window)( |$)' "$CASE_DIR/tmux-calls.log"; then
+    fail "Kimi hook installation failure created a tmux container or pane"
+  fi
+  pass "fm-spawn: Kimi hook installation failure restores the pending receipt"
+}
+
 test_kimi_teardown_removes_pointer_and_registry_token() {
   local id rec out rc token
   id=kimi-teardown-z8
@@ -698,6 +733,7 @@ test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
+test_kimi_install_failure_restores_pending_receipt
 test_kimi_teardown_removes_pointer_and_registry_token
 test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
