@@ -12,6 +12,8 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
+REAL_PERL=$(command -v perl)
+export FM_TEST_REAL_PERL="$REAL_PERL"
 
 test_sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -121,6 +123,21 @@ if [ -n "${FM_TEST_REPLACE_BRIEF_TARGET:-}" ] \
   printf '%s\n' "${FM_TEST_BRIEF_TARGET_REPLACEMENT:-replacement target bytes}" > "$target"
 fi
 SH
+  cat > "$fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+set -u
+target=${!#}
+if [ -n "${FM_TEST_REPLACE_BRIEF_TARGET:-}" ]; then
+  case "$target" in
+    */routing-decision.json)
+      rm -f -- "$FM_TEST_REPLACE_BRIEF_TARGET"
+      printf '%s\n' "${FM_TEST_BRIEF_TARGET_REPLACEMENT:-replacement target bytes}" \
+        > "$FM_TEST_REPLACE_BRIEF_TARGET"
+      ;;
+  esac
+fi
+exec "$FM_TEST_REAL_PERL" "$@"
+SH
   cat > "$fakebin/claude" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_HARNESS_EXEC_LOG:-}" ] || printf 'claude-executed\n' >> "$FM_FAKE_HARNESS_EXEC_LOG"
@@ -139,7 +156,7 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cp" "$fakebin/chmod" "$fakebin/claude" "$fakebin/cursor-agent" "$fakebin/treehouse"
+  chmod +x "$fakebin/timeout" "$fakebin/cp" "$fakebin/chmod" "$fakebin/perl" "$fakebin/claude" "$fakebin/cursor-agent" "$fakebin/treehouse"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -333,6 +350,7 @@ run_spawn() {
     FM_FAKE_WORKTREE_LOG="$home/worktree.log" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
+    FM_TEST_REAL_PERL="$REAL_PERL" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -380,7 +398,8 @@ test_no_profile_keeps_claude_profile_defaults() {
 
   launch=$(cat "$LAUNCH_LOG")
   routing_brief=$(sed -n 's/^routing_brief=//p' "$HOME_DIR/state/$id.meta")
-  launch_input=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$routing_brief")
+  launch_input=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$routing_brief"; printf x)
+  launch_input=${launch_input%x}
   expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions '$launch_input'"
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
@@ -665,11 +684,11 @@ test_duplicate_spawn_preserves_active_routing_provenance() {
 }
 
 test_launch_uses_validated_brief_snapshot_after_source_replacement() {
-  local rec id out status routing_brief launch expected_input
+  local rec id out status routing_brief launch expected_input_file
   id=profile-brief-snapshot-z12b3
   rec=$(make_spawn_case profile-brief-snapshot claude "$id")
   read_case_record "$rec"
-  printf 'validated __MODELFLAG__ __TURNEND__ __WORKTREE__ bytes\n' > "$HOME_DIR/data/$id/brief.md"
+  printf 'validated __MODELFLAG__ __TURNEND__ __WORKTREE__ bytes\n\n\n' > "$HOME_DIR/data/$id/brief.md"
   /bin/cp "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/validated-brief.expected"
 
   out=$(FM_TEST_MUTATE_BRIEF_SOURCE="$HOME_DIR/data/$id/brief.md" \
@@ -684,9 +703,14 @@ test_launch_uses_validated_brief_snapshot_after_source_replacement() {
   [ "$(cat "$HOME_DIR/data/$id/brief.md")" = "replacement after validation snapshot" ] \
     || fail "source brief replacement counterexample did not fire"
   launch=$(cat "$LAUNCH_LOG")
-  expected_input=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$CASE_DIR/validated-brief.expected")
-  assert_contains "$launch" "'$expected_input'" \
-    "emitted launch did not retain the synchronously verified brief input"
+  expected_input_file="$CASE_DIR/validated-launch-input.expected"
+  "$ROOT/bin/fm-operational-input.sh" encode launch-brief \
+    < "$CASE_DIR/validated-brief.expected" > "$expected_input_file"
+  : > "$CASE_DIR/harness-input.log"
+  PATH="$FAKEBIN_DIR:$PATH" FM_FAKE_HARNESS_INPUT_LOG="$CASE_DIR/harness-input.log" bash -c "$launch" \
+    || fail "verified launch command could not execute through its public launch interface"
+  cmp -s "$expected_input_file" "$CASE_DIR/harness-input.log" \
+    || fail "verified harness did not receive every receipt-bound launch-input byte"
   assert_not_contains "$launch" "$routing_brief" \
     "emitted launch reopened the mutable validated brief pathname"
   [ -z "$(find "$HOME_DIR/data/$id" -maxdepth 1 -type d -name '.routing-decision.validate.*' -print -quit)" ] \
@@ -788,11 +812,12 @@ test_active_dispatch_profile_allows_positional_harness() {
 }
 
 test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch command expected_input
+  local rec id out status launch command expected_input_file
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  printf 'raw launch brief with trailing newlines\n\n\n' > "$HOME_DIR/data/$id/brief.md"
 
   command="$FAKEBIN_DIR/claude --model=custom%v1 --effort=high --flag"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -805,12 +830,14 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $command " \
     "raw launch command did not preserve the verified harness invocation"
-  expected_input=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$HOME_DIR/data/$id/brief.md")
+  expected_input_file="$CASE_DIR/raw-launch-input.expected"
+  "$ROOT/bin/fm-operational-input.sh" encode launch-brief \
+    < "$HOME_DIR/data/$id/brief.md" > "$expected_input_file"
   : > "$CASE_DIR/harness-input.log"
   FM_FAKE_HARNESS_INPUT_LOG="$CASE_DIR/harness-input.log" bash -c "$launch" \
     || fail "raw launch command could not execute through its public launch interface"
-  [ "$(cat "$CASE_DIR/harness-input.log")" = "$expected_input" ] \
-    || fail "raw harness did not receive the receipt-bound launch input"
+  cmp -s "$expected_input_file" "$CASE_DIR/harness-input.log" \
+    || fail "raw harness did not receive every receipt-bound launch-input byte"
   pass "raw launch consumes the verified receipt-bound brief"
 }
 

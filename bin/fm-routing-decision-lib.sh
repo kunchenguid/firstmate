@@ -67,6 +67,18 @@ fm_routing_private_input() {
   }
 }
 
+fm_routing_link_exact() {
+  perl -e 'use strict; my ($source, $target) = @ARGV; link($source, $target) or exit 1' -- "$1" "$2"
+}
+
+fm_routing_restore_consumed_pending() {
+  local consumed=$1 source=$2
+  if [ ! -e "$source" ] && [ ! -L "$source" ] \
+    && fm_routing_link_exact "$consumed" "$source"; then
+    rm -f -- "$consumed"
+  fi
+}
+
 FM_ROUTING_WORDS=()
 
 fm_routing_raw_ascii_text() { # <command>
@@ -762,21 +774,21 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
     return 1
   fi
   brief_final="$(dirname "$source_pending")/routing-brief.$brief_hash.md"
+  chmod 0400 "$brief" || {
+    fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief snapshot permissions could not be restricted"
+    return 1
+  }
   if [ -e "$brief_final" ] || [ -L "$brief_final" ]; then
     if [ ! -f "$brief_final" ] || [ -L "$brief_final" ] || ! cmp -s "$brief" "$brief_final"; then
       fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief target does not contain the exact validated bytes"
       return 1
     fi
   else
-    ln "$brief" "$brief_final" 2>/dev/null || {
+    fm_routing_link_exact "$brief" "$brief_final" 2>/dev/null || {
       fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief snapshot could not be published at its hash-addressed path"
       return 1
     }
   fi
-  chmod 0400 "$brief_final" || {
-    fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief snapshot permissions could not be restricted"
-    return 1
-  }
   chmod 0600 "$pending" || {
     fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt permissions could not be restricted"
     return 1
@@ -787,28 +799,18 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
     return 1
   }
   if ! cmp -s "$pending" "$consumed_pending"; then
-    if [ ! -e "$source_pending" ] && [ ! -L "$source_pending" ]; then
-      mv -- "$consumed_pending" "$source_pending" 2>/dev/null || true
-    fi
+    fm_routing_restore_consumed_pending "$consumed_pending" "$source_pending"
     fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt changed after its validation snapshot"
     return 1
   fi
-  mv -f -- "$pending" "$final" || {
-    if [ ! -e "$source_pending" ] && [ ! -L "$source_pending" ]; then
-      mv -- "$consumed_pending" "$source_pending" 2>/dev/null || true
-    fi
+  fm_routing_link_exact "$pending" "$final" 2>/dev/null || {
+    fm_routing_restore_consumed_pending "$consumed_pending" "$source_pending"
     fm_routing_refuse "PERSISTENCE_REFUSED" "validated receipt could not be persisted atomically"
     return 1
   }
-  if [ ! -f "$final" ] || [ -L "$final" ] || ! cmp -s "$final" "$consumed_pending"; then
-    if [ -f "$final/$(basename "$pending")" ] \
-      && [ ! -L "$final/$(basename "$pending")" ] \
-      && cmp -s "$final/$(basename "$pending")" "$consumed_pending"; then
-      rm -f -- "$final/$(basename "$pending")"
-    fi
-    if [ ! -e "$source_pending" ] && [ ! -L "$source_pending" ]; then
-      mv -- "$consumed_pending" "$source_pending" 2>/dev/null || true
-    fi
+  if [ ! -f "$final" ] || [ -L "$final" ] || [[ ! "$final" -ef "$pending" ]] \
+    || ! cmp -s "$final" "$consumed_pending"; then
+    fm_routing_restore_consumed_pending "$consumed_pending" "$source_pending"
     fm_routing_refuse "PERSISTENCE_REFUSED" "validated receipt was not published as the exact regular-file target"
     return 1
   fi

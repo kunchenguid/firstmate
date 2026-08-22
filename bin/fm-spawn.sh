@@ -272,6 +272,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-routing-decision-lib.sh
 . "$SCRIPT_DIR/fm-routing-decision-lib.sh"
+# shellcheck source=bin/fm-operational-input.sh
+. "$SCRIPT_DIR/fm-operational-input.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1499,8 +1501,8 @@ if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
     "$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
     "$RAW_LAUNCH" "$LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
     || exit 1
-  FM_ROUTING_LAUNCH_INPUT=$("$FM_ROOT/bin/fm-operational-input.sh" encode-verified-file \
-    launch-brief "$FM_ROUTING_BRIEF_HASH" "$FM_ROUTING_BRIEF_FINAL") || {
+  fm_operational_verified_file_input \
+    launch-brief "$FM_ROUTING_BRIEF_HASH" "$FM_ROUTING_BRIEF_FINAL" FM_ROUTING_LAUNCH_INPUT || {
     echo "error: validated routing brief changed before launch input construction" >&2
     exit 1
   }

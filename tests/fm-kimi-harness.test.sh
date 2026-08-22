@@ -80,7 +80,7 @@ case "${1:-}" in
           printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
           ;;
         *)
-          printf '%s\n' "$literal" >> "$FM_FAKE_POINTER_LOG"
+          printf '%s' "$literal" > "$FM_FAKE_POINTER_LOG"
           printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE"
           ;;
       esac
@@ -197,13 +197,14 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch input meta task_tmp
+  local id rec out rc launch input meta task_tmp expected_input_file
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
   rm -rf "$task_tmp"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
+  printf 'brief for kimi with trailing newlines\n\n\n' > "$HOME_DIR/data/$id/brief.md"
   out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model kimi-code/k3 --effort high)
@@ -223,6 +224,11 @@ test_kimi_launch_then_send_is_verified() {
     "kimi did not receive the typed validated brief input"
   assert_not_contains "$input" 'Read the brief at' \
     "fresh kimi delivery still reopened a brief pathname"
+  expected_input_file="$CASE_DIR/kimi-launch-input.expected"
+  "$ROOT/bin/fm-operational-input.sh" encode launch-brief \
+    < "$HOME_DIR/data/$id/brief.md" > "$expected_input_file"
+  cmp -s "$expected_input_file" "$CASE_DIR/pointer.log" \
+    || fail "kimi did not receive every receipt-bound launch-input byte"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'model=kimi-code/k3' "$meta" "kimi meta lost the requested model"
   assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"

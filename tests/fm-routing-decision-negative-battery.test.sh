@@ -8,10 +8,13 @@ set -u
 . "$ROOT/bin/fm-routing-decision-lib.sh"
 
 REAL_JQ=$(command -v jq)
+REAL_PERL=$(command -v perl)
 POST_BINDING_RECEIPT_FILTER=
 POST_SNAPSHOT_SOURCE_FILTER=
 POST_SNAPSHOT_CONFIG_FILTER=
 POST_FINAL_DIRECTORY=0
+POST_BRIEF_LINK_DIRECTORY=0
+POST_FINAL_LINK_DIRECTORY=0
 
 chmod() {
   local target=${!#}
@@ -59,6 +62,31 @@ jq() {
     mv "$tmp" "$3" || return 1
   fi
   "$REAL_JQ" "$@"
+}
+
+perl() {
+  local target=${!#} external
+  case "$target" in
+    */routing-brief.*.md)
+      if [ "$POST_BRIEF_LINK_DIRECTORY" -eq 1 ]; then
+        external="$LAB/external-brief-target"
+        mkdir -p "$external" || return 1
+        printf 'external brief sentinel\n' > "$external/sentinel" || return 1
+        ln -s "$external" "$target" || return 1
+        POST_BRIEF_LINK_DIRECTORY=0
+      fi
+      ;;
+    */routing-decision.json)
+      if [ "$POST_FINAL_LINK_DIRECTORY" -eq 1 ]; then
+        external="$LAB/external-receipt-target"
+        mkdir -p "$external" || return 1
+        printf 'external receipt sentinel\n' > "$external/routing-decision.pending.json" || return 1
+        ln -s "$external" "$target" || return 1
+        POST_FINAL_LINK_DIRECTORY=0
+      fi
+      ;;
+  esac
+  "$REAL_PERL" "$@"
 }
 
 TMP_ROOT=$(fm_test_tmproot fm-routing-decision-negative-battery)
@@ -174,6 +202,8 @@ write_fixture() {
   POST_SNAPSHOT_SOURCE_FILTER=
   POST_SNAPSHOT_CONFIG_FILTER=
   POST_FINAL_DIRECTORY=0
+  POST_BRIEF_LINK_DIRECTORY=0
+  POST_FINAL_LINK_DIRECTORY=0
   RUN_CWD=
 }
 
@@ -241,8 +271,8 @@ assert_no_effects() {
   fi
 }
 
-exercise_negative() { # <name> <predicate> <setup-function> [exact-detail]
-  local name=$1 predicate=$2 setup=$3 detail=${4:-} out status
+exercise_negative() { # <name> <predicate> <setup-function> [exact-detail] [post-assertion]
+  local name=$1 predicate=$2 setup=$3 detail=${4:-} post_assertion=${5:-} out status
   write_fixture
   "$setup"
   out=$(run_validator_then_effects 2>&1)
@@ -251,6 +281,7 @@ exercise_negative() { # <name> <predicate> <setup-function> [exact-detail]
   assert_contains "$out" "ROUTING_DECISION $predicate" "$name named the wrong predicate"
   [ -z "$detail" ] || assert_contains "$out" "$detail" "$name named the wrong refusal detail"
   assert_no_effects
+  [ -z "$post_assertion" ] || "$post_assertion"
   negative_count=$((negative_count + 1))
   pass "$name refuses before lease, endpoint, and metadata"
 
@@ -398,6 +429,25 @@ setup_final_symlink() {
 setup_final_directory_after_check() {
   PREEXISTING_FINAL=1
   POST_FINAL_DIRECTORY=1
+}
+setup_brief_link_directory_race() { POST_BRIEF_LINK_DIRECTORY=1; }
+setup_final_link_directory_race() {
+  PREEXISTING_FINAL=1
+  POST_FINAL_LINK_DIRECTORY=1
+}
+assert_brief_link_directory_race() {
+  [ -L "$TASK_DIR/routing-brief.$(sha_file "$TASK_DIR/brief.md").md" ] \
+    || fail "brief destination race did not install its symlink-to-directory counterexample"
+  printf 'external brief sentinel\n' | cmp -s - "$LAB/external-brief-target/sentinel" \
+    || fail "brief publication race changed the unrelated external file"
+  assert_absent "$LAB/external-brief-target/brief.md" \
+    "brief publication race created a file through the directory symlink"
+}
+assert_final_link_directory_race() {
+  [ -L "$TASK_DIR/routing-decision.json" ] \
+    || fail "receipt destination race did not install its symlink-to-directory counterexample"
+  printf 'external receipt sentinel\n' | cmp -s - "$LAB/external-receipt-target/routing-decision.pending.json" \
+    || fail "receipt publication race changed or deleted the unrelated external file"
 }
 setup_truncated_receipt() { printf '{"schema_version":1' > "$TASK_DIR/routing-decision.pending.json"; }
 setup_config_byte_mutation() { printf '\n' >> "$HOME_DIR/config/crew-dispatch.json"; }
@@ -780,7 +830,11 @@ exercise_negative "60 rule source with post-binding kind drift" DISPATCH_CONFIG_
 exercise_negative "61 pending receipt replaced after snapshot" PERSISTENCE_REFUSED setup_pending_replaced_after_snapshot \
   "pending receipt changed after its validation snapshot"
 exercise_negative "62 final directory raced after target check" PERSISTENCE_REFUSED setup_final_directory_after_check \
-  "validated receipt was not published as the exact regular-file target"
+  "validated receipt could not be persisted atomically"
+exercise_negative "63 brief target raced to directory symlink" PERSISTENCE_REFUSED setup_brief_link_directory_race \
+  "validated brief snapshot could not be published at its hash-addressed path" assert_brief_link_directory_race
+exercise_negative "64 receipt target raced to directory symlink" PERSISTENCE_REFUSED setup_final_link_directory_race \
+  "validated receipt could not be persisted atomically" assert_final_link_directory_race
 
 write_fixture
 expected_config_hash=$(jq -r '.dispatch_config.sha256' "$TASK_DIR/routing-decision.pending.json")
@@ -792,7 +846,7 @@ run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement
   || fail "canonical config replacement counterexample did not fire"
 pass "canonical config replacement cannot change snapshotted candidate resolution"
 
-expected_count=$((103 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((105 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \
