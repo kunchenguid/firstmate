@@ -530,23 +530,39 @@ fm_lock_remove_path() {
   rmdir "$lockdir" 2>/dev/null
 }
 
-# Take a stale lock out of the way by renaming it to a private path, and report
-# whether THIS process is the one that took it. rename(2) fails with ENOENT on a
-# source that is already gone, so when several processes reclaim the same stale
-# holder exactly one of them wins the rename and the rest are told to back off.
-# An unlink-then-recreate cannot say that: every racer's unlink "succeeds",
-# including the ones that unlinked a fresh lock the winner had already published.
+# Evict the stale holder the caller just observed, by renaming it to a private
+# path, and report whether what was taken away really was that holder.
+#
+# What the rename buys, precisely: the eviction of one observed holder becomes a
+# single atomic step, so two racers cannot both unlink "the stale lock" and then
+# both believe they replaced it. rename(2) fails with ENOENT on a source that is
+# already gone, so of the racers that observed THAT holder, only one takes it.
+#
+# What it does NOT buy: exclusivity of the lock across the reclaim. The winner
+# recreates the path one statement later, so a straggler that resumes after that
+# finds the path present again and its rename succeeds against a fresh, live
+# holder. The window is only closed for as long as the path stays absent.
+#
+# That is why the post-rename check exists: a straggler is caught HERE, at the
+# eviction, rather than one function later. It compares what it took away
+# against the holder the caller observed, and on a mismatch it refuses, so the
+# caller does not go on to create. It fails closed - the path is already gone by
+# then, and it is deliberately not restored, since putting it back would clobber
+# whatever a third process may have created in the meantime. The fresher holder
+# whose lock was taken away detects that at its own ownership re-prove and backs
+# out, so such a round produces no acquirer and everyone retries.
 #
 # The private name deliberately does not end in ".steal": nothing may mistake it
 # for a steal mutex, and fm_lock_clear_legacy_steal_chain must not walk it.
-fm_lock_claim_stale_by_rename() {  # <lock-path>
-  local lockdir=$1 private
+fm_lock_claim_stale_by_rename() {  # <lock-path> <expected-owner> <expected-pid>
+  local lockdir=$1 expected_owner=${2:-} expected_pid=${3:-} private rc=0
   private=$(mktemp -u "$lockdir.reclaiming.XXXXXX" 2>/dev/null) || return 1
   [ -n "$private" ] || return 1
   fm_lock_path_exists "$private" && return 1
   mv "$lockdir" "$private" 2>/dev/null || return 1
+  fm_lock_recheck_stale_owner "$private" "$expected_owner" "$expected_pid" || rc=1
   fm_lock_remove_path "$private" || rm -rf "$private" 2>/dev/null || true
-  return 0
+  return "$rc"
 }
 
 fm_lock_mid_acquire_is_fresh() {
@@ -920,22 +936,26 @@ fm_lock_clear_legacy_steal_chain() {  # <steal-mutex-path>
 #
 # fm_lock_try_acquire used to serialize this by calling itself on
 # "<path>.steal", which for a steal mutex meant "<path>.steal.steal" and so on
-# with no base case (issue #2787). A leaf has no lock to serialize it, so the
-# exclusion it needs comes from two atomic operations instead of a third lock:
-#   - Creating it is ln -s, which is atomic, so a live holder is never evicted
-#     and two processes never both create it from nothing.
-#   - Reclaiming a dead holder is rename(2) via fm_lock_claim_stale_by_rename,
-#     which fails on a source that is already gone. Exactly one racer takes the
-#     stale mutex out of the way; the rest refuse rather than proceed. An
-#     unlink-then-recreate is what let two of them both believe they had it.
-# Together those bound the mutex to a single holder per reclaim. The residual
-# window - a racer whose staleness recheck passed a moment before the winner
-# published a fresh mutex - is closed downstream rather than here: a reclaimer
-# publishing the primary lock names the mutex owner it believes it holds, and
-# fm_lock_claim_blocked_by_steal rejects that claim unless the mutex is still
-# there and still points at it. That is the property fm_autoarm_release_abandoned
-# depends on: while a steal mutex is held by someone else, no other process can
-# publish the primary lock.
+# with no base case (issue #2787). A leaf has no lock to serialize it, and what
+# it does here is NOT enough to make the steal mutex exclusive. Two processes
+# can still hold it one after the other across a single reclaim: creation is an
+# atomic ln -s and eviction is an atomic rename, but the reclaim recreates the
+# path between them, so a racer that resumes in that gap evicts a live holder
+# and takes the mutex for itself. fm_lock_claim_stale_by_rename narrows that gap
+# and refuses when what it evicted was not the holder this process observed; it
+# does not eliminate it.
+#
+# Exclusivity of the PRIMARY lock does not rest on the mutex being exclusive. It
+# rests on two ownership re-proofs in fm_lock_try_acquire, and a process that
+# lost the mutex is caught by them:
+#   - fm_lock_points_to_owner on the steal mutex immediately before the primary
+#     lock is evicted, so a process whose mutex was taken away stops there
+#     instead of unlinking a lock it no longer has the right to touch.
+#   - fm_lock_claim_blocked_by_steal on the publish, which rejects a claim whose
+#     non-empty allowed_steal_owner no longer matches the steal path, including
+#     when that path is gone entirely.
+# Only one owner directory can satisfy those at a time, so at most one process
+# publishes. That is the property fm_autoarm_release_abandoned depends on.
 fm_lock_try_acquire_leaf() {  # <steal-mutex-path>
   local lockdir=$1 pid owner
   FM_LOCK_HELD_PID=
@@ -985,9 +1005,10 @@ fm_lock_try_acquire_leaf() {  # <steal-mutex-path>
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
   fi
-  # Losing the rename means another reclaimer already took this stale mutex, so
-  # refuse: recreating it here would hand the same mutex to two processes.
-  if ! fm_lock_claim_stale_by_rename "$lockdir"; then
+  # Either another reclaimer took this stale mutex first, or what was evicted
+  # was no longer the holder observed above. Refuse either way: creating here
+  # would hand the mutex to a process that never legitimately took it.
+  if ! fm_lock_claim_stale_by_rename "$lockdir" "$owner" "$pid"; then
     FM_LOCK_FAIL_REASON=held
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
