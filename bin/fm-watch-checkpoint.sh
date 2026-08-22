@@ -61,11 +61,12 @@ trap 'rm -f "$OUT" "$ERR"' EXIT
 
 run_with_perl_timeout() {
   perl -e '
+    use POSIX qw(setsid);
     my $seconds = shift;
     my $pid = fork;
     die "fork failed\n" unless defined $pid;
     if (!$pid) {
-      setpgrp(0, 0);
+      setsid() or die "setsid failed: $!\n";
       exec @ARGV;
       die "exec failed: $!\n";
     }
@@ -73,6 +74,7 @@ run_with_perl_timeout() {
       kill "TERM", -$pid;
       select undef, undef, undef, 0.2;
       kill "KILL", -$pid;
+      waitpid $pid, 0;
       exit 124;
     };
     alarm $seconds;

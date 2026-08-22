@@ -851,6 +851,32 @@ fi
   exit 1
 }
 
+WATCHER_RECOVERY_PENDING=0
+# Arm cleanup before acquiring the singleton lock: a bounded checkpoint can
+# terminate this process as soon as the lock exists.
+WATCHER_PID=${BASHPID:-$$}
+watcher_cleanup() {
+  local cleanup_status=0 owns_lock=0 transition=release-lock
+  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$WATCHER_PID" ]; then
+    owns_lock=1
+    if [ "$WATCHER_RECOVERY_PENDING" -eq 1 ] \
+      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
+      transition=release-lock-existing
+    fi
+  fi
+  [ "$owns_lock" -eq 1 ] || return 0
+  fm_active_check_stop || cleanup_status=1
+  fm_check_output_cleanup
+  fm_custom_check_snapshot_cleanup
+  if ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
+    echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
+    cleanup_status=1
+  fi
+  return "$cleanup_status"
+}
+trap watcher_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
@@ -870,7 +896,6 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
-WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
@@ -889,31 +914,6 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
-watcher_cleanup() {
-  local cleanup_status=0 owns_lock=0 transition=release-lock
-  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
-    owns_lock=1
-    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
-      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
-      transition=release-lock-existing
-    fi
-  fi
-  fm_active_check_stop || cleanup_status=1
-  fm_check_output_cleanup
-  fm_custom_check_snapshot_cleanup
-  if [ "$owns_lock" -eq 1 ] \
-    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
-    echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
-    cleanup_status=1
-  fi
-  return "$cleanup_status"
-}
-trap watcher_cleanup EXIT
-trap 'exit 1' HUP INT TERM
-# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
-# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
-# substitution, so it matches the stored holder pid for the self-eviction check.
-WATCHER_PID=${BASHPID:-$$}
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
