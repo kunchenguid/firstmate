@@ -131,15 +131,27 @@ write_root() {  # <toml> <root>
 # Keep the clone's own status clean: the file is machine-local configuration,
 # never project content.
 exclude_from_git() {  # <project> <relative-path>
-  local project=$1 rel=$2 excl
-  excl=$(git -C "$project" rev-parse --git-path info/exclude 2>/dev/null) || return 0
-  [ -n "$excl" ] || return 0
+  local project=$1 rel=$2 excl grep_status
+  excl=$(git -C "$project" rev-parse --git-path info/exclude 2>/dev/null) || return 1
+  [ -n "$excl" ] || return 1
   case "$excl" in
     /*) ;;
     *) excl="$project/$excl" ;;
   esac
-  mkdir -p "$(dirname "$excl")" 2>/dev/null || return 0
-  grep -qxF "$rel" "$excl" 2>/dev/null || printf '%s\n' "$rel" >> "$excl"
+  mkdir -p "$(dirname "$excl")" 2>/dev/null || return 1
+  if [ -e "$excl" ] || [ -L "$excl" ]; then
+    [ -f "$excl" ] && [ ! -L "$excl" ] || return 1
+    grep -qxF "$rel" "$excl" 2>/dev/null
+    grep_status=$?
+    case "$grep_status" in
+      0) ;;
+      1) printf '%s\n' "$rel" >> "$excl" || return 1 ;;
+      *) return 1 ;;
+    esac
+  else
+    printf '%s\n' "$rel" > "$excl" || return 1
+  fi
+  git -C "$project" check-ignore -q -- "$rel" 2>/dev/null
 }
 
 case "${1:-}" in
@@ -181,6 +193,7 @@ if [ "$(configured_root "$TOML")" != "$ROOT_VALUE" ]; then
 fi
 [ "$(configured_root "$TOML")" = "$ROOT_VALUE" ] \
   || die "could not verify this home's pool root in '$TOML'"
-exclude_from_git "$PROJECT" treehouse.toml
+exclude_from_git "$PROJECT" treehouse.toml \
+  || die "could not exclude treehouse.toml from project '$PROJECT' or verify that Git ignores it"
 
 printf '%s\n' "$ROOT_VALUE"

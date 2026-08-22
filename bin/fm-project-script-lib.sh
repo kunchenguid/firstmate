@@ -12,7 +12,8 @@
 #   - Opt-in is presence of that exact key in the project's package.json
 #     "scripts". No untracked package.json, or no such key, means the project
 #     published nothing and firstmate must behave exactly as it did before. A
-#     tracked manifest missing from the checkout is unconfirmable, not absent.
+#     missing manifest is resolved against both the index and HEAD; an
+#     unavailable repository or unreadable published manifest is unconfirmable.
 #   - The manifest, not a grep, is authoritative. A project that looks like it
 #     published one but cannot be read is reported as UNCONFIRMED, and each
 #     caller applies its own policy - a safety gate refuses, housekeeping warns.
@@ -30,25 +31,55 @@ FM_PROJECT_SCRIPT_ABSENT=1
 FM_PROJECT_SCRIPT_UNCONFIRMED=2
 FM_PROJECT_SCRIPT_INVALID_TIMEOUT=125
 
+fm_project_manifest_script_verdict() {  # <script>
+  node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(0, "utf8")); process.stdout.write(p.scripts && Object.prototype.hasOwnProperty.call(p.scripts, process.argv[1]) ? "declared" : "absent");' \
+    "$1"
+}
+
 # Does <dir> publish <script>? Prints nothing.
 #   0 declared, 1 absent, 2 unconfirmable.
 fm_project_script_declared() {  # <dir> <script>
-  local dir=$1 script=$2 verdict tracked
+  local dir=$1 script=$2 verdict repo_top dir_real repo_real index_entry head_entry manifest
   if [ ! -e "$dir/package.json" ] && [ ! -L "$dir/package.json" ]; then
-    if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      tracked=$(git -C "$dir" ls-files --stage -- package.json 2>/dev/null) \
+    [ -d "$dir" ] || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+    repo_top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) \
+      || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+    dir_real=$(cd "$dir" 2>/dev/null && pwd -P) \
+      || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+    repo_real=$(cd "$repo_top" 2>/dev/null && pwd -P) \
+      || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+    [ "$dir_real" = "$repo_real" ] || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+    git -C "$dir" rev-parse --verify HEAD >/dev/null 2>&1 \
+      || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+    index_entry=$(git -C "$dir" ls-files --stage -- package.json 2>/dev/null) \
+      || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+    head_entry=$(git -C "$dir" ls-tree --name-only HEAD -- package.json 2>/dev/null) \
+      || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+    [ -n "$index_entry" ] || [ -n "$head_entry" ] \
+      || return "$FM_PROJECT_SCRIPT_ABSENT"
+    command -v node >/dev/null 2>&1 || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+    if [ -n "$index_entry" ]; then
+      manifest=$(git -C "$dir" show :package.json 2>/dev/null) \
         || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
-      [ -z "$tracked" ] || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
-    elif [ -e "$dir/.git" ] || [ -L "$dir/.git" ]; then
-      return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+      verdict=$(printf '%s' "$manifest" | fm_project_manifest_script_verdict "$script" 2>/dev/null) \
+        || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+      [ "$verdict" != declared ] || return "$FM_PROJECT_SCRIPT_DECLARED"
+      [ "$verdict" = absent ] || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+    fi
+    if [ -n "$head_entry" ]; then
+      manifest=$(git -C "$dir" show HEAD:package.json 2>/dev/null) \
+        || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+      verdict=$(printf '%s' "$manifest" | fm_project_manifest_script_verdict "$script" 2>/dev/null) \
+        || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+      [ "$verdict" != declared ] || return "$FM_PROJECT_SCRIPT_DECLARED"
+      [ "$verdict" = absent ] || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
     fi
     return "$FM_PROJECT_SCRIPT_ABSENT"
   fi
   [ -f "$dir/package.json" ] && [ ! -L "$dir/package.json" ] \
     || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
   command -v node >/dev/null 2>&1 || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
-  if ! verdict=$(node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(p.scripts && Object.prototype.hasOwnProperty.call(p.scripts, process.argv[2]) ? "declared" : "absent");' \
-    "$dir/package.json" "$script" 2>/dev/null); then
+  if ! verdict=$(fm_project_manifest_script_verdict "$script" < "$dir/package.json" 2>/dev/null); then
     return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
   fi
   case "$verdict" in

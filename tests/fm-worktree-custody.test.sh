@@ -170,6 +170,23 @@ SH
   pass "pool configuration verifies the root that was actually written"
 }
 
+test_pool_root_refuses_when_git_exclude_cannot_be_written() {
+  local case_dir clone out status
+  case_dir=$(make_two_homes_one_project unwritable-exclude)
+  clone="$case_dir/homeA/project"
+  chmod 0444 "$clone/.git/info/exclude"
+
+  out=$(pool_root_for_home "$case_dir/homeA" "$case_dir/base" "$clone" 2>&1)
+  status=$?
+  chmod 0644 "$clone/.git/info/exclude"
+  expect_code 1 "$status" "pool configuration should refuse when info/exclude cannot be written"
+  assert_contains "$out" "could not exclude treehouse.toml" "the failed Git exclusion was not reported"
+  if git -C "$clone" check-ignore -q -- treehouse.toml; then
+    fail "the refused configuration unexpectedly left treehouse.toml ignored"
+  fi
+  pass "pool configuration refuses when Git exclusion cannot be established"
+}
+
 # The vendor fact the class rests on: treehouse hands two clones of one origin
 # slots from the SAME pool, and only `root` moves that pool. Self-skipping,
 # because the pool allocator is a third-party binary CI installs only for the
@@ -746,6 +763,70 @@ test_teardown_refuses_a_missing_tracked_canonical_manifest() {
   git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
     commit -qm "publish the custody check"
   rm "$case_dir/project/package.json"
+  cat > "$case_dir/fakebin/npm" <<SH
+#!/usr/bin/env bash
+printf 'missing working manifest cannot run published custody check\n'
+exit 4
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/npm" "$case_dir/fakebin/treehouse"
+
+  out=$(run_teardown_case "$case_dir")
+  status=$?
+  expect_code 1 "$status" "a missing tracked canonical manifest must not disable custody"
+  assert_contains "$out" "missing working manifest cannot run" "the tracked manifest was not detected from repository state"
+  assert_present "$case_dir/state/task-c1.meta" "a refused cleanup removed the task record"
+  assert_absent "$case_dir/treehouse.log" "a missing tracked manifest allowed the copy to be returned"
+  [ -d "$case_dir/wt" ] || fail "a refused cleanup removed the working copy"
+  pass "a missing tracked canonical manifest remains a published custody opt-in"
+}
+
+test_teardown_detects_a_staged_deleted_canonical_manifest() {
+  local case_dir out status
+  case_dir=$(make_teardown_case teardown-custody-staged-deleted-manifest)
+  printf '{\n  "name": "fixture",\n  "scripts": {\n    "check:worktree-custody": "node custody.js"\n  }\n}\n' \
+    > "$case_dir/project/package.json"
+  git -C "$case_dir/project" add package.json
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -qm "publish the custody check"
+  git -C "$case_dir/project" rm -q package.json
+  cat > "$case_dir/fakebin/npm" <<SH
+#!/usr/bin/env bash
+printf 'HEAD custody check survives staged manifest deletion\n'
+exit 4
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/npm" "$case_dir/fakebin/treehouse"
+
+  out=$(run_teardown_case "$case_dir")
+  status=$?
+  expect_code 1 "$status" "a staged manifest deletion must not disable published custody"
+  assert_contains "$out" "HEAD custody check survives" "the published check was not recovered from HEAD"
+  assert_present "$case_dir/state/task-c1.meta" "a refused cleanup removed the task record"
+  assert_absent "$case_dir/treehouse.log" "a staged manifest deletion allowed the copy to be returned"
+  [ -d "$case_dir/wt" ] || fail "a refused cleanup removed the working copy"
+  pass "a staged manifest deletion preserves the custody opt-in published by HEAD"
+}
+
+test_teardown_refuses_an_unavailable_canonical_project() {
+  local case_dir missing_project out status
+  case_dir=$(make_teardown_case teardown-custody-missing-project)
+  missing_project="$case_dir/missing-project"
+  fm_write_meta "$case_dir/state/task-c1.meta" \
+    "window=firstmate:fm-task-c1" \
+    "endpoint_task_id=task-c1" \
+    "worktree=$case_dir/wt" \
+    "project=$missing_project" \
+    "kind=ship" \
+    "mode=no-mistakes"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
@@ -755,12 +836,13 @@ SH
 
   out=$(run_teardown_case "$case_dir")
   status=$?
-  expect_code 1 "$status" "a missing tracked canonical manifest must not disable custody"
-  assert_contains "$out" "cannot confirm whether project" "the missing tracked manifest was not reported as unconfirmable"
-  assert_present "$case_dir/state/task-c1.meta" "a refused cleanup removed the task record"
-  assert_absent "$case_dir/treehouse.log" "a missing tracked manifest allowed the copy to be returned"
-  [ -d "$case_dir/wt" ] || fail "a refused cleanup removed the working copy"
-  pass "a missing tracked canonical manifest refuses cleanup instead of disabling custody"
+  expect_code 1 "$status" "an unavailable canonical project must refuse before cleanup"
+  assert_contains "$out" "cannot confirm whether project $missing_project" "the unavailable canonical project was not reported as unconfirmable"
+  assert_present "$case_dir/state/task-c1.meta" "an unavailable project removed the task record"
+  assert_absent "$case_dir/treehouse.log" "an unavailable project allowed the copy to be returned"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = "fm/task-c1" ] \
+    || fail "an unavailable canonical project detached the protected working copy"
+  pass "an unavailable canonical project refuses cleanup before mutation"
 }
 
 test_two_homes_configure_distinct_pool_roots
@@ -769,6 +851,7 @@ test_pool_root_is_idempotent_and_preserves_other_keys
 test_pool_root_refuses_a_tracked_config
 test_pool_root_refuses_a_nonregular_config
 test_pool_root_verifies_the_written_config
+test_pool_root_refuses_when_git_exclude_cannot_be_written
 test_real_treehouse_stops_sharing_a_pool_between_homes
 test_spawn_refuses_a_copy_another_task_claims
 test_spawn_refuses_ambiguous_worktree_metadata
@@ -788,3 +871,5 @@ test_teardown_refuses_when_a_published_check_cannot_be_run
 test_teardown_uses_the_canonical_projects_custody_opt_in
 test_teardown_refuses_an_unparseable_canonical_manifest
 test_teardown_refuses_a_missing_tracked_canonical_manifest
+test_teardown_detects_a_staged_deleted_canonical_manifest
+test_teardown_refuses_an_unavailable_canonical_project
