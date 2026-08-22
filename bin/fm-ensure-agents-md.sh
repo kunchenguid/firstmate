@@ -132,12 +132,23 @@ is_canonical_claude_pointer() {
 # minimal build/test/run instruction (is_generated_stub_line); anything else -
 # a descriptive, routing, or ownership statement - is deliberate authorship
 # even at one line.
+#
+# The leading verb alone is not enough: authored prose can start with the
+# same word ("Test the whole payment pipeline end-to-end before merging...").
+# A genuine scaffolding stub is also short and a single clause; anything
+# longer or with a second clause is judged authored even if it starts with a
+# stub verb.
 AUTHORED_MIN_LINES=12
+GENERATED_STUB_MAX_LEN=40
 is_generated_stub_line() {
   case "$1" in
-    [Rr]un\ *|[Bb]uild\ *|[Ii]nstall\ *|[Ss]tart\ *|[Tt]est\ *) return 0 ;;
+    [Rr]un\ *|[Bb]uild\ *|[Ii]nstall\ *|[Ss]tart\ *|[Tt]est\ *) ;;
     *) return 1 ;;
   esac
+  case "$1" in
+    *,*) return 1 ;;
+  esac
+  [ "${#1}" -le "$GENERATED_STUB_MAX_LEN" ]
 }
 
 is_authored_claude_md() {

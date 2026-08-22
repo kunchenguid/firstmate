@@ -393,6 +393,27 @@ EOF
   pass "fm-ensure-agents-md.sh: refuses to promote a short one-heading authored CLAUDE.md"
 }
 
+test_short_one_heading_stub_verb_prose_is_refused_not_promoted() {
+  local repo out rc
+  repo="$TMP_ROOT/stub-verb-prose-project"
+  mkdir -p "$repo"
+  cat > "$repo/CLAUDE.md" <<'EOF'
+# example-project
+
+Test the whole reconciliation pipeline end-to-end before merging any change to the ledger service, especially edge cases around partial refunds.
+EOF
+  cp "$repo/CLAUDE.md" "$repo/.claude-before"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "expected a non-zero exit for authored prose starting with a stub verb"
+  assert_contains "$out" "conflict:" "authored prose starting with a stub verb did not report a conflict"
+  assert_absent "$repo/AGENTS.md" "authored prose starting with a stub verb was promoted into AGENTS.md"
+  cmp -s "$repo/.claude-before" "$repo/CLAUDE.md" \
+    || fail "stub-verb-prose refusal modified CLAUDE.md"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "stub-verb-prose refusal turned CLAUDE.md into a symlink"
+  pass "fm-ensure-agents-md.sh: refuses to promote authored prose that starts with a stub verb"
+}
+
 test_lowercase_agents_md_refuses_case_fragile_pointer() {
   local repo out rc
   repo="$TMP_ROOT/lowercase-project"
@@ -426,4 +447,5 @@ test_wrong_target_symlink_is_refused
 test_non_regular_claude_md_is_refused
 test_authored_claude_md_is_refused_not_promoted
 test_short_one_heading_authored_claude_md_is_refused_not_promoted
+test_short_one_heading_stub_verb_prose_is_refused_not_promoted
 test_lowercase_agents_md_refuses_case_fragile_pointer
