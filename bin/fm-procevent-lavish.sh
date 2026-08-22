@@ -87,8 +87,35 @@ cmd_source_id() {
   fi
 }
 
+# Milliseconds since the epoch, used only to bound cmd_arm's listener-liveness
+# wait by wall clock. Counting fixed sleep intervals cannot bound elapsed time,
+# because every iteration also spends real time on fm_procevent_generation_live's
+# own work - a filesystem lock, claim load, and process-identity check - which a
+# sleep-only budget never accounts for. EPOCHREALTIME is a bash builtin (no
+# fork); a shell without it degrades to whole-second granularity rather than
+# losing the bound entirely.
+arm_now_ms() {
+  local raw sec frac
+  raw=${EPOCHREALTIME:-}
+  case "$raw" in
+    *[0-9][.,][0-9]*)
+      sec=${raw%%[.,]*}
+      frac=${raw#*[.,]}
+      frac="${frac}000"
+      frac=${frac:0:3}
+      case "$sec$frac" in
+        ''|*[!0-9]*) ;;
+        *) printf '%s\n' "$(( sec * 1000 + 10#$frac ))"; return 0 ;;
+      esac
+      ;;
+  esac
+  sec=$(date +%s 2>/dev/null || printf '0')
+  case "$sec" in ''|*[!0-9]*) sec=0 ;; esac
+  printf '%s\n' "$(( sec * 1000 ))"
+}
+
 cmd_arm() {
-  local artifact=${1-} id real reg_out identity wait_ms i=0 max live
+  local artifact=${1-} id real reg_out identity wait_ms live deadline_ms now_ms remaining_ms frac
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
@@ -122,19 +149,22 @@ cmd_arm() {
   # Running it synchronously here would let that internal blocking silently
   # replace the documented bound with reconcile's own, possibly unbounded, one.
   "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 &
-  max=$((wait_ms / 50 + 1))
+  deadline_ms=$(( $(arm_now_ms) + wait_ms ))
   live=1
-  while [ "$i" -lt "$max" ]; do
+  while :; do
     if fm_procevent_generation_live "$id" "$identity"; then
       live=0
       break
     fi
-    i=$((i + 1))
-    # Only sleep before a check the loop bound still allows: sleeping after
-    # the final permitted check would push arm past FM_PROCEVENT_LAVISH_ARM_WAIT_MS
-    # for no benefit, since that sleep's result is never sampled.
-    [ "$i" -lt "$max" ] || break
-    sleep 0.05
+    # Always attempted at least once above; from here the wall clock alone
+    # decides whether another probe fits, since the probe just run may already
+    # have consumed most or all of the budget.
+    now_ms=$(arm_now_ms)
+    [ "$now_ms" -lt "$deadline_ms" ] || break
+    remaining_ms=$(( deadline_ms - now_ms ))
+    [ "$remaining_ms" -le 50 ] || remaining_ms=50
+    printf -v frac '%03d' "$remaining_ms"
+    sleep "0.$frac"
   done
   [ "$live" -eq 0 ] || die "listener for $id did not confirm live within ${wait_ms}ms"
   printf 'armed: %s\n' "$id"
