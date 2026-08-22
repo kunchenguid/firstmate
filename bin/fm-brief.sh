@@ -85,6 +85,14 @@
 # owns their checks (AGENTS.md, "Selected delivery path and approval authority"), and
 # the rule carries no reporting obligation, so the one-line status contract below is
 # never asked to carry command evidence.
+# Ship briefs also carry a compact Engineering bar. Discovering and naming every
+# existing test layer, naming skip reasons, adding real-composition and continuity
+# tests, and searching once for an existing project contract before an architecture
+# or design escalation apply to every ship mode. Worker-run of those layers and
+# command-count evidence apply only to direct-PR and local-only; that evidence goes
+# in the report or PR evidence already named by the red-before-fix rule, not on the
+# one-line status contract. no-mistakes omits the run-and-count clause because the
+# pipeline owns that mode's checks and provides no worker evidence sink for counts.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
@@ -708,6 +716,9 @@ IFS= read -r -d '' CHECKS_RULE <<'EOF' || true
 EOF
 CHECKS_RULE=$'\n'${CHECKS_RULE%$'\n'}
 SHIP_EVIDENCE_RULE='Every changed or new test must be shown RED before the fix, with the red output pasted into the report or PR evidence.'
+# Fast-path only: worker-run layer evidence reuses the red-before-fix sink.
+# no-mistakes clears this so the pipeline remains the sole check owner.
+ENGINEERING_BAR_RUN=$'\n'"Run every layer you can; for each, record the exact command and the pass/fail counts in the report or PR evidence."
 
 case "$MODE" in
   direct-PR)
@@ -741,6 +752,7 @@ EOF
     # The pipeline alone owns this mode's checks (AGENTS.md, "Selected delivery path
     # and approval authority").
     CHECKS_RULE=""
+    ENGINEERING_BAR_RUN=""
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
@@ -864,6 +876,14 @@ $RULE1
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 $HEAVY_SUITE_RULE$CHECKS_RULE
+
+# Engineering bar
+Discover and name every test layer this project already provides before you change code.$ENGINEERING_BAR_RUN
+Name the reason for every layer you skip - do not silently drop one.
+When a change spans a seam between independently tested components, add a real-composition acceptance test that exercises them together.
+When a change alters a sequence or lifecycle rather than only its end state, add continuity assertions that prove the sequence holds, not just the final state.
+Before escalating an architecture or design question, search once for an existing project contract: ADRs, ticket references in code, invariants named in tests, or a prior implementation of the same shape.
+State what you searched and what you found, including finding nothing; the escalation rides on that evidence.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

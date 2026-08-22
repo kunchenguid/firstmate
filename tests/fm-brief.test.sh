@@ -1077,6 +1077,194 @@ test_scout_evidence_archive_opt_in() {
   pass "fm-brief.sh: evidence archive is opt-in for scouts and rejected elsewhere"
 }
 
+# Isolate the generated Engineering bar as a structural section rather than
+# grepping the whole brief. The next ATX heading ends the section, so a
+# contradictory clause that leaked into another owner is visible as absence
+# from this slice, and a contradictory clause that survived inside the slice
+# is visible as presence here.
+extract_engineering_bar_section() {
+  awk '
+    /^# Engineering bar$/ { p=1; print; next }
+    p && /^# / { exit }
+    p { print }
+  ' "$1"
+}
+
+# Mode-aware behavioral oracle for the isolated Engineering bar. Returns 0
+# when the section fits the delivery mode; returns 1 when worker-run
+# command-count reporting is assigned without an owned sink, when no-mistakes
+# still carries worker-run counts, or when fast-path counts ignore the
+# existing report-or-PR-evidence destination. Does not call fail(), so
+# distinguishing counterexamples can expect a nonzero return.
+engineering_bar_fits_mode() {
+  local brief=$1 mode=$2 bar
+  bar=$(extract_engineering_bar_section "$brief")
+  [ -n "$bar" ] || return 1
+  printf '%s\n' "$bar" | grep -q "Discover and name every test layer this project already provides before you change code" \
+    || return 1
+  printf '%s\n' "$bar" | grep -q "Name the reason for every layer you skip" \
+    || return 1
+  printf '%s\n' "$bar" | grep -q "add a real-composition acceptance test that exercises them together" \
+    || return 1
+  printf '%s\n' "$bar" | grep -q "add continuity assertions that prove the sequence holds, not just the final state" \
+    || return 1
+  printf '%s\n' "$bar" | grep -q "search once for an existing project contract" \
+    || return 1
+  printf '%s\n' "$bar" | grep -q "ADRs, ticket references in code, invariants named in tests, or a prior implementation of the same shape" \
+    || return 1
+  printf '%s\n' "$bar" | grep -q "State what you searched and what you found, including finding nothing" \
+    || return 1
+  # Unsinked count reporting is never valid: it has no evidence owner.
+  printf '%s\n' "$bar" | grep -q "for each, state the exact command and the pass/fail counts" \
+    && return 1
+  printf '%s\n' "$bar" | grep -qi "status file" \
+    && return 1
+  case "$mode" in
+    no-mistakes)
+      # Pipeline-owned path: worker-run and command-count reporting must not
+      # appear in the bar. Presence alongside an omitted CI-check rule is the
+      # contradictory coexistence this oracle exists to reject.
+      printf '%s\n' "$bar" | grep -q "Run every layer you can" && return 1
+      printf '%s\n' "$bar" | grep -q "pass/fail counts" && return 1
+      grep -q "identify the exact check commands CI itself runs" "$brief" && return 1
+      ;;
+    direct-PR|local-only)
+      printf '%s\n' "$bar" | grep -q "Run every layer you can" || return 1
+      printf '%s\n' "$bar" | grep -q "record the exact command and the pass/fail counts in the report or PR evidence" \
+        || return 1
+      grep -q "identify the exact check commands CI itself runs" "$brief" || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# The generated ship brief carries one compact engineering bar that combines the
+# project-owned test-layer bar and the existing-contract search before escalation.
+# It is ship-only and delivery-mode aware: no-mistakes keeps the quality bar
+# without worker-run count reporting, while fast paths route retained counts to
+# the existing report-or-PR-evidence sink. Structural section extraction plus
+# the mode oracle replace whole-brief sentence greps that would accept
+# contradictory clauses living in the same generated brief.
+test_ship_brief_engineering_bar() {
+  local home id mode brief bar
+  home="$TMP_ROOT/eng-bar-home"
+  mkdir -p "$home/data"
+  for id_mode in "brief-engbar-f1:no-mistakes" "brief-engbar-f2:direct-PR" "brief-engbar-f3:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "fm-brief.sh $id --mode $mode should exit 0"
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    bar=$(extract_engineering_bar_section "$brief")
+    [ -n "$bar" ] || fail "$id: could not isolate the Engineering bar section"
+    engineering_bar_fits_mode "$brief" "$mode" \
+      || fail "$id: isolated Engineering bar does not fit mode=$mode"
+    printf '%s\n' "$bar" | grep -q "Discover and name every test layer this project already provides before you change code" \
+      || fail "$id: isolated bar lost the discover-and-name-every-layer contract"
+    printf '%s\n' "$bar" | grep -q "Name the reason for every layer you skip" \
+      || fail "$id: isolated bar lost the skip-reason contract"
+    printf '%s\n' "$bar" | grep -q "add a real-composition acceptance test that exercises them together" \
+      || fail "$id: isolated bar lost the real-composition seam contract"
+    printf '%s\n' "$bar" | grep -q "add continuity assertions that prove the sequence holds, not just the final state" \
+      || fail "$id: isolated bar lost the continuity-assertion contract"
+    printf '%s\n' "$bar" | grep -q "search once for an existing project contract" \
+      || fail "$id: isolated bar lost the existing-contract search trigger"
+    printf '%s\n' "$bar" | grep -q "ADRs, ticket references in code, invariants named in tests, or a prior implementation of the same shape" \
+      || fail "$id: isolated bar lost the contract-search sources"
+    printf '%s\n' "$bar" | grep -q "State what you searched and what you found, including finding nothing" \
+      || fail "$id: isolated bar lost the search-evidence escalation contract"
+    if [ "$mode" = no-mistakes ]; then
+      printf '%s\n' "$bar" | grep -q "Run every layer you can" \
+        && fail "$id: no-mistakes Engineering bar assigned worker-run tests"
+      printf '%s\n' "$bar" | grep -q "pass/fail counts" \
+        && fail "$id: no-mistakes Engineering bar assigned command-count reporting with no evidence sink"
+    else
+      printf '%s\n' "$bar" | grep -q "record the exact command and the pass/fail counts in the report or PR evidence" \
+        || fail "$id: fast-path Engineering bar lost owned-sink command-count reporting"
+      printf '%s\n' "$bar" | grep -qi "status file" \
+        && fail "$id: fast-path Engineering bar routed counts onto the status channel"
+    fi
+    printf '%s\n' "$bar" | grep -q "coverage threshold" \
+      && fail "$id: engineering bar introduced a forbidden coverage threshold"
+    printf '%s\n' "$bar" | grep -q "checklist service" \
+      && fail "$id: engineering bar introduced a forbidden checklist service"
+    printf '%s\n' "$bar" | grep -q "second control plane" \
+      && fail "$id: engineering bar introduced a forbidden second control plane"
+  done
+
+  # Distinguishing counterexamples: the same oracle must reject briefs that
+  # keep contradictory clauses the old all-mode sentence greps would accept.
+  brief="$home/data/eng-bar-counter-nomistakes.md"
+  cat > "$brief" <<'EOF'
+# Engineering bar
+Discover and name every test layer this project already provides before you change code.
+Run every layer you can; for each, state the exact command and the pass/fail counts.
+Name the reason for every layer you skip - do not silently drop one.
+When a change spans a seam between independently tested components, add a real-composition acceptance test that exercises them together.
+When a change alters a sequence or lifecycle rather than only its end state, add continuity assertions that prove the sequence holds, not just the final state.
+Before escalating an architecture or design question, search once for an existing project contract: ADRs, ticket references in code, invariants named in tests, or a prior implementation of the same shape.
+State what you searched and what you found, including finding nothing; the escalation rides on that evidence.
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+EOF
+  engineering_bar_fits_mode "$brief" no-mistakes \
+    && fail "oracle accepted a no-mistakes brief that still assigns unsinked worker-run count reporting"
+
+  brief="$home/data/eng-bar-counter-fast-unsinked.md"
+  cat > "$brief" <<'EOF'
+# Engineering bar
+Discover and name every test layer this project already provides before you change code.
+Run every layer you can; for each, state the exact command and the pass/fail counts.
+Name the reason for every layer you skip - do not silently drop one.
+When a change spans a seam between independently tested components, add a real-composition acceptance test that exercises them together.
+When a change alters a sequence or lifecycle rather than only its end state, add continuity assertions that prove the sequence holds, not just the final state.
+Before escalating an architecture or design question, search once for an existing project contract: ADRs, ticket references in code, invariants named in tests, or a prior implementation of the same shape.
+State what you searched and what you found, including finding nothing; the escalation rides on that evidence.
+
+# Rules
+9. Before you push anything or append your final `done:` line, inspect this repository's CI configuration and identify the exact check commands CI itself runs, including any repository-owned wrapper or script CI invokes.
+EOF
+  engineering_bar_fits_mode "$brief" direct-PR \
+    && fail "oracle accepted fast-path count reporting that never names the owned evidence destination"
+
+  brief="$home/data/eng-bar-counter-fast-status.md"
+  cat > "$brief" <<'EOF'
+# Engineering bar
+Discover and name every test layer this project already provides before you change code.
+Run every layer you can; for each, record the exact command and the pass/fail counts in the status file.
+Name the reason for every layer you skip - do not silently drop one.
+When a change spans a seam between independently tested components, add a real-composition acceptance test that exercises them together.
+When a change alters a sequence or lifecycle rather than only its end state, add continuity assertions that prove the sequence holds, not just the final state.
+Before escalating an architecture or design question, search once for an existing project contract: ADRs, ticket references in code, invariants named in tests, or a prior implementation of the same shape.
+State what you searched and what you found, including finding nothing; the escalation rides on that evidence.
+
+# Rules
+9. Before you push anything or append your final `done:` line, inspect this repository's CI configuration and identify the exact check commands CI itself runs, including any repository-owned wrapper or script CI invokes.
+EOF
+  engineering_bar_fits_mode "$brief" local-only \
+    && fail "oracle accepted fast-path count reporting routed onto the status channel"
+
+  # Ship-only contract: scout and secondmate scaffolds keep their existing
+  # wording and must not carry the ship engineering bar.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-engbar-scout some-proj --scout >/dev/null 2>&1
+  brief="$home/data/brief-engbar-scout/brief.md"
+  assert_no_grep "# Engineering bar" "$brief" \
+    "scout brief carries the ship-only engineering bar"
+  assert_no_grep "Discover and name every test layer" "$brief" \
+    "scout brief carries the ship-only test-layer bar"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='domain ops' \
+    "$ROOT/bin/fm-brief.sh" brief-engbar-mate --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/brief-engbar-mate/brief.md"
+  assert_no_grep "# Engineering bar" "$brief" \
+    "secondmate charter carries the ship-only engineering bar"
+  pass "fm-brief.sh: ship engineering bar is mode-aware; scout and secondmate do not carry it"
+}
+
 # The reader/writer access axis (--access, scouts only). A reader scout is
 # dispatched slot-free: a scratch directory plus a bare object-store read handle
 # instead of a pool worktree. Its brief must record the machine-readable access
@@ -1275,7 +1463,7 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_all_brief_kinds_delivery_evidence_contracts
 test_scout_evidence_archive_opt_in
-
+test_ship_brief_engineering_bar
 test_scout_access_reader_scaffold_contract
 test_scout_access_reader_evidence_archive
 test_scout_access_writer_is_default_and_byte_identical
