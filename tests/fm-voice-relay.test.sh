@@ -480,7 +480,7 @@ pass "the relay and the reader agree on the tool names and the handover argument
 # Nothing here talks to AWS; the resolver is replaced with a counter.
 
 python3 - "$ROOT/bin" <<'PY' || fail "credential reuse"
-import asyncio, datetime, os, sys, time
+import asyncio, contextvars, datetime, os, sys, threading, time
 sys.path.insert(0, sys.argv[1])
 import importlib.util, pathlib
 spec = importlib.util.spec_from_file_location(
@@ -592,6 +592,41 @@ def fake(profile, verbose=False, margin=0, allow_ambient=True):
 
 real_resolve = relay.resolve_credentials
 relay.resolve_credentials = fake
+
+# Debian 10 supplies Python 3.7, before asyncio.to_thread was added. The relay's
+# equivalent must keep blocking work off-loop, preserve contextvars like the
+# newer API, and propagate worker failures instead of turning them into success.
+had_to_thread = hasattr(relay.asyncio, "to_thread")
+saved_to_thread = getattr(relay.asyncio, "to_thread", None)
+if had_to_thread:
+    delattr(relay.asyncio, "to_thread")
+
+thread_context = contextvars.ContextVar("thread_context", default="missing")
+thread_context.set("carried")
+main_thread = threading.get_ident()
+
+async def portable_thread_call():
+    return await relay.run_in_thread(
+        lambda: (threading.get_ident(), thread_context.get()))
+
+worker_thread, context_value = asyncio.run(portable_thread_call())
+check(worker_thread != main_thread,
+      "the compatibility helper ran blocking work on the event-loop thread")
+check(context_value == "carried",
+      "the compatibility helper dropped the caller's context")
+
+def reject_in_worker():
+    raise ValueError("worker refusal")
+
+try:
+    asyncio.run(relay.run_in_thread(reject_in_worker))
+    sys.exit("credentials: a worker failure was accepted")
+except ValueError as exc:
+    check(str(exc) == "worker refusal",
+          "the compatibility helper changed the worker failure: %s" % exc)
+finally:
+    if had_to_thread:
+        relay.asyncio.to_thread = saved_to_thread
 
 async def take(cache, count):
     return [await cache.get() for _ in range(count)]
