@@ -332,6 +332,17 @@ _fm_decision_key_transition_allowed() {  # <key> <note>
   return 0
 }
 
+# The ONLY verbs that can OPEN a decision in the fold below; resolve and held
+# can merely drop one. A status file containing no line whose leading verb is
+# one of these therefore cannot contribute a single open decision, which makes
+# skipping the whole fold for such a file provably output-neutral. Anchored the
+# way status_line_verb reads a verb - leading whitespace tolerated, the verb
+# ending at the first colon or metadata tag - so the pattern can over-match (a
+# needless fold, which is only slower) but can never under-match (a dropped
+# decision, which would be silence about real work). Kept beside the fold so the
+# two can never drift apart.
+FM_DECISION_OPENING_VERB_RE='^[[:space:]]*(needs-decision|blocked)'
+
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
   local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped
   stripped=${line//[[:space:]]/}
@@ -454,10 +465,19 @@ EOF
 # above remains the ONE place the open/resolved semantics are decided. Prints
 # one "<task>\t<key>\t<verb>\t<note>" line per open decision, in glob (task id)
 # order; prints nothing when none are open.
+# Each file is pre-filtered by FM_DECISION_OPENING_VERB_RE first: the whole-file
+# fold costs several forks per status LINE, so a fleet-wide walk over long logs
+# is expensive, while one grep per FILE proves most of them cannot hold an open
+# decision at all. The grep is a strictly read-only test and skips only files
+# the fold would have returned nothing for, so the output is unchanged. The
+# symlink rejection status_open_decisions applies is repeated ahead of it so the
+# pre-filter never reads through one either.
 scan_open_decisions() {  # <state>
   local state=$1 f task open line
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    [ ! -L "$f" ] || continue
+    grep -qE "$FM_DECISION_OPENING_VERB_RE" "$f" 2>/dev/null || continue
     task=$(basename "$f"); task="${task%.status}"
     open=$(status_open_decisions "$f") || continue
     [ -n "$open" ] || continue
