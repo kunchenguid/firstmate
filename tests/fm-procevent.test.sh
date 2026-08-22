@@ -771,6 +771,35 @@ assert_not_contains "$out" "armed:" "an unconfirmed listener generation never re
 FM_HOME="$HLE" "$ROOT/bin/fm-procevent.sh" retire "$fallback_id" >/dev/null 2>&1 || true
 pass "arm's readiness wait stays sub-second-accurate even without EPOCHREALTIME"
 
+# --- a single liveness probe cannot hang arm's wait past its own bound ------
+# Regression for the "probe work exceeds timeout" defect: cmd_arm's polling
+# loop only checks the wall-clock deadline BETWEEN calls to
+# fm_procevent_generation_live, never during one, so nothing previously
+# stopped one unexpectedly slow probe (e.g. slow filesystem I/O on the source
+# lock, claim file, or /proc read) from growing arm's total wait past
+# FM_PROCEVENT_LAVISH_ARM_WAIT_MS without limit. arm_probe_live now routes
+# every probe through fm_run_bash_timeout so a stuck probe is killed instead.
+# This runs the adapter's own shipped arm_probe_live definition (extracted
+# verbatim by byte range, not paraphrased) against a stand-in for
+# fm_procevent_generation_live that hangs forever, so the assertion is on
+# arm_probe_live's real, observed exit code and elapsed time - not on any
+# text in the file.
+PROBE_HANG_OUT=$(bash -c '
+  . "$1/bin/fm-timeout-lib.sh"
+  eval "$(sed -n "/^FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S=/,/^}/p" "$1/bin/fm-procevent-lavish.sh")"
+  fm_procevent_generation_live() { sleep 300; }
+  start=$SECONDS
+  arm_probe_live x y
+  rc=$?
+  printf "rc=%s elapsed=%s\n" "$rc" "$(( SECONDS - start ))"
+' _ "$ROOT")
+assert_contains "$PROBE_HANG_OUT" "rc=124" \
+  "a liveness probe that hangs is killed and reported as timed out, not left to run forever: $PROBE_HANG_OUT"
+probe_hang_elapsed=${PROBE_HANG_OUT##*elapsed=}
+[ "$probe_hang_elapsed" -le 5 ] \
+  || fail "arm_probe_live took ${probe_hang_elapsed}s to bound a hung probe: $PROBE_HANG_OUT"
+pass "a single hung liveness probe is bounded rather than left free to run indefinitely"
+
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
 # real blocking source completes, its result is captured and published, the

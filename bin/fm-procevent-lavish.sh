@@ -66,6 +66,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,56p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -123,6 +125,29 @@ arm_now_ms() {
   printf '%s\n' "$(( sec * 1000 ))"
 }
 
+# cmd_arm's polling loop below only checks the wall clock BETWEEN probes, so
+# it decides whether to start another one but cannot stop an already-started
+# probe from running long. fm_procevent_generation_live's own work - a
+# try-once source lock, a claim read, a pid identity check - is normally a
+# handful of fast, non-blocking filesystem/process operations with nothing
+# that retries or waits on contention, but nothing in its contract actually
+# bounds how long any single one of those operations can take (e.g. unusually
+# slow disk I/O). Give every probe its own hard bound via fm_run_bash_timeout,
+# this repo's bash-native bounded-execution mechanism (bin/fm-timeout-lib.sh):
+# it runs the probe in a background subshell of THIS interpreter, so it calls
+# fm_procevent_generation_live directly rather than needing to re-exec a bare
+# process that never sourced fm-procevent-lib.sh, the way fm_run_timed's
+# preferred timeout/gtimeout/perl mechanisms would. The bound is a generous
+# safety ceiling relative to that normal sub-millisecond cost, so it is never
+# expected to fire in ordinary operation; it exists only so a single
+# unexpectedly stuck probe cannot grow arm's overrun past
+# FM_PROCEVENT_LAVISH_ARM_WAIT_MS by an unbounded amount.
+FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S=2
+arm_probe_live() {
+  fm_run_bash_timeout "$FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S" \
+    fm_procevent_generation_live "$1" "$2"
+}
+
 cmd_arm() {
   local artifact=${1-} id real reg_out identity wait_ms live deadline_ms now_ms remaining_ms frac first
   [ -n "$artifact" ] || usage
@@ -174,7 +199,7 @@ cmd_arm() {
       [ "$now_ms" -lt "$deadline_ms" ] || break
     fi
     first=0
-    if fm_procevent_generation_live "$id" "$identity"; then
+    if arm_probe_live "$id" "$identity"; then
       live=0
       break
     fi
