@@ -1038,17 +1038,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   if [ "$RECOVER_MISSING" = 1 ]; then
-    [ "$RELAUNCH_STATE" = missing ] || {
-      # A previous missing-endpoint recovery can leave its replacement pane
-      # structurally present but agent-free after the launch fails. The control
-      # plane authorizes this path only from that recorded recovery journal;
-      # accepting the recovery-grade dead state here is therefore safe and
-      # avoids strand­ing the same task behind an empty Herdr pane.
-      if [ "$RELAUNCH_STATE" != dead ]; then
+    # A previous missing-endpoint recovery can leave its replacement pane
+    # structurally present but agent-free after the launch fails. The control
+    # plane authorizes this path only from that recorded recovery journal;
+    # accepting the recovery-grade dead state here is therefore safe and
+    # avoids stranding the same task behind an empty Herdr pane.
+    case "$RELAUNCH_STATE" in
+      missing|dead) ;;
+      *)
         echo "error: --recover-missing requires the recorded endpoint to be authoritatively missing or agent-free; it reads '$RELAUNCH_STATE'" >&2
         exit 1
-      fi
-    }
+        ;;
+    esac
   else
     [ "$RELAUNCH_STATE" = dead ] || {
       echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
