@@ -22,8 +22,8 @@ Modes:
                      This is the control measurement for the relay path, and it
                      needs no client, no SSH and no microphone.
 
-The two traps this code already avoids, both found the expensive way and
-recorded in data/speech-to-speech-survey-s2/report.md section 10:
+The two traps this code already avoids, both found the expensive way and both
+measured rather than assumed:
 
   1. completionEnd does not arrive on its own. The model holds the session open
      waiting for more speech. The real "the reply is finished" signal is a
@@ -108,8 +108,8 @@ SETTINGS = {
 
 IN_RATE = 16000
 OUT_RATE = 24000
-# 3200 bytes is 100 ms at 16 kHz 16-bit mono, the chunk size the survey measured
-# its timings with. Keeping it identical keeps those numbers comparable.
+# 3200 bytes is 100 ms at 16 kHz 16-bit mono, the chunk size earlier prototype
+# work measured its timings with. Keeping it identical keeps those comparable.
 CHUNK = 3200
 BYTES_PER_MS_IN = IN_RATE * 2 // 1000
 

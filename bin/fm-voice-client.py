@@ -91,8 +91,8 @@ import fm_voice_frame as frame              # noqa: E402
 
 IN_RATE = 16000
 OUT_RATE = 24000
-# 100 ms at each rate. The uplink chunk matches what the relay and the survey
-# measured with; changing it changes the numbers.
+# 100 ms at each rate. The uplink chunk matches what the relay and the earlier
+# prototype work measured with; changing it changes the numbers.
 CHUNK = 3200
 OUT_BLOCK = 2400
 
