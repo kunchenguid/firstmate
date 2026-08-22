@@ -18,7 +18,7 @@ Most of the time your job is to answer questions, review a finished pull request
 
 ## Your first session
 
-Launch your harness inside the firstmate clone, as shown in the README, and let it read `AGENTS.md`.
+Launch Claude Code, Grok, or Pi inside the firstmate clone, as shown in the README, and let it read `AGENTS.md`.
 The first thing it does is a session start: it takes charge of this home, checks the tools it needs, picks up anything left over from your last session, and prints a startup summary.
 
 That summary - the digest - is the first mate orienting itself out loud, and it is worth skimming once.
@@ -45,12 +45,18 @@ At that point it will settle two things with you, and it helps to know what they
 **Delivery mode** is how finished work reaches you:
 
 - `no-mistakes` runs the full validation pipeline - review, tests, documentation - before a pull request is offered to you.
-  This is the safe default and the right choice for anything product-facing.
+  The right choice for anything product-facing.
 - `direct-PR` skips that pipeline and simply opens a pull request.
   Good for small, low-risk, or internal work where the extra rigor is not worth the wait.
 - `local-only` never pushes anywhere.
   The worker leaves a clean branch in your local copy, and the first mate merges it locally once you approve.
   Use this for private repos, experiments, or anything that must not reach a remote.
+
+You are not asked to pick one cold.
+The first mate works out the default for the project it just registered, tells you what it resolved, and lets you confirm or change it.
+A project with a remote resolves to `no-mistakes-prod-only`, which is not a fourth flat mode but a policy: product-facing, mixed, and uncertain work ships `no-mistakes`, while genuinely internal tooling, automation, and process work ships `direct-PR`.
+A project with no remote resolves to `local-only`.
+Ask for one flat mode instead whenever you would rather have it.
 
 **Merge authority** is the separate question of who presses merge.
 By default you do: every pull request and every local landing waits for your explicit word.
@@ -58,7 +64,7 @@ If you set `yolo` on a project, the first mate will merge green, in-scope work i
 It still never merges anything failing, and anything destructive, irreversible, or security-sensitive still comes to you.
 
 You can pick a standing choice per project and override it for a single request whenever you want.
-[docs/configuration.md](configuration.md) owns the files and settings behind these choices, and [docs/architecture.md](architecture.md) explains how delivery modes work under the hood.
+The [`project-management` skill](../.agents/skills/project-management/SKILL.md) owns how registration resolves a posture, and [docs/architecture.md](architecture.md) owns the registry entry behind it, including the `+yolo` merge flag and how each task's mode is decided.
 
 ## Dispatching your first piece of work
 
@@ -93,7 +99,7 @@ Once work is under way the first mate watches it for you continuously and withou
 You get pulled in for four things:
 
 - A decision only you can make.
-- Work that is ready for your review, always with the full pull request link.
+- Work that is ready for your review, with the full pull request link whenever the work produced one.
 - A real failure or blocker, after the first mate has already tried the obvious recovery.
 - Something it needs from you, such as a login or a credential.
 
