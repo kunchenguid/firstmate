@@ -489,6 +489,12 @@ The identity gate's ancestry walk measured 1.375 to 1.624 seconds live and 8.857
 A sampler run measured the owner lock appearing at +1.70s and its `autoarm` role at +1.77s while the guard gave up at +1.81s, a 20 millisecond margin.
 The guard's own wait was an iteration count over fork-heavy passes, so it ran for 2.87s and 29.85s on those two cycles for the same nominal 800 milliseconds.
 
+Three field samples from the primary home bound the window from the other side, each taken by inspecting durable records moments after the guard printed that no recovery was under way.
+Two on 2026-08-21 fired at 390 and 297 seconds of beacon staleness, and one on 2026-08-22 at 03:42 UTC fired at 815 seconds, all with seven tasks in flight.
+In the third the epoch ledger recorded `epoch=1041 owner_pid=1108506 outcome=arming` written in the same second the guard declared the home unclaimed, that pid alive, both the arm wrapper and the watcher live at 40 and 39 seconds old, and the beacon 35 seconds old.
+The spread rules out a near-threshold beacon and therefore a threshold-tuning fix: the staleness was genuine at every sample, and the auto-arm healed it within the same second regardless of how stale the beacon had become.
+It also shows the `arming` outcome reaching the ledger while the guard was still reporting the home unclaimed, which is the case the guard's pre-fix outcome filter dropped.
+
 The portable regression reproduces that window with real concurrent processes rather than fixtures, parking a real auto-arm inside its identity gate behind a `ps` shim and asking the guard for a verdict with the claim as the only evidence on disk.
 
 ```sh
@@ -510,7 +516,7 @@ Each of the four fails against an unpacked pre-fix tree, checked by running them
 not ok - no in-progress claim appeared before the auto-arm's identity gate: firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after 2 bounded attempts, and no live watcher with a fresh beacon was verified.
 not ok - a live identity-matched claim must be accepted as recovery under way: expected exit 0, got 2
 not ok - --claude must not force a turn against a fresh arming epoch: expected exit 0, got 2
-not ok - an 800ms cooperative wait ran 9s on a slow host: it is counting passes, not elapsed time
+not ok - the cooperative wait spent 24818ms of 3s sleeps for an 800ms budget (baseline 1887ms, total 26705ms): it is counting passes, not elapsed time
 ```
 
 The harness-emitted half is the opt-in live guard, which now runs its whole session behind a shim that costs every pid query a fixed slice, so the identity gate reliably outlasts the cooperative wait.
@@ -530,21 +536,47 @@ Two adjacent defects were repaired in the same change rather than left silent.
 `bin/fm-test-run.sh --check-coverage` compared `LC_ALL=C sort` inventories with a locale-sensitive `comm`, so it warned and failed on any host whose locale is not C; it now reports `FM_TEST_COVERAGE ok total=149 parallel=24 serial=113 serial_shards=4 herdr=12` under `en_US.UTF-8`.
 The live auto-arm regression still asserted that the model types the session start command, which the run-tier `SessionStart` hook has made unnecessary, so it could not pass at all; it now asserts that session start ran for that home and that the model issued exactly its two wake drains.
 
-The repo lint gate did not complete on this host and must not be reported as a pass.
+The repo lint gate completes here once actionlint is installed, and did on 2026-08-22.
 
 ```sh
 bin/fm-lint.sh
 ```
 
-Observed output, exit 127:
+Observed output, exit 0:
 
 ```text
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
-fm-lint-workflows.sh: actionlint not found; install actionlint 1.7.12 for CI parity.
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
 ```
 
-ShellCheck 0.11.0 ran over the canonical shell set and reported no findings; the workflow half did not run at all, and no workflow file changed here.
-`tests/fm-test-run.test.sh` likewise cannot complete on this host because its CI YAML assertion requires ruby, which is absent.
+An earlier run of the same gate on 2026-08-18 exited 127 because actionlint was absent from that host, which was a missing tool rather than a result.
+`tests/fm-test-run.test.sh` still cannot complete on this host because its CI YAML assertion requires ruby, which is absent.
+
+### What the cooperative wait budget does and does not bound, 2026-08-22
+
+The first version of the elapsed-time regression asserted the hook's TOTAL wall clock, which made it assert fixed cost rather than the defect and fail under load.
+Measured on the same fixture, varying only the budget, three runs each:
+
+```text
+FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=0      5889 4861 5386 ms
+FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100    5017 5671 5374 ms
+FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800    6642 7148 6243 ms
+FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=3000   6754 6698 7372 ms
+```
+
+A budget of zero forbids every retry, so the roughly 5 seconds it still spends is fixed cost the hook pays regardless: sourcing its libraries, the primary-scope checks, and on the blocking path the budget accounting and banner.
+The budget therefore bounds the retrying only, and `docs/turnend-guard.md` "Claim publication ordering" states that limit rather than claiming the hook completes within the budget.
+
+The regression now measures the difference between a zero budget and the real one on the same host, which is exactly what the wait spent, behind a `sleep` shim charging 3 seconds per interval:
+
+```text
+base_ms=2595 waited_ms=6924 delta_ms=4329
+base_ms=4389 waited_ms=6645 delta_ms=2256
+base_ms=3064 waited_ms=7337 delta_ms=4273
+```
+
+A deadline-bounded wait spends one shimmed interval past its budget; the pass-count loop this replaced would spend `SYNC_WAIT_MS/100` of them, eight here for 24 seconds, so the assertion's three-interval ceiling separates the two by more than a factor of two in both directions.
 
 ## Watcher continuity
 
