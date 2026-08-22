@@ -514,7 +514,9 @@ test_unmerged_task_branch_is_left_alone() {
   mkdir -p "$home/data"
   printf -- '- omicron [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
-  out=$(run_sync "$home" "$clone")
+  # Exercise the enabled sweep. The disabled default is covered separately by
+  # test_merged_task_branch_requires_explicit_prune_authority.
+  out=$(run_sync_with_merged_prune "$home" "$clone")
 
   assert_not_contains "$out" "pruned fm/task-c" "an unmerged fm/* branch must never be reported as pruned"
   branch_exists "$clone" fm/task-c \
@@ -606,7 +608,9 @@ test_gone_unmerged_task_branch_is_left_alone() {
   mkdir -p "$home/data"
   printf -- '- upsilon [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
-  out=$(run_sync "$home" "$clone")
+  # The active sweep must reject a branch whose remote vanished without a
+  # merge; merely proving the default-disabled path is not sufficient.
+  out=$(run_sync_with_merged_prune "$home" "$clone")
 
   assert_not_contains "$out" "pruned fm/task-gone" "a [gone] upstream without a merge must never be reported as pruned"
   branch_exists "$clone" fm/task-gone \
@@ -628,7 +632,8 @@ test_checked_out_task_branch_is_left_alone() {
   mkdir -p "$home/data"
   printf -- '- pi_project [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
-  out=$(run_sync "$home" "$clone")
+  # This safety assertion belongs to the authorized destructive path.
+  out=$(run_sync_with_merged_prune "$home" "$clone")
 
   assert_not_contains "$out" "pruned fm/task-d" "a branch still checked out in a worktree must never be reported as pruned"
   branch_exists "$clone" fm/task-d \
@@ -643,7 +648,9 @@ test_prune_never_targets_the_default_branch() {
   mkdir -p "$home/data"
   printf -- '- rho [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
-  run_sync "$home" "$clone" >/dev/null
+  # Run the captain-authorized sweep itself, rather than only its no-op
+  # default, before asserting that the default branch survives.
+  run_sync_with_merged_prune "$home" "$clone" >/dev/null
 
   branch_exists "$clone" main || fail "default-branch-guard: main was removed by the sweep"
   [ "$(git -C "$clone" symbolic-ref --quiet --short HEAD 2>/dev/null)" = main ] \
