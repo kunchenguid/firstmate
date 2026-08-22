@@ -72,7 +72,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
    For a ship or scout, a recorded Herdr endpoint that is authoritatively missing, or reads agent-free while a durable recovery-attempt marker proves a prior missing-endpoint recovery of this task failed here, skips this step because there is nothing left to stop.
    An ordinary failed relaunch leaves the same dead-pane shape with no marker, and its retry keeps the ordinary same-endpoint path.
-5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which reuses the recorded worktree and either adopts the recorded endpoint or rebuilds a missing Herdr endpoint, clears the previous harness's per-task wiring, and arms a fresh busy generation.
    That skipped stop passes `--recover-missing`, so the launch rebuilds exactly one replacement pane in the recorded session/workspace - or the home's flat workspace when the recorded workspace is gone too - while keeping the task's existing local copy, task identity, durable ownership, and validation ownership.
    An endpoint that turns live or ambiguous between checks refuses rather than risking a duplicate recovery.
 
