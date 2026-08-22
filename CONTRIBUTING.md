@@ -10,6 +10,7 @@ We require this to reduce the maintainer's burden of reviewing and merging contr
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
 A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
+It also fails without the structured pipeline step attestation comment that no-mistakes v1.46.0 and newer writes, with review, test, and document each completed, so an older no-mistakes that writes only the signature line does not pass.
 It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
 GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
 
@@ -17,7 +18,7 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 
 1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
 2. Create a branch and make your changes.
-3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (firstmate expects **no-mistakes v1.31.2+**; without a fork, plain `no-mistakes init` still works for maintainers with push access).
+3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (firstmate expects **no-mistakes v1.46.0+**; without a fork, plain `no-mistakes init` still works for maintainers with push access).
 4. Commit your changes.
 5. Push through the gate instead of pushing to `origin`:
 
