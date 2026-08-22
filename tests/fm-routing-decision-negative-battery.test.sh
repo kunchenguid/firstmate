@@ -748,18 +748,29 @@ model next value is a flag|claude --model --effort high|model flag has no fixed 
 model short option value|claude --model -p --effort high|model flag has no fixed literal value
 model equals duplicate|claude --model opus --model=sonnet --effort high|model flag is duplicated
 model equals empty|claude --model= --effort high|model flag has no fixed literal value
+fallback model separate|claude --model opus --effort high --fallback-model sonnet|raw launch uses an unattested model or fallback selector
+fallback model equals|claude --model opus --effort high --fallback-model=sonnet|raw launch uses an unattested model or fallback selector
+claude settings separate|claude --model opus --effort high --settings route.json|raw launch uses an unattested model-bearing Claude configuration
+claude settings equals|claude --model opus --effort high --settings=route.json|raw launch uses an unattested model-bearing Claude configuration
+claude agent separate|claude --model opus --effort high --agent reviewer|raw launch uses an unattested model-bearing Claude configuration
+claude agents equals|claude --model opus --effort high --agents='{}'|raw launch uses an unattested model-bearing Claude configuration
 effort missing value|claude --model opus --effort|effort flag is missing a value or duplicated
 effort next value is a flag|claude --model opus --effort --flag|effort flag has no fixed literal value
 effort short option value|claude --model opus --effort -p|effort flag has no fixed literal value
 effort equals duplicate|claude --model opus --effort high --effort=low|effort flag is duplicated
 effort equals empty|claude --model opus --effort=|effort flag has no fixed literal value
-config missing value|claude --model opus -c|config flag has no fixed literal value
+config missing value|claude --model opus -c|raw launch uses an unattested configuration or session selector
 config effort duplicate|codex --model opus -c model_reasoning_effort=high -c model_reasoning_effort=low|effort flag is duplicated
 config effort empty|codex --model opus -c model_reasoning_effort=|effort config has no fixed literal value
 config effort unmatched quote|codex --model opus -c 'model_reasoning_effort="high'|effort config quote pair is unmatched
 equals config effort duplicate|codex --model opus -c=model_reasoning_effort=high -c=model_reasoning_effort=low|effort flag is duplicated
 equals config effort empty|codex --model opus -c=model_reasoning_effort=|effort config has no fixed literal value
 equals config effort unmatched quote|codex --model opus '-c=model_reasoning_effort="high'|effort config quote pair is unmatched
+codex config model separate|codex --model opus -c model=sonnet -c model_reasoning_effort=high|raw launch uses an unattested Codex configuration override
+codex config model equals|codex --model opus -c=model=sonnet -c model_reasoning_effort=high|raw launch uses an unattested Codex configuration override
+codex profile separate|codex --model opus -c model_reasoning_effort=high --profile fast|raw launch uses an unattested Codex model or provider configuration
+codex profile equals|codex --model opus -c model_reasoning_effort=high --profile=fast|raw launch uses an unattested Codex model or provider configuration
+codex oss provider|codex --model opus -c model_reasoning_effort=high --oss --local-provider ollama|raw launch uses an unattested Codex model or provider configuration
 command wrapper env|env ROUTE_MODEL=sonnet claude --model opus --effort high|raw launch command head is not a supported harness executable
 command wrapper arch|arch claude --model opus --effort high|raw launch command head is not a supported harness executable
 command wrapper taskset|taskset -c 0 claude --model opus --effort high|raw launch command head is not a supported harness executable
@@ -778,7 +789,7 @@ exercise_negative "raw option terminator" RAW_LAUNCH_UNRESOLVED setup_raw_termin
 exercise_negative "raw reserved placeholder" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_reserved_placeholder \
   "raw launch contains a reserved template placeholder expanded after receipt validation"
 exercise_negative "raw cross-harness codex config" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_cross_harness_codex_config \
-  "model_reasoning_effort config is only verifiable for the codex harness"
+  "raw launch uses an unattested configuration or session selector"
 exercise_negative "raw relative harness path" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_relative_harness_path \
   "raw launch command head uses a relative path"
 exercise_negative "raw absolute harness impostor" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_absolute_harness_impostor \
@@ -846,7 +857,7 @@ run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement
   || fail "canonical config replacement counterexample did not fire"
 pass "canonical config replacement cannot change snapshotted candidate resolution"
 
-expected_count=$((105 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((116 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

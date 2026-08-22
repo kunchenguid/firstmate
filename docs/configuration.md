@@ -408,7 +408,7 @@ The only accepted raw model spelling is `--model <literal>` or `--model=<literal
 Raw effort syntax is adapter-specific: Claude accepts `--effort` with `low`, `medium`, `high`, `xhigh`, or `max`; Codex accepts `-c model_reasoning_effort=` with `low`, `medium`, `high`, or `xhigh`; Grok accepts `--reasoning-effort` with `low`, `medium`, or `high`; Pi and Pi Signed accept `--thinking` with `low`, `medium`, `high`, `xhigh`, or `max`; and Muse accepts `--reasoning-effort` with `low`, `medium`, `high`, `xhigh`, or emitted `ultra` for selected `max`.
 OpenCode, Kimi, and Cursor raw launches are refused because their interactive adapters cannot express the separately required effort axis.
 Applicable equals forms remain accepted, while separate axis values beginning with `-` and unmatched Codex config quotes are refused.
-Raw commands with shell expansion, command substitution, control operators, environment-assignment prefixes, duplicate or missing values, non-standard model spellings such as `-m` or `--model-name`, or either model or effort axis absent return `RAW_LAUNCH_NOT_VERIFIABLE` or `RAW_LAUNCH_UNRESOLVED`.
+Raw commands with shell expansion, command substitution, control operators, environment-assignment prefixes, duplicate or missing values, non-standard model spellings such as `-m` or `--model-name`, unattested fallback or model-bearing configuration selectors, or either model or effort axis absent return `RAW_LAUNCH_NOT_VERIFIABLE` or `RAW_LAUNCH_UNRESOLVED`.
 An observed raw harness, model, or effort that contradicts the selected tuple returns `RAW_LAUNCH_MISMATCH`.
 
 The receipt's `required_gate` must equal the exact intent gate as a self-consistency check rather than independent gate authorization.
@@ -424,8 +424,9 @@ Missing, malformed, hash-mismatched, or older-than-five-minutes multi-candidate 
 
 The receipt and quota timestamps use RFC3339 UTC and are accepted for five minutes, with at most 30 seconds of future clock skew.
 The supervisor home and local host are represented by SHA-256 identities and are recomputed by the spawn process rather than trusted from caller prose.
-On success, `fm-spawn.sh` atomically consumes the pending receipt into `data/<task-id>/routing-decision.json`, records the receipt and validated brief paths in task metadata, and continues into the established spawn path in the same invocation.
-Consumption happens before later delivery, worktree, and endpoint checks, so any later failure burns that pending receipt and a retry requires a fresh one.
+During spawn preflight, `fm-spawn.sh` validates the pending receipt and prepares immutable launch input without consuming the pending artifact, so a project, delivery, credential, backend, or adapter refusal leaves the same receipt retryable.
+After fallible preflight succeeds, `fm-spawn.sh` atomically consumes the pending receipt into `data/<task-id>/routing-decision.json` at the effect boundary, records the receipt and validated brief paths in task metadata, and continues into the established spawn path in the same invocation.
+Successful consumption is one-shot, so a later fresh dispatch attempt requires a fresh pending receipt.
 Any receipt refusal is terminal and occurs before a worktree lease, worker endpoint, task metadata, pane input, or model execution.
 An existing final directory, regular or dangling symlink, or other non-regular target is rejected before the atomic rename.
 

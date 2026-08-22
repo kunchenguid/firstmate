@@ -343,6 +343,22 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
         fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses a non-standard model flag spelling"
         return 1
         ;;
+      --*model*|--*fallback*)
+        fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested model or fallback selector"
+        return 1
+        ;;
+      --settings|--settings=*|--agent|--agent=*|--agents|--agents=*)
+        if [ "$FM_ROUTING_COMMAND_HARNESS" = claude ]; then
+          fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested model-bearing Claude configuration"
+          return 1
+        fi
+        ;;
+      -p|--profile|--profile=*|--oss|--local-provider|--local-provider=*)
+        if [ "$FM_ROUTING_COMMAND_HARNESS" = codex ]; then
+          fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested Codex model or provider configuration"
+          return 1
+        fi
+        ;;
       --effort|--reasoning-effort|--thinking)
         [ "$FM_ROUTING_COMMAND_EFFORT_SEEN" -eq 0 ] \
           && [ $((i + 1)) -lt "${#FM_ROUTING_WORDS[@]}" ] || {
@@ -370,6 +386,10 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
         fm_routing_set_raw_effort "${word%%=*}" "$value" || return 1
         ;;
       -c)
+        [ "$FM_ROUTING_COMMAND_HARNESS" = codex ] || {
+          fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested configuration or session selector"
+          return 1
+        }
         [ $((i + 1)) -lt "${#FM_ROUTING_WORDS[@]}" ] || {
           fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "config flag has no fixed literal value"
           return 1
@@ -388,6 +408,10 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
             }
             fm_routing_set_codex_effort "${value#model_reasoning_effort=}" || return 1
             ;;
+          *)
+            fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested Codex configuration override"
+            return 1
+            ;;
         esac
         ;;
       -c=model_reasoning_effort=*)
@@ -400,6 +424,10 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
           return 1
         }
         fm_routing_set_codex_effort "${word#-c=model_reasoning_effort=}" || return 1
+        ;;
+      -c=*)
+        fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested Codex configuration override"
+        return 1
         ;;
     esac
   done
@@ -801,7 +829,7 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
 fm_routing_decision_persist_prepared() {
   local snapshot_dir=$FM_ROUTING_PREPARED_DIR data=$FM_ROUTING_PREPARED_DATA
   local id=$FM_ROUTING_PREPARED_ID source_pending=$FM_ROUTING_PREPARED_SOURCE_PENDING
-  local task_dir pending brief final brief_final brief_hash consumed_pending generated_at
+  local task_dir pending brief final brief_final brief_anchor brief_hash consumed_pending generated_at
   [ -n "$snapshot_dir" ] && [ -d "$snapshot_dir" ] && [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 0 ] || {
     fm_routing_refuse "PERSISTENCE_REFUSED" "no validated routing transaction is prepared"
     return 1
@@ -823,11 +851,21 @@ fm_routing_decision_persist_prepared() {
       fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief target does not contain the exact validated bytes"
       return 1
     fi
+    brief_anchor="$snapshot_dir/brief.adopted.md"
+    fm_routing_link_exact "$brief_final" "$brief_anchor" 2>/dev/null || {
+      fm_routing_refuse "PERSISTENCE_REFUSED" "existing validated brief target could not be adopted safely"
+      return 1
+    }
+    if [ ! -f "$brief_anchor" ] || [ -L "$brief_anchor" ] || ! cmp -s "$brief" "$brief_anchor"; then
+      fm_routing_refuse "PERSISTENCE_REFUSED" "existing validated brief target changed during adoption"
+      return 1
+    fi
   else
     fm_routing_link_exact "$brief" "$brief_final" 2>/dev/null || {
       fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief snapshot could not be published at its hash-addressed path"
       return 1
     }
+    brief_anchor=$brief
   fi
   chmod 0600 "$pending" || {
     fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt permissions could not be restricted"
@@ -854,7 +892,7 @@ fm_routing_decision_persist_prepared() {
     fm_routing_refuse "PERSISTENCE_REFUSED" "validated receipt was not published as the exact regular-file target"
     return 1
   fi
-  if [ ! -f "$brief_final" ] || [ -L "$brief_final" ] || [[ ! "$brief_final" -ef "$brief" ]] \
+  if [ ! -f "$brief_final" ] || [ -L "$brief_final" ] || [[ ! "$brief_final" -ef "$brief_anchor" ]] \
     || ! cmp -s "$brief_final" "$brief"; then
     fm_routing_rollback_exact "$final" "$pending" "$consumed_pending" "$source_pending" || {
       fm_routing_refuse "PERSISTENCE_REFUSED" "validated routing transaction could not be rolled back safely"

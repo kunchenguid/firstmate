@@ -136,6 +136,16 @@ if [ -n "${FM_TEST_REPLACE_BRIEF_TARGET:-}" ]; then
       ;;
   esac
 fi
+if [ -n "${FM_TEST_FAIL_RECEIPT_LINK_MARKER:-}" ]; then
+  case "$target" in
+    */routing-decision.json)
+      if [ ! -e "$FM_TEST_FAIL_RECEIPT_LINK_MARKER" ]; then
+        : > "$FM_TEST_FAIL_RECEIPT_LINK_MARKER"
+        exit 1
+      fi
+      ;;
+  esac
+fi
 exec "$FM_TEST_REAL_PERL" "$@"
 SH
   cat > "$fakebin/claude" <<'SH'
@@ -829,6 +839,33 @@ test_launch_refuses_replaced_validated_brief_target() {
   pass "spawn refuses a validated brief target replacement before side effects"
 }
 
+test_late_commit_failure_keeps_receipt_retryable() {
+  local rec id out status marker routing_brief_count routing_brief
+  id=profile-late-commit-retry-z12b5
+  rec=$(make_spawn_case profile-late-commit-retry claude "$id")
+  read_case_record "$rec"
+  marker="$CASE_DIR/receipt-link-failed"
+
+  out=$(FM_TEST_FAIL_RECEIPT_LINK_MARKER="$marker" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "late receipt publication failure should refuse"
+  assert_present "$marker" "late receipt publication failure counterexample did not fire"
+  assert_preflight_kept_retryable_receipt "$HOME_DIR" "$id" "$LAUNCH_LOG"
+
+  out=$(FM_TEST_ROUTING_PRESERVE=1 FM_TEST_FAIL_RECEIPT_LINK_MARKER="$marker" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "retry after late receipt publication failure should succeed"
+  routing_brief_count=$(find "$HOME_DIR/data/$id" -maxdepth 1 -type f -name 'routing-brief.*.md' | wc -l | tr -d ' ')
+  [ "$routing_brief_count" -eq 1 ] || fail "late commit retry left $routing_brief_count durable brief links"
+  routing_brief=$(sed -n 's/^routing_brief=//p' "$HOME_DIR/state/$id.meta")
+  assert_present "$routing_brief" "late commit retry left its durable brief link orphaned"
+  assert_present "$HOME_DIR/data/$id/routing-decision.json" \
+    "late commit retry did not publish the routing receipt"
+  pass "late commit failure leaves a retryable receipt and adoptable brief"
+}
+
 test_raw_launches_refuse_unobserved_runtime_selection() {
   local rec dynamic env_prefix env_wrapper terminator nonstandard unresolved id out status command predicate
   dynamic=profile-raw-dynamic-z12c
@@ -1384,6 +1421,7 @@ test_muse_credential_preflight_keeps_receipt_retryable
 test_duplicate_spawn_preserves_active_routing_provenance
 test_launch_uses_validated_brief_snapshot_after_source_replacement
 test_launch_refuses_replaced_validated_brief_target
+test_late_commit_failure_keeps_receipt_retryable
 test_raw_launches_refuse_unobserved_runtime_selection
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
