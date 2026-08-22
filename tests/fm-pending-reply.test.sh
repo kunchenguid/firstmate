@@ -671,8 +671,9 @@ test_unknown_backend_state_uses_capture_fallback() {
       state="$home/state"
       sm_home="$home/sm"
       mkdir -p "$sm_home/state"
-      export FM_PENDING_REPLY_GRACE_SECS=10
       # These fixture overrides are intentionally scoped to the isolated subshell.
+      # shellcheck disable=SC2030,SC2031
+      export FM_PENDING_REPLY_GRACE_SECS=10
       # shellcheck disable=SC2030,SC2031
       export FM_PENDING_REPLY_NOW=10000
       corr=$(fm_pending_reply_create "$home" "$state" "hibit" "$backend fallback")
@@ -696,12 +697,19 @@ test_unknown_backend_state_uses_capture_fallback() {
       # shellcheck disable=SC2030,SC2031
       export FM_PENDING_REPLY_NOW=10010
       fm_pending_reply_tick "$state"
+      [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+        || fail "$backend fallback idle should begin the post-completion grace"
+      # The fallback idle observation proves completion at 10010; recovery
+      # waits its own grace so a valid reply can still reach the parent.
+      # shellcheck disable=SC2030,SC2031
+      export FM_PENDING_REPLY_NOW=10020
+      fm_pending_reply_tick "$state"
       [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
-        || fail "$backend fallback idle should trigger recovery after grace"
-      export FM_PENDING_REPLY_NOW=10011
+        || fail "$backend fallback idle should trigger recovery after completion grace"
+      export FM_PENDING_REPLY_NOW=10021
       export FM_PENDING_TEST_CAPTURE='Working...'
       fm_pending_reply_tick "$state"
-      export FM_PENDING_REPLY_NOW=10012
+      export FM_PENDING_REPLY_NOW=10022
       export FM_PENDING_TEST_CAPTURE='idle footer'
       fm_pending_reply_tick "$state"
       [ "$(phase_of "$state" "$corr")" = escalated ] \
@@ -846,6 +854,53 @@ test_correlations_reuse_only_for_matching_open_task() {
   pass "correlations are reused only for matching open task records"
 }
 
+test_long_turn_reply_waits_for_post_completion_grace() {
+  (
+    local home state corr hook_log rec
+    home=$(setup_parent long-turn-reply)
+    state="$home/state"
+    hook_log="$home/recovery-hook.log"
+    : > "$hook_log"
+    # Scope the deterministic clock and nonzero grace to this lifecycle.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_GRACE_SECS=10
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=100
+    # shellcheck disable=SC2329 # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+    recovery_hook() { printf 'repost\n' >> "$hook_log"; }
+    export -f recovery_hook
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "long working turn")
+    fm_pending_reply_mark_delivered "$state" "$corr" || fail "delivery fixture should succeed"
+    # The request genuinely works beyond the ordinary grace period.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=101
+    fm_pending_reply_tick_one "$state" "$corr" busy || fail "busy observation should succeed"
+    # The substantive turn ends at 200, but its parent report is still in flight.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=200
+    fm_pending_reply_tick_one "$state" "$corr" idle || fail "idle observation should succeed"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "a long turn must retain a post-completion grace before recovery"
+    [ ! -s "$hook_log" ] || fail "a long turn must not schedule a repost at completion"
+    [ "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" = 200 ] \
+      || fail "idle transition should record the completed turn"
+    # This is the production boundary reproduced here: ingestion accepts the
+    # correlated reply just after a substantive turn, without any real backend.
+    printf 'done [corr=%s]: report arrived after working turn\n' "$corr" >> "$state/hibit.status"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=201
+    fm_pending_reply_tick_one "$state" "$corr" idle || fail "ingested reply tick should succeed"
+    [ "$(phase_of "$state" "$corr")" = resolved ] \
+      || fail "accepted correlated reply should resolve the exact expectation"
+    [ ! -s "$hook_log" ] || fail "accepted correlated reply must not receive a repost"
+  ) || fail "long-turn reply grace regression failed"
+  pass "long working turns wait after completion before recovering"
+}
+
 test_tick_end_to_end_missed_then_escalate() {
   local home state corr hook_log sm_home
   home=$(setup_parent tick-e2e)
@@ -928,6 +983,7 @@ test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
 test_correlations_reuse_only_for_matching_open_task
+test_long_turn_reply_waits_for_post_completion_grace
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
 
