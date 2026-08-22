@@ -112,6 +112,26 @@ test_literal_pool_root_override_is_refused() {
   pass "a literal pool root override cannot disable per-home isolation"
 }
 
+test_pool_root_refuses_to_write_inside_the_primary_clone() {
+  local case_dir clone out status generated
+  case_dir=$(make_two_homes_one_project root-inside-primary-refused)
+  clone="$case_dir/homeA/project"
+
+  out=$(FM_HOME="$case_dir/homeA" FM_POOL_ROOT_BASE="$clone" \
+    "$POOL_ROOT_BIN" "$clone" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a pool root inside the primary clone must be refused"
+  assert_contains "$out" "would mutate the primary project" \
+    "the unsafe pool-root refusal did not identify the primary-clone boundary"
+  generated=$(find "$clone" -mindepth 1 -maxdepth 1 -type d -name 'homeA-*' -print -quit)
+  [ -z "$generated" ] || fail "the refusal created a pool directory inside the primary clone"
+  assert_absent "$case_dir/homeA/state/treehouse-config" \
+    "the refusal created a generated config view before rejecting the root"
+  [ -z "$(git -C "$clone" status --porcelain)" ] \
+    || fail "the unsafe pool-root refusal dirtied the primary clone"
+  pass "a pool root inside the primary clone is rejected before any mutation"
+}
+
 test_pool_root_is_idempotent_without_mutating_the_clone() {
   local case_dir clone config before after
   case_dir=$(make_two_homes_one_project idempotent)
@@ -364,10 +384,43 @@ run_spawn_case() {  # <case-dir> <id> <args...>
     FM_STATE_OVERRIDE="$case_dir/home/state" FM_DATA_OVERRIDE="$case_dir/home/data" \
     FM_PROJECTS_OVERRIDE="$case_dir/home/projects" FM_CONFIG_OVERRIDE="$case_dir/home/config" \
     FM_POOL_ROOT_BASE="$case_dir/base" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$case_dir/pool" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="${FM_CASE_PANE_PATH:-$case_dir/pool}" \
     FM_TREEHOUSE_LOG="$case_dir/treehouse.log" \
     PATH="$case_dir/fakebin:$PATH" \
     "$SPAWN" "$id" "$case_dir/project" "$@" 2>&1
+}
+
+test_spawn_returns_a_lease_when_endpoint_confirmation_fails() {
+  local case_dir id out status handoff
+  id='custody-unconfirmed-endpoint-r2'
+  case_dir=$(make_spawn_case spawn-unconfirmed-endpoint "$id")
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+if [ "\${1:-}" = get ]; then
+  printf '%s\n' "$case_dir/pool"
+fi
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  cat > "$case_dir/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/sleep"
+
+  out=$(FM_CASE_PANE_PATH="$case_dir/project" \
+    run_spawn_case "$case_dir" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 1 "$status" "an unconfirmed endpoint must abort spawn"
+  assert_contains "$out" "did not enter a worktree" \
+    "the endpoint-confirmation failure was not reported"
+  assert_grep "return --force $case_dir/pool" "$case_dir/treehouse.log" \
+    "spawn leaked the acquired lease when endpoint confirmation failed"
+  assert_absent "$case_dir/home/state/$id.meta" \
+    "spawn published custody metadata for an unconfirmed endpoint"
+  handoff=$(find "$case_dir/home/state" -maxdepth 1 -name ".$id.treehouse-lease.*" -print -quit)
+  [ -z "$handoff" ] || fail "spawn left its private lease handoff behind after abort cleanup"
+  pass "an acquired lease is returned when endpoint confirmation fails"
 }
 
 test_spawn_refuses_a_copy_another_task_claims() {
@@ -424,6 +477,38 @@ test_spawn_refuses_ambiguous_worktree_metadata() {
   [ "$(git -C "$case_dir/pool" rev-parse --abbrev-ref HEAD)" = "fm/ambiguous-owner" ] \
     || fail "ambiguous metadata allowed spawn to move the claimed copy"
   pass "spawn fails closed on ambiguous worktree metadata without touching the copy"
+}
+
+test_spawn_preserves_a_post_acquire_owner_conflict() {
+  local case_dir id out status
+  id='custody-racing-owner-r2'
+  case_dir=$(make_spawn_case spawn-racing-owner "$id")
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+if [ "\${1:-}" = get ]; then
+  printf '%s\n' \
+    'window=firstmate:fm-racing-task' \
+    'worktree=$case_dir/pool' \
+    'project=$case_dir/project' \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    > "$case_dir/home/state/racing-task.meta"
+  printf '%s\n' "$case_dir/pool"
+fi
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  out=$(run_spawn_case "$case_dir" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 1 "$status" "a post-acquire owner conflict must refuse spawn"
+  assert_contains "$out" "racing-task already claims" \
+    "the post-acquire conflict did not identify its owner"
+  assert_no_grep "return --force" "$case_dir/treehouse.log" \
+    "the owner-conflict refusal returned and reset the contested lease"
+  assert_absent "$case_dir/home/state/$id.meta" \
+    "the owner-conflict refusal published a second custody record"
+  pass "a post-acquire owner conflict preserves the contested lease"
 }
 
 test_fresh_spawn_refuses_an_existing_task_record_before_side_effects() {
@@ -1110,6 +1195,7 @@ SH
 
 test_two_homes_configure_distinct_pool_roots
 test_literal_pool_root_override_is_refused
+test_pool_root_refuses_to_write_inside_the_primary_clone
 test_pool_root_is_idempotent_without_mutating_the_clone
 test_pool_root_preserves_a_tracked_primary_config
 test_pool_root_preserves_a_nonregular_primary_config
@@ -1119,6 +1205,8 @@ test_real_treehouse_stops_sharing_a_pool_between_homes
 test_real_treehouse_accepts_encoded_pool_paths
 test_spawn_refuses_a_copy_another_task_claims
 test_spawn_refuses_ambiguous_worktree_metadata
+test_spawn_returns_a_lease_when_endpoint_confirmation_fails
+test_spawn_preserves_a_post_acquire_owner_conflict
 test_fresh_spawn_refuses_an_existing_task_record_before_side_effects
 test_spawn_claims_this_homes_pool_root_before_leasing
 test_spawn_releases_delivered_copies_before_leasing

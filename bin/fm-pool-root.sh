@@ -79,6 +79,24 @@ pool_root() {
   printf '%s/%s-%s' "$base" "$name" "$(short_hash "$home")"
 }
 
+canonical_intended_path() {  # <path>
+  local candidate probe suffix='' component anchor
+  command -v node >/dev/null 2>&1 || return 1
+  candidate=$(node -e 'process.stdout.write(require("path").resolve(process.argv[1]))' "$1") || return 1
+  probe=$candidate
+  while [ ! -d "$probe" ]; do
+    if [ -e "$probe" ] || [ -L "$probe" ]; then
+      return 1
+    fi
+    component=$(basename "$probe")
+    suffix="/$component$suffix"
+    [ "$(dirname "$probe")" != "$probe" ] || return 1
+    probe=$(dirname "$probe")
+  done
+  anchor=$(cd "$probe" 2>/dev/null && pwd -P) || return 1
+  printf '%s%s' "$anchor" "$suffix"
+}
+
 project_view() {  # <project>
   local project=$1 home project_real name
   home=$(canonical_home) \
@@ -327,6 +345,13 @@ PROJECT_GIT_COMMON_DIR=$(git -C "$PROJECT" rev-parse --path-format=absolute --gi
 
 ROOT_VALUE=$(pool_root) || exit 1
 CONFIG_VIEW=$(project_view "$PROJECT") || exit 1
+ROOT_INTENDED=$(canonical_intended_path "$ROOT_VALUE") \
+  || die "cannot safely resolve this home's intended pool root '$ROOT_VALUE'"
+case "$ROOT_INTENDED" in
+  "$PROJECT"|"$PROJECT"/*)
+    die "this home's pool root '$ROOT_INTENDED' would mutate the primary project '$PROJECT'; choose FM_POOL_ROOT_BASE outside the project"
+    ;;
+esac
 
 # Create and canonicalize before recording it: one home must always resolve the
 # same string, or an every-spawn rewrite would churn the file for nothing.

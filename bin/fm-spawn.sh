@@ -686,6 +686,24 @@ RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 TREEHOUSE_LEASE_HOLDER=
+TREEHOUSE_ABORT_RETURN_PENDING=0
+TREEHOUSE_ABORT_RETURN_WORKTREE=
+TREEHOUSE_ABORT_RETURN_VIEW=
+TREEHOUSE_ABORT_RETURN_SUPPRESSED=0
+TREEHOUSE_LEASE_HANDOFF=
+TREEHOUSE_LEASE_HANDOFF_TMP=
+
+register_treehouse_abort_handoff() {
+  local leased
+  [ "$TREEHOUSE_ABORT_RETURN_PENDING" = 0 ] || return 0
+  [ -n "$TREEHOUSE_LEASE_HANDOFF" ] || return 1
+  [ -f "$TREEHOUSE_LEASE_HANDOFF" ] && [ ! -L "$TREEHOUSE_LEASE_HANDOFF" ] || return 1
+  IFS= read -r -d '' leased < "$TREEHOUSE_LEASE_HANDOFF" || return 2
+  [ -n "$leased" ] || return 2
+  TREEHOUSE_ABORT_RETURN_WORKTREE=$leased
+  TREEHOUSE_ABORT_RETURN_VIEW=$TREEHOUSE_CONFIG_VIEW_REAL
+  TREEHOUSE_ABORT_RETURN_PENDING=1
+}
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -706,6 +724,19 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$TREEHOUSE_ABORT_RETURN_PENDING" = 0 ] \
+     && [ "$TREEHOUSE_ABORT_RETURN_SUPPRESSED" = 0 ]; then
+    register_treehouse_abort_handoff || true
+  fi
+  if [ "$TREEHOUSE_ABORT_RETURN_PENDING" = 1 ]; then
+    TREEHOUSE_ABORT_RETURN_PENDING=0
+    if ! (cd "$TREEHOUSE_ABORT_RETURN_VIEW" 2>/dev/null \
+      && treehouse return --force "$TREEHOUSE_ABORT_RETURN_WORKTREE"); then
+      echo "warning: could not return unpublished Treehouse lease '$TREEHOUSE_ABORT_RETURN_WORKTREE' after spawn $ID aborted" >&2
+    fi
+  fi
+  [ -z "$TREEHOUSE_LEASE_HANDOFF_TMP" ] || rm -f -- "$TREEHOUSE_LEASE_HANDOFF_TMP" 2>/dev/null || true
+  [ -z "$TREEHOUSE_LEASE_HANDOFF" ] || rm -f -- "$TREEHOUSE_LEASE_HANDOFF" 2>/dev/null || true
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -1817,6 +1848,13 @@ validate_worktree_metadata_before_lease() {  # <pool-root>
   done
 }
 
+preserve_conflicted_worktree_lease() {
+  TREEHOUSE_ABORT_RETURN_PENDING=0
+  TREEHOUSE_ABORT_RETURN_SUPPRESSED=1
+  [ -z "$TREEHOUSE_LEASE_HANDOFF_TMP" ] || rm -f -- "$TREEHOUSE_LEASE_HANDOFF_TMP" 2>/dev/null || true
+  [ -z "$TREEHOUSE_LEASE_HANDOFF" ] || rm -f -- "$TREEHOUSE_LEASE_HANDOFF" 2>/dev/null || true
+}
+
 assert_worktree_unclaimed() {  # <worktree>
   local worktree=$1 meta claimed claimed_real other_id wt_real
   wt_real=$(real_path_or_raw "$worktree")
@@ -1824,22 +1862,26 @@ assert_worktree_unclaimed() {  # <worktree>
     [ -e "$meta" ] || [ -L "$meta" ] || continue
     other_id=$(basename "$meta" .meta)
     if [ "$other_id" = "$ID" ]; then
+      preserve_conflicted_worktree_lease
       echo "error: task $ID acquired a durable record while its fresh spawn was leasing '$worktree'; refusing to replace that task's ownership. Nothing was returned or reset. Endpoint $T is parked in that copy." >&2
       HERDR_PROJECTION_ABORT_CLEANUP=0
       exit 1
     fi
     if [ ! -f "$meta" ] || [ -L "$meta" ] || [ ! -r "$meta" ]; then
+      preserve_conflicted_worktree_lease
       echo "error: cannot confirm worktree ownership because task metadata '$meta' is not a readable regular file; refusing to use '$worktree'. Nothing was returned or reset. Endpoint $T is parked in that copy." >&2
       HERDR_PROJECTION_ABORT_CLEANUP=0
       exit 1
     fi
     claimed=$(fm_backend_meta_exact_value "$meta" worktree) || {
+      preserve_conflicted_worktree_lease
       echo "error: cannot confirm worktree ownership because task $other_id has missing, empty, or ambiguous worktree metadata in '$meta'; refusing to use '$worktree'. Nothing was returned or reset. Endpoint $T is parked in that copy." >&2
       HERDR_PROJECTION_ABORT_CLEANUP=0
       exit 1
     }
     claimed_real=$(real_path_or_raw "$claimed")
     [ "$claimed_real" = "$wt_real" ] || continue
+    preserve_conflicted_worktree_lease
     echo "error: task $other_id already claims the working copy '$claimed' that treehouse just handed task $ID; refusing to launch a second owner into it, because either task's cleanup would hard-reset the other's work. Nothing was returned or reset - reconcile $other_id first (tear it down once its work has landed, or correct its record), then spawn $ID again. Endpoint $T is parked in that copy." >&2
     HERDR_PROJECTION_ABORT_CLEANUP=0
     exit 1
@@ -2350,7 +2392,15 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   release_delivered_pool_copies "$PROJ_ABS"
   validate_worktree_metadata_before_lease "$TREEHOUSE_POOL_ROOT"
   TREEHOUSE_LEASE_HOLDER=$ID
-  spawn_send_text_line "$WT_TARGET" "FM_TREEHOUSE_LEASED_WORKTREE=\$(cd $(shell_quote "$TREEHOUSE_CONFIG_VIEW_REAL") && treehouse get --lease --lease-holder $(shell_quote "$TREEHOUSE_LEASE_HOLDER")) && cd \"\$FM_TREEHOUSE_LEASED_WORKTREE\" && unset FM_TREEHOUSE_LEASED_WORKTREE"
+  TREEHOUSE_LEASE_HANDOFF="$STATE/.$ID.treehouse-lease.${BASHPID:-$$}"
+  TREEHOUSE_LEASE_HANDOFF_TMP="$TREEHOUSE_LEASE_HANDOFF.tmp"
+  if [ -e "$TREEHOUSE_LEASE_HANDOFF" ] || [ -L "$TREEHOUSE_LEASE_HANDOFF" ] \
+     || [ -e "$TREEHOUSE_LEASE_HANDOFF_TMP" ] || [ -L "$TREEHOUSE_LEASE_HANDOFF_TMP" ]; then
+    TREEHOUSE_ABORT_RETURN_SUPPRESSED=1
+    echo "error: cannot safely create the Treehouse lease handoff for task $ID; refusing to lease" >&2
+    exit 1
+  fi
+  spawn_send_text_line "$WT_TARGET" "FM_TREEHOUSE_LEASED_WORKTREE=\$(cd $(shell_quote "$TREEHOUSE_CONFIG_VIEW_REAL") && treehouse get --lease --lease-holder $(shell_quote "$TREEHOUSE_LEASE_HOLDER")) && printf '%s\\0' \"\$FM_TREEHOUSE_LEASED_WORKTREE\" > $(shell_quote "$TREEHOUSE_LEASE_HANDOFF_TMP") && mv -f -- $(shell_quote "$TREEHOUSE_LEASE_HANDOFF_TMP") $(shell_quote "$TREEHOUSE_LEASE_HANDOFF") && cd \"\$FM_TREEHOUSE_LEASED_WORKTREE\" && unset FM_TREEHOUSE_LEASED_WORKTREE"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -2374,6 +2424,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
   for _ in $(seq 1 60); do
+    if [ "$TREEHOUSE_ABORT_RETURN_PENDING" = 0 ] && [ -e "$TREEHOUSE_LEASE_HANDOFF" ]; then
+      if ! register_treehouse_abort_handoff; then
+        preserve_conflicted_worktree_lease
+        echo "error: cannot confirm the worktree path in task $ID's Treehouse lease handoff; preserving the lease for reconciliation" >&2
+        exit 1
+      fi
+    fi
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
@@ -2396,8 +2453,17 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  if [ "$TREEHOUSE_ABORT_RETURN_PENDING" = 0 ]; then
+    TREEHOUSE_ABORT_RETURN_WORKTREE=$WT
+    TREEHOUSE_ABORT_RETURN_VIEW=$TREEHOUSE_CONFIG_VIEW_REAL
+    TREEHOUSE_ABORT_RETURN_PENDING=1
+  fi
   wt_pool_real=$(real_path_or_raw "$WT")
+  if [ "$(real_path_or_raw "$TREEHOUSE_ABORT_RETURN_WORKTREE")" != "$wt_pool_real" ]; then
+    preserve_conflicted_worktree_lease
+    echo "error: task $ID's Treehouse lease handoff and endpoint disagree on the acquired worktree; preserving the lease for reconciliation" >&2
+    exit 1
+  fi
   case "$wt_pool_real" in
     "$TREEHOUSE_POOL_ROOT"/.treehouse/*) ;;
     *)
@@ -2405,6 +2471,17 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       exit 1
       ;;
   esac
+  acquired_status=$(git -C "$WT" status --porcelain 2>/dev/null) || {
+    preserve_conflicted_worktree_lease
+    echo "error: could not inspect newly leased worktree '$WT'; preserving its lease for reconciliation" >&2
+    exit 1
+  }
+  if [ -n "$acquired_status" ]; then
+    preserve_conflicted_worktree_lease
+    echo "error: newly leased worktree '$WT' is not clean; preserving its lease and local work for reconciliation" >&2
+    exit 1
+  fi
+  validate_spawn_worktree "treehouse get" "$T"
   assert_worktree_unclaimed "$WT"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
@@ -2775,6 +2852,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
   SPAWN_META_PATH=$SPAWN_META_TMP
+else
+  SPAWN_META_TMP="$STATE/.$ID.meta.spawn.${BASHPID:-$$}"
+  SPAWN_META_PATH=$SPAWN_META_TMP
 fi
 preserve_relaunch_meta() {
   awk -F= '
@@ -2785,7 +2865,7 @@ preserve_relaunch_meta() {
     !($1 in owned)
   ' "$RELAUNCH_META"
 }
-{
+if ! {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
@@ -2834,7 +2914,10 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
-} > "$SPAWN_META_PATH"
+} > "$SPAWN_META_PATH"; then
+  echo "error: could not prepare durable metadata for task $ID" >&2
+  exit 1
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
@@ -2843,6 +2926,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
+else
+  if ! mv -f -- "$SPAWN_META_TMP" "$STATE/$ID.meta"; then
+    echo "error: could not publish durable metadata for task $ID" >&2
+    exit 1
+  fi
+  SPAWN_META_TMP=
+  [ -z "$TREEHOUSE_LEASE_HANDOFF_TMP" ] || rm -f -- "$TREEHOUSE_LEASE_HANDOFF_TMP" 2>/dev/null || true
+  [ -z "$TREEHOUSE_LEASE_HANDOFF" ] || rm -f -- "$TREEHOUSE_LEASE_HANDOFF" 2>/dev/null || true
+  TREEHOUSE_ABORT_RETURN_PENDING=0
+  TREEHOUSE_ABORT_RETURN_SUPPRESSED=1
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown

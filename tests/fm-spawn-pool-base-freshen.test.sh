@@ -30,7 +30,12 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TREEHOUSE_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -84,6 +89,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_POOL_ROOT_BASE="$CASE_DIR/base" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    FM_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
 }
@@ -119,6 +125,8 @@ test_stale_pool_base_refreshes_before_branching() {
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "repeating the base refresh should be idempotent"
+  assert_no_grep 'return --force' "$CASE_DIR/treehouse.log" \
+    "spawn returned a lease after transferring custody to durable metadata"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
     || fail "an idempotent repeat moved the pool away from current origin/main"
 
@@ -159,6 +167,10 @@ test_unreachable_origin_refuses_stale_pool_base() {
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unreachable origin"
   assert_contains "$out" "could not fetch origin" \
     "spawn did not clearly refuse an unreachable origin"
+  assert_grep "return --force $POOL_DIR" "$CASE_DIR/treehouse.log" \
+    "spawn leaked the durable lease after base refresh failed"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "spawn published custody metadata after returning an aborted lease"
   after=$(git -C "$POOL_DIR" rev-parse HEAD)
   [ "$after" = "$before" ] || fail "spawn changed the pooled worktree after origin became unreachable"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
