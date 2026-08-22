@@ -128,6 +128,9 @@ SH
 set -u
 target=${!#}
 receipt_target=
+if [ "${2:-}" = publish ]; then
+  receipt_target="$3/routing-decision.$target.json"
+fi
 for candidate in "$@"; do
   case "$candidate" in
     */routing-decision.*.json)
@@ -138,15 +141,6 @@ for candidate in "$@"; do
       ;;
   esac
 done
-if [ -n "${FM_TEST_REPLACE_BRIEF_TARGET:-}" ]; then
-  case "$receipt_target" in
-    ?*)
-      rm -f -- "$FM_TEST_REPLACE_BRIEF_TARGET"
-      printf '%s\n' "${FM_TEST_BRIEF_TARGET_REPLACEMENT:-replacement target bytes}" \
-        > "$FM_TEST_REPLACE_BRIEF_TARGET"
-      ;;
-  esac
-fi
 if [ -n "${FM_TEST_FAIL_RECEIPT_LINK_MARKER:-}" ]; then
   case "$receipt_target" in
     ?*)
@@ -157,7 +151,21 @@ if [ -n "${FM_TEST_FAIL_RECEIPT_LINK_MARKER:-}" ]; then
       ;;
   esac
 fi
-exec "$FM_TEST_REAL_PERL" "$@"
+"$FM_TEST_REAL_PERL" "$@"
+status=$?
+if [ "$status" -eq 0 ] \
+  && [ "${2:-}" = snapshot ] \
+  && [ -n "${FM_TEST_MUTATE_BRIEF_SOURCE:-}" ]; then
+  printf '%s\n' "${FM_TEST_BRIEF_REPLACEMENT:-replacement brief bytes}" > "$FM_TEST_MUTATE_BRIEF_SOURCE"
+fi
+if [ "$status" -eq 0 ] \
+  && [ "${2:-}" = snapshot ] \
+  && [ -n "${FM_TEST_MUTATE_SNAPSHOT_BRIEF:-}" ]; then
+  rm -f -- "$5/data/$6/brief.md"
+  printf '%s\n' "${FM_TEST_BRIEF_TARGET_REPLACEMENT:-replacement target bytes}" > "$5/data/$6/brief.md"
+  [ -z "${FM_TEST_SNAPSHOT_BRIEF_MARKER:-}" ] || : > "$FM_TEST_SNAPSHOT_BRIEF_MARKER"
+fi
+exit "$status"
 SH
   cat > "$fakebin/claude" <<'SH'
 #!/usr/bin/env bash
@@ -376,6 +384,8 @@ run_spawn() {
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     FM_TEST_REAL_PERL="$REAL_PERL" \
+    FM_TEST_MUTATE_SNAPSHOT_BRIEF="${FM_TEST_MUTATE_SNAPSHOT_BRIEF:-}" \
+    FM_TEST_SNAPSHOT_BRIEF_MARKER="${FM_TEST_SNAPSHOT_BRIEF_MARKER:-}" \
     XDG_CONFIG_HOME="${FM_TEST_XDG_CONFIG_HOME:-$home/xdgconfig}" \
     XDG_DATA_HOME="${FM_TEST_XDG_DATA_HOME:-$home/xdgdata}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
@@ -827,28 +837,27 @@ test_launch_uses_validated_brief_snapshot_after_source_replacement() {
 }
 
 test_launch_refuses_replaced_validated_brief_target() {
-  local rec id out status routing_brief
+  local rec id out status marker
   id=profile-brief-target-race-z12b4
   rec=$(make_spawn_case profile-brief-target-race claude "$id")
   read_case_record "$rec"
-  routing_brief=$(fm_test_routing_brief_path "$HOME_DIR" "$id")
-  /bin/cp "$HOME_DIR/data/$id/brief.md" "$routing_brief"
-  chmod 0400 "$routing_brief"
+  write_test_routing_decision "$HOME_DIR" "$id" claude default default 0
+  marker="$CASE_DIR/snapshot-brief-replaced"
 
-  out=$(FM_TEST_REPLACE_BRIEF_TARGET="$routing_brief" \
-    FM_TEST_BRIEF_TARGET_REPLACEMENT="attacker replacement after validator comparison" \
+  out=$(FM_TEST_ROUTING_PRESERVE=1 FM_TEST_MUTATE_SNAPSHOT_BRIEF=1 \
+    FM_TEST_SNAPSHOT_BRIEF_MARKER="$marker" \
+    FM_TEST_BRIEF_TARGET_REPLACEMENT="attacker replacement before validation read" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 1 "$status" "brief target replacement should refuse synchronously"
-  [ "$(cat "$routing_brief")" = "attacker replacement after validator comparison" ] \
-    || fail "validated brief target replacement counterexample did not fire"
-  assert_contains "$out" "validated routing brief changed before launch input construction" \
-    "brief target replacement lacked a synchronous refusal diagnostic"
+  expect_code 1 "$status" "brief snapshot replacement should refuse synchronously"
+  assert_present "$marker" "brief snapshot replacement counterexample did not fire"
+  assert_contains "$out" "ROUTING_DECISION BRIEF_HASH_MISMATCH" \
+    "brief snapshot replacement lacked its routing refusal diagnostic"
   assert_spawn_refused_before_side_effects "$HOME_DIR" "$id" "$LAUNCH_LOG"
   [ ! -s "$HOME_DIR/worktree.log" ] || fail "brief target replacement leased a worktree"
   [ -z "$(find "$HOME_DIR/data/$id" -maxdepth 1 -type d -name '.routing-decision.validate.*' -print -quit)" ] \
     || fail "validation snapshot directory survived guarded publication"
-  pass "spawn refuses a validated brief target replacement before side effects"
+  pass "spawn refuses a substituted brief snapshot before side effects"
 }
 
 test_late_commit_failure_keeps_receipt_retryable() {

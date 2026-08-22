@@ -20,6 +20,7 @@ PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 CHMOD_BIN=$(command -v chmod) || fail "test needs chmod"
+PERL_BIN=$(command -v perl) || fail "test needs perl"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 cleanup_kimi_harness() {
@@ -138,14 +139,21 @@ SH
   cat > "$fakebin/chmod" <<'SH'
 #!/usr/bin/env bash
 set -u
-"$FM_REAL_CHMOD" "$@" || exit 1
-target=${!#}
-if [ "${FM_FAKE_KIMI_INSTALL_FAIL:-no}" = yes ] \
-  && [[ "$target" == */brief.anchor.md ]]; then
+exec "$FM_REAL_CHMOD" "$@"
+SH
+  cat > "$fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+set -u
+"$FM_REAL_PERL" "$@"
+status=$?
+if [ "$status" -eq 0 ] \
+  && [ "${2:-}" = publish ] \
+  && [ "${FM_FAKE_KIMI_INSTALL_FAIL:-no}" = yes ]; then
   : > "$HOME/.kimi-code/fm-turn-end.d"
 fi
+exit "$status"
 SH
-  chmod +x "$fakebin/chmod"
+  chmod +x "$fakebin/chmod" "$fakebin/perl"
   printf '%s\n' "$fakebin"
 }
 
@@ -200,6 +208,7 @@ run_spawn() {
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
     FM_FAKE_KIMI_INSTALL_FAIL="${FM_FAKE_KIMI_INSTALL_FAIL:-no}" \
     FM_REAL_CHMOD="$CHMOD_BIN" \
+    FM_REAL_PERL="$PERL_BIN" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \

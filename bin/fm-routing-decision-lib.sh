@@ -29,6 +29,13 @@ FM_ROUTING_PREPARED_DATA=
 FM_ROUTING_PREPARED_ID=
 FM_ROUTING_PREPARED_HOME=
 FM_ROUTING_PREPARED_SOURCE_PENDING=
+FM_ROUTING_PREPARED_DIR_DEV=
+FM_ROUTING_PREPARED_DIR_INO=
+FM_ROUTING_PREPARED_PENDING_DEV=
+FM_ROUTING_PREPARED_PENDING_INO=
+FM_ROUTING_PREPARED_GENERATION=
+FM_ROUTING_PREPARED_RECEIPT_DEV=
+FM_ROUTING_PREPARED_RECEIPT_INO=
 FM_ROUTING_PREPARED_CONSUMED=0
 FM_ROUTING_PREPARED_COMMITTED=0
 FM_ROUTING_DECISION_MAX_AGE_SECONDS=300
@@ -83,40 +90,8 @@ fm_routing_private_input() {
   }
 }
 
-fm_routing_link_exact() {
-  perl -e 'use strict; my ($source, $target) = @ARGV; link($source, $target) or exit 1' -- "$1" "$2"
-}
-
-fm_routing_link_regular_exact() {
-  perl -e '
-    use strict;
-    my ($source, $target) = @ARGV;
-    my @source = lstat($source) or exit 1;
-    exit 1 unless -f _ && !-l _;
-    link($source, $target) or exit 1;
-    my @target = lstat($target) or exit 1;
-    exit 1 unless -f _ && !-l _
-      && $source[0] == $target[0] && $source[1] == $target[1];
-  ' -- "$1" "$2"
-}
-
-fm_routing_publish_regular_idempotent() {
-  perl -e '
-    use strict;
-    use Fcntl qw(S_ISREG);
-    my ($source, $target, $anchor) = @ARGV;
-    my @source = lstat($source) or exit 1;
-    exit 1 unless S_ISREG($source[2]);
-    if (!link($source, $target)) {
-      my @target = lstat($target) or exit 1;
-      exit 1 unless S_ISREG($target[2]) && ($target[2] & 0777) == 0400 && $target[3] == 1;
-    }
-    link($target, $anchor) or exit 1;
-    my @target = lstat($target) or exit 1;
-    my @anchored = lstat($anchor) or exit 1;
-    exit 1 unless S_ISREG($target[2]) && S_ISREG($anchored[2])
-      && $target[0] == $anchored[0] && $target[1] == $anchored[1];
-  ' -- "$1" "$2" "$3"
+fm_routing_fs_boundary() {
+  perl "$(dirname "${BASH_SOURCE[0]}")/fm-routing-fs-boundary.pl" "$@"
 }
 
 FM_ROUTING_WORDS=()
@@ -841,10 +816,6 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
     fm_routing_timestamp_fresh "$quota_observed" "NOT_VERIFIABLE(QUOTA)" || return 1
   fi
 
-  chmod 0400 "$brief" || {
-    fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "validated brief snapshot permissions could not be restricted"
-    return 1
-  }
   FM_ROUTING_BRIEF_FINAL=$brief
   FM_ROUTING_BRIEF_HASH=$brief_hash
 }
@@ -852,24 +823,19 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
 fm_routing_decision_persist_prepared() {
   local snapshot_dir=$FM_ROUTING_PREPARED_DIR data=$FM_ROUTING_PREPARED_DATA
   local id=$FM_ROUTING_PREPARED_ID source_pending=$FM_ROUTING_PREPARED_SOURCE_PENDING
-  local home=$FM_ROUTING_PREPARED_HOME task_dir pending validated_pending current_pending
-  local brief final brief_final final_anchor brief_anchor generation generated_at meta prior
+  local home=$FM_ROUTING_PREPARED_HOME task_dir pending final brief_final generation generated_at meta prior result
   [ -n "$snapshot_dir" ] && [ -d "$snapshot_dir" ] && [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 0 ] || {
     fm_routing_refuse "PERSISTENCE_REFUSED" "no validated routing transaction is prepared"
     return 1
   }
   task_dir="$data/$id"
   pending="$task_dir/routing-decision.pending.json"
-  validated_pending="$snapshot_dir/pending.validated.json"
-  brief="$task_dir/brief.md"
   generation=$(fm_routing_sha256_file "$pending") || {
     fm_routing_refuse "PERSISTENCE_REFUSED" "validated receipt generation could not be derived"
     return 1
   }
   final="$(dirname "$source_pending")/routing-decision.$generation.json"
   brief_final="$(dirname "$source_pending")/routing-brief.$generation.md"
-  final_anchor="$snapshot_dir/final.anchor.json"
-  brief_anchor="$snapshot_dir/brief.anchor.md"
   generated_at=$(jq -r '.generated_at' "$pending")
   fm_routing_timestamp_fresh "$generated_at" "STALE" || return 1
   meta="$home/state/$id.meta"
@@ -883,66 +849,56 @@ fm_routing_decision_persist_prepared() {
       return 1
     }
   fi
-  if [ -e "${final%.json}.consumed" ] || [ -L "${final%.json}.consumed" ]; then
-    fm_routing_refuse "PERSISTENCE_REFUSED" "receipt generation was already consumed"
-    return 1
-  fi
-  current_pending="$snapshot_dir/pending.current.json"
-  if ! fm_routing_link_regular_exact "$source_pending" "$current_pending" 2>/dev/null \
-    || [[ ! "$current_pending" -ef "$validated_pending" ]] \
-    || ! cmp -s "$pending" "$current_pending"; then
-    fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt changed or disappeared after its validation snapshot"
-    return 1
-  fi
-  fm_routing_publish_regular_idempotent "$pending" "$final" "$final_anchor" 2>/dev/null \
-    && cmp -s "$pending" "$final_anchor" || {
-    fm_routing_refuse "PERSISTENCE_REFUSED" "receipt generation target is not the same validated bytes"
+  result=$(fm_routing_fs_boundary publish \
+    "$(dirname "$source_pending")" "$snapshot_dir" \
+    "$FM_ROUTING_PREPARED_DIR_DEV" "$FM_ROUTING_PREPARED_DIR_INO" \
+    "$FM_ROUTING_PREPARED_PENDING_DEV" "$FM_ROUTING_PREPARED_PENDING_INO" \
+    "$id" "$generation" 2>&1) || {
+    fm_routing_refuse "PERSISTENCE_REFUSED" "$result"
     return 1
   }
-  fm_routing_publish_regular_idempotent "$brief" "$brief_final" "$brief_anchor" 2>/dev/null \
-    && cmp -s "$brief" "$brief_anchor" || {
-    fm_routing_refuse "PERSISTENCE_REFUSED" "brief generation target is not the same validated bytes"
-    return 1
-  }
-  chmod 0400 "$final_anchor" "$brief_anchor" || {
-    fm_routing_refuse "PERSISTENCE_REFUSED" "generation artifact permissions could not be restricted"
-    return 1
-  }
-  if ! cmp -s "$pending" "$final_anchor" || ! cmp -s "$brief" "$brief_anchor" \
-    || [ "$(fm_routing_sha256_file "$final_anchor")" != "$generation" ]; then
-    fm_routing_refuse "PERSISTENCE_REFUSED" "generation artifact changed before commitment"
-    return 1
-  fi
+  IFS=$'\t' read -r FM_ROUTING_PREPARED_RECEIPT_DEV FM_ROUTING_PREPARED_RECEIPT_INO _ _ <<<"$result"
+  FM_ROUTING_PREPARED_GENERATION=$generation
   FM_ROUTING_PREPARED_COMMITTED=1
   FM_ROUTING_DECISION_FINAL=$final
   FM_ROUTING_BRIEF_FINAL=$brief_final
 }
 
 fm_routing_decision_consume_prepared() {
-  local marker anchor
+  local result
   [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 1 ] && [ "$FM_ROUTING_PREPARED_CONSUMED" -eq 0 ] || return 1
-  marker="${FM_ROUTING_DECISION_FINAL%.json}.consumed"
-  anchor="$FM_ROUTING_PREPARED_DIR/consumed.anchor"
-  fm_routing_link_exact "$FM_ROUTING_DECISION_FINAL" "$marker" 2>/dev/null || {
-    fm_routing_refuse "PERSISTENCE_REFUSED" "receipt generation could not be consumed exclusively"
-    return 1
-  }
-  fm_routing_link_regular_exact "$marker" "$anchor" 2>/dev/null \
-    && [[ "$anchor" -ef "$FM_ROUTING_DECISION_FINAL" ]] || {
-    fm_routing_refuse "PERSISTENCE_REFUSED" "receipt generation consumption marker is not exact"
+  result=$(fm_routing_fs_boundary consume \
+    "$(dirname "$FM_ROUTING_DECISION_FINAL")" "$FM_ROUTING_PREPARED_DIR" \
+    "$FM_ROUTING_PREPARED_DIR_DEV" "$FM_ROUTING_PREPARED_DIR_INO" \
+    "$FM_ROUTING_PREPARED_GENERATION" \
+    "$FM_ROUTING_PREPARED_RECEIPT_DEV" "$FM_ROUTING_PREPARED_RECEIPT_INO" 2>&1) || {
+    fm_routing_refuse "PERSISTENCE_REFUSED" "$result"
     return 1
   }
   FM_ROUTING_PREPARED_CONSUMED=1
 }
 
+fm_routing_decision_cleanup_prepared() {
+  [ -n "$FM_ROUTING_PREPARED_DIR" ] || return 0
+  fm_routing_fs_boundary cleanup "$FM_ROUTING_PREPARED_DIR" \
+    "$FM_ROUTING_PREPARED_DIR_DEV" "$FM_ROUTING_PREPARED_DIR_INO"
+}
+
 fm_routing_decision_discard_prepared() {
   [ -n "$FM_ROUTING_PREPARED_DIR" ] || return 0
-  rm -rf -- "$FM_ROUTING_PREPARED_DIR"
+  fm_routing_decision_cleanup_prepared || return 1
   FM_ROUTING_PREPARED_DIR=
   FM_ROUTING_PREPARED_DATA=
   FM_ROUTING_PREPARED_ID=
   FM_ROUTING_PREPARED_HOME=
   FM_ROUTING_PREPARED_SOURCE_PENDING=
+  FM_ROUTING_PREPARED_DIR_DEV=
+  FM_ROUTING_PREPARED_DIR_INO=
+  FM_ROUTING_PREPARED_PENDING_DEV=
+  FM_ROUTING_PREPARED_PENDING_INO=
+  FM_ROUTING_PREPARED_GENERATION=
+  FM_ROUTING_PREPARED_RECEIPT_DEV=
+  FM_ROUTING_PREPARED_RECEIPT_INO=
   FM_ROUTING_PREPARED_CONSUMED=0
   FM_ROUTING_PREPARED_COMMITTED=0
   FM_ROUTING_DECISION_FINAL=
@@ -952,19 +908,26 @@ fm_routing_decision_discard_prepared() {
 
 fm_routing_decision_seal_prepared() {
   [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 1 ] || return 1
-  rm -rf -- "$FM_ROUTING_PREPARED_DIR"
+  fm_routing_decision_cleanup_prepared || return 1
   FM_ROUTING_PREPARED_DIR=
   FM_ROUTING_PREPARED_DATA=
   FM_ROUTING_PREPARED_ID=
   FM_ROUTING_PREPARED_HOME=
   FM_ROUTING_PREPARED_SOURCE_PENDING=
+  FM_ROUTING_PREPARED_DIR_DEV=
+  FM_ROUTING_PREPARED_DIR_INO=
+  FM_ROUTING_PREPARED_PENDING_DEV=
+  FM_ROUTING_PREPARED_PENDING_INO=
+  FM_ROUTING_PREPARED_GENERATION=
+  FM_ROUTING_PREPARED_RECEIPT_DEV=
+  FM_ROUTING_PREPARED_RECEIPT_INO=
   FM_ROUTING_PREPARED_CONSUMED=0
   FM_ROUTING_PREPARED_COMMITTED=0
 }
 
 fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment>
-  local data=$1 config_dir=$2 id=$3 task_dir source_pending source_intent source_brief
-  local source_config source_quota snapshot_dir snapshot_data snapshot_config status
+  local data=$1 config_dir=$2 id=$3 task_dir source_pending
+  local snapshot_dir snapshot_data snapshot_config status identity snapshot_result snapshot_error
 
   FM_ROUTING_DECISION_FINAL=
   FM_ROUTING_BRIEF_FINAL=
@@ -974,18 +937,17 @@ fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-i
   FM_ROUTING_PREPARED_ID=
   FM_ROUTING_PREPARED_HOME=
   FM_ROUTING_PREPARED_SOURCE_PENDING=
+  FM_ROUTING_PREPARED_DIR_DEV=
+  FM_ROUTING_PREPARED_DIR_INO=
+  FM_ROUTING_PREPARED_PENDING_DEV=
+  FM_ROUTING_PREPARED_PENDING_INO=
+  FM_ROUTING_PREPARED_GENERATION=
+  FM_ROUTING_PREPARED_RECEIPT_DEV=
+  FM_ROUTING_PREPARED_RECEIPT_INO=
   FM_ROUTING_PREPARED_CONSUMED=0
   FM_ROUTING_PREPARED_COMMITTED=0
   task_dir="$data/$id"
   source_pending="$task_dir/routing-decision.pending.json"
-  source_intent="$task_dir/routing-intent.json"
-  source_brief="$task_dir/brief.md"
-  source_config="$config_dir/crew-dispatch.json"
-  source_quota="$task_dir/quota-snapshot.json"
-
-  fm_routing_private_input "$source_pending" "missing" "UNREADABLE_RECEIPT" || return 1
-  fm_routing_private_input "$source_intent" "missing" "UNREADABLE_INTENT" || return 1
-  fm_routing_private_input "$source_brief" "missing" "NOT_VERIFIABLE(BRIEF)" || return 1
   command -v jq >/dev/null 2>&1 || {
     fm_routing_refuse "NOT_VERIFIABLE(SCHEMA)" "jq is unavailable"
     return 1
@@ -995,53 +957,41 @@ fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-i
     fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "private validation snapshot could not be created"
     return 1
   }
-  chmod 0700 "$snapshot_dir" || {
-    rm -rf -- "$snapshot_dir"
-    fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "private validation snapshot permissions could not be restricted"
+  identity=$(fm_routing_fs_boundary identity "$snapshot_dir" 2>&1) || {
+    fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "$identity"
     return 1
   }
+  IFS=$'\t' read -r FM_ROUTING_PREPARED_DIR_DEV FM_ROUTING_PREPARED_DIR_INO <<<"$identity"
+  FM_ROUTING_PREPARED_DIR=$snapshot_dir
   snapshot_data="$snapshot_dir/data"
   snapshot_config="$snapshot_dir/config"
-  mkdir -p "$snapshot_data/$id" "$snapshot_config" || {
-    rm -rf -- "$snapshot_dir"
-    fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "private validation snapshot layout could not be created"
+  snapshot_result=$(fm_routing_fs_boundary snapshot "$task_dir" "$config_dir" "$snapshot_dir" "$id" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    snapshot_error=$snapshot_result
+    fm_routing_decision_cleanup_prepared >/dev/null 2>&1 || true
+    FM_ROUTING_PREPARED_DIR=
+    case "$snapshot_error" in
+      *routing-decision.pending.json*) fm_routing_refuse "missing" "$snapshot_error" ;;
+      *routing-intent.json*) fm_routing_refuse "missing" "$snapshot_error" ;;
+      *brief.md*) fm_routing_refuse "NOT_VERIFIABLE(BRIEF)" "$snapshot_error" ;;
+      *crew-dispatch.json*) fm_routing_refuse "NOT_VERIFIABLE(CONFIG)" "$snapshot_error" ;;
+      *quota-snapshot.json*) fm_routing_refuse "NOT_VERIFIABLE(QUOTA)" "$snapshot_error" ;;
+      *) fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "$snapshot_error" ;;
+    esac
     return 1
-  }
-  if ! fm_routing_link_regular_exact "$source_pending" "$snapshot_dir/pending.validated.json" \
-    || ! cp "$snapshot_dir/pending.validated.json" "$snapshot_data/$id/routing-decision.pending.json" \
-    || ! cp "$source_intent" "$snapshot_data/$id/routing-intent.json" \
-    || ! cp "$source_brief" "$snapshot_data/$id/brief.md"; then
-    rm -rf -- "$snapshot_dir"
-    fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "required authority inputs could not be snapshotted"
-    return 1
   fi
-  if [ -e "$source_config" ] || [ -L "$source_config" ]; then
-    if [ ! -f "$source_config" ] || [ -L "$source_config" ] || [ ! -r "$source_config" ] \
-      || ! cp "$source_config" "$snapshot_config/crew-dispatch.json"; then
-      rm -rf -- "$snapshot_dir"
-      fm_routing_refuse "NOT_VERIFIABLE(CONFIG)" "canonical dispatch configuration could not be snapshotted as a readable regular file"
-      return 1
-    fi
-  fi
-  if [ -e "$source_quota" ] || [ -L "$source_quota" ]; then
-    if [ -f "$source_quota" ] && [ ! -L "$source_quota" ] && [ -r "$source_quota" ]; then
-      cp "$source_quota" "$snapshot_data/$id/quota-snapshot.json" || {
-        rm -rf -- "$snapshot_dir"
-        fm_routing_refuse "NOT_VERIFIABLE(QUOTA)" "quota snapshot could not be snapshotted"
-        return 1
-      }
-    fi
-  fi
+  IFS=$'\t' read -r _ _ FM_ROUTING_PREPARED_PENDING_DEV FM_ROUTING_PREPARED_PENDING_INO _ <<<"$snapshot_result"
 
   fm_routing_decision_validate_snapshot \
     "$snapshot_data" "$snapshot_config" "$id" "$4" "$5" "$6" "$7" "$8" "$9" \
     "${10:-}" "${11:-}" "$source_pending" "$snapshot_dir"
   status=$?
   if [ "$status" -ne 0 ]; then
-    rm -rf -- "$snapshot_dir"
+    fm_routing_decision_cleanup_prepared >/dev/null 2>&1 || true
+    FM_ROUTING_PREPARED_DIR=
     return "$status"
   fi
-  FM_ROUTING_PREPARED_DIR=$snapshot_dir
   FM_ROUTING_PREPARED_DATA=$snapshot_data
   FM_ROUTING_PREPARED_ID=$id
   FM_ROUTING_PREPARED_HOME=$7

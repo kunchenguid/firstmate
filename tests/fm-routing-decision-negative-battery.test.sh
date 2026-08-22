@@ -15,6 +15,9 @@ POST_SNAPSHOT_SOURCE_FILTER=
 POST_SNAPSHOT_CONFIG_FILTER=
 POST_PENDING_DIRECTORY=0
 POST_PENDING_RECREATE=0
+POST_CONFIG_SYMLINK=0
+POST_CONSUME_REPLACE=0
+POST_CLEANUP_REPLACE=0
 
 # One authority guard is defense in depth against the receipt changing after
 # its exact configuration binding is checked.
@@ -52,9 +55,13 @@ jq() {
 }
 
 perl() {
-  local target=${!#} status
-  if [ "$POST_PENDING_RECREATE" -eq 1 ] \
-    && [[ "$target" == */pending.current.json ]]; then
+  local operation=${2:-} status final
+  if [ "$operation" = snapshot ] && [ "$POST_CONFIG_SYMLINK" -eq 1 ]; then
+    mv "$HOME_DIR/config/crew-dispatch.json" "$HOME_DIR/config/crew-dispatch.original.json" || return 1
+    ln -s "$LAB/relocated-config/crew-dispatch.json" "$HOME_DIR/config/crew-dispatch.json" || return 1
+    POST_CONFIG_SYMLINK=0
+  fi
+  if [ "$operation" = publish ] && [ "$POST_PENDING_RECREATE" -eq 1 ]; then
     mv "$TASK_DIR/routing-decision.pending.json" "$TASK_DIR/routing-decision.original.json" || return 1
     mkdir "$TASK_DIR/routing-decision.pending.json" || return 1
     printf 'replacement directory sentinel\n' > "$TASK_DIR/routing-decision.pending.json/sentinel" || return 1
@@ -63,12 +70,24 @@ perl() {
     POST_PENDING_RECREATE=0
     return "$status"
   fi
-  if [ "$POST_PENDING_DIRECTORY" -eq 1 ] \
-    && [[ "$target" == */pending.current.json ]]; then
+  if [ "$operation" = publish ] && [ "$POST_PENDING_DIRECTORY" -eq 1 ]; then
     mv "$TASK_DIR/routing-decision.pending.json" "$TASK_DIR/routing-decision.original.json" || return 1
     mkdir "$TASK_DIR/routing-decision.pending.json" || return 1
     printf 'replacement directory sentinel\n' > "$TASK_DIR/routing-decision.pending.json/sentinel" || return 1
     POST_PENDING_DIRECTORY=0
+  fi
+  if [ "$operation" = consume ] && [ "$POST_CONSUME_REPLACE" -eq 1 ]; then
+    final="$3/routing-decision.$7.json"
+    mv "$final" "$final.validated" || return 1
+    printf 'consume substitute\n' > "$final" || return 1
+    chmod 0400 "$final" || return 1
+    POST_CONSUME_REPLACE=0
+  fi
+  if [ "$operation" = cleanup ] && [ "$POST_CLEANUP_REPLACE" -eq 1 ]; then
+    mv "$3" "$LAB/prepared-original" || return 1
+    mkdir "$3" || return 1
+    printf 'cleanup substitute\n' > "$3/sentinel" || return 1
+    POST_CLEANUP_REPLACE=0
   fi
   "$REAL_PERL" "$@"
 }
@@ -383,6 +402,11 @@ write_fixture() {
   POST_SNAPSHOT_CONFIG_FILTER=
   POST_PENDING_DIRECTORY=0
   POST_PENDING_RECREATE=0
+  POST_CONFIG_SYMLINK=0
+  POST_CONSUME_REPLACE=0
+  POST_CLEANUP_REPLACE=0
+  unset FM_TEST_ROUTING_FS_ORDER FM_TEST_ROUTING_FS_COLLIDE_BEFORE
+  unset FM_TEST_ROUTING_FS_FAIL_AFTER FM_TEST_ROUTING_FS_REPLACE_AFTER
   RUN_CWD=
 }
 
@@ -657,6 +681,35 @@ setup_pending_mutated_in_place_after_compare() {
 setup_pending_recreated_after_relocation() {
   POST_PENDING_RECREATE=1
 }
+setup_config_symlink_before_snapshot() {
+  mkdir -p "$LAB/relocated-config"
+  cp "$HOME_DIR/config/crew-dispatch.json" "$LAB/relocated-config/crew-dispatch.json"
+  POST_CONFIG_SYMLINK=1
+}
+setup_receipt_then_brief_collision() {
+  PREEXISTING_FINAL=1
+  export FM_TEST_ROUTING_FS_COLLIDE_BEFORE=brief
+}
+setup_brief_then_receipt_collision() {
+  PREEXISTING_FINAL=1
+  export FM_TEST_ROUTING_FS_ORDER=brief-first
+  export FM_TEST_ROUTING_FS_COLLIDE_BEFORE=receipt
+}
+setup_permission_failure_after_receipt() {
+  export FM_TEST_ROUTING_FS_FAIL_AFTER=receipt
+}
+setup_identity_collision_after_receipt() {
+  PREEXISTING_FINAL=1
+  export FM_TEST_ROUTING_FS_REPLACE_AFTER=receipt
+}
+setup_final_replaced_before_consume() {
+  PREEXISTING_FINAL=1
+  POST_CONSUME_REPLACE=1
+}
+setup_prepared_directory_replaced_before_cleanup() {
+  export FM_TEST_ROUTING_FS_FAIL_AFTER=receipt
+  POST_CLEANUP_REPLACE=1
+}
 setup_preexisting_writable_brief() {
   PREEXISTING_FINAL=1
   printf 'different brief bytes\n' > "$(brief_final)"
@@ -664,7 +717,8 @@ setup_preexisting_writable_brief() {
 setup_preexisting_hardlinked_brief() {
   PREEXISTING_FINAL=1
   cp "$TASK_DIR/routing-decision.pending.json" "$(receipt_final)"
-  ln "$(receipt_final)" "${TASK_DIR}/routing-decision.$(receipt_generation).consumed"
+  cp "$TASK_DIR/routing-decision.pending.json" "${TASK_DIR}/routing-decision.$(receipt_generation).consumed"
+  chmod 0400 "$(receipt_final)" "${TASK_DIR}/routing-decision.$(receipt_generation).consumed"
 }
 
 assert_pending_directory_preserved() {
@@ -680,6 +734,43 @@ assert_pending_replacement_never_relocated() {
     || fail "pending receipt directory replacement contents changed"
   assert_present "$TASK_DIR/routing-decision.original.json" \
     "pending replacement counterexample did not preserve the validated source inode"
+}
+assert_config_symlink_not_followed() {
+  [ -L "$HOME_DIR/config/crew-dispatch.json" ] \
+    || fail "canonical config substitution did not install its symlink counterexample"
+  cmp -s "$HOME_DIR/config/crew-dispatch.original.json" "$LAB/relocated-config/crew-dispatch.json" \
+    || fail "config snapshot refusal changed relocated configuration bytes"
+}
+assert_receipt_then_brief_collision_transactional() {
+  assert_absent "$(receipt_final)" "brief collision left the attempt-created receipt"
+  printf 'collision\n' | cmp -s - "$(brief_final)" \
+    || fail "brief collision changed or deleted the conflicting target"
+}
+assert_brief_then_receipt_collision_transactional() {
+  assert_absent "$(brief_final)" "receipt collision left the attempt-created brief"
+  printf 'collision\n' | cmp -s - "$(receipt_final)" \
+    || fail "receipt collision changed or deleted the conflicting target"
+}
+assert_permission_failure_transactional() {
+  assert_absent "$(receipt_final)" "permission failure left the attempt-created receipt"
+  assert_absent "$(brief_final)" "permission failure left the attempt-created brief"
+}
+assert_identity_collision_preserved() {
+  printf 'substitute\n' | cmp -s - "$(receipt_final)" \
+    || fail "identity collision changed or deleted the replacement receipt"
+  assert_absent "$(brief_final)" "identity collision left the attempt-created brief"
+}
+assert_consume_replacement_preserved() {
+  printf 'consume substitute\n' | cmp -s - "$(receipt_final)" \
+    || fail "consume refusal changed or deleted the replacement receipt"
+  assert_absent "${TASK_DIR}/routing-decision.$(receipt_generation).consumed" \
+    "consume refusal created a marker for replacement bytes"
+}
+assert_cleanup_replacement_preserved() {
+  printf 'cleanup substitute\n' | cmp -s - "$TASK_DIR"/.routing-decision.validate.*/sentinel \
+    || fail "prepared cleanup changed or deleted the replacement directory"
+  assert_present "$LAB/prepared-original" \
+    "prepared cleanup replacement did not retain the transaction directory identity"
 }
 setup_selection_order_tamper() { update_receipt '.selection_order |= reverse'; }
 setup_quota_byte_mutation() { write_multi_fixture; printf '\n' >> "$TASK_DIR/quota-snapshot.json"; }
@@ -1073,25 +1164,39 @@ exercise_negative "59 rule source with malformed profile" DISPATCH_CONFIG_MISMAT
 exercise_negative "60 rule source with post-binding kind drift" DISPATCH_CONFIG_MISMATCH setup_rule_binding_kind_drift \
   "rule source requires canonical dispatch configuration"
 exercise_negative "61 pending receipt replaced after snapshot" PERSISTENCE_REFUSED setup_pending_replaced_after_snapshot \
-  "pending receipt changed or disappeared after its validation snapshot"
+  "PENDING_IDENTITY"
 exercise_negative "62 pending receipt directory after snapshot" PERSISTENCE_REFUSED setup_pending_directory_after_snapshot \
-  "pending receipt changed or disappeared after its validation snapshot" assert_pending_directory_preserved
+  "OPEN_REGULAR:routing-decision.pending.json" assert_pending_directory_preserved
 exercise_negative "63 final directory raced after target check" PERSISTENCE_REFUSED setup_final_directory_after_check \
-  "receipt generation target is not the same validated bytes"
+  "OPEN_REGULAR:routing-decision"
 exercise_negative "64 brief target raced to directory symlink" PERSISTENCE_REFUSED setup_brief_link_directory_race \
-  "brief generation target is not the same validated bytes" assert_brief_link_directory_race
+  "OPEN_REGULAR:routing-brief" assert_brief_link_directory_race
 exercise_negative "65 receipt target raced to directory symlink" PERSISTENCE_REFUSED setup_final_link_directory_race \
-  "receipt generation target is not the same validated bytes" assert_final_link_directory_race
+  "OPEN_REGULAR:routing-decision" assert_final_link_directory_race
 exercise_negative "66 same-generation receipt collision" PERSISTENCE_REFUSED \
   setup_pending_mutated_in_place_after_compare \
-  "receipt generation target is not the same validated bytes"
+  "COLLISION:routing-decision"
 exercise_negative "67 pending replacement remains at its pathname" PERSISTENCE_REFUSED \
   setup_pending_recreated_after_relocation \
-  "pending receipt changed or disappeared after its validation snapshot" assert_pending_replacement_never_relocated
+  "OPEN_REGULAR:routing-decision.pending.json" assert_pending_replacement_never_relocated
 exercise_negative "68 same-generation brief collision" PERSISTENCE_REFUSED \
-  setup_preexisting_writable_brief "brief generation target is not the same validated bytes"
+  setup_preexisting_writable_brief "COLLISION:routing-brief"
 exercise_negative "69 consumed generation reuse" PERSISTENCE_REFUSED \
-  setup_preexisting_hardlinked_brief "receipt generation was already consumed"
+  setup_preexisting_hardlinked_brief "CONSUMED"
+exercise_negative "70 canonical config symlink before snapshot" 'NOT_VERIFIABLE(CONFIG)' \
+  setup_config_symlink_before_snapshot "OPEN_REGULAR:crew-dispatch.json" assert_config_symlink_not_followed
+exercise_negative "71 receipt success then brief collision" PERSISTENCE_REFUSED \
+  setup_receipt_then_brief_collision "CREATE:routing-brief" assert_receipt_then_brief_collision_transactional
+exercise_negative "72 brief success then receipt collision" PERSISTENCE_REFUSED \
+  setup_brief_then_receipt_collision "CREATE:routing-decision" assert_brief_then_receipt_collision_transactional
+exercise_negative "73 permission failure after receipt" PERSISTENCE_REFUSED \
+  setup_permission_failure_after_receipt "TEST_FAILURE:receipt" assert_permission_failure_transactional
+exercise_negative "74 identity collision after receipt" PERSISTENCE_REFUSED \
+  setup_identity_collision_after_receipt "ROLLBACK_IDENTITY:routing-decision" assert_identity_collision_preserved
+exercise_negative "75 final replacement before consumption" PERSISTENCE_REFUSED \
+  setup_final_replaced_before_consume "FINAL_IDENTITY" assert_consume_replacement_preserved
+exercise_negative "76 prepared directory replacement before cleanup" PERSISTENCE_REFUSED \
+  setup_prepared_directory_replaced_before_cleanup "TEST_FAILURE:receipt" assert_cleanup_replacement_preserved
 
 write_fixture
 cp "$TASK_DIR/routing-decision.pending.json" "$(receipt_final)"
@@ -1127,7 +1232,7 @@ run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement
   || fail "canonical config replacement counterexample did not fire"
 pass "canonical config replacement cannot change snapshotted candidate resolution"
 
-expected_count=$((129 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((136 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

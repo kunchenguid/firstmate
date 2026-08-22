@@ -353,6 +353,8 @@ Every string is non-empty, `brief_sha256` is the SHA-256 of the exact current `d
 The receipt binds the SHA-256 of this exact intent file rather than trusting an unattached hash.
 The validator recomputes the brief hash against a private snapshot before accepting the intent, so replacing the brief before that snapshot returns `BRIEF_HASH_MISMATCH`.
 On acceptance, no-follow no-clobber publication binds the exact validated bytes to `data/<task-id>/routing-brief.<generation>.md` and the validated receipt to `data/<task-id>/routing-decision.<generation>.json`, where `<generation>` is the SHA-256 of the validated receipt bytes and is shared by both paths.
+Canonical input snapshotting, generation publication, consumption, and transaction cleanup use one identity-bound no-follow filesystem boundary, so no operation acts on a pathname substitute after checking another identity.
+Receipt and brief destinations are preflighted together, and any failure after one exclusive creation removes only artifacts whose identities were created by that attempt, leaving either the complete generation or none of it.
 Publication never overwrites or deletes an earlier generation: an existing target is accepted only when it is a single-link 0400 regular artifact with byte-identical content, while a writable, multiply linked, non-regular, or same-generation different-byte collision refuses.
 `fm-spawn.sh` synchronously reads the brief path once, verifies those captured bytes against `brief_sha256` before any worktree lease, endpoint creation, launch input, or metadata publication, and retains every typed launch-input byte, including trailing newlines, through a result-variable API shared by every verified and raw adapter consumer.
 
