@@ -398,9 +398,9 @@ Muse's selected `max` emits and binds the adapter value `ultra`.
 
 For a raw command, `launch_binding.kind` is `raw_launch` and every axis must be observed through the fixed literal command itself.
 Outside shell quotes, raw commands allow only alphanumerics, space or tab separators, and `-`, `_`, `.`, `/`, `:`, `,`, `+`, `@`, or `%`, while `=` is accepted only after a word has begun so zsh cannot expand a leading `=command`.
-Single-quoted content is accepted literally, while double-quoted content accepts alphanumerics, space or tab, and `#`, `%`, `&`, `'`, `(`, `)`, `*`, `+`, `,`, `-`, `.`, `/`, `:`, `;`, `<`, `=`, `>`, `?`, `@`, `[`, `]`, `^`, `_`, `{`, `|`, `}`, or `~`.
+Single-quoted content is accepted literally except for control or non-ASCII input, while double-quoted content accepts alphanumerics, space, and `#`, `%`, `&`, `'`, `(`, `)`, `*`, `+`, `,`, `-`, `.`, `/`, `:`, `;`, `<`, `=`, `>`, `?`, `@`, `[`, `]`, `^`, `_`, `{`, `|`, `}`, or `~`.
 Double-quoted expansion, history, and backslash syntax are refused rather than interpreted or normalized.
-Every other character and any literal newline or carriage return refuses, and a home-relative raw binary such as `~/bin/agent` must be written as an absolute path.
+Every other character refuses, including non-ASCII input and control characters other than a plain-state tab separator, and a home-relative raw binary such as `~/bin/agent` must be written as an absolute path.
 The only accepted raw model spelling is `--model <literal>` or `--model=<literal>`.
 The accepted raw effort spellings are `--effort`, `--reasoning-effort`, `--thinking`, and codex `-c model_reasoning_effort=`, with fixed literal values and applicable equals forms.
 Raw commands with shell expansion, command substitution, control operators, environment-assignment prefixes, duplicate or missing values, non-standard model spellings such as `-m` or `--model-name`, or either model or effort axis absent return `RAW_LAUNCH_NOT_VERIFIABLE` or `RAW_LAUNCH_UNRESOLVED`.

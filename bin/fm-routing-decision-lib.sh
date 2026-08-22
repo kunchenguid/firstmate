@@ -67,11 +67,22 @@ fm_routing_private_input() {
 
 FM_ROUTING_WORDS=()
 
+fm_routing_raw_ascii_text() { # <command>
+  local LC_ALL=C input=$1 ch i
+  for ((i = 0; i < ${#input}; i++)); do
+    ch=${input:i:1}
+    case "$ch" in
+      $'\t'|[[:print:]]) ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
 fm_routing_literal_words() { # <command> <raw:0|1>
   local input=$1 raw=${2:-0} state=plain token='' ch i token_started=0
   FM_ROUTING_WORDS=()
   if [ "$raw" -eq 1 ]; then
-    case "$input" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    fm_routing_raw_ascii_text "$input" || return 1
   fi
   for ((i = 0; i < ${#input}; i++)); do
     ch=${input:i:1}
@@ -101,13 +112,19 @@ fm_routing_literal_words() { # <command> <raw:0|1>
         ;;
       single)
         # POSIX shells treat every character inside single quotes literally;
-        # only the closing quote changes parser state.
-        if [ "$ch" = "'" ]; then state=plain; else token+="$ch"; fi
+        # the raw byte guard and this tab check also exclude line-editor controls.
+        if [ "$ch" = "'" ]; then
+          state=plain
+        elif [ "$raw" -eq 1 ] && [ "$ch" = $'\t' ]; then
+          return 1
+        else
+          token+="$ch"
+        fi
         ;;
       double)
         case "$ch" in
           '"') state=plain ;;
-          [[:alnum:]]|' '|$'\t'|'#'|'%'|'&'|"'"|'('|')'|'*'|'+'|','|'-'|'.'|'/'|':'|';'|'<'|'='|'>'|'?'|'@'|'['|']'|'^'|'_'|'{'|'|'|'}'|'~')
+          [[:alnum:]]|' '|'#'|'%'|'&'|"'"|'('|')'|'*'|'+'|','|'-'|'.'|'/'|':'|';'|'<'|'='|'>'|'?'|'@'|'['|']'|'^'|'_'|'{'|'|'|'}'|'~')
             token+="$ch"
             ;;
           *) return 1 ;;
