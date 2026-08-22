@@ -142,9 +142,10 @@ fm_tasks_axi_backend_available() {
 # never depends on the parser tolerating a repeated section heading. tasks-axi
 # stays the single owner of the backlog format; the copy only makes the archive's
 # own section headings legible to it.
-# That copy is staged at most once per process and reused across lookups, so an
-# entry point that sources this file and reads a record must wire
-# fm_tasks_axi_archive_view_release into its exit path; see the memo below.
+# That copy is staged at most once per process and reused across lookups, and
+# this file removes it at exit itself, without displacing a sourcing script's own
+# exit handler, so an entry point that reads a record wires up nothing; see the
+# memo below.
 #
 # THE OUTCOMES ARE KEPT APART, and fm_tasks_axi_record_show below is the one
 # owner of the whole two-file read so a caller never has to compose it again: a
@@ -265,17 +266,32 @@ fm_tasks_axi_archive_file() {  # <home>
 #   1 - it does not, which INCLUDES there being no archive file at all: a home
 #       that has never had a row trimmed has nothing to search, and that is the
 #       healthy normal state rather than a failure
-#   4 - the archive path exists but is not a readable regular file, so the
-#       question was never asked; a caller must not read this as no entry, and a
-#       caller using this as a fail-closed guard must refuse rather than proceed
+#   4 - the archive path exists but is not a readable regular file, or the read
+#       itself failed, so the question was never asked; a caller must not read
+#       this as no entry, and a caller using this as a fail-closed guard must
+#       refuse rather than proceed
+# Only those three ever escape. The guards below answer whether the path can be
+# opened, but a read can still fail after it opens, and `grep` reports that with
+# a status of its own: a file unlinked under the open, an EIO, a stale network
+# handle. Passing that status through would make "the read broke" arrive at a
+# caller as one of the two ANSWERS, and the ownership check in
+# bin/fm-captain-hold.sh reads "no entry" as "another home owns this origin", so
+# a leaked read error would disown a home from its own investigation. A read that
+# did not complete is therefore folded into 4, which every caller already treats
+# as having settled nothing.
 fm_tasks_axi_archive_has_entry() {  # <archive-file> <id>
-  local file=$1 id=$2 pattern
+  local file=$1 id=$2 pattern rc=0
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
     return 1
   fi
   { [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ]; } || return 4
   pattern=$(printf '%s' "$id" | sed 's/[][\\.*^$+?(){}|/]/\\&/g')
-  grep -Eq "^- \[[ x]\] $pattern - " "$file" 2>/dev/null
+  grep -Eq "^- \[[ x]\] $pattern - " "$file" 2>/dev/null || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 4 ;;
+  esac
 }
 
 # ONE STAGED VIEW PER PROCESS. Every archived lookup needs the same
@@ -303,6 +319,43 @@ fm_tasks_axi_archive_view_release() {
     rm -f -- "$view" 2>/dev/null || true
   fi
   return 0
+}
+
+# REMOVING THE VIEW IS THIS FILE'S OWN JOB, not a convention a sourcing script
+# has to remember. The view outlives the call that staged it, so only an EXIT
+# trap can remove it, and a shell has exactly one. Claiming that trap outright
+# would throw away whatever handler the sourcing script installed, so this arms
+# itself the first time a view is actually staged and CHAINS instead: it reads
+# the handler installed at that moment, puts itself in front of it, and runs the
+# captured handler afterwards. A script has finished its own setup long before it
+# reads a record, so the handler it wants is the one that gets captured. Nothing
+# to wire per entry point, and no caller loses its own cleanup.
+FM_TASKS_AXI_ARCHIVE_VIEW_CHAINED_EXIT=''
+
+fm_tasks_axi_archive_view_exit() {
+  local status=$?
+  fm_tasks_axi_archive_view_release
+  if [ -n "$FM_TASKS_AXI_ARCHIVE_VIEW_CHAINED_EXIT" ]; then
+    eval "$FM_TASKS_AXI_ARCHIVE_VIEW_CHAINED_EXIT" || true
+  fi
+  return "$status"
+}
+
+fm_tasks_axi_archive_view_arm_release() {
+  local spec
+  spec=$(trap -p EXIT 2>/dev/null) || spec=''
+  case "$spec" in
+    *fm_tasks_axi_archive_view_exit*) return 0 ;;
+  esac
+  FM_TASKS_AXI_ARCHIVE_VIEW_CHAINED_EXIT=''
+  if [ -n "$spec" ]; then
+    # `trap -p` prints a command that would reinstall the handler, so re-reading
+    # that command as shell words hands the handler back exactly as the shell
+    # holds it, quoting and all: `trap -- '<handler>' EXIT` puts it in $3.
+    eval "set -- $spec" 2>/dev/null || set -- '' '' ''
+    FM_TASKS_AXI_ARCHIVE_VIEW_CHAINED_EXIT=${3:-}
+  fi
+  trap fm_tasks_axi_archive_view_exit EXIT
 }
 
 # The current staged view of <archive-file>, in FM_TASKS_AXI_ARCHIVE_VIEW.
@@ -336,6 +389,7 @@ fm_tasks_axi_archive_view() {  # <archive-file>
   fi
   FM_TASKS_AXI_ARCHIVE_VIEW=$view
   FM_TASKS_AXI_ARCHIVE_VIEW_KEY=$key
+  fm_tasks_axi_archive_view_arm_release
   return 0
 }
 

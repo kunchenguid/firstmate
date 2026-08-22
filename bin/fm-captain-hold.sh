@@ -169,9 +169,6 @@ captain_hold_cleanup() {
     fm_lock_release "$CAPTAIN_META_LOCK" || true
     CAPTAIN_META_LOCK_HELD=0
   fi
-  # The archive read stages one copy of the archive per process; this is where it
-  # goes away, so no command here can leave one behind.
-  fm_tasks_axi_archive_view_release
 }
 trap captain_hold_cleanup EXIT
 
@@ -910,23 +907,29 @@ command_answers() {
     # trimmed out of the backlog resolves here like any other.
     resolve_rc=0
     resolve_and_load "$origin" "$key" || resolve_rc=$?
+    # These three name RESOLVED_ID, not the delivered key: for a legacy key the
+    # id that actually reached the archive is the composed identity, and naming
+    # the bare key would send a reader hunting a row nothing ever archived.
     if [ "$resolve_rc" -eq 2 ]; then
-      printf 'skipped: %s (archived in %s but that record could not be read)\n' "$key" "$ARCHIVE_FILE"
+      printf 'skipped: %s (archived in %s but that record could not be read)\n' \
+        "$RESOLVED_ID" "$ARCHIVE_FILE"
       skipped=$((skipped + 1))
       continue
     fi
     if [ "$resolve_rc" -eq 3 ]; then
       printf 'skipped: %s (archived in %s but no readable copy of that archive could be staged)\n' \
-        "$key" "$ARCHIVE_FILE"
+        "$RESOLVED_ID" "$ARCHIVE_FILE"
       skipped=$((skipped + 1))
       continue
     fi
     if [ "$resolve_rc" -eq 4 ]; then
       printf 'skipped: %s (%s exists but is not a readable regular file, so the archive could not be searched)\n' \
-        "$key" "$ARCHIVE_FILE"
+        "$RESOLVED_ID" "$ARCHIVE_FILE"
       skipped=$((skipped + 1))
       continue
     fi
+    # The genuine miss keeps the key: no identity resolved, so there is none to
+    # name, and the key is what the channel has to correct.
     if [ "$resolve_rc" -ne 0 ]; then
       printf 'skipped: %s (no captain-held task with that id in %s or %s)\n' \
         "$key" "$BACKLOG_FILE" "$ARCHIVE_FILE"
