@@ -24,9 +24,10 @@
 # Uncommitted changes are never landed.
 # Landing is not the only question: a pooled copy can hold landed work and still
 # belong to somebody else. A project that published a `check:worktree-custody`
-# script is asked for that verdict after the landed check and before anything
-# destructive, and its exit 1 refuses cleanup (docs/configuration.md "Worktree
-# pools"; opt-in and runner mechanics in bin/fm-project-script-lib.sh).
+# script is asked for that verdict from an authenticated snapshot of the
+# canonical clone after the landed check and before anything destructive, and
+# its nonzero exit refuses cleanup (docs/configuration.md "Worktree pools";
+# opt-in and runner mechanics in bin/fm-project-script-lib.sh).
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -1227,7 +1228,7 @@ validate_worktree_teardown_safety() {
 # second task, or one whose branch was advanced from another checkout, passes
 # the first and fails the second. Only the project knows how to read its own
 # working copy, so a project may publish that verdict as a
-# `check:worktree-custody` script and firstmate refuses on its exit 1.
+# `check:worktree-custody` script and firstmate refuses on its nonzero exit.
 #
 # Opt-in by presence, per bin/fm-project-script-lib.sh: a project that published
 # no such script tears down exactly as before. A project that DID publish one
@@ -1253,17 +1254,21 @@ validate_worktree_custody() {  # <worktree> <project>
      && [ "$wt_declared" = "$FM_PROJECT_SCRIPT_ABSENT" ]; then
     return 0
   fi
-  case "$CUSTODY_CHECK_TIMEOUT" in
-    ''|*[!0-9]*|0)
-      echo "REFUSED: $CUSTODY_CHECK_SCRIPT requires a positive integer timeout, not '$CUSTODY_CHECK_TIMEOUT'." >&2
-      echo "Set FM_TEARDOWN_CUSTODY_TIMEOUT correctly before retrying." >&2
-      return 1
-      ;;
-  esac
-  out=$(fm_project_script_run "$wt" "$CUSTODY_CHECK_SCRIPT" "$CUSTODY_CHECK_TIMEOUT" 2>&1) || rc=$?
+  if ! fm_project_script_timeout_valid "$CUSTODY_CHECK_TIMEOUT"; then
+    echo "REFUSED: $CUSTODY_CHECK_SCRIPT requires a positive integer timeout, not '$CUSTODY_CHECK_TIMEOUT'." >&2
+    echo "Set FM_TEARDOWN_CUSTODY_TIMEOUT correctly before retrying." >&2
+    return 1
+  fi
+  out=$(fm_project_script_run_canonical_head "$project" "$CUSTODY_CHECK_SCRIPT" \
+    "$CUSTODY_CHECK_TIMEOUT" --worktree "$wt" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] && return 0
+  if [ "$rc" -eq "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE" ]; then
+    echo "REFUSED: cannot authenticate and execute $CUSTODY_CHECK_SCRIPT from canonical project $project." >&2
+    echo "Restore its published HEAD check before retrying." >&2
+    return 1
+  fi
   if [ "$rc" -eq 127 ]; then
-    echo "REFUSED: worktree $wt publishes a $CUSTODY_CHECK_SCRIPT check but $(fm_project_script_manager "$wt") is unavailable to run it." >&2
+    echo "REFUSED: canonical project $project publishes a $CUSTODY_CHECK_SCRIPT check but $(fm_project_script_manager "$project") is unavailable to run it." >&2
     echo "Install it before retrying." >&2
     return 1
   fi

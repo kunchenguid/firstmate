@@ -30,6 +30,7 @@ FM_PROJECT_SCRIPT_DECLARED=0
 FM_PROJECT_SCRIPT_ABSENT=1
 FM_PROJECT_SCRIPT_UNCONFIRMED=2
 FM_PROJECT_SCRIPT_INVALID_TIMEOUT=125
+FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE=126
 
 fm_project_manifest_script_verdict() {  # <script>
   node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(0, "utf8")); process.stdout.write(p.scripts && Object.prototype.hasOwnProperty.call(p.scripts, process.argv[1]) ? "declared" : "absent");' \
@@ -112,15 +113,22 @@ fm_project_script_manager() {  # <dir>
   fi
 }
 
+fm_project_script_timeout_valid() {  # <seconds>
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *[1-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Run <dir>'s <script> with <timeout> seconds and any extra arguments,
 # preserving its stdout, stderr, and exit status. Exit 127 means the selected
 # package manager is not installed, which no caller may read as a verdict.
 fm_project_script_run() {  # <dir> <script> <timeout> [args...]
   local dir=$1 script=$2 timeout_secs=$3 manager
   shift 3
-  case "$timeout_secs" in
-    ''|*[!0-9]*|0) return "$FM_PROJECT_SCRIPT_INVALID_TIMEOUT" ;;
-  esac
+  fm_project_script_timeout_valid "$timeout_secs" \
+    || return "$FM_PROJECT_SCRIPT_INVALID_TIMEOUT"
   manager=$(fm_project_script_manager "$dir")
   command -v "$manager" >/dev/null 2>&1 || return 127
   local -a argv
@@ -132,3 +140,40 @@ fm_project_script_run() {  # <dir> <script> <timeout> [args...]
   fi
   ( cd "$dir" && fm_run_timed "$timeout_secs" "${argv[@]}" )
 }
+
+fm_project_script_run_canonical_head() (  # <dir> <script> <timeout> [args...]
+  local dir=$1 script=$2 timeout_secs=$3 head manifest verdict git_dir tmp_root archive source rc=0
+  shift 3
+  fm_project_script_timeout_valid "$timeout_secs" \
+    || return "$FM_PROJECT_SCRIPT_INVALID_TIMEOUT"
+  [ -d "$dir" ] || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  head=$(git -C "$dir" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
+    || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  manifest=$(git -C "$dir" show "$head:package.json" 2>/dev/null) \
+    || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  verdict=$(printf '%s' "$manifest" | fm_project_manifest_script_verdict "$script" 2>/dev/null) \
+    || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  [ "$verdict" = declared ] || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  command -v tar >/dev/null 2>&1 || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  git_dir=$(git -C "$dir" rev-parse --absolute-git-dir 2>/dev/null) \
+    || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  [ -d "$git_dir" ] || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  tmp_root=$(mktemp -d "$git_dir/fm-project-script.XXXXXX") \
+    || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  trap 'rm -rf -- "$tmp_root"' EXIT
+  trap 'exit "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"' HUP INT TERM
+  archive="$tmp_root/source.tar"
+  source="$tmp_root/source"
+  mkdir "$source" || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  git -C "$dir" archive --format=tar --output="$archive" "$head" 2>/dev/null \
+    || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  tar -xf "$archive" -C "$source" 2>/dev/null \
+    || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  rm -f -- "$archive" || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  if [ -d "$dir/node_modules" ] && [ ! -e "$source/node_modules" ]; then
+    ln -s "$dir/node_modules" "$source/node_modules" \
+      || return "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE"
+  fi
+  fm_project_script_run "$source" "$script" "$timeout_secs" "$@" || rc=$?
+  return "$rc"
+)

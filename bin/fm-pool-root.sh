@@ -131,7 +131,7 @@ write_root() {  # <toml> <root>
 # Keep the clone's own status clean: the file is machine-local configuration,
 # never project content.
 exclude_from_git() {  # <project> <relative-path>
-  local project=$1 rel=$2 excl grep_status
+  local project=$1 rel=$2 excl grep_status backup='' had_exclude=0
   excl=$(git -C "$project" rev-parse --git-path info/exclude 2>/dev/null) || return 1
   [ -n "$excl" ] || return 1
   case "$excl" in
@@ -144,14 +144,46 @@ exclude_from_git() {  # <project> <relative-path>
     grep -qxF "$rel" "$excl" 2>/dev/null
     grep_status=$?
     case "$grep_status" in
-      0) ;;
-      1) printf '%s\n' "$rel" >> "$excl" || return 1 ;;
+      0)
+        git -C "$project" check-ignore -q -- "$rel" 2>/dev/null
+        return $?
+        ;;
+      1)
+        backup=$(mktemp "$(dirname "$excl")/.fm-git-exclude.XXXXXX") || return 1
+        cp -p -- "$excl" "$backup" || { rm -f -- "$backup"; return 1; }
+        had_exclude=1
+        printf '%s\n' "$rel" >> "$excl" || {
+          mv -f -- "$backup" "$excl" 2>/dev/null || return 1
+          return 1
+        }
+        ;;
       *) return 1 ;;
     esac
   else
-    printf '%s\n' "$rel" > "$excl" || return 1
+    printf '%s\n' "$rel" > "$excl" || { rm -f -- "$excl"; return 1; }
   fi
-  git -C "$project" check-ignore -q -- "$rel" 2>/dev/null
+  if git -C "$project" check-ignore -q -- "$rel" 2>/dev/null; then
+    if [ -n "$backup" ] && ! rm -f -- "$backup"; then
+      mv -f -- "$backup" "$excl" 2>/dev/null || true
+      return 1
+    fi
+    return 0
+  fi
+  if [ "$had_exclude" = 1 ]; then
+    mv -f -- "$backup" "$excl" 2>/dev/null || return 1
+  else
+    rm -f -- "$excl" 2>/dev/null || return 1
+  fi
+  return 1
+}
+
+restore_toml() {  # <toml> <backup> <had-file>
+  local toml=$1 backup=$2 had_file=$3
+  if [ "$had_file" = 1 ]; then
+    mv -f -- "$backup" "$toml"
+  else
+    rm -f -- "$toml"
+  fi
 }
 
 case "${1:-}" in
@@ -170,9 +202,16 @@ esac
 PROJECT=$1
 [ -d "$PROJECT" ] || die "project directory '$PROJECT' does not exist"
 PROJECT=$(cd "$PROJECT" && pwd -P) || die "cannot resolve project directory '$1'"
+PROJECT_GIT_DIR=$(git -C "$PROJECT" rev-parse --absolute-git-dir 2>/dev/null) \
+  || die "project directory '$PROJECT' is not an available Git repository"
+[ -d "$PROJECT_GIT_DIR" ] \
+  || die "project directory '$PROJECT' has no available Git directory"
 
 ROOT_VALUE=$(pool_root) || exit 1
 TOML="$PROJECT/treehouse.toml"
+TOML_BACKUP=''
+TOML_HAD_FILE=0
+TOML_CHANGED=0
 
 if git -C "$PROJECT" ls-files --error-unmatch treehouse.toml >/dev/null 2>&1; then
   die "project '$PROJECT' tracks treehouse.toml, so this home cannot claim its own worktree pool without changing project content. Untrack that file, then spawn again"
@@ -189,11 +228,36 @@ mkdir -p "$ROOT_VALUE" || die "could not create this home's pool root '$ROOT_VAL
 ROOT_VALUE=$(cd "$ROOT_VALUE" && pwd -P) || die "could not resolve this home's pool root"
 
 if [ "$(configured_root "$TOML")" != "$ROOT_VALUE" ]; then
-  write_root "$TOML" "$ROOT_VALUE" || die "could not record this home's pool root in '$TOML'"
+  if [ -f "$TOML" ]; then
+    TOML_BACKUP=$(mktemp "$PROJECT_GIT_DIR/fm-treehouse-rollback.XXXXXX") \
+      || die "could not preserve '$TOML' before configuring this home's pool"
+    cp -p -- "$TOML" "$TOML_BACKUP" || {
+      rm -f -- "$TOML_BACKUP"
+      die "could not preserve '$TOML' before configuring this home's pool"
+    }
+    TOML_HAD_FILE=1
+  fi
+  if ! write_root "$TOML" "$ROOT_VALUE"; then
+    restore_toml "$TOML" "$TOML_BACKUP" "$TOML_HAD_FILE" \
+      || die "could not restore '$TOML' after its pool-root write failed"
+    die "could not record this home's pool root in '$TOML'"
+  fi
+  TOML_CHANGED=1
 fi
-[ "$(configured_root "$TOML")" = "$ROOT_VALUE" ] \
-  || die "could not verify this home's pool root in '$TOML'"
-exclude_from_git "$PROJECT" treehouse.toml \
-  || die "could not exclude treehouse.toml from project '$PROJECT' or verify that Git ignores it"
+if [ "$(configured_root "$TOML")" != "$ROOT_VALUE" ]; then
+  [ "$TOML_CHANGED" = 0 ] \
+    || restore_toml "$TOML" "$TOML_BACKUP" "$TOML_HAD_FILE" \
+    || die "could not restore '$TOML' after verification failed"
+  die "could not verify this home's pool root in '$TOML'"
+fi
+if ! exclude_from_git "$PROJECT" treehouse.toml; then
+  [ "$TOML_CHANGED" = 0 ] \
+    || restore_toml "$TOML" "$TOML_BACKUP" "$TOML_HAD_FILE" \
+    || die "could not restore '$TOML' after Git exclusion failed"
+  die "could not exclude treehouse.toml from project '$PROJECT' or verify that Git ignores it"
+fi
+if [ -n "$TOML_BACKUP" ]; then
+  rm -f -- "$TOML_BACKUP" || die "could not remove the completed rollback snapshot for '$TOML'"
+fi
 
 printf '%s\n' "$ROOT_VALUE"

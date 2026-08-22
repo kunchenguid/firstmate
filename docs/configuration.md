@@ -223,7 +223,9 @@ This one is capacity rather than safety, so a release that fails or cannot be co
 `FM_SPAWN_RELEASE_DELIVERED_TIMEOUT` (default 60 seconds) bounds it.
 
 A project may also publish its own custody verdict as a `check:worktree-custody` script in its `package.json`, run with the package manager its lockfile selects.
-`bin/fm-teardown.sh` then runs that check in the worktree after its landed-work verdict and refuses cleanup when the check exits non-zero, which covers the copies a landed-work test cannot judge: one handed to a second owner, or one whose branch was advanced from another checkout.
+`bin/fm-teardown.sh` then runs the version committed at the canonical clone's `HEAD` from an authenticated Git snapshot, passing `--worktree <absolute-path>` for the copy being judged, after its landed-work verdict and before any destructive operation.
+The mutable code in that protected copy is never trusted to authorize its own return, and an unavailable or unauthenticated canonical check refuses cleanup.
+A non-zero verdict also refuses cleanup, which covers the copies a landed-work test cannot judge: one handed to a second owner, or one whose branch was advanced from another checkout.
 A project that publishes no such script is unaffected.
 `FM_TEARDOWN_CUSTODY_TIMEOUT` (default 120 seconds) bounds that run.
 

@@ -13,8 +13,9 @@
 #       into bin/fm-spawn.sh before the slot is acquired);
 #   (b) a spawn refuses a copy another task in this home already claims
 #       (bin/fm-spawn.sh), before the base refresh touches it;
-#   (c) cleanup refuses when the project's own custody check reports the copy
-#       is not this task's to discard (bin/fm-teardown.sh);
+#   (c) cleanup runs the canonical Git-authenticated custody check against the
+#       copy and refuses when it is not this task's to discard
+#       (bin/fm-teardown.sh);
 #   (d) a spawn asks the project to release its delivered copies before leasing,
 #       so a pool exhausted by copies nobody handed back does not block dispatch
 #       (bin/fm-spawn.sh) - capacity, so a failure warns and the spawn continues.
@@ -41,6 +42,14 @@ pool_root_for_home() {  # <home> <base> <project>
 
 configured_root_of() {  # <clone>
   sed -n 's/^root[[:space:]]*=[[:space:]]*"\(.*\)"$/\1/p' "$1/treehouse.toml" | head -1
+}
+
+file_mode() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
 }
 
 make_two_homes_one_project() {  # <name>
@@ -181,10 +190,33 @@ test_pool_root_refuses_when_git_exclude_cannot_be_written() {
   chmod 0644 "$clone/.git/info/exclude"
   expect_code 1 "$status" "pool configuration should refuse when info/exclude cannot be written"
   assert_contains "$out" "could not exclude treehouse.toml" "the failed Git exclusion was not reported"
+  assert_absent "$clone/treehouse.toml" "a failed Git exclusion left the new local config behind"
   if git -C "$clone" check-ignore -q -- treehouse.toml; then
     fail "the refused configuration unexpectedly left treehouse.toml ignored"
   fi
-  pass "pool configuration refuses when Git exclusion cannot be established"
+  pass "failed Git exclusion removes a newly created pool config"
+}
+
+test_pool_root_restores_existing_config_when_git_exclude_fails() {
+  local case_dir clone out status before_bytes before_mode
+  case_dir=$(make_two_homes_one_project restore-config-after-exclude)
+  clone="$case_dir/homeA/project"
+  printf 'max_trees = 7\nroot = "/shared/original"\n' > "$clone/treehouse.toml"
+  chmod 0600 "$clone/treehouse.toml"
+  before_bytes=$(cksum < "$clone/treehouse.toml")
+  before_mode=$(file_mode "$clone/treehouse.toml")
+  chmod 0444 "$clone/.git/info/exclude"
+
+  out=$(pool_root_for_home "$case_dir/homeA" "$case_dir/base" "$clone" 2>&1)
+  status=$?
+  chmod 0644 "$clone/.git/info/exclude"
+  expect_code 1 "$status" "pool configuration should refuse when an existing config cannot be excluded"
+  assert_contains "$out" "could not exclude treehouse.toml" "the existing-config exclusion failure was not reported"
+  [ "$(cksum < "$clone/treehouse.toml")" = "$before_bytes" ] \
+    || fail "the failed exclusion did not restore the previous config bytes"
+  [ "$(file_mode "$clone/treehouse.toml")" = "$before_mode" ] \
+    || fail "the failed exclusion did not restore the previous config mode"
+  pass "failed Git exclusion restores existing config bytes and mode"
 }
 
 # The vendor fact the class rests on: treehouse hands two clones of one origin
@@ -505,20 +537,20 @@ test_spawn_bounds_a_hanging_release_step_without_external_timeout() {
   pass "a hanging release step is bounded without timeout or gtimeout and spawn continues"
 }
 
-test_spawn_rejects_a_nonpositive_release_timeout() {
+test_spawn_rejects_a_zero_equivalent_release_timeout() {
   local case_dir id out status
   id='custody-release-zero-timeout-r1'
   case_dir=$(make_spawn_case spawn-release-zero-timeout "$id")
   add_release_step "$case_dir" 0
 
-  out=$(FM_SPAWN_RELEASE_DELIVERED_TIMEOUT=0 \
+  out=$(FM_SPAWN_RELEASE_DELIVERED_TIMEOUT=00 \
     run_spawn_case "$case_dir" "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "invalid housekeeping configuration must not block a dispatch: $out"
-  assert_contains "$out" "exit 125" "a zero timeout was not rejected"
+  assert_contains "$out" "exit 125" "a zero-equivalent timeout was not rejected"
   assert_absent "$case_dir/release.log" "the release step ran with a disabled deadline"
   assert_contains "$out" "spawned $id" "the spawn did not continue after rejecting the zero timeout"
-  pass "a nonpositive release timeout is rejected without blocking spawn"
+  pass "a zero-equivalent release timeout is rejected without blocking spawn"
 }
 
 # --- (c) cleanup refuses when the project says the copy is not ours ----------
@@ -555,17 +587,20 @@ make_teardown_case() {  # <name>
 add_custody_check() {  # <case-dir> <exit>
   local case_dir=$1 exit_code=$2
   printf '{\n  "name": "fixture",\n  "scripts": {\n    "check:worktree-custody": "node custody.js"\n  }\n}\n' \
-    > "$case_dir/wt/package.json"
-  # Landed, so the existing landed-work verdict passes and custody is what decides.
-  git -C "$case_dir/wt" add package.json
-  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -qm "publish the custody check"
+    > "$case_dir/project/package.json"
+  printf '%s\n' "$exit_code" > "$case_dir/project/custody.verdict"
+  git -C "$case_dir/project" add package.json custody.verdict
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t commit -qm "publish the custody check"
+  git -C "$case_dir/project" push -q origin main
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t merge -q main
   git -C "$case_dir/wt" push -q origin fm/task-c1
-  git -C "$case_dir/project" fetch -q origin
   cat > "$case_dir/fakebin/npm" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = run ] && [ "\${2:-}" = check:worktree-custody ]; then
+  printf '%s\n' "\$PWD" > "$case_dir/custody-run-dir.log"
+  printf '%s\n' "\$*" > "$case_dir/custody-args.log"
   printf 'pushed-not-merged: this copy is still delivering\n'
-  exit $exit_code
+  exit "\$(cat "\$PWD/custody.verdict")"
 fi
 exit 0
 SH
@@ -598,9 +633,10 @@ test_teardown_refuses_a_red_custody_verdict() {
 }
 
 test_forced_teardown_still_refuses_a_red_custody_verdict() {
-  local case_dir out status
+  local case_dir out status run_dir
   case_dir=$(make_teardown_case teardown-custody-force-red)
   add_custody_check "$case_dir" 1
+  printf '0\n' > "$case_dir/wt/custody.verdict"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
@@ -615,7 +651,37 @@ SH
   assert_present "$case_dir/state/task-c1.meta" "forced custody refusal removed the task record"
   assert_absent "$case_dir/treehouse.log" "forced custody refusal returned the working copy"
   [ -d "$case_dir/wt" ] || fail "forced custody refusal removed the working copy"
-  pass "--force discards own work but never bypasses a red custody verdict"
+  run_dir=$(cat "$case_dir/custody-run-dir.log")
+  [ "$run_dir" != "$case_dir/wt" ] || fail "forced custody trusted the protected worktree's mutable check"
+  [ "$(cat "$case_dir/custody-args.log")" = "run check:worktree-custody -- --worktree $case_dir/wt" ] \
+    || fail "the canonical custody check did not receive the protected worktree path"
+  assert_absent "$run_dir" "the authenticated custody snapshot was not cleaned up"
+  pass "--force trusts canonical custody code, never the protected copy"
+}
+
+test_teardown_refuses_a_worktree_only_custody_check() {
+  local case_dir out status
+  case_dir=$(make_teardown_case teardown-custody-worktree-only)
+  printf '{\n  "name": "fixture",\n  "scripts": {\n    "check:worktree-custody": "node custody.js"\n  }\n}\n' \
+    > "$case_dir/wt/package.json"
+  git -C "$case_dir/wt" add package.json
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -qm "publish only in mutable worktree"
+  git -C "$case_dir/wt" push -q origin fm/task-c1
+  cat > "$case_dir/fakebin/npm" <<SH
+#!/usr/bin/env bash
+touch "$case_dir/unauthenticated-check-ran"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/npm"
+
+  out=$(run_teardown_case "$case_dir" --force)
+  status=$?
+  expect_code 1 "$status" "a worktree-only custody check must not authorize destructive cleanup"
+  assert_contains "$out" "cannot authenticate and execute" "the unauthenticated custody source was not reported"
+  assert_absent "$case_dir/unauthenticated-check-ran" "teardown executed code from the protected worktree"
+  assert_present "$case_dir/state/task-c1.meta" "unauthenticated custody removed the task record"
+  [ -d "$case_dir/wt" ] || fail "unauthenticated custody removed the protected working copy"
+  pass "a worktree-only custody check cannot authorize teardown"
 }
 
 test_forced_secondmate_cleanup_preflights_child_custody() {
@@ -948,6 +1014,7 @@ test_pool_root_refuses_a_tracked_config
 test_pool_root_refuses_a_nonregular_config
 test_pool_root_verifies_the_written_config
 test_pool_root_refuses_when_git_exclude_cannot_be_written
+test_pool_root_restores_existing_config_when_git_exclude_fails
 test_real_treehouse_stops_sharing_a_pool_between_homes
 test_spawn_refuses_a_copy_another_task_claims
 test_spawn_refuses_ambiguous_worktree_metadata
@@ -958,9 +1025,10 @@ test_spawn_skips_projects_that_publish_no_release_step
 test_spawn_ignores_an_untracked_release_manifest
 test_spawn_continues_when_the_release_step_fails
 test_spawn_bounds_a_hanging_release_step_without_external_timeout
-test_spawn_rejects_a_nonpositive_release_timeout
+test_spawn_rejects_a_zero_equivalent_release_timeout
 test_teardown_refuses_a_red_custody_verdict
 test_forced_teardown_still_refuses_a_red_custody_verdict
+test_teardown_refuses_a_worktree_only_custody_check
 test_forced_secondmate_cleanup_preflights_child_custody
 test_teardown_holds_task_set_lock_through_destructive_return
 test_teardown_proceeds_on_a_green_custody_verdict
