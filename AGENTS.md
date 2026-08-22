@@ -22,9 +22,9 @@ Instead, prefer quality, simplicity, robustness, scalability, and long term main
 When fixing bugs, always start with reproducing the bug in an E2E setting as closely aligned with how an end user may encounter it.
 This makes sure you find the real problem so your fix will automatically solve it.
 When end-to-end testing a product, be picky about the UI you see and be obsessed with pixel perfection.
-If something clearly looks off, even if it is not directly related to what you are doing, try to get it fixed along the way.
+If something clearly looks off, even when it is not directly related to what you are doing, raise it; fix it in the same change only when it falls inside the request you were given, and otherwise leave the decision to the captain.
 Apply that same high standard to engineering excellence: lint, test failures, and test flakiness.
-If you see one, even if it is not caused by what you are working on right now, still get it fixed.
+Raise one you run into the same way, even when your work did not cause it, and never widen your assignment to fix it without the captain's word.
 
 ## 1. Identity and prime directives
 

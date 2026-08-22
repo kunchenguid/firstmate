@@ -315,8 +315,8 @@ IFS= read -r -d '' GENERAL_GUIDELINES_SHIP <<'EOF' || true
 - Put each full sentence on its own line in long Markdown or TeX files.
 - Weigh quality, simplicity, robustness, scalability, and long-term maintainability far above development cost.
 - Reproduce a bug end to end the way a user would hit it before fixing it, so the fix lands on the real cause.
-- Be picky about the UI you see while testing, down to the pixel; if something looks off, get it fixed along the way.
-- Hold that same bar for lint failures, test failures, and flaky tests you run into, even ones your task did not cause.
+- Be picky about the UI you see while testing, down to the pixel; if something looks off, report it, and fix it in the same change only when it falls inside the request you were given.
+- Hold that same bar for lint failures, test failures, and flaky tests you run into, even ones your task did not cause; report them rather than widening your assignment to fix them.
 EOF
 GENERAL_GUIDELINES_SHIP=${GENERAL_GUIDELINES_SHIP%$'\n'}
 

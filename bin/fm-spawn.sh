@@ -1742,11 +1742,22 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 # project at all. Absence is detected positively by asking git for origin's
 # URL, never by reading a failed fetch as "no origin".
 #
+# That concession is granted only to a project the captain REGISTERED as
+# local-only in data/projects.md. A remote-backed project whose pool lost its
+# origin, by a damaged git config or a removed remote, looks identical to git
+# and would otherwise launch a worker from a local tip nobody verified, which
+# is the stale base this function exists to prevent. The registry is the right
+# authority for that question and the task's --mode is not: --mode says how
+# this one task ships, while the registered posture says whether the project
+# is supposed to have a remote at all. An unregistered project resolves to the
+# no-mistakes default, so it is refused too, and the refusal names the
+# registration that would allow it.
+#
 # Both paths keep the ordering below: the cleanliness refusal runs before any
 # reset, so a pooled worktree holding uncommitted work is refused rather than
 # discarded. Nothing here is ever forced or stashed.
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 default target expected actual status posture proj_name
   if git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
     if ! git -C "$worktree" fetch --quiet origin; then
       echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -1766,6 +1777,12 @@ freshen_spawn_worktree_base() {  # <worktree>
       return 1
     fi
   else
+    proj_name=$(basename "$PROJ_ABS")
+    posture=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$proj_name" 2>/dev/null | cut -d' ' -f1) || posture=
+    if [ "$posture" != local-only ]; then
+      echo "error: pooled worktree '$worktree' has no origin, but $proj_name is registered as ${posture:-no-mistakes}, which is remote-backed; refusing to launch from a local base no remote confirmed - restore that clone's origin, or register the project as local-only if it really has no remote" >&2
+      return 1
+    fi
     default=$(default_branch "$worktree") || {
       echo "error: could not determine the default branch of pooled worktree '$worktree', which has no origin to consult; refusing to launch from an arbitrary base" >&2
       return 1

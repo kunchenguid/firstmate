@@ -230,6 +230,14 @@ fm_project_origin_anchored_local_path() { # <anchored origin>; prints the filesy
 # for both that caller (bin/fm-merge-local.sh) and the home seeding that anchors
 # an origin it seeds from (normalize_origin_url in bin/fm-home-seed.sh): a colon
 # only makes an origin scp-like when it precedes the first slash.
+#
+# That last rule is git's own (url_is_local_not_ssh in connect.c), deliberately
+# copied rather than improved on, because the answer has to match what git will
+# actually do with the value. So a relative spelling that carries a colon, such
+# as "../work:notes" or "./work:notes", is a path here exactly as it is to git,
+# while a bare "host:path" with no earlier slash is scp-like to both even when a
+# folder of that literal name happens to sit beside the clone - git would open an
+# ssh connection for it, so no caller may follow it as a folder.
 fm_project_origin_is_path_form() { # <url>; 0 when the origin names a filesystem path
   local url=${1-} prefix
   case $url in

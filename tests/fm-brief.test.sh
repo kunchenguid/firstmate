@@ -432,9 +432,9 @@ prefer quality, simplicity, robustness, scalability, and long term maintainabili
 reproducing the bug in an E2E setting|Reproduce a bug end to end the way a user would hit it|Reproduce a bug end to end the way a user would hit it
 find the real problem|so the fix lands on the real cause|so your findings rest on the real cause
 be picky about the UI you see and be obsessed with pixel perfection|Be picky about the UI you see while testing, down to the pixel|
-try to get it fixed along the way|if something looks off, get it fixed along the way|
+fix it in the same change only when it falls inside the request you were given|report it, and fix it in the same change only when it falls inside the request you were given|
 lint, test failures, and test flakiness|lint failures, test failures, and flaky tests|
-still get it fixed|even ones your task did not cause|
+never widen your assignment to fix it without the captain's word|report them rather than widening your assignment to fix them|
 MAP
 }
 

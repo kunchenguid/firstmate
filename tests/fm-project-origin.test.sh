@@ -124,10 +124,19 @@ path_form '../JobSearch'
 path_form '~/JobSearch'
 path_form 'JobSearch'
 path_form './my:folder/JobSearch'
+path_form '../work:notes'
+path_form './work:notes'
+# shellcheck disable=SC2088 # The tilde is a literal prefix in a value read from git config, not a path this test writes, so it is classified unexpanded.
+path_form '~/work:notes'
 not_path_form 'https://example.com/owner/app.git'
 not_path_form 'ssh://git@example.com/owner/app.git'
 not_path_form 'git@example.com:owner/app.git'
 not_path_form 'example.com:owner/app.git'
+# No slash precedes the colon, so git opens an ssh connection to host "work" for
+# this value rather than reading a folder, even when ./work/notes exists beside
+# the clone. Following it as a folder would land the change somewhere git itself
+# would never fetch from.
+not_path_form 'work:notes'
 not_path_form 'ext::sh -c cat'
 not_path_form ''
 pass "path-shaped origin spellings are told apart from origins on another host"

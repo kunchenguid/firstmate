@@ -9,6 +9,9 @@
 # A local-only project's clone can have no origin at all, so they also prove
 # such a clone freshens from its own default-branch tip and launches, without
 # weakening either the unreachable-origin or the dirty-worktree refusal.
+# That concession belongs to a REGISTERED local-only project alone, so they also
+# prove a remote-backed project whose pool lost its origin is refused rather than
+# launched from a local tip no remote confirmed.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -37,6 +40,13 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# fm-spawn resolves a project's REGISTERED posture from data/projects.md, and the
+# origin-less base refresh is granted to a local-only registration alone, so every
+# fixture states the posture it means instead of leaning on the unregistered default.
+register_project() {  # <home> <project-name> <mode>
+  printf -- '- %s [%s] - fixture project (added 2026-08-22)\n' "$2" "$3" > "$1/data/projects.md"
+}
+
 make_case() {
   local name=$1 id=$2 default=${3:-main} case_dir home project origin pool publisher fakebin initial
   case_dir="$TMP_ROOT/$name"
@@ -51,6 +61,7 @@ make_case() {
   printf 'codex\n' > "$home/config/crew-harness"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
+  register_project "$home" project no-mistakes
 
   git init --quiet -b "$default" "$project"
   printf 'base\n' > "$project/README.md"
@@ -84,6 +95,7 @@ make_local_only_case() {
   printf 'codex\n' > "$home/config/crew-harness"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
+  register_project "$home" project local-only
 
   git init --quiet -b "$default" "$project"
   printf 'base\n' > "$project/README.md"
@@ -311,6 +323,33 @@ test_origin_less_dirty_pool_refuses_without_discarding_work() {
   pass "an origin-less pooled worktree with uncommitted work is refused without discarding it"
 }
 
+# A remote-backed project whose pool lost its origin is indistinguishable from a
+# local-only clone by git alone, so the registered posture is what tells them
+# apart. Without that check the worker would launch from whatever the local
+# default branch happens to hold, which is exactly the stale base this guard
+# exists to prevent.
+test_origin_less_pool_of_remote_backed_project_is_refused() {
+  local rec id out status before
+  id='pool-damaged-origin-r7'
+  rec=$(make_case damaged-origin "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" remote remove origin
+  [ -z "$(git -C "$POOL_DIR" remote)" ] || fail "fixture did not remove the pool's origin"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded from a remote-backed pool that lost its origin"
+  assert_contains "$out" "has no origin, but project is registered as no-mistakes" \
+    "spawn did not clearly refuse an origin-less pool for a remote-backed project"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing an origin-less remote-backed pool"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed damaged-origin refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "a remote-backed project whose pool lost its origin is refused, not launched from a local tip"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
@@ -319,5 +358,6 @@ test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_origin_less_pool_refreshes_from_its_own_default_branch
 test_origin_less_dirty_pool_refuses_without_discarding_work
+test_origin_less_pool_of_remote_backed_project_is_refused
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
