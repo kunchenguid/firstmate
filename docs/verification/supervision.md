@@ -495,6 +495,14 @@ In the third the epoch ledger recorded `epoch=1041 owner_pid=1108506 outcome=arm
 The spread rules out a near-threshold beacon and therefore a threshold-tuning fix: the staleness was genuine at every sample, and the auto-arm healed it within the same second regardless of how stale the beacon had become.
 It also shows the `arming` outcome reaching the ledger while the guard was still reporting the home unclaimed, which is the case the guard's pre-fix outcome filter dropped.
 
+An unrelated firstmate home reported the same defect independently on 2026-08-22, which is what establishes it as structural rather than local to one home or to any load condition there.
+That home saw the banner fire six times in one session and be wrong every time, quoting beacon ages of 168, 422, 697, 1001 and 214 seconds where the ages measured immediately afterwards were 3 to 21 seconds, with the rewake counter advancing across every firing, exactly one monitor pair scoped to that home live, and no failure marker present.
+It reached the same mechanism from its own evidence: the guard samples beacon age and claim status at the turn boundary, before the recovery hook firing on that same boundary has claimed the home, so it reports a state that is already obsolete when the reader sees it.
+It also separated this defect from the wake-queue lock deadlock, because nothing deadlocked and recovery always completed on its own.
+
+The cost that makes this worth fixing is that a false alarm every time makes a genuine failure indistinguishable from the noise, so the fix must not buy quiet by weakening the predicate.
+No arm, no live watcher and no claim still blocks loudly, pinned by the re-block, dead-publisher, X-mode, stale-epoch, and exhausted-budget cases in `tests/fm-turnend-guard.test.sh`.
+
 The portable regression reproduces that window with real concurrent processes rather than fixtures, parking a real auto-arm inside its identity gate behind a `ps` shim and asking the guard for a verdict with the claim as the only evidence on disk.
 
 ```sh
