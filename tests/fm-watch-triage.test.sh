@@ -98,14 +98,16 @@ wait_poll_cycle() {  # <state> <pid> [limit-ticks]
   return 1
 }
 
-# Every wait_for_exit budget in this file is 100 ticks (10s), not because any
-# watcher takes that long to decide, but because fm-watch.sh does bounded
-# startup work before its first poll: a tighter budget reaps the process while
-# it is still starting and reports a spurious "did not surface" failure. A
+# Every wait_for_exit and wait_numeric_file budget in this file is 100 ticks (10s),
+# not because any watcher takes that long to decide, but because fm-watch.sh does
+# bounded startup work before its first poll: a tighter budget reaps the process
+# while it is still starting and reports a spurious "did not surface" failure. A
 # generous budget can only remove that false negative - a watcher that never
-# exits still fails the assertion when the budget runs out.
+# exits still fails the assertion when the budget runs out. That is not
+# theoretical: a 30-tick (3s) budget here reported a spurious timer-repair failure
+# on a host at load average 70, so the default below is the convention too.
 wait_numeric_file() {
-  local file=$1 limit=${2:-30} i=0 value
+  local file=$1 limit=${2:-100} i=0 value
   while [ "$i" -lt "$limit" ]; do
     value=$(cat "$file" 2>/dev/null || true)
     case "$value" in
@@ -163,7 +165,28 @@ record_pi_busy() {  # <state-dir> <id>
     --source pi-ext --event agent-start
 }
 
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+# Stop a watcher subprocess and reclaim it in BOUNDED time. A plain `kill; wait`
+# is not enough here: fm-watch.sh deliberately masks HUP/INT/TERM for the duration
+# of wake() so no wake is ever torn in half, so a watcher signalled mid-wake
+# ignores the TERM and the `wait` never returns - which is how a loaded host turned
+# one test's reap into a wedged run of the whole file rather than a failed
+# assertion. Ask politely first (the signal handler is what lets a watcher unlock
+# and exit cleanly), then fall back to KILL, which nothing can mask, so an
+# unreapable watcher costs one bounded pause and then reports ordinarily.
+reap() {  # <pid> [term-ticks]
+  local pid=$1 limit=${2:-100} i=0
+  kill "$pid" 2>/dev/null || true
+  while [ "$i" -lt "$limit" ]; do
+    if ! is_live_non_zombie "$pid"; then
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
 
 # Arm <task>'s REAL merge poll for <pr-url>, published through the same library
 # bin/fm-pr-check.sh uses, plus the migration markers the watcher's startup scan
@@ -1628,6 +1651,13 @@ test_nonterminal_stale_declaration_after_surface_goes_quiet() {
 # the accepted limit documented at merge_wait_absorbs_alarm and at the loop-top
 # reconciliation, and it is deliberately not bought back with a marker recording which
 # hash was absorbed, because that would cache toward silence.
+# Nor does it show the loop-top throttle retirement: this fixture's declaration is
+# fresh and PAUSE_RESURFACE_SECS is 999, so no reminder ever fires and no throttle
+# marker is ever created here. Asserting its absence would be an assertion that cannot
+# fail. The scenario that reaches the retirement needs the opposite knobs - an aged
+# declaration and a finite window, which would fire the very reminder this test's
+# "was absorbed, printed nothing" assertion forbids - so it is a separate fixture:
+# test_merge_wait_withdrawal_retires_the_reminder_throttle below owns that property.
 test_merge_wait_withdrawn_record_returns_to_aging() {
   local dir state fakebin out drain_out capture_file window key pid pr text
   dir=$(make_case merge-wait-withdrawn); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1660,13 +1690,83 @@ test_merge_wait_withdrawn_record_returns_to_aging() {
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a withdrawn declaration kept its pane quiet"; }
   grep -Fx "stale: $window" "$out" >/dev/null || fail "the released pane did not surface its stale wake"
-  [ ! -e "$state/.merge-wait-resurfaced-$key" ] || fail "the withdrawn declaration kept its reminder throttle"
   [ -s "$state/withdrawn.check.sh" ] || fail "the merge poll did not survive the withdrawal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the released pane failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
     || fail "the released pane's stale was not queued"
   unset FM_FAKE_CREW_STATE
-  pass "a withdrawn declaration is honored at the next alarm attempt, returning its pane to ordinary aging and retiring its markers"
+  pass "a withdrawn declaration is honored at the next alarm attempt, returning its pane to ordinary aging"
+}
+
+# --- withdrawing a declaration retires the reminder throttle it earned ----------
+# The throttle marker (.merge-wait-resurfaced-<key>) is the ONE thing suppression
+# leaves behind, and it is per WINDOW while a declaration is per pull request. So a
+# window that spent its reminder, lost its declaration, and is later declared again -
+# de-admitted then re-armed, without the record ever being rewritten - would inherit a
+# throttle nobody declared under, and its first reminder would be delayed by up to a
+# whole PAUSE_RESURFACE_SECS. The loop-top reconciliation retires the marker the moment
+# the declaration stops holding, which is what this pins.
+# The knobs are the opposite of the withdrawal test above on purpose: the declaration
+# is aged past the window and PAUSE_RESURFACE_SECS is finite, because a throttle that
+# was never created cannot prove it gets retired.
+test_merge_wait_withdrawal_retires_the_reminder_throttle() {
+  local dir state fakebin out capture_file window key pid pr text
+  dir=$(make_case merge-wait-throttle-retired); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-throttle"; pr='https://example.test/group/repo/-/merge_requests/17'
+  text='green, waiting on the maintainer'
+  printf '%s' "$text" > "$capture_file"
+  seed_green_merge_task "$state" throttle "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  declare_merge_wait "$state" throttle || fail "could not declare the fixture merge wait"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/throttle.merge-wait"
+
+  # Phase A: the aged declaration spends its one reminder, so the throttle marker this
+  # test is about genuinely exists. Without this the rest would assert nothing.
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the aged declaration never passed its reminder through"; }
+  grep -F "merge wait" "$out" >/dev/null || fail "the reminder was not a merge-wait reminder: $(cat "$out")"
+  [ -e "$state/.merge-wait-resurfaced-$key" ] \
+    || fail "the reminder recorded no throttle, so this test could prove nothing"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional reminder stop"
+
+  # Phase B: withdraw the declaration. The next poll reconciles the leftover throttle
+  # away, without needing the pane to change and without an alarm having to fire first.
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-merge-wait.sh" clear throttle >/dev/null \
+    || fail "could not withdraw the declared merge wait"
+  : > "$out"
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the released pane stayed quiet after the withdrawal: $(cat "$out")"; }
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "the released pane did not return to ordinary surfacing: $(cat "$out")"
+  [ ! -e "$state/.merge-wait-resurfaced-$key" ] \
+    || fail "the withdrawn declaration kept its reminder throttle"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional released-pane stop"
+
+  # Phase C: the consequence, stated behaviorally. A declaration made again on the same
+  # window is entitled to its own first reminder immediately; a throttle inherited from
+  # the withdrawn one would swallow it for the rest of the window.
+  declare_merge_wait "$state" throttle 'the maintainer still owns this merge' \
+    || fail "could not re-declare the fixture merge wait"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/throttle.merge-wait"
+  rm -f "$state/.stale-$key"
+  : > "$out"
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a re-declaration inherited the withdrawn declaration's throttle and lost its first reminder"; }
+  grep -F "someone else's to make" "$out" >/dev/null \
+    || fail "the re-declaration's first reminder did not pass through: $(cat "$out")"
+  [ -s "$state/throttle.check.sh" ] || fail "the merge poll did not survive any of this"
+  unset FM_FAKE_CREW_STATE
+  pass "withdrawing a declaration retires its reminder throttle, so a later declaration on the same window keeps its own first reminder"
 }
 
 # --- the crew's OWN declared pause outranks a live merge-wait record ------------
@@ -2812,7 +2912,7 @@ test_paused_authoritative_working_preserves_wedge_timer() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "authoritative working state did not start wedge tracking"; }
+  wait_numeric_file "$state/.stale-since-$key" 100 || { reap "$pid"; fail "authoritative working state did not start wedge tracking"; }
   since=$(cat "$state/.stale-since-$key")
   sleep 2
   [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" = "$since" ] \
@@ -3308,7 +3408,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "matching stale suppressor with missing timer did not initialize stale-since"; }
+  wait_numeric_file "$state/.stale-since-$key" 100 || { reap "$pid"; fail "matching stale suppressor with missing timer did not initialize stale-since"; }
   if ! kill -0 "$pid" 2>/dev/null; then
     wait "$pid" 2>/dev/null || true
     fail "watcher exited while repairing a missing stale-since timer: $(cat "$out")"
@@ -3323,7 +3423,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "matching stale suppressor with corrupt timer did not repair stale-since"; }
+  wait_numeric_file "$state/.stale-since-$key" 100 || { reap "$pid"; fail "matching stale suppressor with corrupt timer did not repair stale-since"; }
   since=$(cat "$state/.stale-since-$key" 2>/dev/null || true)
   [ "$since" != "corrupt" ] || { reap "$pid"; fail "corrupt stale-since value was left in place"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "corrupt stale-since repair enqueued a wake"; }
@@ -3536,7 +3636,7 @@ test_timer_repair_drops_a_finished_write_deferral_chain() {
     FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 \
+  wait_numeric_file "$state/.stale-since-$key" 100 \
     || { reap "$pid"; fail "the corrupt idle-window timer was not repaired"; }
   [ ! -e "$state/.writing-since-$key" ] \
     || { reap "$pid"; fail "an idle-window timer repair kept a finished write-deferral chain"; }
@@ -4119,6 +4219,7 @@ test_merge_wait_custom_check_in_the_poll_slot_still_alarms
 test_merge_wait_suppression_does_not_inflate_the_escalation_count
 test_nonterminal_stale_declaration_after_surface_goes_quiet
 test_merge_wait_withdrawn_record_returns_to_aging
+test_merge_wait_withdrawal_retires_the_reminder_throttle
 test_nonterminal_stale_declared_pause_outranks_a_merge_wait_record
 test_nonterminal_stale_declared_pause_first_surface_is_not_absorbed
 test_nonterminal_stale_captain_held_keeps_its_own_wording_over_a_merge_wait

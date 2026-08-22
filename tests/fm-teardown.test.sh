@@ -1326,6 +1326,32 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+# A declared merge wait (bin/fm-merge-wait.sh) is durable on purpose: neither the
+# watcher nor the classifier ever deletes one, because a record that expired on its
+# own would silently return a waiting pull request to wedge aging. Retiring the task
+# is therefore the ONE place it must go, alongside the metadata it is bound to. Left
+# behind, it would outlive both the pull request it names and the poll that covered
+# it, and a later task reusing this id would inherit a wait nobody declared for it.
+test_teardown_retires_a_declared_merge_wait() {
+  local case_dir rc
+  case_dir=$(make_case merge-wait-record)
+  write_meta "$case_dir" local-only ship
+  printf 'pr=https://example.test/group/repo/-/merge_requests/21\ndeclared=1\n' \
+    > "$case_dir/state/task-x1.merge-wait"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merge-wait-record: teardown should complete"
+  assert_absent "$case_dir/state/task-x1.merge-wait" \
+    "merge-wait-record: teardown left the declared merge wait behind"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "merge-wait-record: teardown remained incomplete"
+  pass "teardown retires a task's declared merge-wait record with the rest of its state"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -2600,6 +2626,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_teardown_retires_a_declared_merge_wait
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
