@@ -5,6 +5,17 @@ When injection cannot confirm a submit past `FM_MAX_DEFER_SECS`, `inject_wedge_a
 The active alert is pane-independent because a tmux status-line flash has no cross-backend equivalent and cannot reach an unattended captain reliably.
 The durable marker and tmux flash remain as additional signals.
 
+## Durable diagnostic evidence
+
+`state/.subsuper-inject-wedged` starts with the undelivered age and buffered escalation items.
+After the active-alert stage, the daemon appends the supervisor backend and target plus one paired composer observation: the classifier verdict and the ANSI-stripped screen from the exact capture that produced it.
+If capture or classification cannot complete, the marker says that the evidence was unreadable or the capture failed instead of guessing.
+The evidence read is bounded by `FM_WEDGE_ALARM_TIMEOUT_SECS` and occurs at most once per max-defer window, so a hung pane read cannot delay the alert or wedge the daemon itself.
+
+The captured screen can contain visible terminal text.
+The marker stays in local, gitignored state and is a session-scoped delivery artifact, so inspect it before sharing it outside the home.
+The `/afk` lifecycle clears stale artifacts on a fresh entry and removes the marker after confirmed delivery or normal exit.
+
 ## Channels
 
 `config/wedge-alarm` is local and gitignored.
@@ -23,7 +34,7 @@ This is deliberate because the alarm fires only after a genuine max-defer wedge 
 
 Each channel is best-effort.
 A missing binary or non-zero exit logs a warning and continues to the next channel without crashing the daemon loop.
-Every invocation is process-group bounded by `FM_WEDGE_ALARM_TIMEOUT_SECS`, which defaults to 10 seconds, including `command:`, `osascript`, `herdr`, and the test seam.
+Every notifier and the diagnostic evidence read are process-group bounded by `FM_WEDGE_ALARM_TIMEOUT_SECS`, which defaults to 10 seconds, including `command:`, `osascript`, `herdr`, and the test seam.
 On timeout or daemon shutdown, the notifier process group is terminated and the next configured channel may run.
 AppleScript receives the summary as an argv item rather than interpolated source, so summary text cannot alter the script.
 See [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
@@ -35,5 +46,5 @@ When the daemon is sourced as a library, that seam defaults to `discard`, so a t
 `tests/wake-helpers.sh` replaces it with a recorder when a suite needs to assert channel selection and summary propagation.
 Production leaves the seam unset and uses the configured real channels.
 
-`tests/fm-daemon.test.sh` covers directive parsing, rate limiting, timeout and process-group cleanup, argv-safe dispatch, channel fallback, and safe `command:` summary delivery.
+`tests/fm-daemon.test.sh` covers directive parsing, rate limiting, timeout and process-group cleanup, argv-safe dispatch, channel fallback, safe `command:` summary delivery, alert-before-capture ordering, and the single ANSI-stripped verdict/screen observation.
 [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) records the bounded manual macOS and Herdr channel proof.

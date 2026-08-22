@@ -123,10 +123,10 @@
 #                                   daemon defaults this to "discard" so no test
 #                                   can post a real notification (wedge_alarm_emit
 #                                   and the library-mode guard at the foot).
-#          FM_WEDGE_ALARM_TIMEOUT_SECS seconds allowed for each notifier before
-#                                   its watchdog terminates it and continues to the
-#                                   next channel (default 10; invalid/zero uses the
-#                                   default).
+#          FM_WEDGE_ALARM_TIMEOUT_SECS seconds allowed for each notifier or
+#                                   composer-evidence capture before its watchdog
+#                                   terminates it and continues (default 10;
+#                                   invalid/zero uses the default).
 #          FM_INJECT_CONFIRM_RETRIES Enter-retry attempts on a swallowed Enter
 #                                   (default 3); the digest is typed once, only
 #                                   Enter is retried. Composer-empty detection is
@@ -901,7 +901,7 @@ wedge_alarm_notify() {  # <summary> <marker>
 # is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1
+  local state=$1 age=$2 marker target backend max_defer now notify=1 marker_ready=0
   marker="$state/.subsuper-inject-wedged"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
@@ -915,27 +915,50 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     WEDGE_ALARM_LAST_EPOCH=$now
     log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
   fi
-  {
-    printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-    printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
-    cat "$state/.subsuper-escalations" 2>/dev/null
-  } 2>/dev/null > "$marker" || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
-  # Best-effort status-line flash. tmux's display-message is a client-side OSD
-  # with no herdr equivalent; the log line + durable marker above are already
-  # the primary, backend-independent signal, so a non-tmux backend just skips
-  # this cosmetic extra rather than attempting an unsupported call.
-  if [ "$backend" = tmux ]; then
-    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
+  if : > "$marker" 2>/dev/null; then
+    if chmod 0600 "$marker" 2>/dev/null; then
+      marker_ready=1
+    else
+      log "ERROR: away-mode wedge alarm marker could not be secured: $marker"
+    fi
   fi
-  # Backend-independent active alert. Unlike the tmux flash above (skipped on
+  if [ "$marker_ready" -eq 1 ]; then
+    {
+      printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+      printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
+      cat "$state/.subsuper-escalations" 2>/dev/null
+    } 2>/dev/null > "$marker" || true
+  fi
+  # Backend-independent active alert. Unlike the tmux flash below (skipped on
   # every non-tmux backend), this can reach the captain even when every pane and
   # its backend status-line is unreadable - the gap the 2026-07-10 overnight
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
     wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+  fi
+  if [ "$marker_ready" -eq 1 ]; then
+    {
+      # The defer reason alone cannot separate "the captain half-typed a line"
+      # from "this pane's rendering is not in the shape catalogue". Record the
+      # verdict and the screen it was read from, ONCE per max-defer window, so a
+      # wedge is diagnosable from durable state instead of a live re-capture that
+      # may no longer show the wedged rendering. The verdict's meaning is owned by
+      # bin/fm-composer-lib.sh; this only reports it.
+      printf '\n--- supervisor pane %s (%s) ---\n' "$target" "$backend"
+      wedge_alarm_run_bounded composer-evidence \
+        fm_backend_composer_observation "$backend" "$target" 2>/dev/null \
+        || printf 'composer verdict: unreadable\ncaptured screen:\n(capture failed)\n'
+    } 2>/dev/null >> "$marker" || true
+  fi
+  # Best-effort status-line flash. tmux's display-message is a client-side OSD
+  # with no herdr equivalent; the log line + durable marker above are already
+  # the primary, backend-independent signal, so a non-tmux backend just skips
+  # this cosmetic extra rather than attempting an unsupported call.
+  if [ "$backend" = tmux ]; then
+    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
   fi
 }
 

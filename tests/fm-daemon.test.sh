@@ -1209,7 +1209,7 @@ test_submit_ack_reports_pending_on_persistent_swallow() {
 }
 
 test_max_defer_empty_swallow_types_once_and_alarms() {
-  local dir state fakebin sent
+  local dir state fakebin sent marker_mode
   dir=$(make_bordered_case maxdefer-stuck)
   state="$dir/state"; fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
@@ -1225,9 +1225,25 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
     || fail "max-defer typed the digest more than once"
   [ -s "$state/.subsuper-inject-wedged" ] \
     || fail "stuck max-defer inject did not raise a wedge alarm marker"
+  if [ "$(uname)" = Darwin ]; then
+    marker_mode=$(stat -f %Lp "$state/.subsuper-inject-wedged")
+  else
+    marker_mode=$(stat -c %a "$state/.subsuper-inject-wedged")
+  fi
+  [ "$marker_mode" = 600 ] \
+    || fail "wedge alarm marker mode was not 0600: $marker_mode"
   [ -s "$state/.subsuper-escalations" ] \
     || fail "buffer lost after a failed max-defer inject (must be preserved)"
-  pass "max-defer on an empty stuck pane types once, alarms, and preserves the buffer"
+  # The marker must carry enough to tell a half-typed line apart from a
+  # rendering the shape catalogue does not know: the verdict AND the screen it
+  # was read from.
+  grep -q '^composer verdict: ' "$state/.subsuper-inject-wedged" \
+    || fail "wedge marker did not record the composer verdict"
+  # A composer border row only ever comes from the CAPTURE, never from the
+  # buffered escalation text, so it proves the screen itself was recorded.
+  grep -q '^│ >' "$state/.subsuper-inject-wedged" \
+    || fail "wedge marker did not record the captured supervisor screen"
+  pass "max-defer on an empty stuck pane types once, alarms, preserves the buffer, and records the pane"
 }
 
 test_max_defer_flushes_empty_idle_pane() {
@@ -1628,6 +1644,72 @@ test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
   pass "inject_wedge_alarm writes the marker AND emits the active alert even with no tmux status-line (herdr backend)"
 }
 
+test_backend_composer_observation_emits_plain_screen() {
+  local dir fakebin capture esc out
+  dir=$(make_supercase composer-observation-plain)
+  fakebin="$dir/fakebin"; capture="$dir/pane.txt"; esc=$(printf '\033')
+  printf '%s[38;2;136;136;136m❯%s[0m\n' "$esc" "$esc" > "$capture"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    fm_backend_composer_observation tmux fakepane)
+  assert_contains "$out" 'composer verdict: empty' "composer observation lost its styled-capture verdict"
+  assert_contains "$out" $'captured screen:\n❯' "composer observation lost its captured screen"
+  case "$out" in
+    *"$esc"*) fail "composer observation emitted ANSI control sequences" ;;
+  esac
+  pass "fm_backend_composer_observation emits a plain screen from its styled snapshot"
+}
+
+test_inject_wedge_alarm_uses_single_composer_observation() {
+  local dir state log count marker
+  dir=$(make_wedge_case wedge-single-observation)
+  state="$dir/state"; log="$dir/alert.log"; count="$dir/observation-count"
+  marker="$state/.subsuper-inject-wedged"
+  escalate_add "$state" "needs-decision: pick A"
+  (
+    # shellcheck disable=SC2329 # Runtime override is an assertion tripwire for the isolated daemon.
+    fm_backend_composer_state() { fail "wedge evidence called composer_state separately"; }
+    # shellcheck disable=SC2329 # Runtime override is an assertion tripwire for the isolated daemon.
+    fm_backend_capture() { fail "wedge evidence captured a second screen"; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the isolated daemon.
+    fm_backend_composer_observation() {
+      printf 'x' >> "$count"
+      printf 'composer verdict: pending\ncaptured screen:\nsnapshot-one\n'
+    }
+    WEDGE_ALARM_LAST_EPOCH=0
+    FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=osascript \
+      FM_SUPERVISOR_BACKEND=herdr inject_wedge_alarm "$state" 30600
+  ) || fail "single-observation wedge alarm failed"
+  [ "$(cat "$count" 2>/dev/null)" = x ] || fail "wedge evidence did not use exactly one observation"
+  grep -F 'composer verdict: pending' "$marker" >/dev/null || fail "wedge marker lost the observed verdict"
+  grep -F 'snapshot-one' "$marker" >/dev/null || fail "wedge marker lost the screen paired with its verdict"
+  pass "inject_wedge_alarm records one paired composer observation"
+}
+
+test_inject_wedge_alarm_notifies_before_bounded_observation() {
+  local dir state log marker order_error daemon_log start elapsed
+  dir=$(make_wedge_case wedge-bounded-observation)
+  state="$dir/state"; log="$dir/alert.log"; marker="$state/.subsuper-inject-wedged"
+  order_error="$dir/order-error"; daemon_log="$dir/daemon.log"
+  escalate_add "$state" "needs-decision: pick A"
+  start=$SECONDS
+  (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the isolated daemon.
+    fm_backend_composer_observation() {
+      [ -s "$log" ] || printf 'evidence started before alert\n' > "$order_error"
+      sleep 30
+    }
+    WEDGE_ALARM_LAST_EPOCH=0
+    LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=osascript \
+      FM_WEDGE_ALARM_TIMEOUT_SECS=1 FM_SUPERVISOR_BACKEND=herdr \
+      inject_wedge_alarm "$state" 30600
+  ) || fail "bounded-observation wedge alarm failed"
+  elapsed=$((SECONDS - start))
+  [ "$elapsed" -lt 5 ] || fail "hung composer observation blocked the wedge path for ${elapsed}s"
+  [ ! -e "$order_error" ] || fail "composer observation started before the active alert"
+  grep -F '(capture failed)' "$marker" >/dev/null || fail "timed-out observation did not leave a readable marker"
+  pass "inject_wedge_alarm alerts before bounded composer evidence"
+}
+
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   local dir state log daemon_log alerts errors
   dir=$(make_wedge_case wedge-unwritable-marker)
@@ -2010,6 +2092,9 @@ test_wedge_alarm_backgrounded_command_times_out_and_reaps_descendant
 test_wedge_alarm_hung_override_times_out_and_falls_through
 test_wedge_alarm_shutdown_stops_active_notifier_group
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
+test_backend_composer_observation_emits_plain_screen
+test_inject_wedge_alarm_uses_single_composer_observation
+test_inject_wedge_alarm_notifies_before_bounded_observation
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
 test_fm_send_reports_delivered_unconfirmed_submit
 test_fm_send_exits_nonzero_on_initial_send_failure
