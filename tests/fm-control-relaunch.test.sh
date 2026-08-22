@@ -1401,9 +1401,12 @@ test_recover_missing_refuses_secondmate_kind() {
   } > "$home/state/rl41.meta"
   printf '%s\n' "fm-rl41" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
-  # Stop the agent so the endpoint is dead: the recovery-grade state gate
-  # reads the record's endpoint first, then the ship/scout kind gate refuses
-  # on the recorded secondmate kind before any launch work begins.
+  # Stop the agent so the endpoint is dead, and seed the durable
+  # recovery-attempt marker so the control-plane provenance gate passes and
+  # the recovery-grade state gate reads the endpoint first; the ship/scout
+  # kind gate then refuses on the recorded secondmate kind before any launch
+  # work begins.
+  : > "$home/state/rl41.control-relaunch.recovery-attempt"
   printf 'zsh' > "$dir/fake/command"
   out=$(run_spawn "$dir" rl41 --relaunch --recover-missing --harness claude); rc=$?
   expect_code 1 "$rc" "--recover-missing with --secondmate should refuse"
@@ -1589,8 +1592,11 @@ test_recover_missing_refuses_alive_endpoint() {
   local dir out rc
   dir=$(new_case recov-alive rl44)
   add_ship_task "$dir" rl44 claude
-  # An alive endpoint is neither missing nor agent-free, so --recover-missing
-  # must refuse it rather than risk a duplicate recovery launch.
+  # Seed the durable recovery-attempt marker so the control-plane provenance
+  # gate passes. An alive endpoint is neither missing nor agent-free, so
+  # --recover-missing must still refuse it rather than risk a duplicate
+  # recovery launch.
+  : > "$dir/home/state/rl44.control-relaunch.recovery-attempt"
   out=$(run_spawn "$dir" rl44 --relaunch --recover-missing --harness claude); rc=$?
   expect_code 1 "$rc" "recover-missing on a live endpoint should refuse"
   assert_contains "$out" "authoritatively missing or agent-free" \
