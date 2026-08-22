@@ -323,6 +323,9 @@ test_opencode_primary_watch_plugin_uses_effective_state_home() {
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+# Stay beyond the retired one-second log poll so this test proves it awaits the
+# plugin coordinator's bounded readiness result.
+sleep 2
 printf 'home=%s root=%s\n' "${FM_HOME:-}" "${FM_ROOT_OVERRIDE:-}" >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
@@ -333,15 +336,16 @@ import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const client = { session: { promptAsync: async () => {} } };
-const hooks = await mod.FmPrimaryWatchArm({
+await mod.FmPrimaryWatchArm({
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
-for (let i = 0; i < 50 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 20));
+const armStatus = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (armStatus !== "external") {
+  console.error(`expected external arm status, got ${armStatus}`);
+  process.exit(1);
 }
 if (!existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm did not run");
@@ -356,7 +360,7 @@ if (!text.includes(`home=${process.env.FM_HOME}`) || !text.includes(`root=${expe
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must use FM_HOME state outside the repo root"
+  expect_code 0 "$status" "OpenCode watch plugin must use FM_HOME state outside the repo root: $out"
   [ -z "$out" ] || fail "OpenCode effective-state test printed output: $out"
   pass "OpenCode watcher plugin uses the effective FM_HOME state"
 }

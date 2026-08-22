@@ -6553,12 +6553,21 @@ test_secondmate_retirement_rejects_http_proxy_and_object_redirects() {
 }
 
 test_secondmate_network_fetches_pin_validated_addresses() {
-  local case_dir clone source tip rc count
+  local case_dir clone source firstmate_source firstmate_tip root_default default tip rc count
   case_dir=$(make_case secondmate-pinned-network-authority)
   prepare_secondmate_home_fixture "$case_dir"
   write_secondmate_meta "$case_dir"
   clone="$case_dir/wt/projects/test"
   source="$case_dir/source-projects/test"
+  firstmate_source="$case_dir/firstmate-source"
+  root_default=$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf 'origin/main')
+  default=${root_default#origin/}
+  firstmate_tip=$(git -C "$ROOT" rev-parse --verify "refs/remotes/origin/$default^{commit}" 2>/dev/null) \
+    || firstmate_tip=$(git -C "$ROOT" rev-parse --verify 'HEAD^{commit}')
+  git init --quiet "$firstmate_source"
+  git -C "$firstmate_source" fetch --quiet "$ROOT" "$firstmate_tip"
+  git -C "$firstmate_source" checkout --quiet -b "$default" FETCH_HEAD
+  git -C "$case_dir/project" remote set-url origin "$firstmate_source"
   tip=$(git -C "$source" rev-parse refs/remotes/origin/main)
   git -C "$clone" remote set-url origin https://example.com/repository.git
   git -C "$source" remote set-url origin https://example.com/repository.git
@@ -6598,9 +6607,17 @@ esac
 if [ -n "$network_operation" ]; then
   if [ -z "$network_target" ] && [ -n "$repository" ]; then
     remote=$("$FM_REAL_GIT" -C "$repository" remote get-url origin 2>/dev/null || true)
-    [ "$remote" != https://example.com/repository.git ] || network_target=1
+    if [ "$remote" = https://example.com/repository.git ]; then
+      network_target=1
+    else
+      printf '%s\t%s\n' "$network_operation" "$remote" >> "$FM_GIT_UNEXPECTED_NETWORK_LOG"
+      exit 86
+    fi
   fi
-  [ -n "$network_target" ] || exec "$FM_REAL_GIT" "$@"
+  [ -n "$network_target" ] || {
+    printf '%s\t%s\n' "$network_operation" '<unbound>' >> "$FM_GIT_UNEXPECTED_NETWORK_LOG"
+    exit 86
+  }
   printf '%s\t%s\n' "$network_operation" "$pin" >> "$FM_GIT_PIN_LOG"
   [ -n "$pin" ] || exit 88
   if [ "$network_operation" = ls-remote ]; then
@@ -6613,15 +6630,21 @@ exec "$FM_REAL_GIT" "$@"
 SH
   chmod +x "$case_dir/fakebin/git"
   : > "$case_dir/pinned-network.log"
+  : > "$case_dir/unexpected-network.log"
   set +e
+  FM_FAKE_FIRSTMATE_SOURCE="$firstmate_source" \
   FM_REAL_GIT="$(command -v git)" \
   FM_GIT_PIN_LOG="$case_dir/pinned-network.log" \
+  FM_GIT_UNEXPECTED_NETWORK_LOG="$case_dir/unexpected-network.log" \
   FM_PINNED_TIP="$tip" \
   FM_TEARDOWN_TEST_NETWORK_ADDRESSES=203.0.113.10 \
+  FM_TEST_TEARDOWN_ROOT="$firstmate_source" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   expect_code 1 "$rc" "synthetic pinned authority fetch stops before retirement"
+  [ ! -s "$case_dir/unexpected-network.log" ] || fail \
+    "network authority escaped the hermetic fixture: $(cat "$case_dir/unexpected-network.log"); teardown: $(cat "$case_dir/stderr")"
   count=$(wc -l < "$case_dir/pinned-network.log" | tr -d ' ')
   [ "$count" -ge 1 ] || fail \
     "network authority did not exercise its graph probe: $(cat "$case_dir/pinned-network.log"); teardown: $(cat "$case_dir/stderr")"
