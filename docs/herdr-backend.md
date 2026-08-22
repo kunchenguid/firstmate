@@ -203,7 +203,7 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 ## Current transport behavior
 
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
-Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
+Every session-scoped Herdr invocation goes through `fm_backend_herdr_cli` or its identically routed twin, which set the environment and pass an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
 Every control-socket RPC is time-bounded (`FM_BACKEND_HERDR_CLI_TIMEOUT`, default 20 seconds), because a wedged server that accepts connections but never responds otherwise blocks callers - peek reads, teardown chains, and the watcher's supervision cycle - for unbounded time; only the long-lived backgrounded server launch bypasses the bound.
 `fm_backend_herdr_bounded` in `bin/backends/herdr.sh` owns only the knob and what disables it; the bound's mechanics come from `bin/fm-timeout-lib.sh`, this repo's single owner of bounded execution.
