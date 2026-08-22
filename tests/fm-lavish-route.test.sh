@@ -32,6 +32,13 @@ SH
 : "${FM_LAVISH_TEST_LOG:?}"
 printf '<call>\n' >> "$FM_LAVISH_TEST_LOG"
 for arg in "$@"; do printf '<%s>\n' "$arg" >> "$FM_LAVISH_TEST_LOG"; done
+if [ -n "${FM_LAVISH_WINDOWS_ARGV_JSON:-}" ]; then
+  printf '<structured-argv>\n' >> "$FM_LAVISH_TEST_LOG"
+  perl -MJSON::PP -e '
+    my $args = decode_json($ARGV[0]);
+    print "<$_>\n" for @$args;
+  ' "$FM_LAVISH_WINDOWS_ARGV_JSON" >> "$FM_LAVISH_TEST_LOG"
+fi
 if [ "${FM_LAVISH_TEST_OUTPUT:-0}" = 1 ]; then
   action=${6-}
   artifact=${7-}
@@ -42,7 +49,8 @@ if [ "${FM_LAVISH_TEST_OUTPUT:-0}" = 1 ]; then
       ;;
     poll)
       printf 'session:\n  file: "%s"\n  status: feedback\n' "$artifact"
-      printf 'prompts[1]:\n  - target:\n'
+      printf 'prompts[2]:\n  - text: "Captain quoted `lavish-axi poll C:\\\\Users\\\\private.html` in feedback"\n'
+      printf '  - target:\n'
       printf '%s\n' '      scenePath: "C:\\Users\\Captain\\.lavish-axi\\whiteboards\\review #1.excalidraw"'
       printf '    attachments[1]{path}:\n'
       printf '%s\n' '      "C:\\Users\\Captain\\.lavish-axi\\attachments\\marked #1.png"'
@@ -93,6 +101,7 @@ test_wsl_lifecycle_uses_one_windows_route() {
   assert_line_count "$log" '<poll>' 1 "the Windows route did not receive one poll action"
   assert_line_count "$log" '<A # choice>' 1 "an open argument containing spaces and # was split or changed"
   assert_line_count "$log" '<same # session>' 1 "a poll argument containing spaces and # was split or changed"
+  assert_line_count "$log" '<structured-argv>' 2 "dash-prefixed lifecycle argv did not cross the PowerShell boundary structurally"
   ! grep -Fq 'linux-cli-was-called' "$log" \
     || fail "WSL silently started the competing Linux Lavish CLI"
   pass "WSL open and poll preserve artifact identity on one Windows runtime route"
@@ -113,8 +122,8 @@ test_wsl_output_keeps_followup_on_router_and_exposes_feedback_paths() {
     FM_LAVISH_TEST_OUTPUT=1 PATH="$fakebin:$BASE_PATH" \
     "$ROUTER" open "$artifact") \
     || fail "the WSL open output route failed"
-  printf '%s\n' "$out" | grep -F "$ROUTER poll $real" >/dev/null \
-    || fail "open output did not direct follow-up through the router and original WSL artifact"
+  printf '%s\n' "$out" | grep -F "WSL artifact \\\"$real\\\"" >/dev/null \
+    || fail "open output did not identify the original WSL artifact safely"
   ! printf '%s\n' "$out" | grep -F 'WIN::' >/dev/null \
     || fail "open output exposed the Windows artifact path"
   ! printf '%s\n' "$out" | grep -F '`lavish-axi poll' >/dev/null \
@@ -128,10 +137,12 @@ test_wsl_output_keeps_followup_on_router_and_exposes_feedback_paths() {
     || fail "poll output did not expose the whiteboard scene through a WSL path"
   printf '%s\n' "$out" | grep -F '/mnt/c/Users/Captain/.lavish-axi/attachments/marked #1.png' >/dev/null \
     || fail "poll output did not expose the image attachment through a WSL path"
-  printf '%s\n' "$out" | grep -F "$ROUTER poll $real" >/dev/null \
-    || fail "poll output did not keep subsequent feedback on the same routed session"
-  ! printf '%s\n' "$out" | grep -F 'C:\\Users' >/dev/null \
-    || fail "poll output exposed a Windows-only feedback path"
+  printf '%s\n' "$out" | grep -F "WSL artifact \\\"$real\\\"" >/dev/null \
+    || fail "poll output did not identify the original WSL artifact safely"
+  printf '%s\n' "$out" | grep -F "Captain quoted \`lavish-axi poll C:\\\\Users\\\\private.html\` in feedback" >/dev/null \
+    || fail "poll output rewrote arbitrary captain feedback"
+  ! printf '%s\n' "$out" | grep -F 'next_step: "Run `lavish-axi' >/dev/null \
+    || fail "poll output could start a competing Linux Lavish session"
   pass "WSL output keeps follow-up routed and converts feedback paths"
 }
 
@@ -151,7 +162,7 @@ test_wsl_export_converts_output_path() {
     PATH="$fakebin:$BASE_PATH" "$ROUTER" export "$artifact" --out "$output" \
     || fail "the WSL export route failed"
 
-  assert_line_count "$log" '<--out>' 1 "export did not preserve the path-valued option"
+  assert_line_count "$log" '<--out>' 1 "export did not preserve the path-valued option through structured argv"
   assert_line_count "$log" "<WIN::$real_output>" 1 "export did not convert its output path for Windows"
   pass "WSL export writes to the requested converted output path"
 }

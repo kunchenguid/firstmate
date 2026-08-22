@@ -133,7 +133,7 @@ validate_payload() {  # <data.json>
 }
 
 command_build() {
-  local data=${1-} board json tmp sid extracted
+  local data=${1-} board json tmp sid extracted arm_out
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] || fail "board data does not exist: $data"
@@ -183,13 +183,14 @@ command_build() {
     || fail "cannot bind the board source to the keyed-answer intake"
   printf 'bound: %s\n' "$sid"
 
-  if "$SCRIPT_DIR/fm-procevent.sh" list | awk 'NR > 1 { print $1 }' | grep -Fxq "$sid"; then
-    printf 'already-armed: %s\n' "$sid"
-  else
-    "$SCRIPT_DIR/fm-procevent-lavish.sh" arm "$board" >/dev/null \
-      || fail "cannot arm the board as a process-event source"
-    printf 'armed: %s\n' "$sid"
-  fi
+  arm_out=$("$SCRIPT_DIR/fm-procevent-lavish.sh" arm "$board") \
+    || fail "cannot arm or upgrade the board process-event source"
+  case "$arm_out" in
+    already-armed:*) printf 'already-armed: %s\n' "$sid" ;;
+    upgraded:*) printf 'upgraded: %s\n' "$sid" ;;
+    armed:*) printf 'armed: %s\n' "$sid" ;;
+    *) fail "the board process-event source returned an unknown result" ;;
+  esac
 }
 
 case "${1-}" in

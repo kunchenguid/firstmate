@@ -264,9 +264,10 @@ EOF
 set -eu
 if [ "${1:-}" = arm ]; then
   artifact=${2:-}
-  "$REAL_LAVISH_ADAPTER" arm "$artifact" >/dev/null
+  arm_out=$("$REAL_LAVISH_ADAPTER" arm "$artifact")
   sid=$("$REAL_LAVISH_ADAPTER" source-id "$artifact")
   "$REAL_PROCEVENT" start "$sid" >/dev/null
+  printf '%s\n' "$arm_out"
   exit 0
 fi
 exec "$REAL_LAVISH_ADAPTER" "$@"
@@ -358,6 +359,34 @@ test_rebuild_is_idempotent_and_does_not_double_arm() {
   pass "rebuild refreshes the board in place without double-arming"
 }
 
+test_build_upgrades_a_persisted_legacy_linux_poll() {
+  local home data board sid out source
+  home=$(make_home legacy-registration)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the initial board build failed"
+  sid=$(run_lavish_source_id "$home" "$board")
+  run_procevent "$home" retire "$sid" >/dev/null \
+    || fail "could not stage the legacy registration fixture"
+  run_procevent "$home" register lavish "$sid" -- lavish-axi poll "$board" >/dev/null \
+    || fail "could not publish the legacy Linux poll fixture"
+
+  out=$(run_board "$home" build "$data") || fail "the legacy registration upgrade failed"
+  assert_contains "$out" "upgraded: $sid" "the build did not report the legacy route upgrade"
+  source="$home/state/procevent/$sid.source"
+  assert_contains "$(cat "$source")" "$ROOT/bin/fm-lavish.sh" \
+    "the upgraded registration does not execute the tracked router"
+  ! grep -Fxq lavish-axi "$source" \
+    || fail "the upgraded registration retained the legacy Linux executable"
+  [ "$(run_decisions "$home" binding "$sid")" = "(any)" ] \
+    || fail "the registration upgrade lost the board's answer binding"
+
+  out=$(run_board "$home" build "$data") || fail "the post-upgrade rebuild failed"
+  assert_contains "$out" "already-armed: $sid" "the routed registration upgrade was not idempotent"
+  pass "build upgrades a persisted Linux poll without losing its answer binding"
+}
+
 test_build_refuses_a_template_without_exactly_one_slot() {
   local home data rc out
   home=$(make_home badslot)
@@ -380,4 +409,5 @@ test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
+test_build_upgrades_a_persisted_legacy_linux_poll
 test_build_refuses_a_template_without_exactly_one_slot

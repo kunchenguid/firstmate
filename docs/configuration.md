@@ -302,6 +302,8 @@ In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-
 `bin/fm-lavish.sh` is the single Firstmate entry point for opening, polling, ending, exporting, sharing, or stopping a Lavish live session.
 On native Linux and macOS it preserves the installed `lavish-axi` behavior.
 Under WSL it routes every lifecycle action to the tracked Windows bridge, which uses the Windows `lavish-axi.cmd`, the Windows user-profile state store, and port 4388 before opening the returned URL in the Windows browser.
+The router transports lifecycle argv structurally, emits follow-up guidance naming the original WSL artifact without an unsafe shell command, and converts only owned path fields such as exported outputs and feedback attachments across the Windows boundary.
+When a board is armed after an upgrade, its adapter replaces a persisted legacy Linux poll registration with the routed poll while preserving its answer binding.
 This route does not delete or migrate the separate native and Windows Lavish histories.
 If Windows PowerShell interoperability, `wslpath`, Windows Node.js, or Windows `lavish-axi.cmd` is missing, the route refuses instead of starting a competing Linux session.
 Run `bin/fm-bootstrap.sh install lavish-axi` after approving installation to converge the Windows prerequisite idempotently.
