@@ -98,6 +98,12 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
+#   Every fresh crewmate or scout invocation requires a
+#   task-scoped ROUTING_INTENT and pending ROUTING_DECISION under data/<id>/.
+#   The gate is unconditional; canonical config presence or absence is attested,
+#   and FM_CONFIG_OVERRIDE cannot relocate the requirement. The pending receipt
+#   is consumed before hook installation, worktree lease, endpoint creation,
+#   metadata publication, pane input, or model execution. Secondmates are exempt.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -235,6 +241,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# ROUTING_CONFIG is the canonical home-local authority input for routing receipts.
+# FM_CONFIG_OVERRIDE may relocate ordinary configuration reads for fixtures and
+# compatibility, but it cannot relocate this safety contract out of existence.
+ROUTING_CONFIG="$FM_HOME/config"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
@@ -260,6 +270,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-routing-decision-lib.sh
+. "$SCRIPT_DIR/fm-routing-decision-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -754,6 +766,7 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            [ -z "$FM_ROUTING_DECISION_FINAL" ] || echo "routing_decision=$FM_ROUTING_DECISION_FINAL"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -853,7 +866,7 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
-  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
+  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$ROUTING_CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
   fi
@@ -1195,8 +1208,10 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1216,7 +1231,7 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
       harness_src='config/secondmate-harness (falling back to config/crew-harness)'
     else
-      if [ -f "$CONFIG/crew-dispatch.json" ]; then
+      if [ -f "$ROUTING_CONFIG/crew-dispatch.json" ]; then
         echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
         exit 1
       fi
@@ -1438,6 +1453,27 @@ effort_flag_for_harness() {
     # effort flag.
   esac
 }
+
+# Compute the exact adapter fragments before receipt validation.
+# These same bytes replace __MODELFLAG__ and __EFFORTFLAG__ in the command sent
+# to the worker, so an omitted unsupported axis remains null in the receipt even
+# though its requested value is still recorded later in task metadata.
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "${MODEL:-default}")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "${EFFORT:-default}")
+
+# Routing-receipt enforcement is a source-code invariant for every crewmate and
+# scout route, not a feature enabled by a configuration file.
+# Canonical config presence or absence is attested inside the receipt, while an
+# override directory is deliberately irrelevant to the decision authority.
+# Validate and consume before hook installation, worktree lease, endpoint
+# creation, metadata publication, pane input, or model execution.
+# Secondmate routing retains its separate provisioning and registry contract.
+if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
+  fm_routing_decision_validate_and_persist \
+    "$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
+    "$RAW_LAUNCH" "$LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
+    || exit 1
+fi
 
 case "$LAUNCH" in
   *__MUSEBIN__*)
@@ -2647,7 +2683,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort routing_decision busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2665,6 +2701,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$FM_ROUTING_DECISION_FINAL" ] || echo "routing_decision=$FM_ROUTING_DECISION_FINAL"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -2727,8 +2764,6 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}

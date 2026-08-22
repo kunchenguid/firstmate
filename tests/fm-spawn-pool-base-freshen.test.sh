@@ -76,6 +76,7 @@ EOF
 run_spawn() {
   local id=$1
   shift
+  fm_test_write_routing_receipt "$HOME_DIR" "$id" codex
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \

@@ -59,8 +59,11 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
   # Every case here is a ship spawn, which carries an explicit delivery contract
   # (AGENTS.md section 7); these tests are about busy-state wiring, so they pass a
   # fixed valid one.
-  local home=$1 wt=$2 fakebin=$3
+  local home=$1 wt=$2 fakebin=$3 id harness
   shift 3
+  id=$1
+  harness=$(sed -n '/^[[:space:]]*#/d; /^[[:space:]]*$/d; 1{s/[[:space:]].*$//; p;}' "$home/config/crew-harness")
+  fm_test_write_routing_receipt "$home" "$id" "$harness"
   set -- "$@" --mode no-mistakes --yolo off
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \

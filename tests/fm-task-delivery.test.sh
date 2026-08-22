@@ -47,6 +47,7 @@ write_brief() {  # <home> <id> [<recorded-mode>]
     printf 'You are a crewmate.\n\n# Definition of done\n'
     [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"
   } > "$home/data/$id/brief.md"
+  fm_test_write_routing_receipt "$home" "$id" claude
 }
 
 run_spawn() {  # <home> <fakebin> <spawn-args...>

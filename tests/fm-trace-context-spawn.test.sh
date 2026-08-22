@@ -99,6 +99,7 @@ make_spawn_case() {
   id=$name-z1
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  fm_test_write_routing_receipt "$home" "$id" claude
   printf '%s\n' "$home|$proj|$wt|$fakebin|$launchlog|$id"
 }
 
@@ -216,6 +217,7 @@ run_two_level() {
   fm_git_worktree "$wproj" "$wwt" "wt-$name"
   mkdir -p "$sm/state" "$sm/projects" "$sm/data/$worker_id"
   printf 'worker brief\n' > "$sm/data/$worker_id/brief.md"
+  fm_test_write_routing_receipt "$sm" "$worker_id" claude
   touch "$sm/state/.last-watcher-beat"
   start_trace_session "$sm" "$TL_ENV_TC"
   wlog="$base/worker-launch.log"
@@ -395,6 +397,7 @@ test_relaunch_reuses_recorded_carrier() {
   # Relaunch the same task: the recorded carrier must be reused verbatim for both
   # the meta and the injected export, so an observer keeps one identity across
   # restarts.
+  fm_test_write_routing_receipt "$HOME_DIR" "$CASE_ID" claude
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "relaunch spawn should succeed"
@@ -500,6 +503,8 @@ test_two_routed_tasks_through_one_secondmate_root_distinct_traces() {
   mkdir -p "$sm/data/$id_a" "$sm/data/$id_b"
   printf 'brief a\n' > "$sm/data/$id_a/brief.md"
   printf 'brief b\n' > "$sm/data/$id_b/brief.md"
+  fm_test_write_routing_receipt "$sm" "$id_a" claude
+  fm_test_write_routing_receipt "$sm" "$id_b" claude
   log_a="$base/launch-a.log"
   log_b="$base/launch-b.log"
 
@@ -529,6 +534,7 @@ test_two_routed_tasks_through_one_secondmate_root_distinct_traces() {
 
   # Same environment, same task: a relaunch must reuse task A's recorded
   # carrier verbatim, so the per-task boundary never costs recovery identity.
+  fm_test_write_routing_receipt "$sm" "$id_a" claude
   out=$(TRACEPARENT="$sm_tp" run_spawn "$sm" "$wt_a" "$fakebin" "$log_a" "$id_a" "$proj_a")
   status=$?
   expect_code 0 "$status" "routed task A relaunch should succeed"

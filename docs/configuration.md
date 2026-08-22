@@ -261,7 +261,7 @@ Changing this pin affects the next secondmate spawn or control-plane relaunch; t
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
 An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
 Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
-When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
+When canonical `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
@@ -276,8 +276,9 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
-When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
-Batch spawns satisfy the same requirement with a shared `--harness`.
+Every fresh crewmate or scout spawn also requires its own valid task-scoped `ROUTING_DECISION` receipt, whether this optional file is present or absent.
+When canonical `config/crew-dispatch.json` exists, `fm-spawn.sh` additionally refuses crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
+Batch spawns satisfy the harness requirement with a shared `--harness`, while each task keeps its own receipt so one decision cannot be reused for another id.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics.
 `AGENTS.md` section 4 owns the always-loaded dispatch intake boundary, and `quota-array-dispatch` owns the completion-aware profile-array selection procedure.
@@ -313,6 +314,110 @@ Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstr
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+### ROUTING_DECISION receipts
+
+This subsection is the single owner of the `ROUTING_INTENT` and `ROUTING_DECISION` schemas and field semantics.
+The exact validation and atomic persistence mechanics live in `bin/fm-routing-decision-lib.sh`, and `fm-spawn.sh` is the only dispatch integration point.
+The receipt does not replace the natural-language profile match or the agent-owned capability and quota judgment.
+It makes that judgment inspectable and binds the concrete result to exact brief and intent bytes, canonical configuration state, identity, candidate set, emitted command axes, and freshness facts before a worktree lease, worker endpoint, metadata publication, pane input, or model execution.
+
+Receipt enforcement is an unconditional source-code invariant for every fresh crewmate and scout spawn.
+It is not enabled by `config/crew-dispatch.json`, an environment variable, or a movable feature flag.
+The authoritative configuration input is always `<FM_HOME>/config/crew-dispatch.json`, independently of `FM_CONFIG_OVERRIDE`.
+The receipt explicitly attests whether that canonical file is present or absent, so relocating configuration or removing a file changes the attested input and never removes the requirement.
+Secondmate launches retain their separate provisioning, registry, host, and harness contract and do not consume this receipt.
+
+Each covered task directory supplies `data/<task-id>/routing-intent.json` and `data/<task-id>/routing-decision.pending.json`.
+A multi-candidate route also supplies the exact one-intake `quota-axi --json` object as `data/<task-id>/quota-snapshot.json`.
+
+`routing-intent.json` schema version 1 has exactly these fields:
+
+```json
+{
+  "schema_version": 1,
+  "task_id": "task-slug",
+  "brief_sha256": "64 lowercase hexadecimal characters",
+  "hard_capability": "required capability stated by the task authority",
+  "ambiguity": "LOW",
+  "risk": "task risk classification",
+  "authority": "bounded authority for this task",
+  "gate": "required validation gate",
+  "forbidden_effects": ["push", "merge", "publication"]
+}
+```
+
+Every string is non-empty, `brief_sha256` is the SHA-256 of the exact current `data/<task-id>/brief.md` bytes, and `forbidden_effects` is a non-empty string array.
+The receipt binds the SHA-256 of this exact intent file rather than trusting an unattached hash.
+The validator recomputes the brief hash before accepting the intent, so replacing the brief after receipt generation returns `BRIEF_HASH_MISMATCH`.
+
+`routing-decision.pending.json` schema version 1 has exactly this shape:
+
+```json
+{
+  "schema_version": 1,
+  "task_id": "task-slug",
+  "intent_sha256": "64 lowercase hexadecimal characters",
+  "dispatch_config": {"kind": "present", "sha256": "64 lowercase hexadecimal characters"},
+  "matched_profile": {"source": "rule", "index": 0},
+  "supervisor": {"kind": "current-firstmate-home", "home_sha256": "64 lowercase hexadecimal characters"},
+  "host": {"kind": "local", "identity_sha256": "64 lowercase hexadecimal characters"},
+  "launch_binding": {"kind": "verified_template", "harness": "codex", "model": "example-model", "effort": "high"},
+  "harness": "codex",
+  "model": "example-model",
+  "effort": "high",
+  "candidates_considered": [
+    {"harness": "codex", "model": "example-model", "effort": "high"}
+  ],
+  "quota": {"source": "NOT_APPLICABLE_SINGLETON", "observed_at": null, "snapshot_sha256": null},
+  "quota_basis": "NOT_APPLICABLE_SINGLETON",
+  "fallback": "NONE",
+  "rationale": "hard capability and ambiguity selected this singleton before quota",
+  "required_gate": "required validation gate",
+  "selection_order": ["hard_capability", "ambiguity_complexity", "fresh_quota_among_capable"],
+  "generated_at": "2026-08-21T20:00:00Z"
+}
+```
+
+`dispatch_config.kind` is `present` with the SHA-256 of the exact canonical file bytes or `absent` with a null hash.
+Any other file type, unreadable canonical file, presence mismatch, or byte mismatch refuses as configuration that cannot support the receipt.
+`matched_profile.source` is `rule`, `default`, `static_harness`, or `explicit_override`.
+`rule` requires a zero-based integer `index`, `default` requires a null index, and both bind `candidates_considered` to the exact normalized canonical configuration candidate set in array order.
+Normalization represents an omitted selected model or effort as the literal string `default`.
+`static_harness` requires canonical dispatch configuration to be absent, a null index, `authority: "STATIC_HARNESS"` in the exact intent, and a singleton candidate set matching the selected tuple.
+`explicit_override` requires a null index, `authority: "EXPLICIT_RUNTIME_OVERRIDE"` in the exact intent, and a singleton candidate set matching the selected tuple.
+Neither authority label independently proves captain authorization; it records the bounded authority claim that the caller must already possess.
+
+The top-level `harness`, `model`, and `effort` are the selected routing tuple and must be one exact member of `candidates_considered`.
+The `launch_binding` object independently records only values that the command to be emitted demonstrably carries.
+For a verified adapter template, `launch_binding.kind` is `verified_template`, its harness is the selected adapter, and its model or effort is the exact emitted flag value or JSON null when that axis is omitted.
+The requested effort remains in task metadata and the selected tuple when an adapter intentionally omits an unsupported value, but the launch binding stays null and never claims that requested value was emitted or derived.
+For example, codex `max`, grok `xhigh` or `max`, and every opencode, Kimi, or Cursor effort produce a null emitted effort while retaining the requested metadata value.
+Muse's selected `max` emits and binds the adapter value `ultra`.
+
+For a raw command, `launch_binding.kind` is `raw_launch` and every axis must be observed through the fixed literal command itself.
+The only accepted raw model spelling is `--model <literal>` or `--model=<literal>`.
+The accepted raw effort spellings are `--effort`, `--reasoning-effort`, `--thinking`, and codex `-c model_reasoning_effort=`, with fixed literal values and applicable equals forms.
+Raw commands with shell expansion, command substitution, control operators, environment-assignment prefixes, duplicate or missing values, non-standard model spellings such as `-m` or `--model-name`, or either model or effort axis absent return `RAW_LAUNCH_NOT_VERIFIABLE` or `RAW_LAUNCH_UNRESOLVED`.
+An observed raw harness, model, or effort that contradicts the selected tuple returns `RAW_LAUNCH_MISMATCH`.
+
+The receipt's `required_gate` must equal the exact intent gate as a self-consistency check rather than independent gate authorization.
+The separate brief delivery-contract guard enforces the spawn's `--mode`.
+`fallback` is fixed to `NONE` in schema version 1 so a fallback cannot silently lower capability, authority, risk, or validation.
+The fixed `selection_order` records that hard capability is applied before ambiguity or complexity, and fresh quota is considered only among the candidates that remain.
+
+A singleton candidate set must use `quota_basis: "NOT_APPLICABLE_SINGLETON"`, `quota.source: "NOT_APPLICABLE_SINGLETON"`, and null quota timestamp and snapshot hash fields.
+It is invalid to attach quota evidence or claim quota-aware routing for a singleton.
+A multi-candidate set must use `quota_basis: "FRESH_QUOTA_COMPARISON"`, `quota.source: "quota-axi --json"`, and the exact `generatedAt` plus SHA-256 of its task-scoped `quota-snapshot.json`.
+The quota snapshot must be valid schema 5 JSON with at least one provider evidence record.
+Missing, malformed, hash-mismatched, or older-than-five-minutes multi-candidate evidence returns `NOT_VERIFIABLE(QUOTA)`.
+
+The receipt and quota timestamps use RFC3339 UTC and are accepted for five minutes, with at most 30 seconds of future clock skew.
+The supervisor home and local host are represented by SHA-256 identities and are recomputed by the spawn process rather than trusted from caller prose.
+On success, `fm-spawn.sh` atomically consumes the pending receipt into `data/<task-id>/routing-decision.json`, records that path in task metadata, and continues into the established spawn path in the same invocation.
+Consumption happens before later delivery, worktree, and endpoint checks, so any later failure burns that pending receipt and a retry requires a fresh one.
+Any receipt refusal is terminal and occurs before a worktree lease, worker endpoint, task metadata, pane input, or model execution.
+An existing final directory, regular or dangling symlink, or other non-regular target is rejected before the atomic rename.
 
 ## Toolchain
 

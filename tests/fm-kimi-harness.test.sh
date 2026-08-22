@@ -158,8 +158,22 @@ make_spawn_case() {
 }
 
 run_spawn() {
-  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
+  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6 arg next='' model=default effort=default
   shift 6
+  for arg in "$@"; do
+    if [ -n "$next" ]; then
+      case "$next" in model) model=$arg ;; effort) effort=$arg ;; esac
+      next=
+      continue
+    fi
+    case "$arg" in
+      --model) next=model ;;
+      --model=*) model=${arg#*=} ;;
+      --effort) next=effort ;;
+      --effort=*) effort=${arg#*=} ;;
+    esac
+  done
+  fm_test_write_routing_receipt "$home" "$id" kimi "$model" "$effort"
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \

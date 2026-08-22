@@ -13,6 +13,22 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
+test_sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+test_sha256_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    sha256sum | awk '{print $1}'
+  fi
+}
+
 make_spawn_pi_probe() {
   local fakebin=$1 tool=$2
   cat > "$fakebin/$tool" <<'SH'
@@ -42,7 +58,11 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf 'new-window\n' >> "$FM_FAKE_ENDPOINT_LOG"
+    exit 0
+    ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -59,7 +79,11 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_FAKE_WORKTREE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_WORKTREE_LOG"
+exit 0
+SH
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 shift
@@ -73,7 +97,7 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/treehouse"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -105,6 +129,138 @@ enable_dispatch_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
+write_test_routing_decision() { # <home> <id> <harness> <model> <effort> <raw:0|1>
+  local home=$1 id=$2 harness=$3 model=$4 effort=$5 raw=$6
+  local task_dir brief_hash intent_hash home_hash host_hash now source authority config_binding
+  local launch_kind launch_model launch_effort
+  task_dir="$home/data/$id"
+  [ -d "$task_dir" ] || return 0
+  brief_hash=$(test_sha256_file "$task_dir/brief.md")
+  if [ -f "$home/config/crew-dispatch.json" ]; then
+    source=explicit_override
+    authority=EXPLICIT_RUNTIME_OVERRIDE
+    config_binding=$(jq -cn --arg sha256 "$(test_sha256_file "$home/config/crew-dispatch.json")" \
+      '{kind: "present", sha256: $sha256}')
+  else
+    source=static_harness
+    authority=STATIC_HARNESS
+    config_binding='{"kind":"absent","sha256":null}'
+  fi
+  jq -n \
+    --arg task_id "$id" \
+    --arg brief_sha256 "$brief_hash" \
+    --arg authority "$authority" \
+    '{
+      schema_version: 1,
+      task_id: $task_id,
+      brief_sha256: $brief_sha256,
+      hard_capability: "test fixture dispatch",
+      ambiguity: "LOW",
+      risk: "LOCAL_TEST_ONLY",
+      authority: $authority,
+      gate: "LOCAL_TEST_GATE",
+      forbidden_effects: ["push", "merge", "publication"]
+    }' > "$task_dir/routing-intent.json"
+  intent_hash=$(test_sha256_file "$task_dir/routing-intent.json")
+  home_hash=$(printf '%s' "$home" | test_sha256_text)
+  host_hash=$(uname -n | test_sha256_text)
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  launch_kind=verified_template
+  [ "$raw" -eq 0 ] || launch_kind=raw_launch
+  launch_model=null
+  [ "$model" = default ] || launch_model=$(jq -cn --arg value "$model" '$value')
+  launch_effort=null
+  case "$harness:$effort" in
+    claude:low|claude:medium|claude:high|claude:xhigh|claude:max|codex:low|codex:medium|codex:high|codex:xhigh|grok:low|grok:medium|grok:high|pi:low|pi:medium|pi:high|pi:xhigh|pi:max|pi-signed:low|pi-signed:medium|pi-signed:high|pi-signed:xhigh|pi-signed:max|muse:low|muse:medium|muse:high|muse:xhigh)
+      launch_effort=$(jq -cn --arg value "$effort" '$value')
+      ;;
+    muse:max) launch_effort='"ultra"' ;;
+  esac
+  if [ "$raw" -eq 1 ] && [ "$effort" != default ]; then
+    launch_effort=$(jq -cn --arg value "$effort" '$value')
+  fi
+  jq -n \
+    --arg task_id "$id" \
+    --arg intent_sha256 "$intent_hash" \
+    --argjson dispatch_config "$config_binding" \
+    --arg source "$source" \
+    --arg harness "$harness" \
+    --arg model "$model" \
+    --arg effort "$effort" \
+    --arg launch_kind "$launch_kind" \
+    --argjson launch_model "$launch_model" \
+    --argjson launch_effort "$launch_effort" \
+    --arg home_sha256 "$home_hash" \
+    --arg identity_sha256 "$host_hash" \
+    --arg generated_at "$now" \
+    '{
+      schema_version: 1,
+      task_id: $task_id,
+      intent_sha256: $intent_sha256,
+      dispatch_config: $dispatch_config,
+      matched_profile: {source: $source, index: null},
+      supervisor: {kind: "current-firstmate-home", home_sha256: $home_sha256},
+      host: {kind: "local", identity_sha256: $identity_sha256},
+      launch_binding: {kind: $launch_kind, harness: $harness, model: $launch_model, effort: $launch_effort},
+      harness: $harness,
+      model: $model,
+      effort: $effort,
+      candidates_considered: [{harness: $harness, model: $model, effort: $effort}],
+      quota: {source: "NOT_APPLICABLE_SINGLETON", observed_at: null, snapshot_sha256: null},
+      quota_basis: "NOT_APPLICABLE_SINGLETON",
+      fallback: "NONE",
+      rationale: "explicit test-only singleton receipt",
+      required_gate: "LOCAL_TEST_GATE",
+      selection_order: ["hard_capability", "ambiguity_complexity", "fresh_quota_among_capable"],
+      generated_at: $generated_at
+    }' > "$task_dir/routing-decision.pending.json"
+}
+
+prepare_test_routing_receipts() {
+  local home=$1 harness model=default effort=default raw=0 arg next='' first positional=0 id item
+  shift
+  [ "${FM_TEST_ROUTING_PRESERVE:-0}" = 0 ] || return 0
+  harness=$(sed -n '/^[[:space:]]*#/d; /^[[:space:]]*$/d; 1{s/[[:space:]].*$//; p;}' "$home/config/crew-harness")
+  for arg in "$@"; do
+    if [ -n "$next" ]; then
+      case "$next" in harness) harness=$arg ;; model) model=$arg ;; effort) effort=$arg ;; esac
+      next=
+      continue
+    fi
+    case "$arg" in
+      --secondmate|--relaunch) return 0 ;;
+      --harness) next=harness ;;
+      --harness=*) harness=${arg#--harness=} ;;
+      --model) next=model ;;
+      --model=*) model=${arg#--model=} ;;
+      --effort) next=effort ;;
+      --effort=*) effort=${arg#--effort=} ;;
+      --backend|--mode|--yolo|--traceparent) next=ignore ;;
+      --*) ;;
+      *)
+        positional=$((positional + 1))
+        if [ "$positional" -eq 3 ] && [[ "$arg" == *' '* ]]; then
+          raw=1
+          first=${arg%% *}
+          case "$first" in
+            *=*) harness=$(basename "${arg#* }"); harness=${harness%% *} ;;
+            *) harness=$(basename "$first") ;;
+          esac
+        elif [ "$positional" -eq 3 ]; then
+          harness=$arg
+        fi
+        ;;
+    esac
+  done
+  for item in "$@"; do
+    case "$item" in
+      --*) break ;;
+      *=*) id=${item%%=*}; write_test_routing_decision "$home" "$id" "$harness" "$model" "$effort" "$raw" ;;
+      *) id=$item; write_test_routing_decision "$home" "$id" "$harness" "$model" "$effort" "$raw"; break ;;
+    esac
+  done
+}
+
 make_seeded_secondmate_home() {
   local home=$1 id=$2
   mkdir -p "$home/bin" "$home/data"
@@ -116,17 +272,21 @@ make_seeded_secondmate_home() {
 run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
+  prepare_test_routing_receipts "$home" "$@"
   : > "$launchlog"
+  : > "$home/endpoint.log"
+  : > "$home/worktree.log"
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
   # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="${FM_TEST_CONFIG_OVERRIDE:-$home/config}" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$home/endpoint.log" \
+    FM_FAKE_WORKTREE_LOG="$home/worktree.log" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
@@ -150,6 +310,15 @@ assert_meta_profile() {
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+}
+
+assert_spawn_refused_before_side_effects() { # <home> <id> <launch-log>
+  local home=$1 id=$2 launchlog=$3
+  assert_absent "$home/state/$id.meta" "routing refusal published task metadata"
+  [ ! -s "$launchlog" ] || fail "routing refusal sent pane input"
+  [ ! -s "$home/endpoint.log" ] || fail "routing refusal created an endpoint"
+  [ ! -s "$home/worktree.log" ] || fail "routing refusal leased a worktree"
+  assert_absent "$home/data/$id/routing-decision.json" "routing refusal persisted an invalid receipt"
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
@@ -193,6 +362,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   read_case_record "$rec"
   home_real=$(cd "$HOME_DIR" && pwd -P)
   mkdir -p "$CASE_DIR/cdpath/home/state" "$CASE_DIR/cdpath/home/data"
+  write_test_routing_decision "$home_real" "$id" pi default default 0
   : > "$LAUNCH_LOG"
 
   out=$(
@@ -222,6 +392,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   rec=$(make_spawn_case profile-home-defaults pi "$relative_id" "$absolute_id")
   read_case_record "$rec"
   home_real=$(cd "$HOME_DIR" && pwd -P)
+  write_test_routing_decision "$home_real" "$relative_id" pi default default 0
 
   : > "$LAUNCH_LOG"
   out=$(
@@ -244,6 +415,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
+  write_test_routing_decision "$linked_home" "$absolute_id" pi default default 0
   : > "$LAUNCH_LOG"
   out=$(
     FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
@@ -271,6 +443,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
   read_case_record "$rec"
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
+  write_test_routing_decision "$linked_home" "$id" pi default default 0
   : > "$LAUNCH_LOG"
 
   out=$(
@@ -365,6 +538,71 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout() {
   pass "active crew-dispatch profile requires an explicit harness for scout spawns"
 }
 
+test_routing_receipt_is_unconditional_without_dispatch_config() {
+  local rec id out status
+  id=profile-receipt-unconditional-z12a
+  rec=$(make_spawn_case profile-receipt-unconditional claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_ROUTING_PRESERVE=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "missing receipt should refuse even when dispatch config is absent"
+  assert_contains "$out" "ROUTING_DECISION missing" \
+    "unconfigured route did not retain unconditional receipt enforcement"
+  assert_spawn_refused_before_side_effects "$HOME_DIR" "$id" "$LAUNCH_LOG"
+  pass "routing receipt enforcement does not depend on dispatch config presence"
+}
+
+test_config_override_cannot_relocate_receipt_authority() {
+  local rec id empty_config out status
+  id=profile-config-override-z12b
+  rec=$(make_spawn_case profile-config-override claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  empty_config="$CASE_DIR/empty-config"
+  mkdir -p "$empty_config"
+
+  out=$(FM_TEST_ROUTING_PRESERVE=1 FM_TEST_CONFIG_OVERRIDE="$empty_config" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness grok --model grok-4 --effort high)
+  status=$?
+  expect_code 1 "$status" "config relocation without a receipt should still refuse"
+  assert_contains "$out" "ROUTING_DECISION missing" \
+    "FM_CONFIG_OVERRIDE relocated the routing requirement out of existence"
+  assert_spawn_refused_before_side_effects "$HOME_DIR" "$id" "$LAUNCH_LOG"
+  pass "FM_CONFIG_OVERRIDE cannot relocate routing receipt authority"
+}
+
+test_raw_launches_refuse_unobserved_runtime_selection() {
+  local rec dynamic env_prefix nonstandard unresolved id out status command predicate
+  dynamic=profile-raw-dynamic-z12c
+  env_prefix=profile-raw-env-z12d
+  nonstandard=profile-raw-nonstandard-z12e
+  unresolved=profile-raw-unresolved-z12f
+  rec=$(make_spawn_case profile-raw-unobserved claude \
+    "$dynamic" "$env_prefix" "$nonstandard" "$unresolved")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  for id in "$dynamic" "$env_prefix" "$nonstandard" "$unresolved"; do
+    # shellcheck disable=SC2016 # This fixture must preserve the unresolved variable literally.
+    case "$id" in
+      "$dynamic") command='claude --model "$ROUTE_MODEL" --effort high'; predicate=RAW_LAUNCH_NOT_VERIFIABLE ;;
+      "$env_prefix") command='MODEL=opus claude --model opus --effort high'; predicate=RAW_LAUNCH_NOT_VERIFIABLE ;;
+      "$nonstandard") command='claude -m opus --effort high'; predicate=RAW_LAUNCH_NOT_VERIFIABLE ;;
+      *) command='claude --model opus'; predicate=RAW_LAUNCH_UNRESOLVED ;;
+    esac
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$command" --model opus --effort high)
+    status=$?
+    expect_code 1 "$status" "$id should refuse before spawn effects"
+    assert_contains "$out" "ROUTING_DECISION $predicate" "$id named the wrong raw-launch predicate"
+    assert_spawn_refused_before_side_effects "$HOME_DIR" "$id" "$LAUNCH_LOG"
+  done
+  pass "raw shell expansion, environment prefixes, non-standard flags, and missing axes refuse"
+}
+
 test_active_dispatch_profile_allows_explicit_harness() {
   local rec id out status launch
   id=profile-explicit-z13
@@ -408,14 +646,15 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+    "$id" "$PROJ_DIR" "custom-agent --model custom-v1 --effort high --flag" \
+    --model custom-v1 --effort high)
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
+  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent custom-v1 high
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+  [ "$launch" = "custom-agent --model custom-v1 --effort high --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  pass "active crew-dispatch profile allows a fully observed raw launch command"
 }
 
 test_claude_threads_model_and_effort() {
@@ -465,6 +704,8 @@ test_codex_omits_invalid_max_effort() {
   assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
+  jq -e '.launch_binding.effort == null' "$HOME_DIR/data/$id/routing-decision.json" >/dev/null \
+    || fail "codex max receipt laundered the requested effort as emitted"
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
 
@@ -500,6 +741,8 @@ test_grok_omits_invalid_max_reasoning_effort() {
     "grok launch did not preserve the model flag and typed brief when max effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
+  jq -e '.launch_binding.effort == null' "$HOME_DIR/data/$id/routing-decision.json" >/dev/null \
+    || fail "grok max receipt laundered the requested effort as emitted"
   pass "grok omits unsupported max reasoning effort"
 }
 
@@ -519,6 +762,8 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
     "grok launch did not preserve the model flag and typed brief when xhigh effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported xhigh reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
+  jq -e '.launch_binding.effort == null' "$HOME_DIR/data/$id/routing-decision.json" >/dev/null \
+    || fail "grok xhigh receipt laundered the requested effort as emitted"
   pass "grok omits unsupported xhigh reasoning effort"
 }
 
@@ -553,6 +798,9 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not invent a separate reasoning-effort flag"
   assert_grep 'harness=cursor' "$HOME_DIR/state/$id.meta" "cursor harness was not recorded in meta"
   assert_grep 'model=cursor-grok-4.5-high' "$HOME_DIR/state/$id.meta" "cursor model was recorded as default"
+  jq -e '.launch_binding.model == "cursor-grok-4.5-high" and .launch_binding.effort == null' \
+    "$HOME_DIR/data/$id/routing-decision.json" >/dev/null \
+    || fail "cursor receipt did not distinguish emitted model from metadata-only effort"
   pass "cursor receives its model-qualified reasoning class and exact task workspace"
 }
 
@@ -608,6 +856,9 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
+  jq -e '.launch_binding.model == "anthropic/claude-sonnet-4-5" and .launch_binding.effort == null' \
+    "$HOME_DIR/data/$id/routing-decision.json" >/dev/null \
+    || fail "opencode receipt did not distinguish emitted model from metadata-only effort"
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
@@ -834,6 +1085,9 @@ test_absolute_override_spelling_is_preserved_in_launch_paths
 test_unresolvable_relative_overrides_fail_loudly
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
+test_routing_receipt_is_unconditional_without_dispatch_config
+test_config_override_cannot_relocate_receipt_authority
+test_raw_launches_refuse_unobserved_runtime_selection
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command

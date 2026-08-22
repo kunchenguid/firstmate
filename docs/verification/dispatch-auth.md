@@ -202,3 +202,29 @@ It asserts that the script accepts no harness, model, or provider input, never c
 `tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake schema-5 snapshot per case, served as quota-axi's default TOON.
 It covers TOON-first `spendPriority` ranking among candidates that pass eligibility, reasoning-class, and runway-feasibility gates, explicit accounting for unmeasurable runway, the strongest-reasoning constraint, and the runway feasibility floor over a higher `spendPriority`.
 The skill's primary path is that default TOON; `--json` is the documented defensive fallback, and this section records the producer `--json` shape that fallback consumes.
+
+## Routing receipt boundary
+
+Verified 2026-08-22 against the current `fm-spawn.sh` adapter templates and a `quota-axi --json` schema 5 fixture.
+The receipt stores only the exact quota snapshot hash, its producer timestamp, and the fixed source name rather than account-specific quota values.
+
+The focused emitted-command and integration run was:
+
+```sh
+bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
+```
+
+It exited `0` in 94,143 ms with no gate skip.
+The cases prove canonical configuration authority survives `FM_CONFIG_OVERRIDE`, enforcement remains active when canonical dispatch configuration is absent, every routing refusal precedes fake worktree, endpoint, launch, and metadata effects, and raw expansion, environment prefixes, non-standard model flags, and missing axes refuse.
+The same run checks the actual adapter fragments for claude, codex, grok, pi, pi-signed, opencode, Cursor, and the raw-command escape hatch.
+Codex `max`, grok `xhigh` and `max`, opencode effort, and Cursor effort remain requested metadata values while their persisted emitted effort is null.
+
+The independent failure-direction run was:
+
+```sh
+bin/fm-test-run.sh tests/fm-routing-decision-negative-battery.test.sh
+```
+
+It exited `0` in 14,448 ms after all 36 constructed negatives refused before worktree lease, endpoint, and metadata sentinels.
+Each assertion then ran against a locally neutered validator and independently reached all three sentinels, producing 36 per-assertion firing counterexamples rather than one aggregate mutation result.
+The cases cover missing and malformed artifacts, task and byte-binding drift, stale and future timestamps, canonical configuration drift, emitted model and effort mismatch, raw launch ambiguity, quota provenance, authority identity, forbidden fallback, and hostile persistence targets.
