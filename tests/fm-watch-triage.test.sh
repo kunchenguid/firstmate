@@ -1177,7 +1177,7 @@ test_terminal_stale_green_without_declaration_still_surfaces() {
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "watcher did not surface an undeclared green task's stale pane"; }
   grep -Fx "stale: $window" "$out" >/dev/null || fail "the undeclared green stale did not print its wake"
   grep -F "merge wait" "$out" >/dev/null && fail "an undeclared green task was absorbed as a merge wait"
-  [ ! -e "$state/.merge-wait-rechecked-$key" ] || fail "an undeclared green task recorded merge-wait bookkeeping"
+  [ ! -e "$state/.merge-wait-resurfaced-$key" ] || fail "an undeclared green task recorded merge-wait bookkeeping"
   [ -e "$state/.hb-surfaced-undeclared" ] || fail "the surfaced status line was not marked surfaced"
   [ -s "$state/undeclared.check.sh" ] || fail "the merge poll did not survive the surface"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the undeclared green stale failed"
@@ -1217,10 +1217,13 @@ test_merge_wait_refusal_is_per_alarm_and_self_heals() {
     || { reap "$pid"; fail "an unreadable verdict let the declaration silence its pane"; }
   grep -Fx "stale: $window" "$out" >/dev/null \
     || fail "the alarm did not proceed while the declaration was inadmissible: $(cat "$out")"
-  [ "$(crew_state_reads "$reads")" -ge 1 ] || fail "the suppressor never consulted authoritative crew state"
-  # Nothing durable was written, so the refusal cannot outlive this one alarm.
-  [ ! -e "$state/.merge-wait-rechecked-$key" ] \
-    || fail "a refused declaration left a durable mark that could void it on later alarms"
+  # Exactly one read: the branch's own classification, which the emit point reuses
+  # rather than reading again.
+  [ "$(crew_state_reads "$reads")" -eq 1 ] \
+    || fail "the refused alarm cost $(crew_state_reads "$reads") authoritative reads instead of one"
+  # No verdict is cached in either direction, so the refusal cannot outlive this alarm.
+  [ ! -e "$state/.merge-wait-resurfaced-$key" ] \
+    || fail "a refused declaration left bookkeeping that could affect later alarms"
   [ -s "$state/selfheal.merge-wait" ] || fail "the refused alarm removed the captain's declaration record"
   [ -s "$state/selfheal.check.sh" ] || fail "the merge poll did not survive the refused alarm"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional refusal stop"
@@ -1237,11 +1240,74 @@ test_merge_wait_refusal_is_per_alarm_and_self_heals() {
     reap "$pid"; fail "a declaration refused once stayed refused after the read recovered: $(cat "$out")"
   fi
   [ ! -s "$out" ] || { reap "$pid"; fail "the recovered declaration still alarmed: $(cat "$out")"; }
-  [ -e "$state/.merge-wait-rechecked-$key" ] \
-    || { reap "$pid"; fail "the recovered declaration recorded no read-cost bookkeeping"; }
+  # One further read, not zero: the recovery is decided by a fresh verdict for this
+  # sighting rather than by anything remembered from the refused one.
+  [ "$(crew_state_reads "$reads")" -eq 2 ] \
+    || { reap "$pid"; fail "the recovered absorb did not read fresh state: $(crew_state_reads "$reads") reads total"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "a merge-wait refusal lasts exactly one alarm, so a transient unreadable verdict cannot permanently void a live declaration"
+}
+
+# --- a fresh non-green verdict alarms on THAT attempt, not one window later --------
+# The direction rule that makes the suppressor safe: a cached verdict may only ever
+# make an alarm MORE likely than a fresh read would. Reusing "do not suppress" is free,
+# because the worst case is one alarm nobody needed. Reusing "suppress" is not, because
+# the worst case is silence over a red, superseded, or poll-less result.
+# The reachable failure this pins: a churning green declared pane is absorbed at t=0,
+# then its run stops being green (a rerun fails, a rebase drops attribution, the run is
+# cancelled) and the pane settles on a new hash. The branch reads that authoritatively
+# and hands the verdict to the emit point, so the alarm must fire on that very attempt.
+# Caching the earlier admissible verdict for the rest of the window would instead
+# absorb it, and because the arm records the new hash and drops the wedge timer, that
+# hash would never attempt an alarm again - silence over a run that is no longer green.
+test_merge_wait_fresh_non_green_verdict_alarms_on_that_attempt() {
+  local dir state fakebin out capture_file window key pid pr first second reads
+  dir=$(make_case merge-wait-fresh-verdict); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; reads="$dir/reads.log"
+  window="test:fm-fresh"; pr='https://example.test/pr/20'
+  first='PR is green, waiting on the maintainer (00:01)'
+  second='PR is green, waiting on the maintainer (00:02)'
+  printf '%s' "$first" > "$capture_file"
+  seed_green_merge_task "$state" fresh "$window" "$first" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  declare_merge_wait "$state" fresh || fail "could not declare the fixture merge wait"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  log_crew_state_reads "$fakebin"
+
+  # Phase A: genuinely green, so the first hash is absorbed. A long escalation window
+  # keeps any verdict cached here well inside its lifetime for phase B.
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_FAKE_CREW_STATE_LOG="$reads" FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the green declared pane woke firstmate: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the green declared pane was not absorbed: $(cat "$out")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A absorb stop"
+
+  # Phase B: the run stops being green and the pane settles on a new hash, so the next
+  # poll is a fresh sighting whose authoritative verdict is no longer admissible.
+  printf '%s' "$second" > "$capture_file"
+  printf '%s' "$(hash_text "$second")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+  : > "$out"
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_FAKE_CREW_STATE_LOG="$reads" FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a freshly non-green declaration was absorbed on the very poll that read it"; }
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "the no-longer-green pane did not alarm on that attempt: $(cat "$out")"
+  grep -F "merge wait" "$out" >/dev/null \
+    && fail "a no-longer-green declaration still produced a merge-wait reminder"
+  [ -s "$state/fresh.merge-wait" ] || fail "the alarm removed the captain's declaration record"
+  [ -s "$state/fresh.check.sh" ] || fail "the merge poll did not survive the alarm"
+  unset FM_FAKE_CREW_STATE
+  pass "a declaration whose authoritative verdict is freshly not green alarms on that very attempt, so no cached verdict can buy silence"
 }
 
 # --- a superseded or poll-less declaration alarms without any crew-state read ----
@@ -1431,7 +1497,7 @@ test_merge_wait_withdrawn_record_returns_to_aging() {
   if ! wait_poll_cycle "$state" "$pid"; then
     reap "$pid"; fail "the declared merge wait woke firstmate: $(cat "$out")"
   fi
-  [ -e "$state/.merge-wait-rechecked-$key" ] || { reap "$pid"; fail "the absorb recorded no read-cost bookkeeping"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "the declared merge wait was not absorbed: $(cat "$out")"; }
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional absorb stop"
 
@@ -1444,7 +1510,6 @@ test_merge_wait_withdrawn_record_returns_to_aging() {
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a withdrawn declaration kept its pane quiet"; }
   grep -Fx "stale: $window" "$out" >/dev/null || fail "the released pane did not surface its stale wake"
-  [ ! -e "$state/.merge-wait-rechecked-$key" ] || fail "the withdrawn declaration kept its read-cost marker"
   [ ! -e "$state/.merge-wait-resurfaced-$key" ] || fail "the withdrawn declaration kept its reminder throttle"
   [ -s "$state/withdrawn.check.sh" ] || fail "the merge poll did not survive the withdrawal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the released pane failed"
@@ -3404,6 +3469,7 @@ test_terminal_stale_merge_wait_absorbs_each_new_hash
 test_terminal_stale_merge_wait_passes_one_reminder_through_per_window
 test_terminal_stale_green_without_declaration_still_surfaces
 test_merge_wait_refusal_is_per_alarm_and_self_heals
+test_merge_wait_fresh_non_green_verdict_alarms_on_that_attempt
 test_merge_wait_superseded_or_poll_less_declaration_still_alarms
 test_merge_wait_suppression_does_not_inflate_the_escalation_count
 test_nonterminal_stale_declaration_after_surface_goes_quiet

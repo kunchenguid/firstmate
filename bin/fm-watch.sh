@@ -360,37 +360,49 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 #   - the record must be live: present, naming the pull request the task still
 #     records, and with the merge poll still armed. A withdrawn, superseded, or
 #     poll-less declaration fails on file tests alone, with no crew-state read;
-#   - authoritative crew state must still report the terminal checks-green outcome.
-#     .merge-wait-rechecked-<key> bounds the COST of that read to once per
-#     STALE_ESCALATE_SECS per window and nothing else: only a POSITIVE verdict is
-#     stamped, so a bounded no-mistakes timeout (which reports the run as
-#     unattributed) merely lets one alarm through and is re-asked on the next one;
+#   - authoritative crew state must still report the terminal checks-green outcome,
+#     from a verdict that is ALWAYS fresh for this alarm. A cached verdict may only
+#     ever make an alarm more likely than a fresh read would: reusing "do not
+#     suppress" is safe, because the worst case is one alarm nobody needed, while
+#     reusing "suppress" risks silence over a red, superseded, or poll-less result.
+#     So nothing is cached in the suppressing direction. Callers that already hold a
+#     fresh class from their own classification pass it in as <fresh-class> and no
+#     read happens here at all; the only caller that does not is wedge_timer_check,
+#     whose emit is already rate-limited to once per STALE_ESCALATE_SECS per window
+#     because it removes .stale-since-<key> right after emitting. Cost is therefore
+#     one bounded read per new pane hash (the classification the branch already did)
+#     plus at most one per wedge window, with no read added by this function on any
+#     first-sighting path;
 #   - the escalation count is reset, because wedge_timer_check bumps it BEFORE it
 #     emits, so a suppressor at the emit would otherwise let the count climb
 #     invisibly until a genuine escalation surfaced pre-loaded at
 #     "escalation 7, demand-deep-inspection".
 #
-# What the crew-state re-read can and cannot catch: while the run is still open it
-# is live (nm_ci_checks_state re-derives greenness, so a red check flips the verdict
-# back to working and the declaration stops absorbing), and a rebased or rewritten
-# head drops run attribution at any time. But once the run has RECORDED the terminal
+# What the crew-state verdict can and cannot catch: while the run is still open it is
+# live (nm_ci_checks_state re-derives greenness, so a red check flips the verdict back
+# to working and the declaration stops absorbing), and a rebased or rewritten head
+# drops run attribution at any time. But once the run has RECORDED the terminal
 # checks-passed outcome, that outcome is immutable for that run at that head
-# (bin/fm-crew-state.sh), so no amount of re-reading can see a pull request that
-# later goes red or is closed at the same head, and the merge poll only ever reports
-# `merged`. The bounded pass-through below is the real bound for those cases: it is
-# why the reminder asks firstmate to confirm the merge is still someone else's to
-# make, and why removing it would leave them genuinely unreported.
-merge_wait_absorbs_alarm() {  # <window> <task>
-  local win=$1 task=$2 key recheck mtime age
+# (bin/fm-crew-state.sh), so no verdict can report a pull request that later goes red
+# or is closed at the same head, and the merge poll only ever reports `merged`.
+#
+# The pass-through below does NOT cover that case either, and deliberately is not made
+# to. It fires only where an owner attempts an alarm, so it reaches a pane whose hash
+# keeps changing and the non-terminal wedge window, but a byte-static pane on the
+# terminal branch attempts no alarm at all once its hash is recorded, so nothing calls
+# this function and no reminder can fire. Two things already cover that pane, which is
+# why no timer is added back here: the merge poll stays armed and is what reports the
+# merge (bin/fm-merge-wait.sh declare refuses outright without one), and firstmate's
+# fleet-wide heartbeat review reads every task in flight from the structured fleet
+# view whether or not its pane ever changes.
+merge_wait_absorbs_alarm() {  # <window> <task> [fresh-class]
+  local win=$1 task=$2 class=${3-} key mtime age
   [ -n "$task" ] || return 1
   status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && return 1
   merge_wait_declared "$task" "$STATE" || return 1
+  [ -n "$class" ] || class=$(crew_absorb_class "$task" "$STATE")
+  [ "$class" = merge-wait ] || return 1
   key=$(window_key "$win")
-  recheck="$STATE/.merge-wait-rechecked-$key"
-  if [ "$(age_of "$recheck")" -ge "$STALE_ESCALATE_SECS" ]; then
-    [ "$(crew_absorb_class "$task" "$STATE")" = merge-wait ] || return 1
-    date +%s > "$recheck"
-  fi
   rm -f "$STATE/.wedge-escalations-$key"
   mtime=$(stat_mtime "$STATE/$task.merge-wait")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -403,23 +415,30 @@ merge_wait_absorbs_alarm() {  # <window> <task>
 
 # The one emit point for every stale wake a declaration may absorb. 0 when the wake
 # was queued and the caller must carry on to wake(); 1 when it was absorbed, in which
-# case the caller keeps its own bookkeeping and simply does not wake. The caller's
-# bookkeeping must run either way, because a suppressed alarm still settled this
-# hash: the emit is the only thing the declaration removes.
-emit_stale_wake() {  # <window> <task> <reason>
-  local win=$1 task=$2 reason=$3
-  merge_wait_absorbs_alarm "$win" "$task" && return 1
+# case the caller does its own bookkeeping and simply does not wake. <fresh-class> is
+# the caller's own just-read crew_absorb_class verdict where it has one, so the
+# suppressor never has to re-read what the caller already knows.
+#
+# ONE exception to "the caller carries on either way": when the absorb is also due to
+# pass its bounded reminder through, merge_wait_absorbs_alarm reaches resurface_absorbed
+# and wake(), and wake() exits the process, so the caller's remaining bookkeeping does
+# NOT run on that cycle. That is benign and self-correcting rather than a lost update:
+# the hash was not recorded, so the next poll re-enters the same sighting, finds the
+# reminder throttle now fresh, absorbs quietly, and completes the bookkeeping then.
+emit_stale_wake() {  # <window> <task> <reason> [fresh-class]
+  local win=$1 task=$2 reason=$3 class=${4-}
+  merge_wait_absorbs_alarm "$win" "$task" "$class" && return 1
   fm_wake_append stale "$win" "$reason" || exit 1
   return 0
 }
 
-# Drop this window's merge-wait markers. Only the read-cost cache and the
-# pass-through throttle exist to drop: suppression never records the pane hash or any
-# stale bookkeeping of its own, so unlike the absorb this replaces there is nothing
-# that could keep a window quiet on a declaration that no longer holds.
+# Drop this window's merge-wait pass-through throttle. It is the only marker the
+# suppressor keeps: the greenness verdict is never cached, and suppression records no
+# pane hash and no stale bookkeeping of its own, so unlike the absorb this replaces
+# there is nothing that could keep a window quiet on a declaration that no longer holds.
 clear_merge_wait_markers() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.merge-wait-rechecked-$key" "$STATE/.merge-wait-resurfaced-$key"
+  rm -f "$STATE/.merge-wait-resurfaced-$key"
 }
 
 # Defer ONE wedge escalation for a pane that went quiet while its own task
@@ -656,12 +675,12 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
-surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last emitted
+surface_nonterminal_stale() {  # <window> <hash> [fresh-class]
+  local win=$1 h=$2 class=${3-} key task last emitted
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   emitted=0
-  emit_stale_wake "$win" "$task" "stale: $win" && emitted=1
+  emit_stale_wake "$win" "$task" "stale: $win" "$class" && emitted=1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
@@ -1248,14 +1267,14 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
-    # Retire the merge-wait markers once the declaration stops holding - cleared,
+    # Retire the merge-wait throttle once the declaration stops holding - cleared,
     # re-armed on another pull request, or its merge poll retired - so a later
-    # declaration cannot inherit a stale read cache or a throttle that would delay its
-    # first reminder. Nothing else needs releasing: suppression records no pane hash
-    # and no stale bookkeeping, so a window can never be left quiet on a withdrawn
-    # declaration. Skipped entirely for the overwhelmingly common undeclared window,
-    # and never a crew-state call.
-    if [ -e "$STATE/.merge-wait-rechecked-$key" ] || [ -e "$STATE/.merge-wait-resurfaced-$key" ]; then
+    # declaration cannot inherit a throttle that would delay its first reminder.
+    # Nothing else needs releasing: suppression records no pane hash and no stale
+    # bookkeeping, so a window can never be left quiet on a withdrawn declaration.
+    # Skipped entirely for the overwhelmingly common undeclared window, and never a
+    # crew-state call.
+    if [ -e "$STATE/.merge-wait-resurfaced-$key" ]; then
       merge_wait_declared "$task" "$STATE" || clear_merge_wait_markers "$key"
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
@@ -1327,7 +1346,8 @@ EOF
           # seconds on a churning pane. Nothing about that classification changes; the
           # declaration is consulted only when the wake is emitted below.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            case "$(crew_absorb_class "$task" "$STATE")" in
+            stale_class=$(crew_absorb_class "$task" "$STATE")
+            case "$stale_class" in
               working)
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
@@ -1338,11 +1358,13 @@ EOF
                 # A `merge-wait` verdict reaches here with every other non-working
                 # token and is classified identically: the declaration changes only
                 # whether emit_stale_wake queues the wake, never who owns the window.
+                # That verdict is handed to the emit point so the declaration is judged
+                # on the state THIS poll read, never on a cached one.
                 # The status is marked surfaced either way, because a declaration IS
                 # firstmate acknowledging this green line, and leaving it unmarked
                 # would just move the same alarm to the heartbeat backstop.
                 stale_emitted=0
-                emit_stale_wake "$w" "$task" "stale: $w" && stale_emitted=1
+                emit_stale_wake "$w" "$task" "stale: $w" "$stale_class" && stale_emitted=1
                 printf '%s' "$h" > "$sf"
                 rm -f "$ssf"
                 clear_write_tracking "$key"
@@ -1377,7 +1399,8 @@ EOF
           #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
-            case "$(pause_state_class "$w" "$task")" in
+            stale_class=$(pause_state_class "$w" "$task")
+            case "$stale_class" in
               working)
                 clear_pause_tracking "$key"
                 clear_merge_wait_markers "$key"
@@ -1391,8 +1414,9 @@ EOF
               *)
                 # A `merge-wait` verdict is classified as any other non-working,
                 # non-paused token: surface_nonterminal_stale decides the window and
-                # emit_stale_wake alone decides whether the wake is queued.
-                surface_nonterminal_stale "$w" "$h"
+                # emit_stale_wake alone decides whether the wake is queued, judging the
+                # declaration on the verdict this poll just read.
+                surface_nonterminal_stale "$w" "$h" "$stale_class"
                 ;;
             esac
           else
