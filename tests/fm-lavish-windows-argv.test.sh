@@ -32,3 +32,14 @@ actual=$(perl -MJSON::PP -e 'print join("\n", map { "<$_>" } @{decode_json(do { 
 [ "$actual" = $'<stop>\n<>\n<--foo>\n<stop value>' ] \
   || fail "PowerShell changed forwarded argv: $actual"
 pass "PowerShell 5.1 preserves empty and stop-style arguments"
+
+export FM_LAVISH_WINDOWS_ARGV_JSON='[1]'
+if output=$(powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+  "\$env:Path = '$FIXTURE_WIN;' + \$env:Path; & '$BRIDGE_WIN' stop" 2>&1); then
+  fail "the real PowerShell bridge accepted a non-string argument"
+fi
+case "$output" in
+*'Lavish forwarded argv must contain strings only'*) ;;
+*) fail "the real PowerShell bridge returned the wrong validation error: $output" ;;
+esac
+pass "PowerShell 5.1 rejects non-string forwarded arguments"
