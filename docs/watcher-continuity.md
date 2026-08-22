@@ -95,6 +95,9 @@ It also covers abandoned single-flight claims: a claim the ledger shows already 
 
 The goal is continuity without a Pi or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
+When the filesystem itself cannot create the session lock, because it is full, mounted read-only, or has an unwritable parent, acquisition refuses instead of treating the missing lock as a stale one to reclaim.
+A caller that waits for the lock keeps waiting rather than returning without it, and reports the reason on stderr on a throttled cadence, so work stops safely instead of proceeding unlocked.
+Bounding that wait is tracked as separate work and is not in place today.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
 Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
 
