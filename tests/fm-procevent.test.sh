@@ -773,26 +773,30 @@ pass "arm's readiness wait stays sub-second-accurate even without EPOCHREALTIME"
 
 # --- a single liveness probe cannot hang arm's wait past its own bound ------
 # Regression for the "probe work exceeds timeout" defect: cmd_arm's polling
-# loop only checks the wall-clock deadline BETWEEN calls to
+# loop only checked the wall-clock deadline BETWEEN calls to
 # fm_procevent_generation_live, never during one, so nothing previously
 # stopped one unexpectedly slow probe (e.g. slow filesystem I/O on the source
 # lock, claim file, or /proc read) from growing arm's total wait past
-# FM_PROCEVENT_LAVISH_ARM_WAIT_MS without limit. arm_probe_live now routes
-# every probe through fm_run_bash_timeout so a stuck probe is killed instead.
-# This runs the adapter's own shipped arm_probe_live definition (extracted
+# FM_PROCEVENT_LAVISH_ARM_WAIT_MS without limit. arm_probe_live routes every
+# probe through fm_run_bash_timeout so a stuck probe is killed instead. This
+# runs the adapter's own shipped arm_probe_live definition (extracted
 # verbatim by byte range, not paraphrased) against a stand-in for
-# fm_procevent_generation_live that hangs forever, so the assertion is on
-# arm_probe_live's real, observed exit code and elapsed time - not on any
-# text in the file. A generous 10s remaining-budget argument is passed so the
-# safety-ceiling path is what gets exercised here, not the deadline-bound path
-# covered separately below.
+# fm_procevent_generation_live that hangs forever, so the assertion is on the
+# real, observed exit code fm_run_bash_timeout records to the status file and
+# elapsed time - not on any text in the file. arm_probe_live itself now only
+# launches the probe in the background (see the next test for the caller-side
+# deadline guarantee that motivates that), so this test waits on it directly.
 PROBE_HANG_OUT=$(bash -c '
   . "$1/bin/fm-timeout-lib.sh"
   eval "$(sed -n "/^FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S=/,/^}/p" "$1/bin/fm-procevent-lavish.sh")"
   fm_procevent_generation_live() { sleep 300; }
+  status_file=$(mktemp "${TMPDIR:-/tmp}/probe-hang-status.XXXXXX")
   start=$SECONDS
-  arm_probe_live x y 10000
-  rc=$?
+  arm_probe_live x y "$status_file"
+  probe_pid=$!
+  wait "$probe_pid" 2>/dev/null
+  rc=$(cat "$status_file")
+  rm -f "$status_file"
   printf "rc=%s elapsed=%s\n" "$rc" "$(( SECONDS - start ))"
 ' _ "$ROOT")
 assert_contains "$PROBE_HANG_OUT" "rc=124" \
@@ -802,33 +806,47 @@ probe_hang_elapsed=${PROBE_HANG_OUT##*elapsed=}
   || fail "arm_probe_live took ${probe_hang_elapsed}s to bound a hung probe: $PROBE_HANG_OUT"
 pass "a single hung liveness probe is bounded rather than left free to run indefinitely"
 
-# --- a probe launched near the deadline cannot overrun it by the full ceiling
-# Regression for the "probe timeout exceeds arm deadline" defect: a hung probe
-# was always given the full FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S (2s)
-# ceiling regardless of how much of the caller's own bound actually remained,
-# so a near-zero or already-exhausted budget could still overrun by roughly
-# 2s. arm_probe_live now bounds each probe by whichever is smaller: the
-# ceiling, or the caller's own remaining-ms argument (floored at
-# FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS so a real check still happens). Same
-# extraction technique as above - the real shipped function, a hanging
-# fm_procevent_generation_live stand-in - but this time with a 0ms remaining
-# budget, so a passing result depends on the probe actually honoring that
-# argument rather than falling back to the full ceiling.
-PROBE_DEADLINE_OUT=$(bash -c '
+# --- arm_await_live never blocks past its own deadline on a hung probe -----
+# Regression for the "probe floor exceeds deadline" defect: an earlier
+# revision sized each probe's fm_run_bash_timeout bound off the caller's own
+# remaining-ms budget, floored at FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS so that
+# bound was never zero/negative (which disables it entirely) - and then
+# WAITED SYNCHRONOUSLY for that bounded call to return, termination grace
+# included, before rechecking the wall clock. A probe launched with only a
+# few ms of remaining budget therefore still ran for up to the floor, so a
+# genuinely wedged fm_procevent_generation_live made arm return tens of ms
+# after FM_PROCEVENT_LAVISH_ARM_WAIT_MS had already expired, no matter how
+# small that floor was shrunk. arm_await_live now launches each probe in the
+# background (arm_probe_live) and polls its status file against the wall
+# clock instead of waiting on it, so it can give up right at its deadline
+# regardless of how long the most recently launched probe takes to actually
+# die. Same extraction technique as above - the real shipped functions
+# (arm_now_ms, arm_probe_live, arm_await_live), a fm_procevent_generation_live
+# stand-in that never returns - with an already-exhausted (0ms) deadline, the
+# exact "arm wait is zero" case the defect report named: on the prior
+# implementation this measured ~85ms (the 50ms floor plus overhead) on this
+# machine; on this implementation it measures ~8ms, so 40ms is comfortably
+# between the two rather than a razor-thin margin either side could cross on
+# a noisy CI runner.
+AWAIT_DEADLINE_OUT=$(bash -c '
   . "$1/bin/fm-timeout-lib.sh"
   eval "$(sed -n "/^FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S=/,/^}/p" "$1/bin/fm-procevent-lavish.sh")"
+  eval "$(sed -n "/^arm_now_ms()/,/^}/p" "$1/bin/fm-procevent-lavish.sh")"
+  eval "$(sed -n "/^arm_await_live()/,/^}/p" "$1/bin/fm-procevent-lavish.sh")"
+  die() { printf "error: %s\n" "$1" >&2; exit 1; }
   fm_procevent_generation_live() { sleep 300; }
-  start=$SECONDS
-  arm_probe_live x y 0
+  start_ms=$(arm_now_ms)
+  arm_await_live x y "$start_ms"
   rc=$?
-  printf "rc=%s elapsed=%s\n" "$rc" "$(( SECONDS - start ))"
+  end_ms=$(arm_now_ms)
+  printf "rc=%s elapsed_ms=%s\n" "$rc" "$(( end_ms - start_ms ))"
 ' _ "$ROOT")
-assert_contains "$PROBE_DEADLINE_OUT" "rc=124" \
-  "a hung probe at a zero-ms remaining budget is still killed and reported as timed out: $PROBE_DEADLINE_OUT"
-probe_deadline_elapsed=${PROBE_DEADLINE_OUT##*elapsed=}
-[ "$probe_deadline_elapsed" -le 1 ] \
-  || fail "arm_probe_live took ${probe_deadline_elapsed}s to bound a hung probe at a zero-ms remaining budget (expected close to FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS, not the full 2s ceiling): $PROBE_DEADLINE_OUT"
-pass "a liveness probe launched at a zero-ms remaining budget is bounded by that budget, not the full safety ceiling"
+assert_contains "$AWAIT_DEADLINE_OUT" "rc=1" \
+  "an unconfirmed generation with a permanently hung probe still refuses rather than blocking on it: $AWAIT_DEADLINE_OUT"
+await_deadline_elapsed_ms=${AWAIT_DEADLINE_OUT##*elapsed_ms=}
+[ "$await_deadline_elapsed_ms" -le 40 ] \
+  || fail "arm_await_live took ${await_deadline_elapsed_ms}ms to give up on an already-exhausted deadline against a hung probe (expected single-digit ms, not the old 50ms-floor overrun): $AWAIT_DEADLINE_OUT"
+pass "arm_await_live gives up at its own deadline even while its most recently launched probe is still hung"
 
 # --- arm's background reconcile kick is single-flighted, not one-per-call ---
 # Regression for the "background reconciles remain unowned" defect: arm used

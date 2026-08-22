@@ -126,55 +126,99 @@ arm_now_ms() {
   printf '%s\n' "$(( sec * 1000 ))"
 }
 
-# cmd_arm's polling loop below only checks the wall clock BETWEEN probes, so
-# it decides whether to start another one but cannot stop an already-started
-# probe from running long. fm_procevent_generation_live's own work - a
-# try-once source lock, a claim read, a pid identity check - is normally a
-# handful of fast, non-blocking filesystem/process operations with nothing
-# that retries or waits on contention, but nothing in its contract actually
-# bounds how long any single one of those operations can take (e.g. unusually
-# slow disk I/O). Give every probe its own hard bound via fm_run_bash_timeout,
-# this repo's bash-native bounded-execution mechanism (bin/fm-timeout-lib.sh):
-# it runs the probe in a background subshell of THIS interpreter, so it calls
+# fm_procevent_generation_live's own work - a try-once source lock, a claim
+# read, a pid identity check - is normally a handful of fast, non-blocking
+# filesystem/process operations with nothing that retries or waits on
+# contention, but nothing in its contract actually bounds how long any single
+# one of those operations can take (e.g. unusually slow disk I/O). Give every
+# probe its own hard bound via fm_run_bash_timeout, this repo's bash-native
+# bounded-execution mechanism (bin/fm-timeout-lib.sh): it runs the probe in a
+# background subshell of THIS interpreter, so it calls
 # fm_procevent_generation_live directly rather than needing to re-exec a bare
 # process that never sourced fm-procevent-lib.sh, the way fm_run_timed's
 # preferred timeout/gtimeout/perl mechanisms would.
 #
-# A FIXED ceiling here would itself blow the documented bound: the caller's
-# very first probe always runs even against a near-zero remaining budget (see
-# cmd_arm below), so a stuck probe given the full ceiling could return up to
-# FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S seconds after
-# FM_PROCEVENT_LAVISH_ARM_WAIT_MS already expired. Each probe is therefore
-# bounded by whichever is SMALLER: the safety ceiling, or the caller's own
-# remaining time until its deadline - floored at
-# FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS so a probe launched at (or past) that
-# deadline still gets a real, if brief, chance to complete rather than a
-# zero/negative timeout, which fm_run_bash_timeout does not accept as a bound.
-# In ordinary operation a probe finishes in sub-millisecond time either way, so
-# on a hang, these two are the only overrun a caller can ever see past its own
-# deadline: the floor above, and FM_PROCEVENT_LAVISH_ARM_PROBE_TERM_GRACE_S
-# below.
+# This bound exists only to keep a wedged probe from running forever; it is
+# NOT how arm's own readiness wait is bounded (arm_await_live below owns
+# that, independently of how long any one probe takes). So a fixed
+# FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S ceiling on every probe, regardless
+# of how much of the caller's own budget remains, cannot make arm itself
+# return late: an earlier revision sized this bound to the caller's
+# remaining-ms, floored at a minimum so fm_run_bash_timeout was never handed
+# a zero/negative timeout (which disables the bound entirely), and that floor
+# is exactly what let a probe launched near the deadline still run past it -
+# because arm's loop back then WAITED synchronously for this call to return.
+# It no longer does; see arm_await_live.
 FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S=2
-FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS=50
 # fm_procevent_generation_live traps no signal - it is a plain shell function
 # with a try-once lock, a claim read, and a pid check, none of which install a
 # TERM handler - so SIGTERM already ends it outright and fm_run_bash_timeout's
 # general-purpose 0.2s post-TERM grace (meant for a bounded command that DOES
-# trap TERM to clean up) buys a hung probe nothing but 0.2s of extra overrun
-# past its own bound, and therefore past arm's deadline. Scope the grace down
-# for this call only, so a hung probe's worst-case overrun stays governed by
-# the floor above rather than by a teardown allowance this probe cannot use.
+# trap TERM to clean up) buys a hung probe nothing. Scope it down so an
+# abandoned probe's own subshell exits promptly once its bound is hit, rather
+# than sitting around for a teardown allowance it cannot use.
 FM_PROCEVENT_LAVISH_ARM_PROBE_TERM_GRACE_S=0.02
-arm_probe_live() {  # <source-id> <registration-identity> <remaining-ms>
-  local id=$1 identity=$2 remaining_ms=$3 ceiling_ms bound_ms probe_s
-  ceiling_ms=$(( FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S * 1000 ))
-  bound_ms=$remaining_ms
-  [ "$bound_ms" -lt "$ceiling_ms" ] || bound_ms=$ceiling_ms
-  [ "$bound_ms" -ge "$FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS" ] || bound_ms=$FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS
-  printf -v probe_s '%d.%03d' "$(( bound_ms / 1000 ))" "$(( bound_ms % 1000 ))"
-  FM_TIMEOUT_TERM_GRACE_S=$FM_PROCEVENT_LAVISH_ARM_PROBE_TERM_GRACE_S \
-    fm_run_bash_timeout "$probe_s" \
-    fm_procevent_generation_live "$id" "$identity"
+# Launches one liveness probe in the background and returns immediately - the
+# caller reads $! for its pid. The probe's result (fm_run_bash_timeout's own
+# exit status, including 124 on the probe's internal bound) is written to
+# status_file once the probe subshell finishes; nothing here blocks on that.
+arm_probe_live() {  # <source-id> <registration-identity> <status-file>
+  local id=$1 identity=$2 status_file=$3
+  (
+    FM_TIMEOUT_TERM_GRACE_S=$FM_PROCEVENT_LAVISH_ARM_PROBE_TERM_GRACE_S \
+      fm_run_bash_timeout "$FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S" \
+      fm_procevent_generation_live "$id" "$identity"
+    printf '%s\n' "$?" > "$status_file"
+  ) &
+}
+
+# Confirms id/identity's registered generation is live before deadline_ms, or
+# gives up and returns nonzero - but NEVER blocks past deadline_ms on a single
+# probe. An earlier revision ran each probe through fm_run_bash_timeout and
+# then synchronously WAITED for that call to return (bound plus termination
+# grace) before rechecking the wall clock: a probe launched with only a few ms
+# of budget left still had to run its own full bound before the loop could
+# give up, so a genuinely wedged fm_procevent_generation_live could make arm
+# return tens of ms after FM_PROCEVENT_LAVISH_ARM_WAIT_MS already expired.
+# This version launches each probe in the background (arm_probe_live) and
+# polls its status file against the wall clock rather than waiting on it, so
+# once deadline_ms passes this returns immediately regardless of whether the
+# most recent probe has finished. An abandoned probe is left running - its own
+# fm_run_bash_timeout bound still terminates it eventually, so it cannot leak
+# forever, but nothing here waits for that to happen, and the status file it
+# was writing to is left for it to (harmlessly) recreate.
+arm_await_live() {  # <source-id> <registration-identity> <deadline-ms>
+  local id=$1 identity=$2 deadline_ms=$3
+  local status_file probe_pid now_ms remaining_ms rc frac live=1
+  status_file=$(mktemp "${TMPDIR:-/tmp}/fm-arm-probe-status.XXXXXX" 2>/dev/null) \
+    || die "cannot create a liveness-probe status file for $id"
+  probe_pid=
+  while :; do
+    if [ -z "$probe_pid" ]; then
+      now_ms=$(arm_now_ms)
+      [ "$now_ms" -lt "$deadline_ms" ] || break
+      arm_probe_live "$id" "$identity" "$status_file"
+      probe_pid=$!
+    fi
+    if [ -s "$status_file" ]; then
+      wait "$probe_pid" 2>/dev/null
+      rc=$(cat "$status_file" 2>/dev/null)
+      probe_pid=
+      [ "$rc" = 0 ] && { live=0; break; }
+      : > "$status_file"
+      now_ms=$(arm_now_ms)
+      [ "$now_ms" -lt "$deadline_ms" ] || break
+      continue
+    fi
+    now_ms=$(arm_now_ms)
+    [ "$now_ms" -lt "$deadline_ms" ] || break
+    remaining_ms=$(( deadline_ms - now_ms ))
+    [ "$remaining_ms" -le 20 ] || remaining_ms=20
+    printf -v frac '%03d' "$remaining_ms"
+    sleep "0.$frac"
+  done
+  rm -f "$status_file" 2>/dev/null || true
+  return "$live"
 }
 
 # Single-flight lock for cmd_arm's background reconcile kick, scoped to this
@@ -201,7 +245,7 @@ arm_reconcile_kick_pending_lock() {
 }
 
 cmd_arm() {
-  local artifact=${1-} id real reg_out identity wait_ms live deadline_ms now_ms remaining_ms frac first kick_lock pending_lock
+  local artifact=${1-} id real reg_out identity wait_ms deadline_ms kick_lock pending_lock
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
@@ -268,37 +312,8 @@ cmd_arm() {
     fi
   ) &
   deadline_ms=$(( $(arm_now_ms) + wait_ms ))
-  live=1
-  first=1
-  while :; do
-    # The very first probe always runs, even for a 0ms budget, so a caller
-    # gets at least one real check. Every later probe is itself real work -
-    # a filesystem lock, claim load, and process-identity check - so the
-    # deadline is re-checked against the wall clock right before starting
-    # one, not only after it returns; otherwise a probe could be kicked off
-    # an instant after the budget already ran out, growing the overrun by
-    # that whole probe's duration instead of stopping at the deadline. The
-    # same fresh reading also bounds the probe itself (arm_probe_live), so a
-    # probe started near the deadline cannot run long past it either.
-    now_ms=$(arm_now_ms)
-    if [ "$first" -eq 0 ]; then
-      [ "$now_ms" -lt "$deadline_ms" ] || break
-    fi
-    first=0
-    remaining_ms=$(( deadline_ms - now_ms ))
-    [ "$remaining_ms" -gt 0 ] || remaining_ms=0
-    if arm_probe_live "$id" "$identity" "$remaining_ms"; then
-      live=0
-      break
-    fi
-    now_ms=$(arm_now_ms)
-    [ "$now_ms" -lt "$deadline_ms" ] || break
-    remaining_ms=$(( deadline_ms - now_ms ))
-    [ "$remaining_ms" -le 50 ] || remaining_ms=50
-    printf -v frac '%03d' "$remaining_ms"
-    sleep "0.$frac"
-  done
-  [ "$live" -eq 0 ] || die "listener for $id did not confirm live within ${wait_ms}ms"
+  arm_await_live "$id" "$identity" "$deadline_ms" \
+    || die "listener for $id did not confirm live within ${wait_ms}ms"
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
 }
