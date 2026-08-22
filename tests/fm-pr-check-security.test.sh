@@ -26,6 +26,10 @@ REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
 REAL_BASENAME=$(command -v basename)
+# The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
+# deliberately restricted, so a case that needs jq exposes this one rather than
+# depending on the host keeping jq in one of those four directories.
+REAL_JQ=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 
 ack_watcher_cycle() {  # <state>
   local state=$1 err sequence generation
@@ -2892,11 +2896,16 @@ EOF
   # state it could not read.
   write_task_meta "$dir" task-c
   : > "$dir/glab.log"
+  # The merge path needs jq before it reads anything, so this case supplies it
+  # and the refusal below is the unreadable state rather than a missing tool.
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   set +e
-  run_merge_entry "$dir" task-c "$url" >/dev/null 2>&1
+  run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
+  grep -qF 'could not read the GitLab merge request state before merging' "$dir/merge-c.err" \
+    || fail "merge wrapper refused for some reason other than the state it could not read"
   [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
   grep -qF "mr view 7 -R https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
     || fail "merge wrapper did not read the merge request through glab at its own instance"

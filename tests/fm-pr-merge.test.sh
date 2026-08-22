@@ -13,7 +13,8 @@
 #   (e) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
-#   (h) repo override args fail fast because the repo comes from the URL
+#   (h) repo override args fail fast because the repo comes from the URL,
+#       including a bundled short-option cluster that carries -R
 #   (i) a GitLab MR URL resolves and merges through glab instead of erroring
 #   (j) glab is addressed by the host from the URL, never an assumed one
 #   (k) no merge method is imposed on GitLab, so the project's own one applies
@@ -180,11 +181,16 @@ make_gitlab_case() {
   printf '%s\n' "$case_dir"
 }
 
-# mirror_path_without <dir> <tool>: the whole search path re-exposed by symlink
-# except one tool, because a real copy anywhere on PATH would prove nothing.
+# mirror_path_without <dir> <tool> [<bindir> ...]: the whole search path
+# re-exposed by symlink except one tool, because a real copy anywhere on PATH
+# would prove nothing. The named bindirs are mirrored ahead of the search path,
+# so the case's own mocks answer for every tool that is not the omitted one and
+# the refusal names that tool alone whatever the host happens to have installed.
 mirror_path_without() {
-  local dir=$1 omit=$2 bindir entry name
+  local dir=$1 omit=$2 search bindir entry name
+  shift 2
   mkdir -p "$dir"
+  search=$(printf '%s\n' "$@"; printf '%s\n' "$BASE_PATH" | tr ':' '\n')
   while IFS= read -r bindir; do
     [ -d "$bindir" ] || continue
     for entry in "$bindir"/*; do
@@ -194,7 +200,7 @@ mirror_path_without() {
       [ -e "$dir/$name" ] || ln -s "$entry" "$dir/$name" 2>/dev/null
     done
   done <<EOF
-$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+$search
 EOF
   ! PATH="$dir" command -v "$omit" >/dev/null 2>&1 \
     || fail "the $omit-free search path still resolved $omit"
@@ -381,6 +387,67 @@ test_repo_override_args_refuse_before_recording() {
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "repo-override: gh-axi pr merge was invoked despite repo override"
   pass "fm-pr-merge refuses repo override args before recording state"
+}
+
+# A bundled short-option cluster carries -R without ever being exactly -R, and
+# both CLIs expand it one character at a time, so the guard has to read the
+# whole cluster. On GitLab that redirect names an instance, not only a
+# repository, so it must refuse before anything is recorded or read.
+test_bundled_repo_override_args_refuse_before_recording() {
+  local case_dir rc
+  case_dir=$(make_case bundled-repo-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" abababababababababababababababababababab
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/right/repo/pull/6 -- -dR wrong/repo \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "bundled-repo-override: fm-pr-merge should refuse a bundled repo override"
+  assert_grep 'extra merge arguments must not override the repository' "$case_dir/stderr" \
+    "bundled-repo-override: refusal did not explain the repo override"
+  assert_no_grep 'pr=https://github.com/right/repo/pull/6' "$case_dir/state/task-x1.meta" \
+    "bundled-repo-override: PR URL was recorded before rejecting the bundled repo override"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "bundled-repo-override: a bundled repo override armed a merge poll"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "bundled-repo-override: gh-axi pr merge was invoked despite the bundled repo override"
+
+  case_dir=$(make_gitlab_case bundled-repo-override-gitlab)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" -- -yR https://other.example/g/p \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "bundled-repo-override-gitlab: fm-pr-merge should refuse a bundled instance override"
+  assert_grep 'extra merge arguments must not override the repository' "$case_dir/stderr" \
+    "bundled-repo-override-gitlab: refusal did not explain the repo override"
+  assert_no_grep "pr=$MR_URL" "$case_dir/state/task-x1.meta" \
+    "bundled-repo-override-gitlab: the URL was recorded before rejecting the bundled override"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "bundled-repo-override-gitlab: a bundled override armed a merge poll"
+  [ ! -s "$case_dir/glab.log" ] \
+    || fail "bundled-repo-override-gitlab: glab was invoked despite the bundled override"
+
+  # Only a cluster carrying the repository flag is refused: every other short
+  # cluster is still the caller's business and still reaches the forge.
+  case_dir=$(make_case bundled-non-repo-cluster)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/8 -- -d \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "bundled-non-repo-cluster: fm-pr-merge refused a short flag that overrides nothing"
+
+  grep -qxF 'pr merge 8 --repo example/repo --squash -d' "$case_dir/gh-axi.log" \
+    || fail "bundled-non-repo-cluster: a short flag carrying no repository override was not forwarded"
+  pass "fm-pr-merge refuses a bundled short-option repo override and forwards other short flags"
 }
 
 test_explicit_merge_method_not_overridden() {
@@ -673,10 +740,15 @@ test_gitlab_invalid_head_refuses() {
 }
 
 test_gitlab_missing_tool_refuses_before_recording() {
-  local case_dir rc tool
+  local case_dir rc tool other
   for tool in glab jq; do
+    if [ "$tool" = glab ]; then other=jq; else other=glab; fi
     case_dir=$(make_gitlab_case "gitlab-no-$tool")
-    mirror_path_without "$case_dir/no$tool" "$tool"
+    mirror_path_without "$case_dir/no$tool" "$tool" "$case_dir/fakebin"
+    # One tool absent, the other still answered by this case's own mock, so the
+    # refusal names exactly one tool on a host that ships neither.
+    PATH="$case_dir/no$tool" command -v "$other" >/dev/null 2>&1 \
+      || fail "gitlab-no-$tool: the $tool-free search path lost the $other mock as well"
 
     set +e
     FM_ROOT_OVERRIDE="$ROOT" \
@@ -745,6 +817,7 @@ test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge
 test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
+test_bundled_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi

@@ -24,9 +24,9 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
-# Extra args must not include --repo or -R because the repository comes only
-# from the URL, nor --sha on GitLab because the head comes only from the live
-# read.
+# Extra args must not include --repo or -R in any form, including a bundled
+# short-option cluster such as -yR, because the repository comes only from the
+# URL, nor --sha on GitLab because the head comes only from the live read.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
 set -eu
 
@@ -73,7 +73,14 @@ reject_repo_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --repo|--repo=*|-R|-R?*)
+      --repo|--repo=*)
+        echo "error: extra merge arguments must not override the repository" >&2
+        return 1
+        ;;
+      --*) ;;
+      # A single-dash argument is a short-option cluster, which both CLIs expand
+      # one character at a time, so -yR carries --repo exactly as a bare -R does.
+      -*R*)
         echo "error: extra merge arguments must not override the repository" >&2
         return 1
         ;;
