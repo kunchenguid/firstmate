@@ -211,9 +211,11 @@ SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-60}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once; a
-# secondmate earns the cadence on its declaration alone, because its endpoint
-# liveness is deliberately never read (pause_state_class owns that split).
+# bounded cadence, while a live or ambiguously read agent surfaces once per
+# declaration and then joins it; a secondmate earns the cadence on its declaration
+# alone, because its endpoint liveness is deliberately never read
+# (pause_state_class owns that split, and the declaration - not the pane hash -
+# owns how long the cadence holds).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -702,8 +704,23 @@ clear_pause_tracking() {  # <window-key>
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
+#
+# The ordinary-crew liveness gate is ONE-SHOT per declared wait, and .paused-<key>
+# is what makes it one-shot: an ordinary crew whose agent is still live (or read
+# ambiguously) may have declared a wait while actually parked at a decision gate, so
+# the FIRST stale sighting of that declaration is surfaced for inspection. Once a
+# caller has put the key on the bounded cadence, the gate is spent and liveness can
+# no longer re-arm it. Re-reading it on every evaluation is what made a declared
+# wait surface a bare stale wake for every pane redraw: the answer `none` is a
+# caller's "no declared wait here" signal, so the changed-hash caller cleared the
+# cadence flag and its long-cadence throttle, and the next stable hash surfaced as a
+# first sighting all over again. The declaration itself, not the pane hash, now owns
+# how long the cadence holds - .paused-<key> is dropped only when the last status
+# line stops declaring a wait or the crew is provably working again, so the cadence
+# survives further declaring appends and watcher restarts while a genuinely new
+# captain-relevant line still clears it and surfaces through the terminal path.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive kind
+  local win=$1 task=$2 key last recheck_file class agent_alive kind on_cadence
   key=$(window_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
@@ -712,19 +729,11 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  # Read once past the declared-wait gate and reused by both liveness gates below,
-  # so a mate's stale poll costs one metadata scan rather than one per gate, and the
-  # far more common no-declaration path above still costs none.
-  kind=$(window_kind "$win")
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$kind" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
+  if [ -e "$STATE/.paused-$key" ]; then on_cadence=0; else on_cadence=1; fi
+  # Already on the cadence and reconciled within the last wedge window: the poll that
+  # covers the overwhelming majority of a long wait re-reads nothing at all - not the
+  # crew state, not the window's metadata, not the backend.
+  if [ "$on_cadence" -eq 0 ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     printf 'paused'
     return
   fi
@@ -734,22 +743,28 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
-  if [ "$kind" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
-      return
+  # The one-shot liveness gate, and the only reader of the window's kind, so a poll
+  # that never reaches it costs no metadata scan.
+  if [ "$on_cadence" -ne 0 ]; then
+    kind=$(window_kind "$win")
+    if [ "$kind" != secondmate ]; then
+      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      if [ "$agent_alive" != dead ]; then
+        rm -f "$recheck_file"
+        printf 'none'
+        return
+      fi
     fi
   fi
   # Recover paused classification for a declared wait that authoritative crew state
-  # could not name. Reaching here already proves the only two admissible cases: an
+  # could not name. Reaching here already proves the only three admissible cases: an
   # ordinary crew whose agent the gate above confirmed dead, so no live decision gate
-  # is being silenced, or a secondmate, whose endpoint liveness is deliberately never
-  # read and so cannot supply that confirmation. Without the mate case a mate's
-  # captain hold - which has no current-state mapping and so arrives as `none` -
-  # would be silenced by every caller rather than taking the bounded re-surface
-  # cadence, and a forgotten hold would rot invisibly.
+  # is being silenced; a secondmate, whose endpoint liveness is deliberately never
+  # read and so cannot supply that confirmation; or a key already on the bounded
+  # cadence, whose one live-agent inspection has been spent. Without the mate case a
+  # mate's captain hold - which has no current-state mapping and so arrives as
+  # `none` - would be silenced by every caller rather than taking the bounded
+  # re-surface cadence, and a forgotten hold would rot invisibly.
   [ "$class" = none ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;

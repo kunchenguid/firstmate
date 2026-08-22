@@ -1119,6 +1119,169 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
+# One watcher restart over a crew that is idling on a declared wait: run a round,
+# and let it either absorb (three completed poll cycles - the changed hash, the
+# first repeat, and the poll that classifies the now-stable hash) or exit on a
+# wake, acknowledging the queue so the next round starts clean. Output is
+# APPENDED so a caller can count wakes across every round of a scenario.
+# 1 only when an intentional stop could not be acknowledged.
+watch_paused_round() {  # <state> <fakebin> <out> <window> <capture-file>
+  local state=$1 fakebin=$2 out=$3 window=$4 capture=$5 pid
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=3600 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if wait_poll_cycle "$state" "$pid" && wait_poll_cycle "$state" "$pid" \
+    && wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    return 0
+  fi
+  wait "$pid" 2>/dev/null || true
+  ack_stopped_cycle "$state"
+}
+
+# A fully armed declared-wait cadence for <window>: a stably stale idle pane, a
+# current paused: declaration whose signature the signal scan has already seen,
+# and every pause marker the watcher would hold after the wait joined the long
+# cadence. The captain-relevant boundary cases start from exactly this state.
+arm_pause_cadence() {  # <state> <capture-file> <status-file> <window> <key> <pane-hash>
+  local state=$1 capture=$2 statusf=$3 window=$4 key=$5 pane_hash=$6
+  printf 'idle awaiting the upstream release\n' > "$capture"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/armed.meta"
+  printf 'paused: waiting on the upstream vendor release\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-armed_status"
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  date +%s > "$state/.paused-rechecked-$key"
+  date +%s > "$state/.paused-resurfaced-$key"
+}
+
+# The watcher run the captain-relevant boundary cases drive: the same live agent
+# and long cadence as a real declared wait, so only the captain-relevant line
+# differs between the armed fixture and the wake it must still produce.
+watch_armed_pause() {  # <state> <fakebin> <out> <window> <capture-file>
+  local state=$1 fakebin=$2 out=$3 window=$4 capture=$5
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=3600 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+}
+
+# Regression: the bounded pause cadence is owned by the DECLARATION, not by the
+# pane hash. A crew idling on a declared wait keeps re-rendering - a ticking
+# clock, a token counter, its own status echo - and every redraw used to re-arm
+# the one-per-declaration live-agent inspection, because pause_state_class read
+# agent liveness on every evaluation and its `none` answer is a caller's "no
+# declared wait here" signal: the changed-hash caller then cleared the cadence
+# flag and its long-cadence throttle, so the next stable hash surfaced as a first
+# sighting all over again (windows cycling bare stale wakes every few minutes
+# against a current paused: line, 2026-08-22). The declaration never changes
+# here, so exactly one stale wake may be surfaced across every churn, every
+# further declaring append, and every watcher restart.
+test_declared_pause_cadence_survives_pane_churn_and_restarts() {
+  local dir state fakebin out capture_file statusf window key round stales
+  dir=$(make_case declared-pause-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/churn.status"
+  window="test:fm-churn"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/churn.meta"
+  printf 'paused: waiting on the upstream vendor release\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-churn_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The agent is LIVE throughout (a paused crew normally still has its agent up),
+  # which is exactly the case the one-shot inspection covers.
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on the upstream vendor release'
+
+  # Phase A: five watcher restarts, each seeing a differently-rendered idle pane.
+  round=1
+  while [ "$round" -le 5 ]; do
+    printf 'idle awaiting the upstream release\ntokens %s\n' "$round" > "$capture_file"
+    watch_paused_round "$state" "$fakebin" "$out" "$window" "$capture_file" \
+      || fail "could not acknowledge the pause-churn round $round stop"
+    round=$((round + 1))
+  done
+  stales=$(grep -c '^stale:' "$out" || true)
+  [ "$stales" -eq 1 ] \
+    || fail "a churning declared pause surfaced $stales stale wakes across five restarts (expected the single live-agent inspection)"
+
+  # Phase B: the crew keeps appending to its still-current declaration. Each
+  # append's .seen-* signature is primed so the signal scan cannot pre-empt the
+  # stale path being asserted here; the append must not re-arm it either.
+  printf 'idle awaiting the upstream release\ntokens settled\n' > "$capture_file"
+  round=1
+  while [ "$round" -le 3 ]; do
+    printf 'paused: still waiting on the upstream vendor release (check %s)\n' "$round" >> "$statusf"
+    printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-churn_status"
+    watch_paused_round "$state" "$fakebin" "$out" "$window" "$capture_file" \
+      || fail "could not acknowledge the pause-append round $round stop"
+    round=$((round + 1))
+  done
+  stales=$(grep -c '^stale:' "$out" || true)
+  [ "$stales" -eq 1 ] \
+    || fail "declaring status appends re-armed the stale path ($stales stale wakes in total)"
+  [ -e "$state/.paused-$key" ] \
+    || fail "the declared-wait cadence marker was lost across pane churn, appends and restarts"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a declared wait started the wedge timer"
+  grep -F 'possible wedge' "$out" >/dev/null && fail "a declared wait was mislabeled a possible wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "a current declared wait holds its long cadence across pane churn, declaring appends and watcher restarts"
+}
+
+# The safety boundary the pause cadence must never cross: an armed cadence is
+# bookkeeping about a declared wait, never a suppressor for the captain-relevant
+# line that ends it. With the cadence fully armed and the agent live, each
+# terminal verb must still wake immediately - through the signal path when its
+# append is unseen, and through the stale path when the signal scan has already
+# been satisfied.
+test_captain_relevant_line_breaks_an_armed_pause_cadence() {
+  local dir state fakebin out capture_file statusf window key pane_hash pid slug line
+  window="test:fm-armed"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting the upstream release")
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on the upstream vendor release'
+  while IFS='|' read -r slug line; do
+    [ -n "$slug" ] || continue
+
+    # Signal path: the append is unseen, so the captain-relevant line must wake
+    # firstmate on the spot.
+    dir=$(make_case "armed-pause-signal-$slug"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/armed.status"
+    arm_pause_cadence "$state" "$capture_file" "$statusf" "$window" "$key" "$pane_hash"
+    printf '%s\n' "$line" >> "$statusf"
+    watch_armed_pause "$state" "$fakebin" "$out" "$window" "$capture_file"
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "an armed pause cadence swallowed a $slug append on the signal path"; }
+    grep -F "$statusf" "$state/.wake-queue" >/dev/null \
+      || fail "a $slug append behind an armed pause cadence was not queued: $(cat "$state/.wake-queue" 2>/dev/null)"
+
+    # Stale path: the same append with its signature already seen, so only the
+    # stale classifier can surface it. It must, and it must drop the cadence.
+    dir=$(make_case "armed-pause-stale-$slug"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/armed.status"
+    arm_pause_cadence "$state" "$capture_file" "$statusf" "$window" "$key" "$pane_hash"
+    printf '%s\n' "$line" >> "$statusf"
+    printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-armed_status"
+    watch_armed_pause "$state" "$fakebin" "$out" "$window" "$capture_file"
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "an armed pause cadence swallowed a $slug line on the stale path"; }
+    grep -F "stale: $window" "$out" >/dev/null \
+      || fail "a $slug line behind an armed pause cadence did not surface as a stale wake: $(cat "$out")"
+    grep -F 'awaiting external' "$out" >/dev/null \
+      && fail "a $slug line was rechecked on the pause cadence instead of surfacing"
+    [ ! -e "$state/.paused-$key" ] \
+      || fail "a $slug line left the declared-wait cadence armed"
+  done <<'VERBS'
+needs-decision|needs-decision [key=api-shape]: pick the sync or the async client
+blocked|blocked: the upstream vendor token expired
+done|done: PR https://example.test/x/pull/9 checks green
+VERBS
+  unset FM_FAKE_CREW_STATE
+  pass "needs-decision, blocked and done still wake immediately through an armed declared-wait cadence"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2852,6 +3015,8 @@ test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_declared_pause_cadence_survives_pane_churn_and_restarts
+test_captain_relevant_line_breaks_an_armed_pause_cadence
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
