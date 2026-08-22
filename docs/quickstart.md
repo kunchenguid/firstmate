@@ -93,12 +93,13 @@ Running them in parallel is the normal case, not a special mode.
 ## What supervision feels like
 
 Silence is the healthy state.
-Once work is under way the first mate watches it for you continuously and without burning tokens, so an idle-looking session usually means everything is fine.
+Once work is under way the first mate keeps watch for you, so an idle-looking session usually means everything is fine.
 
-You get pulled in for four things:
+You get pulled in for five things:
 
 - A decision only you can make.
 - Work that is ready for your review, with the full pull request link whenever the work produced one.
+- Findings from a finished scout, handed to you as the findings themselves rather than a bare "done".
 - A real failure or blocker, after the first mate has already tried the obvious recovery.
 - Something it needs from you, such as a login or a credential.
 
