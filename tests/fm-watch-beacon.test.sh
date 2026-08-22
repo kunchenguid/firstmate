@@ -48,6 +48,7 @@ file_mtime() {
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
+  # shellcheck disable=SC2016 # $1 belongs to the inner bash -c process.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_BACKEND_HERDR_EVENTS_FORCE=0 \
@@ -118,6 +119,7 @@ SH
   chmod +x "$fakebin/herdr"
   out="$dir/out"
   watch_bg "$state" "$fakebin" "$out"
+  # shellcheck disable=SC2031 # watch_bg backgrounds in this shell, so $! is ours.
   pid=$!
   wait_beat_advance "$state" "$pid" \
     || { reap "$pid"; fail "the beacon must keep advancing while every backend call fails"; }
@@ -147,6 +149,7 @@ SH
   out="$dir/out"
   start=$(date +%s)
   watch_bg "$state" "$fakebin" "$out" FM_BACKEND_HERDR_CLI_TIMEOUT=1
+  # shellcheck disable=SC2031 # watch_bg backgrounds in this shell, so $! is ours.
   pid=$!
   wait_beat_advance "$state" "$pid" \
     || { reap "$pid"; fail "the beacon must keep advancing while backend calls hang"; }
@@ -177,6 +180,7 @@ SH
   chmod +x "$fakebin/herdr"
   out="$dir/out"
   watch_bg "$state" "$fakebin" "$out"
+  # shellcheck disable=SC2031 # watch_bg backgrounds in this shell, so $! is ours.
   pid=$!
   wait_beat_advance "$state" "$pid" \
     || { reap "$pid"; fail "the watcher must be beating normally before the beacon is taken away"; }
@@ -225,6 +229,7 @@ test_liveness_hook_beats_per_pending_reply_record() {
     set +u
     # shellcheck source=bin/fm-pending-reply-lib.sh
     . "$ROOT/bin/fm-pending-reply-lib.sh"
+    # shellcheck disable=SC2329 # Invoked indirectly through FM_LIVENESS_BEAT_HOOK.
     beat_probe() { printf 'x\n' >> "$beats"; }
     fm_pending_reply_create "$dir" "$state" alpha "first request" >/dev/null || exit 1
     fm_pending_reply_create "$dir" "$state" bravo "second request" >/dev/null || exit 1
@@ -248,9 +253,11 @@ test_liveness_hook_beats_per_signal_triage_task() {
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
     # shellcheck source=bin/fm-classify-lib.sh
     . "$ROOT/bin/fm-classify-lib.sh"
+    # shellcheck disable=SC2329 # Invoked indirectly through FM_LIVENESS_BEAT_HOOK.
     beat_probe() { printf 'x\n' >> "$beats"; }
     # Every task provably working, so the batch runs to completion instead of
     # short-circuiting on the first one.
+    # shellcheck disable=SC2030,SC2031 # Deliberately scoped to this subshell.
     export FM_FAKE_CREW_STATE='state: working · source: pane · fake'
     FM_LIVENESS_BEAT_HOOK=beat_probe signal_crew_provably_working \
       "$state/one.status" "$state/two.status" "$state/three.status" || exit 1
@@ -272,10 +279,12 @@ test_liveness_hook_unset_is_a_noop() {
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
     # shellcheck source=bin/fm-pending-reply-lib.sh
     . "$ROOT/bin/fm-pending-reply-lib.sh"
+    # shellcheck disable=SC2329 # Invoked indirectly through FM_LIVENESS_BEAT_HOOK.
     beat_probe() { printf 'x\n' >> "$beats"; }
     fm_liveness_beat || exit 1
     fm_pending_reply_create "$dir" "$state" alpha "first request" >/dev/null || exit 1
     fm_pending_reply_tick "$state" || exit 1
+    # shellcheck disable=SC2030,SC2031 # Deliberately scoped to this subshell.
     export FM_FAKE_CREW_STATE='state: working · source: pane · fake'
     signal_crew_provably_working "$state/one.status" || exit 1
   ) || fail "with no hook set, both loops must behave exactly as they did before the hook existed"
