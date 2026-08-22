@@ -575,6 +575,13 @@ class MirrorBot:
             return False
         return True
 
+    async def delete_message(self, message_id: int) -> None:
+        params = {"chat_id": self.config.chat_id, "message_id": message_id}
+        try:
+            await self.api.call("deleteMessage", params)
+        except TelegramError as exc:
+            log(str(exc))
+
     async def answer_callback(self, callback_id: str, text: str = "") -> None:
         params: dict[str, Any] = {"callback_query_id": callback_id}
         if text:
@@ -875,7 +882,7 @@ class MirrorBot:
             return
         if action == "back":
             entry.revision += 1
-            self.clear_prompt(entry)
+            await self.retire_prompt(entry)
             await self.edit_card(entry.card_id, entry.text, main_markup(entry.voice_id, entry.revision))
 
     async def apply_edit(self, voice_id: int, text: str, message_id: int) -> None:
@@ -899,6 +906,17 @@ class MirrorBot:
         await self.retire_placeholder(
             entry.card_id, entry.voice_id, f"{entry.text}\n\n{footer}",
         )
+
+    async def retire_prompt(self, entry: Voice) -> None:
+        """Back takes the instruction message out of the chat too.
+
+        The binding is dropped first, so even a refused delete cannot leave the
+        message acting as a live correction target.
+        """
+        prompt_id = entry.prompt_id
+        self.clear_prompt(entry)
+        if prompt_id is not None:
+            await self.delete_message(prompt_id)
 
     def clear_prompt(self, entry: Voice) -> None:
         if entry.prompt_id is not None:

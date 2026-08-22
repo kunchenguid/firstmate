@@ -66,6 +66,7 @@ class FakeTelegram:
         self.pending: list[dict[str, Any]] = []
         self.sent: list[dict[str, Any]] = []
         self.edits: list[dict[str, Any]] = []
+        self.deleted: list[int] = []
         self.callback_answers: list[dict[str, Any]] = []
         self.calls: list[tuple[str, dict[str, Any]]] = []
         # Uploads the bot made: (method, fields, [(field, filename, bytes)]).
@@ -197,6 +198,10 @@ class FakeTelegram:
                     raise ParseModeRejected("message can't be edited")
                 self.edits.append(dict(params))
                 return dict(params)
+        if method == "deleteMessage":
+            with self.lock:
+                self.deleted.append(int(params.get("message_id")))
+                return True
         if method == "answerCallbackQuery":
             with self.lock:
                 self.callback_answers.append(dict(params))
@@ -269,11 +274,12 @@ class FakeTelegram:
 
     # --- assertions ---
 
-    def wait_sent(self, predicate, timeout: float = DEADLINE) -> dict[str, Any]:
+    def wait_sent(self, predicate, timeout: float = DEADLINE,
+                  after: int = 0) -> dict[str, Any]:
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self.lock:
-                for message in self.sent:
+                for message in self.sent[after:]:
                     if predicate(message):
                         return message
             time.sleep(0.02)
@@ -289,6 +295,15 @@ class FakeTelegram:
                         return edit
             time.sleep(0.02)
         raise AssertionError(f"no edit matched; saw {[e.get('text') for e in self.edits]}")
+
+    def wait_deleted(self, message_id: int, timeout: float = DEADLINE) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                if message_id in self.deleted:
+                    return
+            time.sleep(0.02)
+        raise AssertionError(f"message {message_id} was never deleted; saw {self.deleted}")
 
     def edit_count(self) -> int:
         with self.lock:
@@ -1632,6 +1647,70 @@ class MirrorTestCase(unittest.TestCase):
         else:
             raise AssertionError("a repeated tap was not refused")
         pi.expect_nothing()
+
+    def test_edit_then_back_retires_the_reply_prompt(self) -> None:
+        """Back must leave no live instruction message a reply could still feed."""
+        pi = self.connect_pi()
+        self.enable_mirror(pi)
+        self.telegram.push_voice(81)
+        card_id = self.card_id_for("please rebase the branch")
+
+        # Edit publishes exactly one instruction message as the correction target.
+        before_first_prompt = len(self.telegram.sent)
+        self.telegram.push_callback("v:81:1:edit", card_id, "cb-edit-1")
+        first_prompt = self.telegram.wait_sent(
+            lambda m: m.get("text") == "Reply to this message with the corrected text.",
+            after=before_first_prompt,
+        )
+        first_prompt_id = int(first_prompt["message_id"])
+        self.assertTrue(first_prompt["reply_markup"]["force_reply"])
+
+        # Back retires that message in Telegram, not only in the bot's memory.
+        before_back_view = self.telegram.edit_count()
+        self.telegram.push_callback("v:81:2:back", card_id, "cb-back")
+        self.telegram.wait_deleted(first_prompt_id)
+        restored = self.telegram.wait_edit(
+            lambda e: int(e.get("message_id", 0)) == card_id, after=before_back_view
+        )
+        restored_buttons = [b["text"] for row in restored["reply_markup"]["inline_keyboard"]
+                            for b in row]
+        self.assertEqual(restored_buttons, ["Send to Firstmate", "Edit", "Cancel"])
+
+        # A reply aimed at the retired prompt is ordinary text, never a correction.
+        self.telegram.push_text("stray reply to a dead prompt", 82,
+                                reply_to=first_prompt_id)
+        stray = pi.read()
+        self.assertEqual(stray["text"], "stray reply to a dead prompt")
+        pi.send({"t": "accepted", "id": stray["id"]})
+        with self.telegram.lock:
+            self.assertTrue(all(e.get("text") != "stray reply to a dead prompt"
+                                for e in self.telegram.edits))
+
+        # Edit again publishes a fresh prompt that still accepts a correction.
+        before_second_prompt = len(self.telegram.sent)
+        self.telegram.push_callback("v:81:3:edit", card_id, "cb-edit-2")
+        second_prompt = self.telegram.wait_sent(
+            lambda m: m.get("text") == "Reply to this message with the corrected text.",
+            after=before_second_prompt,
+        )
+        second_prompt_id = int(second_prompt["message_id"])
+        self.assertNotEqual(second_prompt_id, first_prompt_id)
+        self.assertTrue(second_prompt["reply_markup"]["force_reply"])
+
+        self.telegram.push_text("please rebase the release branch", 83,
+                                reply_to=second_prompt_id)
+        corrected = self.telegram.wait_edit(
+            lambda e: e.get("text") == "please rebase the release branch"
+            and int(e.get("message_id", 0)) == card_id
+        )
+        corrected_buttons = [b["text"] for row in corrected["reply_markup"]["inline_keyboard"]
+                             for b in row]
+        self.assertEqual(corrected_buttons, ["Send to Firstmate", "Edit", "Cancel"])
+        pi.expect_nothing()
+
+        # Exactly one delete: the retired prompt, and no id was retired twice.
+        with self.telegram.lock:
+            self.assertEqual(self.telegram.deleted, [first_prompt_id])
 
     def test_voice_send_waits_for_mirroring_to_be_enabled(self) -> None:
         pi = self.connect_pi()

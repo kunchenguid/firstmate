@@ -203,7 +203,7 @@ If sending the placeholder or editing it in place fails, the result is sent as a
 `Edit` replaces the buttons with `Copy text` and `Back` and opens a reply prompt bound to that transcript.
 Copy the text, paste it into the reply, correct it, and send: the original transcript message updates and the main buttons return, as often as you like.
 A transcript card is limited to 3,800 characters so it always remains one editable message; longer transcriptions are refused in that same message and their temporary audio is removed.
-`Back` leaves the transcript unchanged and restores the main buttons.
+`Back` leaves the transcript unchanged, removes the reply prompt from the chat, and restores the main buttons; a later `Edit` opens a fresh prompt.
 Telegram limits a copy button to 256 characters, so a longer transcript shows only `Back`; copy that text from the transcript message itself.
 
 `Send to Firstmate` removes the buttons, marks the transcript `Sent to Firstmate`, queues the current text through the same path as ordinary Telegram text, and deletes the temporary audio.
