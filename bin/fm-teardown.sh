@@ -518,12 +518,20 @@ quiesce_secondmate_endpoint() {
   local endpoint_home probe_home='' endpoint_status
   endpoint_home=$(fm_backend_endpoint_home "$BACKEND" "$KIND" "$FM_HOME" "$HOME_PATH")
   [ "$endpoint_home" = "$FM_HOME" ] || probe_home=$endpoint_home
-  if managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$probe_home" "$(meta_value "$META" tmux_session_target)"; then
+  # Herdr runs a secondmate in the compartment's workspace, so the backend
+  # probe switches FM_HOME to that compartment. Keep metadata authority bound
+  # to the owning primary state: the compartment legitimately has no copy of
+  # its parent's meta, and falling back to its state makes the exact
+  # workspace/tab/label identity unprovable. This supplies the same metadata
+  # to both read-only absence checks and a needed kill without relaxing any of
+  # the adapter's identity comparisons.
+  if FM_STATE_OVERRIDE="$STATE" \
+      managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$probe_home" "$(meta_value "$META" tmux_session_target)"; then
     return 0
   fi
   if [ -n "$T" ]; then
     if [ -n "$probe_home" ]; then
-      ( unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" "$(meta_value "$META" tmux_session_target)" ) 2>/dev/null || {
+      ( unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" FM_STATE_OVERRIDE="$STATE" fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" "$(meta_value "$META" tmux_session_target)" ) 2>/dev/null || {
         echo "error: failed to stop secondmate endpoint for $ID; refusing child cleanup" >&2
         return 1
       }
@@ -534,7 +542,8 @@ quiesce_secondmate_endpoint() {
       }
     fi
   fi
-  if managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$probe_home" "$(meta_value "$META" tmux_session_target)"; then
+  if FM_STATE_OVERRIDE="$STATE" \
+      managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$probe_home" "$(meta_value "$META" tmux_session_target)"; then
     return 0
   fi
   endpoint_status=$?
@@ -548,7 +557,8 @@ quiesce_secondmate_endpoint() {
 
 quiesce_child_endpoint() {
   local meta=$1 task=$2 owner_home=$3 child_home=${4:-}
-  local backend target kind endpoint_home probe_home='' endpoint_status scoped_target zellij_tab
+  local backend target kind endpoint_home probe_home='' endpoint_status scoped_target zellij_tab meta_state
+  meta_state=$(dirname "$meta")
   backend=$(fm_backend_of_meta "$meta")
   target=$(teardown_backend_target_of_meta "$meta")
   kind=$(meta_value "$meta" kind)
@@ -561,12 +571,14 @@ quiesce_child_endpoint() {
   if [ "$backend" = zellij ] && [ -n "$zellij_tab" ]; then
     if [ -n "$probe_home" ]; then
       ( unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" \
+        FM_STATE_OVERRIDE="$meta_state" \
         fm_backend_kill "$backend" "$target" "$zellij_tab" "fm-$task" "$scoped_target" ) 2>/dev/null || {
         echo "error: failed to stop child endpoint for $task; refusing destructive cleanup" >&2
         return 1
       }
     else
-      fm_backend_kill "$backend" "$target" "$zellij_tab" "fm-$task" "$scoped_target" 2>/dev/null || {
+      FM_STATE_OVERRIDE="$meta_state" \
+        fm_backend_kill "$backend" "$target" "$zellij_tab" "fm-$task" "$scoped_target" 2>/dev/null || {
         echo "error: failed to stop child endpoint for $task; refusing destructive cleanup" >&2
         return 1
       }
@@ -583,7 +595,8 @@ quiesce_child_endpoint() {
     }
     return 0
   fi
-  if managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$scoped_target"; then
+  if FM_STATE_OVERRIDE="$meta_state" \
+    managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$scoped_target"; then
     return 0
   else
     endpoint_status=$?
@@ -597,17 +610,22 @@ quiesce_child_endpoint() {
     return 1
   }
   if [ -n "$probe_home" ]; then
-    ( unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" fm_backend_kill "$backend" "$target" "$(meta_value "$meta" zellij_tab_id)" "fm-$task" "$(meta_value "$meta" tmux_session_target)" ) 2>/dev/null || {
+    ( unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" \
+      FM_STATE_OVERRIDE="$meta_state" \
+      fm_backend_kill "$backend" "$target" "$(meta_value "$meta" zellij_tab_id)" "fm-$task" "$(meta_value "$meta" tmux_session_target)" ) 2>/dev/null || {
       echo "error: failed to stop child endpoint for $task; refusing destructive cleanup" >&2
       return 1
     }
   else
-    ( unset FM_ROOT_OVERRIDE; FM_HOME="$owner_home" FM_ROOT="$owner_home" fm_backend_kill "$backend" "$target" "$(meta_value "$meta" zellij_tab_id)" "fm-$task" "$(meta_value "$meta" tmux_session_target)" ) 2>/dev/null || {
+    ( unset FM_ROOT_OVERRIDE; FM_HOME="$owner_home" FM_ROOT="$owner_home" \
+      FM_STATE_OVERRIDE="$meta_state" \
+      fm_backend_kill "$backend" "$target" "$(meta_value "$meta" zellij_tab_id)" "fm-$task" "$(meta_value "$meta" tmux_session_target)" ) 2>/dev/null || {
       echo "error: failed to stop child endpoint for $task; refusing destructive cleanup" >&2
       return 1
     }
   fi
-  if managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$scoped_target"; then
+  if FM_STATE_OVERRIDE="$meta_state" \
+    managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$scoped_target"; then
     return 0
   fi
   endpoint_status=$?
@@ -648,23 +666,28 @@ quiesce_managed_account_endpoint() {  # <meta> <task> [probe-home]
     }
     return 0
   fi
-  if managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$tmux_session_target"; then
+  if FM_STATE_OVERRIDE="$meta_state" \
+    managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$tmux_session_target"; then
     return 0
   fi
   if [ -n "$target" ]; then
     if [ -n "$probe_home" ]; then
-      ( unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" fm_backend_kill "$backend" "$target" "$zellij_tab" "fm-$task" "$tmux_session_target" ) 2>/dev/null || {
+      ( unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" \
+        FM_STATE_OVERRIDE="$meta_state" \
+        fm_backend_kill "$backend" "$target" "$zellij_tab" "fm-$task" "$tmux_session_target" ) 2>/dev/null || {
         echo "error: failed to stop managed endpoint for $task; retaining its Agent Fleet lease and metadata" >&2
         return 1
       }
     else
-      fm_backend_kill "$backend" "$target" "$zellij_tab" "fm-$task" "$tmux_session_target" 2>/dev/null || {
+      FM_STATE_OVERRIDE="$meta_state" \
+        fm_backend_kill "$backend" "$target" "$zellij_tab" "fm-$task" "$tmux_session_target" 2>/dev/null || {
         echo "error: failed to stop managed endpoint for $task; retaining its Agent Fleet lease and metadata" >&2
         return 1
       }
     fi
   fi
-  if managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$tmux_session_target"; then
+  if FM_STATE_OVERRIDE="$meta_state" \
+    managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$tmux_session_target"; then
     return 0
   else
     endpoint_status=$?

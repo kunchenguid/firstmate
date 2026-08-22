@@ -40,6 +40,7 @@ unit	tests/fm-account-directory.test.sh	test_default_root_uses_passwd_home_not_a
 unit	tests/fm-account-directory.test.sh	test_prepare_installs_and_verifies_per_account_herdr_hooks	system-openat-binding
 unit	tests/fm-account-directory.test.sh	test_spawn_uses_direct_claude_fallback_and_hook	system-openat-binding
 unit	tests/fm-account-directory.test.sh	test_direct_claude_recovery_resolves_legacy_default_to_anchor	system-openat-binding
+unit	tests/fm-teardown-suite.sh	test_forced_nested_secondmate_herdr_uses_owner_meta_state	origin-egress
 unit	tests/fm-teardown-suite.sh	test_forced_secondmate_child_uses_child_home_for_endpoint_verification	origin-egress
 unit	tests/fm-teardown-suite.sh	test_forced_secondmate_quiesces_parent_before_child_cleanup	origin-egress
 unit	tests/fm-teardown-suite.sh	test_forced_secondmate_retains_child_on_checkout_lock_contention	origin-egress
@@ -51,8 +52,11 @@ unit	tests/fm-teardown-suite.sh	test_forced_secondmate_retains_unlanded_child_wo
 unit	tests/fm-teardown-suite.sh	test_forced_secondmate_retains_unquiesced_unmanaged_child	origin-egress
 unit	tests/fm-teardown-suite.sh	test_forced_secondmate_retains_unverified_process_group	origin-egress
 unit	tests/fm-teardown-suite.sh	test_managed_child_teardown_locks_generation_before_snapshot	origin-egress
+unit	tests/fm-teardown-suite.sh	test_managed_secondmate_herdr_release_uses_primary_meta_without_state_override	origin-egress
 unit	tests/fm-teardown-suite.sh	test_nested_secondmate_cleanup_requires_child_home_lock	origin-egress
 unit	tests/fm-teardown-suite.sh	test_normal_secondmate_retires_proven_detached_head	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_herdr_absence_uses_primary_meta_without_state_override	origin-egress
+unit	tests/fm-teardown-suite.sh	test_secondmate_herdr_kill_uses_primary_meta_without_state_override	origin-egress
 unit	tests/fm-teardown-suite.sh	test_secondmate_missing_treehouse_child_is_retained	origin-egress
 unit	tests/fm-teardown-suite.sh	test_secondmate_project_origin_authority_survives_home_removal	origin-egress
 unit	tests/fm-teardown-suite.sh	test_secondmate_project_tags_do_not_prove_landing	origin-egress
