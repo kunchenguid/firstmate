@@ -1619,6 +1619,141 @@ check(closing_code != 0,
 check("connection closed" in spoken.getvalue(),
       "and the captain should be told why it stopped: %r" % spoken.getvalue())
 
+# The case above is the connection going while the run loop is watching for it.
+# The loop cannot only be watching, though: the downlink names the failure and
+# marks the connection closed, and a loop that decides by reading the mark alone
+# is blind for as long as those are two separate writes - the connection is gone,
+# the failure is on the record, and the check has already passed. So the decision
+# belongs where the turn is opened, under the lock both writes are made under.
+# With the connection already gone, opening the turn anyway erased the failure the
+# downlink had recorded, pushed talk-start into a dead pipe, and printed a run
+# that waited out the whole reply timeout as answered: false with relay_error:
+# null - the invented turn this whole seam exists to keep out of runs.jsonl.
+class LostStream:
+    """A downlink that is already gone the first time it is read."""
+
+    def read(self, count):
+        raise OSError(104, "Connection reset by peer")
+
+
+class CountingUplink:
+    """Accepts frames and remembers which kinds were pushed at it."""
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, kind, payload=b""):
+        self.sent.append(kind)
+
+
+gone = client.Client(client.parse_args(
+    ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+     "--out-file", os.path.join(TMP, "reply-gone.pcm"), "--runs", "2",
+     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"]))
+gone.reader = frame.Reader(LostStream())
+gone.uplink = CountingUplink()
+gone.playback = client.FilePlayback(os.path.join(TMP, "reply-gone.pcm"))
+gone.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
+gone.capture.start(gone.up_q, gone.talking)
+thread_lib.Thread(target=gone._sender, daemon=True).start()
+# Run to completion in this thread rather than in a started one: the connection
+# is gone before the first read returns, so the whole downlink is over by the
+# time run() begins and there is no ordering left for the scheduler to decide.
+gone._downlink()
+check(gone.closed.is_set(),
+      "fixture: a connection lost on the first read must leave the client closed")
+
+gone_out, gone_said = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(gone_out), contextlib.redirect_stderr(gone_said):
+    gone_code = gone.run()
+gone.up_q.put(None)
+gone.playback.close()
+
+gone_runs = [json_lib.loads(line) for line in gone_out.getvalue().splitlines()
+             if line.strip()]
+check(gone_runs == [],
+      "a turn must not be opened on a connection already known gone, and no run "
+      "reported for one that never opened: %r" % gone_runs)
+check(gone.uplink.sent == [],
+      "and nothing should be pushed into the dead pipe: %r" % gone.uplink.sent)
+check(gone_code != 0,
+      "a session that took none of its 2 runs must not exit 0, got %r" % gone_code)
+check("connection closed" in gone_said.getvalue()
+      and "run 1 of 2" in gone_said.getvalue(),
+      "and the captain should be told why nothing was taken, naming the run it "
+      "stopped at: %r" % gone_said.getvalue())
+
+# The third moment is a connection that goes DURING a turn that answered anyway,
+# with runs still to take. The answer is real and its record stands, so nothing
+# here is a turn failure; what must not happen is the session ending quietly on a
+# happy exit code, because two of the three runs asked for are missing and a
+# runs.jsonl short of its runs, reported as success, is read later as the whole
+# measurement. Refusing the next turn is the one place a closed connection stops
+# a session, so it reports the same way wherever the connection went.
+class EndingStream:
+    """Serves one whole turn, then reports end of file without waiting."""
+
+    def __init__(self, gate):
+        self._gate = gate
+        self._reply = (
+            frame.encode(frame.AUDIO, b"\x00\x00" * 1200)
+            + frame.encode_json(frame.MARK, {"mark": "reply_end",
+                                             "since_talk_end": 0.4,
+                                             "tool_calls": 0}))
+        self._at = 0
+
+    def read(self, count):
+        check(self._gate.wait(10), "the turn never opened, so nothing was served")
+        chunk = self._reply[self._at:self._at + count]
+        self._at += len(chunk)
+        return chunk
+
+
+ending_served = thread_lib.Event()
+ending = client.Client(client.parse_args(
+    ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+     "--out-file", os.path.join(TMP, "reply-ending.pcm"), "--runs", "3",
+     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"]))
+ending.reader = frame.Reader(EndingStream(ending_served))
+ending.uplink = StartGate(ending_served)
+ending.playback = client.FilePlayback(os.path.join(TMP, "reply-ending.pcm"))
+ending.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
+ending.capture.start(ending.up_q, ending.talking)
+thread_lib.Thread(target=ending._sender, daemon=True).start()
+thread_lib.Thread(target=ending._downlink, daemon=True).start()
+
+# The end of file lands inside the first turn, so it is already seen by the time
+# the wait after that turn begins. Confirming it here rather than trusting the
+# timing keeps the sequence exact on a loaded host as well as an idle one.
+finish_after_end = ending._let_reply_finish
+
+
+def confirm_ended_then_wait(record):
+    check(ending.closed.wait(10),
+          "fixture: the end of file never reached the client during the turn")
+    return finish_after_end(record)
+
+
+ending._let_reply_finish = confirm_ended_then_wait
+ending_out, ending_said = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(ending_out), contextlib.redirect_stderr(ending_said):
+    ending_code = ending.run()
+ending.up_q.put(None)
+ending.playback.close()
+
+ending_runs = [json_lib.loads(line) for line in ending_out.getvalue().splitlines()
+               if line.strip()]
+check(len(ending_runs) == 1,
+      "one turn was served, so exactly one run belongs in the file: %d, %r"
+      % (len(ending_runs), ending_runs))
+check(ending_runs[0]["answered"] and ending_runs[0]["relay_error"] is None,
+      "an answered turn whose connection then ended cleanly is not a turn "
+      "failure, and its record stands: %r" % ending_runs[0])
+check(ending_code != 0,
+      "but a session that took 1 of 3 runs must not exit 0, got %r" % ending_code)
+check("run 2 of 3" in ending_said.getvalue(),
+      "and it should name the run it stopped at: %r" % ending_said.getvalue())
+
 # A startup that refuses part way through releases what it already started, and
 # close() therefore has to survive a half-built client. The real devices cannot be
 # opened on this host, so these stand in for them; what is tested here is the

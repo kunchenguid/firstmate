@@ -583,9 +583,16 @@ class Client:
                 # connection that only says answered: false is indistinguishable
                 # there from a turn the model declined to answer. setdefault
                 # because a relay that named the failure first said it better.
+                #
+                # closed is set in this same critical section, not left to the
+                # tail below, because take_turn decides whether another turn can
+                # be opened by reading it under this lock. Naming the failure
+                # first and announcing the closure afterwards left a window where
+                # the connection was known gone and no reader could tell.
                 with self.lock:
                     self.turn.setdefault(
                         "failed", "the connection was lost: {}".format(exc))
+                    self.closed.set()
                 break
             if got is None:
                 break
@@ -641,14 +648,34 @@ class Client:
                     self.reply_done.set()
             elif kind == frame.BYE:
                 break
-        self.closed.set()
+        # Under the turn lock for the same reason the failure above is: a clean
+        # end of file and a goodbye leave the connection just as unusable as a
+        # dropped one, and take_turn reads this under that lock to decide whether
+        # a turn can still be opened. Already set on the failure path; setting an
+        # event twice costs nothing.
+        with self.lock:
+            self.closed.set()
         self.reply_done.set()
 
     # ---------------------------------------------------------------------- turns
 
     def take_turn(self, index):
-        """Run one turn and return its record."""
+        """Run one turn and return its record, or None if the connection is gone.
+
+        The check and the reset share one critical section with the downlink's
+        closure mark on purpose. The wait between turns is seconds long and is
+        where a relay that dies between questions dies, so the run loop cannot
+        decide to open another turn by reading a flag the downlink sets after it
+        records the failure: between those two writes the connection is already
+        gone and the loop cannot see it. It then cleared the failure the downlink
+        had recorded, sent talk-start into a dead pipe, and came back after the
+        whole reply timeout as answered: false with relay_error: null - a lost
+        connection wearing the shape of a turn the model declined, in the file
+        docs/voice-relay.md computes its published latency spread from.
+        """
         with self.lock:
+            if self.closed.is_set():
+                return None
             self.turn = {}
         self.playback.turn_reset()
         self.reply_done.clear()
@@ -828,29 +855,27 @@ class Client:
         rc = 0
         for index in range(1, self.options.runs + 1):
             record = self.take_turn(index)
+            # take_turn refusing is the one place a closed connection stops the
+            # session, so the outcome is the same wherever the connection went:
+            # nothing more can be taken over it, the runs the captain asked for
+            # were not, and the exit code says so, because a session that stops
+            # early while reporting success is read later as a complete
+            # measurement. A second check here, on a flag read before the turn
+            # rather than under the lock that guards it, is what let a lost
+            # connection through in the first place; and no record is printed for
+            # a turn that never opened, since an invented turn is the whole thing
+            # being kept out of runs.jsonl.
+            if record is None:
+                say("client: the connection closed before run {} of {}; it and "
+                    "the rest were not taken".format(index, self.options.runs))
+                rc = 1
+                break
             print(json.dumps(record))
             sys.stdout.flush()
             if not record["answered"]:
                 rc = 1
-            if self.closed.is_set():
-                break
             if index < self.options.runs:
                 self._let_reply_finish(record)
-                # The connection is checked again on the way out, because that
-                # wait is seconds long and is where a relay that dies between
-                # questions dies. Opening the next turn on a dead connection
-                # cleared the failure the downlink had already recorded, left
-                # nothing to answer it, and returned after the whole reply
-                # timeout as answered: false with relay_error: null - a lost
-                # connection wearing the shape of a turn the model declined, in
-                # the file the published latency spread is read from. Nothing
-                # more can be taken over it, and the runs the captain asked for
-                # were not, so the exit code says so as well.
-                if self.closed.is_set():
-                    say("client: the connection closed after run {} of {}; the "
-                        "rest were not taken".format(index, self.options.runs))
-                    rc = 1
-                    break
         return rc
 
 
