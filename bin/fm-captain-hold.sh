@@ -239,7 +239,7 @@ decode_shown_value() {  # <shown-field>
     \"*\")
       printf '%s' "$value" | perl -MJSON::PP -e '
         local $/;
-        my $value = decode_json(<STDIN>);
+        my $value = JSON::PP->new->utf8->allow_nonref->decode(<STDIN>);
         binmode STDOUT, ":raw";
         utf8::encode($value) if utf8::is_utf8($value);
         print $value;

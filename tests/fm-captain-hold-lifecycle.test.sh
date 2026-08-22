@@ -231,6 +231,73 @@ EOF
   pass "the completion gate attests captain-held inventory and transfers open status decisions"
 }
 
+# JSON::PP 2.97001 rejects scalar JSON through decode_json even though its
+# allow_nonref object API supports the tasks-axi show format. A quoted title
+# must remain portable to that API, while malformed JSON must still refuse the
+# mutation before changing the task.
+test_scalar_json_decode_is_portable_and_malformed_fails_closed() {
+  local home id title show compatlib real_perl
+  home=$(make_home scalar-json-compat)
+  id=sample-scalar-json-call
+  title='Choose "north" or \\south at café'
+  compatlib="$home/json-pp-2.97001-compat"
+  mkdir -p "$compatlib"
+  cat > "$compatlib/JSONPP297001Compat.pm" <<'PERL'
+package JSONPP297001Compat;
+use strict;
+use warnings;
+use JSON::PP ();
+
+my $decode_json = \&JSON::PP::decode_json;
+no warnings 'redefine';
+*JSON::PP::decode_json = sub {
+  my ($text) = @_;
+  die "JSON::PP 2.97001 scalar decode refused\n"
+    unless defined($text) && $text =~ /\A\s*[\[{]/;
+  return $decode_json->(@_);
+};
+1;
+PERL
+  real_perl=$(command -v perl)
+  cat > "$home/fakebin/perl" <<SH
+#!/usr/bin/env bash
+exec env PERL5LIB='$compatlib' PERL5OPT=-MJSONPP297001Compat '$real_perl' "\$@"
+SH
+  chmod +x "$home/fakebin/perl"
+  tasks_in "$home" add "$id" "$title" --kind task --repo sample >/dev/null \
+    || fail "could not create the scalar JSON compatibility fixture"
+
+  run_captain "$home" hold "$id" --title "$title" \
+    --reason "captain scalar JSON choice pending" >/dev/null \
+    || fail "a valid scalar JSON title was not portable to the supported JSON::PP API"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "hold_kind: captain" \
+    "the portable scalar decode did not preserve the captain hold"
+
+  tasks_in "$home" unhold "$id" >/dev/null \
+    || fail "could not reset the scalar JSON fixture before the red path"
+
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = show ] && [ "${2:-}" = sample-scalar-json-call ]; then
+  "$REAL_TASKS_AXI" "$@" | sed 's/^  title: .*/  title: "unterminated/'
+  exit 0
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_captain "$home" hold "$id" --title "$title" \
+    --reason "captain scalar JSON choice pending" \
+    > "$home/malformed.out" 2> "$home/malformed.err"; then
+    fail "a malformed JSON title was accepted"
+  fi
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "held: no" \
+    "the malformed JSON refusal mutated the task before failing"
+  pass "scalar JSON decoding is portable and malformed JSON remains fail-closed"
+}
+
 # The recorded-answer rule: answering closes with the captain's exact words, an
 # exact retry is idempotent, a drifted retry is rejected, dependent work routed
 # behind the answered task is released by the close, and the completion gate is
@@ -1211,6 +1278,7 @@ EOF
 
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
+test_scalar_json_decode_is_portable_and_malformed_fails_closed
 test_answer_records_and_closes
 test_release_frees_held_work
 test_deferral_leaves_captains_call_until_due
