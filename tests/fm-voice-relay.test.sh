@@ -1514,6 +1514,111 @@ check(cut_record["relay_error"],
 check("connection" in cut_record["relay_error"],
       "and it should say the connection went: %r" % cut_record["relay_error"])
 
+# The other moment a connection can go is BETWEEN two turns, during the seconds
+# the client spends letting the previous answer finish. That wait is most of a
+# multi-run session, so it is where a relay that dies between questions dies.
+# Opening the next turn anyway cleared the failure the downlink had recorded,
+# left nothing on the far end to answer it, and produced a run that came back
+# after the whole reply timeout saying answered: false with relay_error: null.
+# In runs.jsonl that is indistinguishable from a turn the model declined, and
+# runs.jsonl is the file docs/voice-relay.md computes its latency spread from, so
+# the invented turn would be averaged into a published number.
+import contextlib
+import json as json_lib
+
+
+class ClosingStream:
+    """Serves one whole turn, then closes during the wait after it.
+
+    Both moments are released by the client reaching them rather than by a
+    timer: the frames wait for the turn to open, and the close waits for the
+    client to enter the inter-turn wait. So the sequence under test is the same
+    on a loaded host as on an idle one.
+    """
+
+    def __init__(self, gate, waiting):
+        self._gate = gate
+        self._waiting = waiting
+        self._reply = (
+            frame.encode(frame.AUDIO, b"\x00\x00" * 1200)
+            + frame.encode_json(frame.MARK, {"mark": "reply_end",
+                                             "since_talk_end": 0.4,
+                                             "tool_calls": 1}))
+        self._at = 0
+
+    def read(self, count):
+        check(self._gate.wait(10), "the turn never opened, so nothing was served")
+        if self._at >= len(self._reply):
+            check(self._waiting.wait(10),
+                  "fixture: the client never reached the wait between turns")
+            return b""
+        chunk = self._reply[self._at:self._at + count]
+        self._at += len(chunk)
+        return chunk
+
+
+class StartGate:
+    """Discards the uplink and reports when a turn's first frame went out."""
+
+    def __init__(self, gate):
+        self._gate = gate
+
+    def send(self, kind, payload=b""):
+        if kind == frame.TALK_START:
+            self._gate.set()
+
+
+served, waiting_between = thread_lib.Event(), thread_lib.Event()
+closing = client.Client(client.parse_args(
+    ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+     "--out-file", os.path.join(TMP, "reply-closing.pcm"), "--runs", "2",
+     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"]))
+closing.reader = frame.Reader(ClosingStream(served, waiting_between))
+closing.uplink = StartGate(served)
+closing.playback = client.FilePlayback(os.path.join(TMP, "reply-closing.pcm"))
+closing.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
+closing.capture.start(closing.up_q, closing.talking)
+thread_lib.Thread(target=closing._sender, daemon=True).start()
+thread_lib.Thread(target=closing._downlink, daemon=True).start()
+
+# The wait between turns is the seam: the connection goes while the client is
+# inside it, after the first run was reported and before the second could open.
+# Waiting for the downlink to see it keeps that ordering exact rather than
+# leaving it to whichever thread the scheduler runs next.
+finish_wait = closing._let_reply_finish
+
+
+def lose_connection_while_waiting(record):
+    waiting_between.set()
+    check(closing.closed.wait(10),
+          "fixture: the connection never closed during the wait between turns")
+    return finish_wait(record)
+
+
+closing._let_reply_finish = lose_connection_while_waiting
+emitted, spoken = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(emitted), contextlib.redirect_stderr(spoken):
+    closing_code = closing.run()
+closing.up_q.put(None)
+closing.playback.close()
+
+closing_runs = [json_lib.loads(line) for line in emitted.getvalue().splitlines()
+                if line.strip()]
+check(len(closing_runs) == 1,
+      "a connection lost between turns must end the session rather than invent a "
+      "turn nobody took: %d run(s) reported, %r" % (len(closing_runs), closing_runs))
+check(closing_runs[0]["answered"] and closing_runs[0]["relay_error"] is None,
+      "fixture is wrong: the turn before the connection went should be a good "
+      "one, so the case cannot pass on a run that failed anyway: %r"
+      % closing_runs[0])
+# Two runs were asked for and one was taken, so the exit code has to be the
+# unhappy one; a session that stops early while reporting success is a
+# measurement someone reads as complete.
+check(closing_code != 0,
+      "a session that took 1 of 2 runs must not exit 0, got %r" % closing_code)
+check("connection closed" in spoken.getvalue(),
+      "and the captain should be told why it stopped: %r" % spoken.getvalue())
+
 # A startup that refuses part way through releases what it already started, and
 # close() therefore has to survive a half-built client. The real devices cannot be
 # opened on this host, so these stand in for them; what is tested here is the

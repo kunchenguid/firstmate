@@ -836,6 +836,21 @@ class Client:
                 break
             if index < self.options.runs:
                 self._let_reply_finish(record)
+                # The connection is checked again on the way out, because that
+                # wait is seconds long and is where a relay that dies between
+                # questions dies. Opening the next turn on a dead connection
+                # cleared the failure the downlink had already recorded, left
+                # nothing to answer it, and returned after the whole reply
+                # timeout as answered: false with relay_error: null - a lost
+                # connection wearing the shape of a turn the model declined, in
+                # the file the published latency spread is read from. Nothing
+                # more can be taken over it, and the runs the captain asked for
+                # were not, so the exit code says so as well.
+                if self.closed.is_set():
+                    say("client: the connection closed after run {} of {}; the "
+                        "rest were not taken".format(index, self.options.runs))
+                    rc = 1
+                    break
         return rc
 
 
