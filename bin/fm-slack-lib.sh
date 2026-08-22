@@ -192,9 +192,16 @@ fms_auth_header_release() {
 # Prints the response body to stdout; returns curl's exit code.
 # FM_SLACK_CURL_LOG may record argv summaries for tests.
 fms_api_post() {
-  local method=$1 data=$2 ofile=$3 auth_header curl_bin=${FM_SLACK_CURL_BIN:-curl} rc
+  local method=$1 data=$2 ofile=$3 auth_header curl_bin=${FM_SLACK_CURL_BIN:-curl}
+  local rc attempt=1 max_attempts=3 delay=0.1
   case "$method" in
-    auth.test|chat.postMessage|chat.update|conversations.history|conversations.replies|reactions.add|reactions.remove) ;;
+    auth.test|chat.update|conversations.history|conversations.replies|reactions.add|reactions.remove) ;;
+    chat.postMessage)
+      # Slack may have accepted a post before a transport error is reported.
+      # This caller supplies no verified deduplication identity, so retrying
+      # could create a second message and leave board metadata orphaned.
+      max_attempts=1
+      ;;
     *) return 1 ;;
   esac
   command -v "$curl_bin" >/dev/null 2>&1 || return 1
@@ -203,12 +210,19 @@ fms_api_post() {
   if [ -n "${FM_SLACK_CURL_LOG:-}" ]; then
     printf 'method=%s data=%s\n' "$method" "$data" >> "$FM_SLACK_CURL_LOG"
   fi
-  "$curl_bin" -m 10 -sS -o "${ofile:-/dev/stdout}" \
-    -H "@$auth_header" \
-    -H 'Content-Type: application/x-www-form-urlencoded; charset=utf-8' \
-    --data "$data" \
-    "${FMS_API}/${method}" 2>/dev/null
-  rc=$?
+  while :; do
+    "$curl_bin" -m 7 -sS -o "${ofile:-/dev/stdout}" \
+      -H "@$auth_header" \
+      -H 'Content-Type: application/x-www-form-urlencoded; charset=utf-8' \
+      --data "$data" \
+      "${FMS_API}/${method}" 2>/dev/null
+    rc=$?
+    [ "$rc" -eq 0 ] && break
+    [ "$attempt" -ge "$max_attempts" ] && break
+    sleep "$delay"
+    delay=$(LC_ALL=C awk -v value="$delay" 'BEGIN { doubled = value * 2; print (doubled > 0.5 ? 0.5 : doubled) }')
+    attempt=$((attempt + 1))
+  done
   fms_auth_header_release "$auth_header"
   trap - INT TERM HUP
   return "$rc"
