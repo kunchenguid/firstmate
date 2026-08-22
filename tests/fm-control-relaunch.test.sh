@@ -1844,18 +1844,20 @@ test_recover_missing_refuses_a_non_control_parent_with_a_transaction() {
   make_herdr_stub "$dir" "hp-rl52-old" "hws-rl52"
   : > "$dir/fake/ws-ok"
   lock="$dir/home/state/.control-rl52.lock"
+  {
+    echo "phase=launching"
+    echo "relaunch_tx=forged"
+  } > "$dir/home/state/rl52.control-relaunch"
   parent="$dir/non-control-parent.sh"
   cat > "$parent" <<SH
 #!/usr/bin/env bash
 set -u
 mkdir -p "$lock"
 printf '%s\\n' "\$\$" > "$lock/pid"
-PATH="$dir/fakebin:\$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \\
+exec -a "$ROOT/bin/fm-control.sh rl52 relaunch" bash -c 'PATH="$dir/fakebin:\$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \\
   FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \\
   FM_CONTROL_RELAUNCH_TX=forged \\
-  "$SPAWN" rl52 --relaunch --recover-missing --harness claude
-rc=\$?
-exit "\$rc"
+  "$SPAWN" rl52 --relaunch --recover-missing --harness claude'
 SH
   chmod +x "$parent"
   out=$(

@@ -267,6 +267,8 @@ trap control_cleanup EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" \
   || die "another lifecycle action is already running for task $ID"
 CONTROL_LOCK_HELD=1
+fm_lock_set_role "$CONTROL_LOCK" control-relaunch \
+  || die "could not bind task $ID's control lock to fm-control"
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ]; then
   case "$RAW_ID" in

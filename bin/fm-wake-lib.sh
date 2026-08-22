@@ -299,7 +299,7 @@ fm_lock_clean_known_files() {
 fm_lock_set_role() {
   local lockdir=$1 role=$2 current pid back
   case "$role" in
-    autoarm|terminal-check) : ;;
+    autoarm|terminal-check|control-relaunch) : ;;
     *) return 1 ;;
   esac
   current=${BASHPID:-$$}
