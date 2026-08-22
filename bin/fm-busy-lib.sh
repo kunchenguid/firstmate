@@ -39,7 +39,7 @@
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, muse-session-log,
+#   endpoint-gone, herdr-native, grok-regex, muse-session-log, omp-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target
 #
@@ -603,6 +603,94 @@ fm_busy_muse_run_terminal() {  # <session-log> <run-id>
   '
 }
 
+# omp session-log busy source
+#
+# omp (Oh My Pi, a standalone Rust fork of Pi) persists an append-only JSONL
+# session log, one object per line with a top-level "type". Unlike muse it has
+# no explicit run start/terminal bracket; the turn lifecycle rides the "message"
+# events. Verified live on omp v18.0.0, a tool-using turn writes:
+#   {"type":"message",...,"message":{"role":"user",...}}                     <- turn opens
+#   {"type":"message",...,"message":{"role":"assistant",...,"stopReason":"toolUse"}}
+#   {"type":"custom",...} {"type":"title_change",...}
+#   {"type":"message",...,"message":{"role":"toolResult",...}}
+#   {"type":"message",...,"message":{"role":"assistant",...,"stopReason":"stop"}} <- turn settles
+# The assistant message line is written on COMPLETION, not streamed, so the last
+# message event is a reliable turn-boundary signal. An Escape interrupt writes an
+# assistant message with stopReason "aborted", so - like muse's session log and
+# cursor's transcript, and unlike Claude's Stop hook - this source covers the
+# manual interrupt path.
+#
+# Binding is by construction, not a sidecar: fm-spawn launches omp with
+# --session-dir pointed at a per-task state/<id>.omp-sessions directory outside
+# the worktree, so the only logs there are this task's own incarnations. No
+# pooled-worktree predecessor or sibling task can write into it, so the newest
+# jsonl is always the live incarnation and no prior-log guard is needed.
+fm_busy_omp_session_dir() {  # <state-dir> <id>
+  printf '%s/%s.omp-sessions' "$1" "$2"
+}
+
+# fm_busy_omp_session_log: the newest *.jsonl in this task's session directory,
+# or non-zero when the directory is absent or holds no session log yet. omp
+# names each log <ISO-8601-timestamp>_<uuid>.jsonl, and bash sorts pathname
+# expansion lexically, so ISO timestamps sort chronologically and the LAST
+# match is the newest incarnation - no ls parsing needed.
+fm_busy_omp_session_log() {  # <state-dir> <id>
+  local dir last f
+  dir=$(fm_busy_omp_session_dir "$1" "$2")
+  [ -d "$dir" ] || return 1
+  last=
+  for f in "$dir"/*.jsonl; do
+    [ -f "$f" ] && last=$f
+  done
+  [ -n "$last" ] || return 1
+  printf '%s' "$last"
+}
+
+# fm_busy_omp_run_state: fold one session log to busy|settled|none.
+#   busy     the last message event is a user turn, a toolResult, or an
+#            assistant message still awaiting a tool loop (stopReason toolUse)
+#   settled  the last message event is an assistant message whose stopReason is
+#            present and is NOT toolUse (stop, aborted, error, and the like)
+#   none     the log holds no message events at all
+# Only "toolUse" continues a turn in the Pi family; every other assistant
+# stopReason is terminal. The extraction is anchored on the exact structural
+# bytes: the top-level "type":"message" prefix (the first key on every event
+# line), the "message":{"role":" object opener, and the unescaped
+# "stopReason":" key - none of which can appear inside a JSON string value,
+# whose own quotes are backslash-escaped. A torn final line reads busy, never a
+# false idle.
+fm_busy_omp_run_state() {  # <session-log>
+  [ -f "$1" ] || return 1
+  LC_ALL=C awk '
+    index($0, "{\"type\":\"message\"") != 1 { next }
+    {
+      seen = 1
+      role = ""
+      m = "\"message\":{\"role\":\""
+      p = index($0, m)
+      if (p != 0) {
+        rest = substr($0, p + length(m))
+        q = index(rest, "\"")
+        if (q != 0) role = substr(rest, 1, q - 1)
+      }
+      sr = ""
+      s = "\"stopReason\":\""
+      p = index($0, s)
+      if (p != 0) {
+        rest = substr($0, p + length(s))
+        q = index(rest, "\"")
+        if (q != 0) sr = substr(rest, 1, q - 1)
+      }
+      last_role = role; last_sr = sr
+    }
+    END {
+      if (!seen) { print "none"; exit }
+      if (last_role == "assistant" && last_sr != "" && last_sr != "toolUse") print "settled"
+      else print "busy"
+    }
+  ' "$1"
+}
+
 # cursor conversation-transcript busy source
 #
 # cursor-agent persists an append-only JSONL transcript per conversation at
@@ -915,6 +1003,23 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         busy) printf 'busy muse-session-log' ;;
         settled) printf 'idle muse-session-log' ;;
         *) printf 'unknown muse-session-log' ;;
+      esac
+      return 0
+      ;;
+    omp*)
+      # Semantic, on demand: fold this task's per-task omp session log. The last
+      # message event is the turn boundary; an assistant message with a terminal
+      # (non-toolUse) stopReason is a finished turn and anything else is a turn
+      # in flight. Every other outcome - no session directory, no jsonl yet, an
+      # unreadable or message-free log - is unknown, never idle.
+      if ! log=$(fm_busy_omp_session_log "$state" "$id"); then
+        printf 'unknown omp-session-log'
+        return 0
+      fi
+      case "$(fm_busy_omp_run_state "$log" 2>/dev/null)" in
+        busy) printf 'busy omp-session-log' ;;
+        settled) printf 'idle omp-session-log' ;;
+        *) printf 'unknown omp-session-log' ;;
       esac
       return 0
       ;;

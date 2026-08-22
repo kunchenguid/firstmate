@@ -119,7 +119,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -193,6 +193,11 @@
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse is crewmate/scout only and is refused for --secondmate.
+# omp (Oh My Pi, a standalone Rust fork of Pi) installs no hook either - its
+# extension event API is undocumented in the shipped binary - so it is launched
+# with --session-dir pointed at a per-task state/<id>.omp-sessions directory and
+# firstmate folds omp's own session jsonl there (bin/fm-busy-lib.sh). Like muse
+# it is crewmate/scout only and is refused for --secondmate.
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -1097,7 +1102,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1227,6 +1232,21 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # omp (Oh My Pi): a positional prompt starts the supervised interactive
+    # session, the Pi/grok/muse shape. --approval-mode yolo is the single flag
+    # that makes a crewmate pane viable: omp ships tool-approval prompts ON by
+    # default, and yolo auto-approves every tool so the crewmate runs unattended
+    # (verified, omp v18.0.0). --session-dir pins omp's own per-project session
+    # jsonl into a per-task directory OUTSIDE the worktree, which is the whole
+    # busy-state binding: firstmate folds the newest jsonl there (bin/fm-busy-lib.sh)
+    # with no armed writer and no cross-task collision, since the directory is
+    # id-scoped. The foreign primary markers are stripped so a stored CLAUDECODE
+    # or PI_CODING_AGENT cannot outrank omp's own OMPCODE marker in a process
+    # that only reads the environment; omp does not clear them itself. omp's
+    # extension surface is real (--hook/-e) but its event API is undocumented in
+    # the shipped binary, so there is no primary turn-end hook to install here -
+    # omp is crewmate/scout only, refused for --secondmate below.
+    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_PI_HARNESS __OMPBIN__ --approval-mode yolo --session-dir __OMPSESSIONDIR__ __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1275,6 +1295,15 @@ esac
 # secondmate whose supervision cycle could never be armed.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+# omp is a standalone Rust fork of Pi verified as a CREWMATE/SCOUT adapter only.
+# It exposes an extension surface, but its event API is undocumented in the
+# shipped binary, so the primary turn-end guard and watcher hooks a secondmate
+# home needs cannot be armed against it. Refusing here keeps that gap loud
+# instead of standing up a secondmate whose supervision cycle could never fire.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = omp ]; then
+  echo "error: omp is a verified crewmate/scout adapter only and cannot run a secondmate; its extension event API is undocumented so no primary supervision protocol is verified. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
@@ -1378,6 +1407,25 @@ resolve_muse_binary() {
   return 1
 }
 
+resolve_omp_binary() {
+  local candidate dir
+  candidate=$(command -v omp 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  echo "error: omp executable not found on PATH; install Oh My Pi (brew can1357/tap/omp) or select a different verified harness" >&2
+  return 1
+}
+
 # muse_credential_present: 0 when a launched muse pane can reach its provider
 # without an interactive login. muse offers exactly two credential paths
 # (verified, muse 0.1.0-R708.1): the META_API_KEY environment variable, which
@@ -1412,7 +1460,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1465,6 +1513,15 @@ effort_flag_for_harness() {
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
       esac
       ;;
+    omp)
+      # omp v18.0.0 --thinking accepts off|minimal|low|medium|high|xhigh|max|auto,
+      # so the full shared effort vocabulary low..max maps straight across, the
+      # same as Pi's --thinking. omp's extra off/minimal/auto levels sit outside
+      # firstmate's shared vocabulary and are deliberately unreachable.
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
@@ -1492,6 +1549,25 @@ case "$LAUNCH" in
     LAUNCH=${LAUNCH//__MUSEBIN__/$(shell_quote "$MUSE_BIN")}
     LAUNCH=${LAUNCH//__MUSECONFIG__/$(shell_quote "$MUSE_CONFIG_HOME")}
     LAUNCH=${LAUNCH//__MUSEDATA__/$(shell_quote "$MUSE_DATA_HOME")}
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__OMPBIN__*)
+    OMP_BIN=$(resolve_omp_binary) || exit 1
+    # The per-task session directory is the whole busy-state binding: omp writes
+    # its own session jsonl here, the classifier folds the newest one, and
+    # teardown rm -rf's it. It is id-scoped and lives outside the worktree, so no
+    # pooled-worktree predecessor or sibling task ever writes into it. omp
+    # auto-creates it, but pre-creating keeps the fold reading a clean empty
+    # directory rather than a missing path before the first turn is written.
+    OMP_SESSION_DIR="$STATE/$ID.omp-sessions"
+    mkdir -p "$OMP_SESSION_DIR" || {
+      echo "error: could not create omp session directory '$OMP_SESSION_DIR'" >&2
+      exit 1
+    }
+    LAUNCH=${LAUNCH//__OMPBIN__/$(shell_quote "$OMP_BIN")}
+    LAUNCH=${LAUNCH//__OMPSESSIONDIR__/$(shell_quote "$OMP_SESSION_DIR")}
     ;;
 esac
 

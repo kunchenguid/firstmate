@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, muse, and omp.
 user-invocable: false
 metadata:
   internal: true
@@ -133,6 +133,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
+| omp | `--model <provider/model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-08-22 on omp v18.0.0. `--thinking` accepts `off\|minimal\|low\|medium\|high\|xhigh\|max\|auto`, so the full shared vocabulary low..max maps straight across, the same as Pi's `--thinking`; omp's extra `off`/`minimal`/`auto` levels sit outside the shared vocabulary and stay unreachable. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 Likewise, `harness=cursor` with `model=cursor-grok-4.5-*` is Cursor Agent CLI routing a Grok model, not the xAI Grok Build `grok` harness.
@@ -152,6 +153,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
 | cursor | Run `cursor-agent --list-models` (or the legacy `agent --list-models`), which lists the ids available to the current Cursor account. `cursor` is not the CLI name. |
+| omp | Run `omp models`, the subcommand that lists, searches, and refreshes available models; `--model` fuzzy-matches (`opus`, `gpt-5.2`, or a full `provider/model`). |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -534,3 +536,42 @@ A teardown refusal naming muse scratch is therefore correct behavior: inspect it
 muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and can replace the running binary underneath the fleet, changing the process name with it.
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
+
+## omp (VERIFIED CREWMATE/SCOUT 2026-08-22, omp v18.0.0)
+
+omp (Oh My Pi, `@oh-my-pi/pi-coding-agent`, binary `omp`, brew `can1357/tap/omp`) is a standalone Rust fork of Pi, and a CREWMATE and SCOUT adapter only.
+`bin/fm-spawn.sh` refuses `--secondmate` on omp, and omp has no supervision protocol under `docs/supervision-protocols/`, so a firstmate primary detected as omp falls back to the `unknown` protocol.
+omp exposes an extension surface (`--hook`/`-e`), but its event API is undocumented in the shipped binary, so the primary turn-end guard and watcher hooks a secondmate needs cannot be armed against it; that gap is why omp is refused for a primary/secondmate role rather than faked.
+
+| Fact | Value |
+|---|---|
+| Binary | Executable `omp` from `PATH`, resolved to an absolute path (`resolve_omp_binary` in `bin/fm-spawn.sh`); spawning refuses if it is absent. The native Rust binary keeps the exact process name `omp` - the brew launcher does NOT exec a versioned child, unlike muse - so the name never changes across auto-update. |
+| Launch | Positional prompt, the Pi/grok/muse shape, so the brief rides the launch command. |
+| Models | `--model <provider/model>` (fuzzy: `opus`, `gpt-5.2`, or a full `provider/model`); the lab's configured providers are opencode-go and antigravity (`~/.omp/agent/models.yml`). |
+| Busy state | Its own append-only session JSONL, folded on demand by `bin/fm-busy-lib.sh` (source `omp-session-log`). There is no hook or plugin writer, so nothing is armed and no busy record is ever seeded. |
+| Exit command | `/exit` (prints `Closing session…` then `Resume this session with omp --resume <session-id>`); one Enter submits it. |
+| Interrupt | Single Escape, which writes an assistant message with `stopReason:"aborted"` and returns the composer to an empty input row, so NO clear key is needed (unlike muse). `bin/fm-control-lib.sh` claims no cancellation acknowledgement: the post-interrupt session-log write latency was not measured as reliably prompt, so like cursor it depends on the busy fold reading the settled log. |
+| Skill invocation | `/<skill>` opens omp's slash behavior, but a separate skill invocation is not independently verified beyond normal command behavior; use natural language if the exact skill command is uncertain, the same honest stance as Pi. The shared submit retry covers a slash popup if one appears. |
+| Autonomy | `--approval-mode yolo`, which auto-approves every tool so the crewmate runs unattended; omp ships tool-approval prompts ON by default (`--auto-approve` is the weaker equivalent and is not used). |
+| Trust dialog | None on a clean first launch inside a git-repo worktree; omp's project picker appears only when launched from a non-project directory, which fm-spawn never does. |
+| Environment marker | `OMPCODE=1`, set for child/tool processes. omp does NOT set `CLAUDECODE` or `PI_CODING_AGENT`, so its own marker is unambiguous WHEN PRESENT, but omp does not clear an inherited foreign marker, so `bin/fm-harness.sh` tests `OMPCODE` BEFORE claude and Pi and the launch strips the foreign markers. |
+| Composer | A compact bordered box whose input rides on the bottom-border row (`╰─ <text> ─╯`); the `π` status/model line is the top border, with NO distinct agent prompt glyph and no side-bordered content rows. The shared structural classifier reads it `unknown` because it needs at least one side-bordered content row to register a box, so a steer is acknowledged by the idle-to-busy transition through the delivery busy regex `FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT` (`Working…\|⟦esc⟧`, matched not the rotating braille spinner) instead - the same fallback cursor uses on tmux. Teaching the classifier omp's zero-content box shape is deferred follow-up. |
+| Effort | `--thinking <low\|medium\|high\|xhigh\|max>`, the Pi mapping; see the launch-profile table above. |
+| Resume | `omp --resume <session-id>` (id printed on exit), or `omp -c` / `omp -r`. |
+
+### Session log and the busy fold
+
+omp launches with `--session-dir` pointed at a per-task `state/<id>.omp-sessions` directory OUTSIDE the worktree, and `bin/fm-busy-lib.sh` folds the newest `*.jsonl` there.
+The binding is by construction, not a sidecar: the directory is id-scoped, so no pooled-worktree predecessor or sibling task can write into it, and no prior-log guard is needed.
+omp names each log `<ISO-8601-timestamp>_<uuid>.jsonl`, which sorts chronologically, so the newest match is always the live incarnation.
+Unlike muse there is no explicit run start/terminal bracket; the turn lifecycle rides the `message` events, and the assistant message is written on COMPLETION, not streamed.
+An assistant message whose `stopReason` is present and NOT `toolUse` (`stop`, `aborted`, `error`) is a settled turn; a trailing user, `toolResult`, or assistant `toolUse` message is a turn in flight.
+Because the interrupt path writes `stopReason:"aborted"`, this source covers manual interruption, which Claude's `Stop` hook does not.
+The extraction is anchored on exact structural bytes (the `{"type":"message"` line prefix, the `"message":{"role":"` opener, and the unescaped `"stopReason":"` key), none of which can appear inside a backslash-escaped JSON string value, so a `stopReason` string sitting inside user text cannot fool the fold and a torn final line reads busy rather than a false idle.
+Both halves are trusted with no opt-in: an open run reads `busy`, a settled log reads `idle`, and only a resolution failure - no session directory, no jsonl yet, an unreadable or message-free log - reads `unknown`, never a false idle.
+`bin/fm-teardown.sh` `rm -rf`s the per-task session directory.
+
+### Config-dir and provider caveats
+
+omp shares its config dir `~/.omp/agent` with Pi through `PI_CODING_AGENT_DIR`; do NOT export that variable globally or Pi and omp collide.
+Verified live on omp v18.0.0 against the opencode-go provider: launch, the session-log fold (including the interrupt-driven `aborted` terminal), single-Escape interrupt with an empty composer afterward, `/exit`, and the delivery busy signature.

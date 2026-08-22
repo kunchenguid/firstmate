@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -50,6 +50,14 @@ detect_own() {
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  # omp (Oh My Pi) sets OMPCODE=1 for its child/tool processes (verified,
+  # omp v18.0.0). It is a standalone Rust fork of Pi but does NOT set
+  # PI_CODING_AGENT or CLAUDECODE, so its own marker is unambiguous WHEN
+  # PRESENT. It is checked before claude for the same reason cursor is: omp
+  # does not clear an inherited CLAUDECODE, so a hand-started omp under a claude
+  # primary carries both markers and the first one tested wins; bin/fm-spawn.sh
+  # additionally strips the foreign markers at the launch boundary.
+  [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -93,6 +101,11 @@ detect_own() {
       # prefix rather than any exact name. Deliberately anchored, never *muse*, so
       # unrelated commands (musescore, amuse) cannot be misread as this harness.
       muse|muse-bin-*) echo muse; return ;;
+      # omp (Oh My Pi) is a native Rust binary whose process name stays exactly
+      # `omp` - the brew launcher does NOT exec a versioned child (verified,
+      # omp v18.0.0), unlike muse. Anchored to the exact name, never *omp*, so
+      # unrelated commands containing the fragment (comp, romp) are not misread.
+      omp) echo omp; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
       node*|python*)

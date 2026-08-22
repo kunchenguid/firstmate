@@ -2859,6 +2859,10 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
 rm -rf "$STATE/$ID.inbox"
+# omp binds its busy source to a per-task --session-dir DIRECTORY (its own
+# session jsonl lives inside), not a sidecar file, so it needs rm -rf rather
+# than the rm -f above. Absent for every non-omp task, which makes this a no-op.
+rm -rf "$STATE/$ID.omp-sessions"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
