@@ -327,7 +327,7 @@ It is not enabled by `config/crew-dispatch.json`, an environment variable, or a 
 The authoritative configuration input is always `<FM_HOME>/config/crew-dispatch.json`, independently of `FM_CONFIG_OVERRIDE`.
 The receipt explicitly attests whether that canonical file is present or absent, so relocating configuration or removing a file changes the attested input and never removes the requirement.
 Secondmate launches retain their separate provisioning, registry, host, and harness contract and do not consume this receipt.
-When a relaunch keeps the exact recorded harness, model, and effort tuple, its republished task metadata preserves the existing `routing_decision` pointer.
+When a relaunch keeps the exact recorded harness, model, and effort tuple, its republished task metadata preserves an existing regular-file `routing_decision` pointer.
 
 Each covered task directory supplies `data/<task-id>/routing-intent.json` and `data/<task-id>/routing-decision.pending.json`.
 A multi-candidate route also supplies the exact one-intake `quota-axi --json` object as `data/<task-id>/quota-snapshot.json`.
@@ -397,6 +397,7 @@ For example, codex `max`, grok `xhigh` or `max`, and every opencode, Kimi, or Cu
 Muse's selected `max` emits and binds the adapter value `ultra`.
 
 For a raw command, `launch_binding.kind` is `raw_launch` and every axis must be observed through the fixed literal command itself.
+Outside shell quotes, raw commands allow only alphanumerics, space or tab separators, and `-`, `_`, `.`, `/`, `=`, `:`, `,`, `+`, or `@`; every other character and any literal newline or carriage return refuses, while quoted content remains literal and accepted.
 The only accepted raw model spelling is `--model <literal>` or `--model=<literal>`.
 The accepted raw effort spellings are `--effort`, `--reasoning-effort`, `--thinking`, and codex `-c model_reasoning_effort=`, with fixed literal values and applicable equals forms.
 Raw commands with shell expansion, command substitution, control operators, environment-assignment prefixes, duplicate or missing values, non-standard model spellings such as `-m` or `--model-name`, or either model or effort axis absent return `RAW_LAUNCH_NOT_VERIFIABLE` or `RAW_LAUNCH_UNRESOLVED`.

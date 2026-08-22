@@ -382,6 +382,8 @@ list_portable_serial() {
 # only: the shard partition stays complete and disjoint whatever they say, so a
 # stale hint costs balance rather than coverage. That doc owns the refresh
 # procedure.
+# docs/fm-test-portable-shards.md records the routing battery's temporary local
+# timing override until the next green CI timing refresh replaces it.
 portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-afk-inject-e2e.test.sh 35900
@@ -471,7 +473,7 @@ tests/fm-sessionstart-hook-live-e2e.test.sh 21
 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 21
 tests/fm-sessionstart-nudge.test.sh 26684
 tests/fm-shared-captain-inheritance.test.sh 10672
-tests/fm-routing-decision-negative-battery.test.sh 35000
+tests/fm-routing-decision-negative-battery.test.sh 60000
 tests/fm-spawn-dispatch-profile.test.sh 120000
 tests/fm-spawn-pool-base-freshen.test.sh 13257
 tests/fm-spawn-worktree-settle.test.sh 4828

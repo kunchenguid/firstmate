@@ -64,15 +64,22 @@ case "${1:-}" in
     ;;
   has-session|new-session|kill-window) exit 0 ;;
   send-keys)
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
-      for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
-        fi
-        prev=$a
-      done
-    fi
+    shift
+    literal=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *)
+          if [ "$literal" -eq 1 ]; then
+            [ -z "${FM_FAKE_LAUNCH_LOG:-}" ] || printf '%s\n' "$1" >> "$FM_FAKE_LAUNCH_LOG"
+          else
+            [ -z "${FM_FAKE_TEXT_LOG:-}" ] || printf '%s\n' "$1" >> "$FM_FAKE_TEXT_LOG"
+          fi
+          break
+          ;;
+      esac
+    done
     exit 0
     ;;
 esac
@@ -275,6 +282,7 @@ run_spawn() {
   prepare_test_routing_receipts "$home" "$@"
   : > "$launchlog"
   : > "$home/endpoint.log"
+  : > "$home/text.log"
   : > "$home/worktree.log"
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
@@ -286,6 +294,7 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$home/endpoint.log" \
+    FM_FAKE_TEXT_LOG="$home/text.log" \
     FM_FAKE_WORKTREE_LOG="$home/worktree.log" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
@@ -316,6 +325,7 @@ assert_spawn_refused_before_side_effects() { # <home> <id> <launch-log>
   local home=$1 id=$2 launchlog=$3
   assert_absent "$home/state/$id.meta" "routing refusal published task metadata"
   [ ! -s "$launchlog" ] || fail "routing refusal sent pane input"
+  [ ! -s "$home/text.log" ] || fail "routing refusal sent non-literal pane input"
   [ ! -s "$home/endpoint.log" ] || fail "routing refusal created an endpoint"
 }
 
@@ -330,6 +340,8 @@ test_no_profile_keeps_claude_profile_defaults() {
   expect_code 0 "$status" "claude spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  assert_grep "treehouse get" "$HOME_DIR/text.log" \
+    "successful spawn did not exercise the non-literal worktree-lease channel"
 
   launch=$(cat "$LAUNCH_LOG")
   expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
@@ -653,6 +665,26 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   launch=$(cat "$LAUNCH_LOG")
   [ "$launch" = "custom-agent --model custom-v1 --effort high --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows a fully observed raw launch command"
+}
+
+test_raw_launch_allows_shell_quoted_punctuation() {
+  local rec id out status launch model command
+  id=profile-raw-quoted-z15b
+  model='custom!#(model)'
+  command="custom-agent --model '$model' --effort high --flag"
+  rec=$(make_spawn_case profile-raw-quoted claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$command" --model "$model" --effort high)
+  status=$?
+  expect_code 0 "$status" "shell-quoted raw punctuation should remain observable"
+  assert_contains "$out" "spawned $id harness=custom-agent" "quoted raw command did not spawn"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent "$model" high
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "$command" ] || fail "quoted raw launch command changed"$'\n'"actual: $launch"
+  pass "raw launch allowlist leaves shell-quoted punctuation intact"
 }
 
 test_claude_threads_model_and_effort() {
@@ -1089,6 +1121,7 @@ test_raw_launches_refuse_unobserved_runtime_selection
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_launch_allows_shell_quoted_punctuation
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

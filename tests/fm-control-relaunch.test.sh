@@ -302,6 +302,20 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
+test_relaunch_drops_a_missing_routing_receipt_pointer() {
+  local dir out rc receipt
+  dir=$(new_case missing-routing-receipt rl36)
+  add_ship_task "$dir" rl36 claude
+  receipt="$dir/home/data/rl36/routing-decision.json"
+  printf 'routing_decision=%s\n' "$receipt" >> "$dir/home/state/rl36.meta"
+
+  out=$(run_control "$dir" rl36 relaunch --note "continue without stale provenance"); rc=$?
+  expect_code 0 "$rc" "unchanged relaunch with a missing prior receipt should still relaunch"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl36 routing_decision)" ] \
+    || fail "relaunch must not republish a pointer whose receipt is missing"
+  pass "fm-control relaunch: a missing routing receipt is not advertised after replacement"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare ready exported release
   dir=$(new_case metadata-race rl28)
@@ -1319,6 +1333,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_drops_a_missing_routing_receipt_pointer
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

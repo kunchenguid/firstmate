@@ -67,15 +67,18 @@ fm_routing_private_input() {
 
 FM_ROUTING_WORDS=()
 
-fm_routing_literal_words() {
-  local input=$1 state=plain token='' ch next i token_started=0
+fm_routing_literal_words() { # <command> <raw:0|1>
+  local input=$1 raw=${2:-0} state=plain token='' ch next i token_started=0
   FM_ROUTING_WORDS=()
+  if [ "$raw" -eq 1 ]; then
+    case "$input" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  fi
   for ((i = 0; i < ${#input}; i++)); do
     ch=${input:i:1}
     case "$state" in
       plain)
         case "$ch" in
-          ' '|$'\t'|$'\n')
+          ' '|$'\t')
             if [ "$token_started" -eq 1 ]; then
               FM_ROUTING_WORDS+=("$token")
               token=
@@ -84,18 +87,11 @@ fm_routing_literal_words() {
             ;;
           "'") state=single; token_started=1 ;;
           '"') state=double; token_started=1 ;;
-          \\)
-            i=$((i + 1))
-            [ "$i" -lt "${#input}" ] || return 1
-            token+="${input:i:1}"
+          [[:alnum:]]|'-'|'_'|'.'|'/'|'='|':'|','|'+'|'@')
+            token+="$ch"
             token_started=1
             ;;
-          '$'|'`'|';'|'|'|'&'|'<'|'>'|'*'|'?'|'['|'{') return 1 ;;
-          '~')
-            [ "$token_started" -eq 1 ] || return 1
-            token+="$ch"
-            ;;
-          *) token+="$ch"; token_started=1 ;;
+          *) return 1 ;;
         esac
         ;;
       single)
@@ -136,7 +132,7 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
   FM_ROUTING_COMMAND_EFFORT=
   FM_ROUTING_COMMAND_MODEL_SEEN=0
   FM_ROUTING_COMMAND_EFFORT_SEEN=0
-  fm_routing_literal_words "$input" || {
+  fm_routing_literal_words "$input" "$raw" || {
     fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
     return 1
   }

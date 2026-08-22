@@ -1474,7 +1474,8 @@ EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "${EFFORT:-default}")
 if [ "$RELAUNCH" -eq 1 ] \
   && [ "$HARNESS" = "$RELAUNCH_PRIOR_HARNESS" ] \
   && [ "${MODEL:-default}" = "$RELAUNCH_PRIOR_MODEL" ] \
-  && [ "${EFFORT:-default}" = "$RELAUNCH_PRIOR_EFFORT" ]; then
+  && [ "${EFFORT:-default}" = "$RELAUNCH_PRIOR_EFFORT" ] \
+  && [ -f "$RELAUNCH_PRIOR_ROUTING_DECISION" ]; then
   FM_ROUTING_DECISION_FINAL=$RELAUNCH_PRIOR_ROUTING_DECISION
 fi
 

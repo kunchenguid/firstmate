@@ -257,11 +257,12 @@ setup_raw_literal() { # <command>
   update_intent '.authority = "EXPLICIT_RUNTIME_OVERRIDE"'
   update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\""
 }
-setup_raw_glob() { setup_raw_literal 'claude --model R* --effort high'; }
-setup_raw_question() { setup_raw_literal 'claude --model R? --effort high'; }
-setup_raw_bracket() { setup_raw_literal 'claude --model R[1] --effort high'; }
-setup_raw_brace() { setup_raw_literal 'claude --model o{p,q} --effort high'; }
-setup_raw_tilde() { setup_raw_literal 'claude --model ~/m --effort high'; }
+RAW_PUNCTUATION=
+RAW_SHAPE_COMMAND=
+setup_raw_punctuation() { setup_raw_literal "claude --model a${RAW_PUNCTUATION}b --effort high"; }
+setup_raw_newline() { setup_raw_literal $'claude --model opus\n--effort high'; }
+setup_raw_carriage_return() { setup_raw_literal $'claude --model opus\r--effort high'; }
+setup_raw_flag_shape() { setup_raw_literal "$RAW_SHAPE_COMMAND"; }
 setup_raw_no_executable() { setup_raw_literal '--model opus --effort high'; }
 setup_raw_harness_contradiction() { setup_raw_literal 'codex --model opus --effort high'; }
 setup_raw_model_contradiction() { setup_raw_literal 'claude --model sonnet --effort high'; }
@@ -448,11 +449,33 @@ exercise_negative "34 selected tuple outside candidates" INCAPABLE_CANDIDATE set
 exercise_negative "35 rule index out of range" DISPATCH_CONFIG_MISMATCH setup_rule_index_out_of_range
 exercise_negative "36 wrong quota schema" 'NOT_VERIFIABLE(QUOTA)' setup_wrong_quota_schema
 
-exercise_negative "37 raw glob expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_glob
-exercise_negative "38 raw question expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_question
-exercise_negative "39 raw bracket expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_bracket
-exercise_negative "40 raw brace expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_brace
-exercise_negative "41 raw leading tilde expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_tilde
+PLAIN_FORBIDDEN_PUNCT='!#$%&()*;<>?[\]^`{|}~'
+for ((punct_index = 0; punct_index < ${#PLAIN_FORBIDDEN_PUNCT}; punct_index++)); do
+  RAW_PUNCTUATION=${PLAIN_FORBIDDEN_PUNCT:punct_index:1}
+  exercise_negative "P$((punct_index + 1)) raw plain-state punctuation" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_punctuation
+done
+exercise_negative "P22 raw embedded newline" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_newline
+exercise_negative "P23 raw embedded carriage return" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_carriage_return
+
+while IFS='|' read -r shape_label RAW_SHAPE_COMMAND shape_detail; do
+  [ -n "$shape_label" ] || continue
+  exercise_negative "raw flag shape $shape_label" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_flag_shape "$shape_detail"
+done <<'RAW_SHAPES'
+model missing value|claude --effort high --model|model flag is missing a value or duplicated
+model next value is a flag|claude --model --effort high|model flag has no fixed literal value
+model equals duplicate|claude --model opus --model=sonnet --effort high|model flag is duplicated
+model equals empty|claude --model= --effort high|model flag has no fixed literal value
+effort missing value|claude --model opus --effort|effort flag is missing a value or duplicated
+effort next value is a flag|claude --model opus --effort --flag|effort flag has no fixed literal value
+effort equals duplicate|claude --model opus --effort high --effort=low|effort flag is duplicated
+effort equals empty|claude --model opus --effort=|effort flag has no fixed literal value
+config missing value|claude --model opus -c|config flag has no fixed literal value
+config effort duplicate|claude --model opus --effort high -c model_reasoning_effort=low|effort flag is duplicated
+config effort empty|claude --model opus -c model_reasoning_effort=|effort config has no fixed literal value
+equals config effort duplicate|claude --model opus --effort high -c=model_reasoning_effort=low|effort flag is duplicated
+equals config effort empty|claude --model opus -c=model_reasoning_effort=|effort config has no fixed literal value
+RAW_SHAPES
+
 exercise_negative "42 raw launch without executable" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_no_executable \
   "launch has no executable harness word"
 exercise_negative "43 raw harness contradiction" RAW_LAUNCH_MISMATCH setup_raw_harness_contradiction \
@@ -495,6 +518,9 @@ exercise_negative "59 rule source with malformed profile" DISPATCH_CONFIG_MISMAT
 exercise_negative "60 rule source with post-binding kind drift" DISPATCH_CONFIG_MISMATCH setup_rule_binding_kind_drift \
   "rule source requires canonical dispatch configuration"
 
-[ "$negative_count" -eq 60 ] || fail "negative battery counted $negative_count refusals instead of 60"
-[ "$counterexample_count" -eq 60 ] || fail "negative battery counted $counterexample_count counterexamples instead of 60"
-echo "# all 60 ROUTING_DECISION negatives refused before effects with 60 call-site firing counterexamples"
+expected_count=$((70 + ${#PLAIN_FORBIDDEN_PUNCT}))
+[ "$negative_count" -eq "$expected_count" ] \
+  || fail "negative battery counted $negative_count refusals instead of $expected_count"
+[ "$counterexample_count" -eq "$expected_count" ] \
+  || fail "negative battery counted $counterexample_count counterexamples instead of $expected_count"
+echo "# all $expected_count ROUTING_DECISION negatives refused before effects with $expected_count call-site firing counterexamples"
