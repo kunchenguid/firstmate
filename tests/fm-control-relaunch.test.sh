@@ -17,6 +17,10 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. A recorded endpoint that is authoritatively gone routes relaunch through
+#      --recover-missing instead of stranding the task, and --recover-missing
+#      itself refuses everything that is not a gone or agent-free ordinary
+#      ship/scout endpoint.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1357,4 +1361,247 @@ test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
+
+# --- recover-missing: fm-spawn flag validation ---------------------------------
+
+test_recover_missing_refuses_without_relaunch() {
+  local dir out rc
+  dir=$(new_case recov-norel rl40)
+  add_ship_task "$dir" rl40 claude
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl40 --recover-missing --harness claude); rc=$?
+  expect_code 1 "$rc" "--recover-missing without --relaunch should refuse"
+  assert_contains "$out" "applies only to --relaunch" \
+    "the refusal should name the required flag"
+  pass "fm-spawn --recover-missing: refuses without --relaunch"
+}
+
+test_recover_missing_refuses_secondmate_kind() {
+  local dir home out rc
+  dir=$(new_case recov-sm rl41)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/rl41"
+  printf '# secondmate brief\n' > "$home/data/rl41/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'rl41\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-rl41"
+    echo "endpoint_task_id=rl41"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/rl41.meta"
+  printf '%s\n' "fm-rl41" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  # Stop the agent so the endpoint is dead: the recovery-grade state gate
+  # reads the record's endpoint first, then the ship/scout kind gate refuses
+  # on the recorded secondmate kind before any launch work begins.
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl41 --relaunch --recover-missing --harness claude); rc=$?
+  expect_code 1 "$rc" "--recover-missing with --secondmate should refuse"
+  assert_contains "$out" "only supported for ordinary ship or scout tasks" \
+    "the refusal should name the supported kinds"
+  pass "fm-spawn --recover-missing: refuses for secondmate tasks"
+}
+
+# --- recover-missing: herdr fakes ----------------------------------------------
+
+# add_herdr_ship_task <case-dir> <id> [harness]
+# A ship task recorded on a Herdr endpoint whose pane (hp-<id>-old) the fake
+# CLI reports as gone, which is exactly the app-restart stranding shape.
+add_herdr_ship_task() {
+  local dir=$1 id=$2 harness=${3:-claude}
+  local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
+  fm_git_worktree "$proj" "$wt" "task-$id"
+  mkdir -p "$home/data/$id"
+  printf '# brief for %s\n\nDo the thing.\n' "$id" > "$home/data/$id/brief.md"
+  {
+    echo "backend=herdr"
+    echo "window=hses:hp-$id-old"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo "harness=$harness"
+    echo "kind=ship"
+    echo "mode=no-mistakes"
+    echo "yolo=off"
+    echo "tasktmp=/tmp/fm-$id"
+    echo "model=default"
+    echo "effort=default"
+    echo "herdr_session=hses"
+    echo "herdr_workspace_id=hws-$id"
+    echo "herdr_tab_id=ht-$id-old"
+    echo "herdr_pane_id=hp-$id-old"
+  } > "$home/state/$id.meta"
+  TASK_TMPS+=("/tmp/fm-$id")
+}
+
+# make_herdr_stub <case-dir> <gone-pane-id>
+# A stateful fake `herdr` CLI in the case's fakebin. State files under
+# $FM_FAKE_DIR drive it:
+#   ws-ok      present -> workspace list reports the recorded workspace;
+#              absent -> workspace list emits unparseable output
+#   tab create echoes its --cwd back as the new pane's foreground_cwd and
+#              records create-cwd/create-label/new-pane for assertions
+#   launched   created when a send carries the launch-brief literal, after
+#              which agent get reports the new pane's agent working
+make_herdr_stub() {  # <dir> <gone-pane-id> <recorded-workspace-id>
+  local fb="$1/fakebin" gonepane=$2 wsid=$3
+  cat > "$fb/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+D=\$FM_FAKE_DIR
+cmd=\${1:-}; sub=\${2:-}
+case "\$cmd \$sub" in
+  "status --json")
+    printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
+  "workspace list")
+    if [ -f "\$D/ws-ok" ]; then
+      printf '{"result":{"workspaces":[{"workspace_id":"%s"}]}}\n' "$wsid"
+    else
+      printf '<html>not json</html>\n'
+    fi ;;
+  "tab list")
+    printf '{"result":{"tabs":[]}}\n' ;;
+  "tab create")
+    cwd= label=
+    shift 2
+    while [ \$# -gt 0 ]; do
+      case "\$1" in
+        --cwd) cwd=\$2; shift 2 ;;
+        --label) label=\$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '%s' "\$cwd" > "\$D/create-cwd"
+    printf '%s' "\$label" > "\$D/create-label"
+    printf 'hp-new' > "\$D/new-pane"
+    printf '%s' "\$cwd" > "\$D/cwd-hp-new"
+    printf '{"result":{"tab":{"tab_id":"ht-new"},"root_pane":{"pane_id":"hp-new"}}}\n' ;;
+  "pane get")
+    if [ "\${3:-}" = "$gonepane" ]; then
+      printf '{"error":{"code":"pane_not_found","message":"gone"}}\n'
+    else
+      printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' "\${3:-}" "\$(cat "\$D/cwd-\${3:-}" 2>/dev/null)"
+    fi ;;
+  "agent get")
+    if [ "\${3:-}" = hp-new ] && [ -f "\$D/launched" ]; then
+      printf '{"result":{"agent":{"pane_id":"hp-new","agent_status":"working"}}}\n'
+    else
+      printf '{"error":{"code":"agent_not_found","message":"none"}}\n'
+    fi ;;
+  "pane send-text"|"pane run"|"pane send-keys")
+    printf '%s\n' "\$*" >> "\$D/sends"
+    case "\$*" in
+      *'encode launch-brief'*) : > "\$D/launched" ;;
+    esac ;;
+  *)
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+}
+
+# --- recover-missing: fm-control.sh detection ----------------------------------
+
+test_recover_missing_recovers_a_missing_herdr_endpoint() {
+  local dir out rc
+  dir=$(new_case recov-miss rl42)
+  add_herdr_ship_task "$dir" rl42 claude
+  make_herdr_stub "$dir" "hp-rl42-old" "hws-rl42"
+  # The recorded workspace still exists; only the pane is gone, which is the
+  # authoritative missing state. The recovery must rebuild one replacement
+  # pane in the RECORDED workspace with the RECORDED worktree as its cwd,
+  # rotate the durable record onto that pane, and confirm the agent alive -
+  # without touching the task's existing local copy.
+  : > "$dir/fake/ws-ok"
+  out=$(run_control "$dir" rl42 relaunch --note "recovered after herdr restart"); rc=$?
+  expect_code 0 "$rc" "a missing Herdr endpoint should recover through a rebuilt pane"$'\n'"$out"
+  assert_contains "$out" "relaunched rl42" "the success line should name the task"
+  [ "$(cat "$dir/fake/create-label")" = "fm-rl42" ] \
+    || fail "the replacement pane should reuse the task's fm-<id> label"
+  [ "$(cat "$dir/fake/create-cwd")" = "$(cat "$dir/home/state/rl42.meta" | grep '^worktree=' | cut -d= -f2-)" ] \
+    || fail "the replacement pane should be created in the recorded worktree"
+  [ "$(meta_field "$dir" rl42 window)" = "hses:hp-new" ] \
+    || fail "the record should point at the rebuilt pane"
+  [ "$(meta_field "$dir" rl42 herdr_tab_id)" = "ht-new" ] \
+    || fail "the record should carry the replacement tab id"
+  [ "$(meta_field "$dir" rl42 worktree)" = "$dir/wt" ] \
+    || fail "the recorded worktree must be unchanged by the recovery"
+  pass "fm-control relaunch: a missing Herdr endpoint recovers through a rebuilt recorded pane"
+}
+
+test_recover_missing_refuses_an_ambiguous_herdr_workspace() {
+  local dir out rc
+  dir=$(new_case recov-ambig rl43)
+  add_herdr_ship_task "$dir" rl43 claude
+  make_herdr_stub "$dir" "hp-rl43-old" "hws-rl43"
+  # Without ws-ok the fake CLI returns unparseable workspace output, so the
+  # recorded workspace's presence is unknown: rebuilding there could land the
+  # replacement somewhere the record cannot explain, so recovery refuses and
+  # the transaction keeps the prior durable record.
+  out=$(run_control "$dir" rl43 relaunch --note "ambiguous workspace"); rc=$?
+  expect_code 1 "$rc" "an unreadable workspace presence must refuse recovery"
+  assert_contains "$out" "refusing ambiguous recovery" \
+    "the refusal should name the ambiguous workspace"
+  [ "$(journal_field "$dir" rl43 phase)" = "failed:launching" ] \
+    || fail "the refused recovery should leave the journal at failed:launching"
+  [ "$(journal_field "$dir" rl43 rollback)" = "prior-record-kept" ] \
+    || fail "the refused recovery should keep the prior durable record"
+  pass "fm-control relaunch: an ambiguous Herdr workspace refuses recovery and keeps the record"
+}
+
+test_ordinary_relaunch_failure_retry_stays_on_the_same_path() {
+  local dir out rc before
+  dir=$(new_case recov-retry rl46)
+  add_ship_task "$dir" rl46 claude
+  before=$(cat "$dir/home/state/rl46.meta")
+  # First attempt fails at the launch owner (endpoint shell outside the
+  # recorded worktree), leaving phase=failed:launching behind - the same
+  # journal shape a failed recovery leaves. For a TMUX record that shape
+  # must stay an ordinary relaunch failure: its endpoint is still present,
+  # so a retry adopts it instead of refusing at the recovery backend gate.
+  printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  out=$(run_control "$dir" rl46 relaunch --harness codex --note "first try"); rc=$?
+  expect_code 1 "$rc" "the first attempt should fail at the launch owner"$'\n'"$out"
+  [ "$(journal_field "$dir" rl46 phase)" = "failed:launching" ] \
+    || fail "the failed launch should leave the journal at failed:launching"
+  # Retry from the correct cwd: the ordinary same-endpoint relaunch succeeds.
+  printf '%s' "$dir/wt" > "$dir/fake/cwd"
+  out=$(run_control "$dir" rl46 relaunch --note "second try"); rc=$?
+  expect_code 0 "$rc" "the retry should take the ordinary path and succeed"$'\n'"$out"
+  assert_contains "$out" "relaunched rl46" "the success line should name the task"
+  [ "$(cat "$dir/home/state/rl46.meta")" != "$before" ] \
+    || fail "the successful retry should publish its new incarnation"
+  pass "fm-control relaunch: a tmux failed-launching retry stays on the ordinary path"
+}
+
+test_recover_missing_refuses_alive_endpoint() {
+  local dir out rc
+  dir=$(new_case recov-alive rl44)
+  add_ship_task "$dir" rl44 claude
+  # An alive endpoint is neither missing nor agent-free, so --recover-missing
+  # must refuse it rather than risk a duplicate recovery launch.
+  out=$(run_spawn "$dir" rl44 --relaunch --recover-missing --harness claude); rc=$?
+  expect_code 1 "$rc" "recover-missing on a live endpoint should refuse"
+  assert_contains "$out" "authoritatively missing or agent-free" \
+    "the refusal should name the required endpoint state"
+  pass "fm-spawn --recover-missing: refuses when the endpoint is alive"
+}
+
+test_recover_missing_refuses_without_relaunch
+test_recover_missing_refuses_secondmate_kind
+test_recover_missing_recovers_a_missing_herdr_endpoint
+test_recover_missing_refuses_an_ambiguous_herdr_workspace
+test_ordinary_relaunch_failure_retry_stays_on_the_same_path
+test_recover_missing_refuses_alive_endpoint
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree

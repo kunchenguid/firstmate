@@ -46,7 +46,14 @@
 #              standing charter is never rewritten.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
-#              bin/fm-spawn.sh --relaunch. A failure before publication keeps
+#              bin/fm-spawn.sh --relaunch. When the recorded Herdr endpoint is
+#              authoritatively gone, or reads agent-free with a failed-launching
+#              recovery journal from a prior attempt, the launch delegates with
+#              --recover-missing instead (fm-spawn's header owns that contract):
+#              there is nothing left to stop, so the ordinary exit step is
+#              skipped, and an endpoint that turns live or ambiguous between
+#              checks refuses rather than risking a duplicate recovery.
+#              A failure before publication keeps
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
@@ -766,7 +773,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line recover_missing=0
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -795,6 +802,21 @@ do_relaunch() {
   else
     note_line="note=none"
   fi
+  # Preserve the recovery reason before the journal is rewritten for this
+  # attempt. A failed recovery launch leaves an agent-free pane and a
+  # failed:launching journal; that combination must continue through the
+  # missing-endpoint path rather than the ordinary same-endpoint path. The
+  # failed:launching signal is scoped to Herdr records: an ordinary tmux or
+  # zellij-style relaunch failure leaves the same journal, and its retry must
+  # stay on the ordinary same-endpoint path.
+  state=$(agent_state)
+  if [ "$BACKEND" = herdr ] \
+     && { [ "$state" = missing ] \
+          || { [ "$state" = dead ] \
+               && [ -f "$JOURNAL" ] \
+               && grep -Fqx 'phase=failed:launching' "$JOURNAL" 2>/dev/null; }; }; then
+    recover_missing=1
+  fi
   safe_checkpoint
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
@@ -803,8 +825,18 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
-  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  state=$(agent_state)
+  if [ "$recover_missing" = 1 ]; then
+    case "$state" in
+      missing) exit_result=missing-endpoint ;;
+      dead) exit_result=agent-free-recovery-endpoint ;;
+      alive) die "task $ID's recovery endpoint became live before replacement launch; refusing duplicate recovery" ;;
+      *) die "task $ID's recovery endpoint reads '$state'; refusing ambiguous recovery" ;;
+    esac
+  else
+    journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
+    exit_result=$(do_exit)
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
@@ -812,6 +844,9 @@ do_relaunch() {
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
+  if [ "$recover_missing" = 1 ]; then
+    spawn_args+=(--recover-missing)
+  fi
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
@@ -821,6 +856,14 @@ do_relaunch() {
     [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
       || RELAUNCH_META_PUBLISHED=1
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
+  fi
+
+  # A recovery moves the endpoint: the rebuilt replacement pane is now the
+  # recorded truth, so adopt it from the just-published record before the
+  # liveness wait and the completion journal name the right place.
+  if [ "$recover_missing" = 1 ]; then
+    T=$(fm_meta_get "$META" window)
+    [ -n "$T" ] || die "task $ID's recovery published no endpoint"
   fi
 
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
