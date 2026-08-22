@@ -7,30 +7,33 @@
 # the pool re-leases a slot that the other home's task still names, and that
 # task's cleanup later hard-resets a copy a live worker is using. Treehouse is a
 # pinned third-party binary whose allocation and return-on-exit are not ours to
-# change, so the guarantee has to come from the one knob its config exposes:
-# `root` in the clone's treehouse.toml, which decides where the pool lives.
+# change, so the guarantee uses its repo-level `root` setting from a generated
+# Git config view inside the canonical operational home.
 #
 # Usage:
-#   fm-pool-root.sh <project-dir>   ensure that clone's pool root, print it
+#   fm-pool-root.sh <project-dir>   ensure this home's config, print its root
 #   fm-pool-root.sh --print         print this home's pool root, write nothing
+#   fm-pool-root.sh --view <project-dir>  ensure and print the config view
 #
 # The root is <base>/<home-basename>-<hash of the home's real path>, with base
 # ${FM_POOL_ROOT_BASE:-$HOME/.treehouse-homes}.
 # Treehouse then places the pool itself at <root>/.treehouse/<repo>-<hash>/.
 #
-# Idempotent by design, so running it before every spawn converges without
-# churn: an already-correct treehouse.toml is left byte-identical, other keys in
-# that file are preserved, and the file is added to the clone's
-# .git/info/exclude so it never dirties the project or reaches a commit.
+# The generated view lives at
+# <canonical-FM_HOME>/state/treehouse-config/<project-path-hash>/<project-name>.
+# Its .git symlink points at the project's existing Git directory and its
+# treehouse.toml contains only the safely encoded home root. Dispatch runs the
+# unwrapped `treehouse get` from that view. The project checkout and its
+# info/exclude remain byte-for-byte outside this configuration path.
 #
 # Existing pools are never touched. A worktree already handed out keeps its
 # absolute path, `treehouse return` accepts that path whatever the config now
 # says, and the separation applies only to slots leased from here on, so live
 # work drains out of a shared pool on its own.
 #
-# A clone that TRACKS treehouse.toml is refused rather than rewritten: silently
-# committing a machine-local path would be worse than stopping, and silently
-# sharing a pool is the very thing this exists to prevent.
+# The view deliberately wins as Treehouse's repo root for Firstmate dispatches;
+# any treehouse.toml in the captain's primary checkout remains untouched and is
+# not configuration authority for another operational home's pool.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,11 +58,15 @@ short_hash() {  # <string>
 # This home's own pool root. Keyed on FM_HOME - the home that owns the
 # state/<id>.meta records naming each leased copy - rather than on the code
 # root, because two homes sharing one code root would still double-claim.
+canonical_home() {
+  cd "$FM_HOME" 2>/dev/null && pwd -P
+}
+
 pool_root() {
   local home base name
   [ -z "${FM_POOL_ROOT:-}" ] \
     || die "FM_POOL_ROOT cannot preserve per-home isolation; use FM_POOL_ROOT_BASE"
-  home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) \
+  home=$(canonical_home) \
     || die "cannot resolve FM_HOME '$FM_HOME' for pool isolation"
   base=${FM_POOL_ROOT_BASE:-}
   if [ -z "$base" ]; then
@@ -71,119 +78,55 @@ pool_root() {
   printf '%s/%s-%s' "$base" "$name" "$(short_hash "$home")"
 }
 
-# The `root` value already configured for this clone, empty when unset. Only
-# top-level keys count: treehouse's config is flat, and a `root` under some
-# future [section] would be a different key entirely.
-configured_root() {  # <toml>
-  local toml=$1 line value
-  [ -f "$toml" ] || return 0
-  while IFS= read -r line; do
-    case "$line" in
-      \[*) break ;;
-      root[[:space:]]*=*|root=*) ;;
-      *) continue ;;
-    esac
-    value=${line#*=}
-    value=${value#"${value%%[![:space:]]*}"}
-    value=${value%"${value##*[![:space:]]}"}
-    case "$value" in
-      \"*\") value=${value#\"}; value=${value%\"} ;;
-      \'*\') value=${value#\'}; value=${value%\'} ;;
-    esac
-    printf '%s' "$value"
-    return 0
-  done < "$toml"
+project_view() {  # <project>
+  local project=$1 home project_real name
+  home=$(canonical_home) \
+    || die "cannot resolve FM_HOME '$FM_HOME' for pool isolation"
+  project_real=$(cd "$project" 2>/dev/null && pwd -P) \
+    || die "cannot resolve project '$project' for pool isolation"
+  name=$(basename "$project_real")
+  printf '%s/state/treehouse-config/%s/%s' \
+    "$home" "$(short_hash "$project_real")" "$name"
 }
 
-# Rewrite <toml> so its top-level `root` is <root>, preserving every other line.
-# A file with no top-level `root` gains one at the top, where TOML requires
-# keys that belong to no section to live anyway.
-write_root() {  # <toml> <root>
-  local toml=$1 root=$2 tmp body seen=0 line in_body=1
-  tmp=$(mktemp "${toml%/*}/.fm-treehouse-toml.XXXXXX") || return 1
-  body=$(mktemp "${toml%/*}/.fm-treehouse-body.XXXXXX") || { rm -f -- "$tmp"; return 1; }
-  if [ -f "$toml" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        \[*) in_body=0 ;;
-      esac
-      if [ "$in_body" = 1 ]; then
-        case "$line" in
-          root[[:space:]]*=*|root=*)
-            [ "$seen" = 1 ] || printf 'root = "%s"\n' "$root" >> "$body"
-            seen=1
-            continue
-            ;;
-        esac
-      fi
-      printf '%s\n' "$line" >> "$body"
-    done < "$toml"
-  fi
-  if [ "$seen" = 0 ]; then
-    printf 'root = "%s"\n' "$root" > "$tmp"
-  fi
-  cat "$body" >> "$tmp" || { rm -f -- "$tmp" "$body"; return 1; }
-  rm -f -- "$body"
-  chmod 0644 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$toml"
+toml_basic_string() {  # <value>
+  command -v node >/dev/null 2>&1 || return 1
+  node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$1"
 }
 
-# Keep the clone's own status clean: the file is machine-local configuration,
-# never project content.
-exclude_from_git() {  # <project> <relative-path>
-  local project=$1 rel=$2 excl grep_status backup='' had_exclude=0
-  excl=$(git -C "$project" rev-parse --git-path info/exclude 2>/dev/null) || return 1
-  [ -n "$excl" ] || return 1
-  case "$excl" in
-    /*) ;;
-    *) excl="$project/$excl" ;;
+write_config() {  # <view> <project-git-dir> <root>
+  local requested_view=$1 project_git_dir=$2 root=$3 home real_view toml tmp literal git_link
+  home=$(canonical_home) || return 1
+  mkdir -p "$requested_view" || return 1
+  real_view=$(cd "$requested_view" 2>/dev/null && pwd -P) || return 1
+  case "$real_view" in
+    "$home"/*) ;;
+    *) return 1 ;;
   esac
-  mkdir -p "$(dirname "$excl")" 2>/dev/null || return 1
-  if [ -e "$excl" ] || [ -L "$excl" ]; then
-    [ -f "$excl" ] && [ ! -L "$excl" ] || return 1
-    grep -qxF "$rel" "$excl" 2>/dev/null
-    grep_status=$?
-    case "$grep_status" in
-      0)
-        git -C "$project" check-ignore -q -- "$rel" 2>/dev/null
-        return $?
-        ;;
-      1)
-        backup=$(mktemp "$(dirname "$excl")/.fm-git-exclude.XXXXXX") || return 1
-        cp -p -- "$excl" "$backup" || { rm -f -- "$backup"; return 1; }
-        had_exclude=1
-        printf '%s\n' "$rel" >> "$excl" || {
-          mv -f -- "$backup" "$excl" 2>/dev/null || return 1
-          return 1
-        }
-        ;;
-      *) return 1 ;;
-    esac
+  git_link="$real_view/.git"
+  if [ -e "$git_link" ] || [ -L "$git_link" ]; then
+    [ -L "$git_link" ] || return 1
+    [ "$(readlink "$git_link")" = "$project_git_dir" ] || return 1
   else
-    printf '%s\n' "$rel" > "$excl" || { rm -f -- "$excl"; return 1; }
+    ln -s "$project_git_dir" "$git_link" || return 1
   fi
-  if git -C "$project" check-ignore -q -- "$rel" 2>/dev/null; then
-    if [ -n "$backup" ] && ! rm -f -- "$backup"; then
-      mv -f -- "$backup" "$excl" 2>/dev/null || true
-      return 1
-    fi
-    return 0
+  git -C "$real_view" rev-parse --show-toplevel >/dev/null 2>&1 || return 1
+  toml="$real_view/treehouse.toml"
+  if [ -e "$toml" ] || [ -L "$toml" ]; then
+    [ -f "$toml" ] && [ ! -L "$toml" ] || return 1
   fi
-  if [ "$had_exclude" = 1 ]; then
-    mv -f -- "$backup" "$excl" 2>/dev/null || return 1
+  literal=$(toml_basic_string "$root") || return 1
+  tmp=$(mktemp "$real_view/.fm-treehouse-config.XXXXXX") || return 1
+  printf 'root = %s\n' "$literal" > "$tmp" \
+    || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if [ -f "$toml" ] && cmp -s "$tmp" "$toml"; then
+    rm -f -- "$tmp"
   else
-    rm -f -- "$excl" 2>/dev/null || return 1
+    mv -f -- "$tmp" "$toml" || { rm -f -- "$tmp"; return 1; }
   fi
-  return 1
-}
-
-restore_toml() {  # <toml> <backup> <had-file>
-  local toml=$1 backup=$2 had_file=$3
-  if [ "$had_file" = 1 ]; then
-    mv -f -- "$backup" "$toml"
-  else
-    rm -f -- "$toml"
-  fi
+  literal=$(toml_basic_string "$root") || return 1
+  [ "$(cat "$toml" 2>/dev/null)" = "root = $literal" ] || return 1
 }
 
 case "${1:-}" in
@@ -193,12 +136,17 @@ case "${1:-}" in
     printf '\n'
     exit 0
     ;;
+  --view)
+    [ "$#" -eq 2 ] || die "usage: fm-pool-root.sh --view <project-dir>"
+    VIEW_ONLY=1
+    shift
+    ;;
   ''|-*)
-    die "usage: fm-pool-root.sh <project-dir> | fm-pool-root.sh --print"
+    die "usage: fm-pool-root.sh <project-dir> | fm-pool-root.sh --view <project-dir> | fm-pool-root.sh --print"
     ;;
 esac
 
-[ "$#" -eq 1 ] || die "usage: fm-pool-root.sh <project-dir>"
+[ "$#" -eq 1 ] || die "usage: fm-pool-root.sh <project-dir> | fm-pool-root.sh --view <project-dir> | fm-pool-root.sh --print"
 PROJECT=$1
 [ -d "$PROJECT" ] || die "project directory '$PROJECT' does not exist"
 PROJECT=$(cd "$PROJECT" && pwd -P) || die "cannot resolve project directory '$1'"
@@ -208,56 +156,18 @@ PROJECT_GIT_DIR=$(git -C "$PROJECT" rev-parse --absolute-git-dir 2>/dev/null) \
   || die "project directory '$PROJECT' has no available Git directory"
 
 ROOT_VALUE=$(pool_root) || exit 1
-TOML="$PROJECT/treehouse.toml"
-TOML_BACKUP=''
-TOML_HAD_FILE=0
-TOML_CHANGED=0
-
-if git -C "$PROJECT" ls-files --error-unmatch treehouse.toml >/dev/null 2>&1; then
-  die "project '$PROJECT' tracks treehouse.toml, so this home cannot claim its own worktree pool without changing project content. Untrack that file, then spawn again"
-fi
-
-if [ -e "$TOML" ] || [ -L "$TOML" ]; then
-  [ -f "$TOML" ] && [ ! -L "$TOML" ] \
-    || die "'$TOML' is not a regular file; refusing to configure this home's pool root"
-fi
+CONFIG_VIEW=$(project_view "$PROJECT") || exit 1
 
 # Create and canonicalize before recording it: one home must always resolve the
 # same string, or an every-spawn rewrite would churn the file for nothing.
 mkdir -p "$ROOT_VALUE" || die "could not create this home's pool root '$ROOT_VALUE'"
 ROOT_VALUE=$(cd "$ROOT_VALUE" && pwd -P) || die "could not resolve this home's pool root"
+write_config "$CONFIG_VIEW" "$PROJECT_GIT_DIR" "$ROOT_VALUE" \
+  || die "could not write and verify this home's isolated Treehouse config view at '$CONFIG_VIEW'"
 
-if [ "$(configured_root "$TOML")" != "$ROOT_VALUE" ]; then
-  if [ -f "$TOML" ]; then
-    TOML_BACKUP=$(mktemp "$PROJECT_GIT_DIR/fm-treehouse-rollback.XXXXXX") \
-      || die "could not preserve '$TOML' before configuring this home's pool"
-    cp -p -- "$TOML" "$TOML_BACKUP" || {
-      rm -f -- "$TOML_BACKUP"
-      die "could not preserve '$TOML' before configuring this home's pool"
-    }
-    TOML_HAD_FILE=1
-  fi
-  if ! write_root "$TOML" "$ROOT_VALUE"; then
-    restore_toml "$TOML" "$TOML_BACKUP" "$TOML_HAD_FILE" \
-      || die "could not restore '$TOML' after its pool-root write failed"
-    die "could not record this home's pool root in '$TOML'"
-  fi
-  TOML_CHANGED=1
-fi
-if [ "$(configured_root "$TOML")" != "$ROOT_VALUE" ]; then
-  [ "$TOML_CHANGED" = 0 ] \
-    || restore_toml "$TOML" "$TOML_BACKUP" "$TOML_HAD_FILE" \
-    || die "could not restore '$TOML' after verification failed"
-  die "could not verify this home's pool root in '$TOML'"
-fi
-if ! exclude_from_git "$PROJECT" treehouse.toml; then
-  [ "$TOML_CHANGED" = 0 ] \
-    || restore_toml "$TOML" "$TOML_BACKUP" "$TOML_HAD_FILE" \
-    || die "could not restore '$TOML' after Git exclusion failed"
-  die "could not exclude treehouse.toml from project '$PROJECT' or verify that Git ignores it"
-fi
-if [ -n "$TOML_BACKUP" ]; then
-  rm -f -- "$TOML_BACKUP" || die "could not remove the completed rollback snapshot for '$TOML'"
+if [ "${VIEW_ONLY:-0}" = 1 ]; then
+  printf '%s\n' "$CONFIG_VIEW"
+  exit 0
 fi
 
 printf '%s\n' "$ROOT_VALUE"

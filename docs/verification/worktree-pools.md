@@ -9,7 +9,7 @@ Active empirical evidence for the pool facts firstmate's single-owner guarantees
 |---|---|
 | Tool | `treehouse` v2.0.0 (`treehouse --version`) |
 | Pinned for CI | v2.0.1 (`bin/fm-install-treehouse.sh`) |
-| Verified | 2026-08-16 |
+| Verified | 2026-08-22 |
 | Platform | macOS arm64 (Darwin 25.3.0) |
 
 Every run below used throwaway repositories and explicit `root` values under a scratch directory, so no run touched a real pool.
@@ -41,16 +41,21 @@ That is why the guarantee cannot rest on clone naming: firstmate's own layout ma
 
 ### `root` is the only knob that separates two homes' pools
 
-After each clone is given its own root, the same two clones no longer share a pool:
+After each home is given its own generated config view and root, the same two clones no longer share a pool without changing either primary checkout:
 
 ```
 $ FM_HOME=.../homeA fm-pool-root.sh .../homeA/projects/proj
 $ FM_HOME=.../homeB fm-pool-root.sh .../homeB/projects/proj
-$ (cd homeA/projects/proj && treehouse get --lease --lease-holder homeA)
+$ viewA=$(FM_HOME=.../homeA fm-pool-root.sh --view .../homeA/projects/proj)
+$ viewB=$(FM_HOME=.../homeB fm-pool-root.sh --view .../homeB/projects/proj)
+$ (cd "$viewA" && treehouse get --lease --lease-holder homeA)
 .../pools/homeA-4b5fe151/.treehouse/proj-dbcb21/1/proj
-$ (cd homeB/projects/proj && treehouse get --lease --lease-holder homeB)
+$ (cd "$viewB" && treehouse get --lease --lease-holder homeB)
 .../pools/homeB-0f7ece37/.treehouse/proj-dbcb21/1/proj
 ```
+
+Both primary clones remained clean and retained their original `treehouse.toml` paths and Git exclusion metadata.
+The portable regression also drives the installed Treehouse parser with a root containing a quote, backslash, and newline, then verifies that the leased path resolves under the intended root.
 
 ### A worktree already leased is unaffected by a later root change
 
@@ -90,4 +95,4 @@ A copy left dirty is skipped rather than re-leased, so uncommitted work is not w
 ## Refreshing this record
 
 Re-run the sequence above against the installed `treehouse` after any upgrade past v2.0.0, and update the version row plus any output that changed.
-The portable half of the same guarantees is enforced continuously by `tests/fm-worktree-custody.test.sh`, including rejection of the unsafe literal-root override; its real-treehouse case self-skips when the binary is absent.
+The portable half of the same guarantees is enforced continuously by `tests/fm-worktree-custody.test.sh`, including rejection of the unsafe literal-root override, primary-clone immutability, semantic TOML-path consumption, and fail-closed canonical custody dependencies; its real-treehouse cases self-skip when the binary is absent.

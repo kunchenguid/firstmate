@@ -64,17 +64,22 @@ SH
 # entirely, distinct from both the project and the worktree - mirroring the
 # live incident where the stale read was another real firstmate home).
 make_settle_case() {
-  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile
+  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile pool_root
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
-  wt="$case_dir/wt"
   stale="$case_dir/stale-other-checkout"
   countfile="$case_dir/pane-call-count"
   fakebin=$(make_settle_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
-  fm_git_worktree "$proj" "$wt" "wt-$name"
+  fm_git_init_commit "$proj"
+  fm_git_add_origin "$proj" "$proj.origin.git"
+  pool_root=$(FM_HOME="$home" FM_POOL_ROOT_BASE="$home/pools" \
+    "$ROOT/bin/fm-pool-root.sh" --print)
+  wt="$pool_root/.treehouse/fixture/1/project"
+  mkdir -p "$(dirname "$wt")"
+  git -C "$proj" worktree add --quiet -b "wt-$name" "$wt"
   fm_git_init_commit "$stale"
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
@@ -93,6 +98,7 @@ run_settle_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_POOL_ROOT_BASE="$HOME_DIR/pools" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \

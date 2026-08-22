@@ -209,14 +209,15 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 ## Worktree pools (FM_POOL_ROOT_BASE)
 
 Crewmate and scout worktrees come from a treehouse pool, and treehouse keys a pool by the repository rather than by the checkout.
-Two firstmate homes that clone the same project would therefore draw from one pool while neither can see the other's task records, so each home gives its own clone a pool of its own instead.
-`bin/fm-pool-root.sh` owns that derivation and its exact mechanics; `bin/fm-spawn.sh` runs it before every crewmate or scout worktree is acquired.
+Two firstmate homes that clone the same project would therefore draw from one pool while neither can see the other's task records, so each home gives its dispatches a pool of their own instead.
+`bin/fm-pool-root.sh` owns that derivation and creates a generated Git config view under the canonical home's `state/treehouse-config/`; `bin/fm-spawn.sh` runs the unwrapped `treehouse get` from that view before every crewmate or scout worktree is acquired.
+The view points Git at the same backing repository and carries the home-specific Treehouse root, while the captain's primary project checkout, its `treehouse.toml`, and its Git exclusion metadata remain untouched.
 By default a home's pool root is `$HOME/.treehouse-homes/<home-directory-name>-<short hash of the home's real path>`, and treehouse places the pool itself under `<root>/.treehouse/`.
 `FM_POOL_ROOT_BASE` moves the directory those per-home roots live in while preserving the mandatory per-home suffix.
 The legacy literal `FM_POOL_ROOT` override is refused because the same inherited value could make multiple homes share a pool.
 The separation applies only to worktrees leased from that point on; reconfiguration never moves, resets, returns, invalidates, or recycles a worktree already leased.
 That existing lease keeps its absolute path and later follows ordinary teardown, so previously shared pools drain without a migration step.
-A project whose `treehouse.toml` is tracked in git is refused rather than rewritten, because recording a machine-local path there would change project content.
+Pool paths are encoded as TOML basic strings in the generated view, so quotes, backslashes, and control characters in valid filesystem paths cannot corrupt Treehouse configuration.
 
 After treehouse hands a fresh spawn a path, Firstmate checks every `state/*.meta` record in that same home before refreshing the copy or launching the agent.
 An unreadable, non-regular, missing, empty, or ambiguous worktree declaration fails closed, as does another task record that resolves to the acquired path.

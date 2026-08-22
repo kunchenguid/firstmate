@@ -58,7 +58,8 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
-#   Every treehouse-get spawn first claims this home's OWN worktree pool
+#   Every treehouse-get spawn first claims this home's OWN worktree pool through
+#   a home-private Treehouse config view that never mutates the project clone
 #   (bin/fm-pool-root.sh, which refuses rather than sharing a pool), then asks
 #   the project to release its delivered copies when it published a
 #   `pool:release-delivered` script, and finally refuses the acquired copy if
@@ -2305,12 +2306,20 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Treehouse keys a pool by the repository, so without this two homes cloning
   # the same project draw from one pool and hand each other's live slots out.
   # bin/fm-pool-root.sh owns the derivation and refuses rather than guessing.
-  "$FM_ROOT/bin/fm-pool-root.sh" "$PROJ_ABS" >/dev/null || {
+  TREEHOUSE_POOL_ROOT=$("$FM_ROOT/bin/fm-pool-root.sh" "$PROJ_ABS") || {
     echo "error: could not give this home its own worktree pool for $PROJ_ABS; refusing to lease a slot another home may already have handed out" >&2
     exit 1
   }
+  TREEHOUSE_CONFIG_VIEW=$("$FM_ROOT/bin/fm-pool-root.sh" --view "$PROJ_ABS") || {
+    echo "error: could not resolve this home's isolated Treehouse config view; refusing to lease" >&2
+    exit 1
+  }
+  TREEHOUSE_CONFIG_VIEW_REAL=$(cd "$TREEHOUSE_CONFIG_VIEW" 2>/dev/null && pwd -P) || {
+    echo "error: could not canonicalize this home's isolated Treehouse config view; refusing to lease" >&2
+    exit 1
+  }
   release_delivered_pool_copies "$PROJ_ABS"
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  spawn_send_text_line "$WT_TARGET" "(cd $(shell_quote "$TREEHOUSE_CONFIG_VIEW_REAL") && exec treehouse get)"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -2337,7 +2346,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+      if [ "$p_real" != "$PROJ_ABS_REAL" ] && [ "$p_real" != "$TREEHOUSE_CONFIG_VIEW_REAL" ]; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
           break
@@ -2357,6 +2366,14 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  wt_pool_real=$(real_path_or_raw "$WT")
+  case "$wt_pool_real" in
+    "$TREEHOUSE_POOL_ROOT"/.treehouse/*) ;;
+    *)
+      echo "error: treehouse get entered '$WT' outside this home's pool root '$TREEHOUSE_POOL_ROOT'; refusing before refresh" >&2
+      exit 1
+      ;;
+  esac
   assert_worktree_unclaimed "$WT"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then

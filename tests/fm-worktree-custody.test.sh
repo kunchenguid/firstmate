@@ -40,8 +40,8 @@ pool_root_for_home() {  # <home> <base> <project>
   FM_HOME="$1" FM_POOL_ROOT_BASE="$2" "$POOL_ROOT_BIN" "$3"
 }
 
-configured_root_of() {  # <clone>
-  sed -n 's/^root[[:space:]]*=[[:space:]]*"\(.*\)"$/\1/p' "$1/treehouse.toml" | head -1
+pool_config_view_for_home() {  # <home> <base> <project>
+  FM_HOME="$1" FM_POOL_ROOT_BASE="$2" "$POOL_ROOT_BIN" --view "$3"
 }
 
 file_mode() {  # <path>
@@ -64,7 +64,7 @@ make_two_homes_one_project() {  # <name>
 }
 
 test_two_homes_configure_distinct_pool_roots() {
-  local case_dir root_a root_b
+  local case_dir root_a root_b config_a config_b
   case_dir=$(make_two_homes_one_project distinct-roots)
 
   root_a=$(pool_root_for_home "$case_dir/homeA" "$case_dir/base" "$case_dir/homeA/project") \
@@ -76,11 +76,17 @@ test_two_homes_configure_distinct_pool_roots() {
   [ "$root_a" != "$root_b" ] \
     || fail "two homes cloning one project resolved the SAME pool root ($root_a)"
   [ -d "$root_a" ] && [ -d "$root_b" ] || fail "fm-pool-root.sh did not create the pool roots"
-  [ "$(configured_root_of "$case_dir/homeA/project")" = "$root_a" ] \
-    || fail "the first home's clone does not carry its own pool root"
-  [ "$(configured_root_of "$case_dir/homeB/project")" = "$root_b" ] \
-    || fail "the second home's clone does not carry its own pool root"
-  pass "two homes cloning one project configure distinct treehouse pool roots"
+  config_a=$(pool_config_view_for_home "$case_dir/homeA" "$case_dir/base" "$case_dir/homeA/project")
+  config_b=$(pool_config_view_for_home "$case_dir/homeB" "$case_dir/base" "$case_dir/homeB/project")
+  assert_present "$config_a/treehouse.toml" "the first home has no generated Treehouse config"
+  assert_present "$config_b/treehouse.toml" "the second home has no generated Treehouse config"
+  assert_absent "$case_dir/homeA/project/treehouse.toml" "pool setup mutated the first primary clone"
+  assert_absent "$case_dir/homeB/project/treehouse.toml" "pool setup mutated the second primary clone"
+  [ -z "$(git -C "$case_dir/homeA/project" status --porcelain)" ] \
+    || fail "pool setup dirtied the first primary clone"
+  [ -z "$(git -C "$case_dir/homeB/project" status --porcelain)" ] \
+    || fail "pool setup dirtied the second primary clone"
+  pass "two homes configure distinct roots outside their primary clones"
 }
 
 test_literal_pool_root_override_is_refused() {
@@ -102,32 +108,25 @@ test_literal_pool_root_override_is_refused() {
   pass "a literal pool root override cannot disable per-home isolation"
 }
 
-test_pool_root_is_idempotent_and_preserves_other_keys() {
-  local case_dir clone before after root
+test_pool_root_is_idempotent_without_mutating_the_clone() {
+  local case_dir clone config before after
   case_dir=$(make_two_homes_one_project idempotent)
   clone="$case_dir/homeA/project"
-  printf 'max_trees = 20\nroot = ""\n\n# keep this comment\n' > "$clone/treehouse.toml"
-
-  root=$(pool_root_for_home "$case_dir/homeA" "$case_dir/base" "$clone") \
-    || fail "fm-pool-root.sh failed on an existing treehouse.toml"
-  [ "$(configured_root_of "$clone")" = "$root" ] || fail "an existing empty root was not replaced"
-  assert_grep 'max_trees = 20' "$clone/treehouse.toml" "max_trees was dropped"
-  assert_grep 'keep this comment' "$clone/treehouse.toml" "an unrelated line was dropped"
-
-  before=$(cksum < "$clone/treehouse.toml")
+  pool_root_for_home "$case_dir/homeA" "$case_dir/base" "$clone" >/dev/null \
+    || fail "fm-pool-root.sh failed on its first generated config"
+  config="$(pool_config_view_for_home "$case_dir/homeA" "$case_dir/base" "$clone")/treehouse.toml"
+  before=$(cksum < "$config")
   pool_root_for_home "$case_dir/homeA" "$case_dir/base" "$clone" >/dev/null \
     || fail "a repeat run of fm-pool-root.sh failed"
-  after=$(cksum < "$clone/treehouse.toml")
-  [ "$before" = "$after" ] || fail "a repeat run rewrote an already-correct treehouse.toml"
-
-  grep -qxF 'treehouse.toml' "$clone/.git/info/exclude" \
-    || fail "the pool config was not excluded from the clone"
+  after=$(cksum < "$config")
+  [ "$before" = "$after" ] || fail "a repeat run rewrote an already-correct generated config"
+  assert_absent "$clone/treehouse.toml" "idempotent pool setup wrote into the primary clone"
   [ -z "$(git -C "$clone" status --porcelain)" ] \
-    || fail "writing the pool root left the clone dirty"
-  pass "the pool root is written idempotently, preserves other keys, and never dirties the clone"
+    || fail "idempotent pool setup dirtied the primary clone"
+  pass "the generated pool config is idempotent and never mutates the primary clone"
 }
 
-test_pool_root_refuses_a_tracked_config() {
+test_pool_root_preserves_a_tracked_primary_config() {
   local case_dir clone out status
   case_dir=$(make_two_homes_one_project tracked-config)
   clone="$case_dir/homeA/project"
@@ -137,14 +136,13 @@ test_pool_root_refuses_a_tracked_config() {
 
   out=$(pool_root_for_home "$case_dir/homeA" "$case_dir/base" "$clone" 2>&1)
   status=$?
-  expect_code 1 "$status" "a tracked treehouse.toml should refuse, not be rewritten"
-  assert_contains "$out" "tracks treehouse.toml" "the refusal did not name the tracked config"
+  expect_code 0 "$status" "an isolated config view should not rewrite or reject tracked project config: $out"
   assert_grep '/somewhere/shared' "$clone/treehouse.toml" "a tracked config was rewritten anyway"
   [ -z "$(git -C "$clone" status --porcelain)" ] || fail "the refusal left project content modified"
-  pass "a project that tracks treehouse.toml is refused rather than rewritten"
+  pass "a tracked primary treehouse.toml remains untouched and outside dispatch authority"
 }
 
-test_pool_root_refuses_a_nonregular_config() {
+test_pool_root_preserves_a_nonregular_primary_config() {
   local case_dir clone out status
   case_dir=$(make_two_homes_one_project nonregular-config)
   clone="$case_dir/homeA/project"
@@ -153,14 +151,13 @@ test_pool_root_refuses_a_nonregular_config() {
 
   out=$(pool_root_for_home "$case_dir/homeA" "$case_dir/base" "$clone" 2>&1)
   status=$?
-  expect_code 1 "$status" "a nonregular treehouse.toml should refuse before configuration"
-  assert_contains "$out" "not a regular file" "the refusal did not identify the invalid config path"
+  expect_code 0 "$status" "an isolated config view should not inspect or rewrite the primary config path: $out"
   assert_present "$clone/treehouse.toml/preserved" "the invalid config path was modified"
-  pass "a nonregular treehouse config is refused without modification"
+  pass "a nonregular primary config path remains untouched by dispatch"
 }
 
 test_pool_root_verifies_the_written_config() {
-  local case_dir clone fakebin out status
+  local case_dir clone fakebin out status generated
   case_dir=$(make_two_homes_one_project verify-written-config)
   clone="$case_dir/homeA/project"
   fakebin=$(fm_fakebin "$case_dir")
@@ -174,49 +171,11 @@ SH
     PATH="$fakebin:$PATH" "$POOL_ROOT_BIN" "$clone" 2>&1)
   status=$?
   expect_code 1 "$status" "pool configuration should refuse when its write did not take effect"
-  assert_contains "$out" "could not verify" "the failed write postcondition was not reported"
-  assert_absent "$clone/treehouse.toml" "the no-op writer unexpectedly configured a pool root"
+  assert_contains "$out" "could not write and verify" "the failed write postcondition was not reported"
+  generated=$(find "$case_dir/homeA/state/treehouse-config" -name treehouse.toml -print -quit 2>/dev/null || true)
+  [ -z "$generated" ] || fail "the no-op writer unexpectedly configured a pool root"
+  assert_absent "$clone/treehouse.toml" "the failed generated write mutated the primary clone"
   pass "pool configuration verifies the root that was actually written"
-}
-
-test_pool_root_refuses_when_git_exclude_cannot_be_written() {
-  local case_dir clone out status
-  case_dir=$(make_two_homes_one_project unwritable-exclude)
-  clone="$case_dir/homeA/project"
-  chmod 0444 "$clone/.git/info/exclude"
-
-  out=$(pool_root_for_home "$case_dir/homeA" "$case_dir/base" "$clone" 2>&1)
-  status=$?
-  chmod 0644 "$clone/.git/info/exclude"
-  expect_code 1 "$status" "pool configuration should refuse when info/exclude cannot be written"
-  assert_contains "$out" "could not exclude treehouse.toml" "the failed Git exclusion was not reported"
-  assert_absent "$clone/treehouse.toml" "a failed Git exclusion left the new local config behind"
-  if git -C "$clone" check-ignore -q -- treehouse.toml; then
-    fail "the refused configuration unexpectedly left treehouse.toml ignored"
-  fi
-  pass "failed Git exclusion removes a newly created pool config"
-}
-
-test_pool_root_restores_existing_config_when_git_exclude_fails() {
-  local case_dir clone out status before_bytes before_mode
-  case_dir=$(make_two_homes_one_project restore-config-after-exclude)
-  clone="$case_dir/homeA/project"
-  printf 'max_trees = 7\nroot = "/shared/original"\n' > "$clone/treehouse.toml"
-  chmod 0600 "$clone/treehouse.toml"
-  before_bytes=$(cksum < "$clone/treehouse.toml")
-  before_mode=$(file_mode "$clone/treehouse.toml")
-  chmod 0444 "$clone/.git/info/exclude"
-
-  out=$(pool_root_for_home "$case_dir/homeA" "$case_dir/base" "$clone" 2>&1)
-  status=$?
-  chmod 0644 "$clone/.git/info/exclude"
-  expect_code 1 "$status" "pool configuration should refuse when an existing config cannot be excluded"
-  assert_contains "$out" "could not exclude treehouse.toml" "the existing-config exclusion failure was not reported"
-  [ "$(cksum < "$clone/treehouse.toml")" = "$before_bytes" ] \
-    || fail "the failed exclusion did not restore the previous config bytes"
-  [ "$(file_mode "$clone/treehouse.toml")" = "$before_mode" ] \
-    || fail "the failed exclusion did not restore the previous config mode"
-  pass "failed Git exclusion restores existing config bytes and mode"
 }
 
 # The vendor fact the class rests on: treehouse hands two clones of one origin
@@ -224,7 +183,7 @@ test_pool_root_restores_existing_config_when_git_exclude_fails() {
 # because the pool allocator is a third-party binary CI installs only for the
 # lanes that need it (bin/fm-install-treehouse.sh).
 test_real_treehouse_stops_sharing_a_pool_between_homes() {
-  local case_dir shared lease_a lease_b pool_a pool_b root_a root_b
+  local case_dir shared lease_a lease_b pool_a pool_b root_a root_b config_a config_b
   if ! command -v treehouse >/dev/null 2>&1; then
     printf 'ok - SKIP real-treehouse pool separation (treehouse not installed)\n'
     return 0
@@ -245,12 +204,15 @@ test_real_treehouse_stops_sharing_a_pool_between_homes() {
     || fail "fixture did not reproduce the shared pool: $pool_a vs $pool_b"
   ( cd "$case_dir/homeA/project" && treehouse return --force "$lease_a" >/dev/null 2>&1 ) || true
   ( cd "$case_dir/homeB/project" && treehouse return --force "$lease_b" >/dev/null 2>&1 ) || true
+  rm -f -- "$case_dir/homeA/project/treehouse.toml" "$case_dir/homeB/project/treehouse.toml"
 
-  # After: each home claims its own root and the pools no longer overlap.
+  # After: each home uses an isolated user config and the pools no longer overlap.
   root_a=$(pool_root_for_home "$case_dir/homeA" "$case_dir/base" "$case_dir/homeA/project")
   root_b=$(pool_root_for_home "$case_dir/homeB" "$case_dir/base" "$case_dir/homeB/project")
-  lease_a=$( cd "$case_dir/homeA/project" && treehouse get --lease 2>/dev/null )
-  lease_b=$( cd "$case_dir/homeB/project" && treehouse get --lease 2>/dev/null )
+  config_a=$(pool_config_view_for_home "$case_dir/homeA" "$case_dir/base" "$case_dir/homeA/project")
+  config_b=$(pool_config_view_for_home "$case_dir/homeB" "$case_dir/base" "$case_dir/homeB/project")
+  lease_a=$( cd "$config_a" && treehouse get --lease 2>/dev/null )
+  lease_b=$( cd "$config_b" && treehouse get --lease 2>/dev/null )
   [ -n "$lease_a" ] && [ -n "$lease_b" ] || fail "treehouse did not lease from the per-home roots"
   case "$(cd "$(dirname "$lease_a")" && pwd -P)" in "$root_a"/*) ;;
     *) fail "the first home leased outside its own pool root: $lease_a" ;;
@@ -263,10 +225,31 @@ test_real_treehouse_stops_sharing_a_pool_between_homes() {
   pass "real treehouse pools two homes together until each claims its own root"
 }
 
+test_real_treehouse_accepts_encoded_pool_paths() {
+  local case_dir special_base root config_home lease
+  if ! command -v treehouse >/dev/null 2>&1; then
+    printf 'ok - SKIP real-treehouse encoded pool path (treehouse not installed)\n'
+    return 0
+  fi
+  case_dir=$(make_two_homes_one_project encoded-root)
+  special_base="$case_dir/"$'pool"back\\slash\nline'
+  mkdir -p "$special_base"
+  root=$(pool_root_for_home "$case_dir/homeA" "$special_base" "$case_dir/homeA/project") \
+    || fail "fm-pool-root.sh rejected a valid filesystem path requiring TOML escapes"
+  config_home=$(pool_config_view_for_home "$case_dir/homeA" "$special_base" "$case_dir/homeA/project")
+  lease=$(cd "$config_home" && treehouse get --lease 2>/dev/null) \
+    || fail "treehouse could not consume the safely encoded pool path"
+  case "$lease" in "$root"/*) ;;
+    *) fail "treehouse interpreted the encoded pool root differently: $lease" ;;
+  esac
+  treehouse return --force "$lease" >/dev/null 2>&1 || true
+  pass "valid filesystem paths are encoded into Treehouse-consumable TOML"
+}
+
 # --- (b) a spawn never launches a second owner into one copy -----------------
 
 make_spawn_case() {  # <name> <id>
-  local name=$1 id=$2 case_dir fakebin
+  local name=$1 id=$2 case_dir fakebin pool_root pool_worktree
   case_dir="$TMP_ROOT/$name"
   fakebin=$(fm_fakebin "$case_dir")
   mkdir -p "$case_dir/home/data/$id" "$case_dir/home/projects" \
@@ -293,7 +276,12 @@ SH
   git clone --quiet --bare "$case_dir/upstream" "$case_dir/origin.git"
   git clone --quiet "$case_dir/origin.git" "$case_dir/project"
   git -C "$case_dir/project" remote set-head origin --auto >/dev/null 2>&1 || true
-  git -C "$case_dir/project" worktree add --quiet --detach "$case_dir/pool" HEAD
+  pool_root=$(FM_HOME="$case_dir/home" FM_POOL_ROOT_BASE="$case_dir/base" \
+    "$POOL_ROOT_BIN" --print)
+  pool_worktree="$pool_root/.treehouse/fixture/1/project"
+  mkdir -p "$(dirname "$pool_worktree")"
+  git -C "$case_dir/project" worktree add --quiet --detach "$pool_worktree" HEAD
+  ln -s "$pool_worktree" "$case_dir/pool"
   printf '%s\n' "$case_dir"
 }
 
@@ -402,7 +390,7 @@ SH
 }
 
 test_spawn_claims_this_homes_pool_root_before_leasing() {
-  local case_dir id out status base_real
+  local case_dir id out status config_home
   id='custody-own-pool-r1'
   case_dir=$(make_spawn_case spawn-own-pool "$id")
 
@@ -410,10 +398,12 @@ test_spawn_claims_this_homes_pool_root_before_leasing() {
   status=$?
   expect_code 0 "$status" "an unclaimed pooled copy should still spawn"
   assert_contains "$out" "spawned $id" "spawn did not report success"
-  base_real=$(cd "$case_dir/base" && pwd -P)
-  grep -q "^root = \"$base_real/" "$case_dir/project/treehouse.toml" \
-    || fail "spawn did not point the clone at this home's own pool root"
-  pass "a spawn gives the clone this home's own pool root before asking for a slot"
+  config_home=$(pool_config_view_for_home "$case_dir/home" "$case_dir/base" "$case_dir/project")
+  assert_present "$config_home/treehouse.toml" "spawn did not generate this home's Treehouse config"
+  assert_absent "$case_dir/project/treehouse.toml" "spawn wrote Treehouse config into the primary clone"
+  [ -z "$(git -C "$case_dir/project" status --porcelain)" ] \
+    || fail "spawn dirtied the primary clone while selecting its pool"
+  pass "a spawn selects this home's pool without mutating the primary clone"
 }
 
 # --- (d) delivered copies are released before a slot is requested ------------
@@ -657,6 +647,38 @@ SH
     || fail "the canonical custody check did not receive the protected worktree path"
   assert_absent "$run_dir" "the authenticated custody snapshot was not cleaned up"
   pass "--force trusts canonical custody code, never the protected copy"
+}
+
+test_teardown_refuses_mutable_canonical_dependencies() {
+  local case_dir out status
+  case_dir=$(make_teardown_case teardown-custody-mutable-dependency)
+  printf '{\n  "name": "fixture",\n  "scripts": {\n    "check:worktree-custody": "node custody.js"\n  }\n}\n' \
+    > "$case_dir/project/package.json"
+  printf '%s\n' 'process.exit(require("custody-verdict"));' > "$case_dir/project/custody.js"
+  git -C "$case_dir/project" add package.json custody.js
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -qm "publish dependency-backed custody check"
+  git -C "$case_dir/project" push -q origin main
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t merge -q main
+  git -C "$case_dir/wt" push -q origin fm/task-c1
+  mkdir -p "$case_dir/project/node_modules/custody-verdict"
+  printf '%s\n' 'module.exports = 0;' \
+    > "$case_dir/project/node_modules/custody-verdict/index.js"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  out=$(NODE_PATH="$case_dir/project/node_modules" run_teardown_case "$case_dir" --force)
+  status=$?
+  expect_code 1 "$status" "mutable node_modules must not authorize destructive cleanup"
+  assert_contains "$out" "check:worktree-custody says" "the unauthenticated dependency failure was not surfaced"
+  assert_absent "$case_dir/treehouse.log" "mutable dependency code authorized a Treehouse return"
+  assert_present "$case_dir/state/task-c1.meta" "mutable dependency code removed task ownership metadata"
+  [ -d "$case_dir/wt" ] || fail "mutable dependency code removed the protected working copy"
+  pass "canonical custody refuses rather than importing mutable node_modules"
 }
 
 test_teardown_refuses_a_worktree_only_custody_check() {
@@ -1009,13 +1031,12 @@ SH
 
 test_two_homes_configure_distinct_pool_roots
 test_literal_pool_root_override_is_refused
-test_pool_root_is_idempotent_and_preserves_other_keys
-test_pool_root_refuses_a_tracked_config
-test_pool_root_refuses_a_nonregular_config
+test_pool_root_is_idempotent_without_mutating_the_clone
+test_pool_root_preserves_a_tracked_primary_config
+test_pool_root_preserves_a_nonregular_primary_config
 test_pool_root_verifies_the_written_config
-test_pool_root_refuses_when_git_exclude_cannot_be_written
-test_pool_root_restores_existing_config_when_git_exclude_fails
 test_real_treehouse_stops_sharing_a_pool_between_homes
+test_real_treehouse_accepts_encoded_pool_paths
 test_spawn_refuses_a_copy_another_task_claims
 test_spawn_refuses_ambiguous_worktree_metadata
 test_fresh_spawn_refuses_an_existing_task_record_before_side_effects
@@ -1028,6 +1049,7 @@ test_spawn_bounds_a_hanging_release_step_without_external_timeout
 test_spawn_rejects_a_zero_equivalent_release_timeout
 test_teardown_refuses_a_red_custody_verdict
 test_forced_teardown_still_refuses_a_red_custody_verdict
+test_teardown_refuses_mutable_canonical_dependencies
 test_teardown_refuses_a_worktree_only_custody_check
 test_forced_secondmate_cleanup_preflights_child_custody
 test_teardown_holds_task_set_lock_through_destructive_return

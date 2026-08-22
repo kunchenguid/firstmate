@@ -35,12 +35,11 @@ SH
 }
 
 make_case() {
-  local name=$1 id=$2 default=${3:-main} case_dir home project origin pool publisher fakebin initial
+  local name=$1 id=$2 default=${3:-main} case_dir home project origin pool publisher fakebin initial pool_root
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   project="$case_dir/project"
   origin="$case_dir/origin.git"
-  pool="$case_dir/pool"
   publisher="$case_dir/publisher"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
 
@@ -56,6 +55,10 @@ make_case() {
   git clone --quiet --bare "$project" "$origin"
   git -C "$project" remote add origin "file://$origin"
   initial=$(git -C "$project" rev-parse HEAD)
+  pool_root=$(FM_HOME="$home" FM_POOL_ROOT_BASE="$case_dir/base" \
+    "$ROOT/bin/fm-pool-root.sh" --print)
+  pool="$pool_root/.treehouse/fixture/1/$(basename "$project")"
+  mkdir -p "$(dirname "$pool")"
   git -C "$project" worktree add --quiet --detach "$pool" "$initial"
 
   git clone --quiet "file://$origin" "$publisher"
@@ -79,6 +82,7 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_POOL_ROOT_BASE="$CASE_DIR/base" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
