@@ -338,8 +338,9 @@ Wake-time refreshes can target a single clone by project name, so the primary ho
 Clean default-branch clones fast-forward to `origin/<default>`, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
 Dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched.
 Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and remove the lock only when the shared staleness proof can prove it abandoned; [configuration.md](configuration.md#toolchain) owns the recovery details and tuning knobs.
-Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
-The refresh also prunes local branches whose remote is gone and that no worktree still needs.
+Local-only projects, clones without an origin remote, and fetch failures remain benign skips for remote refreshes.
+Before those mode and remote gates, fleet sync also safely prunes firstmate-owned `fm/<task-id>` branches whose tips are already contained in the local default branch and are not checked out in any worktree, so the backstop covers local-only and no-origin projects without discarding unmerged work.
+For remote-backed projects, it additionally prunes local branches whose upstream is gone and that no worktree still needs.
 
 ## Self-updates stay safe
 
