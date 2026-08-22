@@ -187,7 +187,7 @@ codex_checkpoint() {
     seconds=${seconds#0}
   done
   if [ "${#seconds}" -gt "${#CODEX_CHECKPOINT_MAX}" ] \
-    || { [ "${#seconds}" -eq "${#CODEX_CHECKPOINT_MAX}" ] && [[ "$seconds" > "$CODEX_CHECKPOINT_MAX" ]]; }; then
+    || { [ "${#seconds}" -eq "${#CODEX_CHECKPOINT_MAX}" ] && [ "$seconds" -gt "$CODEX_CHECKPOINT_MAX" ]; }; then
     seconds=$CODEX_CHECKPOINT_MAX
   fi
   if [ ! -x "$CHECKPOINT" ]; then
