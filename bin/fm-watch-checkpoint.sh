@@ -11,7 +11,7 @@ usage() {
 Usage: fm-watch-checkpoint.sh [--seconds <n>]
 
 Run bin/fm-watch.sh in the foreground for a bounded checkpoint.
-On an actionable watcher wake, pass through the watcher output and exit 0.
+On an actionable watcher wake, pass through the watcher output and one bounded wake-context packet, then exit 0.
 On a quiet checkpoint, print "checkpoint: no actionable wake within <n>s" and exit 124.
 EOF
 }
@@ -89,6 +89,14 @@ set -e
 if grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; then
   cat "$OUT"
   [ ! -s "$ERR" ] || cat "$ERR" >&2
+  set +e
+  CONTEXT_OUT=$("$SCRIPT_DIR/fm-wake-context.sh" --present 2>&1)
+  CONTEXT_RC=$?
+  set -e
+  [ -z "$CONTEXT_OUT" ] || printf '%s\n' "$CONTEXT_OUT"
+  if [ "$CONTEXT_RC" -ne 0 ] && ! printf '%s\n' "$CONTEXT_OUT" | grep -F 'WAKE_CONTEXT_FALLBACK:' >/dev/null; then
+    printf 'WAKE_CONTEXT_FALLBACK: run bin/fm-wake-drain.sh once.\n' >&2
+  fi
   exit 0
 fi
 

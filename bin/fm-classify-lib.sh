@@ -674,7 +674,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     offset=$size
     cursor_dirty=1
   fi
-  if [ "$cursor_dirty" -eq 1 ]; then
+  if [ "$cursor_dirty" -eq 1 ] && [ "${FM_WAKE_CONTEXT_NONMUTATING:-0}" != 1 ]; then
     target_cursor="$cf.tmp.$$"
     {
       printf 'version=%s\n' "$FM_OPEN_DECISIONS_FOLD_VERSION"
@@ -866,9 +866,9 @@ $snapshot
 EOF
 }
 
-status_commit_presentation_snapshot() {  # <state> <snapshot>
-  local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp
-  tmp="$state/.status-presentation-cursor.tmp.$$"
+status_commit_presentation_snapshot() {  # <state> <snapshot> [<target>]
+  local state=$1 snapshot=$2 target=${3:-$1/.status-presentation-cursor} task endpoint ident f cur_ident size tmp
+  tmp="$target.tmp.$$"
   : > "$tmp" || return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
@@ -887,7 +887,7 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
   done <<EOF
 $snapshot
 EOF
-  mv -f "$tmp" "$state/.status-presentation-cursor" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$target" || { rm -f "$tmp"; return 1; }
 }
 
 scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>

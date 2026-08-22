@@ -261,7 +261,13 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
     [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
-    printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
+    CONTEXT_OUT=$("$SCRIPT_DIR/fm-wake-context.sh" --present 2>&1)
+    CONTEXT_RC=$?
+    [ -z "$CONTEXT_OUT" ] || printf '%s\n' "$CONTEXT_OUT"
+    if [ "$CONTEXT_RC" -ne 0 ] && ! printf '%s\n' "$CONTEXT_OUT" | grep -F 'WAKE_CONTEXT_FALLBACK:' >/dev/null; then
+      printf 'WAKE_CONTEXT_FALLBACK: run bin/fm-wake-drain.sh once.\n'
+    fi
+    printf 'Handle the attached presentation without rebuilding fleet context. After handling, run its exact acknowledgement command. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 2

@@ -32,6 +32,9 @@ ACK_THROUGH=
 ACK_GENERATION=
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
+WAKE_CONTEXT_CACHE="$STATE/.wake-context-cache"
+WAKE_CONTEXT_CURSOR="$WAKE_CONTEXT_CACHE.status-cursor"
+WAKE_CONTEXT_FALLBACK_RECEIPT="$STATE/.wake-context-fallback-receipt"
 
 # --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --
 # main (FM_SUPERVISION_ACTOR unset or "main", via fm-lease-lib.sh's fm_lease_actor
@@ -168,6 +171,31 @@ esac
 # Never let a guard hiccup change the drain's exit status.
 assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
+}
+
+wake_context_receipt_matches_ack() { # <receipt>
+  jq -e --argjson ack "$ACK_THROUGH" --arg generation "$ACK_GENERATION" \
+    '.replay.ack_through == $ack and .replay.recovery_generation == $generation' \
+    "$1" >/dev/null 2>&1
+}
+
+commit_wake_context_cache() {
+  local receipt="$WAKE_CONTEXT_CACHE"
+  [ -e "$receipt" ] || receipt="$WAKE_CONTEXT_FALLBACK_RECEIPT"
+  [ -e "$receipt" ] || return 0
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  wake_context_receipt_matches_ack "$receipt" || return 0
+  if [ -e "$WAKE_CONTEXT_CURSOR" ] || [ -L "$WAKE_CONTEXT_CURSOR" ]; then
+    [ -f "$WAKE_CONTEXT_CURSOR" ] && [ ! -L "$WAKE_CONTEXT_CURSOR" ] || return 1
+    mv -f "$WAKE_CONTEXT_CURSOR" "$STATE/.status-presentation-cursor" || return 1
+  fi
+  rm -f -- "$WAKE_CONTEXT_CACHE" "$WAKE_CONTEXT_FALLBACK_RECEIPT"
+}
+
+supersede_wake_context_fallback() {
+  [ "${FM_WAKE_CONTEXT_NONMUTATING:-0}" != 1 ] || return 0
+  [ -e "$WAKE_CONTEXT_FALLBACK_RECEIPT" ] || return 0
+  rm -f -- "$WAKE_CONTEXT_FALLBACK_RECEIPT" "$WAKE_CONTEXT_CURSOR"
 }
 
 # Mark presentation-stage inactive terminal outcomes only after the handling
@@ -357,6 +385,11 @@ print_status_sections() {
   print_unread_status_section "$snapshot" || return 1
   print_open_decisions_section "$snapshot" || return 1
   print_record_divergence_section || return 1
+  if [ "${FM_WAKE_CONTEXT_NONMUTATING:-0}" = 1 ]; then
+    [ -n "${FM_WAKE_CONTEXT_STATUS_CURSOR_STAGE:-}" ] || return 1
+    status_commit_presentation_snapshot "$STATE" "$acknowledged" "$FM_WAKE_CONTEXT_STATUS_CURSOR_STAGE"
+    return
+  fi
   status_commit_presentation_snapshot "$STATE" "$acknowledged"
 }
 
@@ -480,6 +513,10 @@ if [ -n "$ACK_THROUGH" ]; then
   else
     consume_actor_rows_locked "$MAIN_ROWS_FILE" "$ACK_THROUGH" || exit 1
   fi
+  commit_wake_context_cache || {
+    echo "wake drain: wake-context acknowledgement could not commit safely" >&2
+    exit 1
+  }
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   if [ "$RECOVERY_ACK_MOVED" = true ]; then
@@ -488,6 +525,11 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   exit 0
 fi
+
+supersede_wake_context_fallback || {
+  echo "wake drain: prior wake-context fallback could not be superseded safely" >&2
+  exit 1
+}
 
 if [ ! -s "$FM_WAKE_QUEUE" ]; then
   : > "$FM_WAKE_QUEUE"
