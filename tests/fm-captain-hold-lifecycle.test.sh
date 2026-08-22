@@ -1580,6 +1580,10 @@ test_archived_origin_still_owns_a_later_review_pass() {
     "the refusal must name the archive it could not search"
   assert_not_contains "$err" "is not owned by the active home" \
     "an archive that was never searched must not read as a disowned origin"
+  assert_contains "$err" "investigation origin $id" \
+    "the refusal must name the origin as an origin, because that is the record to look at"
+  assert_not_contains "$err" "captain call $id" \
+    "the refusal must not send the operator hunting a captain call by the origin's id"
   pass "an origin whose own row retention archived still owns a later review pass"
 }
 
@@ -1657,6 +1661,14 @@ test_unopenable_archive_refuses_instead_of_reading_as_absent() {
     "the refusal must say the archive could not be read, not that the record is gone"
   assert_not_contains "$err" "has no record" \
     "an archive that was never searched must not be reported as holding no record"
+
+  # The mirror of the origin-ownership subject: here the record really is a
+  # captain call, so the refusal has to say so. Wiring the two subjects backwards
+  # has to fail on this line as well as on the ownership one.
+  assert_contains "$err" "captain call sample-unopenable-call" \
+    "an inventory entry's refusal must name the captain call it could not settle"
+  assert_not_contains "$err" "investigation origin" \
+    "a captain call's refusal must not be reported as an origin-ownership failure"
 
   # And `hold` must not mint a second row for a call the archive may already
   # hold, which is the split identity that guard exists to prevent.
@@ -1822,6 +1834,14 @@ SH
     "a read that failed must not tell the operator to repair a symlink"
   assert_not_contains "$err" "unreadable mode" \
     "a read that failed must not tell the operator to repair a file mode"
+
+  # And it must name the right KIND of record. The subject here is an
+  # investigation origin, so calling it a captain call would send the operator
+  # looking for a captain-held task by an id no captain call ever had.
+  assert_contains "$err" "investigation origin $id" \
+    "an ownership failure must name the origin as an origin"
+  assert_not_contains "$err" "captain call $id" \
+    "an ownership failure must not send the operator hunting a captain call by the origin's id"
 
   # Non-vacuity: the same gate passes the moment the read works again, so the
   # refusal above is the failed read and not the fixture.

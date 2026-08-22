@@ -321,17 +321,23 @@ unstageable_archive() {  # <task-id>
 # broke after the path opened. Naming only the first would send an operator to
 # check a mode and a symlink on a file whose mode is fine, so it states both and
 # prescribes no single repair. It cannot claim the record is archived and it must
-# never claim the record is absent, and it names the id being asked about.
-unsearchable_archive() {  # <task-id>
-  fail "the archive could not be searched for captain call $1: $ARCHIVE_FILE is not a readable regular file, or the read of it did not complete; a record may well be in there, so this cannot tell until that read works"
+# never claim the record is absent.
+# The SUBJECT is a parameter because this one refusal serves two kinds of caller:
+# the record reads below ask about a captain call, while origin_exists_here asks
+# about an investigation origin. Naming the wrong kind sends an operator looking
+# for a captain-held task by an id no captain call ever had, which is the same
+# misdirection as reporting an archived record absent.
+unsearchable_archive() {  # <subject> <id>
+  fail "the archive could not be searched for $1 $2: $ARCHIVE_FILE is not a readable regular file, or the read of it did not complete; a record may well be in there, so this cannot tell until that read works"
 }
 
 # Every archive-read failure, each said in its own words. None may degrade into
 # "no record": a record that exists, or might exist, is never reported as absent.
+# Every status here is reached only while asking about a captain call's record.
 archive_read_failed() {  # <status> <task-id>
   [ "$1" -ne 2 ] || unreadable_archive "$2"
   [ "$1" -ne 3 ] || unstageable_archive "$2"
-  [ "$1" -ne 4 ] || unsearchable_archive "$2"
+  [ "$1" -ne 4 ] || unsearchable_archive "captain call" "$2"
 }
 
 # The single "no record in either file" message. It names both files on purpose:
@@ -362,7 +368,7 @@ origin_exists_here() {  # <origin-id>
   [ -f "$DATA/$1/report.md" ] && return 0
   task_show "$1" >/dev/null 2>&1 && return 0
   fm_tasks_axi_archive_has_entry "$ARCHIVE_FILE" "$1" || rc=$?
-  [ "$rc" -ne 4 ] || unsearchable_archive "$1"
+  [ "$rc" -ne 4 ] || unsearchable_archive "investigation origin" "$1"
   return "$rc"
 }
 
@@ -549,6 +555,26 @@ require_resolved_record() {  # <origin-or-empty> <entry>
     fail "captain call $entry has no record: neither $entry nor its legacy identity $legacy is in $BACKLOG_FILE or $ARCHIVE_FILE"
   fi
   no_durable_record "$entry"
+}
+
+# Rule on every entry of one recorded captain-call inventory. The two commands
+# that own a gate share this: `complete` attests the union of what was recorded
+# before and what this pass supplies, `verify` re-reads what was attested, and the
+# ruling on a list of entries must be the same act either way.
+# One lookup per entry, and the verdict rules on exactly the record the resolution
+# found: no command substitution to swallow a refusal, and no second read that a
+# concurrent prune or answer could disagree with. Deliberately not a subshell, so
+# a refusal inside stops the whole command rather than one iteration.
+verify_inventory() {  # <origin-id> <comma-separated-entries>
+  local origin=$1 keys=$2 entry
+  [ -n "$keys" ] || return 0
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    require_resolved_record "$origin" "$entry"
+    verify_loaded_durable "$RESOLVED_ID"
+  done <<EOF
+$(printf '%s\n' "$keys" | tr ',' '\n')
+EOF
 }
 
 command_hold() {
@@ -1015,7 +1041,7 @@ command_answers() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc
+  local origin=${1:-} meta previous='' supplied='' keys='' key status_file open raw_open has_meta=0 transfer_rc
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -1043,18 +1069,7 @@ command_complete() {
     previous=$(meta_value "$meta" decision_keys)
   fi
   keys=$(sorted_key_union "$previous" "$supplied")
-  if [ -n "$keys" ]; then
-    while IFS= read -r entry; do
-      [ -n "$entry" ] || continue
-      # One lookup per entry, and the verdict rules on exactly the record the
-      # resolution found: no command substitution to swallow a refusal, and no
-      # second read that a concurrent prune or answer could disagree with.
-      require_resolved_record "$origin" "$entry"
-      verify_loaded_durable "$RESOLVED_ID"
-    done <<EOF
-$(printf '%s\n' "$keys" | tr ',' '\n')
-EOF
-  fi
+  verify_inventory "$origin" "$keys"
 
   status_file="$STATE/$origin.status"
   raw_open=$(status_open_decisions "$status_file")
@@ -1092,7 +1107,7 @@ EOF
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys entry key open
+  local origin=${1:-} meta reviewed keys key open
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
@@ -1101,16 +1116,7 @@ command_verify() {
   reviewed=$(meta_value "$meta" decisions_reviewed)
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed captain-call inventory"
   keys=$(meta_value "$meta" decision_keys)
-  if [ -n "$keys" ]; then
-    while IFS= read -r entry; do
-      [ -n "$entry" ] || continue
-      # See command_complete: one lookup, one record, one message per failure.
-      require_resolved_record "$origin" "$entry"
-      verify_loaded_durable "$RESOLVED_ID"
-    done <<EOF
-$(printf '%s\n' "$keys" | tr ',' '\n')
-EOF
-  fi
+  verify_inventory "$origin" "$keys"
   open=$(origin_open_decisions "$origin")
   while IFS=$'\t' read -r key _verb _summary; do
     [ -n "$key" ] || continue
