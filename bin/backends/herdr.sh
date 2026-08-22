@@ -377,16 +377,35 @@ FM_BACKEND_HERDR_CLI_TIMEOUT=${FM_BACKEND_HERDR_CLI_TIMEOUT:-20}
 # Prefers timeout(1)/gtimeout(1); falls back to a perl alarm wrapper (perl
 # ships on macOS, which lacks coreutils timeout by default). Exit 124 on a
 # killed run, mirroring timeout(1).
+#
+# All three mechanisms escalate TERM to KILL: a herdr client wedged on the
+# control socket may never service a TERM handler, and `timeout` without
+# --kill-after then waits for that child forever - an unbounded hang inside
+# the very wrapper that exists to bound it.
+#
+# Exit status is the command's own, except that a signal death is reported as
+# 128+signal rather than collapsing to the low byte. The perl branch must do
+# that explicitly: `$? >> 8` is 0 for every signalled child, which would turn
+# a KILLed `herdr pane read` into a successful capture of an empty pane and
+# invert `... || return 1` guards across the adapter.
+#
+# A host with none of the three bounding mechanisms runs the command
+# unbounded, as it did before the bound existed: routing every RPC through a
+# wrapper that cannot run would disable the backend outright, which is a worse
+# failure than the hang this bound removes.
 fm_backend_herdr_bounded() {  # <command...>
   local t=$FM_BACKEND_HERDR_CLI_TIMEOUT
   case "$t" in ''|*[!0-9]*|0) "$@"; return $? ;; esac
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$t" "$@"
+    timeout -k 2 "$t" "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$t" "$@"
-  else
+    gtimeout -k 2 "$t" "$@"
+  elif command -v perl >/dev/null 2>&1; then
     # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV or exit 127 } my $stop = sub { kill "TERM", $pid; select undef, undef, undef, 0.2; kill "KILL", $pid; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$t" "$@"
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV or exit 127 } my $stop = sub { kill "TERM", $pid; select undef, undef, undef, 0.2; kill "KILL", $pid; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; alarm $t; waitpid $pid, 0; my $st = $?; exit($st & 127 ? 128 + ($st & 127) : $st >> 8)' "$t" "$@"
+  else
+    "$@"
+    return $?
   fi
 }
 

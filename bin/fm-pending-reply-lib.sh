@@ -1295,6 +1295,12 @@ fm_pending_reply_tick() {  # <state-dir>
     case "$(basename "$rec")" in
       .*) continue ;;
     esac
+    # Per-record beat: an open record's observation below is a bounded backend
+    # probe, so this loop's wall time scales with the number of open records and
+    # with how degraded the backend is. A supervisor that judges its own
+    # liveness by a beacon refreshes it here (fm_liveness_beat, owned by
+    # bin/fm-classify-lib.sh); every other caller of this tick gets a no-op.
+    fm_liveness_beat
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
     task_id=$(fm_pending_reply_get "$rec" task_id)
