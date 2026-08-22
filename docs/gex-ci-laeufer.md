@@ -6,7 +6,7 @@ Die Umstellung der einzelnen Repos gehoert nicht hierher, sondern in [`gex-ci-ue
 
 ## Kurzfassung
 
-Zwei ephemere Laeufer bedienen `lensclash` unter dem Label `gex`.
+15 ephemere Laeufer-Plaetze auf 14 Repos unter dem Label `gex`, siehe [Plaetze](#plaetze) fuer die vollstaendige Liste.
 Sie laufen als unprivilegierter Nutzer `ghrunner` in rootless-Podman-Containern, teilen sich hoechstens 8 Kerne und 16 GB, und weichen der Produktion bei Knappheit aus.
 Auf gex liegt **kein dauerhaftes GitHub-Geheimnis**; ein Relais auf dem Laptop des Kapitaens reicht alle 30 Minuten ein kurzlebiges Registrierungs-Token durch.
 
@@ -56,6 +56,31 @@ Auf dem **Laptop des Kapitaens**:
 
 Wortgleiche Kopien aller Dateien liegen in [`examples/gex-ci-runner/`](examples/gex-ci-runner/).
 Sie liegen bewusst **nicht** unter `bin/`: das ist Flotten-Werkzeug fuer alle firstmate-Nutzer, dies hier ist wirtsspezifische Betriebstechnik fuer genau eine Maschine.
+
+## Plaetze
+
+Stand 22.08.2026, gegen `/etc/gh-runner/repos` und `gh api repos/swippipp/<repo>/actions/runners` auf gex geprueft.
+Alle Plaetze `enabled`, `Restart=always`, bei GitHub `online`, `busy=false`.
+
+| Repo | Plaetze | Seit | Bemerkung |
+|---|---|---|---|
+| `lensclash` | `lensclash-1`, `lensclash-2` | 21.08.2026 | Workflow bereits auf `gex` umgestellt (Repo-Bahn). |
+| `GEX_GATEWAY` | `GEX_GATEWAY-1` | 21.08.2026 | |
+| `LensclashDB` | `LensclashDB-1` | 21.08.2026 | |
+| `testlab` | `testlab-1` | 21.08.2026, seit 22.08.2026 dauerhaft | Workflow bereits auf `gex` umgestellt (Repo-Bahn). Stand vorher aus, s. [Ein Repo anbinden](#ein-repo-anbinden). |
+| `SnackSuite` | `SnackSuite-1` | 22.08.2026 | Bild fehlen noch die Playwright/Chromium-Systempakete, s. [Grenzen](#grenzen-und-offene-punkte). |
+| `Quiz-Web` | `Quiz-Web-1` | 22.08.2026 | |
+| `HPlan` | `HPlan-1` | 22.08.2026 | Nicht Teil der urspruenglichen Zwoelf-Analyse in der Uebergabe; auf ausdruecklichen Auftrag ergaenzt (aktive Lieferstrasse). |
+| `Strickapp` | `Strickapp-1` | 22.08.2026 | Dito HPlan. |
+| `Bietkompass` | `Bietkompass-1` | 22.08.2026 | Bild fehlt noch `poppler-utils`, s. [Grenzen](#grenzen-und-offene-punkte). |
+| `Homepage` | `Homepage-1` | 22.08.2026 | |
+| `Lernplattform` | `Lernplattform-1` | 22.08.2026 | |
+| `wimmel` | `wimmel-1` | 22.08.2026 | |
+| `rag-digital` | `rag-digital-1` | 22.08.2026 | |
+| `trooper_ai` | `trooper_ai-1` | 22.08.2026 | |
+
+Ein Platz allein legt `runs-on` im Repo nicht um - das bleibt Sache der jeweiligen Bahn, siehe [Uebergabe](gex-ci-uebergabe-phase2.md).
+`HPlan` und `Strickapp` sind private swippipp-Repos ausserhalb der urspruenglich analysierten zwoelf; ihre Plaetze folgen demselben Verfahren, aber ihr Verbrauch und ihre Werkzeuganforderungen sind noch nicht wie bei den zwoelf durchgeprueft - vor der Umstellung dort gilt dieselbe Vorsicht wie in der Uebergabe beschrieben.
 
 ## Das Relais - warum auf gex kein Dauergeheimnis liegt
 
@@ -203,8 +228,9 @@ Ein Platz stoppt in Sekunden, wenn er untaetig ist, und laesst einen laufenden A
 3. `gxr systemctl --user enable --now gh-runner@<repo>-1.service` (und `-2` fuer einen zweiten Platz).
 4. Im Repo `runs-on` umstellen - siehe [Uebergabe](gex-ci-uebergabe-phase2.md).
 
-`testlab` steht als Rauchprobe-Repo in der Positivliste, sein Platz ist aber abgeschaltet.
-Fuer eine Probe nach einer Aenderung: `gxr systemctl --user start gh-runner@testlab-1.service`.
+`testlab` steht als Rauchprobe-Repo in der Positivliste.
+Sein Platz stand urspruenglich ab und war nur fuer eine Probe manuell zu starten; das liess echte PRs (aus der lensclash-Bahn) still und unsichtbar in der Warteschlange haengen, wenn `testlab` gerade gebraucht wurde.
+Seit 22.08.2026 ist `testlab-1` deshalb dauerhaft aktiviert (`enabled`, `Restart=always`), wie jeder andere Platz - der Deckel traegt das muehelos, der Rauchprobe-Job ist leicht (s. [Plaetze](#plaetze)).
 
 ### Rueckbau
 
