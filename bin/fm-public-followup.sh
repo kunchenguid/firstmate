@@ -672,7 +672,7 @@ public_followup_registration_valid() {
 }
 
 public_followup_secondmate_home() {
-  local id=$1 meta_home registry_home home marker
+  local id=$1 include_absent=${2:-} meta_home registry_home home marker
   fm_pf_home_id_valid "secondmate:$id" || return 1
   meta_home=$(fmx_meta_get "$STATE/$id.meta" home)
   registry_home=
@@ -687,6 +687,7 @@ public_followup_secondmate_home() {
   case "$home" in /*) ;; *) return 2 ;; esac
   if [ ! -e "$home" ]; then
     [ ! -L "$home" ] || return 2
+    [ "$include_absent" = include-absent ] && printf '%s\n' "$home"
     return 3
   fi
   home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 2
@@ -708,16 +709,22 @@ clear_public_followup_link() {
       state=$STATE
       ;;
     secondmate:*)
+      work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)
+      case "$work_home_path" in /*) ;; *) return 1 ;; esac
+      case "$work_home_path" in *$'\n'*|*$'\r'*) return 1 ;; esac
       rc=0
-      home=$(public_followup_secondmate_home "${work_home#secondmate:}") || rc=$?
-      [ "$rc" -ne 3 ] || return 0
+      home=$(public_followup_secondmate_home "${work_home#secondmate:}" include-absent) || rc=$?
+      if [ "$rc" -eq 3 ]; then
+        [ "$home" = "$work_home_path" ] || return 1
+        [ ! -e "$work_home_path" ] && [ ! -L "$work_home_path" ] || return 1
+        return 0
+      fi
       if [ "$rc" -eq 4 ]; then
-        work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)
-        case "$work_home_path" in /*) ;; *) return 1 ;; esac
         [ ! -e "$work_home_path" ] && [ ! -L "$work_home_path" ] || return 1
         return 0
       fi
       [ "$rc" -eq 0 ] || return 1
+      [ "$home" = "$work_home_path" ] || return 1
       state="$home/state"
       ;;
     *) return 1 ;;

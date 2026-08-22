@@ -269,9 +269,9 @@ test_restart_e2e_delivers_exactly_once() {
   home=$(make_home restart-e2e)
   child=$(make_home restart-child relay-off)
   log="$home/curl.log"; : > "$log"
-  seed_commitment "$home" pf-restart req-restart discord secondmate:fmdev work-code-q1
   printf '%s\n' fmdev > "$child/.fm-secondmate-home"
   fm_write_meta "$home/state/fmdev.meta" "kind=secondmate" "home=$child"
+  seed_commitment "$home" pf-restart req-restart discord secondmate:fmdev work-code-q1
   fm_write_meta "$child/state/work-code-q1.meta" \
     "x_request=req-restart" "x_request_ts=1700000000" "x_followups=1"
 
@@ -562,9 +562,9 @@ test_outward_delivery_stays_with_the_owning_home() {
   owner=$(make_home owner)
   child=$(make_home child relay-off)
   log="$owner/curl.log"; : > "$log"
-  seed_commitment "$owner" pf-own req-own discord secondmate:child work-child
   printf '%s\n' child > "$child/.fm-secondmate-home"
   fm_write_meta "$owner/state/child.meta" "kind=secondmate" "home=$child"
+  seed_commitment "$owner" pf-own req-own discord secondmate:child work-child
   fm_write_meta "$child/state/work-child.meta" \
     "x_request=req-own" "x_request_ts=1700000000" "x_followups=1"
 
@@ -1756,6 +1756,44 @@ test_retire_refuses_unbound_existing_secondmate() {
   pass "retire fails closed for an unbound existing secondmate"
 }
 
+test_retire_refuses_reassigned_secondmate_home() {
+  local home original replacement log
+  home=$(make_home retire-reassigned-secondmate)
+  original="$home/original-mate"
+  replacement="$home/replacement-mate"
+  mkdir -p "$original/state"
+  printf 'mate\n' > "$original/.fm-secondmate-home"
+  fm_write_meta "$home/state/mate.meta" "kind=secondmate" "home=$original"
+  log="$home/curl.log"; : > "$log"
+  seed_repro_commitment "$home" pf-reassigned-mate req-reassigned-mate secondmate:mate scout-reassigned
+  "$EMIT" --home "$home" --obligation pf-reassigned-mate --relation rel-code \
+    --source-home secondmate:mate --work-id scout-reassigned --generation 1 \
+    --outcome report-ready --deliverable report_path=data/scout-reassigned/report.md \
+    --outcome-text 'The original child completed its investigation.' >/dev/null || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-reassigned-mate >/dev/null || fail "deliver failed"
+
+  rm -rf "$original"
+  mkdir -p "$replacement/state"
+  replacement=$(cd "$replacement" && pwd -P)
+  printf 'mate\n' > "$replacement/.fm-secondmate-home"
+  fm_write_meta "$replacement/state/scout-reassigned.meta" \
+    "status=working" "x_request=req-unrelated-replacement"
+  fm_write_meta "$home/state/mate.meta" "kind=secondmate" "home=$replacement"
+
+  expect_failure "retire must not clear a reassigned secondmate home" \
+    run_pf "$home" retire pf-reassigned-mate --reason "original child was removed"
+  assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
+    "retirement must fail when the stable ID resolves to a different home"
+  assert_present "$home/state/public-followup/registry/pf-reassigned-mate" \
+    "a reassigned child must retain the registration"
+  assert_absent "$home/state/public-followup/retired/pf-reassigned-mate" \
+    "a reassigned child must not create a retirement receipt"
+  assert_grep 'x_request=req-unrelated-replacement' "$replacement/state/scout-reassigned.meta" \
+    "failed retirement must preserve the replacement home's Relay link"
+  pass "retire fails closed when a secondmate ID is reassigned"
+}
+
 test_rechain_refuses_unclaimed_existing_destination() {
   local home log out
   home=$(make_home rechain-existing-destination)
@@ -2138,6 +2176,7 @@ test_registration_replay_preserves_delivery_and_retirement
 test_redelivery_does_not_report_retired_loop_open
 test_retire_after_secondmate_home_removal
 test_retire_refuses_unbound_existing_secondmate
+test_retire_refuses_reassigned_secondmate_home
 test_rechain_refuses_unclaimed_existing_destination
 test_pending_skips_concurrent_retirement
 test_retire_reason_closes_the_open_loop
