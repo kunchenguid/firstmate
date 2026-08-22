@@ -8,6 +8,7 @@ This record holds reusable version-scoped evidence for the runner's active guara
 Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
 Generic keyed-answer feed verified on 2026-08-16 on the same platform, against the same published poll response shape.
 Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
+Arm listener-liveness confirmation verified on 2026-08-22 against a fake blocking Lavish stand-in, through the public `arm` command end to end.
 
 ## The published Lavish poll interface the adapter wraps
 
@@ -87,6 +88,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | terminal retirement preserves the result | the retired source's captured output, its announced event, its handled acknowledgement, and later explicit `retire` all still behave normally |
 | registration-generation retirement | an old terminal runner preserves a concurrently replaced registration and releases ownership so the replacement runs independently; injected registration-removal failure retains a terminal claim, performs no second poll, and completes idempotently once removal recovers |
 | one `Send & End`, one result | an armed Lavish source driven against a stand-in for the published poll, which delivers the final `session_ended` feedback once and empty ended sessions afterward, polls exactly once, captures exactly one result, publishes one distinct event, and retires itself |
+| arm proves listener liveness before reporting ready | `bin/fm-procevent-lavish.sh arm` kicks one reconcile immediately and prints `armed:` only once its own fresh registration generation is confirmed live, after which that same listener consumes a completed feedback result end to end; a live owner of a different, older registration generation keeps the fresh generation from ever being confirmed, so arm returns nonzero with no `armed:` line, names the cause, and leaves the registration in place for later reconciliation |
 | bounded re-announcement until handled | a durably captured result with no handled acknowledgement is re-announced by `reconcile` with the same source and sequence on every call - not only the first restart after a crash - and a presented-but-unacknowledged wake resurfaces identically after a simulated replacement session |
 | handled acknowledgement | `fm-procevent.sh handled <source-id> <sequence>` atomically and idempotently records handling at mode `0600`, fails without leaving a marker when private-mode enforcement fails, reports the first call distinctly from every repeat, stops further re-announcement once recorded, and never authorizes a paired effect twice across repeat calls |
 | publication-and-acknowledgement serialization | a concurrent `reconcile` cannot append a wake after `handled` wins the shared per-source boundary, so an acknowledged result is not re-announced by a publication race |
