@@ -47,8 +47,9 @@
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. When the recorded Herdr endpoint is
-#              authoritatively gone, or reads agent-free with a failed-launching
-#              recovery journal from a prior attempt, the launch delegates with
+#              authoritatively gone, or reads agent-free while a durable
+#              recovery-attempt marker proves a prior missing-endpoint recovery
+#              of this task failed here, the launch delegates with
 #              --recover-missing instead (fm-spawn's header owns that contract):
 #              there is nothing left to stop, so the ordinary exit step is
 #              skipped, and an endpoint that turns live or ambiguous between
@@ -502,6 +503,13 @@ JOURNAL="$STATE/$ID.control-relaunch"
 META_PRIOR="$JOURNAL.meta-prior"
 BRIEF_PRIOR="$JOURNAL.brief-prior"
 NOTE_FILE="$JOURNAL.note"
+# The durable recovery-attempt marker: written when this plane commits a
+# relaunch to the missing-endpoint path, removed once the replacement is
+# confirmed alive. Its presence is what authorizes continuing a failed
+# recovery (fm-spawn's --recover-missing gate checks it) and what tells THIS
+# predicate apart from an ordinary failed relaunch, which leaves the same
+# dead-pane journal shape without any marker.
+RECOVERY_ATTEMPT_MARKER="$JOURNAL.recovery-attempt"
 RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
 RELAUNCH_TX=
@@ -802,19 +810,15 @@ do_relaunch() {
   else
     note_line="note=none"
   fi
-  # Preserve the recovery reason before the journal is rewritten for this
-  # attempt. A failed recovery launch leaves an agent-free pane and a
-  # failed:launching journal; that combination must continue through the
-  # missing-endpoint path rather than the ordinary same-endpoint path. The
-  # failed:launching signal is scoped to Herdr records: an ordinary tmux or
-  # zellij-style relaunch failure leaves the same journal, and its retry must
-  # stay on the ordinary same-endpoint path.
+  # Route Herdr endpoints onto the missing-endpoint path. A missing endpoint
+  # recovers directly. A dead one does so ONLY when this task's durable
+  # recovery-attempt marker proves a prior fm-control recovery committed here:
+  # an ordinary relaunch failure leaves the same dead-pane-plus-failed-journal
+  # shape behind, and its retry must stay on the ordinary same-endpoint path.
   state=$(agent_state)
-  if [ "$BACKEND" = herdr ] \
-     && { [ "$state" = missing ] \
-          || { [ "$state" = dead ] \
-               && [ -f "$JOURNAL" ] \
-               && grep -Fqx 'phase=failed:launching' "$JOURNAL" 2>/dev/null; }; }; then
+  if [ "$BACKEND" = herdr ] && [ "$state" = missing ]; then
+    recover_missing=1
+  elif [ "$BACKEND" = herdr ] && [ "$state" = dead ] && [ -f "$RECOVERY_ATTEMPT_MARKER" ]; then
     recover_missing=1
   fi
   safe_checkpoint
@@ -845,6 +849,13 @@ do_relaunch() {
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   if [ "$recover_missing" = 1 ]; then
+    # Persist the recovery-attempt marker BEFORE delegating the launch: from
+    # here on a failed attempt leaves exactly the agent-free replacement state
+    # whose retry must route back through --recover-missing, and the marker is
+    # both that retry's fm-control provenance and this plane's proof that a
+    # dead endpoint here means failed recovery rather than ordinary failure.
+    : > "$RECOVERY_ATTEMPT_MARKER" \
+      || die "could not persist task $ID's recovery-attempt marker before recovery launch"
     spawn_args+=(--recover-missing)
   fi
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
@@ -870,6 +881,11 @@ do_relaunch() {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
   }
   RELAUNCH_AGENT_CONFIRMED=1
+  # The recovery landed: its attempt marker must not outlive it, or a later
+  # ordinary agent-free relaunch would be misread as a failed recovery retry.
+  if [ "$recover_missing" = 1 ]; then
+    rm -f "$RECOVERY_ATTEMPT_MARKER" 2>/dev/null || true
+  fi
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0

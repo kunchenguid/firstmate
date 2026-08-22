@@ -21,7 +21,11 @@
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either.
 #   --recover-missing is used only by the control plane when the recorded
-#   Herdr endpoint is authoritatively gone; it creates one replacement pane in
+#   Herdr endpoint is authoritatively gone, and this script enforces that
+#   reservation itself: it refuses the flag unless the invoking process is a
+#   live bin/fm-control.sh relaunch holding this task's control lock, or the
+#   recovery-attempt marker from that plane's prior attempt authorizes the
+#   retry. It creates one replacement pane in
 #   the recorded workspace when possible, or the same home's flat workspace,
 #   while preserving the task's existing local copy and validation ownership.
 #   It is never a fresh spawn and never allocates another worktree. It is
@@ -1015,6 +1019,23 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
+  # --recover-missing rebuilds an endpoint, so it must trace to the control
+  # plane: either this process IS bin/fm-control.sh's own relaunch child -
+  # proven by that task's control lock naming our direct parent plus the
+  # transaction id fm-control passes through - or the durable recovery-attempt
+  # marker fm-control persists when it commits to a missing-endpoint recovery
+  # authorizes finishing a failed attempt. Any other caller is refused rather
+  # than allowed an endpoint rebuild outside the control plane's transaction.
+  RECOVER_MISSING_AUTHORIZED=0
+  if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
+    RECOVER_MISSING_AUTHORIZED=1
+  elif [ -f "$STATE/$ID.control-relaunch.recovery-attempt" ]; then
+    RECOVER_MISSING_AUTHORIZED=1
+  fi
+  if [ "$RECOVER_MISSING" = 1 ] && [ "$RECOVER_MISSING_AUTHORIZED" != 1 ]; then
+    echo "error: --recover-missing is reserved for bin/fm-control.sh $ID relaunch; run the relaunch through the control plane so its live transaction or recorded recovery-attempt marker proves this recovery is fm-control's" >&2
+    exit 1
+  fi
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   if [ "$RECOVER_MISSING" = 1 ]; then
     [ "$RELAUNCH_STATE" = missing ] || {
@@ -2287,7 +2308,14 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$RECOVER_MISSING" -eq 1 ]; then
   relaunch_seen=
   for _ in $(seq 1 20); do
     relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
-    [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" = "$relaunch_wt_real" ] && break
+    # A positive conjunction before break: "[ -z ] || ... && break" groups
+    # left-to-right as "(empty-or-match) && break", so an empty first read -
+    # a pane that has not reported any path yet - would break immediately and
+    # fail a recovery that one more poll would have settled.
+    if [ -n "$relaunch_seen" ] \
+       && [ "$(real_path_or_raw "$relaunch_seen")" = "$relaunch_wt_real" ]; then
+      break
+    fi
     sleep 0.5
   done
   if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then

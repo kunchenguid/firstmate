@@ -70,7 +70,8 @@ It is not deterministic across the verified adapters: codex and grok resume only
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
-   A recorded Herdr endpoint that is authoritatively missing, or reads agent-free with a `failed:launching` journal from a prior attempt, skips this step because there is nothing left to stop.
+   A recorded Herdr endpoint that is authoritatively missing, or reads agent-free while a durable recovery-attempt marker proves a prior missing-endpoint recovery of this task failed here, skips this step because there is nothing left to stop.
+   An ordinary failed relaunch leaves the same dead-pane shape with no marker, and its retry keeps the ordinary same-endpoint path.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
    That skipped stop passes `--recover-missing`, so the launch rebuilds exactly one replacement pane in the recorded session/workspace - or the home's flat workspace when the recorded workspace is gone too - while keeping the task's existing local copy, records, and validation ownership.
    An endpoint that turns live or ambiguous between checks refuses rather than risking a duplicate recovery.
@@ -103,7 +104,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
-  Under `--recover-missing` the same gate accepts only an authoritatively missing Herdr endpoint, or an agent-free one left by a failed recovery attempt.
+  `--recover-missing` is control-plane-only: the launch owner accepts it only from a live `bin/fm-control.sh relaunch` holding that task's control lock, or when the durable recovery-attempt marker from that plane's prior attempt authorizes finishing it, and under it the same gate accepts only an authoritatively missing Herdr endpoint, or an agent-free one left by a failed recovery attempt.
 
 ## Capability matrix
 
