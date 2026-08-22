@@ -23,8 +23,7 @@
 # proof in fm-branch-merge-lib.sh): a backstop for a branch fm-teardown.sh's own
 # inline cleanup did not or could not reach - e.g. a local-only fast-forward merge
 # whose branch survived past teardown, or a PR merged outside firstmate's own
-# flow. It requires explicit FM_FLEET_PRUNE_MERGED=1 authority and is never a
-# factor in the STUCK/self-heal decisions above.
+# flow. Never a factor in the STUCK/self-heal decisions above.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
@@ -277,10 +276,9 @@ prune_gone_branches() {
 # both. Uses the LOCAL default branch as the merged-into ref, so it runs with
 # no fetch and no origin dependency; a remote-backed project whose local
 # default is still behind origin simply catches up on the next sweep once the
-# fast-forward below advances it. It is off until the captain explicitly sets
-# FM_FLEET_PRUNE_MERGED=1.
+# fast-forward below advances it. Set FM_FLEET_PRUNE=0 to skip pruning entirely.
 prune_merged_fm_branches() {
-  [ "${FM_FLEET_PRUNE_MERGED:-0}" = "1" ] || return 0
+  [ "${FM_FLEET_PRUNE:-1}" != "0" ] || return 0
   local default branch
   default=$(default_branch) || return 0
   git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$default^{commit}" >/dev/null || return 0
