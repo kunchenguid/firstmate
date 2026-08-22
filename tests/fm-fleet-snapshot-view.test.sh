@@ -799,6 +799,95 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# The snapshot hands whole JSON documents to jq. execve caps ONE argument string
+# far below the total ARG_MAX (on Linux, MAX_ARG_STRLEN is 128 KiB), so once a
+# home's backlog document crossed that ceiling the whole snapshot aborted with
+# "Argument list too long" before jq ever ran. Size the fixture from the ceiling
+# this host actually enforces, rather than a guess, so the regression is neither
+# needlessly slow here nor vacuous on a platform with a different cap.
+probe_single_arg_ceiling() {  # smallest refused single-argument size, 0 if none
+  local n=32768 blob
+  while [ "$n" -le 2097152 ]; do
+    blob=$(head -c "$n" /dev/zero | tr '\0' a)
+    env true "$blob" 2>/dev/null || { printf '%s\n' "$n"; return 0; }
+    n=$((n * 2))
+  done
+  printf '%s\n' 0
+}
+
+write_oversize_backlog() {  # <home> <record-count>
+  local home=$1 records=$2 i=1
+  {
+    printf '## Queued\n'
+    while [ "$i" -le "$records" ]; do
+      printf -- '- [ ] argv-task-%05d - Queued task %05d with a title long enough to give every record real weight (repo: alpha) (kind: ship) (since 2026-07-08)\n' \
+        "$i" "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+}
+
+test_backlog_larger_than_one_argv_string() {
+  local home ceiling records out backlog_bytes summary
+  ceiling=$(probe_single_arg_ceiling)
+  if [ "$ceiling" -eq 0 ]; then
+    echo "skip: this host accepts a 2 MiB single argument, so the argv ceiling cannot be sized"
+    return 0
+  fi
+  home=$(make_home argv-ceiling)
+  # ~600 compact JSON bytes per record is a deliberate underestimate, so the
+  # fixture overshoots the ceiling; the assertion below proves it actually did.
+  records=$((ceiling / 600 + 40))
+  write_oversize_backlog "$home" "$records"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must survive a backlog document larger than one argv string ($records records)"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "snapshot over an oversize backlog must still be valid JSON"
+
+  # Compact bytes understate the document the snapshot actually carries, so
+  # clearing the ceiling here means the pre-fix argv form cleared it too.
+  backlog_bytes=$(printf '%s' "$out" | jq -c '.backlog' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$backlog_bytes" -gt "$ceiling" ] \
+    || fail "fixture proves nothing: backlog document is $backlog_bytes bytes, this host refuses $ceiling"
+
+  printf '%s' "$out" | jq -e --argjson n "$records" '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.backlog.records | length) == $n
+      and .main_inventory.valid == true
+      and .main_inventory.unstructured_current_count == 0
+  ' >/dev/null || fail "oversize-backlog snapshot lost records or inventory validity"
+
+  # The home-summary mode carries the same two documents into a different jq
+  # call, so it has the same ceiling and needs the same proof.
+  summary=$(FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "the home-summary mode must survive the same oversize backlog document"
+  printf '%s' "$summary" | jq -e --argjson n "$records" '
+    .schema == "fm-secondmate-home-summary.v1" and .counts.queued == $n
+  ' >/dev/null || fail "oversize-backlog home summary malformed or lost queued items: $summary"
+
+  pass "a backlog document larger than one argv string still produces a complete snapshot ($records records over a $ceiling-byte ceiling)"
+}
+
+# The documented contract is that the snapshot stages nothing on disk: the
+# oversize documents above reach jq through pipes, so a run under a private
+# TMPDIR must leave that directory exactly as empty as it found it. A staged
+# scratch file would also need a signal trap to survive the bounded, routinely
+# killed cross-home reads, so "wrote nothing" is the property worth pinning.
+test_snapshot_stages_nothing_on_disk() {
+  local home scratch left
+  home=$(make_home tmpdir-untouched)
+  scratch=$TMP_ROOT/tmpdir-probe
+  rm -rf "$scratch"
+  mkdir -p "$scratch"
+  TMPDIR="$scratch" FM_HOME="$home" "$SNAPSHOT" --json >/dev/null \
+    || fail "snapshot failed while running under a private TMPDIR"
+  left=$(find "$scratch" -mindepth 1 | wc -l | tr -d ' ')
+  [ "$left" -eq 0 ] \
+    || fail "snapshot left $left entries behind in its TMPDIR: $(find "$scratch" -mindepth 1)"
+  pass "the snapshot stages no documents on disk and leaves its TMPDIR empty"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -810,6 +899,8 @@ test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
+test_backlog_larger_than_one_argv_string
+test_snapshot_stages_nothing_on_disk
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
