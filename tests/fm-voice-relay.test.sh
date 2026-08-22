@@ -1278,12 +1278,14 @@ pass "a reader failure is named to the captain, a clean end and a close are not"
 
 # --- the laptop end ---------------------------------------------------------
 #
-# The microphone and speaker paths cannot be tested from a host with neither, and
-# are not tested anywhere: the first live run is their test. What IS testable is
-# everything around them, and these are the pieces whose failure is hardest to
-# read from the symptom. A missing -T corrupts audio rather than erroring, and a
-# banner-printing login shell desynchronises the stream in a way that looks like a
-# protocol bug and is not.
+# The microphone and speaker DEVICES cannot be opened on a host with neither, so
+# the first live run is their test and nothing below touches audio hardware. What
+# IS testable is everything around them, and these are the pieces whose failure is
+# hardest to read from the symptom. A missing -T corrupts audio rather than
+# erroring, and a banner-printing login shell desynchronises the stream in a way
+# that looks like a protocol bug and is not. The speaker's byte accounting is
+# testable as well, being arithmetic rather than device work, and is covered
+# further down this block against a stub stream with the callback driven by hand.
 
 mkdir -p "$TMP_ROOT/client-files"
 printf '\0\0\0\0' > "$TMP_ROOT/client-files/clip.pcm"
@@ -2080,6 +2082,193 @@ check("Traceback" not in (handling_runs[0]["relay_error"] or ""),
 check(handling_code != 0,
       "a session that took none of its runs must not exit 0, got %r"
       % handling_code)
+
+# The other end of the same handler: reply audio that arrives after THIS end has
+# released the output. close() joins the downlink at five seconds while the relay
+# teardown it waits on can take up to ten, so the join can expire with audio still
+# in flight, and the chunk behind it then met a closed file. That raised into the
+# guard above and printed its fault line and a full traceback on a session that
+# answered its turn and exited 0, which is an alarm firing on success: the reader
+# learns to skip the line, and the real one is then invisible too. The connection
+# was never the problem either, so it was a wrong cause as well as a false one.
+#
+# Driven through the events the client itself reaches, not a sleep: the turn is
+# answered and recorded, the output is released exactly as close() releases it, and
+# only then is the late chunk let through.
+class LateAudioStream:
+    """Serves one whole answer, then one more chunk once the output is released."""
+
+    def __init__(self, opened, released):
+        self._opened = opened
+        self._released = released
+        self._reply = frame.encode(frame.AUDIO, b"\x00\x00" * 1200) + REPLY_END
+        self._late = frame.encode(frame.AUDIO, b"\x00\x00" * 1200)
+        self._at = 0
+        self._late_at = 0
+        self._never = thread_lib.Event()
+
+    def read(self, count):
+        check(self._opened.wait(10), "the turn never opened, so nothing was served")
+        if self._at < len(self._reply):
+            chunk = self._reply[self._at:self._at + count]
+            self._at += len(chunk)
+            return chunk
+        check(self._released.wait(10),
+              "fixture: the output was never released, so nothing arrived late")
+        if self._late_at < len(self._late):
+            chunk = self._late[self._late_at:self._late_at + count]
+            self._late_at += len(chunk)
+            return chunk
+        # Parked rather than ending the stream, so the only lines on stderr are the
+        # ones this case is about.
+        self._never.wait(30)
+        return b""
+
+
+class CountingPlayback(client.FilePlayback):
+    """Reports each chunk once it has been handed over, so the test can wait."""
+
+    def __init__(self, path, handled):
+        client.FilePlayback.__init__(self, path)
+        self._handled = handled
+        self.calls = 0
+
+    def write(self, pcm, turn):
+        self.calls += 1
+        try:
+            client.FilePlayback.write(self, pcm, turn)
+        finally:
+            # In a finally, so the late chunk raising is as observable as the late
+            # chunk being discarded and neither outcome hangs the case.
+            if self.calls >= 2:
+                self._handled.set()
+
+
+def audio_after_close(label, extra):
+    """Answer one turn, release the output, then let a late chunk arrive."""
+    opened, released, handled = (thread_lib.Event(), thread_lib.Event(),
+                                 thread_lib.Event())
+    out_file = os.path.join(TMP, "reply-late-%s.pcm" % label)
+    late = client.Client(client.parse_args(
+        ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+         "--out-file", out_file, "--timeout", "2", "--audio-idle", "0.05"]
+        + extra))
+    late.reader = frame.Reader(LateAudioStream(opened, released))
+    late.uplink = StartGate(opened)
+    late.playback = CountingPlayback(out_file, handled)
+    late.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
+    late.capture.start(late.up_q, late.talking)
+    thread_lib.Thread(target=late._sender, daemon=True).start()
+    thread_lib.Thread(target=late._downlink, daemon=True).start()
+    out, said = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(said):
+        code = late.run()
+        # Exactly what close() does with the output, at the point close() does it.
+        late.playback.close()
+        released.set()
+        check(handled.wait(10), "fixture: the late chunk never reached the output")
+        late._say_dropped()
+    late.up_q.put(None)
+    records = [json_lib.loads(line) for line in out.getvalue().splitlines()
+               if line.strip()]
+    check(len(records) == 1,
+          "%s: one turn was answered, so one record belongs in the file: %r"
+          % (label, records))
+    return late, records[0], said.getvalue(), code, out_file
+
+
+quiet, quiet_run, quiet_said, quiet_code, quiet_file = audio_after_close(
+    "quiet", [])
+# THE POINT. The session worked, so nothing may read as a fault.
+check("could not handle the relay's reply" not in quiet_said,
+      "audio arriving after the output was released is this end's own teardown, "
+      "not a fault to alarm on: %r" % quiet_said)
+check("Traceback" not in quiet_said,
+      "and it must not leave a traceback behind either: %r" % quiet_said)
+check(quiet_code == 0,
+      "a session whose only turn was answered must still exit 0, got %r"
+      % quiet_code)
+check(quiet_run["answered"] and quiet_run["relay_error"] is None,
+      "and its record stands, reason-free: %r" % quiet_run)
+# Condition 2: the discard is diagnostic only. The late chunk is the same size as
+# the answer, so anything crediting it would double both figures.
+check(quiet.playback.discarded == 1,
+      "the late chunk must be counted as discarded: %r"
+      % quiet.playback.discarded)
+check(quiet.playback.turn_bytes == 2400,
+      "but must not be credited to the turn: %r" % quiet.playback.turn_bytes)
+check(quiet_run["reply_audio_seconds"] == 0.05,
+      "so the reply's own duration stands: %r" % quiet_run["reply_audio_seconds"])
+check(quiet_run["first_audio_s"] is not None,
+      "and the answer's real first-audio figure stands: %r"
+      % quiet_run["first_audio_s"])
+check(os.path.getsize(quiet_file) == 2400,
+      "and the discarded chunk reached no file: %d bytes"
+      % os.path.getsize(quiet_file))
+
+# Condition 1: discarded, not silently swallowed. A write after close outside
+# teardown is a real logic bug, so the count has somewhere to be read.
+loud, _, loud_said, loud_code, _ = audio_after_close("loud", ["--verbose"])
+check("discarded 1 reply audio chunk" in loud_said,
+      "--verbose must say how many chunks were dropped: %r" % loud_said)
+check("could not handle the relay's reply" not in loud_said
+      and "Traceback" not in loud_said,
+      "and saying so is not the same as calling it a fault: %r" % loud_said)
+check(loud_code == 0 and loud.playback.turn_bytes == 2400,
+      "and reporting it changes neither the exit code nor the turn's bytes: %r %r"
+      % (loud_code, loud.playback.turn_bytes))
+
+# Which of the playback's two locks covers what, driven rather than asserted about.
+# take_turn calls turn_reset while holding the client's own turn lock, so anything
+# turn_reset can wait behind stalls the whole client: neither the downlink nor the
+# sender can stamp a thing without that lock. The file write is the one slow step
+# here, so it must sit outside the lock turn_reset takes. The handle below parks
+# instead of writing, which makes a slow filesystem exact rather than simulated.
+parked, release_write, reset_done = (thread_lib.Event(), thread_lib.Event(),
+                                     thread_lib.Event())
+
+
+class ParkingHandle:
+    """A file whose write blocks until this case lets it through."""
+
+    def __init__(self):
+        self.written = 0
+
+    def write(self, pcm):
+        self.written += len(pcm)
+        parked.set()
+        check(release_write.wait(10), "fixture: the parked write was never freed")
+
+    def close(self):
+        pass
+
+
+slow = client.FilePlayback(os.path.join(TMP, "reply-slow.pcm"))
+slow._handle.close()
+slow._handle = ParkingHandle()
+slow.turn_reset(1)
+thread_lib.Thread(target=slow.write, args=(b"\x00\x00" * 600, 1),
+                  daemon=True).start()
+check(parked.wait(10), "fixture: the write never reached the handle")
+
+
+def advance_the_turn():
+    slow.turn_reset(2)
+    reset_done.set()
+
+
+thread_lib.Thread(target=advance_the_turn, daemon=True).start()
+# Bounded, and it discriminates in both directions: with the write outside that
+# lock the reset completes at once, and with the write inside it the reset cannot
+# complete until the line below runs, whatever the machine is doing.
+check(reset_done.wait(5),
+      "a turn advance must not wait behind a file write, because take_turn makes "
+      "it while holding the lock the downlink and the sender both need")
+release_write.set()
+# The accounting still had to happen, and under the lock: the chunk was turn one's.
+check(slow.turn_bytes == 0 and slow.first_played is None,
+      "and turn two starts owed nothing and unstamped: %r %r"
+      % (slow.turn_bytes, slow.first_played))
 
 # A reply that is handled AFTER the turn it belongs to has already been recorded.
 # The downlink reads a frame on one thread and applies it on another, so a turn

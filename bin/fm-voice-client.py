@@ -206,25 +206,52 @@ class FilePlayback:
 
     def __init__(self, path):
         self._handle = open(path, "wb")
+        # Two locks, and which one covers what is the point of them. _lock is the
+        # per-turn accounting, and turn_reset takes it while the client holds its
+        # own turn lock, so nothing slow may ever be done under it. _handle_lock
+        # covers the file itself, so a write and a close cannot overlap. The
+        # ordering is always _handle_lock then _lock and never the reverse.
+        self._handle_lock = threading.Lock()
         self._lock = threading.Lock()
         self.first_played = None
         self.device_latency = None
         self.turn_bytes = 0
+        # Chunks dropped because they arrived after the file was released. Read by
+        # --verbose only; see write() for why it is not an outcome input.
+        self.discarded = 0
         self._turn = None
+        self._closed = False
 
     def write(self, pcm, turn):
-        # Held across the whole body, as the speaker's is, because the turn
-        # comparison, the stamp and the count are one decision and the file write
-        # sitting between them releases the interpreter. A turn advancing in that
-        # gap took the credit for a chunk that was not its own and a first-audio
-        # stamp from before it began, which is a negative headline figure.
-        with self._lock:
-            mine = turn == self._turn
-            if mine and self.first_played is None:
-                self.first_played = time.monotonic()
+        # A chunk arriving after close is DISCARDED rather than raising. close()
+        # joins the downlink at five seconds while the relay teardown it waits on
+        # can take up to ten, so reply audio still in flight when the file is
+        # released is an expected and benign race, and erroring on it reported this
+        # end's own teardown as a fault through the frame-handling guard, on a
+        # session that worked. Discard is the honest semantic for it, and after
+        # this any fault line printed during teardown is a real one.
+        #
+        # Counted, because a write after close OUTSIDE teardown is a logic bug and
+        # a silent no-op would hide it. Counted and nothing more: discarded bytes
+        # stamp no clock, are credited to no turn, and so reach neither answered,
+        # first_audio_s nor the exit code, which are decided from turn_bytes.
+        #
+        # The turn comparison, the stamp and the count are one decision and are
+        # made together under _lock. The file write is not: it blocks, and holding
+        # the lock turn_reset needs across it would stall the whole client behind
+        # the filesystem. One writer keeps the file in order without that.
+        with self._handle_lock:
+            if self._closed:
+                with self._lock:
+                    self.discarded += 1
+                return
+            with self._lock:
+                mine = turn == self._turn
+                if mine and self.first_played is None:
+                    self.first_played = time.monotonic()
+                if mine:
+                    self.turn_bytes += len(pcm)
             self._handle.write(pcm)
-            if mine:
-                self.turn_bytes += len(pcm)
 
     def turn_reset(self, turn):
         with self._lock:
@@ -236,16 +263,22 @@ class FilePlayback:
         del timeout
 
     def close(self):
-        self._handle.close()
+        with self._handle_lock:
+            self._closed = True
+            self._handle.close()
 
 
 class SpeakerPlayback:
     """Play reply audio through the laptop speaker.
 
-    UNVERIFIED: written from the sounddevice interface and never run against a
-    real device, because the machine this was built on has no speaker. The
-    timestamp is taken when the audio is handed to the device callback, which is
-    the last moment this process can see. The device's own output buffer sits
+    The DEVICE is UNVERIFIED: written from the sounddevice interface and never run
+    against a real one, because the machine this was built on has no speaker, so
+    the first live run is its test. The byte ACCOUNTING below is covered, against
+    a stub stream with the callback driven by hand, and covering it says nothing
+    about how a real device behaves.
+
+    The timestamp is taken when the audio is handed to the device callback, which
+    is the last moment this process can see. The device's own output buffer sits
     after that, so its reported latency is included in the turn record rather
     than pretended away.
 
@@ -597,12 +630,11 @@ class Client:
             # stopping on its own.
             self.quitting.set()
             self._quietly("the uplink", lambda: self.uplink.send(frame.QUIT))
-        # Before the devices are released, and bounded so a wedged relay cannot
-        # hold the exit. The downlink is still handing reply audio to the speaker,
-        # and a speaker closed underneath it raises there, which the frame-handling
-        # guard would then report as a fault on the way out of a session that
-        # worked. Letting the goodbye above end that thread first costs nothing and
-        # keeps the fault line meaning a fault.
+        # Before the devices are released, so the reply the goodbye above answers
+        # has somewhere to land, and bounded so a wedged relay cannot hold the
+        # exit. The bound is shorter than the relay's own teardown, so audio can
+        # still arrive after the output is released; the playback discards that
+        # rather than raising, which is what keeps a fault line meaning a fault.
         if self.down_thread is not None:
             self.down_thread.join(timeout=5)
         if self.capture is not None:
@@ -619,6 +651,22 @@ class Client:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+        # Said last, because the relay exiting above is what stops the audio still
+        # in flight.
+        self._say_dropped()
+
+    def _say_dropped(self):
+        """Report reply audio the output was no longer open to take.
+
+        Expected while this end is shutting down and said nowhere else, so a count
+        appearing on a session that has not ended is the logic bug it is kept for.
+        Diagnostic only: it names nothing in the record and decides no exit code.
+        """
+        dropped = getattr(self.playback, "discarded", 0)
+        if dropped:
+            log(self.verbose,
+                "discarded {} reply audio chunk(s) that arrived after the output "
+                "was released".format(dropped))
 
     # -------------------------------------------------------------------- threads
 

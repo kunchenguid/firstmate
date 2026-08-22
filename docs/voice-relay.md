@@ -120,10 +120,11 @@ wrong instant rather than printing a number that looks fast.
 
 ## Setting up the laptop
 
-**None of this is verified.** No worker can reach the captain's laptop, so the
-capture and playback paths have never run. Everything else in the client is
-exercised with files. Treat the first live run as the test, and expect the audio
-device setup to be where it fails.
+**The audio devices are not verified.** No worker can reach the captain's laptop, so neither the microphone nor the speaker has ever been opened.
+Treat the first live run as their test, and expect the device setup to be where it fails.
+Everything around them is exercised with files.
+That includes the speaker's own byte accounting, the arithmetic deciding which turn a chunk of reply audio is credited to and whose first-audio clock it stamps, which runs against a stub stream in the test suite.
+Covering that arithmetic says nothing about how a real output device behaves.
 
 Copy the two files the laptop needs, and install the one dependency:
 
