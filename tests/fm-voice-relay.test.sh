@@ -1803,20 +1803,35 @@ REPLY_END = frame.encode_json(frame.MARK, {"mark": "reply_end",
                                            "tool_calls": 0})
 
 
+def wire_client(args, reader, uplink, playback=None, start=True):
+    """Build a client wired to stand-ins for both its ends, threads running.
+
+    The same seven lines were written out at every case below. playback defaults to
+    a file at whatever --out-file the arguments name, which is what most of them
+    want; a case needing a playback of its own passes one. start=False is for the
+    one case that has to arrange something before the threads may read.
+    """
+    wired = client.Client(client.parse_args(args))
+    wired.reader = frame.Reader(reader)
+    wired.uplink = uplink
+    wired.playback = (client.FilePlayback(wired.options.out_file)
+                      if playback is None else playback)
+    wired.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
+    wired.capture.start(wired.up_q, wired.talking)
+    if start:
+        thread_lib.Thread(target=wired._sender, daemon=True).start()
+        thread_lib.Thread(target=wired._downlink, daemon=True).start()
+    return wired
+
+
 def turn_lost(label, make_stream, out_name, runs="1"):
     """Take one turn against a downlink that ends during it, and return run and stderr."""
     gate = thread_lib.Event()
-    lost = client.Client(client.parse_args(
+    lost = wire_client(
         ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
          "--out-file", os.path.join(TMP, out_name), "--runs", runs,
-         "--timeout", "2", "--audio-idle", "0.05"]))
-    lost.reader = frame.Reader(make_stream(gate))
-    lost.uplink = StartGate(gate)
-    lost.playback = client.FilePlayback(os.path.join(TMP, out_name))
-    lost.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
-    lost.capture.start(lost.up_q, lost.talking)
-    thread_lib.Thread(target=lost._sender, daemon=True).start()
-    thread_lib.Thread(target=lost._downlink, daemon=True).start()
+         "--timeout", "2", "--audio-idle", "0.05"],
+        make_stream(gate), StartGate(gate))
     out, said = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(said):
         code = lost.run()
@@ -1913,17 +1928,11 @@ SESSION_ENDED = frame.encode_json(frame.NOTICE, {"event": "session-ended"})
 def turn_cut(label, payload, out_name):
     """Take one turn, at the default run count, against a scripted downlink."""
     gate = thread_lib.Event()
-    cut = client.Client(client.parse_args(
+    cut = wire_client(
         ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
          "--out-file", os.path.join(TMP, out_name),
-         "--timeout", "2", "--audio-idle", "0.05"]))
-    cut.reader = frame.Reader(ScriptedStream(gate, payload, label))
-    cut.uplink = StartGate(gate)
-    cut.playback = client.FilePlayback(os.path.join(TMP, out_name))
-    cut.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
-    cut.capture.start(cut.up_q, cut.talking)
-    thread_lib.Thread(target=cut._sender, daemon=True).start()
-    thread_lib.Thread(target=cut._downlink, daemon=True).start()
+         "--timeout", "2", "--audio-idle", "0.05"],
+        ScriptedStream(gate, payload, label), StartGate(gate))
     out, said = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(said):
         code = cut.run()
@@ -1981,6 +1990,133 @@ for label, payload, subject in (
           "one run and even though the turn was answered, got %r"
           % (label, partial_code))
 
+# THE OTHER SIDE OF THE SAME LINE, and the complement of the answered case further
+# up this block. Those cases are faults that landed while the turn was still owed
+# an answer. These two land AFTER the answer was complete, in the gap between the
+# reply_end mark arriving and the record being copied, which the client spends
+# waiting for the reply audio to go quiet. A turn answered in full must carry no
+# reason and must not fail the session, whichever path the late fault takes: an
+# end of stream and a reset differ only in what the kernel delivered, and one relay
+# death must not produce two different exit codes depending on which it was.
+#
+# Gated at both ends rather than timed. The fault cannot be delivered until the
+# client has passed the reply_end wait, and the record cannot be copied until the
+# downlink has marked the connection finished with, which it does only after the
+# fault has been applied. Nothing here sleeps and nothing races.
+class RaisingAfterReply:
+    """Serves one whole answer, then raises once the record window is open."""
+
+    def __init__(self, gate, window):
+        self._gate = gate
+        self._window = window
+        self._bytes = frame.encode(frame.AUDIO, b"\x00\x00" * 1200) + REPLY_END
+        self._at = 0
+
+    def read(self, count):
+        check(self._gate.wait(10), "the turn never opened, so nothing was served")
+        if self._at < len(self._bytes):
+            chunk = self._bytes[self._at:self._at + count]
+            self._at += len(chunk)
+            return chunk
+        check(self._window.wait(10),
+              "fixture: the record window never opened, so nothing raced it")
+        raise OSError(104, "Connection reset by peer")
+
+
+class FailingAfterReply:
+    """Serves one whole answer, then a named turn failure in that same window."""
+
+    def __init__(self, gate, window):
+        self._gate = gate
+        self._window = window
+        self._reply = frame.encode(frame.AUDIO, b"\x00\x00" * 1200) + REPLY_END
+        self._late = frame.encode_json(
+            frame.NOTICE, {"event": "turn-failed",
+                           "error": "the model stream dropped"})
+        self._at = 0
+        self._late_at = 0
+
+    def read(self, count):
+        check(self._gate.wait(10), "the turn never opened, so nothing was served")
+        if self._at < len(self._reply):
+            chunk = self._reply[self._at:self._at + count]
+            self._at += len(chunk)
+            return chunk
+        check(self._window.wait(10),
+              "fixture: the record window never opened, so nothing raced it")
+        if self._late_at < len(self._late):
+            chunk = self._late[self._late_at:self._late_at + count]
+            self._late_at += len(chunk)
+            return chunk
+        # The notice is handled before this read is reached again, and the end of
+        # stream behind it is what marks the connection finished with, which is the
+        # gate the record waits on below.
+        return b""
+
+
+def fault_after_answer(label, make_stream, out_name):
+    """Answer one turn in full, then land a fault before the record is copied."""
+    gate, window = thread_lib.Event(), thread_lib.Event()
+    after = wire_client(
+        ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+         "--out-file", os.path.join(TMP, out_name),
+         "--timeout", "2", "--audio-idle", "0.05"],
+        make_stream(gate, window), StartGate(gate))
+    quiet_wait = after._wait_audio_quiet
+
+    def open_the_window(deadline):
+        window.set()
+        quiet_wait(deadline)
+        # take_turn copies the record on the line after this returns, so the fault
+        # has to be in before it. closed is the downlink's own mark that it has
+        # finished with the connection and it is set only after the fault has been
+        # applied, which makes it the gate rather than any elapsed time.
+        check(after.closed.wait(10),
+              "%s: fixture: the late fault never landed before the record"
+              % label)
+
+    after._wait_audio_quiet = open_the_window
+    out, said = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(said):
+        code = after.run()
+    after.up_q.put(None)
+    after.playback.close()
+    records = [json_lib.loads(line) for line in out.getvalue().splitlines()
+               if line.strip()]
+    check(len(records) == 1,
+          "%s: one turn was answered, so one record belongs in the file: %r"
+          % (label, records))
+    check(after.options.runs == 1,
+          "%s: fixture is wrong, this case is about the default run count: %r"
+          % (label, after.options.runs))
+    check(records[0]["answered"] and records[0]["reply_audio_seconds"] > 0,
+          "%s: fixture is wrong, the whole reply should have arrived: %r"
+          % (label, records[0]))
+    check(records[0]["relay_error"] is None,
+          "%s: a turn answered in full must carry no reason, whatever arrived "
+          "afterwards: %r" % (label, records[0]["relay_error"]))
+    check(code == 0,
+          "%s: and a session that delivered its answer must exit 0, got %r"
+          % (label, code))
+    return said.getvalue()
+
+
+# The read-failure path: a reset rather than a clean end of stream.
+rst_said = fault_after_answer(
+    "a reset after the answer", RaisingAfterReply, "reply-rst.pcm")
+# The guard is on the record and nothing else, so the captain is still told.
+check("connection lost" in rst_said,
+      "the connection going is still said on stderr, only not recorded against a "
+      "turn it did not cost: %r" % rst_said)
+
+# The relay fail_turn path: its own model stream broke, after this turn's answer.
+failed_said = fault_after_answer(
+    "a named relay failure after the answer", FailingAfterReply,
+    "reply-late-fail.pcm")
+check("could not finish that turn" in failed_said,
+      "the relay's own words are still said on stderr for the same reason: %r"
+      % failed_said)
+
 # With runs still to take, the loop also has to say why they were not taken, and
 # that line has to restate the cause that was recorded rather than asserting a
 # default. Told "the relay stopped" and then "the connection closed", the captain
@@ -2019,19 +2155,14 @@ class FullDiskPlayback(client.FilePlayback):
 
 
 handling_served = thread_lib.Event()
-handling = client.Client(client.parse_args(
+handling = wire_client(
     ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
      "--out-file", os.path.join(TMP, "reply-handling.pcm"), "--runs", "2",
-     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"]))
-handling.reader = frame.Reader(ScriptedStream(
-    handling_served, frame.encode(frame.AUDIO, b"\x00\x00" * 600),
-    "the one reply frame"))
-handling.uplink = StartGate(handling_served)
-handling.playback = FullDiskPlayback(os.path.join(TMP, "reply-handling.pcm"))
-handling.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
-handling.capture.start(handling.up_q, handling.talking)
-thread_lib.Thread(target=handling._sender, daemon=True).start()
-thread_lib.Thread(target=handling._downlink, daemon=True).start()
+     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"],
+    ScriptedStream(handling_served, frame.encode(frame.AUDIO, b"\x00\x00" * 600),
+                   "the one reply frame"),
+    StartGate(handling_served),
+    FullDiskPlayback(os.path.join(TMP, "reply-handling.pcm")))
 handling_out, handling_said = io.StringIO(), io.StringIO()
 with contextlib.redirect_stdout(handling_out), \
         contextlib.redirect_stderr(handling_said):
@@ -2149,17 +2280,12 @@ def audio_after_close(label, extra):
     opened, released, handled = (thread_lib.Event(), thread_lib.Event(),
                                  thread_lib.Event())
     out_file = os.path.join(TMP, "reply-late-%s.pcm" % label)
-    late = client.Client(client.parse_args(
+    late = wire_client(
         ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
          "--out-file", out_file, "--timeout", "2", "--audio-idle", "0.05"]
-        + extra))
-    late.reader = frame.Reader(LateAudioStream(opened, released))
-    late.uplink = StartGate(opened)
-    late.playback = CountingPlayback(out_file, handled)
-    late.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
-    late.capture.start(late.up_q, late.talking)
-    thread_lib.Thread(target=late._sender, daemon=True).start()
-    thread_lib.Thread(target=late._downlink, daemon=True).start()
+        + extra,
+        LateAudioStream(opened, released), StartGate(opened),
+        CountingPlayback(out_file, handled))
     out, said = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(said):
         code = late.run()
@@ -2302,20 +2428,19 @@ class TurnCountingGate:
 
 
 stale_open, stale_next = thread_lib.Event(), thread_lib.Event()
-stale = client.Client(client.parse_args(
+# Wired without starting its threads, because the notice has to be parked before
+# the downlink is allowed to read it.
+stale = wire_client(
     ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
      "--out-file", os.path.join(TMP, "reply-stale.pcm"), "--runs", "2",
-     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"]))
-stale.reader = frame.Reader(ScriptedStream(
-    stale_open,
-    frame.encode_json(frame.NOTICE, {"event": "turn-failed",
-                                     "error": "the model dropped turn one"})
-    + frame.encode(frame.AUDIO, b"\x00\x00" * 1200) + REPLY_END,
-    "turn one's failure and turn two's answer"))
-stale.uplink = TurnCountingGate(stale_open, stale_next)
-stale.playback = client.FilePlayback(os.path.join(TMP, "reply-stale.pcm"))
-stale.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
-stale.capture.start(stale.up_q, stale.talking)
+     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"],
+    ScriptedStream(
+        stale_open,
+        frame.encode_json(frame.NOTICE, {"event": "turn-failed",
+                                         "error": "the model dropped turn one"})
+        + frame.encode(frame.AUDIO, b"\x00\x00" * 1200) + REPLY_END,
+        "turn one's failure and turn two's answer"),
+    TurnCountingGate(stale_open, stale_next), start=False)
 
 # The notice is held between arriving and being applied, which is the window the
 # turn identity exists to close. Turn one then times out and is recorded, turn two
@@ -2390,19 +2515,14 @@ class LatePlayback(client.FilePlayback):
 
 late_open, late_next = thread_lib.Event(), thread_lib.Event()
 late_out_file = os.path.join(TMP, "reply-late.pcm")
-late = client.Client(client.parse_args(
+late = wire_client(
     ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
      "--out-file", late_out_file, "--runs", "2",
-     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"]))
-late.reader = frame.Reader(ScriptedStream(
-    late_open, frame.encode(frame.AUDIO, b"\x00\x00" * 1200),
-    "turn one's audio"))
-late.uplink = TurnCountingGate(late_open, late_next)
-late.playback = LatePlayback(late_out_file, late_next)
-late.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
-late.capture.start(late.up_q, late.talking)
-thread_lib.Thread(target=late._sender, daemon=True).start()
-thread_lib.Thread(target=late._downlink, daemon=True).start()
+     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"],
+    ScriptedStream(late_open, frame.encode(frame.AUDIO, b"\x00\x00" * 1200),
+                   "turn one's audio"),
+    TurnCountingGate(late_open, late_next),
+    LatePlayback(late_out_file, late_next))
 late_out, late_said = io.StringIO(), io.StringIO()
 with contextlib.redirect_stdout(late_out), contextlib.redirect_stderr(late_said):
     late_code = late.run()
@@ -2447,20 +2567,14 @@ check(os.path.getsize(late_out_file) == 2400,
 # the elapsed time distinguishes stopping from waiting; nothing in the case sleeps
 # on purpose, the code under test is the sleep.
 prompt_served = thread_lib.Event()
-prompt = client.Client(client.parse_args(
+prompt = wire_client(
     ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
      "--out-file", os.path.join(TMP, "reply-prompt.pcm"), "--runs", "3",
-     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "5"]))
-prompt.reader = frame.Reader(ScriptedStream(
-    prompt_served,
-    frame.encode(frame.AUDIO, b"\x00\x00" * 1200) + REPLY_END,
-    "one whole answer and then the end of stream"))
-prompt.uplink = StartGate(prompt_served)
-prompt.playback = client.FilePlayback(os.path.join(TMP, "reply-prompt.pcm"))
-prompt.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
-prompt.capture.start(prompt.up_q, prompt.talking)
-thread_lib.Thread(target=prompt._sender, daemon=True).start()
-thread_lib.Thread(target=prompt._downlink, daemon=True).start()
+     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "5"],
+    ScriptedStream(prompt_served,
+                   frame.encode(frame.AUDIO, b"\x00\x00" * 1200) + REPLY_END,
+                   "one whole answer and then the end of stream"),
+    StartGate(prompt_served))
 prompt_out, prompt_said = io.StringIO(), io.StringIO()
 prompt_began = clock.monotonic()
 with contextlib.redirect_stdout(prompt_out), contextlib.redirect_stderr(prompt_said):

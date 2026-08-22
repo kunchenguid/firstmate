@@ -685,21 +685,25 @@ class Client:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
         # Said last, because the relay exiting above is what stops the audio still
-        # in flight.
-        self._say_dropped()
+        # in flight, and through _quietly like every other step here: a playback
+        # that cannot answer for its count must not replace the refusal that
+        # brought us into close() in the first place.
+        self._quietly("the discard count", self._say_dropped)
 
     def _say_dropped(self):
         """Report reply audio the output was no longer open to take.
 
-        Expected while this end is shutting down and said nowhere else, so a count
-        appearing on a session that has not ended is the logic bug it is kept for.
-        That holds on both output paths, because both count it. Diagnostic only: it
+        A count read at teardown, which should normally be zero. This has one
+        caller and it is the last statement of close(), so the count is only ever
+        reported at the end of a session; the tripwire is still worth keeping,
+        because a close() added anywhere else would be counted here too. Both
+        output paths count it rather than only the file one. Diagnostic only: it
         names nothing in the record and decides no exit code.
 
         Read straight off the playback rather than through a default, so a playback
-        that cannot answer is a failure here rather than a zero indistinguishable
-        from having measured none. The None check is close()'s own, for the startup
-        that refused before there was an output at all.
+        that cannot answer is a failure rather than a zero indistinguishable from
+        having measured none. The None check is close()'s own, for the startup that
+        refused before there was an output at all.
         """
         if self.playback is None:
             return
@@ -793,9 +797,41 @@ class Client:
                 # be opened by reading it under this lock. Naming the failure
                 # first and announcing the closure afterwards left a window where
                 # the connection was known gone and no reader could tell.
+                #
+                # The reply_done test is the one the quiet close paths below
+                # already apply, and it is here for the same reason: a reason
+                # belongs to a turn that has not had its answer yet. Without it a
+                # fault landing in the gap between reply_end arriving and the
+                # record being copied named a turn that was fully answered, and
+                # since a recorded reason exits non-zero that failed a session
+                # which had delivered everything asked of it. An end of stream and
+                # a reset differ only in what the kernel handed us, so they must
+                # not produce two different exit codes for one relay death.
+                #
+                # WHAT THE TEST MAKES INVISIBLE, because it is a real cost rather
+                # than none: a relay failure arriving after the FINAL turn's reply
+                # was already complete now records no reason and exits 0. The relay
+                # puts every audioOutput chunk and the reply_end mark on one
+                # ordered queue, so by the time this end sets reply_done every byte
+                # of that answer has already reached the playback, and a fault
+                # after it cannot have cost the captain any part of what they were
+                # given. What it can still cost is a LATER turn, and that is
+                # reported with no per-turn reason at all by the remaining-runs
+                # check, which exits non-zero whenever the connection is known gone
+                # with runs still to take. A relay dying at that instant is also
+                # indistinguishable from the same relay dying a moment later during
+                # this end's own teardown, which this client already treats as
+                # benign. The bound: take_turn clears reply_done in the same
+                # critical section as the closure mark, so the blind spot is
+                # exactly "after this turn's reply completed" and never "during a
+                # turn".
+                #
+                # closed_because and the closure mark stay outside it, so the
+                # session still knows the connection went and still says so.
                 with self.lock:
-                    self.turn.setdefault(
-                        "failed", "the connection was lost: {}".format(exc))
+                    if not self.reply_done.is_set():
+                        self.turn.setdefault(
+                            "failed", "the connection was lost: {}".format(exc))
                     self.closed_because = "the connection was lost"
                     self.closed.set()
                 break
@@ -858,10 +894,17 @@ class Client:
                         say("client: the relay could not finish that turn: {}"
                             .format(obj.get("error", "")))
                         # Named and released in one critical section, so no turn
-                        # can be released without also being told why.
+                        # can be released without also being told why. The
+                        # reply_done test is the read path's, for the reason given
+                        # there: a relay whose model stream broke in the gap after
+                        # this turn's answer completed has cost this turn nothing,
+                        # and naming it here would fail a session that answered.
+                        # The release stays outside the test, so a failure arriving
+                        # while the turn is still waiting still ends its wait.
                         with self.lock:
                             if arrived_in == self.turn_id:
-                                self.turn["failed"] = obj.get("error", "")
+                                if not self.reply_done.is_set():
+                                    self.turn["failed"] = obj.get("error", "")
                                 self.reply_done.set()
                     elif event == "session-ended":
                         say("client: the relay ended the session")
