@@ -397,13 +397,13 @@ The requested effort remains in task metadata and the selected tuple when an ada
 For example, codex `max`, grok `xhigh` or `max`, and every opencode, Kimi, or Cursor effort produce a null emitted effort while retaining the requested metadata value.
 Muse's selected `max` emits and binds the adapter value `ultra`.
 
-For a raw command, `launch_binding.kind` is `raw_launch` and every axis must be observed through the fixed literal command itself.
+For a raw command, `launch_binding.kind` is `raw_launch`, every axis must be observed through the fixed literal command itself, and the command head must be `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `muse`, or the canonical `cursor-agent` executable, optionally at an absolute path.
 Outside shell quotes, raw commands allow only alphanumerics, space separators, and `-`, `_`, `.`, `/`, `:`, `,`, `+`, `@`, or `%`, while `=` is accepted only after a word has begun so zsh cannot expand a leading `=command`.
 Single-quoted content is accepted literally except for control or non-ASCII input, while double-quoted content accepts alphanumerics, space, and `#`, `%`, `&`, `'`, `(`, `)`, `*`, `+`, `,`, `-`, `.`, `/`, `:`, `;`, `<`, `=`, `>`, `?`, `@`, `[`, `]`, `^`, `_`, `{`, `|`, `}`, or `~`.
 Double-quoted expansion, history, and backslash syntax are refused rather than interpreted or normalized.
-Every other character refuses, including non-ASCII input and all control characters, and a home-relative raw binary such as `~/bin/agent` must be written as an absolute path.
-The only accepted raw model spelling is `--model <literal>` or `--model=<literal>`.
-The accepted raw effort spellings are `--effort`, `--reasoning-effort`, `--thinking`, and codex `-c model_reasoning_effort=`, with fixed literal values and applicable equals forms.
+Every other character refuses, including non-ASCII input and all control characters, and a home-relative raw binary such as `~/bin/claude` must be written as an absolute path.
+The only accepted raw model spelling is `--model <literal>` or `--model=<literal>`, and a separate value beginning with `-` is refused while the equals form remains unambiguous.
+The accepted raw effort spellings are `--effort`, `--reasoning-effort`, `--thinking`, and codex `-c model_reasoning_effort=`, with fixed literal values and applicable equals forms; separate axis values beginning with `-` and unmatched Codex config quotes are refused.
 Raw commands with shell expansion, command substitution, control operators, environment-assignment prefixes, duplicate or missing values, non-standard model spellings such as `-m` or `--model-name`, or either model or effort axis absent return `RAW_LAUNCH_NOT_VERIFIABLE` or `RAW_LAUNCH_UNRESOLVED`.
 An observed raw harness, model, or effort that contradicts the selected tuple returns `RAW_LAUNCH_MISMATCH`.
 

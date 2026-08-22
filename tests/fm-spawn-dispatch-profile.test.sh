@@ -734,29 +734,31 @@ test_active_dispatch_profile_allows_positional_harness() {
 }
 
 test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch
+  local rec id out status launch command
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
 
+  command="$FAKEBIN_DIR/claude --model=custom%v1 --effort=high --flag"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --model custom%v1 --effort high --flag" \
+    "$id" "$PROJ_DIR" "$command" \
     --model custom%v1 --effort high)
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
-  assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent custom%v1 high
+  assert_contains "$out" "spawned $id harness=claude" "spawn did not report raw command harness"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude custom%v1 high
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --model custom%v1 --effort high --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows a fully observed raw launch with inert percent"
+  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $command" ] \
+    || fail "raw launch command changed"$'\n'"actual: $launch"
+  pass "active crew-dispatch profile allows a supported absolute harness with equals axes"
 }
 
 test_raw_launch_allows_shell_quoted_punctuation() {
   local rec id out status launch model command
   id=profile-raw-quoted-z15b
   model='custom!#(model)'
-  command="custom-agent --model '$model' --effort high --flag"
+  command="claude --model '$model' --effort high --flag"
   rec=$(make_spawn_case profile-raw-quoted claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -765,10 +767,11 @@ test_raw_launch_allows_shell_quoted_punctuation() {
     "$id" "$PROJ_DIR" "$command" --model "$model" --effort high)
   status=$?
   expect_code 0 "$status" "shell-quoted raw punctuation should remain observable"
-  assert_contains "$out" "spawned $id harness=custom-agent" "quoted raw command did not spawn"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent "$model" high
+  assert_contains "$out" "spawned $id harness=claude" "quoted raw command did not spawn"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude "$model" high
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "$command" ] || fail "quoted raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $command" ] \
+    || fail "quoted raw launch command changed"$'\n'"actual: $launch"
   pass "raw launch allowlist leaves shell-quoted punctuation intact"
 }
 

@@ -144,6 +144,52 @@ FM_ROUTING_COMMAND_EFFORT=
 FM_ROUTING_COMMAND_MODEL_SEEN=0
 FM_ROUTING_COMMAND_EFFORT_SEEN=0
 
+fm_routing_raw_harness_for_executable() { # <executable-word>
+  case "$(basename "$1")" in
+    claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+      basename "$1"
+      ;;
+    cursor-agent)
+      printf '%s\n' cursor
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_routing_set_codex_effort() { # <encoded-effort>
+  local encoded=$1
+  case "$encoded" in
+    \"*)
+      case "$encoded" in
+        *\") encoded=${encoded#\"}; encoded=${encoded%\"} ;;
+        *)
+          fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort config quote pair is unmatched"
+          return 1
+          ;;
+      esac
+      ;;
+    \'*)
+      case "$encoded" in
+        *\') encoded=${encoded#\'}; encoded=${encoded%\'} ;;
+        *)
+          fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort config quote pair is unmatched"
+          return 1
+          ;;
+      esac
+      ;;
+    *\"|*\')
+      fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort config quote pair is unmatched"
+      return 1
+      ;;
+  esac
+  [ -n "$encoded" ] || {
+    fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort config has no fixed literal value"
+    return 1
+  }
+  FM_ROUTING_COMMAND_EFFORT=$encoded
+  FM_ROUTING_COMMAND_EFFORT_SEEN=1
+}
+
 fm_routing_parse_command_axes() { # <command> <raw:0|1>
   local input=$1 raw=$2 word value i executable_seen=0 harness_word
   FM_ROUTING_COMMAND_HARNESS=
@@ -174,14 +220,13 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
         continue
       fi
       case "$word" in -*) break ;; esac
-      harness_word=$(basename "$word")
       if [ "$raw" -eq 1 ]; then
-        case "$harness_word" in
-          arch|chroot|daemon|doas|env|command|exec|ionice|nohup|nice|prlimit|script|setsid|start-stop-daemon|stdbuf|sudo|taskset|time|timeout|xargs|sh|bash|zsh|dash|ksh|fish)
-            fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch begins with a command wrapper rather than the emitted harness"
-            return 1
-            ;;
-        esac
+        harness_word=$(fm_routing_raw_harness_for_executable "$word") || {
+          fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch command head is not a supported harness executable"
+          return 1
+        }
+      else
+        harness_word=$(basename "$word")
       fi
       FM_ROUTING_COMMAND_HARNESS=$harness_word
       executable_seen=1
@@ -201,7 +246,7 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
         }
         i=$((i + 1))
         FM_ROUTING_COMMAND_MODEL=${FM_ROUTING_WORDS[$i]}
-        case "$FM_ROUTING_COMMAND_MODEL" in --*|'')
+        case "$FM_ROUTING_COMMAND_MODEL" in -*|'')
           fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "model flag has no fixed literal value"
           return 1
         esac
@@ -231,7 +276,7 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
         }
         i=$((i + 1))
         FM_ROUTING_COMMAND_EFFORT=${FM_ROUTING_WORDS[$i]}
-        case "$FM_ROUTING_COMMAND_EFFORT" in --*|'')
+        case "$FM_ROUTING_COMMAND_EFFORT" in -*|'')
           fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag has no fixed literal value"
           return 1
         esac
@@ -266,16 +311,7 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
               fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag is duplicated"
               return 1
             }
-            FM_ROUTING_COMMAND_EFFORT=${value#model_reasoning_effort=}
-            case "$FM_ROUTING_COMMAND_EFFORT" in
-              \"*\") FM_ROUTING_COMMAND_EFFORT=${FM_ROUTING_COMMAND_EFFORT#\"}; FM_ROUTING_COMMAND_EFFORT=${FM_ROUTING_COMMAND_EFFORT%\"} ;;
-              \'*\') FM_ROUTING_COMMAND_EFFORT=${FM_ROUTING_COMMAND_EFFORT#\'}; FM_ROUTING_COMMAND_EFFORT=${FM_ROUTING_COMMAND_EFFORT%\'} ;;
-            esac
-            [ -n "$FM_ROUTING_COMMAND_EFFORT" ] || {
-              fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort config has no fixed literal value"
-              return 1
-            }
-            FM_ROUTING_COMMAND_EFFORT_SEEN=1
+            fm_routing_set_codex_effort "${value#model_reasoning_effort=}" || return 1
             ;;
         esac
         ;;
@@ -288,16 +324,7 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
           fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag is duplicated"
           return 1
         }
-        FM_ROUTING_COMMAND_EFFORT=${word#-c=model_reasoning_effort=}
-        case "$FM_ROUTING_COMMAND_EFFORT" in
-          \"*\") FM_ROUTING_COMMAND_EFFORT=${FM_ROUTING_COMMAND_EFFORT#\"}; FM_ROUTING_COMMAND_EFFORT=${FM_ROUTING_COMMAND_EFFORT%\"} ;;
-          \'*\') FM_ROUTING_COMMAND_EFFORT=${FM_ROUTING_COMMAND_EFFORT#\'}; FM_ROUTING_COMMAND_EFFORT=${FM_ROUTING_COMMAND_EFFORT%\'} ;;
-        esac
-        [ -n "$FM_ROUTING_COMMAND_EFFORT" ] || {
-          fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort config has no fixed literal value"
-          return 1
-        }
-        FM_ROUTING_COMMAND_EFFORT_SEEN=1
+        fm_routing_set_codex_effort "${word#-c=model_reasoning_effort=}" || return 1
         ;;
     esac
   done
@@ -685,10 +712,10 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
   fi
   brief_final="$(dirname "$source_pending")/routing-brief.$brief_hash.md"
   if [ -e "$brief_final" ] || [ -L "$brief_final" ]; then
-    [ -f "$brief_final" ] && [ ! -L "$brief_final" ] && cmp -s "$brief" "$brief_final" || {
+    if [ ! -f "$brief_final" ] || [ -L "$brief_final" ] || ! cmp -s "$brief" "$brief_final"; then
       fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief target does not contain the exact validated bytes"
       return 1
-    }
+    fi
   else
     ln "$brief" "$brief_final" 2>/dev/null || {
       fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief snapshot could not be published at its hash-addressed path"
@@ -786,12 +813,12 @@ fm_routing_decision_validate_and_persist() { # <data> <canonical-config> <task-i
     return 1
   fi
   if [ -e "$source_config" ] || [ -L "$source_config" ]; then
-    [ -f "$source_config" ] && [ ! -L "$source_config" ] && [ -r "$source_config" ] \
-      && cp "$source_config" "$snapshot_config/crew-dispatch.json" || {
+    if [ ! -f "$source_config" ] || [ -L "$source_config" ] || [ ! -r "$source_config" ] \
+      || ! cp "$source_config" "$snapshot_config/crew-dispatch.json"; then
       rm -rf -- "$snapshot_dir"
       fm_routing_refuse "NOT_VERIFIABLE(CONFIG)" "canonical dispatch configuration could not be snapshotted as a readable regular file"
       return 1
-    }
+    fi
   fi
   if [ -e "$source_quota" ] || [ -L "$source_quota" ]; then
     if [ -f "$source_quota" ] && [ ! -L "$source_quota" ] && [ -r "$source_quota" ]; then

@@ -31,7 +31,7 @@ chmod() {
 # The fixture mutates at the later source read so that guard is independently
 # reachable without a production test bypass.
 jq() {
-  local tmp
+  local tmp rule_filter=".rules[\$index].use"
   if [ -n "$POST_SNAPSHOT_SOURCE_FILTER" ] \
     && [ "$#" -eq 3 ] \
     && [ "$1" = -r ] \
@@ -44,7 +44,7 @@ jq() {
   if [ -n "$POST_SNAPSHOT_CONFIG_FILTER" ] \
     && [ "$#" -ge 1 ] \
     && [ "${!#}" != "$HOME_DIR/config/crew-dispatch.json" ] \
-    && [[ "$*" == *'.rules[$index].use'* ]]; then
+    && [[ "$*" == *"$rule_filter"* ]]; then
     tmp="$HOME_DIR/config/crew-dispatch.json.replacement"
     "$REAL_JQ" "$POST_SNAPSHOT_CONFIG_FILTER" "$HOME_DIR/config/crew-dispatch.json" > "$tmp" || return 1
     mv "$tmp" "$HOME_DIR/config/crew-dispatch.json" || return 1
@@ -578,6 +578,8 @@ exercise_shell_position_differential double start
 [ "$shell_differential_run_count" -eq 20 ] \
   || fail "shell differential ran $shell_differential_run_count shell modes instead of 20"
 pass "$shell_differential_character_count parser-derived printable ASCII state-position cases match real bash and zsh argv"
+run_real_shell_differential separate-option-like-axis \
+  "$SHELL_DIFF_PROBE --model -p --effort -q"
 
 exercise_negative "01 missing receipt" missing setup_missing_receipt
 exercise_negative "02 missing intent" missing setup_missing_intent
@@ -640,20 +642,26 @@ while IFS='|' read -r shape_label RAW_SHAPE_COMMAND shape_detail; do
 done <<'RAW_SHAPES'
 model missing value|claude --effort high --model|model flag is missing a value or duplicated
 model next value is a flag|claude --model --effort high|model flag has no fixed literal value
+model short option value|claude --model -p --effort high|model flag has no fixed literal value
 model equals duplicate|claude --model opus --model=sonnet --effort high|model flag is duplicated
 model equals empty|claude --model= --effort high|model flag has no fixed literal value
 effort missing value|claude --model opus --effort|effort flag is missing a value or duplicated
 effort next value is a flag|claude --model opus --effort --flag|effort flag has no fixed literal value
+effort short option value|claude --model opus --effort -p|effort flag has no fixed literal value
 effort equals duplicate|claude --model opus --effort high --effort=low|effort flag is duplicated
 effort equals empty|claude --model opus --effort=|effort flag has no fixed literal value
 config missing value|claude --model opus -c|config flag has no fixed literal value
 config effort duplicate|codex --model opus --effort high -c model_reasoning_effort=low|effort flag is duplicated
 config effort empty|codex --model opus -c model_reasoning_effort=|effort config has no fixed literal value
+config effort unmatched quote|codex --model opus -c 'model_reasoning_effort="high'|effort config quote pair is unmatched
 equals config effort duplicate|codex --model opus --effort high -c=model_reasoning_effort=low|effort flag is duplicated
 equals config effort empty|codex --model opus -c=model_reasoning_effort=|effort config has no fixed literal value
-command wrapper env|env ROUTE_MODEL=sonnet claude --model opus --effort high|raw launch begins with a command wrapper rather than the emitted harness
-command wrapper arch|arch claude --model opus --effort high|raw launch begins with a command wrapper rather than the emitted harness
-command wrapper taskset|taskset -c 0 claude --model opus --effort high|raw launch begins with a command wrapper rather than the emitted harness
+equals config effort unmatched quote|codex --model opus '-c=model_reasoning_effort="high'|effort config quote pair is unmatched
+command wrapper env|env ROUTE_MODEL=sonnet claude --model opus --effort high|raw launch command head is not a supported harness executable
+command wrapper arch|arch claude --model opus --effort high|raw launch command head is not a supported harness executable
+command wrapper taskset|taskset -c 0 claude --model opus --effort high|raw launch command head is not a supported harness executable
+command wrapper caffeinate|caffeinate claude --model opus --effort high|raw launch command head is not a supported harness executable
+command wrapper xcrun|xcrun claude --model opus --effort high|raw launch command head is not a supported harness executable
 RAW_SHAPES
 
 exercise_negative "raw option terminator" RAW_LAUNCH_UNRESOLVED setup_raw_terminator \
@@ -719,7 +727,7 @@ run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement
   || fail "canonical config replacement counterexample did not fire"
 pass "canonical config replacement cannot change snapshotted candidate resolution"
 
-expected_count=$((88 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((94 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

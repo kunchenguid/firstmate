@@ -1224,13 +1224,15 @@ launch_template() {
 
 RAW_LAUNCH=0
 case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
+  *' '*)  # raw launch command headed by a supported harness executable
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
+    RAW_HARNESS=$(fm_routing_raw_harness_for_executable "$HARNESS" 2>/dev/null || true)
+    [ -z "$RAW_HARNESS" ] || HARNESS=$RAW_HARNESS
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1239,7 +1241,7 @@ case "$ARG3" in
     # active. Resolving here on every spawn is what makes the split DURABLE - a
     # respawn (recovery, /updatefirstmate, restart) re-resolves, so
     # config/secondmate-harness keeps governing secondmate launches across restarts.
-    # The launch_template lookup below is the unverified-adapter guard for both
+    # The launch_template lookup below is the verified-adapter guard for both
     # kinds: a harness with no template aborts the spawn.
     if [ "$KIND" = secondmate ]; then
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
@@ -1252,11 +1254,11 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a fully observed raw command headed by a supported harness executable" >&2; exit 1; }
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a fully observed raw command headed by a supported harness executable" >&2; exit 1; }
     ;;
 esac
 
