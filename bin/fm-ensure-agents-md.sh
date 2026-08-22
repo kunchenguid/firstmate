@@ -4,9 +4,12 @@
 # real regular file whose canonical content is the two-line @AGENTS.md pointer
 # that Claude Code inlines at load time. Creates a minimal AGENTS.md skeleton
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
-# file present (unless it is already the canonical pointer), converts a correct
-# CLAUDE.md -> AGENTS.md symlink into the pointer file, and refuses to clobber
-# distinct real files or wrong symlinks.
+# file present and reads as a trivial stub (unless it is already the canonical
+# pointer), converts a correct CLAUDE.md -> AGENTS.md symlink into the pointer
+# file, and refuses to clobber distinct real files, wrong symlinks, or an
+# authored CLAUDE.md - one with real document structure or enough content to
+# be a deliberate memory file rather than a placeholder (issue: promoting one
+# silently restructures deliberate content inside an unrelated diff).
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and any existing AGENTS.md that still lacks it.
@@ -112,6 +115,20 @@ EOF
 is_canonical_claude_pointer() {
   [ -f "$CLAUDE" ] && [ ! -L "$CLAUDE" ] || return 1
   claude_pointer_content | cmp -s - "$CLAUDE"
+}
+
+# A CLAUDE.md that is not the canonical pointer but carries real document
+# structure (two or more headings) or enough content to be more than a
+# trivial stub (more than AUTHORED_MIN_LINES lines) is judged authored rather
+# than a placeholder. Promoting an authored file would silently restructure
+# deliberate content, so it is refused instead of moved, the same way a
+# distinct real AGENTS.md/CLAUDE.md pair is refused elsewhere in this script.
+AUTHORED_MIN_LINES=12
+is_authored_claude_md() {
+  local headings lines
+  headings=$(grep -c '^#' "$CLAUDE" 2>/dev/null) || headings=0
+  lines=$(awk 'END { print NR }' "$CLAUDE" 2>/dev/null) || lines=0
+  [ "${headings:-0}" -ge 2 ] || [ "${lines:-0}" -gt "$AUTHORED_MIN_LINES" ]
 }
 
 # Write the canonical pointer as a regular file. Unlink a symlink first so the
@@ -237,6 +254,10 @@ if [ -e "$CLAUDE" ]; then
       write_skeleton
       echo "created: AGENTS.md and kept CLAUDE.md @AGENTS.md pointer in $DIR"
       exit 0
+    fi
+    if is_authored_claude_md; then
+      echo "conflict: CLAUDE.md in $DIR is an authored memory file, not the canonical @AGENTS.md pointer; promoting it would silently restructure deliberate content, so reconcile it manually instead" >&2
+      exit 1
     fi
     mv "$CLAUDE" "$AGENTS"
     ensure_maintenance_section

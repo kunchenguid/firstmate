@@ -41,7 +41,15 @@
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      green, so a green PR is never silently read as still-validating. A
+#      cancelled run is also not automatically a failure: firstmate can cancel
+#      a run deliberately AFTER a successful push (e.g. skipping a no-CI
+#      repo's day-long ci-step poll), and that is delivered work, not lost
+#      work. report_cancelled_state reads meta's pr= as durable delivery
+#      evidence - recorded only after fm-pr-check.sh validates the PR against
+#      the forge - and, when the forge also supplied pr_head=, requires it
+#      match the run's own head; a cancelled run backed by that evidence
+#      reports done · "cancelled after delivery" instead of failed.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -109,6 +117,8 @@ WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
+PR_URL=$(meta_value pr)
+PR_HEAD=$(meta_value pr_head)
 [ -n "$KIND" ] || KIND=ship
 
 # A torn-down (or never-created) worktree has no current state to read. A
@@ -443,6 +453,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
+    RUN_HEAD=$(strip_quotes "$(nm_field head)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
     else
@@ -461,6 +472,20 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     fi
   fi
 fi
+
+# A cancelled run backed by durable delivery evidence is not a failure - see
+# the header comment. $1 is the run's own reported head when known (the full
+# path's RUN_HEAD), or empty when only a coarse status word is available and
+# no head can be compared. Sets RUN_STATE/RUN_DETAIL.
+report_cancelled_state() {  # <run-head-or-empty>
+  if [ -n "$PR_URL" ] && { [ -z "$PR_HEAD" ] || [ -z "${1:-}" ] || [ "$PR_HEAD" = "${1:-}" ]; }; then
+    RUN_STATE="done"
+    RUN_DETAIL="cancelled after delivery: PR $PR_URL"
+  else
+    RUN_STATE=failed
+    RUN_DETAIL="run cancelled"
+  fi
+}
 
 # --- run-step authoritative path -------------------------------------------
 
@@ -482,7 +507,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+      cancelled) report_cancelled_state "" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
   else
@@ -499,7 +524,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
-        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
+        cancelled)     report_cancelled_state "$RUN_HEAD" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
     elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
@@ -523,7 +548,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
         failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+        cancelled)      report_cancelled_state "$RUN_HEAD" ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac

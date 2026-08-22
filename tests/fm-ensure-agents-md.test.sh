@@ -337,6 +337,41 @@ test_non_regular_claude_md_is_refused() {
   pass "fm-ensure-agents-md.sh: refuses a non-regular CLAUDE.md"
 }
 
+test_authored_claude_md_is_refused_not_promoted() {
+  local repo out rc
+  repo="$TMP_ROOT/authored-claude-project"
+  mkdir -p "$repo"
+  cat > "$repo/CLAUDE.md" <<'EOF'
+# example-project
+
+## Overview
+
+This is the router doc for example-project.
+
+## Setup
+
+Run `make dev` to start the stack.
+
+## Architecture
+
+The bridge talks to three services.
+
+## Testing
+
+Run `pytest` for the test suite.
+EOF
+  cp "$repo/CLAUDE.md" "$repo/.claude-before"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "expected a non-zero exit for an authored CLAUDE.md"
+  assert_contains "$out" "conflict:" "authored CLAUDE.md did not report a conflict"
+  assert_absent "$repo/AGENTS.md" "authored CLAUDE.md was promoted into AGENTS.md"
+  cmp -s "$repo/.claude-before" "$repo/CLAUDE.md" \
+    || fail "authored-CLAUDE.md refusal modified CLAUDE.md"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "authored-CLAUDE.md refusal turned CLAUDE.md into a symlink"
+  pass "fm-ensure-agents-md.sh: refuses to promote an authored CLAUDE.md"
+}
+
 test_lowercase_agents_md_refuses_case_fragile_pointer() {
   local repo out rc
   repo="$TMP_ROOT/lowercase-project"
@@ -368,4 +403,5 @@ test_distinct_real_files_are_refused
 test_agents_md_symlink_is_refused
 test_wrong_target_symlink_is_refused
 test_non_regular_claude_md_is_refused
+test_authored_claude_md_is_refused_not_promoted
 test_lowercase_agents_md_refuses_case_fragile_pointer

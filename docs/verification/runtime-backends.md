@@ -173,6 +173,21 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+## Claude Code permission mode
+
+The interactive `--dangerously-skip-permissions` downgrade was verified live on 2026-08-22 against Claude Code 2.1.237 on an account under an organization-managed settings policy that disables bypass-permissions mode.
+
+A crewmate launched with `--dangerously-skip-permissions` rendered `manual mode on` in its footer and stopped on its very first Bash call awaiting an approval dialog no unattended crewmate can answer.
+The same task relaunched with `--permission-mode auto` instead rendered `auto mode on` and ran to completion.
+Headless `claude -p` sessions are unaffected by this policy, which is why only interactive crewmates broke.
+
+An unprivileged container also could not initialize the Bash sandbox (`apply-seccomp: write /proc/self/uid_map: Operation not permitted`), so every call fell back to the unsandboxed path, which is what surfaced the approval dialog on every command rather than only on risky ones; the underlying downgrade is the account policy, independent of that sandbox restriction.
+
+`bin/fm-spawn.sh`'s `claude` launch template now passes `--permission-mode auto` for interactive launches instead of `--dangerously-skip-permissions`, which survives the policy downgrade.
+Every crewmate dispatched after the fix ran without a manual-approval stall.
+
+Refresh this evidence after any Claude Code upgrade by relaunching one interactive crewmate under the same managed-policy account and confirming the footer reads `auto mode on` rather than `manual mode on`.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
