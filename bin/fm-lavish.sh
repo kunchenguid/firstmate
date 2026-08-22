@@ -133,8 +133,17 @@ windows_invoke() { # <action> [artifact] [args...]
   windows_bridge=$(wslpath -w "$WINDOWS_BRIDGE") \
     || die "cannot convert the Windows bridge path"
   case "$action" in
-    doctor|setup|stop)
+    doctor|setup)
       powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$windows_bridge" "$action" "$@"
+      return $?
+      ;;
+    stop)
+      windows_args=("$@")
+      argv_json=$(perl -MJSON::PP -e 'print encode_json(\@ARGV)' -- "${windows_args[@]}") \
+        || die "cannot encode Lavish argv for Windows"
+      WSLENV="${WSLENV:+$WSLENV:}FM_LAVISH_WINDOWS_ARGV_JSON" \
+        FM_LAVISH_WINDOWS_ARGV_JSON="$argv_json" \
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$windows_bridge" "$action"
       return $?
       ;;
   esac
@@ -261,8 +270,7 @@ case "${1-}" in
   stop)
     shift
     if [ "$(runtime)" = windows ]; then
-      [ "$#" -eq 0 ] || { usage; exit 2; }
-      windows_invoke stop
+      windows_invoke stop "$@"
     else
       run_native stop "$@"
     fi

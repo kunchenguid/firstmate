@@ -187,7 +187,7 @@ test_wsl_routes_every_lifecycle_action() {
       || fail "the WSL $action route failed"
   done
   FM_LAVISH_RUNTIME_OVERRIDE=windows FM_LAVISH_TEST_LOG="$log" \
-    PATH="$fakebin:$BASE_PATH" "$ROUTER" stop \
+    PATH="$fakebin:$BASE_PATH" "$ROUTER" stop --port 4390 \
     || fail "the WSL stop route failed"
   FM_LAVISH_RUNTIME_OVERRIDE=windows FM_LAVISH_TEST_LOG="$log" \
     PATH="$fakebin:$BASE_PATH" "$ROUTER" setup \
@@ -197,6 +197,9 @@ test_wsl_routes_every_lifecycle_action() {
     assert_line_count "$log" "<$action>" 1 "the $action action did not use the Windows route exactly once"
   done
   assert_line_count "$log" '<call>' 5 "a lifecycle or setup action created a duplicate runtime invocation"
+  assert_line_count "$log" '<--port>' 1 "the WSL stop route dropped its port option"
+  assert_line_count "$log" '<4390>' 1 "the WSL stop route changed its port value"
+  assert_line_count "$log" '<structured-argv>' 4 "a lifecycle argument list bypassed structured forwarding"
   ! grep -Fq 'linux-cli-was-called' "$log" \
     || fail "a WSL lifecycle action fell back to Linux"
   pass "every supported WSL live-session lifecycle action stays on Windows"
