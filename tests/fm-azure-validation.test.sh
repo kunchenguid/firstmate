@@ -1390,6 +1390,34 @@ receipt_run_scope_contract() {
   pass "shard receipts survive resumed attempts of the same run and never cross a run boundary"
 }
 
+terminal_classifier_empty_gate_contract() {
+  local work snippet output
+  work=$(fm_test_tmproot fm-azure-validation-terminal-classifier)
+  snippet=$work/classify.sh
+
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' "RUN_LOG=\$1"
+    grep '^last_awaiting=' "$GUEST"
+    printf '%s\n' "printf '%s\\n' \"\$last_awaiting\""
+  } >"$snippet"
+  [ "$(grep -c '^last_awaiting=' "$snippet")" -eq 1 ] \
+    || fail "the exact terminal gate classifier assignment was not extracted once"
+
+  printf '%s\n' 'outcome: failed' >"$work/no-gate.log"
+  output=$(bash "$snippet" "$work/no-gate.log") \
+    || fail "a terminal run with no awaiting gate aborted before result assembly"
+  [ -z "$output" ] \
+    || fail "a terminal run with no awaiting gate invented an awaiting line"
+
+  printf '%s\n' 'status: awaiting_approval' 'outcome: failed' >"$work/gate.log"
+  output=$(bash "$snippet" "$work/gate.log") \
+    || fail "the terminal gate classifier failed on an actual awaiting gate"
+  [ "$output" = 1 ] \
+    || fail "the terminal gate classifier did not retain the exact awaiting line"
+
+  pass "terminal result classification tolerates no awaiting gate and still finds a real gate"
+}
+
 receipt_chain_close_contract() {
   local tmp work exchange head tree block
   fm_test_tmproot_into tmp fm-azure-validation-receipt-chain
@@ -2060,5 +2088,6 @@ multi_lane_queue_contract
 operator_documentation_contract
 shard_receipt_demotion_contract
 receipt_run_scope_contract
+terminal_classifier_empty_gate_contract
 receipt_chain_close_contract
 gate_answer_binding_contract

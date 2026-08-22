@@ -1139,7 +1139,7 @@ OUTCOME=failed
 # awaiting line, a still-parked run shows only gate findings and help text,
 # while an answered gate is followed by later step rows or terminal lines.
 gate_parked=0
-last_awaiting=$(grep -nEi 'status:[[:space:]]*awaiting[_ -](approval|user)' "$RUN_LOG" 2>/dev/null | tail -n 1 | cut -d: -f1)
+last_awaiting=$(grep -nEi 'status:[[:space:]]*awaiting[_ -](approval|user)' "$RUN_LOG" 2>/dev/null | tail -n 1 | cut -d: -f1 || true)
 # A refused respond attempt prints an error line while the gate stays
 # parked, so error lines cannot terminate the parked window; only later
 # step-progress rows or a rendered run outcome prove the gate was answered.
