@@ -7,6 +7,7 @@ description: >-
 user-invocable: false
 metadata:
   internal: true
+  policy-owner: diagnostic-hypothesis-table
 ---
 
 # diagnostic-reasoning
@@ -32,6 +33,14 @@ Do not collapse those facts into one label.
 A masking condition may explain why a fault appears only sometimes without being the initiating cause, and the visible symptom may be several layers downstream from both.
 
 ## Test the causal explanation
+
+Every diagnostic-reasoning investigation report must include a Hypothesis table with this conceptual header: `| hypothesis | prediction | experiment | outcome | verdict |`.
+The table must contain exactly two hypothesis rows: the leading explanation and exactly one bounded competing explanation selected to challenge it.
+Use the competing explanation to attempt disconfirmation of the leading cause, without expanding the investigation into an open-ended survey.
+The verdict column uses only these closed values: `supported`, `refuted`, and `inconclusive`.
+Do not block delivery on Markdown formatting trivia; record any table-shape limitation and continue.
+When evidence contradicts the leading explanation, record that contradiction in the verdict column rather than blocking delivery.
+Mechanical validation lives in `bin/fm-diagnostic-report.sh evaluate`.
 
 Inspect the failing path and a proven path where the intended behavior is known to work.
 Compare their inputs, state transitions, dependencies, timing, and control flow to find the earliest meaningful divergence.

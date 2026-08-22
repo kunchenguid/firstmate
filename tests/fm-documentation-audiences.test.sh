@@ -148,6 +148,26 @@ MD
   pass "local links resolve while dates, versions, commands, and incident prose remain semantically reviewed"
 }
 
+test_hypothesis_table_policy_scan_is_single_declared_owner() {
+  local out repo owner skill
+  out=$("$ROOT/bin/fm-diagnostic-report.sh" policy-scan "$ROOT" 2>&1) \
+    || fail "repository hypothesis-table policy scan failed: $out"
+  assert_contains "$out" 'policy=single-declared-owner' \
+    "policy scan must confirm the structural owner declaration on the repository root"
+  repo="$TMP_ROOT/policy-fixture"
+  owner='.agents/skills/diagnostic-reasoning/SKILL.md'
+  skill="$repo/$owner"
+  mkdir -p "$(dirname "$skill")" "$repo/.agents/extra"
+  printf '%s\n' 'policy-owner: diagnostic-hypothesis-table' > "$skill"
+  printf '%s\n' 'policy-owner: diagnostic-hypothesis-table' > "$repo/.agents/extra/duplicate.md"
+  run_expect_failure 'expected exactly one declared' \
+    "$ROOT/bin/fm-diagnostic-report.sh" policy-scan "$repo"
+  rm "$skill"
+  run_expect_failure 'declared hypothesis-table owner is missing' \
+    "$ROOT/bin/fm-diagnostic-report.sh" policy-scan "$repo"
+  pass "hypothesis-table structural ownership is enforced through the public policy scan"
+}
+
 write_pointer_fixture() {
   local repo=$1
   mkdir -p "$repo/docs" "$repo/bin"
@@ -243,6 +263,7 @@ test_duplicate_and_setup_classification_fail
 test_required_pointer_fails
 test_linktext_without_fragment_fails
 test_local_links_and_no_keyword_heuristic
+test_hypothesis_table_policy_scan_is_single_declared_owner
 test_anchored_owner_pointer_pins_collapsed_block
 test_never_touch_stub_is_pinned
 test_local_search_pointer_is_pinned

@@ -574,6 +574,8 @@ SCOUT_RULES_3_TO_7=${SCOUT_RULES_3_TO_7%$'\n'}
 IFS= read -r -d '' SCOUT_DOD_COMMON <<EOF || true
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+When the investigation follows diagnostic-reasoning, include the bounded two-row table contract from \`$FM_ROOT/.agents/skills/diagnostic-reasoning/SKILL.md\`.
+Firstmate may verify that table with \`bin/fm-diagnostic-report.sh evaluate <report>\`.
 Every cited number must be recomputed in this session with its command shown; any instrument-derived count must also state its coverage and age.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
