@@ -423,14 +423,14 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 # or is closed at the same head, and the merge poll only ever reports `merged`.
 #
 # THE ACCEPTED LIMIT. This header is its owner and states it in full below, so a reader who
-# reaches here needs to look nowhere else. DO NOT restate any of it elsewhere, in code or in
-# docs: point here instead, because two statements of one contract drift apart the moment
-# only one of them is edited. The pass-through below fires only where an owner attempts an
-# alarm, so it reaches a pane whose hash keeps changing and the non-terminal wedge window.
-# A byte-static pane on the terminal branch attempts no alarm at all once its hash is
-# recorded, so nothing calls this function there: no reminder can fire, and a WITHDRAWN
-# declaration is likewise honored only at the next alarm attempt, which such a pane never
-# makes. Those are two faces of one limit, not two separate gaps.
+# reaches here needs to look nowhere else. DO NOT add another statement of it elsewhere, in
+# code or in docs: point here instead, because two statements of one contract drift apart
+# the moment only one of them is edited. The pass-through below fires only where an owner
+# attempts an alarm, so it reaches a pane whose hash keeps changing and the non-terminal
+# wedge window. A byte-static pane on the terminal branch attempts no alarm at all once
+# its hash is recorded, so nothing calls this function there: no reminder can fire, and a
+# WITHDRAWN declaration is likewise honored only at the next alarm attempt, which such a
+# pane never makes. Those are two faces of one limit, not two separate gaps.
 #
 # The single cover is the merge poll: it stays armed and is what reports the merge, and
 # bin/fm-merge-wait.sh declare refuses outright without it. That is why the gate above
