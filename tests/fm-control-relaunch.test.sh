@@ -40,8 +40,12 @@ TASK_TMPS=()
 relaunch_cleanup() {
   local d
   for d in "${TASK_TMPS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    if [ -n "$d" ]; then
+      fm_test_prepare_tree_removal "$d"
+      rm -rf "$d"
+    fi
   done
+  fm_test_prepare_tree_removal "$TMP_ROOT"
   rm -rf "$TMP_ROOT"
 }
 trap relaunch_cleanup EXIT
@@ -191,6 +195,23 @@ routing_sha_text() {
   else
     sha256sum | awk '{print $1}'
   fi
+}
+
+write_committed_routing_receipt() {
+  local dir=$1 id=$2 task_dir="$1/home/data/$2" brief receipt generation generation_dir
+  brief="$task_dir/committed-brief.md"
+  printf 'committed brief\n' > "$brief"
+  receipt="$task_dir/committed-receipt.json"
+  jq -cn --arg brief_hash "$(routing_sha_file "$brief")" '{brief_sha256: $brief_hash}' > "$receipt"
+  generation=$(routing_sha_file "$receipt")
+  generation_dir="$task_dir/routing-generation.$generation"
+  mkdir "$generation_dir"
+  mv "$receipt" "$generation_dir/receipt.json"
+  mv "$brief" "$generation_dir/brief.md"
+  printf 'fixture\ttransaction\t%s\n' "$(routing_sha_file "$generation_dir/brief.md")" > "$generation_dir/transaction"
+  chmod 0400 "$generation_dir/receipt.json" "$generation_dir/brief.md" "$generation_dir/transaction"
+  chmod 0500 "$generation_dir"
+  printf '%s/receipt.json\n' "$generation_dir"
 }
 
 prepare_relaunch_receipt() { # <case-dir> <id> <harness> <model> <effort> [note] [authority]
@@ -392,8 +413,7 @@ test_relaunch_preserves_durable_task_metadata() {
   local dir out rc receipt
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
-  receipt="$dir/home/data/rl19/routing-decision.json"
-  printf '{}\n' > "$receipt"
+  receipt=$(write_committed_routing_receipt "$dir" rl19)
   {
     printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
     printf '%s\n' 'pr_head=feature/relaunch'
@@ -415,6 +435,23 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 routing_decision)" = "$receipt" ] \
     || fail "an unchanged relaunch must preserve its routing receipt pointer"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+test_relaunch_drops_a_symlinked_routing_receipt_pointer() {
+  local dir out rc receipt linked
+  dir=$(new_case symlinked-routing-receipt rl43)
+  add_ship_task "$dir" rl43 claude
+  receipt=$(write_committed_routing_receipt "$dir" rl43)
+  linked="$dir/home/data/rl43/routing-decision.link.json"
+  ln -s "$receipt" "$linked"
+  [ -f "$linked" ] || fail "symlinked receipt counterexample did not satisfy the legacy regular-file test"
+  printf 'routing_decision=%s\n' "$linked" >> "$dir/home/state/rl43.meta"
+
+  out=$(run_control "$dir" rl43 relaunch --note "continue without symlinked provenance"); rc=$?
+  expect_code 0 "$rc" "unchanged relaunch with a symlinked prior receipt should still relaunch"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl43 routing_decision)" ] \
+    || fail "relaunch republished a symlinked routing receipt pointer"
+  pass "fm-control relaunch: a symlinked routing receipt is not inherited"
 }
 
 test_relaunch_drops_a_missing_routing_receipt_pointer() {
@@ -658,7 +695,8 @@ test_committed_handoff_does_not_revalidate_after_exit() {
     || fail "route-changing relaunch did not point metadata at its new generation"
   assert_present "$old_receipt" "route-changing relaunch deleted its prior receipt generation"
   assert_present "$new_receipt" "control preflight did not publish the committed receipt generation"
-  assert_present "${new_receipt%.json}.consumed" "control preflight did not burn the committed generation"
+  perl "$ROOT/bin/fm-routing-fs-boundary.pl" resolve "$new_receipt" >/dev/null 2>&1 \
+    || fail "control preflight did not commit the consumed generation"
   assert_present "$dir/home/data/rl42/routing-decision.pending.json" \
     "control preflight deleted the retained pending receipt pathname"
   pass "fm-control relaunch: committed handoff publishes a new durable generation"
@@ -1586,6 +1624,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_drops_a_missing_routing_receipt_pointer
+test_relaunch_drops_a_symlinked_routing_receipt_pointer
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

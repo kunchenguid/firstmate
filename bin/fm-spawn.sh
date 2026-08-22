@@ -719,10 +719,7 @@ parse_orca_worktree_result() {
 spawn_abort_cleanup() {
   local status=$?
   if [ -n "${FM_ROUTING_PREPARED_DIR:-}" ]; then
-    fm_routing_decision_discard_prepared || {
-      echo "warning: could not roll back the prepared routing receipt for $ID" >&2
-      status=1
-    }
+    fm_routing_decision_discard_prepared
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
@@ -1544,8 +1541,8 @@ if [ "$ROUTING_DECISION_REQUIRED" -eq 0 ] \
   && [ "$HARNESS" = "$RELAUNCH_PRIOR_HARNESS" ] \
   && [ "${MODEL:-default}" = "$RELAUNCH_PRIOR_MODEL" ] \
   && [ "${EFFORT:-default}" = "$RELAUNCH_PRIOR_EFFORT" ] \
-  && [ -f "$RELAUNCH_PRIOR_ROUTING_DECISION" ]; then
-  FM_ROUTING_DECISION_FINAL=$RELAUNCH_PRIOR_ROUTING_DECISION
+  && fm_routing_decision_resolve_committed "$RELAUNCH_PRIOR_ROUTING_DECISION" "$DATA/$ID"; then
+  :
 fi
 
 # Routing-receipt enforcement is a source-code invariant for every fresh
@@ -1978,7 +1975,7 @@ fi
 if [ -n "${KIMI_BIN:-}" ] && [ "$KIND" != secondmate ]; then
   "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
     if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
-      fm_routing_decision_discard_prepared || true
+      fm_routing_decision_discard_prepared
     fi
     echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
     exit 1

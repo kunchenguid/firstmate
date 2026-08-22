@@ -129,7 +129,7 @@ set -u
 target=${!#}
 receipt_target=
 if [ "${2:-}" = publish ]; then
-  receipt_target="$3/routing-decision.$target.json"
+  receipt_target="$3/routing-generation.$target/receipt.json"
 fi
 for candidate in "$@"; do
   case "$candidate" in
@@ -694,6 +694,17 @@ assert_preflight_kept_retryable_receipt() {
   [ ! -s "$home/worktree.log" ] || fail "preflight refusal leased a worktree"
 }
 
+assert_routing_snapshots_retired() {
+  local home=$1 id=$2 snapshot mode found=0
+  for snapshot in "$home/data/$id"/.routing-decision.validate.*; do
+    [ -d "$snapshot" ] || continue
+    found=1
+    mode=$(stat -f %Lp "$snapshot" 2>/dev/null || stat -c %a "$snapshot" 2>/dev/null) || return 1
+    [ "$mode" = 0 ] || fail "validation snapshot residue remained active with mode $mode"
+  done
+  [ "$found" -eq 1 ] || fail "validation snapshot retirement left no observable staged residue"
+}
+
 test_project_preflight_keeps_receipt_retryable() {
   local rec id out status missing_project
   id=profile-project-preflight-z12b1
@@ -831,8 +842,7 @@ test_launch_uses_validated_brief_snapshot_after_source_replacement() {
     || fail "verified harness did not receive every receipt-bound launch-input byte"
   assert_not_contains "$launch" "$routing_brief" \
     "emitted launch reopened the mutable validated brief pathname"
-  [ -z "$(find "$HOME_DIR/data/$id" -maxdepth 1 -type d -name '.routing-decision.validate.*' -print -quit)" ] \
-    || fail "validation snapshot directory survived successful persistence"
+  assert_routing_snapshots_retired "$HOME_DIR" "$id"
   pass "launch verifies the persisted brief bytes after source replacement"
 }
 
@@ -855,8 +865,7 @@ test_launch_refuses_replaced_validated_brief_target() {
     "brief snapshot replacement lacked its routing refusal diagnostic"
   assert_spawn_refused_before_side_effects "$HOME_DIR" "$id" "$LAUNCH_LOG"
   [ ! -s "$HOME_DIR/worktree.log" ] || fail "brief target replacement leased a worktree"
-  [ -z "$(find "$HOME_DIR/data/$id" -maxdepth 1 -type d -name '.routing-decision.validate.*' -print -quit)" ] \
-    || fail "validation snapshot directory survived guarded publication"
+  assert_routing_snapshots_retired "$HOME_DIR" "$id"
   pass "spawn refuses a substituted brief snapshot before side effects"
 }
 
@@ -878,7 +887,7 @@ test_late_commit_failure_keeps_receipt_retryable() {
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "retry after late receipt publication failure should succeed"
-  routing_brief_count=$(find "$HOME_DIR/data/$id" -maxdepth 1 -type f -name 'routing-brief.*.md' | wc -l | tr -d ' ')
+  routing_brief_count=$(find "$HOME_DIR/data/$id" -maxdepth 1 -type d -name 'routing-generation.*' | wc -l | tr -d ' ')
   [ "$routing_brief_count" -eq 1 ] || fail "late commit retry left $routing_brief_count durable brief links"
   routing_brief=$(sed -n 's/^routing_brief=//p' "$HOME_DIR/state/$id.meta")
   assert_present "$routing_brief" "late commit retry left its durable brief link orphaned"

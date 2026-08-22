@@ -327,7 +327,7 @@ It is not enabled by `config/crew-dispatch.json`, an environment variable, or a 
 The authoritative configuration input is always `<FM_HOME>/config/crew-dispatch.json`, independently of `FM_CONFIG_OVERRIDE`.
 The receipt explicitly attests whether that canonical file is present or absent, so relocating configuration or removing a file changes the attested input and never removes the requirement.
 Fresh secondmate launches retain their separate provisioning, registry, host, and harness contract and do not consume this receipt.
-A flag-free same-route relaunch also stays exempt and preserves an existing regular-file `routing_decision` pointer in its republished task metadata.
+A flag-free same-route relaunch also stays exempt and preserves an existing non-symlink regular `routing_decision` pointer only when the committed-generation resolver accepts it.
 Supplying any routing-axis flag is a fresh routing decision even when the supplied value equals the recorded value.
 
 Each covered task directory supplies `data/<task-id>/routing-intent.json` and `data/<task-id>/routing-decision.pending.json`.
@@ -352,10 +352,11 @@ A multi-candidate route also supplies the exact one-intake `quota-axi --json` ob
 Every string is non-empty, `brief_sha256` is the SHA-256 of the exact current `data/<task-id>/brief.md` bytes, and `forbidden_effects` is a non-empty string array.
 The receipt binds the SHA-256 of this exact intent file rather than trusting an unattached hash.
 The validator recomputes the brief hash against a private snapshot before accepting the intent, so replacing the brief before that snapshot returns `BRIEF_HASH_MISMATCH`.
-On acceptance, no-follow no-clobber publication binds the exact validated bytes to `data/<task-id>/routing-brief.<generation>.md` and the validated receipt to `data/<task-id>/routing-decision.<generation>.json`, where `<generation>` is the SHA-256 of the validated receipt bytes and is shared by both paths.
-Canonical input snapshotting, generation publication, consumption, and transaction cleanup use one identity-bound no-follow filesystem boundary, so no operation acts on a pathname substitute after checking another identity.
-Receipt, brief, and consumption destinations are preflighted and committed in one transaction, and any failure after one exclusive creation quarantines and removes only identities created by that attempt, leaving either the complete consumed generation or none of it.
-Publication never overwrites or deletes an earlier generation: an existing target is accepted only when it is a single-link 0400 regular artifact with byte-identical content, while a writable, multiply linked, non-regular, or same-generation different-byte collision refuses.
+On acceptance, no-follow no-clobber publication binds the exact validated bytes to `data/<task-id>/routing-generation.<generation>/brief.md` and the validated receipt to `data/<task-id>/routing-generation.<generation>/receipt.json`, where `<generation>` is the SHA-256 of the validated receipt bytes.
+The generation directory is staged at mode 0700 with single-link 0400 artifacts and a transaction manifest that binds the validated brief hash, and one POSIX `fchmod` on its already-held directory descriptor changes it to mode 0500 as the atomic commit point supported by macOS and Linux.
+Readers resolve receipt and brief paths only through that committed parent mode and revalidate the receipt generation plus brief hash, so mode-0700 or mode-000 staging residue is inert even when cleanup cannot safely remove it.
+Publication never overwrites or deletes an earlier committed generation, byte-identical mode-0700 staging from the same prepared transaction is idempotent, and every already committed generation refuses reuse.
+Cleanup retires its already-held private validation snapshot with descriptor `fchmod` and never renames, unlinks, or recursively deletes a pathname after checking it; a failure is reported as staging residue rather than carrying publication correctness.
 `fm-spawn.sh` synchronously reads the brief path once, verifies those captured bytes against `brief_sha256` before any worktree lease, endpoint creation, launch input, or metadata publication, and retains every typed launch-input byte, including trailing newlines, through a result-variable API shared by every verified and raw adapter consumer.
 
 `routing-decision.pending.json` schema version 1 has exactly this shape:
@@ -431,12 +432,12 @@ The supervisor home and local host are represented by SHA-256 identities and are
 During ordinary spawn preflight, `fm-spawn.sh` validates the pending receipt and prepares immutable launch input without consuming its generation, so a project, delivery, credential, backend, or adapter refusal leaves the same receipt retryable.
 The control-plane preflight for a route-changing relaunch is the exception: it commits the receipt before any checkpoint journal or agent exit, then passes the exact committed paths and launch-input bytes through the owning lifecycle transaction so the launch half cannot perform a second routing validation after effects.
 That commit applies the same five-minute acceptance check without widening it; once accepted, the receipt is not re-aged during the bounded control handoff, and it remains consumed even if a later non-routing checkpoint, stop, or launch operation fails.
-Routing refusals always precede every side effect; non-routing preflight failures may occur after receipt consumption and burn the one-shot receipt, including Muse credential or Kimi hook installation failure on a committed control handoff.
+Routing refusals always precede every side effect; non-routing preflight failures may occur after receipt consumption and burn the one-shot receipt, including Kimi hook installation after an ordinary or control-handoff commit and Muse credential failure after a committed control handoff.
 For an ordinary spawn, after fallible preflight succeeds, `fm-spawn.sh` exclusively publishes and consumes the generation at the effect boundary, records its exact artifact paths in task metadata, and continues into the established spawn path in the same invocation.
-The pending pathname is retained so routing lifecycle cleanup never deletes an untrusted raced replacement; a generation is one-shot when it is recorded as the current agent's receipt or burned by the control-plane preflight, so a later fresh dispatch attempt requires different receipt bytes and therefore a fresh generation.
-Route-changing relaunches publish a new generation without overwriting prior receipt or brief artifacts, while flag-free same-route relaunches preserve the existing regular-file pointer.
+The pending pathname is retained so routing lifecycle cleanup never deletes an untrusted raced replacement; a generation becomes one-shot at its atomic commit, so a later fresh dispatch attempt requires different receipt bytes and therefore a fresh generation.
+Route-changing relaunches publish a new generation without overwriting prior receipt or brief artifacts, while flag-free same-route relaunches preserve only an existing non-symlink regular receipt that the committed-generation resolver accepts.
 Any receipt refusal is terminal and occurs before a worktree lease, worker endpoint, task metadata, pane input, or model execution.
-An existing generation directory, regular or dangling symlink, or other non-regular target is rejected before publication.
+An existing generation symlink, a directory with the wrong mode or transaction identity, or a malformed staged artifact is rejected before commitment.
 
 ## Toolchain
 

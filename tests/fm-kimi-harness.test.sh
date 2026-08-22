@@ -25,6 +25,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 cleanup_kimi_harness() {
   [ -z "$KIMI_RUNTIME_TASK_TMP" ] || rm -rf "$KIMI_RUNTIME_TASK_TMP"
+  fm_test_prepare_tree_removal "$TMP_ROOT"
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_kimi_harness EXIT
@@ -473,8 +474,8 @@ test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation() {
   pass "fm-spawn: unsafe Kimi global config refuses before pane creation"
 }
 
-test_kimi_install_failure_restores_pending_receipt() {
-  local id rec out rc decision brief
+test_kimi_install_failure_burns_one_generation() {
+  local id rec out rc decision brief retry_decision
   id=kimi-install-rollback-z9
   rec=$(make_spawn_case install-rollback "$id")
   read_spawn_record "$rec"
@@ -488,16 +489,21 @@ test_kimi_install_failure_restores_pending_receipt() {
     "Kimi hook installation failure burned the retryable pending receipt"
   decision=$(fm_test_routing_decision_path "$HOME_DIR" "$id")
   brief=$(fm_test_routing_brief_path "$HOME_DIR" "$id")
-  assert_absent "$decision" "Kimi hook installation failure retained an uncommitted receipt generation"
-  assert_absent "$brief" "Kimi hook installation failure retained an uncommitted brief generation"
+  assert_present "$decision" "Kimi hook installation failure lost its committed receipt generation"
+  assert_present "$brief" "Kimi hook installation failure lost its committed brief generation"
   if grep -Eq '(^| )new-(session|window)( |$)' "$CASE_DIR/tmux-calls.log"; then
     fail "Kimi hook installation failure created a tmux container or pane"
   fi
   rm "$HOME_DIR/.kimi-code/fm-turn-end.d"
+  printf 'fresh retry brief\n' >> "$HOME_DIR/data/$id/brief.md"
   rc=0
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
-  expect_code 0 "$rc" "Kimi retry should publish a fresh transaction"$'\n'"$out"
-  pass "fm-spawn: Kimi hook failure rolls back its routing transaction"
+  expect_code 0 "$rc" "Kimi retry with a fresh receipt should succeed"$'\n'"$out"
+  retry_decision=$(fm_test_routing_decision_path "$HOME_DIR" "$id")
+  [ "$retry_decision" != "$decision" ] || fail "Kimi retry reused its burned routing generation"
+  assert_present "$decision" "Kimi retry removed the prior committed generation"
+  assert_present "$retry_decision" "Kimi retry did not commit its fresh generation"
+  pass "fm-spawn: Kimi hook failure burns one generation and a fresh receipt retries"
 }
 
 test_kimi_secondmate_skips_global_hook_installation() {
@@ -774,7 +780,7 @@ test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
-test_kimi_install_failure_restores_pending_receipt
+test_kimi_install_failure_burns_one_generation
 test_kimi_secondmate_skips_global_hook_installation
 test_kimi_teardown_removes_pointer_and_registry_token
 test_kimi_falls_back_to_expanded_home_binary

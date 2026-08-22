@@ -94,6 +94,17 @@ fm_routing_fs_boundary() {
   perl "$(dirname "${BASH_SOURCE[0]}")/fm-routing-fs-boundary.pl" "$@"
 }
 
+fm_routing_decision_resolve_committed() {
+  local receipt=$1 task_dir=$2 result resolved brief
+  [ "$(dirname "$(dirname "$receipt")")" = "$task_dir" ] || return 1
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  result=$(fm_routing_fs_boundary resolve "$receipt" 2>/dev/null) || return 1
+  IFS=$'\t' read -r resolved brief <<<"$result"
+  [ "$resolved" = "$receipt" ] && [ -f "$brief" ] && [ ! -L "$brief" ] || return 1
+  FM_ROUTING_DECISION_FINAL=$resolved
+  FM_ROUTING_BRIEF_FINAL=$brief
+}
+
 FM_ROUTING_WORDS=()
 
 fm_routing_raw_ascii_text() { # <command>
@@ -831,8 +842,8 @@ fm_routing_decision_persist_prepared() {
   task_dir="$data/$id"
   pending="$task_dir/routing-decision.pending.json"
   generation=$FM_ROUTING_PREPARED_GENERATION
-  final="$(dirname "$source_pending")/routing-decision.$generation.json"
-  brief_final="$(dirname "$source_pending")/routing-brief.$generation.md"
+  final="$(dirname "$source_pending")/routing-generation.$generation/receipt.json"
+  brief_final="$(dirname "$source_pending")/routing-generation.$generation/brief.md"
   generated_at=$(jq -r '.generated_at' "$pending")
   fm_routing_timestamp_fresh "$generated_at" "STALE" || return 1
   meta="$home/state/$id.meta"
@@ -863,15 +874,7 @@ fm_routing_decision_persist_prepared() {
 }
 
 fm_routing_decision_consume_prepared() {
-  local result
   [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 1 ] || return 1
-  [ "$FM_ROUTING_PREPARED_CONSUMED" -eq 0 ] || return 0
-  result=$(fm_routing_fs_boundary consume \
-    "$(dirname "$FM_ROUTING_DECISION_FINAL")" "$FM_ROUTING_PREPARED_DIR" \
-    "$FM_ROUTING_PREPARED_DIR_DEV" "$FM_ROUTING_PREPARED_DIR_INO" 2>&1) || {
-    fm_routing_refuse "PERSISTENCE_REFUSED" "$result"
-    return 1
-  }
   FM_ROUTING_PREPARED_CONSUMED=1
 }
 
@@ -882,13 +885,11 @@ fm_routing_decision_cleanup_prepared() {
 }
 
 fm_routing_decision_discard_prepared() {
-  [ -n "$FM_ROUTING_PREPARED_DIR" ] || return 0
-  if [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 1 ]; then
-    fm_routing_fs_boundary abort "$(dirname "$FM_ROUTING_DECISION_FINAL")" \
-      "$FM_ROUTING_PREPARED_DIR" "$FM_ROUTING_PREPARED_DIR_DEV" "$FM_ROUTING_PREPARED_DIR_INO" \
-      || return 1
+  local cleanup_error
+  if [ -n "$FM_ROUTING_PREPARED_DIR" ]; then
+    cleanup_error=$(fm_routing_decision_cleanup_prepared 2>&1) ||
+      echo "warning: routing validation staging residue remains: $cleanup_error" >&2
   fi
-  fm_routing_decision_cleanup_prepared || return 1
   FM_ROUTING_PREPARED_DIR=
   FM_ROUTING_PREPARED_DATA=
   FM_ROUTING_PREPARED_ID=
@@ -910,7 +911,9 @@ fm_routing_decision_discard_prepared() {
 
 fm_routing_decision_seal_prepared() {
   [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 1 ] || return 1
-  fm_routing_decision_cleanup_prepared || return 1
+  local cleanup_error
+  cleanup_error=$(fm_routing_decision_cleanup_prepared 2>&1) ||
+    echo "warning: routing validation staging residue remains: $cleanup_error" >&2
   FM_ROUTING_PREPARED_DIR=
   FM_ROUTING_PREPARED_DATA=
   FM_ROUTING_PREPARED_ID=
@@ -971,8 +974,7 @@ fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-i
   status=$?
   if [ "$status" -ne 0 ]; then
     snapshot_error=$snapshot_result
-    fm_routing_decision_cleanup_prepared >/dev/null 2>&1 || true
-    FM_ROUTING_PREPARED_DIR=
+    fm_routing_decision_discard_prepared
     case "$snapshot_error" in
       *routing-decision.pending.json*) fm_routing_refuse "missing" "$snapshot_error" ;;
       *routing-intent.json*) fm_routing_refuse "missing" "$snapshot_error" ;;
@@ -990,8 +992,7 @@ fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-i
     "${10:-}" "${11:-}" "$source_pending" "$snapshot_dir"
   status=$?
   if [ "$status" -ne 0 ]; then
-    fm_routing_decision_cleanup_prepared >/dev/null 2>&1 || true
-    FM_ROUTING_PREPARED_DIR=
+    fm_routing_decision_discard_prepared
     return "$status"
   fi
   FM_ROUTING_PREPARED_DATA=$snapshot_data
@@ -1011,7 +1012,7 @@ fm_routing_decision_validate_and_persist() { # <data> <canonical-config> <task-i
   if [ "$status" -eq 0 ]; then
     fm_routing_decision_seal_prepared || status=1
   else
-    fm_routing_decision_discard_prepared || true
+    fm_routing_decision_discard_prepared
   fi
   return "$status"
 }

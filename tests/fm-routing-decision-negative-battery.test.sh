@@ -16,7 +16,6 @@ POST_SNAPSHOT_CONFIG_FILTER=
 POST_PENDING_DIRECTORY=0
 POST_PENDING_RECREATE=0
 POST_CONFIG_SYMLINK=0
-POST_CONSUME_REPLACE=0
 POST_CLEANUP_REPLACE=0
 
 # One authority guard is defense in depth against the receipt changing after
@@ -55,7 +54,7 @@ jq() {
 }
 
 perl() {
-  local operation=${2:-} status final result generation brief
+  local operation=${2:-} status result generation stage receipt brief transaction
   if [ "$operation" = snapshot ] && [ "$POST_CONFIG_SYMLINK" -eq 1 ]; then
     mv "$HOME_DIR/config/crew-dispatch.json" "$HOME_DIR/config/crew-dispatch.original.json" || return 1
     ln -s "$LAB/relocated-config/crew-dispatch.json" "$HOME_DIR/config/crew-dispatch.json" || return 1
@@ -82,52 +81,51 @@ perl() {
     printf 'cleanup substitute\n' > "$3/sentinel" || return 1
     POST_CLEANUP_REPLACE=0
   fi
-  result=$("$REAL_PERL" "$@" 2>&1)
-  status=$?
-  if [ "$operation" = publish ] && [ "$status" -eq 0 ]; then
-    generation=${result%%$'\t'*}
-    final="$3/routing-decision.$generation.json"
-    brief="$3/routing-brief.$generation.md"
-    if [ "${FM_TEST_ROUTING_FS_COLLIDE_BEFORE:-}" = brief ]; then
-      rm "$brief" || return 1
-      printf 'collision\n' > "$brief" || return 1
-      chmod 0400 "$brief" || return 1
-      "$REAL_PERL" "$1" abort "$3" "$4" "$5" "$6" >/dev/null 2>&1 || true
-      printf 'CREATE:routing-brief\n' >&2
-      return 1
-    fi
-    if [ "${FM_TEST_ROUTING_FS_ORDER:-}" = brief-first ] \
-      && [ "${FM_TEST_ROUTING_FS_COLLIDE_BEFORE:-}" = receipt ]; then
-      rm "$final" || return 1
-      printf 'collision\n' > "$final" || return 1
-      chmod 0400 "$final" || return 1
-      "$REAL_PERL" "$1" abort "$3" "$4" "$5" "$6" >/dev/null 2>&1 || true
-      printf 'CREATE:routing-decision\n' >&2
-      return 1
-    fi
-    if [ "${FM_TEST_ROUTING_FS_FAIL_AFTER:-}" = receipt ]; then
-      "$REAL_PERL" "$1" abort "$3" "$4" "$5" "$6" >/dev/null 2>&1 || true
-      printf 'TEST_FAILURE:receipt\n' >&2
-      return 1
-    fi
-    if [ "${FM_TEST_ROUTING_FS_REPLACE_AFTER:-}" = receipt ]; then
-      rm "$final" || return 1
-      printf 'substitute\n' > "$final" || return 1
-      chmod 0400 "$final" || return 1
-      "$REAL_PERL" "$1" abort "$3" "$4" "$5" "$6" >/dev/null 2>&1 || true
-      printf 'ROLLBACK_IDENTITY:routing-decision\n' >&2
-      return 1
-    fi
-    if [ "$POST_CONSUME_REPLACE" -eq 1 ]; then
-      rm "$final" || return 1
-      printf 'consume substitute\n' > "$final" || return 1
-      chmod 0400 "$final" || return 1
-      "$REAL_PERL" "$1" abort "$3" "$4" "$5" "$6" >/dev/null 2>&1 || true
-      POST_CONSUME_REPLACE=0
-      printf 'FINAL_IDENTITY\n' >&2
-      return 1
+  if [ "$operation" = publish ]; then
+    generation=${10}
+    stage="$3/routing-generation.$generation"
+    receipt="$stage/receipt.json"
+    brief="$stage/brief.md"
+    transaction="$stage/transaction"
+    if [ -n "${FM_TEST_ROUTING_FS_COLLIDE_BEFORE:-}" ] \
+      || [ -n "${FM_TEST_ROUTING_FS_FAIL_AFTER:-}" ] \
+      || [ -n "${FM_TEST_ROUTING_FS_PERMISSION_AFTER:-}" ] \
+      || [ -n "${FM_TEST_ROUTING_FS_REPLACE_AFTER:-}" ]; then
+      mkdir "$stage" || return 1
+      chmod 0700 "$stage" || return 1
+      printf '%s\t%s\t%s\n' "$5" "$6" "$(sha_file "$4/data/$9/brief.md")" > "$transaction" || return 1
+      chmod 0400 "$transaction" || return 1
+      case "${FM_TEST_ROUTING_FS_COLLIDE_BEFORE:-}" in
+        brief)
+          cp "$4/data/$9/routing-decision.pending.json" "$receipt" || return 1
+          printf 'collision\n' > "$brief" || return 1
+          ;;
+        receipt)
+          printf 'collision\n' > "$receipt" || return 1
+          cp "$4/data/$9/brief.md" "$brief" || return 1
+          ;;
+        *)
+          cp "$4/data/$9/routing-decision.pending.json" "$receipt" || return 1
+          if [ "${FM_TEST_ROUTING_FS_FAIL_AFTER:-}" = receipt ]; then
+            mkdir "$brief" || return 1
+          elif [ "${FM_TEST_ROUTING_FS_PERMISSION_AFTER:-}" = receipt ]; then
+            :
+          elif [ "${FM_TEST_ROUTING_FS_REPLACE_AFTER:-}" = receipt ]; then
+            mv "$receipt" "$stage/receipt.validated.json" || return 1
+            ln -s "$stage/receipt.validated.json" "$receipt" || return 1
+            cp "$4/data/$9/brief.md" "$brief" || return 1
+          fi
+          ;;
+      esac
+      chmod 0400 "$receipt" || return 1
+      [ ! -f "$brief" ] || chmod 0400 "$brief" || return 1
+      if [ "${FM_TEST_ROUTING_FS_PERMISSION_AFTER:-}" = receipt ]; then
+        chmod 0500 "$stage" || return 1
+      fi
     fi
   fi
+  result=$("$REAL_PERL" "$@" 2>&1)
+  status=$?
   printf '%s\n' "$result"
   return "$status"
 }
@@ -374,8 +372,17 @@ future_timestamp() {
     || date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ
 }
 
+restore_fixture_permissions() {
+  local fixture_dir
+  for fixture_dir in "$TASK_DIR"/.routing-decision.validate.* "$TASK_DIR"/routing-generation.*; do
+    [ -d "$fixture_dir" ] && [ ! -L "$fixture_dir" ] || continue
+    chmod 0700 "$fixture_dir" 2>/dev/null || true
+  done
+}
+
 write_fixture() {
   local brief_hash intent_hash config_hash home_hash host_hash now
+  restore_fixture_permissions
   rm -rf "$LAB"
   mkdir -p "$TASK_DIR" "$HOME_DIR/config" "$HOME_DIR/state"
   printf 'exact brief bytes for t1\n' > "$TASK_DIR/brief.md"
@@ -443,10 +450,9 @@ write_fixture() {
   POST_PENDING_DIRECTORY=0
   POST_PENDING_RECREATE=0
   POST_CONFIG_SYMLINK=0
-  POST_CONSUME_REPLACE=0
   POST_CLEANUP_REPLACE=0
-  unset FM_TEST_ROUTING_FS_ORDER FM_TEST_ROUTING_FS_COLLIDE_BEFORE
-  unset FM_TEST_ROUTING_FS_FAIL_AFTER FM_TEST_ROUTING_FS_REPLACE_AFTER
+  unset FM_TEST_ROUTING_FS_COLLIDE_BEFORE FM_TEST_ROUTING_FS_FAIL_AFTER
+  unset FM_TEST_ROUTING_FS_PERMISSION_AFTER FM_TEST_ROUTING_FS_REPLACE_AFTER
   RUN_CWD=
 }
 
@@ -666,41 +672,39 @@ setup_singleton_quota() {
     | .quota = {source: "quota-axi --json", observed_at: .generated_at, snapshot_sha256: ("0" * 64)}'
 }
 receipt_generation() { sha_file "$TASK_DIR/routing-decision.pending.json"; }
-receipt_final() { printf '%s/routing-decision.%s.json\n' "$TASK_DIR" "$(receipt_generation)"; }
-brief_final() { printf '%s/routing-brief.%s.md\n' "$TASK_DIR" "$(receipt_generation)"; }
-setup_final_directory() { PREEXISTING_FINAL=1; mkdir "$(receipt_final)"; }
+generation_dir() { printf '%s/routing-generation.%s\n' "$TASK_DIR" "$(receipt_generation)"; }
+receipt_final() { printf '%s/receipt.json\n' "$(generation_dir)"; }
+brief_final() { printf '%s/brief.md\n' "$(generation_dir)"; }
+setup_final_directory() { PREEXISTING_FINAL=1; mkdir "$(generation_dir)"; chmod 0755 "$(generation_dir)"; }
 setup_final_symlink() {
   PREEXISTING_FINAL=1
-  printf '{}\n' > "$TASK_DIR/attacker-target.json"
-  ln -s "$TASK_DIR/attacker-target.json" "$(receipt_final)"
+  mkdir "$TASK_DIR/attacker-target"
+  ln -s "$TASK_DIR/attacker-target" "$(generation_dir)"
 }
 setup_final_directory_after_check() {
   PREEXISTING_FINAL=1
-  mkdir "$(receipt_final)"
+  mkdir "$(generation_dir)"
+  chmod 0755 "$(generation_dir)"
 }
 setup_brief_link_directory_race() {
   PREEXISTING_FINAL=1
   mkdir -p "$LAB/external-brief-target"
   printf 'external brief sentinel\n' > "$LAB/external-brief-target/sentinel"
-  ln -s "$LAB/external-brief-target" "$(brief_final)"
+  export FM_TEST_ROUTING_FS_REPLACE_AFTER=receipt
 }
 setup_final_link_directory_race() {
   PREEXISTING_FINAL=1
   mkdir -p "$LAB/external-receipt-target"
   printf 'external receipt sentinel\n' > "$LAB/external-receipt-target/routing-decision.pending.json"
-  ln -s "$LAB/external-receipt-target" "$(receipt_final)"
+  export FM_TEST_ROUTING_FS_REPLACE_AFTER=receipt
 }
 assert_brief_link_directory_race() {
-  [ -L "$(brief_final)" ] \
-    || fail "brief destination race did not install its symlink-to-directory counterexample"
   printf 'external brief sentinel\n' | cmp -s - "$LAB/external-brief-target/sentinel" \
     || fail "brief publication race changed the unrelated external file"
   assert_absent "$LAB/external-brief-target/brief.md" \
     "brief publication race created a file through the directory symlink"
 }
 assert_final_link_directory_race() {
-  [ -L "$(receipt_final)" ] \
-    || fail "receipt destination race did not install its symlink-to-directory counterexample"
   printf 'external receipt sentinel\n' | cmp -s - "$LAB/external-receipt-target/routing-decision.pending.json" \
     || fail "receipt publication race changed or deleted the unrelated external file"
 }
@@ -716,7 +720,7 @@ setup_pending_replaced_after_snapshot() {
 setup_pending_directory_after_snapshot() { POST_PENDING_DIRECTORY=1; }
 setup_pending_mutated_in_place_after_compare() {
   PREEXISTING_FINAL=1
-  printf '{"collision":true}\n' > "$(receipt_final)"
+  export FM_TEST_ROUTING_FS_COLLIDE_BEFORE=receipt
 }
 setup_pending_recreated_after_relocation() {
   POST_PENDING_RECREATE=1
@@ -732,19 +736,17 @@ setup_receipt_then_brief_collision() {
 }
 setup_brief_then_receipt_collision() {
   PREEXISTING_FINAL=1
-  export FM_TEST_ROUTING_FS_ORDER=brief-first
   export FM_TEST_ROUTING_FS_COLLIDE_BEFORE=receipt
 }
 setup_permission_failure_after_receipt() {
+  export FM_TEST_ROUTING_FS_PERMISSION_AFTER=receipt
+}
+setup_stranded_staging_residue() {
   export FM_TEST_ROUTING_FS_FAIL_AFTER=receipt
 }
 setup_identity_collision_after_receipt() {
   PREEXISTING_FINAL=1
   export FM_TEST_ROUTING_FS_REPLACE_AFTER=receipt
-}
-setup_final_replaced_before_consume() {
-  PREEXISTING_FINAL=1
-  POST_CONSUME_REPLACE=1
 }
 setup_prepared_directory_replaced_before_cleanup() {
   export FM_TEST_ROUTING_FS_FAIL_AFTER=receipt
@@ -752,13 +754,16 @@ setup_prepared_directory_replaced_before_cleanup() {
 }
 setup_preexisting_writable_brief() {
   PREEXISTING_FINAL=1
-  printf 'different brief bytes\n' > "$(brief_final)"
+  export FM_TEST_ROUTING_FS_COLLIDE_BEFORE=brief
 }
 setup_preexisting_hardlinked_brief() {
   PREEXISTING_FINAL=1
+  mkdir "$(generation_dir)"
   cp "$TASK_DIR/routing-decision.pending.json" "$(receipt_final)"
-  cp "$TASK_DIR/routing-decision.pending.json" "${TASK_DIR}/routing-decision.$(receipt_generation).consumed"
-  chmod 0400 "$(receipt_final)" "${TASK_DIR}/routing-decision.$(receipt_generation).consumed"
+  cp "$TASK_DIR/brief.md" "$(brief_final)"
+  printf 'prior\ttransaction\t%s\n' "$(sha_file "$(brief_final)")" > "$(generation_dir)/transaction"
+  chmod 0400 "$(receipt_final)" "$(brief_final)" "$(generation_dir)/transaction"
+  chmod 0500 "$(generation_dir)"
 }
 
 assert_pending_directory_preserved() {
@@ -782,29 +787,33 @@ assert_config_symlink_not_followed() {
     || fail "config snapshot refusal changed relocated configuration bytes"
 }
 assert_receipt_then_brief_collision_transactional() {
-  assert_absent "$(receipt_final)" "brief collision left the attempt-created receipt"
   printf 'collision\n' | cmp -s - "$(brief_final)" \
     || fail "brief collision changed or deleted the conflicting target"
+  if "$REAL_PERL" "$ROOT/bin/fm-routing-fs-boundary.pl" resolve "$(receipt_final)" >/dev/null 2>&1; then
+    fail "brief collision became a resolvable routing receipt"
+  fi
 }
 assert_brief_then_receipt_collision_transactional() {
-  assert_absent "$(brief_final)" "receipt collision left the attempt-created brief"
   printf 'collision\n' | cmp -s - "$(receipt_final)" \
     || fail "receipt collision changed or deleted the conflicting target"
+  if "$REAL_PERL" "$ROOT/bin/fm-routing-fs-boundary.pl" resolve "$(receipt_final)" >/dev/null 2>&1; then
+    fail "receipt collision became a resolvable routing receipt"
+  fi
 }
 assert_permission_failure_transactional() {
-  assert_absent "$(receipt_final)" "permission failure left the attempt-created receipt"
-  assert_absent "$(brief_final)" "permission failure left the attempt-created brief"
+  assert_present "$(receipt_final)" "permission failure did not leave its inert staged receipt counterexample"
+  if "$REAL_PERL" "$ROOT/bin/fm-routing-fs-boundary.pl" resolve "$(receipt_final)" >/dev/null 2>&1; then
+    fail "permission failure staging residue became a resolvable routing receipt"
+  fi
 }
 assert_identity_collision_preserved() {
-  printf 'substitute\n' | cmp -s - "$(receipt_final)" \
-    || fail "identity collision changed or deleted the replacement receipt"
-  assert_absent "$(brief_final)" "identity collision left the attempt-created brief"
+  [ -L "$(receipt_final)" ] || fail "identity substitution did not leave its symlink counterexample"
+  if "$REAL_PERL" "$ROOT/bin/fm-routing-fs-boundary.pl" resolve "$(receipt_final)" >/dev/null 2>&1; then
+    fail "identity substitution became a resolvable routing receipt"
+  fi
 }
 assert_consume_replacement_preserved() {
-  printf 'consume substitute\n' | cmp -s - "$(receipt_final)" \
-    || fail "consume refusal changed or deleted the replacement receipt"
-  assert_absent "${TASK_DIR}/routing-decision.$(receipt_generation).consumed" \
-    "consume refusal created a marker for replacement bytes"
+  assert_permission_failure_transactional
 }
 assert_cleanup_replacement_preserved() {
   printf 'cleanup substitute\n' | cmp -s - "$TASK_DIR"/.routing-decision.validate.*/sentinel \
@@ -1208,45 +1217,60 @@ exercise_negative "61 pending receipt replaced after snapshot" PERSISTENCE_REFUS
 exercise_negative "62 pending receipt directory after snapshot" PERSISTENCE_REFUSED setup_pending_directory_after_snapshot \
   "OPEN_REGULAR:routing-decision.pending.json" assert_pending_directory_preserved
 exercise_negative "63 final directory raced after target check" PERSISTENCE_REFUSED setup_final_directory_after_check \
-  "OPEN_REGULAR:routing-decision"
+  "STAGING_COLLISION:routing-generation"
 exercise_negative "64 brief target raced to directory symlink" PERSISTENCE_REFUSED setup_brief_link_directory_race \
-  "OPEN_REGULAR:routing-brief" assert_brief_link_directory_race
+  "OPEN_REGULAR:receipt.json" assert_brief_link_directory_race
 exercise_negative "65 receipt target raced to directory symlink" PERSISTENCE_REFUSED setup_final_link_directory_race \
-  "OPEN_REGULAR:routing-decision" assert_final_link_directory_race
+  "OPEN_REGULAR:receipt.json" assert_final_link_directory_race
 exercise_negative "66 same-generation receipt collision" PERSISTENCE_REFUSED \
   setup_pending_mutated_in_place_after_compare \
-  "COLLISION:routing-decision"
+  "COLLISION:receipt.json:generation"
 exercise_negative "67 pending replacement remains at its pathname" PERSISTENCE_REFUSED \
   setup_pending_recreated_after_relocation \
   "OPEN_REGULAR:routing-decision.pending.json" assert_pending_replacement_never_relocated
 exercise_negative "68 same-generation brief collision" PERSISTENCE_REFUSED \
-  setup_preexisting_writable_brief "COLLISION:routing-brief"
+  setup_preexisting_writable_brief "COLLISION:brief.md:hash"
 exercise_negative "69 consumed generation reuse" PERSISTENCE_REFUSED \
   setup_preexisting_hardlinked_brief "CONSUMED"
 exercise_negative "70 canonical config symlink before snapshot" 'NOT_VERIFIABLE(CONFIG)' \
   setup_config_symlink_before_snapshot "OPEN_REGULAR:crew-dispatch.json" assert_config_symlink_not_followed
 exercise_negative "71 receipt success then brief collision" PERSISTENCE_REFUSED \
-  setup_receipt_then_brief_collision "CREATE:routing-brief" assert_receipt_then_brief_collision_transactional
+  setup_receipt_then_brief_collision "COLLISION:brief.md:hash" assert_receipt_then_brief_collision_transactional
 exercise_negative "72 brief success then receipt collision" PERSISTENCE_REFUSED \
-  setup_brief_then_receipt_collision "CREATE:routing-decision" assert_brief_then_receipt_collision_transactional
+  setup_brief_then_receipt_collision "COLLISION:receipt.json:generation" assert_brief_then_receipt_collision_transactional
 exercise_negative "73 permission failure after receipt" PERSISTENCE_REFUSED \
-  setup_permission_failure_after_receipt "TEST_FAILURE:receipt" assert_permission_failure_transactional
+  setup_permission_failure_after_receipt "CONSUMED" assert_permission_failure_transactional
 exercise_negative "74 identity collision after receipt" PERSISTENCE_REFUSED \
-  setup_identity_collision_after_receipt "ROLLBACK_IDENTITY:routing-decision" assert_identity_collision_preserved
-exercise_negative "75 final replacement before consumption" PERSISTENCE_REFUSED \
-  setup_final_replaced_before_consume "FINAL_IDENTITY" assert_consume_replacement_preserved
+  setup_identity_collision_after_receipt "OPEN_REGULAR:receipt.json" assert_identity_collision_preserved
+exercise_negative "75 stranded staging residue is unresolvable" PERSISTENCE_REFUSED \
+  setup_stranded_staging_residue "OPEN_REGULAR:brief.md:not-regular" assert_consume_replacement_preserved
 exercise_negative "76 prepared directory replacement before cleanup" PERSISTENCE_REFUSED \
-  setup_prepared_directory_replaced_before_cleanup "TEST_FAILURE:receipt" assert_cleanup_replacement_preserved
+  setup_prepared_directory_replaced_before_cleanup "OPEN_REGULAR:brief.md:not-regular" assert_cleanup_replacement_preserved
 
 write_fixture
+fm_routing_decision_validate_and_prepare \
+  "$HOME_DIR/data" "$HOME_DIR/config" t1 \
+  "$RUN_HARNESS" "$RUN_MODEL" "$RUN_EFFORT" "$HOME_DIR" "$RUN_RAW" "$RUN_LAUNCH" \
+  "$RUN_MODEL_FRAGMENT" "$RUN_EFFORT_FRAGMENT" \
+  || fail "byte-identical staging test could not prepare"
+mkdir "$(generation_dir)"
 cp "$TASK_DIR/routing-decision.pending.json" "$(receipt_final)"
 cp "$TASK_DIR/brief.md" "$(brief_final)"
-chmod 0400 "$(receipt_final)" "$(brief_final)"
-idempotent_out=$(run_validator_then_effects 2>&1) \
-  || fail "byte-identical generation publication was not idempotent: $idempotent_out"
+printf '%s\t%s\t%s\n' "$FM_ROUTING_PREPARED_DIR_DEV" "$FM_ROUTING_PREPARED_DIR_INO" \
+  "$(sha_file "$(brief_final)")" \
+  > "$(generation_dir)/transaction"
+chmod 0400 "$(receipt_final)" "$(brief_final)" "$(generation_dir)/transaction"
+chmod 0700 "$(generation_dir)"
+idempotent_out="$LAB/idempotent.out"
+fm_routing_decision_persist_prepared > "$idempotent_out" 2>&1 \
+  || fail "byte-identical generation publication was not idempotent: $(< "$idempotent_out")"
+fm_routing_decision_consume_prepared || fail "idempotent generation was not consumed"
+fm_routing_decision_seal_prepared || fail "idempotent generation did not seal"
+mkdir -p "$LAB/worktree.lease" "$LAB/endpoint"
+printf 'published\n' > "$HOME_DIR/state/t1.meta"
 assert_present "$LAB/worktree.lease" "idempotent generation did not reach the worktree lease"
-assert_present "${TASK_DIR}/routing-decision.$(receipt_generation).consumed" \
-  "idempotent generation was not consumed"
+"$REAL_PERL" "$ROOT/bin/fm-routing-fs-boundary.pl" resolve "$(receipt_final)" >/dev/null 2>&1 \
+  || fail "idempotent generation was not committed"
 pass "byte-identical generation publication is idempotent"
 
 write_fixture
@@ -1306,17 +1330,18 @@ fm_routing_decision_consume_prepared \
 fm_routing_decision_seal_prepared \
   || fail "immutable snapshot generation transaction did not seal"
 MUTABLE_GENERATION_COUNTEREXAMPLE=0
-assert_present "$TASK_DIR/routing-decision.$expected_generation.json" \
+assert_present "$TASK_DIR/routing-generation.$expected_generation/receipt.json" \
   "immutable snapshot generation was not published"
-assert_absent "$TASK_DIR/routing-decision.$mutable_generation.json" \
+assert_absent "$TASK_DIR/routing-generation.$mutable_generation/receipt.json" \
   "mutable pending pathname selected the durable generation"
 pass "generation derives from the immutable validated snapshot"
 
 write_fixture
 run_validator_then_effects >/dev/null 2>&1 \
   || fail "one-shot generation setup did not publish"
-consumed_marker="$TASK_DIR/routing-decision.$(receipt_generation).consumed"
-assert_present "$consumed_marker" "successful publication did not consume its generation"
+committed_receipt=$(receipt_final)
+"$REAL_PERL" "$ROOT/bin/fm-routing-fs-boundary.pl" resolve "$committed_receipt" >/dev/null 2>&1 \
+  || fail "successful publication did not commit its consumed generation"
 rm -rf "$LAB/worktree.lease" "$LAB/endpoint"
 rm "$HOME_DIR/state/t1.meta"
 reuse_out=$(run_validator_then_effects 2>&1)
@@ -1328,9 +1353,20 @@ assert_contains "$reuse_out" "CONSUMED" \
   "ordinary generation reuse did not name its one-shot marker"
 PREEXISTING_FINAL=1
 assert_no_effects
-rm "$consumed_marker"
-run_validator_then_effects >/dev/null 2>&1 \
+fm_routing_decision_validate_and_prepare \
+  "$HOME_DIR/data" "$HOME_DIR/config" t1 \
+  "$RUN_HARNESS" "$RUN_MODEL" "$RUN_EFFORT" "$HOME_DIR" "$RUN_RAW" "$RUN_LAUNCH" \
+  "$RUN_MODEL_FRAGMENT" "$RUN_EFFORT_FRAGMENT" \
+  || fail "one-shot generation counterexample could not prepare"
+chmod 0700 "$(generation_dir)"
+chmod 0600 "$(generation_dir)/transaction"
+printf '%s\t%s\t%s\n' "$FM_ROUTING_PREPARED_DIR_DEV" "$FM_ROUTING_PREPARED_DIR_INO" \
+  "$(sha_file "$(brief_final)")" \
+  > "$(generation_dir)/transaction"
+chmod 0400 "$(generation_dir)/transaction"
+fm_routing_decision_persist_prepared >/dev/null 2>&1 \
   || fail "one-shot generation firing counterexample did not reach effects"
+mkdir -p "$LAB/worktree.lease"
 assert_present "$LAB/worktree.lease" \
   "one-shot generation firing counterexample did not lease a worktree"
 pass "ordinary successful publication consumes its generation once"
@@ -1340,4 +1376,5 @@ expected_count=$((136 + ${#PLAIN_FORBIDDEN_PUNCT}))
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \
   || fail "negative battery counted $counterexample_count counterexamples instead of $expected_count"
+restore_fixture_permissions
 echo "# all $expected_count ROUTING_DECISION negatives refused before effects with $expected_count call-site firing counterexamples"
