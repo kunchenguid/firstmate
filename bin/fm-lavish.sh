@@ -101,25 +101,27 @@ rewrite_known_windows_paths() { # <line> <windows-path> <wsl-path>...
 
 windows_rewrite_output() { # <output> <artifact> <windows-path> <wsl-path>...
   local output=$1 artifact=$2 line attachment_rows=0 artifact_encoded
+  local attachment_path_pattern='^[[:space:]]+"[[:alpha:]]:\\\\[^"]*"[[:space:]]*$'
   shift 2
   artifact_encoded=$(toon_escape "$artifact")
   while IFS= read -r line || [ -n "$line" ]; do
-    if [ "$attachment_rows" -eq 1 ] && [[ ! $line =~ ^[[:space:]] ]]; then
-      attachment_rows=0
-    fi
     if [[ $line == next_step:* ]]; then
       printf 'next_step: "Continue through the Firstmate Lavish router using WSL artifact \\"%s\\"; do not invoke lavish-axi directly."\n' \
         "$artifact_encoded"
       continue
     fi
     if [[ $line =~ ^[[:space:]]*(file|path|scenePath|output|out):[[:space:]] ]] \
-      || [ "$attachment_rows" -eq 1 ]; then
+      || { [ "$attachment_rows" -gt 0 ] && [[ $line =~ $attachment_path_pattern ]]; }; then
       rewrite_known_windows_paths "$line" "$@"
     else
       printf '%s\n' "$line"
     fi
-    if [[ $line =~ ^[[:space:]]*attachments\[[0-9]+\] ]]; then
-      attachment_rows=1
+    if [[ $line =~ ^[[:space:]]*attachments\[([0-9]+)\] ]]; then
+      attachment_rows=${BASH_REMATCH[1]}
+    elif [ "$attachment_rows" -gt 0 ] && [[ $line =~ $attachment_path_pattern ]]; then
+      attachment_rows=$((attachment_rows - 1))
+    elif [ "$attachment_rows" -gt 0 ]; then
+      attachment_rows=0
     fi
   done <<< "$output"
 }

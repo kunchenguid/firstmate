@@ -30,8 +30,32 @@ function Get-LavishCommand {
   return $Command.Source
 }
 
+function Invoke-LavishCommand([string]$Lavish, [string[]]$Arguments) {
+  $Node = Get-Command 'node.exe' -ErrorAction SilentlyContinue
+  if (-not $Node) {
+    throw 'Windows node.exe is unavailable. Install Node.js for Windows, then rerun: bin/fm-bootstrap.sh install lavish-axi'
+  }
+  $env:FM_LAVISH_WINDOWS_COMMAND = $Lavish
+  $env:FM_LAVISH_WINDOWS_NATIVE_ARGV_JSON = ConvertTo-Json -Compress -InputObject @($Arguments)
+  $Launcher = @'
+const fs = require('fs');
+const path = require('path');
+const childProcess = require('child_process');
+const command = process.env.FM_LAVISH_WINDOWS_COMMAND;
+const packagePath = path.join(path.dirname(command), 'node_modules', 'lavish-axi', 'package.json');
+const packageData = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+const bin = typeof packageData.bin === 'string' ? packageData.bin : packageData.bin['lavish-axi'];
+const result = childProcess.spawnSync(process.execPath, [path.resolve(path.dirname(packagePath), bin), ...JSON.parse(process.env.FM_LAVISH_WINDOWS_NATIVE_ARGV_JSON)], { encoding: 'utf8' });
+if (result.stdout) process.stdout.write(result.stdout);
+if (result.stderr) process.stderr.write(result.stderr);
+if (result.error) throw result.error;
+process.exit(result.status === null ? 1 : result.status);
+'@
+  & $Node.Source -e $Launcher
+}
+
 function Get-LavishVersion([string]$Lavish) {
-  $Output = @(& $Lavish --version 2>&1)
+  $Output = @(Invoke-LavishCommand $Lavish @('--version') 2>&1)
   if ($LASTEXITCODE -ne 0) {
     throw 'Windows lavish-axi did not report its version'
   }
@@ -89,7 +113,7 @@ if ($Action -eq 'setup') {
     exit $LASTEXITCODE
   }
   $Lavish = Get-LavishCommand
-  & $Lavish setup hooks
+  Invoke-LavishCommand $Lavish @('setup', 'hooks')
   exit $LASTEXITCODE
 }
 
@@ -107,7 +131,7 @@ if ($Action -eq 'doctor') {
 }
 
 if ($Action -eq 'stop') {
-  & $Lavish stop @ExtraArgs
+  Invoke-LavishCommand $Lavish (@('stop') + $ExtraArgs)
   exit $LASTEXITCODE
 }
 
@@ -120,7 +144,7 @@ Ensure-LavishServer $Lavish
 switch ($Action) {
   'open' {
     $env:LAVISH_AXI_NO_OPEN = '1'
-    $Output = @(& $Lavish $Artifact @ExtraArgs 2>&1)
+    $Output = @(Invoke-LavishCommand $Lavish (@($Artifact) + $ExtraArgs) 2>&1)
     $ExitCode = $LASTEXITCODE
     $Output | ForEach-Object { Write-Output $_ }
     if ($ExitCode -ne 0) {
@@ -145,19 +169,19 @@ switch ($Action) {
     }
   }
   'poll' {
-    & $Lavish poll $Artifact @ExtraArgs
+    Invoke-LavishCommand $Lavish (@('poll', $Artifact) + $ExtraArgs)
     exit $LASTEXITCODE
   }
   'end' {
-    & $Lavish end $Artifact @ExtraArgs
+    Invoke-LavishCommand $Lavish (@('end', $Artifact) + $ExtraArgs)
     exit $LASTEXITCODE
   }
   'export' {
-    & $Lavish export $Artifact @ExtraArgs
+    Invoke-LavishCommand $Lavish (@('export', $Artifact) + $ExtraArgs)
     exit $LASTEXITCODE
   }
   'share' {
-    & $Lavish share $Artifact @ExtraArgs
+    Invoke-LavishCommand $Lavish (@('share', $Artifact) + $ExtraArgs)
     exit $LASTEXITCODE
   }
 }
