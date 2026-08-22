@@ -19,9 +19,10 @@ A typed untrusted ingress composed with the existing process-event inbox and dur
 
 `bin/fm-procevent-external-event.sh` is that ingress and adapter.
 An external authenticated webhook terminator or automation invokes it locally or over an operator-controlled SSH route; Firstmate intentionally contains no public HTTP server.
-The same boundary accepts hourly initiative-wide reconciliation findings, with a shared issue-revision delivery key coalescing webhook retries and unchanged scan observations.
+The same boundary accepts findings from an external operator-owned hourly initiative-wide reconciliation scan, with a shared issue-revision delivery key coalescing webhook retries and unchanged scan observations.
 Transport bytes remain hints: the wake-time handler queries Linear authoritatively, then applies the existing natural-language secondmate scope judgment and handoff workflow.
 Consequently the transport owns no project or initiative-to-secondmate mapping, and a restart after durable capture but before handling is recovered by the existing process-event reconciliation path.
+Firstmate does not poll Linear, enumerate its workspaces, schedule reconciliation, or provide complete automatic detection and routing; this ingress is only the durable partial foundation those external producers can invoke.
 Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or a Relay mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS` without their own task worktree being written, declared external waits and verified captain-held transfers that remain declared past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 A pane holding a file newer than the start of its own quiet window, anywhere in the worktree recorded for that task, is deferred instead of escalated, because a crew writing source, then tests, then documentation behind a static pane is liveness that neither pane quietness nor the run step can show.

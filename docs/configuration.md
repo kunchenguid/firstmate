@@ -593,8 +593,8 @@ An SSH forwarder supplies the same two arguments and stdin to that command on th
 For Linear, configure the immediate producer to call `fm-procevent-external-event.sh ingest-linear <issue-uuid> <updated-at>` with the immutable issue UUID and the exact `updatedAt` scalar supplied by Linear:
 
 - A Linear webhook or automation invokes it immediately for issue creation and for changes to bug type, workflow state, initiative, labels, or other routing-relevant fields.
-- `bin/fm-linear-reconcile.sh` authoritatively enumerates every connected Linear workspace and every active Bug-labeled issue, then invokes the same ingress for each candidate as the initiative-wide drift backstop.
-- Schedule that one-shot command hourly with an existing operator scheduler; it does not install a timer, start a daemon, or create another supervision owner.
+- An external operator-owned initiative-wide reconciliation scan invokes it hourly for every active bug as the drift backstop.
+- Periodic fleet sweeps or manual invocation of that external scan remain interim coverage.
 
 The command lowercases the canonical hyphenated UUID and owns the exact `linear:<uuid>@<updatedAt>` delivery-key encoding, so independent producers coalesce for the same revision while a later revision remains discoverable.
 Pass the event body or a minimal issue locator on stdin; neither is authoritative.
@@ -602,10 +602,10 @@ Store any webhook secret in the external terminator or automation, not in Firstm
 
 On the resulting `procevent external-event ...` wake, Firstmate reads the typed envelope and queries Linear authoritatively before it creates or routes work.
 Current initiative and domain semantics are compared with the natural-language secondmate scopes in `data/secondmates.md`, so mutable ownership mappings stay out of transport configuration.
-The operator must ensure Orca connects every workspace containing an initiative in scope, that its authoritative Linear credential remains valid, and that the one-shot reconciliation command is scheduled hourly; Firstmate cannot prove delivery before either producer successfully invokes the local boundary.
+The operator must authenticate and operate both the immediate producer and the initiative-wide hourly reconciliation scan; Firstmate does not enumerate Linear workspaces, schedule or run reconciliation, or prove delivery before either external producer successfully invokes the local boundary.
 In an active home, successful producer invocations gain durable capture, duplicate coalescing, prompt observation through the existing watcher or away supervisor, and restart replay through Firstmate's existing process-event machinery.
 A completely idle home cannot promptly consume these events through a supported repository boundary; periodic fleet sweeps or operator-owned manual reconciliation invocation provide interim coverage without blocking use of the ingress.
-Operator setup of the authenticated immediate producer and hourly schedule remains required, and there is no delivery or overnight-discovery guarantee until those producers successfully invoke the boundary.
+Automatic Linear detection, reconciliation, and routing remain external and are not proven by this partial foundation, so it provides no delivery or overnight-discovery guarantee.
 Default and fallback `check` publication is still best-effort, so the same source and sequence can repeat even before any restart; handlers deduplicate that identity rather than assuming a wake is unique.
 The runner proves nothing about the source side, and the handled acknowledgement proves nothing about a paired external effect performed before it: a crash between that effect and the acknowledgement call can still repeat the effect on replay, so this is never a generic exactly-once guarantee.
 The published `lavish-axi poll` clears feedback destructively before returning it, so a result lost between that clearing and the runner reading process output is unrecoverable.
