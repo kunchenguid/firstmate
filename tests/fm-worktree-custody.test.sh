@@ -135,6 +135,41 @@ test_pool_root_refuses_a_tracked_config() {
   pass "a project that tracks treehouse.toml is refused rather than rewritten"
 }
 
+test_pool_root_refuses_a_nonregular_config() {
+  local case_dir clone out status
+  case_dir=$(make_two_homes_one_project nonregular-config)
+  clone="$case_dir/homeA/project"
+  mkdir "$clone/treehouse.toml"
+  touch "$clone/treehouse.toml/preserved"
+
+  out=$(pool_root_for_home "$case_dir/homeA" "$case_dir/base" "$clone" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a nonregular treehouse.toml should refuse before configuration"
+  assert_contains "$out" "not a regular file" "the refusal did not identify the invalid config path"
+  assert_present "$clone/treehouse.toml/preserved" "the invalid config path was modified"
+  pass "a nonregular treehouse config is refused without modification"
+}
+
+test_pool_root_verifies_the_written_config() {
+  local case_dir clone fakebin out status
+  case_dir=$(make_two_homes_one_project verify-written-config)
+  clone="$case_dir/homeA/project"
+  fakebin=$(fm_fakebin "$case_dir")
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/mv"
+
+  out=$(FM_HOME="$case_dir/homeA" FM_POOL_ROOT_BASE="$case_dir/base" \
+    PATH="$fakebin:$PATH" "$POOL_ROOT_BIN" "$clone" 2>&1)
+  status=$?
+  expect_code 1 "$status" "pool configuration should refuse when its write did not take effect"
+  assert_contains "$out" "could not verify" "the failed write postcondition was not reported"
+  assert_absent "$clone/treehouse.toml" "the no-op writer unexpectedly configured a pool root"
+  pass "pool configuration verifies the root that was actually written"
+}
+
 # The vendor fact the class rests on: treehouse hands two clones of one origin
 # slots from the SAME pool, and only `root` moves that pool. Self-skipping,
 # because the pool allocator is a third-party binary CI installs only for the
@@ -702,10 +737,38 @@ test_teardown_refuses_an_unparseable_canonical_manifest() {
   pass "an unparseable canonical manifest refuses cleanup instead of disabling custody"
 }
 
+test_teardown_refuses_a_missing_tracked_canonical_manifest() {
+  local case_dir out status
+  case_dir=$(make_teardown_case teardown-custody-missing-tracked-manifest)
+  printf '{\n  "name": "fixture",\n  "scripts": {\n    "check:worktree-custody": "node custody.js"\n  }\n}\n' \
+    > "$case_dir/project/package.json"
+  git -C "$case_dir/project" add package.json
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -qm "publish the custody check"
+  rm "$case_dir/project/package.json"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  out=$(run_teardown_case "$case_dir")
+  status=$?
+  expect_code 1 "$status" "a missing tracked canonical manifest must not disable custody"
+  assert_contains "$out" "cannot confirm whether project" "the missing tracked manifest was not reported as unconfirmable"
+  assert_present "$case_dir/state/task-c1.meta" "a refused cleanup removed the task record"
+  assert_absent "$case_dir/treehouse.log" "a missing tracked manifest allowed the copy to be returned"
+  [ -d "$case_dir/wt" ] || fail "a refused cleanup removed the working copy"
+  pass "a missing tracked canonical manifest refuses cleanup instead of disabling custody"
+}
+
 test_two_homes_configure_distinct_pool_roots
 test_literal_pool_root_override_is_refused
 test_pool_root_is_idempotent_and_preserves_other_keys
 test_pool_root_refuses_a_tracked_config
+test_pool_root_refuses_a_nonregular_config
+test_pool_root_verifies_the_written_config
 test_real_treehouse_stops_sharing_a_pool_between_homes
 test_spawn_refuses_a_copy_another_task_claims
 test_spawn_refuses_ambiguous_worktree_metadata
@@ -724,3 +787,4 @@ test_teardown_skips_projects_that_publish_no_check
 test_teardown_refuses_when_a_published_check_cannot_be_run
 test_teardown_uses_the_canonical_projects_custody_opt_in
 test_teardown_refuses_an_unparseable_canonical_manifest
+test_teardown_refuses_a_missing_tracked_canonical_manifest

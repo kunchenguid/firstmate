@@ -166,7 +166,10 @@ if git -C "$PROJECT" ls-files --error-unmatch treehouse.toml >/dev/null 2>&1; th
   die "project '$PROJECT' tracks treehouse.toml, so this home cannot claim its own worktree pool without changing project content. Untrack that file, then spawn again"
 fi
 
-[ ! -L "$TOML" ] || die "'$TOML' is a symlink; refusing to write this home's pool root through it"
+if [ -e "$TOML" ] || [ -L "$TOML" ]; then
+  [ -f "$TOML" ] && [ ! -L "$TOML" ] \
+    || die "'$TOML' is not a regular file; refusing to configure this home's pool root"
+fi
 
 # Create and canonicalize before recording it: one home must always resolve the
 # same string, or an every-spawn rewrite would churn the file for nothing.
@@ -176,6 +179,8 @@ ROOT_VALUE=$(cd "$ROOT_VALUE" && pwd -P) || die "could not resolve this home's p
 if [ "$(configured_root "$TOML")" != "$ROOT_VALUE" ]; then
   write_root "$TOML" "$ROOT_VALUE" || die "could not record this home's pool root in '$TOML'"
 fi
+[ "$(configured_root "$TOML")" = "$ROOT_VALUE" ] \
+  || die "could not verify this home's pool root in '$TOML'"
 exclude_from_git "$PROJECT" treehouse.toml
 
 printf '%s\n' "$ROOT_VALUE"

@@ -10,8 +10,9 @@
 #
 # The contract, stated once:
 #   - Opt-in is presence of that exact key in the project's package.json
-#     "scripts". No package.json, or no such key, means the project published
-#     nothing and firstmate must behave exactly as it did before.
+#     "scripts". No untracked package.json, or no such key, means the project
+#     published nothing and firstmate must behave exactly as it did before. A
+#     tracked manifest missing from the checkout is unconfirmable, not absent.
 #   - The manifest, not a grep, is authoritative. A project that looks like it
 #     published one but cannot be read is reported as UNCONFIRMED, and each
 #     caller applies its own policy - a safety gate refuses, housekeeping warns.
@@ -32,8 +33,19 @@ FM_PROJECT_SCRIPT_INVALID_TIMEOUT=125
 # Does <dir> publish <script>? Prints nothing.
 #   0 declared, 1 absent, 2 unconfirmable.
 fm_project_script_declared() {  # <dir> <script>
-  local dir=$1 script=$2 verdict
-  [ -f "$dir/package.json" ] || return "$FM_PROJECT_SCRIPT_ABSENT"
+  local dir=$1 script=$2 verdict tracked
+  if [ ! -e "$dir/package.json" ] && [ ! -L "$dir/package.json" ]; then
+    if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      tracked=$(git -C "$dir" ls-files --stage -- package.json 2>/dev/null) \
+        || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+      [ -z "$tracked" ] || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+    elif [ -e "$dir/.git" ] || [ -L "$dir/.git" ]; then
+      return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
+    fi
+    return "$FM_PROJECT_SCRIPT_ABSENT"
+  fi
+  [ -f "$dir/package.json" ] && [ ! -L "$dir/package.json" ] \
+    || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
   command -v node >/dev/null 2>&1 || return "$FM_PROJECT_SCRIPT_UNCONFIRMED"
   if ! verdict=$(node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(p.scripts && Object.prototype.hasOwnProperty.call(p.scripts, process.argv[2]) ? "declared" : "absent");' \
     "$dir/package.json" "$script" 2>/dev/null); then
