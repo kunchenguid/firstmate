@@ -422,6 +422,21 @@ class Client:
         self.closed = threading.Event()
         self.ready_notice = {}
         self.turn = {}
+        # Which turn self.turn is. A frame is read on one thread and applied on
+        # another, so a reply that arrives late, or a notice whose handling is
+        # descheduled, can be applied after the turn it belongs to has already
+        # been recorded and the next one opened. Without an identity to compare,
+        # that reply lands on the wrong turn: it names a fault that turn never
+        # had, releases it before its own answer, and stamps its first and last
+        # audio, which are the figures this whole tool exists to report. The
+        # downlink takes a copy of this when a frame arrives and applies nothing
+        # once it no longer matches.
+        self.turn_id = 0
+        # What run() tells the captain when no further turn can be taken. The
+        # connection ending is the ordinary reason and stays the default; a fault
+        # on this end replaces it, because a line naming the wrong cause sends
+        # them looking where the fault is not.
+        self.closed_because = "the connection closed"
         self.lock = threading.Lock()
 
     # ------------------------------------------------------------------ lifecycle
@@ -600,71 +615,113 @@ class Client:
                     self.closed.set()
                 break
             if got is None:
+                say("client: the connection ended")
                 why = "the connection ended before this turn was answered"
                 break
             kind, payload = got
-            if kind == frame.AUDIO:
-                with self.lock:
-                    now = time.monotonic()
-                    self.turn.setdefault("first_frame", now)
-                    self.turn["last_frame"] = now
-                self.playback.write(payload)
-            elif kind == frame.TEXT:
-                obj = frame.decode_json(payload)
-                text = (obj.get("text") or "").strip()
-                if text and not text.startswith("{"):
-                    who = "you" if obj.get("role") == "USER" else "assistant"
-                    say("  {}: {}".format(who, text))
-            elif kind == frame.NOTICE:
-                obj = frame.decode_json(payload)
-                event = obj.get("event", "")
-                if event == "ready":
-                    self.ready_notice = obj
-                    self.ready.set()
-                elif event == "queued":
-                    say("  handed to the first mate: {}".format(
-                        obj.get("request", "")))
+            # Which turn this frame belongs to, taken the moment it arrives. Every
+            # write below applies only while it is still that turn; see turn_id.
+            with self.lock:
+                arrived_in = self.turn_id
+            try:
+                if kind == frame.AUDIO:
                     with self.lock:
-                        self.turn["queued"] = obj.get("note_id", "")
-                elif event == "interrupted":
+                        if arrived_in == self.turn_id:
+                            now = time.monotonic()
+                            self.turn.setdefault("first_frame", now)
+                            self.turn["last_frame"] = now
+                    # Played whichever turn it belongs to. Late audio is the tail
+                    # of an answer the captain is still listening to, so dropping
+                    # it would cut them off; only the timing figures are a claim
+                    # about a particular turn.
+                    self.playback.write(payload)
+                elif kind == frame.TEXT:
+                    obj = frame.decode_json(payload)
+                    text = (obj.get("text") or "").strip()
+                    if text and not text.startswith("{"):
+                        who = "you" if obj.get("role") == "USER" else "assistant"
+                        say("  {}: {}".format(who, text))
+                elif kind == frame.NOTICE:
+                    obj = frame.decode_json(payload)
+                    event = obj.get("event", "")
+                    if event == "ready":
+                        self.ready_notice = obj
+                        self.ready.set()
+                    elif event == "queued":
+                        say("  handed to the first mate: {}".format(
+                            obj.get("request", "")))
+                        with self.lock:
+                            if arrived_in == self.turn_id:
+                                self.turn["queued"] = obj.get("note_id", "")
+                    elif event == "interrupted":
+                        with self.lock:
+                            if arrived_in == self.turn_id:
+                                self.turn["interrupted"] = True
+                        log(self.verbose, "the model treated this turn as an "
+                                          "interruption of its own speech")
+                    elif event == "turn-failed":
+                        # The relay is still there and the next talk key gets a
+                        # new session, so this ends the turn rather than the run.
+                        say("client: the relay could not finish that turn: {}"
+                            .format(obj.get("error", "")))
+                        # Named and released in one critical section, so no turn
+                        # can be released without also being told why.
+                        with self.lock:
+                            if arrived_in == self.turn_id:
+                                self.turn["failed"] = obj.get("error", "")
+                                self.reply_done.set()
+                    elif event == "session-ended":
+                        say("client: the relay ended the session")
+                        # An ordinary session end is not a turn failure at the
+                        # relay, and the next talk key still gets a working one. A
+                        # turn released by it nevertheless has no answer, and
+                        # relay_error is where the reason for that is read from
+                        # later, so it carries what the captain was just told. The
+                        # reply_done test and the setdefault are the tail's, for
+                        # the tail's reasons.
+                        with self.lock:
+                            if arrived_in == self.turn_id:
+                                if not self.reply_done.is_set():
+                                    self.turn.setdefault(
+                                        "failed", "the relay ended the session "
+                                                  "before this turn was answered")
+                                self.reply_done.set()
+                    else:
+                        log(self.verbose, "notice {}".format(obj))
+                elif kind == frame.MARK:
+                    obj = frame.decode_json(payload)
                     with self.lock:
-                        self.turn["interrupted"] = True
-                    log(self.verbose, "the model treated this turn as an "
-                                      "interruption of its own speech")
-                elif event == "turn-failed":
-                    # The relay is still there and the next talk key gets a new
-                    # session, so this ends the turn rather than the run.
-                    say("client: the relay could not finish that turn: {}".format(
-                        obj.get("error", "")))
-                    with self.lock:
-                        self.turn["failed"] = obj.get("error", "")
-                    self.reply_done.set()
-                elif event == "session-ended":
-                    say("client: the relay ended the session")
-                    # An ordinary session end is not a turn failure at the relay,
-                    # and the next talk key still gets a working one. A turn
-                    # released by it nevertheless has no answer, and relay_error
-                    # is where the reason for that is read from later, so it
-                    # carries what the captain was just told. The test and the
-                    # setdefault are the tail's, for the tail's reasons.
-                    with self.lock:
-                        if not self.reply_done.is_set():
+                        if arrived_in == self.turn_id:
                             self.turn.setdefault(
-                                "failed", "the relay ended the session before "
-                                          "this turn was answered")
-                    self.reply_done.set()
-                else:
-                    log(self.verbose, "notice {}".format(obj))
-            elif kind == frame.MARK:
-                obj = frame.decode_json(payload)
+                                "marks", {})[obj.get("mark", "?")] = \
+                                obj.get("since_talk_end")
+                            self.turn["tool_calls"] = obj.get("tool_calls", 0)
+                            if obj.get("mark") == "reply_end":
+                                self.reply_done.set()
+                elif kind == frame.BYE:
+                    say("client: the relay said goodbye")
+                    why = "the relay said goodbye before this turn was answered"
+                    break
+            except Exception as exc:               # noqa: BLE001
+                # A fault on THIS end, handling a reply that did arrive: the
+                # speaker or the output file refusing the audio, or a payload that
+                # is not the JSON the wire format promises. Caught as a class
+                # rather than as a list, because this handling code can raise
+                # something nobody listed, and the failure being removed here is
+                # this thread dying silently: closed and reply_done then stay
+                # unset, and every remaining run opens a turn, waits out the whole
+                # timeout and is recorded unanswered with no reason at all, so one
+                # fault costs the session instead of one turn.
+                #
+                # Deliberately not worded as a lost connection. The connection is
+                # fine and naming it would send the captain to the wrong end.
+                fault = ("this end could not handle the relay's reply: {}: {}"
+                         .format(type(exc).__name__, exc))
+                say("client: {}".format(fault))
                 with self.lock:
-                    self.turn.setdefault("marks", {})[obj.get("mark", "?")] = \
-                        obj.get("since_talk_end")
-                    self.turn["tool_calls"] = obj.get("tool_calls", 0)
-                if obj.get("mark") == "reply_end":
-                    self.reply_done.set()
-            elif kind == frame.BYE:
-                why = "the relay said goodbye before this turn was answered"
+                    self.turn.setdefault("failed", fault)
+                    self.closed_because = fault
+                    self.closed.set()
                 break
         # Under the turn lock for the same reason the failure above is: a clean
         # end of file and a goodbye leave the connection just as unusable as a
@@ -706,6 +763,9 @@ class Client:
             if self.closed.is_set():
                 return None
             self.turn = {}
+            # Advanced here, with the reset it names, so a frame still being
+            # handled from the previous turn can tell that its turn is over.
+            self.turn_id += 1
             # In the same critical section as the closure mark, because this
             # event is how the downlink tells a turn waiting for a reply from the
             # space between turns. Cleared outside the lock it leaves a window
@@ -901,8 +961,13 @@ class Client:
             # a turn that never opened, since an invented turn is the whole thing
             # being kept out of runs.jsonl.
             if record is None:
-                say("client: the connection closed before run {} of {}; it and "
-                    "the rest were not taken".format(index, self.options.runs))
+                # What actually stopped it, not an assumption that the connection
+                # went: a fault on this end leaves the connection open, and a line
+                # blaming it would send the captain to the wrong end.
+                with self.lock:
+                    because = self.closed_because
+                say("client: {} before run {} of {}; it and the rest were not "
+                    "taken".format(because, index, self.options.runs))
                 rc = 1
                 break
             print(json.dumps(record))
