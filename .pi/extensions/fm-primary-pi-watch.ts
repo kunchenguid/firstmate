@@ -89,6 +89,7 @@ const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(exte
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
+const wakeContextTimeoutMs = positiveInteger("FM_WAKE_CONTEXT_TIMEOUT_MS", 5000);
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
 // bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
 // SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
@@ -193,8 +194,9 @@ function wakeContextPresentation(): string {
     env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
     encoding: "utf8",
     maxBuffer: 128 * 1024,
+    timeout: wakeContextTimeoutMs,
   });
-  if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOBUFS") return fallback;
+  if (["ENOBUFS", "ETIMEDOUT"].includes((result.error as NodeJS.ErrnoException | undefined)?.code || "")) return fallback;
   const output = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
   if (result.status === 0 && output) return output;
   if (output.includes("WAKE_CONTEXT_FALLBACK:")) return output;
