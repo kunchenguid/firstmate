@@ -493,8 +493,12 @@ assert_no_projection_mutation_since() {  # <line-count> <case-name>
 }
 
 test_projected_custody_conflict() {
-  local conflict_wt conflict_head conflict_start conflict_pane
-  conflict_wt="$TMP_ROOT/custody-conflict-wt"
+  local conflict_pool conflict_wt conflict_head conflict_start conflict_pane
+  conflict_pool=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-pool-root.sh" "$PROJECT_DIR") \
+    || fail "projected custody conflict could not resolve its home pool"
+  conflict_wt="$conflict_pool/.treehouse/custody-conflict-wt"
+  mkdir -p "$(dirname "$conflict_wt")"
   git -C "$PROJECT_DIR" worktree add --quiet --detach "$conflict_wt" HEAD
   conflict_head=$(git -C "$conflict_wt" rev-parse HEAD)
   printf 'window=firstmate:fm-other-owner\nworktree=%s\nproject=%s\nkind=ship\nmode=no-mistakes\n' \
