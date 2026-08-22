@@ -94,14 +94,21 @@ worker_publish_identity() {
   mv -f -- "$tmp" "$identity_file"
 }
 
+# Ownership records are staged in the state directory rather than inside the
+# lock, then moved in. The lock is a directory whose emptiness is what makes it
+# removable, so a publisher that stages inside it can leave debris that no later
+# worker can rmdir - and this publisher runs between mkdir and the shutdown
+# trap, where a stop signal still kills the process outright. Staging outside
+# keeps an interrupted publish from wedging ownership permanently, and matches
+# how the pid, readiness, and identity records are already published.
 worker_publish_lock_owner() {
   local pid start command pid_tmp start_tmp command_tmp
   pid=${BASHPID:-$$}
   start=$(fm_remote_job_process_start "$pid") || return 1
   command=$(fm_remote_job_process_command "$pid") || return 1
-  pid_tmp=$(umask 077; mktemp "$WORKER_LOCK/.pid.XXXXXX") || return 1
-  start_tmp=$(umask 077; mktemp "$WORKER_LOCK/.start.XXXXXX") || { rm -f -- "$pid_tmp"; return 1; }
-  command_tmp=$(umask 077; mktemp "$WORKER_LOCK/.command.XXXXXX") || { rm -f -- "$pid_tmp" "$start_tmp"; return 1; }
+  pid_tmp=$(umask 077; mktemp "$FM_REMOTE_JOB_STATE/.lock-pid.XXXXXX") || return 1
+  start_tmp=$(umask 077; mktemp "$FM_REMOTE_JOB_STATE/.lock-start.XXXXXX") || { rm -f -- "$pid_tmp"; return 1; }
+  command_tmp=$(umask 077; mktemp "$FM_REMOTE_JOB_STATE/.lock-command.XXXXXX") || { rm -f -- "$pid_tmp" "$start_tmp"; return 1; }
   printf '%s\n' "$pid" > "$pid_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; }
   printf '%s\n' "$start" > "$start_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; }
   printf '%s\n' "$command" > "$command_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; }
@@ -143,6 +150,34 @@ worker_recover_quarantine() { # <account-home>
   rm -f -- "$WORKER_LOCK/quarantine"
 }
 
+worker_ownership_retry() { # <deadline>
+  [ "$(date +%s)" -lt "$1" ] || return 1
+  sleep 0.1
+}
+
+# Everything the ownership protocol ever writes into the lock directory. A
+# reclaim removes all of it, not only the three published names: a predecessor
+# stopped mid-publish by an older build staged inside the lock, and one surviving
+# staging file makes the directory permanently un-rmdir-able, so every later
+# worker refuses ownership forever on a queue that is otherwise unowned.
+# Symlinks are still refused rather than followed.
+worker_clear_lock_contents() {
+  local entry
+  for entry in "$WORKER_LOCK"/* "$WORKER_LOCK"/.*; do
+    case "${entry##*/}" in '.'|'..'|'*'|'.*') continue ;; esac
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    [ ! -L "$entry" ] && [ ! -d "$entry" ] || return 1
+    rm -f -- "$entry" || return 1
+  done
+}
+
+# Ownership outcomes are distinct states and the caller reports them
+# differently: 0 acquired, 2 already owned by this process's own worker,
+# 3 quarantined, 4 the wait ran out while another owner still looked live, and
+# 1 an unsafe lock this worker refuses to touch. Losing a benign race - the lock
+# vanishing under the check, or another reclaimer removing it first - is neither
+# a refusal nor a timeout, so it retries within the same deadline instead of
+# being reported as either.
 worker_acquire_lock() {
   local account_home=$1 deadline
   deadline=$(( $(date +%s) + FM_REMOTE_JOB_OWNERSHIP_WAIT_SECONDS ))
@@ -152,27 +187,35 @@ worker_acquire_lock() {
       worker_publish_lock_owner || return 1
       return 0
     fi
-    [ -d "$WORKER_LOCK" ] && [ ! -L "$WORKER_LOCK" ] || return 1
+    [ ! -L "$WORKER_LOCK" ] || return 1
+    if [ ! -d "$WORKER_LOCK" ]; then
+      worker_ownership_retry "$deadline" || return 4
+      continue
+    fi
     if [ -e "$WORKER_LOCK/quarantine" ] || [ -L "$WORKER_LOCK/quarantine" ]; then
       worker_recover_quarantine "$account_home" || return 3
       continue
     fi
     if fm_remote_job_lock_owner_matches_process "$account_home"; then return 2; fi
     if fm_remote_job_probe "$account_home" || worker_lock_recent; then
-      [ "$(date +%s)" -lt "$deadline" ] || return 1
-      sleep 0.1
+      worker_ownership_retry "$deadline" || return 4
       continue
     fi
-    [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] || return 1
-    rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" || return 1
-    rmdir "$WORKER_LOCK" || return 1
+    worker_clear_lock_contents || return 1
+    rmdir "$WORKER_LOCK" 2>/dev/null || {
+      # Non-empty again, or already gone: a concurrent worker is reclaiming the
+      # same lock. Whoever wins publishes ownership and the loser observes it on
+      # the next pass.
+      worker_ownership_retry "$deadline" || return 4
+    }
   done
 }
 
 worker_publish_quarantine() {
   local tmp
   [ "$WORKER_LOCK_HELD" -eq 1 ] || return 1
-  tmp=$(umask 077; mktemp "$WORKER_LOCK/.quarantine.XXXXXX") || return 1
+  # Staged outside the lock for the reason worker_publish_lock_owner states.
+  tmp=$(umask 077; mktemp "$FM_REMOTE_JOB_STATE/.lock-quarantine.XXXXXX") || return 1
   printf 'active execution could not be confirmed stopped\n' > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$WORKER_LOCK/quarantine"
@@ -681,7 +724,8 @@ main() {
     0) ;;
     2) exit 0 ;;
     3) worker_error "worker ownership is quarantined after an unconfirmed shutdown"; exit 75 ;;
-    *) worker_error "cannot acquire or safely reclaim worker ownership"; exit 1 ;;
+    4) worker_error "another worker still held ownership after ${FM_REMOTE_JOB_OWNERSHIP_WAIT_SECONDS}s"; exit 1 ;;
+    *) worker_error "refusing an unsafe worker ownership lock"; exit 1 ;;
   esac
   trap worker_shutdown HUP INT TERM
   worker_publish_identity "$account_home" || { worker_error "cannot publish worker code identity"; exit 1; }

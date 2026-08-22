@@ -671,6 +671,133 @@ case "$FM_REMOTE_JOB_ERROR" in
 esac
 pass "a worker that never becomes ready still fails the readiness wait"
 
+# A worker force-stopped between staging an ownership record and moving it into
+# place used to leave that staging file inside the lock directory. rmdir can
+# never empty such a directory, so every later worker on the account refused
+# ownership forever - a queue with no owner that no worker could ever own. The
+# reclaim must clear what the protocol wrote there and take ownership.
+DEBRIS_ROOT="$TMP_ROOT/debris-root"
+DEBRIS_HOME="$TMP_ROOT/debris-account"
+DEBRIS_STATE="$TMP_ROOT/debris-jobs"
+cp -R "$REMOTE_ROOT" "$DEBRIS_ROOT"
+mkdir -p "$DEBRIS_HOME" "$DEBRIS_STATE/jobs" "$DEBRIS_STATE/logs" "$DEBRIS_STATE/worker.lock"
+chmod 700 "$DEBRIS_HOME" "$DEBRIS_STATE" "$DEBRIS_STATE/jobs" "$DEBRIS_STATE/logs" \
+  "$DEBRIS_STATE/worker.lock"
+sleep 0.1 &
+DEBRIS_DEAD_PID=$!
+wait "$DEBRIS_DEAD_PID" 2>/dev/null || true
+printf '%s\n' "$DEBRIS_DEAD_PID" > "$DEBRIS_STATE/worker.lock/pid"
+printf 'stopped-worker-start\n' > "$DEBRIS_STATE/worker.lock/start"
+printf 'stopped-worker-command\n' > "$DEBRIS_STATE/worker.lock/command"
+printf 'staged but never moved\n' > "$DEBRIS_STATE/worker.lock/.quarantine.aB3xQz"
+printf '%s\n' "$DEBRIS_DEAD_PID" > "$DEBRIS_STATE/worker.pid"
+chmod 600 "$DEBRIS_STATE/worker.lock"/* "$DEBRIS_STATE/worker.lock/.quarantine.aB3xQz" \
+  "$DEBRIS_STATE/worker.pid"
+FM_REMOTE_JOB_STATE_ROOT="$DEBRIS_STATE" fm_remote_job_ensure_worker "$DEBRIS_ROOT" "$DEBRIS_HOME" \
+  || fail "ownership was never reclaimed from a lock holding a stopped worker's staging file: $FM_REMOTE_JOB_ERROR"
+assert_absent "$DEBRIS_STATE/worker.lock/.quarantine.aB3xQz" \
+  "the reclaim left the stopped worker's staging file in the lock"
+FM_REMOTE_JOB_STATE_ROOT="$DEBRIS_STATE" fm_remote_job_stage "$DEBRIS_HOME" "$DEBRIS_ROOT" \
+  "$REMOTE_HOME" fm-probe-job.sh < /dev/null > /dev/null
+DEBRIS_JOB_ID=$FM_REMOTE_JOB_ID
+FM_REMOTE_JOB_STATE_ROOT="$DEBRIS_STATE" fm_remote_job_wait "$DEBRIS_HOME" "$DEBRIS_JOB_ID" \
+  || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "the worker that reclaimed a debris-filled lock could not run a job"
+FM_REMOTE_JOB_STATE_ROOT="$DEBRIS_STATE" fm_remote_job_stop_worker_tree \
+  "$(cat "$DEBRIS_STATE/worker.pid")" || true
+pass "ownership is reclaimed from a lock holding a stopped worker's staging file"
+
+# The reclaim above must not have been bought by emptying the lock
+# indiscriminately: a lock holding something the protocol never writes is an
+# unsafe lock, and the worker must still refuse it rather than delete it.
+UNSAFE_ROOT="$TMP_ROOT/unsafe-lock-root"
+UNSAFE_HOME="$TMP_ROOT/unsafe-lock-account"
+UNSAFE_STATE="$TMP_ROOT/unsafe-lock-jobs"
+cp -R "$REMOTE_ROOT" "$UNSAFE_ROOT"
+mkdir -p "$UNSAFE_HOME" "$UNSAFE_STATE/jobs" "$UNSAFE_STATE/logs" \
+  "$UNSAFE_STATE/worker.lock/unexpected-directory"
+chmod 700 "$UNSAFE_HOME" "$UNSAFE_STATE" "$UNSAFE_STATE/jobs" "$UNSAFE_STATE/logs" \
+  "$UNSAFE_STATE/worker.lock"
+FM_REMOTE_JOB_STATE_ROOT="$UNSAFE_STATE" fm_remote_job_ensure_worker "$UNSAFE_ROOT" "$UNSAFE_HOME" \
+  && fail "ensure reported a ready worker over a lock holding an unexpected directory"
+assert_present "$UNSAFE_STATE/worker.lock/unexpected-directory" \
+  "the reclaim deleted a lock entry the protocol never writes"
+pass "reclaim refuses a lock holding an entry the protocol never writes"
+
+# A worker that starts, refuses, and exits is a different state from a worker
+# that never started, and the readiness report must not collapse the two. It
+# used to assert "no worker is running the code" in the same breath as quoting
+# the worker that had just declined.
+REFUSE_ROOT="$TMP_ROOT/refusing-root"
+REFUSE_HOME="$TMP_ROOT/refusing-account"
+REFUSE_STATE="$TMP_ROOT/refusing-jobs"
+cp -R "$REMOTE_ROOT" "$REFUSE_ROOT"
+mkdir -p "$REFUSE_HOME" "$REFUSE_STATE"
+cat > "$REFUSE_ROOT/bin/fm-remote-job-worker.sh" <<'SH'
+#!/bin/bash
+printf 'remote-job-worker: cannot acquire or safely reclaim worker ownership\n' >&2
+exit 1
+SH
+chmod +x "$REFUSE_ROOT/bin/fm-remote-job-worker.sh"
+FM_REMOTE_JOB_STATE_ROOT="$REFUSE_STATE" fm_remote_job_ensure_worker "$REFUSE_ROOT" "$REFUSE_HOME" \
+  && fail "ensure reported a ready worker while the worker was refusing to start"
+assert_contains "$FM_REMOTE_JOB_ERROR" "cannot acquire or safely reclaim worker ownership" \
+  "the readiness failure dropped the refusal the worker reported"
+assert_contains "$FM_REMOTE_JOB_ERROR" "a worker ran and declined" \
+  "the readiness failure did not report that a worker ran and declined"
+case "$FM_REMOTE_JOB_ERROR" in
+  *"no worker is running the code"*)
+    fail "the readiness failure claimed no worker is running while quoting one that declined: $FM_REMOTE_JOB_ERROR" ;;
+esac
+pass "the readiness report separates a worker that declined from one that never started"
+
+# The worker log is append-only across every generation on an account, so an
+# unqualified tail hands a previous run's refusal to the next attempt as if it
+# were current. Only a log written during this attempt may be quoted.
+touch -t 200001010000 "$REFUSE_STATE/logs/$FM_REMOTE_JOB_LABEL.log"
+cat > "$REFUSE_ROOT/bin/fm-remote-job-worker.sh" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "$REFUSE_ROOT/bin/fm-remote-job-worker.sh"
+FM_REMOTE_JOB_STATE_ROOT="$REFUSE_STATE" fm_remote_job_ensure_worker "$REFUSE_ROOT" "$REFUSE_HOME" \
+  && fail "ensure reported a ready worker for a worker that published nothing"
+case "$FM_REMOTE_JOB_ERROR" in
+  *"cannot acquire or safely reclaim worker ownership"*)
+    fail "the readiness failure quoted a previous attempt's refusal as this attempt's: $FM_REMOTE_JOB_ERROR" ;;
+esac
+assert_contains "$FM_REMOTE_JOB_ERROR" "no worker published a code identity" \
+  "the readiness failure did not report the absent code identity: $FM_REMOTE_JOB_ERROR"
+pass "the readiness report never attributes an earlier run's refusal to this attempt"
+
+# An identity published for other code is a worker that is running, just not
+# this one. Reporting it as an absence sends a reader looking for a process that
+# is right there.
+OTHERCODE_ROOT="$TMP_ROOT/othercode-root"
+OTHERCODE_HOME="$TMP_ROOT/othercode-account"
+OTHERCODE_STATE="$TMP_ROOT/othercode-jobs"
+cp -R "$REMOTE_ROOT" "$OTHERCODE_ROOT"
+mkdir -p "$OTHERCODE_HOME" "$OTHERCODE_STATE"
+cat > "$OTHERCODE_ROOT/bin/fm-remote-job-worker.sh" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "$OTHERCODE_ROOT/bin/fm-remote-job-worker.sh"
+FM_REMOTE_JOB_STATE_ROOT="$OTHERCODE_STATE" fm_remote_job_prepare_state "$OTHERCODE_HOME" \
+  || fail "$FM_REMOTE_JOB_ERROR"
+printf 'aaaaaaaa:bbbbbbbb:cccccccc\n' > "$OTHERCODE_STATE/worker.identity"
+chmod 600 "$OTHERCODE_STATE/worker.identity"
+FM_REMOTE_JOB_STATE_ROOT="$OTHERCODE_STATE" fm_remote_job_ensure_worker \
+  "$OTHERCODE_ROOT" "$OTHERCODE_HOME" \
+  && fail "ensure reported a ready worker while the published identity was for other code"
+assert_contains "$FM_REMOTE_JOB_ERROR" "running other code" \
+  "the readiness failure did not report the identity as other code: $FM_REMOTE_JOB_ERROR"
+case "$FM_REMOTE_JOB_ERROR" in
+  *"no worker is running the code"*)
+    fail "the readiness failure reported an identity for other code as an absence: $FM_REMOTE_JOB_ERROR" ;;
+esac
+pass "the readiness report separates a worker on other code from no worker at all"
+
 # Every wait above the freshness window is derived from it, so widening the
 # window widens them rather than leaving a wait shorter than what it waits on.
 READY_BASE_OWNERSHIP=$FM_REMOTE_JOB_OWNERSHIP_WAIT_SECONDS

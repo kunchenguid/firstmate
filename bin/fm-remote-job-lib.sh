@@ -870,19 +870,36 @@ fm_remote_job_code_identity() { # <remote-root> <account-home>
   printf '%s:%s:%s\n' "$root_hash" "$library_hash" "$worker_hash"
 }
 
-fm_remote_job_worker_identity_matches() { # <remote-root> <account-home>
+# What the published worker code identity says about <root>, as exactly one of:
+#   matches    - a worker is running this code
+#   different  - a worker published an identity, but for other code
+#   absent     - no identity has been published at all
+#   unreadable - an identity exists but is malformed, oversized, or unresolvable
+# The readiness report needs these apart. A worker that published nothing and a
+# worker bound to other code are different states, and only the first of them
+# means nothing is running - the distinction the report used to collapse.
+fm_remote_job_worker_identity_state() { # <remote-root> <account-home>
   local root=$1 account_home=$2 identity_file expected actual extra
-  [ "${FM_REMOTE_JOB_ACTIVE:-}" != 1 ] || return 0
-  fm_remote_job_prepare_state "$account_home" || return 1
+  fm_remote_job_prepare_state "$account_home" || { printf 'unreadable\n'; return 0; }
   identity_file=$(fm_remote_job_worker_identity_path)
-  fm_remote_job_regular_bounded "$identity_file" 256 || return 1
-  IFS= read -r actual < "$identity_file" || return 1
+  if [ ! -e "$identity_file" ] && [ ! -L "$identity_file" ]; then
+    printf 'absent\n'
+    return 0
+  fi
+  fm_remote_job_regular_bounded "$identity_file" 256 || { printf 'unreadable\n'; return 0; }
+  IFS= read -r actual < "$identity_file" || { printf 'unreadable\n'; return 0; }
   if IFS= read -r extra < <(tail -n +2 "$identity_file"); then
     : "$extra"
-    return 1
+    printf 'unreadable\n'
+    return 0
   fi
-  expected=$(fm_remote_job_code_identity "$root" "$account_home") || return 1
-  [ "$actual" = "$expected" ]
+  expected=$(fm_remote_job_code_identity "$root" "$account_home") || { printf 'unreadable\n'; return 0; }
+  if [ "$actual" = "$expected" ]; then printf 'matches\n'; else printf 'different\n'; fi
+}
+
+fm_remote_job_worker_identity_matches() { # <remote-root> <account-home>
+  [ "${FM_REMOTE_JOB_ACTIVE:-}" != 1 ] || return 0
+  [ "$(fm_remote_job_worker_identity_state "$1" "$2")" = matches ]
 }
 
 fm_remote_job_worker_alive() { # <account-home>
@@ -917,10 +934,23 @@ fm_remote_job_worker_log_path() { # <account-home>; the worker's own diagnostics
   fi
 }
 
-fm_remote_job_worker_last_diagnostic() { # <account-home>; last line the worker reported
-  local account_home=$1 log line last=
+# The last line the worker reported, but only when the log was actually written
+# during this start attempt. The log is append-only across every generation of
+# worker on this account, so an unqualified tail attributes a previous run's
+# refusal to the worker being waited on now - the same conflation of one state
+# with another that this report exists to avoid.
+fm_remote_job_worker_last_diagnostic() { # <account-home> [written-since-epoch]
+  local account_home=$1 since=${2:-} log line mtime last=''
   log=$(fm_remote_job_worker_log_path "$account_home") || return 1
   [ -f "$log" ] && [ ! -L "$log" ] || return 1
+  case "$since" in
+    ''|*[!0-9]*) ;;
+    *)
+      mtime=$(fm_remote_job_path_mtime "$log" 2>/dev/null || true)
+      case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$mtime" -ge "$since" ] || return 1
+      ;;
+  esac
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|' ') continue ;; esac
     last=$line
@@ -933,8 +963,14 @@ fm_remote_job_worker_last_diagnostic() { # <account-home>; last line the worker 
 # reports its own terminal failures - quarantined ownership, an ownership it
 # could not reclaim, an identity it could not publish - and without this they
 # were discarded in favour of "did not report ready".
-fm_remote_job_readiness_observation() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 lock ready mtime now age observed diagnostic
+#
+# A worker that started and declined is not a worker that never started, so the
+# two are never merged here. This report quotes the worker's own refusal when it
+# made one, and states only what the identity record actually shows: nothing
+# published, something published for other code, or something unreadable. It
+# never asserts that no worker is running while quoting one that plainly is.
+fm_remote_job_readiness_observation() { # <remote-root> <account-home> [attempt-started-epoch]
+  local root=$1 account_home=$2 since=${3:-} lock ready mtime now age observed diagnostic identity
   observed=
   fm_remote_job_prepare_state "$account_home" || {
     printf 'the worker state directory is unavailable\n'
@@ -964,11 +1000,20 @@ fm_remote_job_readiness_observation() { # <remote-root> <account-home>
   else
     observed="${observed:+$observed; }no readiness heartbeat was ever published"
   fi
-  if ! fm_remote_job_worker_identity_matches "$root" "$account_home"; then
-    observed="${observed:+$observed; }no worker is running the code at $root"
-  fi
-  diagnostic=$(fm_remote_job_worker_last_diagnostic "$account_home" 2>/dev/null || true)
-  [ -z "$diagnostic" ] || observed="${observed:+$observed; }the worker reported: $diagnostic"
+  diagnostic=$(fm_remote_job_worker_last_diagnostic "$account_home" "$since" 2>/dev/null || true)
+  identity=$(fm_remote_job_worker_identity_state "$root" "$account_home")
+  case "$identity" in
+    absent)
+      if [ -n "$diagnostic" ]; then
+        observed="${observed:+$observed; }a worker ran and declined before publishing its code identity"
+      else
+        observed="${observed:+$observed; }no worker published a code identity for $root"
+      fi
+      ;;
+    different) observed="${observed:+$observed; }the worker holding this queue is running other code, not $root" ;;
+    unreadable) observed="${observed:+$observed; }the published worker code identity is unreadable" ;;
+  esac
+  [ -z "$diagnostic" ] || observed="${observed:+$observed; }the worker itself reported: $diagnostic"
   printf '%s\n' "${observed:-nothing observable changed}"
 }
 
@@ -996,8 +1041,8 @@ fm_remote_job_readiness_failed_for_good() { # <account-home>
 # invocations - so an iteration count buys a different amount of waiting on
 # every machine. Returns 2 when it observed a terminal failure and retrying the
 # start cannot help.
-fm_remote_job_wait_for_probe() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 deadline
+fm_remote_job_wait_for_probe() { # <remote-root> <account-home> [attempt-started-epoch]
+  local root=$1 account_home=$2 since=${3:-} deadline
   FM_REMOTE_JOB_READY_OBSERVED=
   deadline=$(( $(date +%s) + FM_REMOTE_JOB_READY_WAIT_SECONDS ))
   while :; do
@@ -1005,13 +1050,13 @@ fm_remote_job_wait_for_probe() { # <remote-root> <account-home>
       return 0
     fi
     if fm_remote_job_readiness_failed_for_good "$account_home"; then
-      FM_REMOTE_JOB_READY_OBSERVED=$(fm_remote_job_readiness_observation "$root" "$account_home")
+      FM_REMOTE_JOB_READY_OBSERVED=$(fm_remote_job_readiness_observation "$root" "$account_home" "$since")
       return 2
     fi
     [ "$(date +%s)" -lt "$deadline" ] || break
     sleep 0.1
   done
-  FM_REMOTE_JOB_READY_OBSERVED=$(fm_remote_job_readiness_observation "$root" "$account_home")
+  FM_REMOTE_JOB_READY_OBSERVED=$(fm_remote_job_readiness_observation "$root" "$account_home" "$since")
   return 1
 }
 
@@ -1092,7 +1137,10 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
 }
 
 fm_remote_job_ensure_worker() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 platform uid identity_matches=0 ready_status
+  local root=$1 account_home=$2 platform uid identity_matches=0 ready_status started
+  # Anchors the worker's own diagnostics to this attempt, so an append-only log
+  # cannot report a previous generation's refusal as this one's.
+  started=$(date +%s)
   FM_REMOTE_JOB_ERROR=
   FM_REMOTE_JOB_REPAIRED=0
   FM_REMOTE_JOB_LAUNCH_PID=
@@ -1130,7 +1178,7 @@ fm_remote_job_ensure_worker() { # <remote-root> <account-home>
   else
     fm_remote_job_start_linux_worker "$root" "$account_home" || return 1
   fi
-  fm_remote_job_wait_for_probe "$root" "$account_home"
+  fm_remote_job_wait_for_probe "$root" "$account_home" "$started"
   ready_status=$?
   case "$ready_status" in
     0) return 0 ;;
@@ -1142,7 +1190,7 @@ fm_remote_job_ensure_worker() { # <remote-root> <account-home>
       if [ "$platform" = darwin ]; then
         fm_remote_job_reload_launchagent "$account_home" "$uid" || return 1
         FM_REMOTE_JOB_REPAIRED=1
-        fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
+        fm_remote_job_wait_for_probe "$root" "$account_home" "$started" && return 0
       else
         # A replaced Linux supervisor can lose its first ownership race while
         # the prior supervisor finishes releasing the shared worker lock. Retry
@@ -1150,7 +1198,7 @@ fm_remote_job_ensure_worker() { # <remote-root> <account-home>
         # above for launchd, before reporting a startup failure.
         fm_remote_job_start_linux_worker "$root" "$account_home" || return 1
         FM_REMOTE_JOB_REPAIRED=1
-        fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
+        fm_remote_job_wait_for_probe "$root" "$account_home" "$started" && return 0
       fi
       ;;
   esac
