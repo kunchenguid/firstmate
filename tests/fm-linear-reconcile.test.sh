@@ -22,6 +22,15 @@ case $* in
     printf '%s\n' '{"ok":true,"result":{"teams":[{"workspace":{"id":"workspace-a"}},{"workspace":{"id":"workspace-a"}},{"workspace":{"id":"workspace-b"}}]}}'
     ;;
   *'--workspace workspace-a --json')
+    if [ "${FM_LINEAR_TEST_MODE:-}" = cursor-cycle ]; then
+      case $* in
+        *'--cursor cycle-a'*) next_cursor=cycle-b ;;
+        *'--cursor cycle-b'*) next_cursor=cycle-a ;;
+        *) next_cursor=cycle-a ;;
+      esac
+      printf '{"ok":true,"result":{"issues":[],"meta":{"hasMore":true,"nextCursor":"%s"}}}\n' "$next_cursor"
+      exit 0
+    fi
     if [ "${FM_LINEAR_TEST_MODE:-}" = missing-cursor ]; then
       printf '%s\n' '{"ok":true,"result":{"issues":[],"meta":{"hasMore":true}}}'
       exit 0
@@ -85,6 +94,13 @@ if FM_HOME="$HOME_DIR" FM_LINEAR_CLI="$FAKE_BIN/orca-linear-fixture" \
   fail "Linear reconciliation accepted a missing pagination cursor"
 fi
 pass "reconciliation fails closed on missing pagination cursors"
+
+if FM_HOME="$HOME_DIR" FM_LINEAR_CLI="$FAKE_BIN/orca-linear-fixture" \
+  FM_LINEAR_TEST_CALLS="$CALLS" FM_LINEAR_TEST_MODE=cursor-cycle \
+  "$RECONCILE" >/dev/null 2>&1; then
+  fail "Linear reconciliation accepted a cyclic pagination cursor"
+fi
+pass "reconciliation fails closed on cyclic pagination cursors"
 
 BLOCKED_HOME="$TMP_ROOT/blocked-home"
 mkdir -p "$BLOCKED_HOME/state"

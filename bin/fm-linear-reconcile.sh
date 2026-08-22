@@ -69,7 +69,8 @@ list_workspaces() {
 }
 
 reconcile_workspace() {
-  local workspace=$1 cursor response has_more next_cursor issue issue_id updated_at count
+  local workspace=$1 cursor response has_more next_cursor issue issue_id updated_at count seen
+  local -a seen_cursors=()
   cursor=
   count=0
   while :; do
@@ -107,7 +108,11 @@ reconcile_workspace() {
       || die 'could not read Linear pagination cursor'
     [ -n "$next_cursor" ] \
       || die "Linear pagination cursor is missing for workspace $workspace"
-    [ "$next_cursor" != "$cursor" ] || die "Linear pagination did not advance for workspace $workspace"
+    for seen in "${seen_cursors[@]}"; do
+      [ "$next_cursor" != "$seen" ] \
+        || die "Linear pagination repeated a cursor for workspace $workspace"
+    done
+    seen_cursors+=("$next_cursor")
     cursor=$next_cursor
   done
   printf '%s\n' "$count"
