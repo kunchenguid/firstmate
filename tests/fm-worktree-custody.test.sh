@@ -252,6 +252,33 @@ test_spawn_refuses_a_copy_another_task_claims() {
   pass "a spawn refuses a pooled copy another task claims, leaving that copy untouched"
 }
 
+test_spawn_refuses_ambiguous_worktree_metadata() {
+  local case_dir id out status pool_head
+  id='custody-ambiguous-r1'
+  case_dir=$(make_spawn_case spawn-ambiguous "$id")
+  fm_write_meta "$case_dir/home/state/ambiguous-task.meta" \
+    "window=firstmate:fm-ambiguous-task" \
+    "worktree=$case_dir/not-this-copy" \
+    "worktree=$case_dir/pool" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  git -C "$case_dir/pool" checkout --quiet -b fm/ambiguous-owner
+  git -C "$case_dir/pool" commit -q --allow-empty -m "ambiguous owner's unlanded work"
+  pool_head=$(git -C "$case_dir/pool" rev-parse HEAD)
+
+  out=$(run_spawn_case "$case_dir" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 1 "$status" "spawn should fail closed on ambiguous worktree metadata"
+  assert_contains "$out" "ambiguous worktree metadata" "the refusal did not identify the ambiguous ownership record"
+  assert_absent "$case_dir/home/state/$id.meta" "ambiguous metadata still allowed a second owner record"
+  [ "$(git -C "$case_dir/pool" rev-parse HEAD)" = "$pool_head" ] \
+    || fail "ambiguous metadata allowed spawn to reset the claimed copy"
+  [ "$(git -C "$case_dir/pool" rev-parse --abbrev-ref HEAD)" = "fm/ambiguous-owner" ] \
+    || fail "ambiguous metadata allowed spawn to move the claimed copy"
+  pass "spawn fails closed on ambiguous worktree metadata without touching the copy"
+}
+
 test_spawn_claims_this_homes_pool_root_before_leasing() {
   local case_dir id out status base_real
   id='custody-own-pool-r1'
@@ -526,6 +553,72 @@ SH
   pass "forced secondmate cleanup validates every child before any mutation"
 }
 
+test_teardown_holds_task_set_lock_through_destructive_return() {
+  local case_dir teardown_pid waited=0 spawn_out spawn_status teardown_status
+  local endpoint_created=0 meta_published=0 teardown_alive=0
+  case_dir=$(make_teardown_case teardown-spawn-race)
+  add_custody_check "$case_dir" 0
+  mkdir -p "$case_dir/home" "$case_dir/data/task-b" "$case_dir/projects" "$case_dir/base"
+  printf 'brief for task-b\n' > "$case_dir/data/task-b/brief.md"
+  printf 'codex\n' > "$case_dir/config/crew-harness"
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "\$*" >> "$case_dir/endpoint.log"
+case "\$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "$case_dir/wt"; exit 0 ;;
+esac
+case "\${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+if [ "\${1:-}" = return ]; then
+  : > "$case_dir/return-started"
+  while [ ! -e "$case_dir/return-release" ]; do sleep 0.05; done
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+
+  run_teardown_case "$case_dir" > "$case_dir/teardown.out" 2>&1 &
+  teardown_pid=$!
+  while [ ! -e "$case_dir/return-started" ] && kill -0 "$teardown_pid" 2>/dev/null \
+      && [ "$waited" -lt 1200 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  [ -e "$case_dir/return-started" ] || {
+    : > "$case_dir/return-release"
+    wait "$teardown_pid" 2>/dev/null || true
+    fail "teardown never reached its destructive return boundary: $(cat "$case_dir/teardown.out")"
+  }
+
+  spawn_out=$(FM_ROOT_OVERRIDE='' FM_HOME="$case_dir/home" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_PROJECTS_OVERRIDE="$case_dir/projects" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    FM_POOL_ROOT_BASE="$case_dir/base" FM_SPAWN_NO_GUARD=1 \
+    TMUX="fake,1,0" PATH="$case_dir/fakebin:$PATH" \
+    "$SPAWN" task-b "$case_dir/project" --mode no-mistakes --yolo off 2>&1)
+  spawn_status=$?
+  [ ! -e "$case_dir/endpoint.log" ] || endpoint_created=1
+  [ ! -e "$case_dir/state/task-b.meta" ] || meta_published=1
+  kill -0 "$teardown_pid" 2>/dev/null && teardown_alive=1
+
+  : > "$case_dir/return-release"
+  if wait "$teardown_pid"; then teardown_status=0; else teardown_status=$?; fi
+  expect_code 1 "$spawn_status" "spawn should refuse while teardown owns the task set"
+  assert_contains "$spawn_out" "task set is locked" "concurrent spawn did not refuse on the teardown's task-set lock"
+  [ "$meta_published" -eq 0 ] || fail "concurrent spawn published metadata during destructive teardown"
+  [ "$endpoint_created" -eq 0 ] || fail "concurrent spawn created an endpoint during destructive teardown"
+  [ "$teardown_alive" -eq 1 ] || fail "teardown stopped holding the destructive boundary before the spawn refusal"
+  expect_code 0 "$teardown_status" "serialized teardown should complete after return is released"
+  pass "teardown holds the task-set lock through custody and destructive return"
+}
+
 test_teardown_proceeds_on_a_green_custody_verdict() {
   local case_dir out status
   case_dir=$(make_teardown_case teardown-custody-green)
@@ -615,6 +708,7 @@ test_pool_root_is_idempotent_and_preserves_other_keys
 test_pool_root_refuses_a_tracked_config
 test_real_treehouse_stops_sharing_a_pool_between_homes
 test_spawn_refuses_a_copy_another_task_claims
+test_spawn_refuses_ambiguous_worktree_metadata
 test_spawn_claims_this_homes_pool_root_before_leasing
 test_spawn_releases_delivered_copies_before_leasing
 test_spawn_skips_projects_that_publish_no_release_step
@@ -624,6 +718,7 @@ test_spawn_rejects_a_nonpositive_release_timeout
 test_teardown_refuses_a_red_custody_verdict
 test_forced_teardown_still_refuses_a_red_custody_verdict
 test_forced_secondmate_cleanup_preflights_child_custody
+test_teardown_holds_task_set_lock_through_destructive_return
 test_teardown_proceeds_on_a_green_custody_verdict
 test_teardown_skips_projects_that_publish_no_check
 test_teardown_refuses_when_a_published_check_cannot_be_run

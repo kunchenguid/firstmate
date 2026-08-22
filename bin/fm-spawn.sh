@@ -1784,10 +1784,19 @@ assert_worktree_unclaimed() {  # <worktree>
   local worktree=$1 meta claimed claimed_real other_id wt_real
   wt_real=$(real_path_or_raw "$worktree")
   for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
     other_id=$(basename "$meta" .meta)
     [ "$other_id" != "$ID" ] || continue
-    claimed=$(fm_backend_meta_exact_value "$meta" worktree) || continue
+    if [ ! -f "$meta" ] || [ -L "$meta" ] || [ ! -r "$meta" ]; then
+      echo "error: cannot confirm worktree ownership because task metadata '$meta' is not a readable regular file; refusing to use '$worktree'. Nothing was returned or reset. Endpoint $T is parked in that copy." >&2
+      HERDR_PROJECTION_ABORT_CLEANUP=0
+      exit 1
+    fi
+    claimed=$(fm_backend_meta_exact_value "$meta" worktree) || {
+      echo "error: cannot confirm worktree ownership because task $other_id has missing, empty, or ambiguous worktree metadata in '$meta'; refusing to use '$worktree'. Nothing was returned or reset. Endpoint $T is parked in that copy." >&2
+      HERDR_PROJECTION_ABORT_CLEANUP=0
+      exit 1
+    }
     claimed_real=$(real_path_or_raw "$claimed")
     [ "$claimed_real" = "$wt_real" ] || continue
     echo "error: task $other_id already claims the working copy '$claimed' that treehouse just handed task $ID; refusing to launch a second owner into it, because either task's cleanup would hard-reset the other's work. Nothing was returned or reset - reconcile $other_id first (tear it down once its work has landed, or correct its record), then spawn $ID again. Endpoint $T is parked in that copy." >&2
