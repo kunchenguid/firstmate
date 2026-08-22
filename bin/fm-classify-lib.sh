@@ -311,14 +311,18 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"
 }
-# Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
-# Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
-_fm_decision_drop() {  # <open-set> <key>
-  local set=$1 key=$2 line out=''
+# Drop the record(s) for <key> (and optional <verb>) from a newline-terminated
+# "<key>\t<verb>\t<note>" set. Portable (no associative arrays) so the fold runs
+# on bash 3.2 as well as 4+.
+_fm_decision_drop() {  # <open-set> <key> [<verb>]
+  local set=$1 key=$2 want_verb=${3-} line verb out=''
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
-      "$key"$'\t'*) : ;;
+      "$key"$'\t'*)
+        verb=${line#*$'\t'}; verb=${verb%%$'\t'*}
+        [ -z "$want_verb" ] || [ "$verb" = "$want_verb" ] || out="${out}${line}"$'\n'
+        ;;
       *) out="${out}${line}"$'\n' ;;
     esac
   done <<EOF
@@ -326,9 +330,12 @@ $set
 EOF
   printf '%s' "$out"
 }
-# Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
+# Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-record open
 # set, applying the same needs-decision/blocked-opens, resolved/captain-held-closes
-# rule status_open_decisions documents above. Pure text transform, no file I/O.
+# rule status_open_decisions documents above. A promotion that reuses an already-open
+# ordinary key is an additional record, not a replacement: otherwise resolving the
+# promotion would silently discard the pre-existing unrelated obligation. Pure text
+# transform, no file I/O.
 # This is the ONE place the per-line open/resolved rule is written; both the
 # whole-file fold (status_open_decisions) and the incremental cursor-backed fold
 # (status_open_decisions_incremental) below call this instead of re-deriving the
@@ -379,19 +386,34 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
     || { printf '%s' "$open"; return 0; }
   case "$verb" in
     needs-decision|blocked)
-      [ "$( _fm_open_set_verb "$open" "$key")" = "$FM_CLASSIFY_PROMOTION_VERB" ] \
+      _fm_open_set_has_verb "$open" "$key" "$FM_CLASSIFY_PROMOTION_VERB" \
         && { printf '%s' "$open"; return 0; }
       ;;
   esac
   case "$verb" in
-    needs-decision|blocked|"$FM_CLASSIFY_PROMOTION_VERB")
+    needs-decision|blocked)
       note=$(status_line_note "$line")
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
       open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
       ;;
+    "$FM_CLASSIFY_PROMOTION_VERB")
+      note=$(status_line_note "$line")
+      # A later promotion refreshes only its own record. Any earlier ordinary
+      # decision/blocker sharing the key remains independently open.
+      open=$(_fm_decision_drop "$open" "$key" "$FM_CLASSIFY_PROMOTION_VERB")
+      [ -n "$open" ] && open="${open}"$'\n'
+      open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+      ;;
     "$resolve"|"$held")
-      open=$(_fm_decision_drop "$open" "$key")
+      # With a colliding ordinary record, this close is the promotion closure
+      # that the landing gate requests. Preserve the other obligation; it needs
+      # its own explicit close rather than being erased by the re-staff record.
+      if _fm_open_set_has_verb "$open" "$key" "$FM_CLASSIFY_PROMOTION_VERB"; then
+        open=$(_fm_decision_drop "$open" "$key" "$FM_CLASSIFY_PROMOTION_VERB")
+      else
+        open=$(_fm_decision_drop "$open" "$key")
+      fi
       [ -n "$open" ] && open="${open}"$'\n'
       ;;
   esac
@@ -425,6 +447,14 @@ status_open_decisions() {  # <status-file>
 _fm_open_set_has() {  # <open-set> <key>
   case "$1" in
     "$2"$'\t'*|*$'\n'"$2"$'\t'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 0 when a folded open set has a record for both <key> and <verb>.
+_fm_open_set_has_verb() {  # <open-set> <key> <verb>
+  case "$1" in
+    "$2"$'\t'"$3"$'\t'*|*$'\n'"$2"$'\t'"$3"$'\t'*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -576,7 +606,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=5
+FM_OPEN_DECISIONS_FOLD_VERSION=6
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure

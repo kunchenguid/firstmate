@@ -109,6 +109,28 @@ test_promotion_and_decision_are_independent_records() {
   pass "a promotion and a decision stay independent records"
 }
 
+# Keys identify the route used to close a record, but a worker can independently
+# promote while an ordinary decision or blocker with that key is still open. The
+# promotion must remain gate-visible without allowing its later resolution to erase
+# that prior obligation.
+test_promotion_collision_preserves_the_existing_obligation() {
+  local d f
+  d=$(case_dir collision); f="$d/t.status"
+  {
+    printf 'blocked [key=tier]: wait for the rollback plan\n'
+    printf 'promoted [key=tier]: tier-2 auth boundary - new policy path\n'
+  } > "$f"
+  assert_fold "$f" \
+    "$(printf 'tier\tblocked\twait for the rollback plan\ntier\tpromoted\ttier-2 auth boundary - new policy path')" \
+    "a promotion preserves an earlier ordinary record with its key"
+
+  printf 'resolved [key=tier]: re-staffed to the stronger runtime\n' >> "$f"
+  assert_fold "$f" \
+    "$(printf 'tier\tblocked\twait for the rollback plan')" \
+    "closing the promotion leaves the prior ordinary record open"
+  pass "a colliding promotion cannot erase an earlier open obligation"
+}
+
 test_promotion_is_surfaced_not_absorbed() {
   status_is_captain_relevant 'promoted [key=tier]: tier-2 blast-radius - auth policy path' \
     || fail "a promotion line must be surfaced, never absorbed as routine progress"
@@ -155,6 +177,7 @@ test_keyed_resolved_closes_the_promotion
 test_later_progress_does_not_close_the_promotion
 test_successive_promotions_supersede_under_one_key
 test_promotion_and_decision_are_independent_records
+test_promotion_collision_preserves_the_existing_obligation
 test_promotion_is_surfaced_not_absorbed
 test_promotion_is_not_terminal
 test_promotion_is_not_a_pause
