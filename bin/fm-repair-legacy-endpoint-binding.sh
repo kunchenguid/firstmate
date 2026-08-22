@@ -29,7 +29,10 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P)}
+# The gate-refusal anchor is this command's checkout, never an environment
+# override. A gate agent can alter FM_ROOT_OVERRIDE, but it cannot redirect the
+# physical script path without ceasing to run this checked-out command.
+SCRIPT_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P)
 
 die_usage() {
   echo "usage: FM_HOME=/path/to/firstmate-home $0 <task-id>" >&2
@@ -68,7 +71,7 @@ SNAPSHOT=
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-fm_refuse_if_gate_agent "$FM_ROOT"
+fm_refuse_if_gate_agent "$SCRIPT_ROOT"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 

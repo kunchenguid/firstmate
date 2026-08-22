@@ -376,25 +376,46 @@ test_no_mistakes_gate_agent_cannot_drive_repair() {
   pass "legacy endpoint repair: no-mistakes gate agents cannot drive fleet recovery"
 }
 
-test_gate_worktree_path_backstop_anchors_to_repair_root() {
-  local dir before rc
+make_gate_checkout_with_repair() {  # <case-dir>
+  local dir=$1 seed="$1/gate-seed" origin="$1/gate-origin.git" \
+    bare="$1/.no-mistakes/repos/repair.git" \
+    checkout="$1/.no-mistakes/worktrees/repair/run"
+  mkdir -p "$(dirname "$bare")"
+  git init -q --bare "$origin"
+  fm_git_init_commit "$seed"
+  git -C "$seed" remote add origin "$origin"
+  git -C "$seed" push -q origin HEAD:main
+  git clone -q --bare "$origin" "$bare"
+  git -C "$bare" worktree add --detach "$checkout" main >/dev/null 2>&1
+  mkdir -p "$checkout/bin"
+  cp "$ROOT/bin/fm-backend.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$ROOT/bin/fm-repair-legacy-endpoint-binding.sh" "$checkout/bin/"
+  printf '%s\n' "$checkout"
+}
+
+test_gate_worktree_path_backstop_ignores_caller_root_override() {
+  local dir gate_checkout repair normal_root before rc
   dir=$(make_case gate-path-backstop)
+  gate_checkout=$(make_gate_checkout_with_repair "$dir")
+  repair="$gate_checkout/bin/fm-repair-legacy-endpoint-binding.sh"
+  normal_root="$dir/normal-root"
+  fm_git_init_commit "$normal_root"
   mkdir -p "$dir/outside"
   before=$(cat "$dir/home/state/legacy-task.meta")
   set +e
   (
     cd "$dir/outside" || exit 111
     env -u FM_GATE_REFUSE_BYPASS -u NO_MISTAKES_GATE \
-      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$PATH" \
-      "$REPAIR" legacy-task > "$dir/stdout" 2> "$dir/stderr"
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$normal_root" PATH="$dir/fakebin:$PATH" \
+      "$repair" legacy-task > "$dir/stdout" 2> "$dir/stderr"
   )
   rc=$?
   set -e
-  expect_code 3 "$rc" "gate-worktree path backstop from outside the worktree"
+  expect_code 3 "$rc" "gate-worktree path backstop with a caller-controlled root override"
   [ "$(cat "$dir/home/state/legacy-task.meta")" = "$before" ] \
     || fail "gate-worktree path refusal changed metadata"
   [ ! -s "$dir/herdr.log" ] || fail "gate-worktree path refusal reached Herdr"
-  pass "legacy endpoint repair: gate-worktree path backstop survives an outside cwd"
+  pass "legacy endpoint repair: gate-worktree path backstop ignores a caller-controlled root override"
 }
 
 test_legacy_record_reproduces_the_metadata_only_refusal
@@ -408,4 +429,4 @@ test_metadata_drift_refuses_without_overwriting_concurrent_state
 test_control_lock_contention_refuses_before_runtime_access
 test_task_inventory_lock_contention_refuses_before_runtime_access
 test_no_mistakes_gate_agent_cannot_drive_repair
-test_gate_worktree_path_backstop_anchors_to_repair_root
+test_gate_worktree_path_backstop_ignores_caller_root_override
