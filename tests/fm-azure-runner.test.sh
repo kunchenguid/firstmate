@@ -737,9 +737,27 @@ make_dispatch_fixture() {  # <root>: real dispatch + step code, capturing runner
   cp "$ROOT/bin/fm-azure-runner-dispatch.sh" "$root/bin/fm-azure-runner-dispatch.sh"
   cp "$ROOT/bin/fm-no-mistakes-test-command.sh" "$root/bin/fm-no-mistakes-test-command.sh"
   cp "$ROOT/bin/fm-azure-runner-command.sh" "$root/bin/fm-azure-runner-command.sh"
+  cp "$ROOT/bin/fm-azure-runner-routing.py" "$root/bin/fm-azure-runner-routing.py"
+  cp "$ROOT/bin/fm-azure-runner.py" "$root/bin/fm-azure-runner.py"
   cat >"$root/bin/fm-azure-runner.sh" <<SH
 #!/bin/sh
 printf '%s\n' "\$@" >"$root/captured"
+{
+  printf 'FM_HOME=%s\n' "\${FM_HOME:-}"
+  printf 'FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION=%s\n' "\${FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION:-}"
+  printf 'FM_AZURE_TENANT_ID=%s\n' "\${FM_AZURE_TENANT_ID:-}"
+  printf 'FM_AZURE_SUBSCRIPTION_ID=%s\n' "\${FM_AZURE_SUBSCRIPTION_ID:-}"
+  printf 'FM_AZURE_NAMING_PREFIX=%s\n' "\${FM_AZURE_NAMING_PREFIX:-}"
+  printf 'FM_AZURE_STORAGE_NAME=%s\n' "\${FM_AZURE_STORAGE_NAME:-}"
+  printf 'FM_AZURE_OWNER_TAG=%s\n' "\${FM_AZURE_OWNER_TAG:-}"
+  printf 'FM_AZURE_DEPLOYMENT_GENERATION=%s\n' "\${FM_AZURE_DEPLOYMENT_GENERATION:-}"
+  printf 'FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID=%s\n' "\${FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID:-}"
+  printf 'FM_AZURE_RESOURCE_GROUP=%s\n' "\${FM_AZURE_RESOURCE_GROUP:-}"
+  printf 'FM_AZURE_RUNNER_TASK=%s\n' "\${FM_AZURE_RUNNER_TASK:-}"
+  printf 'FM_AZURE_RUNNER_GENERATION=%s\n' "\${FM_AZURE_RUNNER_GENERATION:-}"
+  printf 'FM_AZURE_RUNNER_STATE_DIR=%s\n' "\${FM_AZURE_RUNNER_STATE_DIR:-}"
+  printf 'FM_AZURE_SHARED_CAPACITY_STATE_DIR=%s\n' "\${FM_AZURE_SHARED_CAPACITY_STATE_DIR:-}"
+} >"$root/captured-env"
 exit 0
 SH
   cat >"$root/tests/run.sh" <<SH
@@ -923,7 +941,8 @@ PY
 }
 
 no_mistakes_test_step_offload_contract() {
-  local tmp fixture gatewt gate_head fakebin rc out
+  local tmp fixture gatewt gate_head fakebin anchor fmhome routing expires rc out
+  local mutation mutation_action replacement
   fm_test_tmproot_into tmp fm-azure-runner-test-step-offload
   fixture="$tmp/fixture"
   make_dispatch_fixture "$fixture"
@@ -937,7 +956,172 @@ no_mistakes_test_step_offload_contract() {
 [ "${1:-}" = -V ] && echo "tmux 3.4"
 exit 0
 SH
-  chmod +x "$fakebin/tmux"
+  cat >"$fakebin/uv" <<'SH'
+#!/bin/sh
+exit 0
+SH
+  chmod +x "$fakebin/tmux" "$fakebin/uv"
+
+  anchor="$tmp/operator-home"
+  fmhome="$anchor/firstmate-home"
+  routing="$anchor/.fm-azure/runner-routing"
+  mkdir -p "$fmhome/state" "$routing"
+  cat >"$anchor/.fm-azure/fleet.env" <<ENV
+FM_AZURE_TENANT_ID=$SUB
+FM_AZURE_SUBSCRIPTION_ID=$SUB
+FM_AZURE_NAMING_PREFIX=fmfixture
+FM_AZURE_STORAGE_NAME=stfixture001
+FM_AZURE_OWNER_TAG=fixture-owner
+FM_AZURE_DEPLOYMENT_GENERATION=fixture-generation
+FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID=$SUB
+FM_AZURE_RESOURCE_GROUP=rg-fixture
+ENV
+  chmod 600 "$anchor/.fm-azure/fleet.env"
+  expires=$(python3 -c 'import datetime as d;print((d.datetime.now(d.timezone.utc)+d.timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+
+  write_test_routing() {  # <python-dict-overrides>
+    python3 - "$routing/$NM_RUN_FIXTURE.json" "$fmhome" "$SUB" "$expires" "$NM_RUN_FIXTURE" "$1" <<'PY'
+import json,sys
+value={
+  "schema":"fm.azure-runner-routing/v1","run_id":sys.argv[5],
+  "classes":{"test":"behavior-heavy"},"fm_home":sys.argv[2],
+  "subscription":sys.argv[3],"expires_at":sys.argv[4],"max_dispatches":1,
+}
+value.update(json.loads(sys.argv[6]))
+open(sys.argv[1],"w").write(json.dumps(value,indent=2)+"\n")
+PY
+    chmod 600 "$routing/$NM_RUN_FIXTURE.json"
+  }
+
+  routing_dispatch_count() {
+    python3 - "$routing/$NM_RUN_FIXTURE.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1])).get("dispatched", 0))
+PY
+  }
+
+  # The daemon-owned production path has no FM_AZURE_RUNNER_REMOTE_CLASSES.
+  # A valid per-run selection must still choose the split lane, and inspection
+  # must not spend a second budget slot before the real dispatch consumes one.
+  write_test_routing '{}'
+  rm -f "$fixture/captured" "$fixture/local-runs"
+  out=$(cd "$gatewt" && env HOME="$anchor" PATH="$fakebin:$PATH" \
+    "$fixture/bin/fm-no-mistakes-test-command.sh" 2>&1) \
+    || fail "a per-run test selection did not choose the split lane"
+  [ -f "$fixture/captured" ] || fail "a per-run test selection never reached the fixture runner"
+  assert_contains "$out" "selected REMOTE resource-class=behavior-heavy" \
+    "the per-run test selection emitted no remote-selection proof"
+  grep -q "fm-fixture-herdr.test.sh" "$fixture/local-runs" \
+    || fail "the per-run test selection lost the local Herdr shard"
+  grep -q -- "--skip-herdr" "$fixture/local-runs" 2>/dev/null \
+    && fail "the remotely selected non-Herdr shard also ran locally"
+  [ "$(routing_dispatch_count)" -eq 1 ] \
+    || fail "non-consuming test inspection did not leave exactly one durable dispatch spend"
+
+  # Inspection is only a planning read. The real heavy dispatch must carry an
+  # exact binding from that read so deletion, unselection, or replacement in
+  # the interval can never turn the Azure payload into an ordinary local
+  # command or silently dispatch a different selection.
+  cat >"$fakebin/grep" <<'SH'
+#!/bin/sh
+case " $* " in
+  *test-capabilities.tsv*)
+    if [ ! -e "$FM_TEST_ROUTING_MUTATED" ]; then
+      : >"$FM_TEST_ROUTING_MUTATED"
+      case "$FM_TEST_ROUTING_MUTATION" in
+        delete) rm -f "$FM_TEST_ROUTING_PATH" ;;
+        replace) mv "$FM_TEST_ROUTING_REPLACEMENT" "$FM_TEST_ROUTING_PATH" ;;
+        *) exit 97 ;;
+      esac
+    fi
+    ;;
+esac
+exec /usr/bin/grep "$@"
+SH
+  chmod +x "$fakebin/grep"
+  for mutation in delete unselect replace; do
+    write_test_routing '{}'
+    replacement="$tmp/$mutation-routing.json"
+    case "$mutation" in
+      delete) : >"$replacement" ;;
+      unselect)
+        write_test_routing '{"classes":{"lint":"validation-standard"}}'
+        cp "$routing/$NM_RUN_FIXTURE.json" "$replacement"
+        write_test_routing '{}'
+        ;;
+      replace)
+        write_test_routing '{"classes":{"test":"validation-standard"}}'
+        cp "$routing/$NM_RUN_FIXTURE.json" "$replacement"
+        write_test_routing '{}'
+        ;;
+    esac
+    mutation_action=$mutation
+    [ "$mutation_action" != unselect ] || mutation_action=replace
+    rm -f "$fixture/captured" "$fixture/local-runs" "$tmp/heavy-local" "$tmp/routing-mutated"
+    rc=0
+    out=$(cd "$gatewt" && env HOME="$anchor" PATH="$fakebin:$PATH" \
+      FM_TEST_ROUTING_MUTATION="$mutation_action" \
+      FM_TEST_ROUTING_PATH="$routing/$NM_RUN_FIXTURE.json" \
+      FM_TEST_ROUTING_REPLACEMENT="$replacement" \
+      FM_TEST_ROUTING_MUTATED="$tmp/routing-mutated" \
+      "$fixture/bin/fm-no-mistakes-test-command.sh" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] \
+      || fail "a routing $mutation after inspection did not refuse the bound heavy dispatch"
+    assert_contains "$out" "selection binding" \
+      "a routing $mutation after inspection did not name the stale selection binding"
+    [ ! -e "$fixture/captured" ] \
+      || fail "a routing $mutation after inspection dispatched a different remote selection"
+    ! grep -q -- '--skip-herdr' "$fixture/local-runs" 2>/dev/null \
+      || fail "a routing $mutation after inspection downgraded the heavy shard to local execution"
+    if [ "$mutation" != delete ]; then
+      [ "$(routing_dispatch_count)" -eq 0 ] \
+        || fail "a routing $mutation after inspection spent a dispatch slot before refusing"
+    fi
+  done
+  rm -f "$fakebin/grep"
+
+  # A present malformed authority runs nothing, even when explicit local
+  # recovery is also requested. Recovery may override a valid selection only.
+  write_test_routing '{"schema":"fm.azure-runner-routing/v99"}'
+  rm -f "$fixture/captured" "$fixture/local-runs"
+  rc=0
+  out=$(cd "$gatewt" && env HOME="$anchor" PATH="$fakebin:$PATH" \
+    FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES=test \
+    "$fixture/bin/fm-no-mistakes-test-command.sh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the real test owner bypassed a malformed per-run routing authority"
+  assert_contains "$out" "declares schema" \
+    "the real test owner's malformed-routing refusal did not name the defect"
+  [ ! -e "$fixture/captured" ] && [ ! -e "$fixture/local-runs" ] \
+    || fail "the real test owner executed after a malformed-routing refusal"
+
+  # A valid document that does not select test preserves the complete ordinary
+  # local suite and records why the test class ran locally in the step log.
+  write_test_routing '{"classes":{"lint":"validation-standard"}}'
+  rm -f "$fixture/captured" "$fixture/local-runs"
+  out=$(cd "$gatewt" && env HOME="$anchor" PATH="$fakebin:$PATH" \
+    "$fixture/bin/fm-no-mistakes-test-command.sh" 2>&1) \
+    || fail "an unselected per-run test class did not preserve full local execution"
+  [ ! -e "$fixture/captured" ] || fail "an unselected per-run test class reached the runner"
+  [ -e "$fixture/local-runs" ] || fail "an unselected per-run test class did not run locally"
+  assert_contains "$out" "executed LOCALLY (routing=present-not-selected, env=absent)" \
+    "an unselected per-run test class emitted no local-execution proof"
+  [ "$(routing_dispatch_count)" -eq 0 ] \
+    || fail "an unselected per-run test class spent a dispatch budget slot"
+
+  # Explicit recovery over a valid selected document runs the ordinary full
+  # suite locally, says so, and consumes no remote budget.
+  write_test_routing '{}'
+  rm -f "$fixture/captured" "$fixture/local-runs"
+  out=$(cd "$gatewt" && env HOME="$anchor" PATH="$fakebin:$PATH" \
+    FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES=test \
+    "$fixture/bin/fm-no-mistakes-test-command.sh" 2>&1) \
+    || fail "explicit per-run test recovery did not preserve full local execution"
+  [ ! -e "$fixture/captured" ] || fail "explicit per-run test recovery reached the runner"
+  [ -e "$fixture/local-runs" ] || fail "explicit per-run test recovery did not run locally"
+  assert_contains "$out" "executed LOCALLY (explicit local recovery)" \
+    "explicit per-run test recovery emitted no local-execution proof"
+  [ "$(routing_dispatch_count)" -eq 0 ] \
+    || fail "explicit per-run test recovery spent a dispatch budget slot"
 
   # The REAL no-mistakes test step machinery: the remote-selected test class
   # dispatches the non-Herdr suite through the REAL caller with bindings
@@ -992,7 +1176,526 @@ retail_rate_unit
 quota_snapshot_unit
 shared_allocator_bridge_unit
 commissioning_admission_unit
+run_owned_execution_proof_contract() {
+  python3 - "$ROOT/bin/fm-azure-runner.py" <<'PY' \
+    || fail "the verified Azure execution identity was not emitted into the run-owned step log"
+import contextlib
+import importlib.util
+import io
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_azure_runner", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+state = {
+    "invocation": "inv-proof",
+    "staging": {"output_blob": "private-proof.tar"},
+    "cost": {"max_increment": 1.25},
+    "resources": {"vm_instance_id": "11111111-1111-1111-1111-111111111111"},
+    "expected_boot_id": "22222222-2222-2222-2222-222222222222",
+}
+result = {
+    "exit_code": 0,
+    "timed_out": False,
+    "signal": None,
+    "stdout_truncated": False,
+    "stderr_truncated": False,
+}
+captured = io.StringIO()
+with contextlib.redirect_stderr(captured):
+    module.print_logs_and_summary(state, result)
+line = captured.getvalue()
+assert "invocation=inv-proof" in line, line
+assert "exit=0" in line, line
+assert "vm_instance_id=11111111-1111-1111-1111-111111111111" in line, line
+assert "boot_id=22222222-2222-2222-2222-222222222222" in line, line
+assert "unrecorded" not in line, line
+PY
+  pass "the run-owned step log carries the verified Azure VM instance and boot identities beside the verdict"
+}
+
+run_owned_execution_proof_contract
+runner_document_contract() {
+  python3 - "$ROOT/docs/azure-runner.md" <<'PY' \
+    || fail "the runner document no longer pins the per-run routing and execution-proof contract"
+import sys
+
+document = open(sys.argv[1], encoding="utf-8").read()
+required = (
+    "~/.fm-azure/runner-routing/<run-id>.json",
+    "does not rely on `FM_HOME`",
+    "An absent per-run file executes the class locally",
+    "runs the command nowhere",
+    "`fm_home` becomes `FM_HOME`",
+    "`~/.fm-azure/fleet.env`",
+    "FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID",
+    "immutable Azure `vm_instance_id`",
+    "verified guest `boot_id`",
+    "The earlier `selected REMOTE ... (dispatching)` line proves only selection",
+)
+missing = [needle for needle in required if needle not in document]
+assert not missing, missing
+obsolete = (
+    "export FM_AZURE_RUNNER_REMOTE_CLASSES="
+    "'test=behavior-heavy,lint=validation-standard'\n"
+    "no-mistakes axi run"
+)
+assert obsolete not in document, "the disproven env-only no-mistakes recipe returned"
+PY
+  pass "the runner document owns the per-run file, HOME-owned environment admission, visible local path, and run-owned Azure proof"
+}
+
+runner_document_contract
+routing_file_contract() {
+  local tmp fixture dispatch gatewt routing anchor fmhome expires out rc watcher assignment
+  fm_test_tmproot_into tmp fm-azure-runner-routing
+  fixture="$tmp/fixture"
+  make_dispatch_fixture "$fixture"
+  dispatch="$fixture/bin/fm-azure-runner-dispatch.sh"
+  gatewt="$tmp/nm-home/worktrees/19543ae8611e/$NM_RUN_FIXTURE"
+  make_ambient_worktree "$gatewt"
+  routing="$tmp/routing"
+  anchor="$tmp/home-anchor"
+  fmhome="$anchor/firstmate-home"
+  mkdir -p "$routing" "$fmhome/state" "$anchor/.fm-azure"
+  cat >"$anchor/.fm-azure/fleet.env" <<ENV
+FM_AZURE_TENANT_ID=$SUB
+FM_AZURE_SUBSCRIPTION_ID=$SUB
+FM_AZURE_NAMING_PREFIX=fmfixture
+FM_AZURE_STORAGE_NAME=stfixture001
+FM_AZURE_OWNER_TAG=fixture-owner
+FM_AZURE_DEPLOYMENT_GENERATION=fixture-generation
+FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID=$SUB
+FM_AZURE_RESOURCE_GROUP=rg-fixture
+ENV
+  chmod 600 "$anchor/.fm-azure/fleet.env"
+  expires=$(python3 -c 'import datetime as d;print((d.datetime.now(d.timezone.utc)+d.timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+
+  write_routing() {  # <python-dict-overrides>
+    python3 - "$routing/$NM_RUN_FIXTURE.json" "$fmhome" "$SUB" "$expires" "$NM_RUN_FIXTURE" "$1" <<'PY'
+import json,sys
+value={
+  "schema":"fm.azure-runner-routing/v1","run_id":sys.argv[5],
+  "classes":{"lint":"validation-standard"},"fm_home":sys.argv[2],
+  "subscription":sys.argv[3],"expires_at":sys.argv[4],"max_dispatches":3,
+}
+value.update(json.loads(sys.argv[6]))
+for key in [k for k,v in value.items() if v is None]:
+    del value[key]
+open(sys.argv[1],"w").write(json.dumps(value,indent=2)+"\n")
+PY
+    chmod 600 "$routing/$NM_RUN_FIXTURE.json"
+  }
+
+  dispatch_here() {  # runs the real dispatch in the gate worktree
+    (cd "$gatewt" && env HOME="$anchor" FM_AZURE_RUNNER_ROUTING_ROOT="$routing" \
+      FM_AZURE_RUNNER_STATE_DIR="$tmp/ambient-runner-state" \
+      FM_AZURE_SHARED_CAPACITY_STATE_DIR="$tmp/ambient-shared-state" \
+      "$dispatch" lint -- sh -c "touch '$tmp/ran-locally'" 2>&1)
+  }
+
+  expect_refusal() {  # <needle> <what>
+    rm -f "$fixture/captured" "$tmp/ran-locally"
+    local rc=0 out
+    out=$(dispatch_here) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$2: a broken routing file did not refuse"
+    assert_contains "$out" "$1" "$2: the refusal did not name the reason"
+    [ ! -e "$fixture/captured" ] || fail "$2: a broken routing file still dispatched to Azure"
+    [ ! -e "$tmp/ran-locally" ] || fail "$2: a broken routing file fell back to silent local execution"
+  }
+
+  write_raw_routing() {  # <exact-json>
+    printf '%s\n' "$1" >"$routing/$NM_RUN_FIXTURE.json"
+    chmod 600 "$routing/$NM_RUN_FIXTURE.json"
+  }
+
+  # R1. ABSENT is safe: local execution, exactly today's default, and it SAYS SO.
+  # The line is what turns a routing file written too late - the run id cannot
+  # exist before the run starts - into a visible fact instead of a silent
+  # fallback, so it is asserted, not assumed.
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  out=$(dispatch_here) || fail "an absent routing file did not execute locally"
+  [ -e "$tmp/ran-locally" ] || fail "an absent routing file did not run the command locally"
+  [ ! -e "$fixture/captured" ] || fail "an absent routing file reached the runner"
+  assert_contains "$out" "executed LOCALLY (routing=absent, env=absent)" \
+    "a local execution did not announce itself distinguishably"
+
+  # R2. A valid selection dispatches with the file's OWN bindings. fm_home and
+  # the subscription come from the file rather than the environment, because the
+  # step has neither and fm_home selects which spend ledger the run writes to.
+  write_routing '{}'
+  rm -f "$fixture/captured" "$tmp/ran-locally" "$fixture/captured-env"
+  out=$(dispatch_here) || fail "a valid routing selection failed to dispatch"
+  [ -e "$fixture/captured" ] || fail "a valid routing selection never reached the runner"
+  [ ! -e "$tmp/ran-locally" ] || fail "a dispatched class also ran locally"
+  assert_contains "$out" "selected REMOTE resource-class=validation-standard" \
+    "the dispatch did not announce its remote selection"
+  python3 - "$fixture/captured" "$fixture/captured-env" "$fmhome" "$SUB" <<'PY' \
+    || fail "the routing file's own bindings were not passed to the runner"
+import sys
+argv=open(sys.argv[1]).read().splitlines()
+env=dict(line.split("=",1) for line in open(sys.argv[2]).read().splitlines())
+def value(flag): return argv[argv.index(flag)+1]
+assert value("--resource-class")=="validation-standard", argv
+assert value("--confirm-subscription")==sys.argv[4], argv
+assert env["FM_HOME"]==sys.argv[3], env
+assert env["FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION"]==sys.argv[4], env
+assert env["FM_AZURE_TENANT_ID"]==sys.argv[4], env
+assert env["FM_AZURE_SUBSCRIPTION_ID"]==sys.argv[4], env
+assert env["FM_AZURE_NAMING_PREFIX"]=="fmfixture", env
+assert env["FM_AZURE_STORAGE_NAME"]=="stfixture001", env
+assert env["FM_AZURE_OWNER_TAG"]=="fixture-owner", env
+assert env["FM_AZURE_DEPLOYMENT_GENERATION"]=="fixture-generation", env
+assert env["FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID"]==sys.argv[4], env
+assert env["FM_AZURE_RESOURCE_GROUP"]=="rg-fixture", env
+assert env["FM_AZURE_RUNNER_TASK"]=="", env
+assert env["FM_AZURE_RUNNER_GENERATION"]=="", env
+assert env["FM_AZURE_RUNNER_STATE_DIR"]=="", env
+assert env["FM_AZURE_SHARED_CAPACITY_STATE_DIR"]=="", env
+PY
+
+  # The real runner requires more than FM_HOME and a confirmation. A selected
+  # daemon step has only HOME/PATH, so the operator-owned Azure environment is
+  # part of remote admission rather than an ambient assumption.
+  write_routing '{}'
+  mv "$anchor/.fm-azure/fleet.env" "$anchor/.fm-azure/fleet.env.off"
+  expect_refusal "operator Azure environment file" "a missing operator Azure environment"
+  mv "$anchor/.fm-azure/fleet.env.off" "$anchor/.fm-azure/fleet.env"
+
+  write_routing '{}'
+  sed 's/^FM_AZURE_SUBSCRIPTION_ID=.*/FM_AZURE_SUBSCRIPTION_ID=11111111-1111-1111-1111-111111111111/' \
+    "$anchor/.fm-azure/fleet.env" >"$anchor/.fm-azure/fleet.env.mismatch"
+  mv "$anchor/.fm-azure/fleet.env.mismatch" "$anchor/.fm-azure/fleet.env"
+  chmod 600 "$anchor/.fm-azure/fleet.env"
+  expect_refusal "does not match the operator Azure environment subscription" \
+    "a mismatched subscription confirmation"
+  sed 's/^FM_AZURE_SUBSCRIPTION_ID=.*/FM_AZURE_SUBSCRIPTION_ID='"$SUB"'/' \
+    "$anchor/.fm-azure/fleet.env" >"$anchor/.fm-azure/fleet.env.restored"
+  mv "$anchor/.fm-azure/fleet.env.restored" "$anchor/.fm-azure/fleet.env"
+  chmod 600 "$anchor/.fm-azure/fleet.env"
+
+  # fleet.env may carry only the explicit infrastructure allowlist. Per-run
+  # selectors, identity, confirmation, and any state-directory control are
+  # categorically not inputs to a routing-file dispatch.
+  cp "$anchor/.fm-azure/fleet.env" "$anchor/.fm-azure/fleet.env.base"
+  for assignment in \
+    "FM_AZURE_RUNNER_REMOTE_CLASSES=lint=validation-standard" \
+    "FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES=lint" \
+    "FM_AZURE_RUNNER_ROUTING_ROOT=$routing" \
+    "FM_AZURE_RUNNER_TASK=foreign-task" \
+    "FM_AZURE_RUNNER_GENERATION=foreign-generation" \
+    "FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION=$SUB" \
+    "FM_AZURE_RUNNER_STATE_DIR=$tmp/foreign-runner-state" \
+    "FM_AZURE_SHARED_CAPACITY_STATE_DIR=$tmp/foreign-shared-state" \
+    "FM_AZURE_WORKER_STATE_DIR=$tmp/foreign-worker-state"; do
+    cp "$anchor/.fm-azure/fleet.env.base" "$anchor/.fm-azure/fleet.env"
+    printf '%s\n' "$assignment" >>"$anchor/.fm-azure/fleet.env"
+    chmod 600 "$anchor/.fm-azure/fleet.env"
+    write_routing '{}'
+    expect_refusal "may not declare per-run control ${assignment%%=*}" \
+      "a fleet environment carrying ${assignment%%=*}"
+  done
+  mv "$anchor/.fm-azure/fleet.env.base" "$anchor/.fm-azure/fleet.env"
+  chmod 600 "$anchor/.fm-azure/fleet.env"
+
+  # Non-control Azure names outside the fixed infrastructure allowlist are
+  # ignored rather than exported into the runner environment.
+  printf '%s\n' 'FM_AZURE_FUTURE_DIAGNOSTIC=ignored' >>"$anchor/.fm-azure/fleet.env"
+  write_routing '{}'
+  dispatch_here >/dev/null \
+    || fail "an unknown non-control fleet value disrupted the infrastructure allowlist"
+  sed '/^FM_AZURE_FUTURE_DIAGNOSTIC=/d' "$anchor/.fm-azure/fleet.env" \
+    >"$anchor/.fm-azure/fleet.env.restored"
+  mv "$anchor/.fm-azure/fleet.env.restored" "$anchor/.fm-azure/fleet.env"
+  chmod 600 "$anchor/.fm-azure/fleet.env"
+
+  # The resolver must hand the dispatch exact values read from the validated
+  # fleet.env inode, not return its pathname for a later check-then-source.
+  # Replacing that pathname as soon as the durable spend lands must therefore
+  # neither inject replacement values nor invalidate the admitted dispatch.
+  write_routing '{"max_dispatches": 1}'
+  sed 's/^FM_AZURE_SUBSCRIPTION_ID=.*/FM_AZURE_SUBSCRIPTION_ID=11111111-1111-1111-1111-111111111111/' \
+    "$anchor/.fm-azure/fleet.env" >"$anchor/.fm-azure/fleet.env.replacement"
+  chmod 600 "$anchor/.fm-azure/fleet.env.replacement"
+  python3 - "$routing/$NM_RUN_FIXTURE.json" "$anchor/.fm-azure/fleet.env.replacement" \
+    "$anchor/.fm-azure/fleet.env" <<'PY' &
+import json, os, pathlib, sys, time
+route, replacement, live = map(pathlib.Path, sys.argv[1:])
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    try:
+        if json.loads(route.read_text()).get("dispatched") == 1:
+            os.replace(replacement, live)
+            raise SystemExit(0)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    time.sleep(0.001)
+raise SystemExit(91)
+PY
+  watcher=$!
+  rm -f "$fixture/captured" "$tmp/ran-locally" "$fixture/captured-env"
+  dispatch_here >/dev/null \
+    || fail "a pathname replacement after fleet environment admission changed the dispatch"
+  wait "$watcher" \
+    || fail "the fleet environment race fixture never observed the durable dispatch spend"
+  python3 - "$fixture/captured-env" "$SUB" <<'PY' \
+    || fail "the dispatch did not retain values from the exact admitted fleet environment inode"
+import sys
+env=dict(line.split("=",1) for line in open(sys.argv[1]).read().splitlines())
+assert env["FM_AZURE_SUBSCRIPTION_ID"] == sys.argv[2], env
+PY
+  sed 's/^FM_AZURE_SUBSCRIPTION_ID=.*/FM_AZURE_SUBSCRIPTION_ID='"$SUB"'/' \
+    "$anchor/.fm-azure/fleet.env" >"$anchor/.fm-azure/fleet.env.restored"
+  mv "$anchor/.fm-azure/fleet.env.restored" "$anchor/.fm-azure/fleet.env"
+  chmod 600 "$anchor/.fm-azure/fleet.env"
+
+  # R3. The budget is durable: max_dispatches=1 spends once, then refuses.
+  write_routing '{"max_dispatches": 1}'
+  rm -f "$fixture/captured"
+  dispatch_here >/dev/null || fail "the first dispatch inside budget failed"
+  [ -e "$fixture/captured" ] || fail "the first dispatch never reached the runner"
+  expect_refusal "spent its dispatch budget" "an exhausted budget"
+
+  # The budget is also atomic across the parallel steps of one no-mistakes
+  # run. A lock on the routing-file inode is insufficient because consuming a
+  # dispatch replaces that inode: every resolver must serialize on one stable
+  # authority and re-read the budget while it owns that lock.
+  write_routing '{"max_dispatches": 1}'
+  mkdir -p "$tmp/concurrent-results"
+  for index in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    (
+      set +e
+      env HOME="$anchor" FM_AZURE_RUNNER_ROUTING_ROOT="$routing" \
+        "$fixture/bin/fm-azure-runner-routing.py" resolve \
+        --run-id "$NM_RUN_FIXTURE" --class lint \
+        >"$tmp/concurrent-results/$index.out" 2>"$tmp/concurrent-results/$index.err"
+      printf '%s\n' "$?" >"$tmp/concurrent-results/$index.rc"
+    ) &
+  done
+  wait
+  selected=$(grep -l '^0$' "$tmp/concurrent-results"/*.rc | wc -l | tr -d ' ')
+  [ "$selected" -eq 1 ] \
+    || fail "one dispatch slot was consumed by $selected parallel resolvers instead of exactly one"
+
+  # R4. A file that exists but does not select this class is a SELECTION, not a
+  # fault: local, and distinguishable from absent.
+  write_routing '{"classes": {"test": "behavior-heavy"}}'
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  out=$(dispatch_here) || fail "an unselected class did not execute locally"
+  [ -e "$tmp/ran-locally" ] || fail "an unselected class did not run locally"
+  assert_contains "$out" "routing=present-not-selected" \
+    "a present-but-unselected file was not distinguishable from an absent one"
+
+  # R5. PRESENT-BUT-BROKEN never falls back to local. Every shape refuses BY NAME
+  # and the command runs NOWHERE.
+  write_routing '{"schema": "fm.azure-runner-routing/v99"}'
+  expect_refusal "declares schema" "a wrong schema"
+  write_routing '{"subscription": null}'
+  expect_refusal "missing required field" "a missing field"
+  write_routing '{"expires_at": "2020-01-01T00:00:00Z"}'
+  expect_refusal "expired at" "an expired window"
+  write_routing '{"run_id": "01ZZZZZZZZZZZZZZZZZZZZZZZZ"}'
+  expect_refusal "is bound to run" "a file bound to another run"
+  write_routing '{"fm_home": "/nonexistent/ledger"}'
+  expect_refusal "not an existing directory" "an unusable fm_home"
+  write_routing "{\"fm_home\": \"$tmp/outside-home\"}"
+  mkdir -p "$tmp/outside-home"
+  expect_refusal "outside" "an fm_home outside the user home"
+  mkdir -p "$tmp/escaped-home"
+  write_routing "{\"fm_home\": \"$anchor/../escaped-home\"}"
+  expect_refusal "parent traversal" "an fm_home that lexically escapes through a parent"
+  write_routing '{"classes": {"lint": "not-a-real-class"}}'
+  expect_refusal "unknown resource class" "an unknown resource class"
+  write_routing '{"classes": {"test": "not-a-real-class"}}'
+  expect_refusal "unknown resource class" "an unknown resource class on an unselected command"
+  write_routing '{"max_dispatches": 0}'
+  expect_refusal "positive whole number" "a non-positive budget"
+  write_raw_routing "{\"schema\":\"fm.azure-runner-routing/v1\",\"schema\":\"fm.azure-runner-routing/v1\",\"run_id\":\"$NM_RUN_FIXTURE\",\"classes\":{\"lint\":\"validation-standard\"},\"fm_home\":\"$fmhome\",\"subscription\":\"$SUB\",\"expires_at\":\"$expires\",\"max_dispatches\":3}"
+  expect_refusal "duplicate JSON key" "a duplicate top-level key"
+  write_raw_routing "{\"schema\":\"fm.azure-runner-routing/v1\",\"run_id\":\"$NM_RUN_FIXTURE\",\"classes\":{\"lint\":\"validation-standard\",\"lint\":\"behavior-heavy\"},\"fm_home\":\"$fmhome\",\"subscription\":\"$SUB\",\"expires_at\":\"$expires\",\"max_dispatches\":3}"
+  expect_refusal "duplicate JSON key" "a duplicate nested class key"
+  write_routing '{"unexpected_authority":"silently-ignored"}'
+  expect_refusal "unknown top-level field" "an undeclared top-level field"
+  write_routing '{"expires_at":"2999-01-01T01:00:00+01:00"}'
+  expect_refusal "literal UTC Z" "a non-Z UTC offset"
+  write_routing '{"expires_at":"2999-01-01T00:00:00.001Z"}'
+  expect_refusal "literal UTC Z" "a fractional non-schema UTC timestamp"
+  printf '{"schema": "fm.azure-runner-rout' >"$routing/$NM_RUN_FIXTURE.json"
+  expect_refusal "not valid JSON" "a torn write"
+  : >"$routing/$NM_RUN_FIXTURE.json"
+  expect_refusal "torn write" "an empty file"
+  write_routing '{}'
+  chmod 000 "$routing/$NM_RUN_FIXTURE.json"
+  expect_refusal "unreadable" "an unreadable file"
+  chmod 600 "$routing/$NM_RUN_FIXTURE.json"
+  chmod 666 "$routing/$NM_RUN_FIXTURE.json"
+  expect_refusal "group- or world-writable" "a world-writable file"
+  rm -f "$routing/$NM_RUN_FIXTURE.json"
+  ln -s /dev/null "$routing/$NM_RUN_FIXTURE.json"
+  expect_refusal "is a symlink" "a symlinked routing file"
+  rm -f "$routing/$NM_RUN_FIXTURE.json"
+  mkfifo "$routing/$NM_RUN_FIXTURE.json"
+  chmod 600 "$routing/$NM_RUN_FIXTURE.json"
+  expect_refusal "is not a regular file" "a FIFO routing path"
+  rm -f "$routing/$NM_RUN_FIXTURE.json"
+  python3 - "$routing/$NM_RUN_FIXTURE.json" <<'PY'
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_bytes(b"x" * (64 * 1024 + 1))
+PY
+  chmod 600 "$routing/$NM_RUN_FIXTURE.json"
+  expect_refusal "exceeds the 65536-byte bound" "an oversized routing file"
+
+  # Replacing a checked regular file just before open must not switch the
+  # resolver onto a different inode, even when the replacement is also safe.
+  write_routing '{}'
+  python3 - "$fixture/bin/fm-azure-runner-routing.py" \
+    "$routing/$NM_RUN_FIXTURE.json" <<'PY' \
+    || fail "a routing pathname replacement was not identity-pinned"
+import contextlib
+import importlib.util
+import io
+import os
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("routing_under_test", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+route = pathlib.Path(sys.argv[2])
+replacement = route.with_name(route.name + ".replacement")
+replacement.write_text(route.read_text())
+replacement.chmod(0o600)
+expected = route.lstat()
+real_open = module.os.open
+
+def replacing_open(path, flags, *args):
+    if pathlib.Path(path) == route:
+        os.replace(replacement, route)
+    return real_open(path, flags, *args)
+
+module.os.open = replacing_open
+stderr = io.StringIO()
+try:
+    with contextlib.redirect_stderr(stderr):
+        module.load_document(route, expected)
+except SystemExit as exc:
+    assert exc.code == module.EXIT_REFUSED, exc.code
+else:
+    raise AssertionError("a replacement inode was accepted")
+finally:
+    module.os.open = real_open
+assert "changed while it was opened" in stderr.getvalue(), stderr.getvalue()
+PY
+  rm -f "$routing/$NM_RUN_FIXTURE.json"
+
+  # Explicit local recovery may override a valid remote selection, but it may
+  # not turn a present malformed authority into local execution. Present and
+  # broken always means NOWHERE.
+  write_routing '{"schema": "fm.azure-runner-routing/v99"}'
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  rc=0
+  out=$(cd "$gatewt" && env HOME="$anchor" FM_AZURE_RUNNER_ROUTING_ROOT="$routing" \
+    FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES=lint \
+    "$dispatch" lint -- sh -c "touch '$tmp/ran-locally'" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "explicit local recovery bypassed a malformed routing file"
+  assert_contains "$out" "declares schema" \
+    "local-recovery refusal did not name the malformed routing file"
+  [ ! -e "$fixture/captured" ] && [ ! -e "$tmp/ran-locally" ] \
+    || fail "a malformed routing file executed under explicit local recovery"
+
+  # R6. Two authorities that disagree are never silently reconciled.
+  write_routing '{}'
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  rc=0
+  out=$(cd "$gatewt" && env HOME="$anchor" FM_AZURE_RUNNER_ROUTING_ROOT="$routing" \
+    FM_AZURE_RUNNER_REMOTE_CLASSES='lint=behavior-heavy' \
+    "$dispatch" lint -- sh -c "touch '$tmp/ran-locally'" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a routing/environment disagreement was silently reconciled"
+  assert_contains "$out" "disagree on class lint" "the disagreement refusal was not explicit"
+  [ ! -e "$fixture/captured" ] && [ ! -e "$tmp/ran-locally" ] \
+    || fail "a routing/environment disagreement still executed"
+
+  # R7. THE LOOKUP PATH IS NEVER DERIVED FROM REPOSITORY CONTENT. This is the
+  # whole answer to "what stops a checkout carrying one", so it is an asserted
+  # invariant rather than a property of today's code: a later refactor that
+  # anchors on the worktree or the working directory turns this red.
+  rm -f "$routing/$NM_RUN_FIXTURE.json"
+  mkdir -p "$gatewt/.fm-azure/runner-routing"
+  python3 - "$gatewt/.fm-azure/runner-routing/$NM_RUN_FIXTURE.json" "$fmhome" "$SUB" "$expires" \
+    "$NM_RUN_FIXTURE" <<'PY'
+import json,sys
+open(sys.argv[1],"w").write(json.dumps({
+  "schema":"fm.azure-runner-routing/v1","run_id":sys.argv[5],
+  "classes":{"lint":"validation-standard"},"fm_home":sys.argv[2],
+  "subscription":sys.argv[3],"expires_at":sys.argv[4],"max_dispatches":9,
+})+"\n")
+PY
+  cp "$gatewt/.fm-azure/runner-routing/$NM_RUN_FIXTURE.json" "$gatewt/$NM_RUN_FIXTURE.json"
+  mkdir -p "$anchor/.fm-azure/runner-routing"
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  # No FM_AZURE_RUNNER_ROUTING_ROOT: the DEFAULT lookup must anchor on $HOME.
+  out=$(cd "$gatewt" && env HOME="$anchor" "$dispatch" lint -- sh -c "touch '$tmp/ran-locally'" 2>&1) \
+    || fail "the default routing lookup failed"
+  [ -e "$tmp/ran-locally" ] || fail "a repository-carried routing file was not ignored"
+  [ ! -e "$fixture/captured" ] \
+    || fail "a routing file carried inside the checkout selected remote execution"
+  assert_contains "$out" "routing=absent" "a repository-carried routing file was consulted"
+
+  # The HOME anchor itself must be lexical, not merely resolved. Otherwise a
+  # checkout can carry the authority by replacing $HOME/.fm-azure with a
+  # symlink even though the final routing file and directory are both owned and
+  # mode-safe.
+  symlink_anchor="$tmp/symlink-anchor"
+  checkout_authority="$tmp/checkout-authority"
+  mkdir -p "$symlink_anchor/firstmate-home/state" \
+    "$checkout_authority/.fm-azure/runner-routing"
+  ln -s "$checkout_authority/.fm-azure" "$symlink_anchor/.fm-azure"
+  python3 - "$checkout_authority/.fm-azure/runner-routing/$NM_RUN_FIXTURE.json" \
+    "$symlink_anchor/firstmate-home" "$SUB" "$expires" "$NM_RUN_FIXTURE" <<'PY'
+import json,sys
+open(sys.argv[1],"w").write(json.dumps({
+  "schema":"fm.azure-runner-routing/v1","run_id":sys.argv[5],
+  "classes":{"lint":"validation-standard"},"fm_home":sys.argv[2],
+  "subscription":sys.argv[3],"expires_at":sys.argv[4],"max_dispatches":1,
+})+"\n")
+PY
+  chmod 600 "$checkout_authority/.fm-azure/runner-routing/$NM_RUN_FIXTURE.json"
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  rc=0
+  out=$(cd "$gatewt" && env HOME="$symlink_anchor" \
+    "$dispatch" lint -- sh -c "touch '$tmp/ran-locally'" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a checkout-carried authority was followed through a HOME symlink"
+  assert_contains "$out" "is a symlink" \
+    "a checkout-carried authority did not name the symlinked HOME path"
+  [ ! -e "$fixture/captured" ] && [ ! -e "$tmp/ran-locally" ] \
+    || fail "a checkout-carried authority still executed"
+
+  # R8. ...and the default DOES read $HOME, so R7 proves indifference to the
+  # checkout rather than a lookup that never resolves anything at all.
+  cp "$gatewt/.fm-azure/runner-routing/$NM_RUN_FIXTURE.json" \
+    "$anchor/.fm-azure/runner-routing/$NM_RUN_FIXTURE.json"
+  chmod 600 "$anchor/.fm-azure/runner-routing/$NM_RUN_FIXTURE.json"
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  (cd "$gatewt" && env HOME="$anchor" "$dispatch" lint -- sh -c "touch '$tmp/ran-locally'" >/dev/null 2>&1) \
+    || fail "the default HOME-anchored routing lookup failed to dispatch"
+  [ -e "$fixture/captured" ] || fail "the default routing root does not resolve under \$HOME"
+
+  # R9. Outside a gate worktree there is no run identity, so routing cannot
+  # apply and the environment variable remains the only selector.
+  make_ambient_worktree "$tmp/plain"
+  rm -f "$fixture/captured" "$tmp/ran-locally"
+  out=$(cd "$tmp/plain" && env HOME="$anchor" "$dispatch" lint -- sh -c "touch '$tmp/ran-locally'" 2>&1) \
+    || fail "a non-gate worktree failed to execute locally"
+  [ -e "$tmp/ran-locally" ] || fail "a non-gate worktree did not run locally"
+  assert_contains "$out" "routing=absent" "a non-gate worktree did not report an absent routing"
+
+  pass "per-run routing selects a class from a file the run can carry, an absent file stays local and says so, and every present-but-broken file refuses by name and runs the command nowhere"
+}
+
 dispatch_ambient_binding_contract
 no_mistakes_test_step_offload_contract
+routing_file_contract
 
 echo "# fm-azure-runner.test.sh: all assertions passed"

@@ -24,7 +24,11 @@ The policy reviewer compartment remains separate.
 
 The tracked no-mistakes command entries call the dispatch wrapper.
 The wrapper executes locally by default.
-An operator opts in each command class with `FM_AZURE_RUNNER_REMOTE_CLASSES`, and a selected remote command never falls back to the Mac after any cloud, identity, quota, staging, execution, or integrity failure.
+Inside a no-mistakes gate worktree, an operator opts in through the run-owned file at `~/.fm-azure/runner-routing/<run-id>.json`; the daemon step discovers the run id from its own Git top-level and does not rely on `FM_HOME` or any operator-shell export reaching it.
+`FM_AZURE_RUNNER_REMOTE_CLASSES` remains the compatibility selector for a direct invocation whose process actually inherits that environment; it is not the no-mistakes per-run recipe.
+An absent per-run file executes the class locally and writes `executed LOCALLY` plus the absence reason into that step's stderr.
+A present file that is unreadable, partial, malformed, expired, exhausted, wrongly bound, or otherwise unusable refuses by name and runs the command nowhere.
+Once either selector validly chooses remote execution, the command never falls back to the Mac after any cloud, identity, quota, staging, execution, or integrity failure.
 `FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES` is the only explicit local recovery selection.
 
 No billable resource was created while implementing this code.
@@ -127,6 +131,11 @@ The host validates the bounded control-plane result before accepting the command
 A transport or integrity failure exits 125 and is not rendered as the repository command's outcome.
 A verified command failure returns that command's exit code after safe collection and cleanup.
 This distinction prevents remote failure from becoming a pass.
+
+After a verified result is collected, the runner writes one summary into the command step's own stderr beside its verdict.
+That run-owned proof names the invocation, exit result, immutable Azure `vm_instance_id`, and verified guest `boot_id`.
+The earlier `selected REMOTE ... (dispatching)` line proves only selection; it is never evidence that Azure executed the command.
+Conversely, every local path writes `executed LOCALLY` into the same step-owned log, so a routing file written after the selected step began is visible as a local run rather than being mistaken for remote execution.
 
 ## Admission, parallelism, and cost
 
@@ -274,29 +283,60 @@ bin/fm-azure-runner.sh run \
   -- bin/fm-azure-runner-command.sh bash -c 'tests/run.sh --skip-herdr'
 ```
 
-Select no-mistakes command classes explicitly:
+### Per-run no-mistakes routing
 
-```sh
-export FM_AZURE_RUNNER_REMOTE_CLASSES='test=behavior-heavy,lint=validation-standard'
-no-mistakes axi run --intent '<captain goal and implementation context>'
+The no-mistakes daemon is launched with only `HOME` and `PATH`.
+An `export FM_AZURE_RUNNER_REMOTE_CLASSES=...` in the operator shell therefore does not reach a gate step and must not be used as the no-mistakes routing recipe.
+Start the run without a machine-global selector, then, once its 26-character run id exists and before the class to offload begins, write exactly one operator-owned file at `~/.fm-azure/runner-routing/<run-id>.json`.
+The full schema and exit-code contract are owned by [`bin/fm-azure-runner-routing.py`](../bin/fm-azure-runner-routing.py); the required document shape is:
+
+```json
+{
+  "schema": "fm.azure-runner-routing/v1",
+  "run_id": "<exact 26-character run id>",
+  "classes": {
+    "test": "behavior-heavy",
+    "lint": "validation-standard"
+  },
+  "fm_home": "/absolute/operator/firstmate-home",
+  "subscription": "<exact Azure subscription UUID>",
+  "expires_at": "<short exact UTC expiry, YYYY-MM-DDTHH:MM:SSZ>",
+  "max_dispatches": 2
+}
 ```
 
-The three `FM_AZURE_RUNNER_TASK` / `FM_AZURE_RUNNER_GENERATION` /
-`FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION` exports above are an operator override,
-not a requirement of the no-mistakes path: `bin/fm-azure-runner-dispatch.sh` is
-the caller that derives the per-run bindings from the ambient no-mistakes run
-when they are not exported.
+Only those seven required fields and the resolver-owned optional `dispatched` counter are allowed at the top level, duplicate JSON keys are refused, and `expires_at` must use the literal UTC `Z` form shown above.
+
+Create the routing directory and file outside every checkout, with every lexical component from `HOME` through the file owned by the invoking uid, free of symlinks, and not group- or world-writable; the file itself is a regular mode-`0600` file no larger than 64 KiB.
+Publish a complete file with an atomic rename rather than writing the live path in place.
+A checkout-carried `.fm-azure/runner-routing` tree is never consulted, and a symlink from the HOME-owned path into a checkout is refused.
+The resolver opens with no-follow semantics and reads only the exact device/inode it checked, under the fixed byte ceiling; FIFOs, oversized files, and pathname replacement races refuse before selection.
+Each selected dispatch consumes one `max_dispatches` slot under a stable sibling lock and durably records the new count before the runner starts.
+Delete the exact run file after the run; expiry and the dispatch budget remain fail-closed backstops, not garbage collection.
+
+The no-mistakes test owner must choose between its ordinary complete local suite and the remote-non-Herdr/local-Herdr split before it has a payload to dispatch.
+It asks `bin/fm-azure-runner-dispatch.sh --inspect-selection test` for that decision.
+Inspection applies the same complete routing-document, local-recovery, and dual-authority checks but never consumes a dispatch slot, and returns an exact selection binding.
+The subsequent real remote dispatch must present that binding, refuses if the route was deleted, unselected, or replaced, revalidates under the stable lock, and is the only budget consumer.
+A local inspection writes the exact local reason into the test step's own stderr before the full suite starts, while a malformed present authority refuses before either local or remote tests start.
+
+The selected daemon step then asks the resolver to read the landed Azure host configuration from the provenance-checked regular file `~/.fm-azure/fleet.env`.
+That file must supply `FM_AZURE_TENANT_ID`, `FM_AZURE_SUBSCRIPTION_ID`, `FM_AZURE_NAMING_PREFIX`, `FM_AZURE_STORAGE_NAME`, `FM_AZURE_OWNER_TAG`, `FM_AZURE_DEPLOYMENT_GENERATION`, and `FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID`.
+The resolver opens and reads the validated inode once, evaluates those exact bounded bytes, and returns only an explicit infrastructure allowlist in encoded form rather than a mutable pathname for the dispatch shell to source later.
+That allowlist covers the required identities plus the runner's documented resource-group, private data-plane, image, concurrency, budget, cost-mode, cell, SKU, and untrained-forecast infrastructure settings; unrelated `FM_AZURE_*` names are ignored.
+Per-run selectors, routing roots, task/generation identity, subscription confirmation, and every `*_STATE_DIR` control are refused if `fleet.env` declares them.
+Its subscription must exactly equal the routing document's explicit `subscription`, which becomes `FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION`; the routing document's explicit `fm_home` becomes `FM_HOME` and therefore selects the spend ledger.
+For a routing-file dispatch, ambient runner/shared/worker state-directory overrides are cleared, so this exact `fm_home` is the sole ledger authority.
+Missing, unsafe, incomplete, or disagreeing configuration refuses before runner preparation.
+
+The `FM_AZURE_RUNNER_TASK` / `FM_AZURE_RUNNER_GENERATION` exports shown for a direct run above are an operator override, not a requirement of the no-mistakes path: `bin/fm-azure-runner-dispatch.sh` derives the per-run bindings from the ambient no-mistakes run when they are not exported.
 The task and generation come from the run's own identity - the
 `$FM_HOME/state/<task>.meta` whose `worktree=` records the command's Git
 top-level, or, inside a no-mistakes gate worktree
 (`<nm-home>/worktrees/<repo-id>/<run-id>`), the run id as `nm-<run-id>` with
 the exact snapshot HEAD as the generation.
-The subscription confirmation is always passed through from the operator
-environment's `FM_AZURE_SUBSCRIPTION_ID` and never synthesized.
-In the ambient lane, `FM_AZURE_RUNNER_REMOTE_CLASSES` is therefore the spend
-switch, full stop: selecting a class remote is the single operator gesture
-that authorizes billable dispatch, and the auto-derived subscription
-confirmation is no longer a second one.
+For a per-run file, the subscription confirmation and spend-ledger home come only from that written operator act and are never guessed.
+For the compatibility environment selector, confirmation still passes through from the invoking process's `FM_AZURE_SUBSCRIPTION_ID` and is never synthesized.
 Explicit values are honored only as a task/generation pair; half a hand-set
 identity refuses.
 A binding that cannot be derived fails closed with an exact error naming what

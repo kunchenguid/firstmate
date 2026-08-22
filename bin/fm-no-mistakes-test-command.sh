@@ -7,20 +7,6 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 DISPATCH="$ROOT/bin/fm-azure-runner-dispatch.sh"
-remote_selected=0
-local_recovery=0
-entry='' name=''
-
-IFS=, read -r -a entries <<<"${FM_AZURE_RUNNER_REMOTE_CLASSES:-}"
-for entry in "${entries[@]:-}"; do
-  name=${entry%%=*}
-  [ "$name" != test ] || remote_selected=1
-done
-IFS=, read -r -a entries <<<"${FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES:-}"
-for entry in "${entries[@]:-}"; do
-  name=${entry%%=*}
-  [ "$name" != test ] || local_recovery=1
-done
 
 run_full() {
   command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; return 1; }
@@ -32,10 +18,45 @@ run_full() {
   return "$rc"
 }
 
-if [ "$remote_selected" -ne 1 ] || [ "$local_recovery" -eq 1 ]; then
-  run_full
-  exit $?
-fi
+# A daemon step inherits no FM_* selection variables from the operator. Ask the
+# dispatch owner for the effective per-run decision instead of trying to infer
+# it here. This validates every present routing-file field and explicit local
+# recovery without spending a dispatch slot; only the real dispatch below may
+# consume one. Any malformed or disagreeing authority exits before either the
+# full-local suite or one half of the split can start.
+set +e
+selection_output=$("$DISPATCH" --inspect-selection test)
+selection_rc=$?
+set -e
+[ "$selection_rc" -eq 0 ] || exit "$selection_rc"
+selection_count=$(printf '%s\n' "$selection_output" | grep -c '^selection=' || true)
+[ "$selection_count" -eq 1 ] \
+  || { echo "azure-runner test selection inspection returned no unique decision" >&2; exit 1; }
+selection=$(printf '%s\n' "$selection_output" | sed -n 's/^selection=//p')
+case "$selection" in
+  local)
+    reason_count=$(printf '%s\n' "$selection_output" | grep -c '^reason=' || true)
+    [ "$reason_count" -eq 1 ] \
+      || { echo "azure-runner local test selection returned no unique reason" >&2; exit 1; }
+    reason=$(printf '%s\n' "$selection_output" | sed -n 's/^reason=//p')
+    [ -n "$reason" ] \
+      || { echo "azure-runner local test selection returned an empty reason" >&2; exit 1; }
+    printf 'azure-runner: class=test executed LOCALLY (%s)\n' "$reason" >&2
+    run_full
+    exit $?
+    ;;
+  remote) ;;
+  *)
+    printf 'azure-runner test selection inspection returned invalid decision: %s\n' "$selection" >&2
+    exit 1
+    ;;
+esac
+binding_count=$(printf '%s\n' "$selection_output" | grep -c '^selection_binding=' || true)
+[ "$binding_count" -eq 1 ] \
+  || { echo "azure-runner remote test selection returned no unique selection binding" >&2; exit 1; }
+selection_binding=$(printf '%s\n' "$selection_output" | sed -n 's/^selection_binding=//p')
+[[ "$selection_binding" =~ ^sha256:[0-9a-f]{64}$ ]] \
+  || { echo "azure-runner remote test selection returned an invalid selection binding" >&2; exit 1; }
 
 herdr_tests=()
 while IFS=$'\t' read -r script capability; do
@@ -49,7 +70,8 @@ done < <(grep -v '^#' "$ROOT/tests/test-capabilities.tsv")
 # the local shard runs every Herdr declaration through its owned guarded lab.
 # They run concurrently and report independently into this one command step.
 # shellcheck disable=SC2016 # The command expands its variables inside the Azure guest shell.
-"$DISPATCH" test -- "$ROOT/bin/fm-azure-runner-command.sh" bash -c '
+"$DISPATCH" --require-selection-binding "$selection_binding" test -- \
+  "$ROOT/bin/fm-azure-runner-command.sh" bash -c '
   command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; exit 1; }
   tmux -V
   rc=0

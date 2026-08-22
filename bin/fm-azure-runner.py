@@ -2945,13 +2945,22 @@ def dispatch_prepared(env, state, confirm_subscription, confirm_cost_admission_m
 
 
 def print_logs_and_summary(state, result):
+    # vm_instance_id and boot_id are the only evidence that this command ran on
+    # Azure rather than through the dispatch's local fallback, and they used to
+    # live ONLY in $FM_HOME/state/azure-runner/<invocation>.json. That left the
+    # step's own log, and the no-mistakes run record built from it, unable to
+    # distinguish a real cell execution from a local one. The proof of WHERE the
+    # work ran belongs in the same artifact as the verdict, so it is printed
+    # here, on the step's own stderr.
     print(
-        "azure-runner: invocation={} exit={} timeout={} signal={} stdout_truncated={} stderr_truncated={} private_archive={} max_cost=${:.2f}".format(
+        "azure-runner: invocation={} exit={} timeout={} signal={} stdout_truncated={} stderr_truncated={} private_archive={} max_cost=${:.2f} vm_instance_id={} boot_id={}".format(
             state["invocation"], result["exit_code"], str(result["timed_out"]).lower(),
             result.get("signal") if result.get("signal") is not None else "none",
             str(result["stdout_truncated"]).lower(), str(result["stderr_truncated"]).lower(),
             state["staging"]["output_blob"],
             state.get("cost", {}).get("max_increment", 0.0),
+            state.get("resources", {}).get("vm_instance_id") or "unrecorded",
+            state.get("expected_boot_id") or "unrecorded",
         ),
         file=sys.stderr,
     )
