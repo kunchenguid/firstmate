@@ -15,6 +15,17 @@
 #       except 124, which means the bound was hit (GNU timeout's convention,
 #       reproduced by the perl and bash fallbacks).
 #
+#   FM_TIMEOUT_TERM_GRACE_S
+#       Seconds fm_run_bash_timeout waits after SIGTERM before escalating to
+#       SIGKILL on a hit bound. Default 0.2. This grace only helps a bounded
+#       command that traps TERM to clean up; a command with no such trap (a
+#       plain shell function, for instance) gains nothing from it and simply
+#       overruns its own requested bound by the grace on every hang. A caller
+#       whose command has no TERM trap can scope this down for that one call
+#       (`FM_TIMEOUT_TERM_GRACE_S=0.02 fm_run_bash_timeout ...`) to shrink its
+#       own worst-case overrun instead of inheriting the general-purpose
+#       default meant for commands that do clean up on TERM.
+#
 # A non-positive bound is not a bound: `timeout 0` and the perl fallback's
 # `alarm 0` both disable the deadline, so callers must reject 0 before calling.
 #
@@ -42,8 +53,9 @@ fm_timeout_mechanism() {
 }
 
 fm_run_bash_timeout() {
-  local seconds=$1 command_status deadline_status child_pid watchdog_pid command_rc recorded_rc monitor_was_on=0
+  local seconds=$1 command_status deadline_status child_pid watchdog_pid command_rc recorded_rc monitor_was_on=0 term_grace_s
   shift
+  term_grace_s=${FM_TIMEOUT_TERM_GRACE_S:-0.2}
   command_status=$(mktemp "${TMPDIR:-/tmp}/fm-bash-timeout-command.XXXXXX" 2>/dev/null) || return 124
   deadline_status="${command_status}.deadline"
   case $- in *m*) monitor_was_on=1 ;; esac
@@ -61,7 +73,7 @@ fm_run_bash_timeout() {
     sleep "$seconds"
     printf 'expired\n' > "$deadline_status"
     kill -TERM -- "-$child_pid" 2>/dev/null || true
-    sleep 0.2
+    sleep "$term_grace_s"
     kill -KILL -- "-$child_pid" 2>/dev/null || true
     exit 124
   ) &

@@ -151,9 +151,20 @@ arm_now_ms() {
 # deadline still gets a real, if brief, chance to complete rather than a
 # zero/negative timeout, which fm_run_bash_timeout does not accept as a bound.
 # In ordinary operation a probe finishes in sub-millisecond time either way, so
-# this floor is the only overrun a caller can ever see past its own deadline.
+# on a hang, these two are the only overrun a caller can ever see past its own
+# deadline: the floor above, and FM_PROCEVENT_LAVISH_ARM_PROBE_TERM_GRACE_S
+# below.
 FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S=2
 FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS=50
+# fm_procevent_generation_live traps no signal - it is a plain shell function
+# with a try-once lock, a claim read, and a pid check, none of which install a
+# TERM handler - so SIGTERM already ends it outright and fm_run_bash_timeout's
+# general-purpose 0.2s post-TERM grace (meant for a bounded command that DOES
+# trap TERM to clean up) buys a hung probe nothing but 0.2s of extra overrun
+# past its own bound, and therefore past arm's deadline. Scope the grace down
+# for this call only, so a hung probe's worst-case overrun stays governed by
+# the floor above rather than by a teardown allowance this probe cannot use.
+FM_PROCEVENT_LAVISH_ARM_PROBE_TERM_GRACE_S=0.02
 arm_probe_live() {  # <source-id> <registration-identity> <remaining-ms>
   local id=$1 identity=$2 remaining_ms=$3 ceiling_ms bound_ms probe_s
   ceiling_ms=$(( FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S * 1000 ))
@@ -161,7 +172,8 @@ arm_probe_live() {  # <source-id> <registration-identity> <remaining-ms>
   [ "$bound_ms" -lt "$ceiling_ms" ] || bound_ms=$ceiling_ms
   [ "$bound_ms" -ge "$FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS" ] || bound_ms=$FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS
   printf -v probe_s '%d.%03d' "$(( bound_ms / 1000 ))" "$(( bound_ms % 1000 ))"
-  fm_run_bash_timeout "$probe_s" \
+  FM_TIMEOUT_TERM_GRACE_S=$FM_PROCEVENT_LAVISH_ARM_PROBE_TERM_GRACE_S \
+    fm_run_bash_timeout "$probe_s" \
     fm_procevent_generation_live "$id" "$identity"
 }
 
@@ -174,8 +186,22 @@ arm_reconcile_kick_lock() {
   printf '%s/.lavish-arm-reconcile-kick.lock\n' "$(fm_procevent_registry_dir "$STATE")"
 }
 
+# Companion lock: whether a reconcile kick is currently QUEUED for this home -
+# either waiting for arm_reconcile_kick_lock or about to. Bounds how many arm
+# calls ever act on a kick to at most one queued plus one running, no matter
+# how large a concurrent burst is, instead of one detached waiter per call.
+# Every arm call still forks its own background attempt (see cmd_arm) - that
+# fork cannot be avoided, since only a fresh process can try this lock
+# without blocking cmd_arm's own readiness wait - but an attempt that finds a
+# kick already queued does one non-blocking try, loses it, and exits
+# immediately: it never blocks, never runs reconcile, and never survives past
+# that try, so it is not itself a waiter.
+arm_reconcile_kick_pending_lock() {
+  printf '%s/.lavish-arm-reconcile-kick-pending.lock\n' "$(fm_procevent_registry_dir "$STATE")"
+}
+
 cmd_arm() {
-  local artifact=${1-} id real reg_out identity wait_ms live deadline_ms now_ms remaining_ms frac first kick_lock
+  local artifact=${1-} id real reg_out identity wait_ms live deadline_ms now_ms remaining_ms frac first kick_lock pending_lock
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
@@ -208,22 +234,38 @@ cmd_arm() {
   # the timed sampling loop below is allowed to bound how long arm waits.
   # Running it synchronously here would let that internal blocking silently
   # replace the documented bound with reconcile's own, possibly unbounded, one.
-  # The kick is single-flighted through arm_reconcile_kick_lock rather than
-  # fired unconditionally: each call's kick blocks on that lock until any
-  # earlier kick's reconcile pass has fully finished, then runs its own fresh
-  # pass - which is guaranteed to see this call's own registration, already
-  # committed above before the kick was even queued. A burst of concurrent arm
-  # calls therefore collapses to at most one reconcile process actually
-  # running at a time, each still with a real pass of its own, instead of N
-  # independent, unowned processes racing reconcile's internal per-source
-  # locking. The lock's recorded pid IS the kick's ownership; if its holder
-  # dies mid-reconcile, the same stale-lock recovery every other lock in this
-  # repo relies on reclaims it.
+  #
+  # Coalesced through arm_reconcile_kick_pending_lock rather than fired
+  # unconditionally or queued per call. This background attempt first tries
+  # (non-blocking) to own the "a kick is queued" marker:
+  #   - Losing that try means some earlier, still-pending attempt already
+  #     owns it and has not yet started reconcile (it releases the marker
+  #     only once it actually holds arm_reconcile_kick_lock, immediately
+  #     before running reconcile). That earlier attempt is therefore
+  #     guaranteed to run its pass AFTER this call's own registration, which
+  #     was already committed above before this attempt even started. This
+  #     attempt does nothing further and exits.
+  #   - Winning it makes this attempt the queued kick: it waits for
+  #     arm_reconcile_kick_lock (serializing against any reconcile pass
+  #     already running), releases the pending marker the instant it holds
+  #     that lock so a later arm call can queue the NEXT pass, then runs its
+  #     own fresh reconcile pass and releases the lock. The lock's recorded
+  #     pid IS the kick's ownership; if its holder dies mid-reconcile, the
+  #     same stale-lock recovery every other lock in this repo relies on
+  #     reclaims it.
+  # A burst of concurrent arm calls therefore leaves at most one background
+  # process actually waiting on anything - one running (or about to run)
+  # reconcile pass plus, at most, one queued behind it - never one detached,
+  # unowned waiter per call.
   (
-    kick_lock=$(arm_reconcile_kick_lock)
-    fm_lock_acquire_wait "$kick_lock"
-    "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1
-    fm_lock_release "$kick_lock"
+    pending_lock=$(arm_reconcile_kick_pending_lock)
+    if fm_lock_try_acquire "$pending_lock"; then
+      kick_lock=$(arm_reconcile_kick_lock)
+      fm_lock_acquire_wait "$kick_lock"
+      fm_lock_release "$pending_lock"
+      "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1
+      fm_lock_release "$kick_lock"
+    fi
   ) &
   deadline_ms=$(( $(arm_now_ms) + wait_ms ))
   live=1

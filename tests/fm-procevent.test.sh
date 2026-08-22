@@ -891,6 +891,96 @@ wait "$kick_holder_pid" 2>/dev/null || true
   || fail "3 arm calls issued while a kick was blocked left $running_reconciles reconcile processes running concurrently, expected at most 1"
 pass "a burst of arm calls single-flights its background reconcile kick instead of piling up untracked processes"
 
+# --- arm's background reconcile kick coalesces instead of queuing one -------
+# --- unowned waiter per call -------------------------------------------------
+# Regression for the "detached reconcile waiter that can survive the caller"
+# defect: the single-flight cut above proves at most one reconcile process
+# ever RUNS at a time, but the kick used to queue one independent background
+# waiter subshell per arm call regardless - each spin-polling
+# arm_reconcile_kick_lock until its own turn, surviving long after its own
+# arm invocation had already returned, so a burst of N calls left N such
+# detached processes behind rather than at most one running plus one queued.
+# cmd_arm's kick is now coalesced through arm_reconcile_kick_pending_lock:
+# only the one call whose background attempt wins that lock's non-blocking
+# try becomes a real waiter; every other call's attempt loses the try and
+# exits immediately, leaving nothing behind.
+#
+# Proven on real OS process survival, not source text. A backgrounded
+# subshell with more than one statement keeps the interpreter's own argv in
+# ps/cmdline - bash only replaces a background job's cmdline with a tail
+# command's own argv when that command is the subshell's single/last
+# statement (verified separately against this shell), which is never true of
+# this coalescing block since a lock release always follows the reconcile
+# call - so every surviving background arm-kick attempt is directly
+# countable by pattern once its own foreground `arm` invocation has already
+# exited.
+HLK2="$TMP_ROOT/hlk2"; new_home "$HLK2"
+COALESCE_BLOCKER_ID="aab-arm-kick-coalesce-blocker"
+pe_register "$HLK2" lavish "$COALESCE_BLOCKER_ID" -- /bin/true >/dev/null
+COALESCE_READY="$TMP_ROOT/coalesce-lock-ready"
+COALESCE_RELEASE="$TMP_ROOT/coalesce-lock-release"
+hold_source_lock "$COALESCE_BLOCKER_ID" "$COALESCE_READY" "$COALESCE_RELEASE"
+coalesce_holder_pid=$HOLDER_PID
+wait_for "$COALESCE_READY" || fail "could not hold the unrelated source's lock boundary for the kick coalescing cut"
+
+COALESCE_LAVISH_BIN=$(fm_fakebin "$TMP_ROOT/coalesce-lavish-stub")
+cat > "$COALESCE_LAVISH_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Never needs to complete: this cut only inspects how many background
+# arm-kick attempts survive a burst of arm calls, not readiness.
+sleep 300
+SH
+chmod +x "$COALESCE_LAVISH_BIN/lavish-axi"
+
+COALESCE_ART="$TMP_ROOT/coalesce-review.html"
+printf '<h1>coalesce review</h1>\n' > "$COALESCE_ART"
+coalesce_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$COALESCE_ART")
+PE_TRACKED+=("$HLK2|$coalesce_id")
+
+reconcile_pattern="$ROOT/bin/fm-procevent.sh reconcile"
+arm_survivor_pattern="$ROOT/bin/fm-procevent-lavish.sh arm $COALESCE_ART"
+
+# The first call's kick always wins the pending lock uncontested (nothing
+# else is racing for it yet), so its reconcile process becoming observably
+# running is proof the pending lock is free again - releasing it happens
+# strictly before that process is started - which is the exact moment every
+# later call's own attempt below races for it.
+PATH="$COALESCE_LAVISH_BIN:$PATH" FM_HOME="$HLK2" FM_PROCEVENT_LAVISH_ARM_WAIT_MS=200 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$COALESCE_ART" >/dev/null 2>&1 &
+first_arm_pid=$!
+first_reconcile_seen=0
+for _ in $(seq 1 100); do
+  # pgrep -c prints "0" AND exits nonzero on a genuine zero-match, so an
+  # `|| printf '0'` fallback here would double it to "0\n0"; normalize
+  # instead of falling back.
+  reconcile_count=$(pgrep -cf "$reconcile_pattern" 2>/dev/null)
+  case "$reconcile_count" in ''|*[!0-9]*) reconcile_count=0 ;; esac
+  [ "$reconcile_count" -ge 1 ] && { first_reconcile_seen=1; break; }
+  sleep 0.05
+done
+if [ "$first_reconcile_seen" -ne 1 ]; then
+  : > "$COALESCE_RELEASE"
+  wait "$coalesce_holder_pid" 2>/dev/null || true
+  wait "$first_arm_pid" 2>/dev/null || true
+  fail "the first arm call's kick never started a reconcile process; the coalescing cut proves nothing without one"
+fi
+
+for _ in 1 2 3 4; do
+  PATH="$COALESCE_LAVISH_BIN:$PATH" FM_HOME="$HLK2" FM_PROCEVENT_LAVISH_ARM_WAIT_MS=200 \
+    "$ROOT/bin/fm-procevent-lavish.sh" arm "$COALESCE_ART" >/dev/null 2>&1 || true
+done
+wait "$first_arm_pid" 2>/dev/null || true
+
+survivors=$(pgrep -cf "$arm_survivor_pattern" 2>/dev/null)
+case "$survivors" in ''|*[!0-9]*) survivors=0 ;; esac
+: > "$COALESCE_RELEASE"
+wait "$coalesce_holder_pid" 2>/dev/null || true
+[ "$survivors" -ge 1 ] \
+  || fail "no background arm-kick attempt was ever observed surviving its own arm call; the coalescing cut proves nothing without one"
+[ "$survivors" -le 2 ] \
+  || fail "5 arm calls issued while a kick was blocked left $survivors background kick attempts alive at once, expected at most 2 (one running, one coalesced and queued)"
+pass "a burst of arm calls coalesces its background reconcile kick to at most one queued waiter instead of one detached waiter per call"
+
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
 # real blocking source completes, its result is captured and published, the
