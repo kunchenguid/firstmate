@@ -34,6 +34,11 @@ TMP_ROOT=$(fm_test_tmproot fm-omp-harness)
 # The one release the adapter is pinned to; drift from this must refuse.
 OMP_PINNED_VERSION="omp/17.2.9"
 
+# The INSTALLED omp, resolved here at file scope so it is the real asset and
+# never one of the per-case stub fakebins. Absent on CI and on any machine
+# without omp, which is why the live case below self-skips rather than failing.
+REAL_OMP=$(command -v omp 2>/dev/null || true)
+
 # Every omp launch requires an explicit, fully qualified provider/model. This is
 # a STRUCTURAL fixture string only: no provider is contacted, no model catalog is
 # queried, and the stub executable still refuses to open any session.
@@ -336,12 +341,12 @@ test_omp_launch_argv_is_contained() {
   # rather than one of omp's subcommands (auth, token, usage, setup, update,
   # plugin, marketplace, acp), which is what keeps those surfaces unreachable.
   assert_contains "$launch" \
-    "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 '$FAKEBIN_DIR/omp' --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash --model '$OMP_MODEL' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
+    "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 '$FAKEBIN_DIR/omp' --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep,bash --model '$OMP_MODEL' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
     "omp launch argv is not the contained shape"
 
   # The allowlist is exact, so a later widening has to be deliberate.
   tools=$(printf '%s\n' "$launch" | sed -n 's/.*--tools \([^ ]*\).*/\1/p')
-  [ "$tools" = "read,write,edit,ls,grep,find,bash" ] \
+  [ "$tools" = "read,write,edit,glob,grep,bash" ] \
     || fail "omp tool allowlist drifted, got '$tools'"
   case ",$tools," in
     *,task,*) fail "omp allowlist must exclude the task subagent tool" ;;
@@ -1045,6 +1050,73 @@ test_omp_trusts_only_its_own_semantic_source() {
   pass "omp trusts exactly its own omp-ext semantic source"
 }
 
+
+# The one case in this file that EXECUTES the installed omp asset. It is an
+# argument-validation-only invocation: no prompt, no session, no TUI, no
+# provider call, no model turn. omp rejects the list and exits before any of
+# that, because the probe always carries a deliberately invalid sentinel name.
+#
+# This case exists because a hardcoded expected string cannot catch the failure
+# it guards against. The pins above prove the adapter still ships the allowlist
+# firstmate INTENDED; only the installed binary can say whether that allowlist
+# is one it will actually accept. Before this case existed, `ls` and a comment
+# claiming static verification sat here together while every omp spawn died on
+# "Unknown tool in --tools: ls".
+test_omp_tool_allowlist_is_accepted_by_the_installed_binary() {
+  local rec id=omp-tools-live out launch tmux_log tools version probe unknown
+  local sentinel=__fm_not_a_tool__
+
+  if [ -z "$REAL_OMP" ]; then
+    echo "skip: omp not installed; cannot verify the tool allowlist against the real binary"
+    return 0
+  fi
+  version=$("$REAL_OMP" --version 2>/dev/null | tr -d '[:space:]')
+  if [ "$version" != "$OMP_PINNED_VERSION" ]; then
+    echo "skip: installed omp is '$version', not the pinned $OMP_PINNED_VERSION"
+    return 0
+  fi
+
+  # The allowlist comes from a REAL fm-spawn launch, read back off the pane, so
+  # this asserts what the adapter actually delivers rather than what the source
+  # file says.
+  rec=$(make_omp_case omp-tools-live claude "$id")
+  read_case_record "$rec"
+  tmux_log="$CASE_DIR/tmux-sends"
+  : > "$tmux_log"
+  out=$(FM_TMUX_LOG="$tmux_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
+  expect_code 0 $? "omp spawn should succeed: $out"
+  launch=$(grep -F -- '--approval-mode' "$tmux_log" | tail -1)
+  [ -n "$launch" ] || fail "no omp launch command was delivered to the pane"
+  tools=$(printf '%s\n' "$launch" | sed -n 's/.*--tools \([^ ]*\).*/\1/p')
+  [ -n "$tools" ] || fail "the omp launch carried no --tools allowlist to verify"
+
+  # omp reports the unknown names between "--tools: " and the sentence stop.
+  omp_unknown_names() {  # <comma-list> -> echoes the names omp rejected
+    timeout 30 "$REAL_OMP" --tools "$1" </dev/null 2>&1 \
+      | sed -n 's/.*Unknown tools\{0,1\} in --tools: \([^.]*\)\..*/\1/p' \
+      | head -1
+  }
+
+  # Positive control FIRST. If omp ever changes this diagnostic, the parser
+  # above would silently return empty for every input and the real assertion
+  # would pass while checking nothing. Proving a known-bad name IS reported is
+  # what keeps this case from going vacuous.
+  unknown=$(omp_unknown_names "$sentinel")
+  [ "$unknown" = "$sentinel" ] \
+    || fail "the omp rejection probe is no longer readable: asked about '$sentinel', parsed '$unknown'"
+
+  # The real assertion: append the sentinel so the launch never starts, then
+  # require that the ONLY name omp rejects is the sentinel. Any adapter name it
+  # also rejects shows up here by name.
+  probe="$tools,$sentinel"
+  unknown=$(omp_unknown_names "$probe")
+  [ "$unknown" = "$sentinel" ] \
+    || fail "installed $version refuses names in the omp allowlist '$tools': rejected '$unknown'"
+
+  pass "installed $version accepts every name in the omp allowlist '$tools'"
+}
+
 test_omp_token_is_not_normalized_to_pi
 test_omp_is_unreachable_without_explicit_selection
 test_omp_accepts_only_the_exact_pinned_version
@@ -1052,6 +1124,7 @@ test_omp_refuses_a_missing_binary
 test_omp_refuses_version_drift
 test_omp_refuses_a_substituted_binary
 test_omp_launch_argv_is_contained
+test_omp_tool_allowlist_is_accepted_by_the_installed_binary
 test_omp_records_exact_task_metadata
 test_omp_accepts_a_scout_launch
 test_omp_launch_carries_exactly_one_qualified_model_flag
