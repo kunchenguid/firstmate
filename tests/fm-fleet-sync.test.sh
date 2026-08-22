@@ -463,6 +463,29 @@ test_detached_project_prunes_merged_task_branch() {
   pass "the shared sweep deletes against its explicit default-branch proof even from detached HEAD"
 }
 
+test_unrelated_checkout_prunes_branch_merged_into_default() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" unrelated_head)
+  # Make an unrelated branch before main advances, so it does not contain the
+  # task commit. Fleet sync still must use its explicit main proof, rather than
+  # letting `git branch -d` accidentally judge mergedness against this HEAD.
+  git -C "$clone" branch -q unrelated
+  ff_merge_task_branch "$clone" fm/task-unrelated feature.txt hello
+  git -C "$clone" checkout -q unrelated
+  commit_file "$clone" unrelated.txt value "unrelated work"
+  mkdir -p "$home/data"
+  printf -- '- unrelated_head [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync_with_merged_prune "$home" "$clone")
+
+  assert_contains "$out" "unrelated_head: pruned fm/task-unrelated" \
+    "the sweep must delete a branch proved merged into main even from unrelated HEAD"
+  branch_exists "$clone" fm/task-unrelated \
+    && fail "unrelated-head-prune: fm/task-unrelated should have been deleted"
+  pass "the final safe deletion uses the explicit default-branch merge target, not the caller's unrelated checkout"
+}
+
 test_merged_task_branch_requires_explicit_prune_authority() {
   local home clone out
   home=$(new_home)
@@ -549,8 +572,8 @@ test_worktree_added_between_proof_and_delete_is_left_alone() {
   real_git=$(command -v git)
   cat > "$fakegit/git" <<'EOF'
 #!/bin/sh
-if [ "$1" = "-C" ] && [ "$2" = "$RACE_REPO" ] \
-  && [ "$3" = "branch" ] && [ "$4" = "-d" ] && [ "$6" = "$RACE_BRANCH" ]; then
+if [ "$1" = "-C" ] && [ "$3" = "branch" ] \
+  && [ "$4" = "-d" ] && [ "$6" = "$RACE_BRANCH" ]; then
   "$REAL_GIT" -C "$RACE_REPO" worktree add -q "$RACE_WORKTREE" "$RACE_BRANCH"
 fi
 exec "$REAL_GIT" "$@"
@@ -884,6 +907,7 @@ test_local_only_skipped
 test_local_only_prunes_merged_task_branch
 test_no_origin_prunes_merged_task_branch
 test_detached_project_prunes_merged_task_branch
+test_unrelated_checkout_prunes_branch_merged_into_default
 test_merged_task_branch_requires_explicit_prune_authority
 test_unmerged_task_branch_is_left_alone
 test_branch_update_between_proof_and_delete_is_left_alone
