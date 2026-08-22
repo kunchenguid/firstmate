@@ -628,3 +628,34 @@ test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
+
+test_queued_enter_verdict_busy_pending_is_empty() {
+  local out
+  out=$(fm_composer_queued_enter_verdict pending busy)
+  [ "$out" = empty ] || fail "busy + proven pending must be queued delivery (empty), got '$out'"
+  pass "fm_composer_queued_enter_verdict: pending + busy returns empty (queued Enter)"
+}
+
+test_queued_enter_verdict_idle_pending_stays_pending() {
+  local out
+  out=$(fm_composer_queued_enter_verdict pending idle)
+  [ "$out" = pending ] || fail "idle + proven pending must stay a genuine swallow, got '$out'"
+  out=$(fm_composer_queued_enter_verdict pending unknown)
+  [ "$out" = pending ] || fail "unknown busy is not proof of a queue, got '$out'"
+  pass "fm_composer_queued_enter_verdict: pending + idle/unknown stays pending"
+}
+
+test_queued_enter_verdict_does_not_convert_other_states() {
+  local state out
+  for state in empty pending-unproven unknown send-failed future-state; do
+    out=$(fm_composer_queued_enter_verdict "$state" busy)
+    [ "$out" = "$state" ] || fail "busy must not convert '$state', got '$out'"
+    out=$(fm_composer_queued_enter_verdict "$state" idle)
+    [ "$out" = "$state" ] || fail "idle must not convert '$state', got '$out'"
+  done
+  pass "fm_composer_queued_enter_verdict: only proven pending is converted"
+}
+
+test_queued_enter_verdict_busy_pending_is_empty
+test_queued_enter_verdict_idle_pending_stays_pending
+test_queued_enter_verdict_does_not_convert_other_states

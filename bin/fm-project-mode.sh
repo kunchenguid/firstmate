@@ -37,9 +37,8 @@
 #                          Mechanical output maps it to its most rigorous leg,
 #                          no-mistakes, so sync, seeding, and init treat such a
 #                          project as the remote-backed pipeline project it is.
-# yolo (orthogonal) = when on, firstmate may make routine approval decisions itself.
-#   AGENTS.md section 7 is the single owner of authority exceptions, including
-#   ask-user contract expansion and stronger captain boundaries.
+# yolo (orthogonal) = merge authority only: when on, firstmate merges green,
+#   in-scope work itself (AGENTS.md section 7).
 # branch=<prefix> (orthogonal) = overrides the "fm/" ship-branch prefix so a
 #   project's branch and PR do not read as firstmate-authored, e.g. for a
 #   third-party repo that does not use this tooling. Query it with
