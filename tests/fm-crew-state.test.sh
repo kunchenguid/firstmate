@@ -748,6 +748,27 @@ test_terminal_cancelled_with_mismatched_pr_head_is_failed() {
   pass "cancelled run whose recorded pr_head diverges from the run's own head stays failed"
 }
 
+# GitLab merge requests never get a recorded pr_head (fm-pr-check.sh only reads
+# it from GitHub's JSON), so a cancelled run backed by a recorded pr= but no
+# pr_head has no head to compare against. It must read as its own unverified
+# state - never silently promoted to delivered, never misreported as failed.
+test_terminal_cancelled_with_pr_and_no_pr_head_is_unverified() {
+  reset_fakes
+  local d; d=$(new_case cancelled-pr-no-head)
+  make_repo_on_branch "$d/wt" fm/feat-cancel-nohead
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cancel-nohead.meta" "window=fm:fm-feat-cancel-nohead" "worktree=$d/wt" "kind=ship" \
+    "pr=https://gitlab.com/o/r/-/merge_requests/9"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-cancel-nohead)"
+  local out; out=$(run_crew_state "$d" feat-cancel-nohead)
+  assert_contains "$out" "state: unknown" "cancelled run with pr= but no pr_head -> unknown, not done or failed"
+  assert_contains "$out" "delivery unverified" "unverifiable cancel names the distinct detail"
+  assert_contains "$out" "https://gitlab.com/o/r/-/merge_requests/9" "unverifiable cancel detail names the PR url"
+  assert_not_contains "$out" "state: done" "unverifiable delivery must never be silently promoted to done"
+  assert_not_contains "$out" "state: failed" "unverifiable delivery must never be silently misreported as failed"
+  pass "cancelled run with a recorded PR but no comparable head reads as its own unverified state"
+}
+
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
 # routine case once more than one crew validates the same underlying repo
 # concurrently - they share ONE no-mistakes repo registration), so the helper
@@ -1495,6 +1516,7 @@ test_terminal_failed
 test_terminal_cancelled_without_pr_is_failed
 test_terminal_cancelled_with_matching_pr_is_delivered
 test_terminal_cancelled_with_mismatched_pr_head_is_failed
+test_terminal_cancelled_with_pr_and_no_pr_head_is_unverified
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status

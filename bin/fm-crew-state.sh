@@ -47,9 +47,14 @@
 #      repo's day-long ci-step poll), and that is delivered work, not lost
 #      work. report_cancelled_state reads meta's pr= as durable delivery
 #      evidence - recorded only after fm-pr-check.sh validates the PR against
-#      the forge - and, when the forge also supplied pr_head=, requires it
-#      match the run's own head; a cancelled run backed by that evidence
-#      reports done · "cancelled after delivery" instead of failed.
+#      the forge. When the forge also supplied pr_head=, it must match the
+#      run's own head for the cancel to report done · "cancelled after
+#      delivery"; a recorded pr_head that does not match still reports
+#      failed. When no pr_head is available to compare (e.g. GitLab MRs never
+#      record one, or only the coarse runs-list fallback ran), the outcome is
+#      unprovable either way, so it reports its own unknown ·
+#      "delivery unverified" state naming the PR instead of guessing done or
+#      failed.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -478,7 +483,19 @@ fi
 # path's RUN_HEAD), or empty when only a coarse status word is available and
 # no head can be compared. Sets RUN_STATE/RUN_DETAIL.
 report_cancelled_state() {  # <run-head-or-empty>
-  if [ -n "$PR_URL" ] && { [ -z "$PR_HEAD" ] || [ -z "${1:-}" ] || [ "$PR_HEAD" = "${1:-}" ]; }; then
+  if [ -z "$PR_URL" ]; then
+    RUN_STATE=failed
+    RUN_DETAIL="run cancelled"
+  elif [ -z "$PR_HEAD" ] || [ -z "${1:-}" ]; then
+    # The recorded PR is real durable delivery evidence, but no head is
+    # available to compare it against (e.g. GitLab MRs never record
+    # pr_head - see fm-pr-check.sh - or only the coarse runs-list fallback
+    # was available). Neither "delivered" nor "failed" is provable, so this
+    # is reported as its own state that points the captain at the PR rather
+    # than silently claiming either outcome.
+    RUN_STATE=unknown
+    RUN_DETAIL="cancelled - delivery unverified: PR $PR_URL (head could not be compared)"
+  elif [ "$PR_HEAD" = "${1:-}" ]; then
     RUN_STATE="done"
     RUN_DETAIL="cancelled after delivery: PR $PR_URL"
   else
