@@ -2009,6 +2009,7 @@ test_busy_turn_bound_is_not_absorbed_by_a_merge_wait() {
 # Prints `absorbed` or `proceeded`.
 merge_wait_suppressor_verdict() {  # <state> <fakebin> <window> <task> <alarm-class>
   local state=$1 fakebin=$2 window=$3 task=$4 alarm=$5
+  # shellcheck disable=SC2016 # single quotes are deliberate: $1 through $4 are the inner bash -c's positional parameters, bound by the trailing arguments, not this shell's
   env FM_STATE_OVERRIDE="$state" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_PAUSE_RESURFACE_SECS=999999 FM_STALE_ESCALATE_SECS=240 \
