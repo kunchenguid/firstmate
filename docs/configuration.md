@@ -637,7 +637,7 @@ Ordinary message classification remains owned by `fms_is_non_captain_message` in
 
 `bin/fm-slack-post.sh` posts and updates messages only on the configured channel id.
 Its captain message size guard - caps, the gitignored `config/slack-captain-comms-lines` and `config/slack-captain-comms-chars` overrides, `--long`, exemptions, and fail-open - is specified in full in the `bin/fm-slack-post.sh` header.
-`board` creates one living status message and later edits it in place via `chat.update`, recording `state/slack-board.meta`.
+`board` creates one living status message and later edits it in place via `chat.update`, recording its identity under `state/slack-board.meta/`.
 Thread replies use `message <text> <thread_ts>`.
 Its `decision <key> <text> [option...]` form posts a captain decision and records a private binding under `state/slack-decision-bindings/` from the posted message timestamp to the decision key and option count, numbering any options with keycap emoji so a number reaction is unambiguous; the header owns key validation, numbering, and binding mechanics.
 The socket event consumer accepts `reaction_added` from the pinned captain id only, on messages firstmate itself posted, and only with a recorded binding: `white_check_mark` answers yes, `x` answers no, and `one`/`two`/`three` select the matching numbered option, while every other reaction event is refused and recorded under `state/slack-refused/` without acknowledgement or wake.

@@ -73,6 +73,60 @@ test_private_artifact_path_works_under_public_state() {
 
 test_private_artifact_path_works_under_public_state
 
+# A curl that always fails at the transport level, so the poll reaches its
+# error-marker path without any Slack API response.
+make_failing_curl() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+exit 7
+SH
+  chmod +x "$fakebin/curl"
+  printf '%s\n' "$fakebin"
+}
+
+test_poll_error_marker_dedupes_under_public_state() {
+  local home fakebin out rc
+  home="$TMP_ROOT/poll-error-public-state"
+  make_home "$home"
+  chmod 755 "$home/state"
+  fakebin=$(make_failing_curl "$home/fake-down")
+  out=$(run_poll "$home" "$fakebin"); rc=$?
+  [ "$rc" -eq 0 ] || fail "poll error exit must stay 0 under a public state parent"
+  [ "$out" = "slack-captain-error auth.test failed" ] \
+    || fail "poll must emit its error diagnostic under a public state parent: $out"
+  [ "$(private_mode "$home/state/slack-poll.error")" = 700 ] \
+    || fail "poll error marker directory must be private under a public state parent"
+  [ "$(private_mode "$home/state/slack-poll.error/slack-poll.error")" = 600 ] \
+    || fail "poll error marker must be a private file under a public state parent"
+  out=$(run_poll "$home" "$fakebin"); rc=$?
+  [ "$rc" -eq 0 ] && [ -z "$out" ] \
+    || fail "a persisted poll error marker must dedupe the repeat diagnostic: $out"
+  pass "fm-slack-poll error marker publishes and dedupes under a public state parent"
+}
+
+test_poll_error_marker_dedupes_under_public_state
+
+test_poll_error_publication_failure_is_loud() {
+  local home fakebin err out rc
+  home="$TMP_ROOT/poll-error-write-failure"
+  make_home "$home"
+  mkdir "$home/state/slack-poll.error"
+  chmod 755 "$home/state/slack-poll.error"
+  fakebin=$(make_failing_curl "$home/fake-loud")
+  err="$home/stderr"
+  out=$(run_poll "$home" "$fakebin" 2>"$err"); rc=$?
+  [ "$rc" -eq 0 ] || fail "poll must continue after an error marker publication failure"
+  [ "$out" = "slack-captain-error auth.test failed" ] \
+    || fail "poll must still emit its diagnostic after a marker publication failure: $out"
+  grep -F "failed to publish Slack poll error marker" "$err" >/dev/null \
+    || fail "poll must report its own error marker publication failure"
+  pass "fm-slack-poll surfaces an error marker publication failure"
+}
+
+test_poll_error_publication_failure_is_loud
+
 # --- poll inert defaults ----------------------------------------------------
 
 home="$TMP_ROOT/inert"
@@ -775,6 +829,24 @@ if run_post "$home" "$fakebin" board "board v2" >/dev/null 2>&1; then
   fail "board update must refuse a mismatched stored channel"
 fi
 pass "fm-slack-post board refuses a mismatched stored channel"
+
+home="$TMP_ROOT/board-public-state"
+make_home "$home"
+chmod 755 "$home/state"
+fakebin=$(make_fake_curl "$home/fake-board-public")
+unset FM_SLACK_CURL_LOG FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+ts=$(run_post "$home" "$fakebin" board "board v1")
+[ "$ts" = "1786735224.690829" ] \
+  || fail "board post must return ts under a public state parent"
+[ "$(private_mode "$home/state/slack-board.meta")" = 700 ] \
+  || fail "board meta directory must be private under a public state parent"
+[ "$(private_mode "$home/state/slack-board.meta/slack-board.meta")" = 600 ] \
+  || fail "board meta must be a private file under a public state parent"
+ts2=$(run_post "$home" "$fakebin" board "board v2")
+[ "$ts2" = "1786735224.690829" ] \
+  || fail "board update must read its recorded meta back under a public state parent"
+pass "fm-slack-post board meta persists and reads back under a public state parent"
 
 # --- invalid thread ts ------------------------------------------------------
 

@@ -238,6 +238,51 @@ test_poll_error_publication_failure_is_loud() {
   pass "fm-x-poll surfaces a publication failure in a non-private directory"
 }
 
+test_poll_claim_error_marker_dedupes_under_public_state() {
+  local home fakebin out rc body
+  home="$TMP_ROOT/poll-claim-error-public-state"; mkdir -p "$home/state" "$home/external-context"
+  fakebin=$(make_fake_curl "$home")
+  chmod 755 "$home/state"
+  ln -s "$home/external-context" "$home/state/x-context"
+  body='{"request_id":"req-claim-public","text":"status?"}'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_PAIRING_TOKEN=tok-claim-public FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "offer claim failure poll exit under a public state parent"
+  [ "$out" = "x-mode-error cannot record mention offer" ] \
+    || fail "an offer claim failure must emit its diagnostic under a public state parent (got: $out)"
+  [ "$(path_mode "$home/state/x-poll.claim-error")" = 700 ] \
+    || fail "offer claim marker directory must be private under a public state parent"
+  [ "$(path_mode "$home/state/x-poll.claim-error/x-poll.claim-error")" = 600 ] \
+    || fail "offer claim marker must be a private file under a public state parent"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_PAIRING_TOKEN=tok-claim-public FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "repeated offer claim failure poll exit under a public state parent"
+  [ -z "$out" ] || fail "a persisted offer claim marker must dedupe the repeat diagnostic (got: $out)"
+  pass "fm-x-poll offer claim marker publishes and dedupes under a public state parent"
+}
+
+test_poll_claim_error_publication_failure_is_loud() {
+  local home fakebin err out rc body
+  home="$TMP_ROOT/poll-claim-error-public-dir"; mkdir -p "$home/state/x-poll.claim-error" "$home/external-context"
+  fakebin=$(make_fake_curl "$home")
+  chmod 700 "$home/state"
+  chmod 755 "$home/state/x-poll.claim-error"
+  ln -s "$home/external-context" "$home/state/x-context"
+  body='{"request_id":"req-claim-loud","text":"status?"}'
+  err="$home/stderr"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_PAIRING_TOKEN=tok-claim-loud FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh" 2>"$err"); rc=$?
+  expect_code 0 "$rc" "offer claim publication failure poll exit"
+  [ "$out" = "x-mode-error cannot record mention offer" ] \
+    || fail "an offer claim failure must still emit its diagnostic (got: $out)"
+  grep -F "failed to publish X poll claim error marker" "$err" >/dev/null \
+    || fail "poll must report its own offer claim marker publication failure"
+  pass "fm-x-poll surfaces an offer claim marker publication failure"
+}
+
 test_poll_error_private_publication_rejects_unsafe_paths() {
   local home fakebin out rc target marker hardlink
 
@@ -2822,6 +2867,8 @@ test_poll_204_is_silent
 test_poll_empty_env_relay_overrides_env_file
 test_poll_auth_error_reports_once
 test_poll_error_publication_failure_is_loud
+test_poll_claim_error_marker_dedupes_under_public_state
+test_poll_claim_error_publication_failure_is_loud
 test_poll_error_private_publication_rejects_unsafe_paths
 test_poll_question_stashes_and_marks
 test_poll_mentions_wake_once_per_durable_offer
