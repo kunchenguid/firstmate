@@ -1390,32 +1390,40 @@ receipt_run_scope_contract() {
   pass "shard receipts survive resumed attempts of the same run and never cross a run boundary"
 }
 
-terminal_classifier_empty_gate_contract() {
+terminal_classifier_optional_matches_contract() {
   local work snippet output
   work=$(fm_test_tmproot fm-azure-validation-terminal-classifier)
   snippet=$work/classify.sh
 
   {
-    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' "RUN_LOG=\$1"
-    grep '^last_awaiting=' "$GUEST"
-    printf '%s\n' "printf '%s\\n' \"\$last_awaiting\""
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
+      "RUN_LOG=\$1" "STATUS_LOG=\$2" "STATUS_RC=\$3" "RUN_EXIT=\$4"
+    awk '/^OUTCOME=failed$/{found=1} found{if(/^SHARD_RECEIPTS=/) exit; print}' "$GUEST"
+    printf '%s\n' "printf '%s\\t%s\\t%s\\n' \"\$OUTCOME\" \"\$CHECKS_GREEN\" \"\$PR\""
   } >"$snippet"
-  [ "$(grep -c '^last_awaiting=' "$snippet")" -eq 1 ] \
-    || fail "the exact terminal gate classifier assignment was not extracted once"
+  [ "$(grep -c '^OUTCOME=failed$' "$snippet")" -ge 1 ] \
+    || fail "the real terminal classifier region was not extracted"
+
+  printf '%s\n' 'outcome: failed' >"$work/status.log"
+  printf '%s\n' 'review,completed,0' >"$work/no-outcome.log"
+  output=$(bash "$snippet" "$work/no-outcome.log" "$work/status.log" 0 1) \
+    || fail "a failed status with no rendered run outcome aborted before result assembly"
+  [ "$output" = "failed"$'\t'"false"$'\t' ] \
+    || fail "a failed status with no rendered run outcome was misclassified: $output"
 
   printf '%s\n' 'outcome: failed' >"$work/no-gate.log"
-  output=$(bash "$snippet" "$work/no-gate.log") \
+  output=$(bash "$snippet" "$work/no-gate.log" "$work/status.log" 0 1) \
     || fail "a terminal run with no awaiting gate aborted before result assembly"
-  [ -z "$output" ] \
-    || fail "a terminal run with no awaiting gate invented an awaiting line"
+  [ "$output" = "failed"$'\t'"false"$'\t' ] \
+    || fail "a terminal run with no awaiting gate invented a decision: $output"
 
-  printf '%s\n' 'status: awaiting_approval' 'outcome: failed' >"$work/gate.log"
-  output=$(bash "$snippet" "$work/gate.log") \
-    || fail "the terminal gate classifier failed on an actual awaiting gate"
-  [ "$output" = 1 ] \
-    || fail "the terminal gate classifier did not retain the exact awaiting line"
+  printf '%s\n' 'status: awaiting_approval' >"$work/gate.log"
+  output=$(bash "$snippet" "$work/gate.log" "$work/status.log" 0 1) \
+    || fail "the terminal classifier aborted on an actual awaiting gate"
+  [ "$output" = "needs-decision"$'\t'"false"$'\t' ] \
+    || fail "the terminal classifier did not preserve an actual awaiting gate: $output"
 
-  pass "terminal result classification tolerates no awaiting gate and still finds a real gate"
+  pass "terminal result classification tolerates optional no-match fields and still finds a real gate"
 }
 
 receipt_chain_close_contract() {
@@ -2088,6 +2096,6 @@ multi_lane_queue_contract
 operator_documentation_contract
 shard_receipt_demotion_contract
 receipt_run_scope_contract
-terminal_classifier_empty_gate_contract
+terminal_classifier_optional_matches_contract
 receipt_chain_close_contract
 gate_answer_binding_contract

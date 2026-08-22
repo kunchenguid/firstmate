@@ -1165,7 +1165,7 @@ elif [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*failed' "$STATUS_L
   # shutdown signature and the run's own terminal report was
   # checks-passed, the terminal report wins. The LAST outcome line guards
   # against checks that greened mid-run and regressed before the end.
-  last_run_outcome=$(grep -Ei '^outcome:' "$RUN_LOG" 2>/dev/null | tail -n 1)
+  last_run_outcome=$(grep -Ei '^outcome:' "$RUN_LOG" 2>/dev/null | tail -n 1 || true)
   if [ "$RUN_EXIT" -eq 0 ] && grep -q 'daemon shutting down' "$STATUS_LOG" \
     && printf '%s' "$last_run_outcome" | grep -Eiq 'outcome:[[:space:]]*checks-passed'; then
     OUTCOME=checks-passed
