@@ -117,54 +117,21 @@ is_canonical_claude_pointer() {
   claude_pointer_content | cmp -s - "$CLAUDE"
 }
 
-# A CLAUDE.md that is not the canonical pointer but carries real document
-# structure (two or more headings), enough total content to be more than a
-# trivial stub (more than AUTHORED_MIN_LINES lines), or more than one
-# substantive (non-heading, non-blank) content line is judged authored rather
-# than a placeholder. Promoting an authored file would silently restructure
-# deliberate content, so it is refused instead of moved, the same way a
-# distinct real AGENTS.md/CLAUDE.md pair is refused elsewhere in this script.
-#
-# A single heading plus a single content line is ambiguous by line count
-# alone (issue: a short one-heading router-style file was still classified as
-# a placeholder and silently promoted). At that size, judge the shape of the
-# content line itself instead: a placeholder a scaffolding tool drops in is a
-# minimal build/test/run instruction (is_generated_stub_line); anything else -
-# a descriptive, routing, or ownership statement - is deliberate authorship
-# even at one line.
-#
-# The leading verb alone is not enough: authored prose can start with the
-# same word ("Test the whole payment pipeline end-to-end before merging...").
-# A genuine scaffolding stub is also short and a single clause; anything
-# longer or with a second clause is judged authored even if it starts with a
-# stub verb.
-AUTHORED_MIN_LINES=12
-GENERATED_STUB_MAX_LEN=40
-is_generated_stub_line() {
-  case "$1" in
-    [Rr]un\ *|[Bb]uild\ *|[Ii]nstall\ *|[Ss]tart\ *|[Tt]est\ *) ;;
-    *) return 1 ;;
-  esac
-  case "$1" in
-    *,*) return 1 ;;
-  esac
-  [ "${#1}" -le "$GENERATED_STUB_MAX_LEN" ]
-}
-
+# A CLAUDE.md that is not the canonical pointer is judged authored, and thus
+# refused instead of promoted, unless it is effectively empty (no non-blank
+# content at all).
+# Distinguishing a deliberate placeholder stub from authored prose by
+# inspecting the wording of a single line was tried and failed twice, each
+# time to a new counter-example, so that approach is abandoned rather than
+# sharpened again.
+# The two failure modes are not symmetric.
+# Wrongly promoting an authored file silently restructures somebody's real
+# documentation inside an unrelated change, while wrongly refusing a trivial
+# file costs one message and a few seconds of a human's time.
+# This predicate biases hard toward refusing, the same way a distinct real
+# AGENTS.md/CLAUDE.md pair is refused elsewhere in this script.
 is_authored_claude_md() {
-  local headings lines content_lines sole_line
-  headings=$(grep -c '^#' "$CLAUDE" 2>/dev/null) || headings=0
-  lines=$(awk 'END { print NR }' "$CLAUDE" 2>/dev/null) || lines=0
-  content_lines=$(awk '!/^#/ && NF { c++ } END { print c+0 }' "$CLAUDE" 2>/dev/null) || content_lines=0
-  if [ "${headings:-0}" -ge 2 ] || [ "${lines:-0}" -gt "$AUTHORED_MIN_LINES" ] ||
-    [ "${content_lines:-0}" -gt 1 ]; then
-    return 0
-  fi
-  if [ "${content_lines:-0}" -eq 1 ]; then
-    sole_line=$(awk '!/^#/ && NF { print; exit }' "$CLAUDE")
-    is_generated_stub_line "$sole_line" || return 0
-  fi
-  return 1
+  grep -q '[^[:space:]]' "$CLAUDE" 2>/dev/null
 }
 
 # Write the canonical pointer as a regular file. Unlink a symlink first so the

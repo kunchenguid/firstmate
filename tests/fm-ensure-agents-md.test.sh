@@ -58,43 +58,56 @@ test_fresh_setup_writes_real_claude_pointer() {
   pass "fm-ensure-agents-md.sh: fresh setup writes a real @AGENTS.md pointer"
 }
 
-test_promoted_claude_md_includes_self_governance() {
+test_promoted_blank_claude_md_includes_self_governance() {
   local repo agents count
   repo="$TMP_ROOT/claude-project"
   mkdir -p "$repo"
-  cat > "$repo/CLAUDE.md" <<'EOF'
-# Existing agent memory
-
-Run tests with `make test`.
-EOF
+  printf '\n\n' > "$repo/CLAUDE.md"
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "fm-ensure-agents-md.sh failed for CLAUDE.md promotion"
   agents="$repo/AGENTS.md"
   assert_present "$agents" "AGENTS.md was not created during promotion"
   assert_claude_pointer "$repo/CLAUDE.md"
-  assert_grep "Run tests with \`make test\`." "$agents" \
-    "promotion lost existing CLAUDE.md content"
   count=$(grep -Fc "## Maintaining this file" "$agents")
   [ "$count" -eq 1 ] || fail "promotion wrote $count self-governance sections"
   assert_grep "Keep this file for knowledge useful to almost every future agent session in this project." "$agents" \
     "promoted AGENTS.md missing self-governance wording"
-  pass "fm-ensure-agents-md.sh: promoted CLAUDE.md includes self-governance section"
+  pass "fm-ensure-agents-md.sh: promoted blank CLAUDE.md includes self-governance section"
 }
 
 test_promoted_claude_md_without_trailing_newline_keeps_blank_separator() {
   local repo agents before
   repo="$TMP_ROOT/no-trailing-newline-project"
   mkdir -p "$repo"
-  printf '# Existing agent memory\n\nRun tests with make test.' > "$repo/CLAUDE.md"
+  printf '   ' > "$repo/CLAUDE.md"
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "fm-ensure-agents-md.sh failed for newline-less CLAUDE.md promotion"
   agents="$repo/AGENTS.md"
-  assert_grep "Run tests with make test." "$agents" \
-    "newline-less promotion lost or mangled the last content line"
   assert_grep "## Maintaining this file" "$agents" \
     "newline-less promotion did not append the self-governance section"
   before=$(grep -B1 -Fx '## Maintaining this file' "$agents" | head -n 1)
   [ -z "$before" ] || fail "self-governance heading not preceded by a blank line (got: $before)"
   assert_claude_pointer "$repo/CLAUDE.md"
   pass "fm-ensure-agents-md.sh: newline-less promotion keeps a blank separator line"
+}
+
+test_short_one_heading_generated_looking_stub_is_refused_not_promoted() {
+  local repo out rc
+  repo="$TMP_ROOT/short-generated-looking-stub-project"
+  mkdir -p "$repo"
+  cat > "$repo/CLAUDE.md" <<'EOF'
+# example-project
+
+Test thoroughly before shipping to prod.
+EOF
+  cp "$repo/CLAUDE.md" "$repo/.claude-before"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "expected a non-zero exit for a short one-heading generated-looking stub"
+  assert_contains "$out" "conflict:" "short one-heading generated-looking stub did not report a conflict"
+  assert_absent "$repo/AGENTS.md" "short one-heading generated-looking stub was promoted into AGENTS.md"
+  cmp -s "$repo/.claude-before" "$repo/CLAUDE.md" \
+    || fail "generated-looking-stub refusal modified CLAUDE.md"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "generated-looking-stub refusal turned CLAUDE.md into a symlink"
+  pass "fm-ensure-agents-md.sh: refuses to promote a short one-heading generated-looking stub"
 }
 
 test_existing_agents_md_with_symlink_gains_self_governance() {
@@ -432,7 +445,7 @@ test_lowercase_agents_md_refuses_case_fragile_pointer() {
 
 test_created_agents_md_includes_self_governance
 test_fresh_setup_writes_real_claude_pointer
-test_promoted_claude_md_includes_self_governance
+test_promoted_blank_claude_md_includes_self_governance
 test_promoted_claude_md_without_trailing_newline_keeps_blank_separator
 test_existing_agents_md_with_symlink_gains_self_governance
 test_correct_symlink_migrates_to_pointer_without_clobbering_agents
@@ -448,4 +461,5 @@ test_non_regular_claude_md_is_refused
 test_authored_claude_md_is_refused_not_promoted
 test_short_one_heading_authored_claude_md_is_refused_not_promoted
 test_short_one_heading_stub_verb_prose_is_refused_not_promoted
+test_short_one_heading_generated_looking_stub_is_refused_not_promoted
 test_lowercase_agents_md_refuses_case_fragile_pointer
