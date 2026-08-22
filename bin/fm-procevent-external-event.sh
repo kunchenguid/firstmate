@@ -34,6 +34,8 @@
 #   FM_HOME                      operational home
 #   FM_STATE_OVERRIDE            state directory override
 #   FM_EXTERNAL_EVENT_MAX_BYTES  maximum payload size, default 1048576
+#
+# See docs/configuration.md for the Linear producer contract and setup.
 set -u
 export LC_ALL=C
 umask 077
