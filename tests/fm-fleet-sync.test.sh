@@ -577,6 +577,37 @@ EOF
   pass "a branch update between merged proof and deletion is left intact"
 }
 
+test_worktree_added_between_proof_and_delete_is_left_alone() {
+  local home clone fakegit real_git worktree
+  home=$(new_home)
+  clone=$(build_pair "$home" worktree_race)
+  ff_merge_task_branch "$clone" fm/task-worktree-race feature.txt merged
+  fakegit="$home/fake-git"; mkdir -p "$fakegit"
+  worktree="$home/active-task-worktree"
+  real_git=$(command -v git)
+  cat > "$fakegit/git" <<'EOF'
+#!/bin/sh
+if [ "$1" = "-C" ] && [ "$2" = "$RACE_REPO" ] \
+  && [ "$3" = "branch" ] && [ "$4" = "-d" ] && [ "$6" = "$RACE_BRANCH" ]; then
+  "$REAL_GIT" -C "$RACE_REPO" worktree add -q "$RACE_WORKTREE" "$RACE_BRANCH"
+fi
+exec "$REAL_GIT" "$@"
+EOF
+  chmod +x "$fakegit/git"
+
+  PATH="$fakegit:$PATH" REAL_GIT="$real_git" RACE_REPO="$clone" \
+    RACE_BRANCH=fm/task-worktree-race RACE_WORKTREE="$worktree" \
+    bash -c '. "$1"; fm_branch_delete_if_safely_merged "$2" fm/task-worktree-race refs/heads/main' \
+    bash "$ROOT/bin/fm-branch-merge-lib.sh" "$clone" \
+    && fail "concurrent-worktree-checkout: deletion unexpectedly succeeded"
+
+  branch_exists "$clone" fm/task-worktree-race \
+    || fail "concurrent-worktree-checkout: branch was deleted after a worktree checked it out"
+  [ "$(git -C "$worktree" symbolic-ref --short HEAD)" = "fm/task-worktree-race" ] \
+    || fail "concurrent-worktree-checkout: linked worktree did not retain the task branch"
+  pass "a worktree checkout between merged proof and deletion leaves the branch intact"
+}
+
 test_gone_unmerged_task_branch_is_left_alone() {
   local home clone remote out
   home=$(new_home)
@@ -945,6 +976,7 @@ test_detached_project_prunes_merged_task_branch
 test_merged_task_branch_requires_explicit_prune_authority
 test_unmerged_task_branch_is_left_alone
 test_branch_update_between_proof_and_delete_is_left_alone
+test_worktree_added_between_proof_and_delete_is_left_alone
 test_gone_unmerged_task_branch_is_left_alone
 test_checked_out_task_branch_is_left_alone
 test_prune_never_targets_the_default_branch
