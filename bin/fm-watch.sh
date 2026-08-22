@@ -393,11 +393,13 @@ clear_write_tracking() {  # <window-key>
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
+# escalates once STALE_ESCALATE_SECS have elapsed. Reads no crew state itself.
+# Shared by both places a hash can be absorbed this way: the plain non-terminal
+# path, which reads none either, and the stale_is_terminal-overridden path,
+# whose caller samples crew state at most once per claim_run_state_probe cap
+# window before falling through to this timer. Escalating retires this window's
+# timer, so it also retires that caller's cap, leaving the next poll free to
+# classify the pane again.
 # The worktree write probe runs ONLY here, inside the at-threshold branch that is
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
@@ -424,7 +426,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
-        rm -f "$since_file"
+        rm -f "$since_file" "$STATE/.run-state-probed-terminal-$(window_key "$win")"
         clear_write_tracking "$(window_key "$win")"
         wake "$reason"
       fi
