@@ -156,11 +156,10 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # merge wait for a task whose checks are green and whose merge only someone outside
 # this fleet can make (bin/fm-merge-wait.sh) is NOT a classification at all: it
 # absorbs the alarm at the single emit point (merge_wait_absorbs_alarm via
-# emit_stale_wake), after whichever owner classified the window. It passes one reminder
-# through per PAUSE_RESURFACE_SECS only where an owner keeps attempting an alarm, which
-# is a pane whose hash keeps changing and the non-terminal wedge window; a byte-static
-# pane on the terminal branch attempts none once its hash is recorded, so it gets no
-# reminder and the armed merge poll is what covers it (see merge_wait_absorbs_alarm).
+# emit_stale_wake), after whichever owner classified the window. It is bounded rather
+# than permanent silence, passing one reminder through per PAUSE_RESURFACE_SECS;
+# merge_wait_absorbs_alarm's header owns which alarm attempts that reminder reaches and
+# the accepted limit that follows, and is the only place either is stated.
 # It absorbs the idle-pane stale class ONLY, never the busy-pane completed-turn bound
 # below, which reports a possible hung foreground call rather than a pending merge.
 # An ACTIONABLE wake (a captain-relevant

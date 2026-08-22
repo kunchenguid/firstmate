@@ -2137,10 +2137,11 @@ test_idle_wedge_window_is_still_absorbed_by_a_merge_wait() {
 }
 
 # --- the reminder also passes through from the wedge window ---------------------
-# docs/architecture.md claims the bounded reminder wherever an alarm attempt recurs,
-# which includes the non-terminal wedge window and not only a first sighting. Driving it
-# from wedge_timer_check also exercises the documented exception that wake() exits before
-# the caller's since-file bookkeeping runs.
+# merge_wait_absorbs_alarm's header, the single owner of which alarm attempts that
+# reminder reaches, claims it wherever an attempt recurs, which includes the non-terminal
+# wedge window and not only a first sighting. Driving it from wedge_timer_check also
+# exercises the documented exception that wake() exits before the caller's since-file
+# bookkeeping runs.
 test_merge_wait_reminder_passes_through_from_the_wedge_window() {
   local dir state fakebin out capture_file window key pid pr text sig
   dir=$(make_case merge-wait-wedge-reminder); state="$dir/state"; fakebin="$dir/fakebin"
