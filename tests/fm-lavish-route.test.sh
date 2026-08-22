@@ -58,6 +58,7 @@ if [ "${FM_LAVISH_TEST_OUTPUT:-0}" = 1 ]; then
       printf '%s\n' '      scenePath: "C:\\Users\\Captain\\.lavish-axi\\whiteboards\\review #1.excalidraw"'
       printf '    attachments[1]{path}:\n'
       printf '%s\n' '      "C:\\Users\\Captain\\.lavish-axi\\attachments\\marked #1.png"'
+      printf '%s\n' '  - text: "C:\\Users\\private.html"'
       printf 'next_step: "Run `lavish-axi poll %s --agent-reply answer` again."\n' "$artifact"
       ;;
   esac
@@ -145,6 +146,8 @@ test_wsl_output_keeps_followup_on_router_and_exposes_feedback_paths() {
     || fail "poll output did not identify the original WSL artifact safely"
   printf '%s\n' "$out" | grep -F "Captain quoted \`lavish-axi poll C:\\\\Users\\\\private.html\` in feedback" >/dev/null \
     || fail "poll output rewrote arbitrary captain feedback"
+  printf '%s\n' "$out" | grep -F '  - text: "C:\\Users\\private.html"' >/dev/null \
+    || fail "poll output rewrote indented feedback after an attachment block"
   ! printf '%s\n' "$out" | grep -F 'next_step: "Run `lavish-axi' >/dev/null \
     || fail "poll output could start a competing Linux Lavish session"
   pass "WSL output keeps follow-up routed and converts feedback paths"
