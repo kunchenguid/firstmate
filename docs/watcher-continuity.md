@@ -20,7 +20,7 @@ Only an exhausted failure with no verified watcher emits one last-resort notice 
 The Claude turn-end guard owns the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
 Codex's synchronous `.codex/hooks.json` Stop hook owns the gap between bounded foreground checkpoints.
-It runs one checkpoint inside each Stop, forces a continuation after either an actionable wake or a quiet bound, and lets the next Stop start the successor checkpoint without a model-authored command.
+When supervision remains needed and no healthy watcher already owns the home, it runs one checkpoint inside the Stop, forces a continuation after either an actionable wake or a quiet bound, and lets the next eligible Stop start the successor checkpoint without a model-authored command.
 Every checkpoint remains a foreground descendant of the hook; Codex uses no detached watcher or parallel loop.
 
 ## Actionable wake ordering

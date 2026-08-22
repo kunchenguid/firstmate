@@ -37,9 +37,10 @@
 # present. A true value means the current stop attempt already follows a block,
 # so this guard always allows it. Passive harness adapters provide their own
 # one-follow-up guard before calling this script. Codex's explicit --codex mode
-# instead owns a fresh bounded foreground checkpoint at every Stop while
-# supervision is needed, including a Stop-driven continuation, so continuity
-# does not depend on the model remembering another manual checkpoint.
+# instead owns a fresh bounded foreground checkpoint at every Stop that still
+# needs supervision and has no healthy watcher, including a Stop-driven
+# continuation, so continuity does not depend on the model remembering another
+# manual checkpoint.
 #
 # Loop-guard, --claude mode (Stop-owned auto-arm cooperation): Claude Code
 # marks EVERY stop after ANY stop-hook-driven continuation stop_hook_active=true,
