@@ -669,6 +669,9 @@ HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
+HERDR_RECOVERY_ABORT_CLEANUP=0
+HERDR_RECOVERY_ABORT_SESSION=
+HERDR_RECOVERY_ABORT_PANE=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
@@ -731,6 +734,13 @@ spawn_abort_cleanup() {
           --gen "$RELAUNCH_REPLACEMENT_BUSY_GEN"; then
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
       fi
+    fi
+  fi
+  if [ "$HERDR_RECOVERY_ABORT_CLEANUP" = 1 ]; then
+    HERDR_RECOVERY_ABORT_CLEANUP=0
+    if ! fm_backend_herdr_explicit_close_pane_confirmed \
+      "$HERDR_RECOVERY_ABORT_SESSION" "$HERDR_RECOVERY_ABORT_PANE"; then
+      echo "warning: could not remove replacement pane after aborted recovery of $ID" >&2
     fi
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
@@ -1952,6 +1962,9 @@ EOF
       echo "error: Herdr did not return a replacement pane for $ID" >&2
       exit 1
     }
+    HERDR_RECOVERY_ABORT_CLEANUP=1
+    HERDR_RECOVERY_ABORT_SESSION=$HERDR_SES
+    HERDR_RECOVERY_ABORT_PANE=$HERDR_PANE_ID
     T="$HERDR_SES:$HERDR_PANE_ID"
     WT_TARGET="$T"
   fi
@@ -2821,6 +2834,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
   RELAUNCH_REPLACEMENT_PENDING=0
+  HERDR_RECOVERY_ABORT_CLEANUP=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
