@@ -170,7 +170,8 @@ make_spawn_case() {
 }
 
 run_spawn() {
-  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6 arg next='' model=default effort=default
+  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6 arg next='' model=default effort=default secondmate=0
+  local delivery_args=(--mode no-mistakes --yolo off)
   shift 6
   for arg in "$@"; do
     if [ -n "$next" ]; then
@@ -183,8 +184,10 @@ run_spawn() {
       --model=*) model=${arg#*=} ;;
       --effort) next=effort ;;
       --effort=*) effort=${arg#*=} ;;
+      --secondmate) secondmate=1 ;;
     esac
   done
+  [ "$secondmate" -eq 0 ] || delivery_args=()
   fm_test_write_routing_receipt "$home" "$id" kimi "$model" "$effort"
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -201,7 +204,7 @@ run_spawn() {
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --harness kimi ${delivery_args[@]+"${delivery_args[@]}"} "$@" 2>&1
 }
 
 read_spawn_record() {
@@ -462,7 +465,7 @@ test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation() {
 }
 
 test_kimi_install_failure_restores_pending_receipt() {
-  local id rec out rc
+  local id rec out rc brief_hash
   id=kimi-install-rollback-z9
   rec=$(make_spawn_case install-rollback "$id")
   read_spawn_record "$rec"
@@ -476,10 +479,36 @@ test_kimi_install_failure_restores_pending_receipt() {
     "Kimi hook installation failure burned the retryable pending receipt"
   assert_absent "$HOME_DIR/data/$id/routing-decision.json" \
     "Kimi hook installation failure left a committed final receipt"
+  brief_hash=$(fm_test_sha256_file "$HOME_DIR/data/$id/brief.md")
+  assert_absent "$HOME_DIR/data/$id/routing-brief.$brief_hash.md" \
+    "Kimi hook installation failure left a failed-attempt routing brief"
   if grep -Eq '(^| )new-(session|window)( |$)' "$CASE_DIR/tmux-calls.log"; then
     fail "Kimi hook installation failure created a tmux container or pane"
   fi
   pass "fm-spawn: Kimi hook installation failure restores the pending receipt"
+}
+
+test_kimi_secondmate_skips_global_hook_installation() {
+  local id rec out rc config_before
+  id=kimi-secondmate-z10
+  rec=$(make_spawn_case secondmate "$id")
+  read_spawn_record "$rec"
+  mkdir -p "$WT_DIR/bin" "$WT_DIR/data"
+  printf '# Firstmate\n' > "$WT_DIR/AGENTS.md"
+  printf '%s\n' "$id" > "$WT_DIR/.fm-secondmate-home"
+  printf 'charter for %s\n' "$id" > "$WT_DIR/data/charter.md"
+  printf '[malformed\n' > "$HOME_DIR/.kimi-code/config.toml"
+  config_before=$(cat "$HOME_DIR/.kimi-code/config.toml")
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$WT_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --secondmate) || rc=$?
+  expect_code 0 "$rc" "Kimi secondmate should ignore the unused global hook configuration: $out"
+  assert_contains "$out" "spawned $id harness=kimi kind=secondmate" \
+    "Kimi secondmate did not complete through its secondmate path"
+  [ "$(cat "$HOME_DIR/.kimi-code/config.toml")" = "$config_before" ] \
+    || fail "Kimi secondmate modified the global hook configuration"
+  assert_absent "$HOME_DIR/.kimi-code/fm-turn-end.sh" \
+    "Kimi secondmate installed an unused global hook"
+  pass "fm-spawn: Kimi secondmates skip global hook installation"
 }
 
 test_kimi_teardown_removes_pointer_and_registry_token() {
@@ -734,6 +763,7 @@ test_kimi_launch_then_send_is_verified
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
 test_kimi_install_failure_restores_pending_receipt
+test_kimi_secondmate_skips_global_hook_installation
 test_kimi_teardown_removes_pointer_and_registry_token
 test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation

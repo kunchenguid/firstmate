@@ -19,6 +19,7 @@ POST_BRIEF_LINK_DIRECTORY=0
 POST_FINAL_LINK_DIRECTORY=0
 POST_PENDING_DIRECTORY=0
 POST_CONSUMED_INPLACE_MUTATION=0
+POST_PENDING_RECREATE=0
 
 cmp() {
   local status arg
@@ -85,7 +86,21 @@ jq() {
 }
 
 perl() {
-  local target=${!#} external
+  local target=${!#} external status
+  if [ "$POST_PENDING_RECREATE" -eq 1 ] \
+    && [[ "$target" == */pending.consumed.json ]]; then
+    mv "$TASK_DIR/routing-decision.pending.json" "$TASK_DIR/routing-decision.original.json" || return 1
+    mkdir "$TASK_DIR/routing-decision.pending.json" || return 1
+    printf 'replacement directory sentinel\n' > "$TASK_DIR/routing-decision.pending.json/sentinel" || return 1
+    FM_TEST_RENAME_SOURCE="$TASK_DIR/routing-decision.pending.json" \
+      FM_TEST_RENAME_TARGET="$target" \
+      PERL5LIB="$TASK_DIR/perl-lib${PERL5LIB:+:$PERL5LIB}" \
+      PERL5OPT=-MFMTestRenameHook \
+      "$REAL_PERL" "$@"
+    status=$?
+    POST_PENDING_RECREATE=0
+    return "$status"
+  fi
   if [ "$POST_FINAL_DIRECTORY" -eq 1 ] \
     && [[ "$target" == */pending.consumed.json ]]; then
     mkdir "$TASK_DIR/routing-decision.json" || return 1
@@ -434,6 +449,7 @@ write_fixture() {
   POST_FINAL_LINK_DIRECTORY=0
   POST_PENDING_DIRECTORY=0
   POST_CONSUMED_INPLACE_MUTATION=0
+  POST_PENDING_RECREATE=0
   RUN_CWD=
 }
 
@@ -690,12 +706,54 @@ setup_pending_replaced_after_snapshot() {
 }
 setup_pending_directory_after_snapshot() { POST_PENDING_DIRECTORY=1; }
 setup_pending_mutated_in_place_after_compare() { POST_CONSUMED_INPLACE_MUTATION=1; }
+setup_pending_recreated_after_relocation() {
+  mkdir -p "$TASK_DIR/perl-lib"
+  cat > "$TASK_DIR/perl-lib/FMTestRenameHook.pm" <<'PM'
+package FMTestRenameHook;
+use strict;
+use warnings;
+BEGIN {
+  *CORE::GLOBAL::rename = sub {
+    my ($source, $target) = @_;
+    my $status = CORE::rename($source, $target);
+    if ($status && defined $ENV{FM_TEST_RENAME_TARGET}
+        && $target eq $ENV{FM_TEST_RENAME_TARGET}) {
+      mkdir $ENV{FM_TEST_RENAME_SOURCE} or die "mkdir: $!";
+      open my $sentinel, ">", "$ENV{FM_TEST_RENAME_SOURCE}/recreated-sentinel" or die "open: $!";
+      print {$sentinel} "recreated source sentinel\n";
+      close $sentinel or die "close: $!";
+    }
+    return $status;
+  };
+}
+1;
+PM
+  POST_PENDING_RECREATE=1
+}
+setup_preexisting_writable_brief() {
+  cp "$TASK_DIR/brief.md" "$TASK_DIR/routing-brief.$(sha_file "$TASK_DIR/brief.md").md"
+  chmod 0600 "$TASK_DIR/routing-brief.$(sha_file "$TASK_DIR/brief.md").md"
+}
+setup_preexisting_hardlinked_brief() {
+  cp "$TASK_DIR/brief.md" "$TASK_DIR/preexisting-brief.md"
+  chmod 0400 "$TASK_DIR/preexisting-brief.md"
+  ln "$TASK_DIR/preexisting-brief.md" "$TASK_DIR/routing-brief.$(sha_file "$TASK_DIR/brief.md").md"
+}
 
 assert_pending_directory_preserved() {
   [ -d "$TASK_DIR/routing-decision.pending.json" ] \
     || fail "pending receipt directory replacement was not restored"
   printf 'replacement directory sentinel\n' | cmp -s - "$TASK_DIR/routing-decision.pending.json/sentinel" \
     || fail "pending receipt directory replacement contents were changed or deleted"
+}
+assert_pending_replacement_never_relocated() {
+  [ -d "$TASK_DIR/routing-decision.pending.json" ] \
+    || fail "pending receipt directory replacement left its source pathname"
+  printf 'replacement directory sentinel\n' | cmp -s - "$TASK_DIR/routing-decision.pending.json/sentinel" \
+    || fail "pending receipt directory replacement contents changed"
+  if find "$TASK_DIR" -path '*/pending.consumed.json' -print -quit | grep -q .; then
+    fail "pending receipt directory replacement was relocated into the validation snapshot"
+  fi
 }
 setup_selection_order_tamper() { update_receipt '.selection_order |= reverse'; }
 setup_quota_byte_mutation() { write_multi_fixture; printf '\n' >> "$TASK_DIR/quota-snapshot.json"; }
@@ -1101,6 +1159,13 @@ exercise_negative "65 receipt target raced to directory symlink" PERSISTENCE_REF
 exercise_negative "66 pending receipt mutated in place after comparison" PERSISTENCE_REFUSED \
   setup_pending_mutated_in_place_after_compare \
   "validated receipt was not published as the exact regular-file target"
+exercise_negative "67 pending replacement recreated after relocation" PERSISTENCE_REFUSED \
+  setup_pending_recreated_after_relocation \
+  "pending receipt changed or disappeared after its validation snapshot" assert_pending_replacement_never_relocated
+exercise_negative "68 pre-existing writable routing brief" PERSISTENCE_REFUSED \
+  setup_preexisting_writable_brief "validated brief target already exists"
+exercise_negative "69 pre-existing hard-linked routing brief" PERSISTENCE_REFUSED \
+  setup_preexisting_hardlinked_brief "validated brief target already exists"
 
 write_fixture
 setup_final_directory
@@ -1125,7 +1190,7 @@ run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement
   || fail "canonical config replacement counterexample did not fire"
 pass "canonical config replacement cannot change snapshotted candidate resolution"
 
-expected_count=$((126 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((129 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

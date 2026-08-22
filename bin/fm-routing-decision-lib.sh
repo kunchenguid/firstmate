@@ -28,6 +28,7 @@ FM_ROUTING_PREPARED_DIR=
 FM_ROUTING_PREPARED_DATA=
 FM_ROUTING_PREPARED_ID=
 FM_ROUTING_PREPARED_SOURCE_PENDING=
+FM_ROUTING_PREPARED_BRIEF_FINAL=
 FM_ROUTING_PREPARED_COMMITTED=0
 FM_ROUTING_PREPARED_UNSAFE=0
 FM_ROUTING_DECISION_MAX_AGE_SECONDS=300
@@ -104,20 +105,35 @@ fm_routing_link_regular_exact() {
 fm_routing_consume_regular_exact() {
   perl -e '
     use strict;
-    use Errno qw(ENOENT);
     use Fcntl qw(S_ISREG);
     my ($source, $validated, $consumed) = @ARGV;
-    rename($source, $consumed) or exit 1;
-    my @consumed = lstat($consumed);
+    my @source = lstat($source);
     my @validated = stat($validated);
-    if (!@consumed || !@validated || !S_ISREG($consumed[2])
-        || $consumed[0] != $validated[0] || $consumed[1] != $validated[1]) {
-      if (!lstat($source) && $! == ENOENT && rename($consumed, $source)) {
-        exit 1;
-      }
-      exit 2;
+    exit 1 unless @source && @validated && S_ISREG($source[2])
+      && $source[0] == $validated[0] && $source[1] == $validated[1];
+    link($source, $consumed) or exit 1;
+    my @consumed = lstat($consumed);
+    @source = lstat($source);
+    unless (@consumed && @source && S_ISREG($consumed[2]) && S_ISREG($source[2])
+        && $consumed[0] == $validated[0] && $consumed[1] == $validated[1]
+        && $source[0] == $validated[0] && $source[1] == $validated[1]) {
+      unlink($consumed);
+      exit 1;
     }
+    unlink($source) or do { unlink($consumed); exit 1 };
   ' -- "$1" "$2" "$3"
+}
+
+fm_routing_unlink_exact() {
+  perl -e '
+    use strict;
+    my ($target, $expected) = @ARGV;
+    my @expected = stat($expected) or exit 1;
+    my @target = lstat($target) or exit 1;
+    exit 1 unless -f _ && !-l _
+      && $target[0] == $expected[0] && $target[1] == $expected[1];
+    unlink($target) or exit 1;
+  ' -- "$1" "$2"
 }
 
 fm_routing_restore_consumed_pending() {
@@ -896,26 +912,15 @@ fm_routing_decision_persist_prepared() {
     return 1
   fi
   if [ -e "$brief_final" ] || [ -L "$brief_final" ]; then
-    if [ ! -f "$brief_final" ] || [ -L "$brief_final" ] || ! cmp -s "$brief" "$brief_final"; then
-      fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief target does not contain the exact validated bytes"
-      return 1
-    fi
-    brief_anchor="$snapshot_dir/brief.adopted.md"
-    fm_routing_link_exact "$brief_final" "$brief_anchor" 2>/dev/null || {
-      fm_routing_refuse "PERSISTENCE_REFUSED" "existing validated brief target could not be adopted safely"
-      return 1
-    }
-    if [ ! -f "$brief_anchor" ] || [ -L "$brief_anchor" ] || ! cmp -s "$brief" "$brief_anchor"; then
-      fm_routing_refuse "PERSISTENCE_REFUSED" "existing validated brief target changed during adoption"
-      return 1
-    fi
-  else
-    fm_routing_link_exact "$brief" "$brief_final" 2>/dev/null || {
-      fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief snapshot could not be published at its hash-addressed path"
-      return 1
-    }
-    brief_anchor=$brief
+    fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief target already exists"
+    return 1
   fi
+  fm_routing_link_exact "$brief" "$brief_final" 2>/dev/null || {
+    fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief snapshot could not be published at its hash-addressed path"
+    return 1
+  }
+  FM_ROUTING_PREPARED_BRIEF_FINAL=$brief_final
+  brief_anchor=$brief
   chmod 0600 "$validated_pending" || {
     fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt permissions could not be restricted"
     return 1
@@ -966,20 +971,25 @@ fm_routing_decision_persist_prepared() {
 }
 
 fm_routing_decision_discard_prepared() {
-  local pending consumed final
+  local pending consumed final brief
   [ -n "$FM_ROUTING_PREPARED_DIR" ] || return 0
   [ "$FM_ROUTING_PREPARED_UNSAFE" -eq 0 ] || return 1
   pending="$FM_ROUTING_PREPARED_DATA/$FM_ROUTING_PREPARED_ID/routing-decision.pending.json"
   consumed="$FM_ROUTING_PREPARED_DIR/pending.consumed.json"
   final="${FM_ROUTING_PREPARED_SOURCE_PENDING%.pending.json}.json"
+  brief="$FM_ROUTING_PREPARED_DATA/$FM_ROUTING_PREPARED_ID/brief.md"
   if [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 1 ]; then
     fm_routing_rollback_exact "$final" "$pending" "$consumed" "$FM_ROUTING_PREPARED_SOURCE_PENDING" || return 1
+  fi
+  if [ -n "$FM_ROUTING_PREPARED_BRIEF_FINAL" ]; then
+    fm_routing_unlink_exact "$FM_ROUTING_PREPARED_BRIEF_FINAL" "$brief" || return 1
   fi
   rm -rf -- "$FM_ROUTING_PREPARED_DIR"
   FM_ROUTING_PREPARED_DIR=
   FM_ROUTING_PREPARED_DATA=
   FM_ROUTING_PREPARED_ID=
   FM_ROUTING_PREPARED_SOURCE_PENDING=
+  FM_ROUTING_PREPARED_BRIEF_FINAL=
   FM_ROUTING_PREPARED_COMMITTED=0
   FM_ROUTING_PREPARED_UNSAFE=0
   FM_ROUTING_DECISION_FINAL=
@@ -995,6 +1005,7 @@ fm_routing_decision_seal_prepared() {
   FM_ROUTING_PREPARED_DATA=
   FM_ROUTING_PREPARED_ID=
   FM_ROUTING_PREPARED_SOURCE_PENDING=
+  FM_ROUTING_PREPARED_BRIEF_FINAL=
   FM_ROUTING_PREPARED_COMMITTED=0
   FM_ROUTING_PREPARED_UNSAFE=0
 }
@@ -1010,6 +1021,7 @@ fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-i
   FM_ROUTING_PREPARED_DATA=
   FM_ROUTING_PREPARED_ID=
   FM_ROUTING_PREPARED_SOURCE_PENDING=
+  FM_ROUTING_PREPARED_BRIEF_FINAL=
   FM_ROUTING_PREPARED_COMMITTED=0
   FM_ROUTING_PREPARED_UNSAFE=0
   task_dir="$data/$id"
