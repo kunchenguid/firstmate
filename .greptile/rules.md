@@ -7,6 +7,8 @@ dropped stops being a decision and becomes a blind spot.
 
 ## A captain-facing surface is not automatically a `VISION.md` violation
 
+This is the first mate's working interpretation rather than settled repository policy; whether `VISION.md` itself should be reconciled remains an open question belonging to the captain; and the conditions listed below are what this interpretation depends on.
+
 `VISION.md` says "The captain talks to the first mate and to nobody else; every
 worker reports through the first mate and never addresses the captain directly."
 That line protects who is answerable for work. Read alongside the sentence it
