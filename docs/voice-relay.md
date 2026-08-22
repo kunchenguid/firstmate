@@ -44,47 +44,39 @@ Six runs each, all six answered each way.
 | Direct from this desktop, no relay | 1.165 1.190 1.215 1.250 1.281 1.352 | 1.232 |
 | Over the relay, real client and framing | 1.138 1.165 1.171 1.174 1.177 1.283 | 1.172 |
 
-The clock starts the instant the captain stops speaking and stops when the first
-byte of reply audio arrives. The direct figure reproduces the 1.164 second
-measurement in the earlier survey, to within the noise floor below, which is what
-makes it usable as a control.
+The clock starts the instant the captain stops speaking and stops when the first byte of reply audio arrives.
+An earlier measurement of the same question, on the same model and region and also reading the records, put the direct path at 1.164 seconds median over five runs, and this control reproduces it to within the noise floor below.
+That measurement is not published here, so read it as corroboration rather than as something to open: the direct column stands as a control on its own, because it was taken in the same pass, on the same clip, model, region and read scope, with only the relay removed.
 
-**The relay's own cost is smaller than this measurement can resolve.** The relay
-median lands below the direct control, which does not mean the relay is faster:
-two direct-control passes twenty minutes apart differ by 0.070 seconds of median,
-so that is the floor, and framing and the extra process hop are both under it.
+**The relay's own cost is smaller than this measurement can resolve.**
+The relay median lands below the direct control, which does not mean the relay is faster: two direct-control passes twenty minutes apart differ by 0.070 seconds of median, so that is the floor, and framing and the extra process hop are both under it.
+The earlier measurement above independently agrees on that floor, spreading 0.087 seconds across its own five runs, and two measurements agreeing on the noise are worth more than one asserting it.
 Read the two rows as the same number.
 
-The first pass, on the relay as first written, put it 0.22 seconds behind the
-control, and that gap read as framing, the process hop and the per-turn reconnect.
-It was none of them, and the difference is worth keeping, because a wrong number
-invites a re-measurement while a wrong cause invites a fix to the wrong part of
-the relay. Each relay run is six turns in one session, so a per-turn defect shows
-up as a step: that pass stepped from 1.229 on turn one to a 1.447 median across
-turns two to six, and the same step appeared independently on the
-talk-end-to-tool-request mark, 0.599 rising to 0.730. The re-measured passes are
-flat, stepping 0.009 and 0.021. The 0.22 seconds was the relay resolving AWS
-credentials again for every turn's session, which review found and fixed:
-`Credentials` in `bin/fm-voice-relay.py` resolves once, and every later session
-reuses that answer, so a reconnect costs a reconnect.
+The first pass, on the relay as first written, put it 0.22 seconds behind the control, and that gap read as framing, the process hop and the per-turn reconnect.
+It was none of them, and the difference is worth keeping, because a wrong number invites a re-measurement while a wrong cause invites a fix to the wrong part of the relay.
+Each relay run is six turns in one session, so a per-turn defect shows up as a step: that pass stepped from 1.229 on turn one to a 1.447 median across turns two to six, and the same step appeared independently on the talk-end-to-tool-request mark, 0.599 rising to 0.730.
+The re-measured passes are flat, stepping 0.009 and 0.021.
+The 0.22 seconds was the relay resolving AWS credentials again for every turn's session, which review found and fixed: `Credentials` in `bin/fm-voice-relay.py` resolves once, and every later session reuses that answer, so a reconnect costs a reconnect.
+This is the second time credential resolution has dominated a voice path's latency on a host like this one, because earlier prototype work measured the local credential helper at about a second per call and found that fixed per-call overhead exceeded the model's own cost.
+So it is the first thing to suspect when a spoken path is slower than the model, and it is worth checking that anything new doing per-turn work resolves credentials once rather than once per session.
 
 What the relay figure does NOT include, and could not be measured from here:
 
 - **The SSH hop itself.**
-These runs drove the relay as a local child process, which is the identical relay command with only the `ssh -T <host>` prefix omitted, so the client, the framing, the uplink ordering, the relay, the records read and the handover are all real and only the SSH subprocess is absent.
-Two facts bound what its absence can be hiding.
-A constant transport cost cannot produce the turn-by-turn step that the credential defect produced, and the first pass, which did run over `ssh localhost`, put its own first turn 0.009 seconds above its own direct control.
-Neither of those is a measurement of the SSH path on this code, and neither is offered as one.
+  These runs drove the relay as a local child process, which is the identical relay command with only the `ssh -T <host>` prefix omitted, so the client, the framing, the uplink ordering, the relay, the records read and the handover are all real and only the SSH subprocess is absent.
+  Two facts bound what its absence can be hiding.
+  A constant transport cost cannot produce the turn-by-turn step that the credential defect produced, and the first pass, which did run over `ssh localhost`, put its own first turn 0.009 seconds above its own direct control.
+  Neither of those is a measurement of the SSH path on this code, and neither is offered as one.
 - **Your laptop's round trip to this desktop.**
-Add roughly your own round trip time: the audio goes up and the reply comes back, so it lands about once.
+  Add roughly your own round trip time: the audio goes up and the reply comes back, so it lands about once.
 - **Microphone capture and speaker output latency.**
-This desktop has no microphone and no speaker, so every measurement used audio files.
-The client reports both device figures in its own output, so your first live run measures them rather than guessing.
+  This desktop has no microphone and no speaker, so every measurement used audio files.
+  The client reports both device figures in its own output, so your first live run measures them rather than guessing.
 
-So your number is about 1.15 to 1.3 seconds plus your round trip time plus your
-audio devices. It is worth saying plainly that this came in under the bottom of
-the 1.5 to 2.5 second estimate the relay shape was given before it was built. The
-safer shape, with no credentials on the laptop, is not the slower one.
+So your number is about 1.15 to 1.3 seconds plus your round trip time plus your audio devices.
+It is worth saying plainly that this came in under the bottom of the 1.5 to 2.5 second estimate the relay shape was given before it was built.
+The safer shape, with no credentials on the laptop, is not the slower one.
 
 ## Setting up this desktop
 
@@ -274,8 +266,7 @@ these are the shapes.
 
 `$0.00293` per exchange, derived from the first pass's token counts and session seconds, which is roughly a dollar for three hundred and forty questions.
 The re-measured exchange is about a quarter of a second shorter, worth about `$0.00004` at the session rate below, so the figure is unchanged at the precision it is quoted to.
-Push to talk is `$0.0101` per minute of session
-against `$0.0151` with an open microphone.
+Push to talk is `$0.0101` per minute of session against `$0.0151` with an open microphone.
 
 Text in and out is materially dearer on this model version than the one it
 replaces, so a long system prompt or a large record answer is a real cost as well
