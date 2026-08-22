@@ -857,6 +857,14 @@ fm_routing_decision_persist_prepared() {
       return 1
     }
   fi
+  result=$(fm_routing_fs_boundary consume-generation "$(dirname "$source_pending")" "$generation" 2>&1) || {
+    fm_routing_refuse "PERSISTENCE_REFUSED" "$result"
+    return 1
+  }
+  [ "$result" = "$generation" ] || {
+    fm_routing_refuse "PERSISTENCE_REFUSED" "consumed-generation ledger returned an unexpected identity"
+    return 1
+  }
   result=$(fm_routing_fs_boundary publish \
     "$(dirname "$source_pending")" "$snapshot_dir" \
     "$FM_ROUTING_PREPARED_DIR_DEV" "$FM_ROUTING_PREPARED_DIR_INO" \

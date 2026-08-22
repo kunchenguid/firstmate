@@ -2,8 +2,9 @@
 use strict;
 use warnings;
 use Errno qw(EEXIST ENOENT);
-use Fcntl qw(:DEFAULT :mode);
+use Fcntl qw(:DEFAULT :flock :mode);
 use Digest::SHA qw(sha256_hex);
+use IO::Handle ();
 
 sub fail {
   print STDERR "$_[0]\n";
@@ -178,6 +179,43 @@ sub hash_regular {
   print sha256_hex(read_all($file)), "\n";
 }
 
+sub consume_generation {
+  my ($task_path, $generation) = @_;
+  $generation =~ /\A[0-9a-f]{64}\z/ or fail("CONSUME:generation");
+  my ($task) = open_dir($task_path);
+  enter_dir($task);
+  my $name = 'routing-generations.consumed';
+  my $fh;
+  my $created = sysopen($fh, $name, O_RDWR | O_APPEND | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK, 0600);
+  if (!$created) {
+    $! == EEXIST or fail("OPEN_LEDGER:$name:$!");
+    sysopen($fh, $name, O_RDWR | O_APPEND | O_NOFOLLOW | O_NONBLOCK)
+      or fail("OPEN_LEDGER:$name:$!");
+  }
+  if ($created) {
+    chmod(0600, $fh) or fail("LEDGER_CHMOD:$name:$!");
+  }
+  my @st = stat($fh);
+  @st && S_ISREG($st[2]) && ($st[2] & 0777) == 0600 && $st[3] == 1
+    or fail("LEDGER_OWNERSHIP:$name");
+  flock($fh, LOCK_EX) or fail("LEDGER_LOCK:$name:$!");
+  my $bytes = read_all($fh);
+  $bytes =~ /\A(?:[0-9a-f]{64}\n)*\z/ or fail("LEDGER_FORMAT:$name");
+  index($bytes, "$generation\n") < 0 or fail("CONSUMED_GENERATION:$generation");
+  my $record = "$generation\n";
+  my $offset = 0;
+  while ($offset < length($record)) {
+    my $count = syswrite($fh, $record, length($record) - $offset, $offset);
+    defined($count) && $count > 0 or fail("LEDGER_WRITE:$name:$!");
+    $offset += $count;
+  }
+  $fh->sync or fail("LEDGER_SYNC:$name:$!");
+  my @path_st = lstat($name);
+  @path_st && $path_st[0] == $st[0] && $path_st[1] == $st[1]
+    or fail("LEDGER_IDENTITY:$name");
+  print "$generation\n";
+}
+
 my $operation = shift(@ARGV) // fail('USAGE');
 if ($operation eq 'identity') {
   my ($dir, $st) = open_dir($ARGV[0]);
@@ -188,6 +226,8 @@ if ($operation eq 'identity') {
   publish_bundle(@ARGV);
 } elsif ($operation eq 'hash') {
   hash_regular(@ARGV);
+} elsif ($operation eq 'consume-generation') {
+  consume_generation(@ARGV);
 } else {
   fail('USAGE');
 }

@@ -297,7 +297,7 @@ exercise_relaunch_negative() { # <name> <predicate> <setup-function> [detail]
   [ ! -s "$RELAUNCH_LEASE_LOG" ] \
     || fail "$name counterexample leased a second worktree instead of reusing the recorded one"
   counterexample_count=$((counterexample_count + 1))
-  pass "$name firing counterexample"
+  pass "$name integration call-site counterexample"
 }
 
 sha_file() {
@@ -487,7 +487,7 @@ exercise_negative() { # <name> <predicate> <setup-function> [exact-detail] [post
     fail "$name counterexample did not fire after the routing validator was neutered"
   fi
   counterexample_count=$((counterexample_count + 1))
-  pass "$name firing counterexample"
+  pass "$name integration call-site counterexample"
 }
 
 setup_missing_receipt() { rm "$TASK_DIR/routing-decision.pending.json"; }
@@ -1224,16 +1224,59 @@ assert_absent "$LAB/worktree.lease" "one-shot refusal leased a worktree"
 assert_absent "$LAB/endpoint" "one-shot refusal created an endpoint"
 [ "$(sed -n 's/^routing_decision=//p' "$HOME_DIR/state/t1.meta")" = "$(receipt_final)" ] \
   || fail "one-shot refusal changed authoritative task metadata"
-rm "$HOME_DIR/state/t1.meta"
+pass "successful metadata makes its current generation one-shot"
+
+write_fixture
+generation_a=$(receipt_generation)
+receipt_a="$LAB/receipt-a.json"
+cp "$TASK_DIR/routing-decision.pending.json" "$receipt_a"
 run_validator_then_effects >/dev/null 2>&1 \
-  || fail "one-shot generation firing counterexample did not reach effects"
-assert_present "$LAB/worktree.lease" \
-  "one-shot generation firing counterexample did not lease a worktree"
-pass "successful metadata makes its generation one-shot"
+  || fail "consumed-generation ledger could not record generation A"
+rm -rf "$LAB/worktree.lease" "$LAB/endpoint"
+rm "$HOME_DIR/state/t1.meta"
+update_receipt '.rationale = "fresh generation B"'
+generation_b=$(receipt_generation)
+[ "$generation_a" != "$generation_b" ] \
+  || fail "consumed-generation setup did not produce distinct generations"
+run_validator_then_effects >/dev/null 2>&1 \
+  || fail "consumed-generation ledger could not record generation B"
+rm -rf "$LAB/worktree.lease" "$LAB/endpoint"
+rm "$HOME_DIR/state/t1.meta"
+cp "$receipt_a" "$TASK_DIR/routing-decision.pending.json"
+reuse_out=$(run_validator_then_effects 2>&1)
+reuse_status=$?
+expect_code 1 "$reuse_status" "restored generation A was reusable after generation B"
+assert_contains "$reuse_out" "ROUTING_DECISION PERSISTENCE_REFUSED" \
+  "historical generation reuse named the wrong predicate"
+assert_contains "$reuse_out" "CONSUMED_GENERATION:$generation_a" \
+  "historical generation reuse did not identify the consumed generation"
+assert_absent "$LAB/worktree.lease" "historical generation reuse leased a worktree"
+assert_absent "$LAB/endpoint" "historical generation reuse created an endpoint"
+assert_absent "$HOME_DIR/state/t1.meta" "historical generation reuse published metadata"
+if (
+  fm_routing_fs_boundary() {
+    if [ "$1" = consume-generation ]; then
+      printf '%s\n' "$3"
+      return 0
+    fi
+    command perl "$ROOT/bin/fm-routing-fs-boundary.pl" "$@"
+  }
+  run_validator_then_effects >/dev/null 2>&1
+); then
+  assert_present "$LAB/worktree.lease" \
+    "historical-generation counterexample did not lease a worktree"
+  assert_present "$LAB/endpoint" \
+    "historical-generation counterexample did not create an endpoint"
+  assert_present "$HOME_DIR/state/t1.meta" \
+    "historical-generation counterexample did not publish metadata"
+else
+  fail "historical-generation counterexample did not fire when only the ledger guard was bypassed"
+fi
+pass "consumed ledger rejects restored generation A after generation B"
 
 expected_count=$((128 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \
   || fail "negative battery counted $counterexample_count counterexamples instead of $expected_count"
-echo "# all $expected_count ROUTING_DECISION negatives refused before effects with $expected_count call-site firing counterexamples"
+echo "# all $expected_count ROUTING_DECISION negatives refused before effects with $expected_count integration call-site counterexamples"

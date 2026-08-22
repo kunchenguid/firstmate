@@ -209,6 +209,12 @@ Verified 2026-08-22 against the generation-specific routing receipt implementati
 Publication uses no-follow exclusive creation for the receipt and brief, preserves every prior generation, and intentionally makes no all-or-none guarantee across those two files.
 A refused publication may leave partial artifacts, but those artifacts cannot authorize a launch because the runtime never scans generation directories and flag-free inheritance starts only from the successful task metadata `routing_decision` pointer, then requires a non-symlink regular receipt whose task-scoped generation matches its bytes.
 The canonical dispatch snapshot is opened through the executable no-follow boundary, and final receipt freshness is read from the immutable prepared snapshot rather than the mutable pending pathname.
+Every accepted deterministic generation is synchronized to the locked append-only task ledger before generation publication, so restoring generation A after generations A and B were consumed refuses before worktree lease, endpoint, or metadata effects.
+The negative battery's shared-validator mutations prove only that the dispatch integration call site is load-bearing; guard-specific mutation coverage remains owned by the separate external 64-site mutation sweep and is not claimed here.
+
+The retained lifecycle call-site inventory is `fm_routing_decision_persist_prepared` for pre-effect ledger consumption and generation publication, `fm_routing_decision_consume_prepared` for the published-state assertion, `fm_routing_decision_resolve_inherited` for metadata-authorized same-route inheritance, and the executable boundary operations `snapshot`, `publish`, `hash`, and `consume-generation`.
+There are no surviving routing-lifecycle removal call sites.
+Publication between the generation directory and its two artifacts, cleanup of partial artifacts, and adversarial replacement after an identity check remain deliberately outside this ship; the ledger does not add rollback or an all-or-none publication claim.
 
 The routing boundary verification entrypoints are:
 
