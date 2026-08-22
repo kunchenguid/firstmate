@@ -207,6 +207,7 @@ Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the envir
 An environment variable alone is not reliable when another Herdr server is running.
 Every control-socket RPC is time-bounded (`FM_BACKEND_HERDR_CLI_TIMEOUT`, default 20 seconds), because a wedged server that accepts connections but never responds otherwise blocks callers - peek reads, teardown chains, and the watcher's supervision cycle - for unbounded time; only the long-lived backgrounded server launch bypasses the bound.
 `fm_backend_herdr_bounded` in `bin/backends/herdr.sh` owns only the knob and what disables it; the bound's mechanics come from `bin/fm-timeout-lib.sh`, this repo's single owner of bounded execution.
+`tests/fm-backend-herdr.test.sh` covers that bound: a hung RPC killed at it, `0` passing the call through unbounded, and a signal death still reported non-zero so a killed read is never mistaken for a successful empty capture.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
@@ -286,6 +287,7 @@ There is still one watcher process; the event reader is a bounded child of that 
 The watcher's reads from that child are themselves bounded to the reader's budget plus slack, so a reader wedged past its own deadlines classifies the event path unusable instead of hanging the supervision cycle.
 
 `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
+`tests/fm-backend-herdr.test.sh` additionally covers the capability probe reading a large schema with no broken-pipe noise under ignored SIGPIPE, and a reader wedged past its budget being killed and classified unusable within the bound.
 
 ## Away-mode supervisor support
 
