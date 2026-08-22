@@ -129,8 +129,12 @@ cmd_arm() {
       live=0
       break
     fi
-    sleep 0.05
     i=$((i + 1))
+    # Only sleep before a check the loop bound still allows: sleeping after
+    # the final permitted check would push arm past FM_PROCEVENT_LAVISH_ARM_WAIT_MS
+    # for no benefit, since that sleep's result is never sampled.
+    [ "$i" -lt "$max" ] || break
+    sleep 0.05
   done
   [ "$live" -eq 0 ] || die "listener for $id did not confirm live within ${wait_ms}ms"
   printf 'armed: %s\n' "$id"
