@@ -51,7 +51,7 @@
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
-#          1.31.2.
+#          1.46.0.
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
 #          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
 #          build below its floor reports MISSING like no-mistakes, so the operator
@@ -872,7 +872,14 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_TOOLS=""
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
-NO_MISTAKES_MIN=1.31.2
+# The no-mistakes floor is what firstmate's own required PR check can accept,
+# not the oldest gate that still runs. The Require no-mistakes workflow
+# (.github/workflows/no-mistakes-required.yml) rejects a PR body carrying only
+# the signature line: it also reads the structured pipeline step attestation
+# comment that no-mistakes first emits in 1.46.0. A pipeline driven by an older
+# gate opens a PR that can never turn that required check green, so the floor
+# names the version whose output the check accepts.
+NO_MISTAKES_MIN=1.46.0
 # AXI-FAMILY FLOOR POLICY. Every axi-family floor is the CURRENT LATEST published
 # version of that tool, captain-bumped periodically to keep the whole fleet on the
 # newest axi tools. It is NOT the minimum feature-introduced version. These floors
