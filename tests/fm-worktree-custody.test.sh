@@ -8,7 +8,7 @@
 # handed to the other home - and whichever task is cleaned up first hard-resets
 # the copy the other is working in.
 #
-# Three guarantees close that, and each is pinned here:
+# Four guarantees close that, and each is pinned here:
 #   (a) every home leases from its OWN pool root (bin/fm-pool-root.sh, wired
 #       into bin/fm-spawn.sh before the slot is acquired);
 #   (b) a spawn refuses a copy another task in this home already claims

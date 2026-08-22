@@ -62,6 +62,7 @@ make_fake_root() {
   # fm-project-script-lib.sh: teardown sources it for a project's own opt-in
   # worktree-custody verdict.
   ln -s "$ROOT/bin/fm-project-script-lib.sh" "$fake/bin/fm-project-script-lib.sh"
+  ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # Lifecycle serialization, status presentation retirement, and shared adapter
@@ -149,6 +150,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # fm-project-script-lib.sh: teardown sources it for a project's own opt-in
   # worktree-custody verdict.
   ln -s "$ROOT/bin/fm-project-script-lib.sh" "$fake/bin/fm-project-script-lib.sh"
+  ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
   ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"

@@ -214,8 +214,14 @@ Two firstmate homes that clone the same project would therefore draw from one po
 By default a home's pool root is `$HOME/.treehouse-homes/<home-directory-name>-<short hash of the home's real path>`, and treehouse places the pool itself under `<root>/.treehouse/`.
 `FM_POOL_ROOT_BASE` moves the directory those per-home roots live in while preserving the mandatory per-home suffix.
 The legacy literal `FM_POOL_ROOT` override is refused because the same inherited value could make multiple homes share a pool.
-The separation applies to worktrees leased from that point on; a worktree already leased keeps its path, is returned normally, and drains out of a previously shared pool on its own.
+The separation applies only to worktrees leased from that point on; reconfiguration never moves, resets, returns, invalidates, or recycles a worktree already leased.
+That existing lease keeps its absolute path and later follows ordinary teardown, so previously shared pools drain without a migration step.
 A project whose `treehouse.toml` is tracked in git is refused rather than rewritten, because recording a machine-local path there would change project content.
+
+After treehouse hands a fresh spawn a path, Firstmate checks every `state/*.meta` record in that same home before refreshing the copy or launching the agent.
+An unreadable, non-regular, missing, empty, or ambiguous worktree declaration fails closed, as does another task record that resolves to the acquired path.
+The refused spawn neither returns nor resets the copy and leaves its new endpoint parked there, so the recorded owner can be reconciled without losing work.
+A fresh spawn also refuses before endpoint or lease creation when its task id already has a durable record; [`agent-control.md`](agent-control.md) owns how `relaunch` safely reuses that task's recorded endpoint and worktree.
 
 A pool also runs out when delivered copies are never handed back, and a dispatch then fails for want of a slot rather than for want of work.
 A project may publish that housekeeping as a `pool:release-delivered` script, which `bin/fm-spawn.sh` runs once in the clone with `--yes` before asking for a worktree; the project owns the script's idempotency and its own pool lock.
@@ -226,6 +232,7 @@ A project may also publish its own custody verdict as a `check:worktree-custody`
 `bin/fm-teardown.sh` then runs the version committed at the canonical clone's `HEAD` from an authenticated Git snapshot, passing `--worktree <absolute-path>` for the copy being judged, after its landed-work verdict and before any destructive operation.
 The mutable code in that protected copy is never trusted to authorize its own return, and an unavailable or unauthenticated canonical check refuses cleanup.
 A non-zero verdict also refuses cleanup, which covers the copies a landed-work test cannot judge: one handed to a second owner, or one whose branch was advanced from another checkout.
+`--force` does not bypass this custody verdict.
 A project that publishes no such script is unaffected.
 `FM_TEARDOWN_CUSTODY_TIMEOUT` (default 120 seconds) bounds that run.
 

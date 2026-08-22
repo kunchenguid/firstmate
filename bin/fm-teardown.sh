@@ -223,10 +223,11 @@ TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
   echo "error: could not resolve the task-set lock for $STATE; nothing was changed" >&2
   exit 1
 }
-fm_lock_try_acquire "$TASK_SET_LOCK" || {
-  echo "error: this home's task set is locked by another operation; refusing teardown of task $ID because nothing destructive may race a spawn" >&2
-  exit 1
-}
+# A fresh spawn refuses while teardown owns this lock. In the opposite
+# direction teardown waits for publication to finish, then validates the now
+# complete task set. Waiting also preserves the existing contract that two
+# cleanups in one home serialize rather than making one fail spuriously.
+fm_lock_acquire_wait "$TASK_SET_LOCK"
 TASK_SET_LOCK_HELD=1
 fm_lock_try_acquire "$CONTROL_LOCK" || {
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2

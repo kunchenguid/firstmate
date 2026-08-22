@@ -82,15 +82,18 @@
 #   then creates a disposable
 #   workspace containing only the ordinary task pane. A successful clean create
 #   upgrades its attempt journal with exact home, session, workspace, tab, pane,
-#   parent, and label bindings. On a same-identity restart, that complete binding
-#   plus authoritative metadata may replace one exact agent-free husk in place.
-#   The journal, visible token, and labels alone are never endpoint or ownership
-#   authority, and every ambiguous recovery stays on the flat fallback after
-#   duplicate-agent risk is independently absent. Treehouse allocation and task
-#   metadata are unchanged.
-#   A clean projected create or exact resume makes one bounded attempt to hold
-#   the one session-scoped presentation-order lock (keyed by named session plus
-#   canonical socket, outside any home's state/) through launch handoff. Lock
+#   parent, and label bindings. A durable task record always blocks a fresh
+#   spawn before backend or worktree side effects; neither that binding nor an
+#   agent-free restart husk authorizes endpoint replacement. Relaunch instead
+#   reuses the task's exact recorded endpoint and worktree, or refuses without
+#   mutation when they no longer agree. The journal, visible token, and labels
+#   alone are never endpoint or ownership authority, and every ambiguous orphan
+#   recovery stays on the flat fallback after duplicate-agent risk is
+#   independently absent.
+#   A clean projected create or orphan-journal recovery makes one bounded
+#   attempt to hold the one session-scoped presentation-order lock (keyed by
+#   named session plus canonical socket, outside any home's state/) through
+#   launch handoff. Lock
 #   contention warns and falls back to the ordinary flat layout before any
 #   projection mutation. The exact response-derived new workspace is inserted
 #   immediately after its owning parent (firstmate or 2ndmate-<id>) contiguous
