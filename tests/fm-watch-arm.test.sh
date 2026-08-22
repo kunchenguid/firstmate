@@ -929,14 +929,15 @@ test_empty_fleet_recovery_stays_silent_across_rearms() {
 }
 
 # Start the real watcher on top of a lock a dead predecessor left behind, so
-# fm-watch.sh reclaims that lock ITSELF rather than being handed one an arm has
-# already cleared.
-# The PR-check migration runs ahead of the watcher's own lock acquisition, and an
-# unsatisfied one would steal this planted lock first and publish a downtime
-# episode of its own - leaving the watcher an ordinary free lock and quietly
-# turning this case back into the published-episode case. The seeded markers stop
-# that, and running the very same migration binary here proves they did rather
-# than assuming it.
+# fm-watch.sh reclaims that lock ITSELF rather than being handed one an arm or
+# the PR-check migration already cleared. The reclaim still arrives on a
+# published episode: fm_lock_try_acquire publishes downtime as part of stealing
+# the watch lock. What differs is WHO published it, and that is what the guards
+# below pin - the migration runs ahead of the watcher's own lock acquisition,
+# and an unsatisfied one would steal this planted lock first and hand the
+# watcher an ordinary free lock instead. The seeded markers stop that, and
+# running the very same migration binary here proves they did rather than
+# assuming it.
 start_reclaiming_watcher() {  # <home> <state> <fakebin> <watch-out>
   local home=$1 state=$2 fakebin=$3 out=$4 dead
   mark_pr_check_migration_complete "$state"
@@ -955,9 +956,9 @@ start_reclaiming_watcher() {  # <home> <state> <fakebin> <watch-out>
   ARM_PID=$!
 }
 
-# The worth-sending test must not depend on which recovery marker happens to be
-# pending. A watcher that reclaims a stale lock itself becomes recovery-pending
-# with no arm-published episode of its own, so it has to obey the same rule:
+# The worth-sending test governs the reclaim path too. A watcher that takes over
+# a dead predecessor's lock itself becomes recovery-pending on the episode its
+# own steal published, and it has to obey the same rule as any other successor:
 # silent over an empty fleet, resurfacing when a source really holds something.
 test_reclaimed_stale_lock_obeys_the_presentable_test() {
   local dir home state fakebin i lock_pid
