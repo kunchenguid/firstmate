@@ -16,7 +16,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|exited|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -46,10 +46,16 @@
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#   4. No run for this crew (pre-validation, or kind=scout): ask the endpoint
+#      what is actually there before believing any record about it. A readable
+#      target proves only that the SHELL survives, so a frozen agent reports
+#      suspended and an agent that EXITED with no terminal status line reports
+#      `exited` - neither may fall through to a record its own writer is no
+#      longer around to advance. An agent that is merely idle or unreachable is
+#      never reported gone. Then the recorded backend's pane busy state, then
+#      the status log's last line only when its verb maps to a recognized
+#      run-state. Decision-only events such as `resolved` never become current
+#      state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -610,6 +616,44 @@ fi
 # was a secondmate.
 if fm_backend_endpoint_suspended "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null; then
   emit unknown pane "harness process is suspended, not gone; resume it in its own endpoint before trusting any recorded state"
+fi
+
+# An agent that EXITED is checked next, and for the same reason: a readable
+# endpoint proves the SHELL is there, not the agent. pane_readable above only
+# asked whether the target resolves, so a worker whose agent left behind a live
+# prompt reached the busy verdict and the status log below with no one to
+# contradict them - the semantic record kept the `idle` its own shutdown hook
+# wrote, and the log kept the last line the worker appended BEFORE it left.
+# That pre-exit line then became the reported CURRENT state, which is how four
+# workers on 2026-08-20 each went on reporting `working` for up to an hour
+# after their agent was gone.
+#
+# fm_backend_agent_state is the one source that separates the three ways a
+# quiet endpoint looks identical from the outside, and it is deliberately the
+# ONLY thing consulted here: `dead` means the endpoint's foreground process
+# group is shells alone, `suspended` means the agent is present but frozen
+# (handled just above), and `alive` means the agent is right there - between
+# turns, or unable to accept input behind its own overlay. Only `dead` is
+# consumed, so an agent that is merely unreachable is never reported as gone,
+# and a live worker can never be relaunched onto its own worktree on this
+# evidence.
+#
+# The status log still decides whether the exit was a REPORT or a departure.
+# A worker that wrote done:/failed: (or a captain-relevant needs-decision: or
+# blocked:) and then exited said what happened, and keeps its own verdict from
+# the log below. This verdict answers only the case the log cannot: the
+# terminal line was never written at all. That distinction is the whole
+# defect - not the exit, which is normal, but the missing line, which is what
+# leaves firstmate unable to tell a finished worker from a stopped one.
+if [ "$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET" \
+    "$EXPECTED_LABEL" "$WT" 2>/dev/null)" = dead ] \
+  && ! status_is_terminal_verb "$LOG_LINE"; then
+  if [ -n "$LOG_LINE" ]; then
+    EXIT_LAST="last event: $(status_line_note "$LOG_LINE")"
+  else
+    EXIT_LAST="no status events"
+  fi
+  emit exited pane "harness agent exited without a terminal status line ($EXIT_LAST); its work is intact at $WT - read the deliverable to tell finished from stopped mid-task, and do not assume either"
 fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy

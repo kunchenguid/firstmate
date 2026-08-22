@@ -1065,7 +1065,18 @@ families_for_changed_path() {
       ;;
     bin/fm-lint.sh|bin/fm-lint-workflows.sh|bin/fm-install-shellcheck.sh|\
     bin/fm-install-actionlint.sh|\
-    bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
+    bin/fm-crew-state.sh)
+      # The current-state verdict's own contract cases, plus the ONE
+      # backend-dispatch script they now rest on. The verdict asks
+      # bin/backends/tmux.sh whether the AGENT is still there, and the proof
+      # that the composed answer follows a real foreground process group lives
+      # in that adapter's real-process suite - so a crew-state change must
+      # re-run it. Named as a script rather than pulling in the whole family:
+      # no other backend-dispatch suite reads this verdict.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' "__script__:fm-tmux-agent-liveness.test.sh"
+      ;;
+    bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|\
     bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
     bin/fm-vendor-auth-probe.sh|\

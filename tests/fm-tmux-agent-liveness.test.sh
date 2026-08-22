@@ -133,6 +133,38 @@ EOF
   return 1
 }
 
+# The COMPOSED current-state verdict for a real pane, as firstmate reads it
+# (bin/fm-crew-state.sh). The adapter cases above prove what the endpoint says;
+# these prove what firstmate is TOLD, which is where the 2026-08-20 defect lived
+# - the endpoint knew the agent had gone and nothing asked it.
+crew_state_for() {  # <window> <status-line>
+  local window=$1 line=$2 id="live-$1"
+  mkdir -p "$LAB/state"
+  cat > "$LAB/state/$id.meta" <<META
+window=$SESSION:$window
+worktree=$LAB/wt
+kind=ship
+harness=claude
+backend=tmux
+META
+  if [ -n "$line" ]; then
+    printf '%s\n' "$line" > "$LAB/state/$id.status"
+  else
+    rm -f "$LAB/state/$id.status"
+  fi
+  # The semantic busy record every one of these panes would carry: `idle`. An
+  # agent writes it from its own shutdown hook on the way out, a stopped agent's
+  # record froze at whatever it last said, and an agent between turns wrote it
+  # truthfully. Seeding it deliberately removes the `unknown` short-circuit, so
+  # each verdict below is forced all the way down to the path where the defect
+  # lived instead of stopping early on absent semantic state.
+  local gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$LAB/state" "$id") || return 1
+  "$ROOT/bin/fm-busy-event.sh" apply "$LAB/state" "$id" idle --gen "$gen" \
+    --source claude-hook --event stop >/dev/null || return 1
+  FM_STATE_OVERRIDE="$LAB/state" FM_HOME="$LAB" "$ROOT/bin/fm-crew-state.sh" "$id"
+}
+
 # The core anti-brittleness assertion: the two name sources must genuinely
 # DISAGREE for this case, so a verdict of alive proves the surviving source
 # carried it. Without this the divergence cases could silently go vacuous.
@@ -222,6 +254,38 @@ wait_for_state "$SESSION:idle" dead \
   || fail "an idle shell pane must classify dead"
 pass "tmux liveness: an idle shell pane classifies dead"
 
+# --- what firstmate is TOLD about that pane ---------------------------------
+# The 2026-08-20 defect, end to end over REAL processes. Four workers exited
+# leaving exactly the pane above - a live endpoint running nothing but a shell -
+# and firstmate went on being told they were `working`, because the composed
+# verdict fell through to the last line each worker had appended BEFORE it left.
+# The adapter knew (`dead`, asserted directly above); the verdict never asked.
+# These cases pin the ask, and pin it against a real foreground process group
+# rather than a stubbed process name.
+
+case "$(crew_state_for idle 'working: reproducing the flake')" in
+  'state: exited'*) : ;;
+  *) fail "a real pane whose agent exited must report exited, not the last line it wrote before leaving; got: $(crew_state_for idle 'working: reproducing the flake')" ;;
+esac
+pass "crew state: a real exited agent reports exited rather than its stale status log"
+
+# The opposite direction on a real running agent. A live worker misreported as
+# gone is the expensive confusion: it invites a relaunch onto its own worktree,
+# and it is exactly what a worker sitting behind an overlay that swallows its
+# input looks like from outside.
+case "$(crew_state_for agent 'working: still building')" in
+  'state: exited'*) fail "a real pane with a running agent must never report exited" ;;
+esac
+pass "crew state: a real running agent is never reported exited"
+
+# Exiting AFTER reporting is how a healthy worker finishes, so the verdict is
+# gated on the missing terminal line, not on the exit itself.
+case "$(crew_state_for idle 'done: PR https://example.invalid/pr/1 checks complete')" in
+  'state: done'*) : ;;
+  *) fail "a real exited agent that DID report must keep its own done verdict; got: $(crew_state_for idle 'done: PR https://example.invalid/pr/1 checks complete')" ;;
+esac
+pass "crew state: a real exited agent that reported keeps its own terminal verdict"
+
 # --- a harness-named BACKGROUND process must not fake an agent --------------
 # Scoping to the foreground process group is what prevents this false alive; a
 # descendant walk of the pane would report this pane as running an agent.
@@ -304,6 +368,17 @@ wait_for_state "$SESSION:suspended" suspended \
 [ "$(fm_backend_agent_alive tmux "$SESSION:suspended")" = unknown ] \
   || fail "a suspended agent must read unknown, not dead, in the three-state view: dead licenses recovery"
 pass "tmux liveness: a stopped agent classifies suspended, not dead, however its foreground group reads"
+
+# A frozen agent and a departed one both leave a foreground group of shells
+# alone, so the composed verdict must keep them apart: one is resumable in
+# place, the other is gone. This pins the ordering - the suspension evidence is
+# consulted before the exit verdict, so a stopped worker is never reported as
+# having left.
+case "$(crew_state_for suspended 'working: mid-turn')" in
+  *suspended*) : ;;
+  *) fail "a real stopped agent must report suspended, never exited; got: $(crew_state_for suspended 'working: mid-turn')" ;;
+esac
+pass "crew state: a real stopped agent reports suspended, not exited"
 
 kill -CONT "$susp_pid" 2>/dev/null || true
 

@@ -25,6 +25,9 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) an agent that EXITED behind a live endpoint: with no terminal status
+#       line -> exited (never its stale pre-exit line); with one -> its own
+#       done/failed verdict; a present or unattributable agent -> never exited.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -79,13 +82,40 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  # The tmux endpoint surface. `display-message` is FORMAT-AWARE because the
+  # agent-liveness classifier (bin/backends/tmux.sh) asks it three different
+  # questions: the pane id (does the target resolve), the pane tty (whose
+  # foreground process group it reads with ps), and the pane's current command
+  # (the name it attributes). FM_FAKE_PANE_TTY defaults to a tty that owns no
+  # process, so the classifier falls through to the command name and these
+  # cases stay hermetic - the real foreground-process reading is proven against
+  # REAL processes in tests/fm-tmux-agent-liveness.test.sh, which is where that
+  # kernel-level signal belongs. FM_FAKE_TMUX_WINDOWS defaults to EMPTY, which
+  # the classifier reads as `missing`, so every case that does not opt in keeps
+  # exactly the behavior it had before the classifier was consulted here at all.
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-windows)
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    printf '%s\n' ${FM_FAKE_TMUX_WINDOWS:-} ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    printf '%%1\n' ;;
+    shift
+    fmt=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -p) shift ;;
+        *) fmt=$1; shift ;;
+      esac
+    done
+    case "$fmt" in
+      '#{pane_tty}') printf '%s\n' "${FM_FAKE_PANE_TTY:-/dev/fm-no-such-tty}" ;;
+      '#{pane_current_command}') printf '%s\n' "${FM_FAKE_PANE_COMMAND:-%1}" ;;
+      *) printf '%%1\n' ;;
+    esac ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
@@ -166,11 +196,15 @@ reset_fakes() {
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
+  FM_FAKE_TMUX_WINDOWS=""
+  FM_FAKE_PANE_TTY=""
+  FM_FAKE_PANE_COMMAND=""
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_TMUX_WINDOWS FM_FAKE_PANE_TTY FM_FAKE_PANE_COMMAND
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
@@ -1408,6 +1442,163 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# ---------------------------------------------------------------------------
+# (l) THE 2026-08-20 DEFECT: a worker whose AGENT exited, leaving its endpoint
+#     alive as a bare login shell.
+#
+#     Every record that could have said so was already saying something else.
+#     The agent's own shutdown hook wrote `idle` into the semantic busy record
+#     on its way out - truthfully, since its turn had ended - and the status log
+#     kept the last line the worker appended BEFORE it left. Nothing on this
+#     path asked the endpoint whether the AGENT was still there, so that
+#     pre-exit line became the reported CURRENT state, and four workers went on
+#     reporting `working` for up to an hour after they were gone.
+#
+#     The cases below pin the three-way separation the verdict now makes, and
+#     the two directions it must refuse to guess in. The endpoint evidence is
+#     stubbed here only down to the process NAME; the kernel-level foreground
+#     process group that produces that name is proven with REAL processes in
+#     tests/fm-tmux-agent-liveness.test.sh.
+
+# The defect itself: agent gone, no terminal line ever written.
+test_exited_agent_without_terminal_line_is_not_working() {
+  reset_fakes
+  local d; d=$(new_case exited-no-report)
+  make_repo_on_branch "$d/wt" fm/feat-exited
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-exited.meta" "window=fm:fm-feat-exited" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  printf 'working: reproducing the flake\n' > "$d/state/feat-exited.status"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-exited
+  FM_FAKE_PANE_COMMAND=zsh          # the agent left; its login shell is what remains
+  arm_idle_record "$d/state" feat-exited   # what the agent's own shutdown hook wrote
+  local out; out=$(run_crew_state "$d" feat-exited)
+  assert_contains "$out" "state: exited" "an exited agent reports exited, not its last pre-exit line"
+  assert_not_contains "$out" "state: working" "a departed worker must never still read as working"
+  assert_contains "$out" "source: pane" "the exit verdict comes from the endpoint, not the log"
+  assert_contains "$out" "reproducing the flake" "the last event it did write is preserved in the detail"
+  pass "an agent that exited without a terminal status line no longer reads as working"
+}
+
+# Same defect with nothing in the log at all - the verdict may not depend on
+# having a line to quote.
+test_exited_agent_with_no_status_events_still_reports_exited() {
+  reset_fakes
+  local d; d=$(new_case exited-silent)
+  make_repo_on_branch "$d/wt" fm/feat-silent
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-silent.meta" "window=fm:fm-feat-silent" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-silent
+  FM_FAKE_PANE_COMMAND=zsh
+  arm_idle_record "$d/state" feat-silent
+  local out; out=$(run_crew_state "$d" feat-silent)
+  assert_contains "$out" "state: exited" "a silent worker that exited still reports exited"
+  assert_contains "$out" "no status events" "the detail says the log is empty rather than inventing one"
+  pass "an exited agent with no status events at all still reports exited"
+}
+
+# The other direction, and the reason the verdict is gated on the LOG and not
+# on the exit: exiting after reporting is how every healthy worker finishes.
+# That worker said what happened, so its own verdict must survive.
+test_exited_agent_that_reported_done_keeps_its_own_verdict() {
+  reset_fakes
+  local d; d=$(new_case exited-reported)
+  make_repo_on_branch "$d/wt" fm/feat-reported
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-reported.meta" "window=fm:fm-feat-reported" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  printf 'done: PR https://example.invalid/pr/7 checks complete\n' > "$d/state/feat-reported.status"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-reported
+  FM_FAKE_PANE_COMMAND=zsh
+  arm_idle_record "$d/state" feat-reported
+  local out; out=$(run_crew_state "$d" feat-reported)
+  assert_contains "$out" "state: done" "a worker that reported before exiting keeps its done verdict"
+  assert_not_contains "$out" "state: exited" "a normal reported finish is not an unreported exit"
+  pass "an exited agent that DID report keeps its own terminal verdict"
+}
+
+# The third state, added 2026-08-22 after two workers went unreachable behind a
+# background-shells panel that swallowed their input: the agent was fine, and an
+# Escape restored it. From the outside that reads exactly like the two cases
+# above - quiet endpoint, settled record, stale log - so the verdict must never
+# convert "cannot accept input" into "gone". Confusing them is the expensive
+# direction: relaunching a live worker duplicates an agent onto its own worktree.
+test_live_agent_between_turns_is_never_reported_exited() {
+  reset_fakes
+  local d; d=$(new_case alive-not-exited)
+  make_repo_on_branch "$d/wt" fm/feat-alive
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-alive.meta" "window=fm:fm-feat-alive" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  printf 'working: waiting on the build\n' > "$d/state/feat-alive.status"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-alive
+  FM_FAKE_PANE_COMMAND=claude       # the agent process is right there
+  arm_idle_record "$d/state" feat-alive
+  local out; out=$(run_crew_state "$d" feat-alive)
+  assert_not_contains "$out" "state: exited" "an agent that is present must never be reported as gone"
+  assert_contains "$out" "source: status-log" "a present idle agent still reads from its own log"
+  pass "a live agent between turns (or behind an overlay) is never reported exited"
+}
+
+# Fail-closed in the same direction: only a confident `dead` licenses the
+# verdict. An endpoint whose foreground process cannot be attributed is
+# `ambiguous`, and ambiguity is not evidence of departure.
+test_unattributable_endpoint_is_never_reported_exited() {
+  reset_fakes
+  local d; d=$(new_case ambiguous-not-exited)
+  make_repo_on_branch "$d/wt" fm/feat-amb
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-amb.meta" "window=fm:fm-feat-amb" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  printf 'working: still going\n' > "$d/state/feat-amb.status"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-amb
+  FM_FAKE_PANE_COMMAND=some-unrelated-process
+  arm_idle_record "$d/state" feat-amb
+  local out; out=$(run_crew_state "$d" feat-amb)
+  assert_not_contains "$out" "state: exited" "an unattributable endpoint is not proof the agent left"
+  pass "an endpoint whose process cannot be attributed is never reported exited"
+}
+
+# A secondmate skips the busy check entirely (its idle endpoint is healthy), so
+# for one the status log is the ONLY other source and the exit check is the only
+# thing standing between a departed mate and a log that outlives it.
+test_exited_secondmate_does_not_ride_its_stale_log() {
+  reset_fakes
+  local d; d=$(new_case exited-secondmate)
+  make_repo_on_branch "$d/wt" fm/mate-gone
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mate-gone.meta" "window=fm:fm-mate-gone" "worktree=$d/wt" \
+    "kind=secondmate" "harness=claude"
+  printf 'working: picked up the routed task\n' > "$d/state/mate-gone.status"
+  FM_FAKE_TMUX_WINDOWS=fm-mate-gone
+  FM_FAKE_PANE_COMMAND=zsh
+  local out; out=$(run_crew_state "$d" mate-gone)
+  assert_contains "$out" "state: exited" "a secondmate whose agent left reports exited"
+  assert_not_contains "$out" "state: working" "a departed secondmate must not ride its own stale log"
+  pass "an exited secondmate does not ride its stale status log"
+}
+
+# The fleet-facing consequence, through the watcher's own absorb predicate
+# rather than a re-reading of the line above: a wake about a departed worker
+# must never be swallowed as "still working". This is the property that decides
+# whether firstmate looks now or an hour from now.
+test_exited_agent_is_not_absorbed_as_working() {
+  reset_fakes
+  local d; d=$(new_case exited-absorb)
+  make_repo_on_branch "$d/wt" fm/feat-absorb
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-absorb.meta" "window=fm:fm-feat-absorb" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-absorb.status"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-absorb
+  FM_FAKE_PANE_COMMAND=zsh
+  arm_idle_record "$d/state" feat-absorb
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-absorb \
+    && fail "a wake about a departed worker was absorbed as still working"
+  pass "an exited worker is never absorbed as provably working"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1461,5 +1652,12 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_exited_agent_without_terminal_line_is_not_working
+test_exited_agent_with_no_status_events_still_reports_exited
+test_exited_agent_that_reported_done_keeps_its_own_verdict
+test_live_agent_between_turns_is_never_reported_exited
+test_unattributable_endpoint_is_never_reported_exited
+test_exited_secondmate_does_not_ride_its_stale_log
+test_exited_agent_is_not_absorbed_as_working
 
 echo "all fm-crew-state tests passed"

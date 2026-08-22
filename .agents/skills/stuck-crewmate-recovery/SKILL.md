@@ -2,7 +2,7 @@
 name: stuck-crewmate-recovery
 description: >-
   Agent-only playbook for stuck or missing ordinary Firstmate direct reports.
-  Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
+  Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, a worker reported as exited without reporting, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
   Reconciles recorded work before escalating from targeted inspection through safe relaunch or failure.
 user-invocable: false
 metadata:
@@ -11,7 +11,7 @@ metadata:
 
 # stuck-crewmate-recovery
 
-Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
+Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, reported as having exited without reporting, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
 
 Interrupt, stop, relaunch, and rebind a worker through `bin/fm-control.sh <task-id> interrupt|exit|relaunch|rebind`, which resolves the recorded runtime itself, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](../../../docs/agent-control.md)).
 That plane covers workers running in this home; a remotely placed secondmate is refused by name and reconciled through `secondmate-provisioning` instead.
@@ -37,6 +37,11 @@ Do not sweep another home's endpoints or infer ownership from a matching window 
 An endpoint that does not answer is not automatically an endpoint that is gone.
 A recorded identifier reported as `drifted` means a live endpoint still carries this task's identity under a new identifier, and a worker reported as `suspended` is stopped rather than gone; both refuse recovery on purpose, because relaunching over either one puts a second agent on a live copy of the work.
 Correct a drifted record with `bin/fm-control.sh <task-id> rebind` and then decide from its real state; resume a suspended worker in its own endpoint instead of replacing it.
+
+A worker reported as `exited` is the third shape, and the only one of the three where the agent really is gone: its endpoint survives as a bare shell and it never wrote a terminal status line.
+That verdict says the agent left, never that the work is unfinished - on 2026-08-20 the most expensive case was a complete report sitting on disk unclaimed for an hour while the record still read `working`.
+So decide from the work rather than from the last status line: read the task's deliverable and worktree first, claim a finished one through its normal completion path, and relaunch only what is genuinely incomplete.
+Nothing is lost either way, because the worktree, its commits, and any written deliverable all survive the exit and a relaunch in that same worktree resumes cleanly.
 
 Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
 Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
