@@ -379,8 +379,7 @@ test_short_one_heading_authored_claude_md_is_refused_not_promoted() {
   cat > "$repo/CLAUDE.md" <<'EOF'
 # example-project
 
-This is the router memory file for example-project.
-See docs/architecture.md for the system design and docs/setup.md for onboarding.
+This file is a deliberate router pointing agents at the project's real documentation elsewhere.
 EOF
   cp "$repo/CLAUDE.md" "$repo/.claude-before"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)

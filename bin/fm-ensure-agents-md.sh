@@ -121,22 +121,39 @@ is_canonical_claude_pointer() {
 # structure (two or more headings), enough total content to be more than a
 # trivial stub (more than AUTHORED_MIN_LINES lines), or more than one
 # substantive (non-heading, non-blank) content line is judged authored rather
-# than a placeholder. A generated stub is a single heading followed by a
-# single one-line instruction; anything with a second content line is already
-# more than a placeholder can hold, even when it still fits in a handful of
-# lines under one heading (issue: a short one-heading router-style file was
-# still being classified as a placeholder and silently promoted). Promoting
-# an authored file would silently restructure deliberate content, so it is
-# refused instead of moved, the same way a distinct real AGENTS.md/CLAUDE.md
-# pair is refused elsewhere in this script.
+# than a placeholder. Promoting an authored file would silently restructure
+# deliberate content, so it is refused instead of moved, the same way a
+# distinct real AGENTS.md/CLAUDE.md pair is refused elsewhere in this script.
+#
+# A single heading plus a single content line is ambiguous by line count
+# alone (issue: a short one-heading router-style file was still classified as
+# a placeholder and silently promoted). At that size, judge the shape of the
+# content line itself instead: a placeholder a scaffolding tool drops in is a
+# minimal build/test/run instruction (is_generated_stub_line); anything else -
+# a descriptive, routing, or ownership statement - is deliberate authorship
+# even at one line.
 AUTHORED_MIN_LINES=12
+is_generated_stub_line() {
+  case "$1" in
+    [Rr]un\ *|[Bb]uild\ *|[Ii]nstall\ *|[Ss]tart\ *|[Tt]est\ *) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 is_authored_claude_md() {
-  local headings lines content_lines
+  local headings lines content_lines sole_line
   headings=$(grep -c '^#' "$CLAUDE" 2>/dev/null) || headings=0
   lines=$(awk 'END { print NR }' "$CLAUDE" 2>/dev/null) || lines=0
   content_lines=$(awk '!/^#/ && NF { c++ } END { print c+0 }' "$CLAUDE" 2>/dev/null) || content_lines=0
-  [ "${headings:-0}" -ge 2 ] || [ "${lines:-0}" -gt "$AUTHORED_MIN_LINES" ] ||
-    [ "${content_lines:-0}" -gt 1 ]
+  if [ "${headings:-0}" -ge 2 ] || [ "${lines:-0}" -gt "$AUTHORED_MIN_LINES" ] ||
+    [ "${content_lines:-0}" -gt 1 ]; then
+    return 0
+  fi
+  if [ "${content_lines:-0}" -eq 1 ]; then
+    sole_line=$(awk '!/^#/ && NF { print; exit }' "$CLAUDE")
+    is_generated_stub_line "$sole_line" || return 0
+  fi
+  return 1
 }
 
 # Write the canonical pointer as a regular file. Unlink a symlink first so the
