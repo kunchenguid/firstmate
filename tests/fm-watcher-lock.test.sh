@@ -1262,13 +1262,27 @@ test_lock_stale_steal_mutex_single_winner_under_concurrency() {
   : > "$marker"
   pids=
   i=1
+  # A single round can legitimately end with NOBODY acquiring, so the racers
+  # retry the way real callers do. A racer descheduled between its staleness
+  # recheck of the stale mutex and its eviction of it wakes to a fresher mutex,
+  # refuses at the eviction, and the holder it displaced then refuses at its own
+  # ownership re-prove. Neither may proceed, which is the point - so what has to
+  # hold is AT MOST one acquirer per round, not one on the first try. Whoever
+  # acquires holds past every other racer's last attempt, so a second entry in
+  # the marker is a real double-publish and not a handoff.
   while [ "$i" -le 40 ]; do
     FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
-      if fm_lock_try_acquire "$2"; then
-        printf "%s\n" "${BASHPID:-$$}" >> "$3"
-        sleep 1
-      fi
+      n=0
+      while [ "$n" -lt 10 ]; do
+        if fm_lock_try_acquire "$2"; then
+          printf "%s\n" "${BASHPID:-$$}" >> "$3"
+          sleep 5
+          break
+        fi
+        n=$((n + 1))
+        sleep 0.2
+      done
     ' _ "$LIB" "$lockdir" "$marker" &
     pids="$pids $!"
     i=$((i + 1))
@@ -1277,7 +1291,8 @@ test_lock_stale_steal_mutex_single_winner_under_concurrency() {
     wait "$pid" 2>/dev/null || true
   done
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
-  [ "$wins" -eq 1 ] || fail "expected exactly one winner reclaiming a stale steal mutex, got $wins"
+  [ "$wins" -le 1 ] || fail "two racers published through one stale steal mutex ($wins)"
+  [ "$wins" -eq 1 ] || fail "no racer ever reclaimed the stale steal mutex, so the test proves nothing"
   pass "concurrent reclaim through a stale steal mutex yields exactly one winner"
 }
 

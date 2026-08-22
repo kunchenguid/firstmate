@@ -497,8 +497,14 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
-    if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
+  if ln -s "$ownerdir" "$lockdir" 2>/dev/null; then
+    # The link went in, which is proof the filesystem refused nothing. Every way
+    # this can still fail is another process moving under us, and the path is a
+    # useless witness to that: a reclaimer renaming our fresh link away leaves it
+    # as absent as ENOSPC would.
+    FM_LOCK_CREATE_FAILURE=contended
+    if fm_lock_points_to_owner "$lockdir" "$ownerdir" \
+      && fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       FM_LOCK_CREATE_FAILURE=
       return 0
@@ -506,9 +512,10 @@ fm_lock_try_create() {
     if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
       rm -f "$lockdir" 2>/dev/null || true
     fi
+    fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
   else
-    # A link that lost to someone else's is contention; one the filesystem
-    # refused outright leaves the path as empty as it found it.
+    # The link was refused. Someone else's lock already sitting there is
+    # contention; a path as empty as it was found means the filesystem refused.
     if fm_lock_path_exists "$lockdir"; then
       FM_LOCK_CREATE_FAILURE=contended
     fi
