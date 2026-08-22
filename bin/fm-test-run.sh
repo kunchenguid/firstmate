@@ -165,6 +165,8 @@ family_for_basename() {
   case "$1" in
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
+    fm-capture-visual-evidence-mechanism.test.sh|\
+    fm-pr-body.test.sh|fm-pr-body-template-mechanism.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-ci-load-guard.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|fm-daily.test.sh|\
@@ -992,6 +994,11 @@ families_for_changed_path() {
     bin/fm-quota-utilization.sh|bin/fm-quota-utilization.mjs)
       printf '%s\n' pure-contract-unit
       printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-pr-body.sh)
+      # Explicit entry ahead of the bin/fm-pr-* glob: its tests live in
+      # pure-contract-unit, not pr-forge.
+      printf '%s\n' pure-contract-unit
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)

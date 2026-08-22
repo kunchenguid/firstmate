@@ -29,6 +29,7 @@
 #                         [--set KEY=VALUE]... [--set-file KEY=<path>]...
 #   fm-pr-body.sh check --file <path>
 #   fm-pr-body.sh check                 (reads the body from stdin)
+#   fm-pr-body.sh publish --file <path> -- <forge command> [args...]
 #   fm-pr-body.sh has-template --project <name> --repo-dir <path>
 #
 # render fills only named {{PLACEHOLDER}} slots explicitly supplied via --set
@@ -48,10 +49,11 @@
 # stderr; nothing is written to --out and nothing is printed to stdout on
 # that path, so a partial or unrendered body never reaches disk. This makes
 # the refusal structural: a direct-PR ship's `render ... --out body.md &&
-# gh-axi pr create --body-file body.md` never reaches the open call on
-# unresolved input, without depending on a worker remembering a second
-# command. no-mistakes ships have no equivalent seam yet: `no-mistakes axi
-# run --help` documents `--intent` as the user's goal only, with no PR-body
+# fm-pr-body.sh publish --file body.md -- gh-axi pr create --body-file
+# body.md` never reaches the open call on unresolved input, without depending
+# on a worker remembering a second check command. no-mistakes ships have no
+# equivalent seam yet: `no-mistakes axi run --help` documents `--intent` as
+# the user's goal only, with no PR-body
 # input of any kind, so this mechanism does not cover no-mistakes mode in
 # this slice. That gap is a follow-up, not something to paper over by
 # overloading --intent.
@@ -61,9 +63,21 @@
 # edited) rather than to fresh render output; render's own refusal is the
 # primary gate.
 #
-# Both render and check also refuse (exit 1) a body that contains a local
-# home or temporary-directory absolute path (e.g. /home/<user>/...,
-# /Users/<user>/..., /root/..., /tmp/..., /var/tmp/..., /private/tmp/...,
+# publish is the executable publication boundary for every colleague-facing
+# text surface a direct-PR worker owns - the PR body (templated or
+# untemplated), a PR comment, or a review reply. It applies the same refusal
+# as check to the --file content and execs the forge command after `--`
+# verbatim only when the text is safe, propagating that command's own exit
+# status. This makes the safe path one command instead of a remembered
+# manual `check && gh-axi ...` chain, and unsafe text never reaches the
+# network even when a worker would otherwise invoke the forge command
+# directly. publish never guesses the forge command: a missing or empty
+# command after `--` is a usage error.
+#
+# render, check, and publish also refuse (exit 1) a body that contains a
+# local home or temporary-directory path (e.g. /home/<user>/...,
+# /Users/<user>/..., /root/..., C:\Users\<user>\... or C:/Users/<user>/...,
+# /tmp/..., /var/tmp/..., /private/tmp/...,
 # /private/var/folders/...): those shapes leak this machine's local layout
 # and are never acceptable evidence. A repository-relative path (no leading
 # '/'), a URL, ordinary prose, and a command example that names no real
@@ -81,9 +95,10 @@
 # resolution so a caller (bin/fm-brief.sh's scaffold requirement) never
 # hand-rolls a second detector that can drift from render's real behavior.
 #
-# Exit codes: 0 ok; 1 refusal (unresolved placeholders or a local-path leak)
-# or an I/O failure; 2 usage error; 3 render found no private or repository
-# template (step-aside signal).
+# Exit codes: 0 ok (publish propagates the forge command's own exit status);
+# 1 refusal (unresolved placeholders or a local-path leak) or an I/O failure;
+# 2 usage error; 3 render found no private or repository template (step-aside
+# signal).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -151,6 +166,13 @@ find_unresolved() {
 has_local_path_leak() {
   local content=$1 tok
   local tokens
+  # Windows local-home shapes (C:\Users\... or C:/Users/...) carry no leading
+  # '/', so the absolute-path token scan below never sees them; scan for the
+  # drive-letter shape directly. The required separator after "users" keeps a
+  # plain mention like "see c:/users guide" from matching.
+  if printf '%s' "$content" | grep -qiE '[a-z]:[\\/]users[\\/]'; then
+    return 0
+  fi
   tokens=$(printf '%s' "$content" | grep -oE '(/[A-Za-z0-9._@-]+)+' || true)
   [ -n "$tokens" ] || return 1
   while IFS= read -r tok; do
@@ -459,6 +481,24 @@ cmd_render() {
   fi
 }
 
+# refuse_unsafe_publication <content>: the single publication-text safety
+# scan shared by check and publish so both surfaces enforce one contract that
+# cannot drift. Returns 1 with a concise stderr refusal (never echoing the
+# offending path) when unresolved placeholders or a local-path leak remain.
+refuse_unsafe_publication() {
+  local content=$1 unresolved
+  unresolved=$(find_unresolved "$content")
+  if [ -n "$unresolved" ]; then
+    echo "error: unresolved PR body placeholders: $unresolved" >&2
+    return 1
+  fi
+  if has_local_path_leak "$content"; then
+    echo "error: publication text contains a local filesystem path; publish only repo-relative paths, URLs, or an uploaded evidence link" >&2
+    return 1
+  fi
+  return 0
+}
+
 cmd_check() {
   local file=''
   while [ $# -gt 0 ]; do
@@ -475,17 +515,27 @@ cmd_check() {
   else
     content=$(cat)
   fi
-  local unresolved
-  unresolved=$(find_unresolved "$content")
-  if [ -n "$unresolved" ]; then
-    echo "error: unresolved PR body placeholders: $unresolved" >&2
-    exit 1
-  fi
-  if has_local_path_leak "$content"; then
-    echo "error: PR body contains a local filesystem path; publish only repo-relative paths, URLs, or an uploaded evidence link" >&2
-    exit 1
-  fi
+  refuse_unsafe_publication "$content" || exit 1
   exit 0
+}
+
+cmd_publish() {
+  local file=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --file) file=${2:?--file requires a value}; shift 2 ;;
+      --file=*) file=${1#--file=}; shift ;;
+      --) shift; break ;;
+      *) die_usage "unknown publish argument: $1 (expected: publish --file <path> -- <forge command> [args...])" ;;
+    esac
+  done
+  [ -n "$file" ] || die_usage "publish requires --file <path>"
+  [ -f "$file" ] || die_usage "--file not found: $file"
+  [ $# -gt 0 ] || die_usage "publish requires the forge command after --"
+  local content
+  content=$(cat -- "$file") || { echo "error: could not read: $file" >&2; exit 1; }
+  refuse_unsafe_publication "$content" || exit 1
+  exec "$@"
 }
 
 cmd_has_template() {
@@ -511,12 +561,13 @@ cmd_has_template() {
 }
 
 SUBCOMMAND=${1:-}
-[ -n "$SUBCOMMAND" ] || die_usage "a subcommand is required: render or check"
+[ -n "$SUBCOMMAND" ] || die_usage "a subcommand is required: render, check, publish, or has-template"
 shift
 
 case "$SUBCOMMAND" in
   render) cmd_render "$@" ;;
   check) cmd_check "$@" ;;
+  publish) cmd_publish "$@" ;;
   has-template) cmd_has_template "$@" ;;
-  *) die_usage "unknown subcommand '$SUBCOMMAND'; expected render, check, or has-template" ;;
+  *) die_usage "unknown subcommand '$SUBCOMMAND'; expected render, check, publish, or has-template" ;;
 esac

@@ -9,7 +9,7 @@
 # repeat the load-bearing task block at the end so oracle, acceptance criteria,
 # and hard constraints stay visible at both structural boundaries
 # (lost-in-the-middle).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--visual] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--access <reader|writer>] [--evidence-archive] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #        fm-brief.sh <task-id> --fill <text-file>
@@ -26,6 +26,10 @@
 #   divergent brief is refused before mutation.
 #   --evidence-archive is valid only with --scout. It opts an evidence-heavy scout
 #   into data/<task-id>/sources/ and its provenance index; ordinary scouts remain archive-free.
+#   --visual is valid only with ship briefs whose symptom or acceptance criterion is
+#   visual. It adds a Visual evidence section requiring before/after capture with the
+#   target project's own existing capability and a PR Evidence section that names what
+#   each artifact proves.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and its task environment is scratch.
 #   --access is the scout reader/writer axis, resolved by firstmate at intake
@@ -116,15 +120,18 @@
 # local-only ships no PR, so its brief carries no PR-body contract.
 # When this home has a private PR body template at data/pr-templates/<repo-name>.md,
 # a direct-PR brief additionally requires the worker to render it through
-# bin/fm-pr-body.sh as one `&&`-gated sequence immediately before `gh-axi pr
-# create`, so an unresolved placeholder structurally stops the PR from ever
-# opening rather than depending on the worker remembering a separate check.
+# bin/fm-pr-body.sh and open the PR through that script's publish seam, so an
+# unresolved placeholder or a local-path leak structurally stops the PR from
+# ever opening rather than depending on the worker remembering a separate
+# check. Every direct-PR brief, templated or not, routes PR bodies, PR
+# comments, and review replies through the same publish seam, which refuses
+# unsafe text before the forge command runs.
 # Scoped to direct-PR only: that is the one ship mode where the worker itself
 # opens the PR. no-mistakes has no equivalent seam in this slice - it owns
 # the PR it opens and takes no body input - so it carries no such
 # requirement here; covering it is a follow-up. local-only ships no PR at
-# all. bin/fm-pr-body.sh's own header owns the render/check interface and
-# template-precedence rules; this script only decides whether the
+# all. bin/fm-pr-body.sh's own header owns the render/check/publish interface
+# and template-precedence rules; this script only decides whether the
 # requirement applies, from the template file's presence at scaffold time.
 # Refuses to overwrite an existing brief.
 set -eu
@@ -177,6 +184,7 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 KIND=ship
 HERDR_LAB=0
 EVIDENCE_ARCHIVE=0
+VISUAL=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
@@ -203,6 +211,7 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --evidence-archive) EVIDENCE_ARCHIVE=1 ;;
+    --visual) VISUAL=1 ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
@@ -354,6 +363,11 @@ fi
 
 if [ "$EVIDENCE_ARCHIVE" -eq 1 ] && [ "$KIND" != scout ]; then
   echo "error: --evidence-archive applies only to --scout briefs" >&2
+  exit 1
+fi
+
+if [ "$VISUAL" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --visual applies only to ship briefs" >&2
   exit 1
 fi
 
@@ -787,6 +801,22 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
+VISUAL_EVIDENCE_SECTION=''
+if [ "$VISUAL" -eq 1 ]; then
+  IFS= read -r -d '' VISUAL_EVIDENCE_SECTION_BODY <<'EOF' || true
+# Visual evidence
+This task's symptom or acceptance criterion is visual.
+Capture before and after evidence with this project's own existing visual-capture capability before you call the fix done.
+The PR Evidence section must name each artifact and state exactly what it proves.
+You cannot report a visual defect done without reviewer-accessible evidence or a stated reason capture was impossible.
+Reviewer-facing evidence is an uploaded URL.
+If upload is not yet available, use only a `pending upload` marker plus a description of the evidence and who must upload it; never publish a local filesystem path as the fallback.
+Private status or report paths stay private; do not copy them into the PR body or PR comments.
+EOF
+  VISUAL_EVIDENCE_SECTION_BODY=${VISUAL_EVIDENCE_SECTION_BODY%$'\n'}
+  VISUAL_EVIDENCE_SECTION=$'\n'"$VISUAL_EVIDENCE_SECTION_BODY"$'\n\n'
+fi
+
 # Ship tasks that end in a PR must satisfy the target repository's own PR
 # submission rules, which vary per repo and may be absent entirely. The brief
 # makes the worker look for them and follow them, and say plainly when none
@@ -807,6 +837,16 @@ Never invent evidence you do not have.
 If a required section needs something you cannot produce (a demo video, a benchmark, a human review sign-off), mark it as pending and name who provides it (for example "Demo video: pending - recording from <person>") instead of fabricating a link, value, or sign-off.
 PR_BODY_EOF
     PR_BODY_SECTION_BODY=${PR_BODY_SECTION_BODY%$'\n'}
+    if [ "$MODE" = direct-PR ]; then
+      PR_PUBLICATION_HELPER=$(shell_quote "$FM_ROOT/bin/fm-pr-body.sh")
+      IFS= read -r -d '' PR_PUBLICATION_ADDENDUM <<EOF || true
+Publish every colleague-facing summary - the PR body (templated or untemplated), a PR comment, or a review reply - through the helper's executable seam: write the text to a file, then run \`$PR_PUBLICATION_HELPER publish --file <path> -- <forge command>\` with the real publication command after the \`--\`, for example \`$PR_PUBLICATION_HELPER publish --file <path> -- gh-axi pr comment <pr> --body-file <path>\` or the equivalent review reply command.
+The seam refuses unresolved \`{{PLACEHOLDER}}\` tokens and local filesystem paths and never invokes the forge command on a refusal, so unsafe text cannot reach the network; never invoke \`gh-axi pr create\`, \`gh-axi pr comment\`, or a review reply command directly to publish.
+Never copy private status or report paths into public text; reviewer-facing evidence is an uploaded URL, or a \`pending upload\` marker plus a description and who must upload it - never a local path as the fallback.
+EOF
+      PR_PUBLICATION_ADDENDUM=${PR_PUBLICATION_ADDENDUM%$'\n'}
+      PR_BODY_SECTION_BODY="$PR_BODY_SECTION_BODY"$'\n'"$PR_PUBLICATION_ADDENDUM"
+    fi
     if [ "$HAS_PR_TEMPLATE" -eq 1 ]; then
       PR_TEMPLATE_HELPER=$(shell_quote "$FM_ROOT/bin/fm-pr-body.sh")
       if [ -f "$DATA/pr-templates/$REPO.md" ]; then
@@ -816,8 +856,8 @@ PR_BODY_EOF
       fi
       IFS= read -r -d '' PR_TEMPLATE_ADDENDUM <<EOF || true
 $PR_TEMPLATE_SOURCE_LINE
-Render and open the PR as one gated sequence so an incomplete body can never reach \`gh-axi pr create\`: \`$PR_TEMPLATE_HELPER render --project $REPO --repo-dir . --set KEY=VALUE... --out <path> && gh-axi pr create --body-file <path>\`, supplying every placeholder value your task has.
-\`render\` itself refuses (nonzero exit, naming the unresolved keys or a local filesystem path) and writes nothing to \`--out\` on either refusal, so the \`&&\` never reaches \`gh-axi pr create\` on an incomplete or leaking body; fill the named values (never a local path - use an uploaded evidence URL, or a pending-upload marker plus description) and re-run rather than opening the PR anyway.
+Render and open the PR as one gated sequence so an incomplete body can never reach the forge: \`$PR_TEMPLATE_HELPER render --project $REPO --repo-dir . --set KEY=VALUE... --out <path> && $PR_PUBLICATION_HELPER publish --file <path> -- gh-axi pr create --body-file <path>\`, supplying every placeholder value your task has.
+\`render\` and \`publish\` refuse (nonzero exit, naming the unresolved keys or a local filesystem path), \`render\` writes nothing to \`--out\` on refusal, and \`publish\` never invokes the forge command on unsafe text; fill the named values (never a local path - use an uploaded evidence URL, or a pending-upload marker plus description) and re-run rather than opening the PR anyway.
 EOF
       PR_TEMPLATE_ADDENDUM=${PR_TEMPLATE_ADDENDUM%$'\n'}
       PR_BODY_SECTION_BODY="$PR_BODY_SECTION_BODY"$'\n'"$PR_TEMPLATE_ADDENDUM"
@@ -893,7 +933,7 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
-$PR_BODY_SECTION$DOD
+$VISUAL_EVIDENCE_SECTION$PR_BODY_SECTION$DOD
 $LOAD_BEARING_BOOKEND
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace the two standalone {TASK} slots)"

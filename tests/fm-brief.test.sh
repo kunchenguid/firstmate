@@ -1276,7 +1276,7 @@ test_scout_access_reader_scaffold_contract() {
   local home brief project_rules
   home="$TMP_ROOT/access-reader-home"
   mkdir -p "$home/data"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" access-reader-r1 someproj --scout --access reader >/dev/null 2>&1 \
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-brief.sh" access-reader-r1 someproj --scout --access reader >/dev/null 2>&1 \
     || fail "reader scout scaffold should succeed"
   brief="$home/data/access-reader-r1/brief.md"
   assert_present "$brief" "reader scout brief was not scaffolded"

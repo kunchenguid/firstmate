@@ -4,8 +4,8 @@
 # direct-PR ship - the one mode where the worker itself opens the PR - and
 # never for no-mistakes, local-only, scout, or an untemplated project) and
 # the structural pre-open refusal itself, proven against a fake PR opener
-# using the exact `&&`-gated sequence the brief requires. bin/fm-pr-body.sh's
-# own render/check/strip behavior is covered by tests/fm-pr-body.test.sh.
+# through the publish seam the brief requires. bin/fm-pr-body.sh's own
+# render/check/strip behavior is covered by tests/fm-pr-body.test.sh.
 #
 # fm-pr-check.sh is deliberately not exercised here: it registers a PR
 # *after* it is already open (arms the merge-watch poll), so it cannot own a
@@ -39,8 +39,8 @@ test_brief_requires_helper_for_templated_direct_pr() {
     "templated direct-PR brief must name the private template it must use"
   assert_grep "fm-pr-body.sh' render" "$brief" \
     "templated direct-PR brief must require rendering through the helper"
-  assert_grep "&& gh-axi pr create" "$brief" \
-    "templated direct-PR brief must gate its own gh-axi PR-open call (the repository's own tool contract, not bare gh) on render's exit code, not on a remembered separate check"
+  assert_grep "-- gh-axi pr create" "$brief" \
+    "templated direct-PR brief must hand its own gh-axi PR-open call (the repository's own tool contract, not bare gh) to the helper's publish seam, not to a remembered manual check"
   pass "fm-brief.sh: a templated direct-PR ship brief requires a render-gated gh-axi pr create"
 }
 
@@ -61,8 +61,8 @@ test_brief_requires_helper_for_repository_only_template() {
   brief="$home/data/$id/brief.md"
   assert_grep "fm-pr-body.sh' render" "$brief" \
     "a project with only a repository-owned .github PR template must still require rendering through the helper (closing the repository-template activation gap)"
-  assert_grep "&& gh-axi pr create" "$brief" \
-    "a repository-only templated direct-PR brief must gate gh-axi pr create on render's exit code exactly like the private-template case"
+  assert_grep "-- gh-axi pr create" "$brief" \
+    "a repository-only templated direct-PR brief must hand gh-axi pr create to the publish seam exactly like the private-template case"
   assert_no_grep "data/pr-templates/repo-only-proj.md" "$brief" \
     "no private template exists here, so the brief must not claim one at data/pr-templates/repo-only-proj.md"
   pass "fm-brief.sh: a direct-PR brief for a project with only a repository-owned .github PR template still requires the render-gated scaffold"
@@ -92,11 +92,13 @@ test_brief_omits_helper_requirement_without_template() {
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-brief.sh" "$id" untemplated-proj --mode direct-PR >/dev/null 2>&1 \
     || fail "fm-brief.sh exited non-zero scaffolding an untemplated direct-PR brief"
   brief="$home/data/$id/brief.md"
-  assert_no_grep "fm-pr-body.sh" "$brief" \
-    "an untemplated project's brief must not reference the helper (missing-template compatibility: existing PR-rules path unchanged)"
+  assert_grep "fm-pr-body.sh' publish" "$brief" \
+    "every direct-PR brief must route colleague-facing summaries through the publish seam"
+  assert_no_grep "fm-pr-body.sh' render" "$brief" \
+    "an untemplated project's brief must not require template rendering (missing-template compatibility: existing PR-rules path unchanged)"
   assert_grep "# PR requirements" "$brief" \
     "an untemplated project's brief must still carry the existing generic PR requirements section"
-  pass "fm-brief.sh: a ship brief with no configured template carries no helper requirement"
+  pass "fm-brief.sh: a ship brief with no configured template carries the publish seam but no render requirement"
 }
 
 test_brief_omits_helper_requirement_for_local_only() {
@@ -135,19 +137,23 @@ test_brief_project_traversal_never_reaches_helper_requirement() {
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-brief.sh" "$id" "../escape" --mode direct-PR >/dev/null 2>&1 \
     || fail "fm-brief.sh exited non-zero scaffolding a brief for a path-shaped repo name"
   brief="$home/data/$id/brief.md"
-  assert_no_grep "fm-pr-body.sh" "$brief" \
+  assert_no_grep "fm-pr-body.sh' render" "$brief" \
+    "a repo name shaped like a path must never trigger template rendering"
+  assert_no_grep "data/pr-templates" "$brief" \
     "a repo name shaped like a path must never be used to probe outside data/pr-templates"
+  assert_grep "fm-pr-body.sh' publish" "$brief" \
+    "direct-PR still carries the publish seam when template detection is refused"
   pass "fm-brief.sh: a path-shaped repo name is never used to look outside data/pr-templates"
 }
 
 # --- structural pre-open refusal, proven against a fake PR opener ----------
 #
-# This proves the mechanism itself, not brief prose: the exact `&&`-gated
-# shell sequence bin/fm-brief.sh's direct-PR addendum requires (render --out
-# <path> && <open>) really does keep a fake opener from ever running when the
-# rendered body is incomplete, and really does invoke it once the body is
-# complete. No fm-pr-check.sh or gh-axi involvement: this is a plain shell
-# proof of the render-gates-open contract.
+# This proves the mechanism itself, not brief prose: the exact gated shell
+# sequence bin/fm-brief.sh's direct-PR addendum requires (render --out <path>
+# && publish --file <path> -- <open>) really does keep a fake opener from
+# ever running when the rendered body is incomplete, and really does invoke
+# it once the body is complete. No fm-pr-check.sh or gh-axi involvement: this
+# is a plain shell proof of the render-plus-publish-seam contract.
 
 opener_case() {
   local name=$1 dir
@@ -167,7 +173,7 @@ test_render_gated_open_never_runs_on_unresolved_body() {
   dir=$(opener_case incomplete)
   printf 'Summary: {{SUMMARY}}\nTicket: {{TICKET}}\n' > "$dir/home/data/pr-templates/demo.md"
   FM_HOME="$dir/home" bash -c \
-    '"$1" render --project demo --repo-dir "$2" --set SUMMARY=x --out "$3/out.md" && "$3/fake-open" --body-file "$3/out.md"' \
+    '"$1" render --project demo --repo-dir "$2" --set SUMMARY=x --out "$3/out.md" && "$1" publish --file "$3/out.md" -- "$3/fake-open" --body-file "$3/out.md"' \
     _ "$TOOL" "$dir/repo" "$dir" >/dev/null 2>&1
   rc=$?
   expect_code 1 "$rc" "the gated sequence must exit non-zero when the rendered body is incomplete"
@@ -181,7 +187,7 @@ test_render_gated_open_runs_on_resolved_body() {
   dir=$(opener_case complete)
   printf 'Summary: {{SUMMARY}}\nTicket: {{TICKET}}\n' > "$dir/home/data/pr-templates/demo.md"
   FM_HOME="$dir/home" bash -c \
-    '"$1" render --project demo --repo-dir "$2" --set SUMMARY=x --set TICKET=T-1 --out "$3/out.md" && "$3/fake-open" --body-file "$3/out.md"' \
+    '"$1" render --project demo --repo-dir "$2" --set SUMMARY=x --set TICKET=T-1 --out "$3/out.md" && "$1" publish --file "$3/out.md" -- "$3/fake-open" --body-file "$3/out.md"' \
     _ "$TOOL" "$dir/repo" "$dir" >/dev/null 2>&1
   rc=$?
   expect_code 0 "$rc" "the gated sequence must succeed once the rendered body is complete"
@@ -196,7 +202,7 @@ test_render_gated_open_never_runs_on_local_path_leak() {
   dir=$(opener_case local-path-leak)
   printf 'Summary: {{SUMMARY}}\n' > "$dir/home/data/pr-templates/demo.md"
   FM_HOME="$dir/home" bash -c \
-    '"$1" render --project demo --repo-dir "$2" --set "SUMMARY=see /home/captain/notes/report.md" --out "$3/out.md" && "$3/fake-open" --body-file "$3/out.md"' \
+    '"$1" render --project demo --repo-dir "$2" --set "SUMMARY=see /home/captain/notes/report.md" --out "$3/out.md" && "$1" publish --file "$3/out.md" -- "$3/fake-open" --body-file "$3/out.md"' \
     _ "$TOOL" "$dir/repo" "$dir" >/dev/null 2>&1
   rc=$?
   expect_code 1 "$rc" "the gated sequence must exit non-zero when the rendered body leaks a local filesystem path"
