@@ -239,8 +239,8 @@ it, six turns in a row all answered.
 The same path covers a session the model ends on its own, mid-conversation: that
 costs the turn it was in and not the relay, and the next talk key builds a
 replacement. Either way the client hears about it at once rather than waiting out
-the whole reply timeout in silence, and a turn that broke rather than merely
-ending carries the reason on its own JSON record.
+the whole reply timeout in silence.
+A turn still waiting for its answer when either happens names why in its own `relay_error`, and [setting up the laptop](#setting-up-the-laptop) describes those reasons.
 
 **What it gives up is memory.** Every question starts fresh, so "and what about
 that one" will not work. Carrying context across turns means handling
