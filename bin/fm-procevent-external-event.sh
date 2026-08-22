@@ -3,6 +3,7 @@
 #
 # Usage:
 #   fm-procevent-external-event.sh ingest <source> <delivery-key> < payload
+#   fm-procevent-external-event.sh ingest-linear <issue-uuid> <updated-at> < payload
 #   fm-procevent-external-event.sh classify <result-file>
 #   fm-procevent-external-event.sh metadata <result-file>
 #   fm-procevent-external-event.sh payload <result-file>
@@ -22,6 +23,9 @@
 # A source-scoped delivery key deduplicates retries durably; callers that want
 # webhook and reconciliation observations to coalesce must give the same
 # authoritative object revision the same delivery key.
+# `ingest-linear` removes that producer choice: it lowercases a canonical
+# hyphenated issue UUID and encodes the key as `linear:<uuid>@<updatedAt>`,
+# preserving the exact nonempty `updatedAt` scalar returned by Linear.
 #
 # The result envelope is owned here:
 #   schema=fm-external-event.v1
@@ -82,6 +86,23 @@ delivery_valid() {
     ''|*[!A-Za-z0-9._:@+-]*) return 1 ;;
   esac
   [ "${#1}" -le 240 ]
+}
+
+linear_uuid_valid() {
+  [[ ${1-} =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+}
+
+linear_updated_at_valid() {
+  [ -n "${1-}" ] && delivery_valid "$1" && [[ $1 != *@* ]]
+}
+
+linear_delivery_key() {
+  local uuid updated_at
+  uuid=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || return 1
+  updated_at=$2
+  linear_uuid_valid "$uuid" || return 1
+  linear_updated_at_valid "$updated_at" || return 1
+  printf 'linear:%s@%s\n' "$uuid" "$updated_at"
 }
 
 max_bytes_valid() {
@@ -215,6 +236,14 @@ action_classify() {
   fi
 }
 
+action_ingest_linear() {
+  local issue_uuid=${1-} updated_at=${2-} delivery
+  [ "$#" -eq 2 ] || die 'usage: ingest-linear <issue-uuid> <updated-at> < payload'
+  delivery=$(linear_delivery_key "$issue_uuid" "$updated_at") \
+    || die 'Linear identity must be a hyphenated issue UUID and a nonempty updatedAt scalar using delivery-key characters other than at'
+  action_ingest linear "$delivery"
+}
+
 action_metadata() {
   [ "$#" -eq 1 ] || die 'usage: metadata <result-file>'
   result_read_metadata "$1" || die 'invalid external-event result'
@@ -230,6 +259,7 @@ action_payload() {
 
 case ${1-} in
   ingest) shift; action_ingest "$@" ;;
+  ingest-linear) shift; action_ingest_linear "$@" ;;
   classify) shift; action_classify "$@" ;;
   metadata) shift; action_metadata "$@" ;;
   payload) shift; action_payload "$@" ;;

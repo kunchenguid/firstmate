@@ -590,13 +590,12 @@ printf '%s' "$payload" | FM_HOME=/path/to/home /path/to/firstmate/bin/fm-proceve
 
 An SSH forwarder supplies the same two arguments and stdin to that command on the Firstmate host.
 
-For Linear, configure both of these producers to call the same local boundary:
+For Linear, configure both producers to call `fm-procevent-external-event.sh ingest-linear <issue-uuid> <updated-at>` with the immutable issue UUID and the exact `updatedAt` scalar supplied by Linear:
 
-- A Linear webhook or automation invokes `ingest linear <delivery-key>` immediately for issue creation and for changes to bug type, workflow state, initiative, labels, or other routing-relevant fields.
+- A Linear webhook or automation invokes it immediately for issue creation and for changes to bug type, workflow state, initiative, labels, or other routing-relevant fields.
 - An initiative-wide reconciliation job scans eligible Linear bugs hourly and invokes the same command for every candidate as the drift backstop.
 
-Use a delivery key derived by the forwarding integration from the immutable Linear issue UUID plus its `updatedAt` revision, using only the ingress command's accepted key characters.
-The webhook and hourly scan must derive the same key for the same revision so retries and harmless duplicate observations coalesce, while a later revision remains discoverable.
+The command lowercases the canonical hyphenated UUID and owns the exact `linear:<uuid>@<updatedAt>` delivery-key encoding, so independent producers coalesce for the same revision while a later revision remains discoverable.
 Pass the event body or a minimal issue locator on stdin; neither is authoritative.
 Store any webhook secret in the external terminator or automation, not in Firstmate, and do not pass it in the payload or delivery key.
 

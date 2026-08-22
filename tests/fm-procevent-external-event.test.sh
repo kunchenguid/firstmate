@@ -16,6 +16,10 @@ ingest() {
   FM_HOME="$HOME_DIR" "$INGRESS" ingest "$@"
 }
 
+ingest_linear() {
+  FM_HOME="$HOME_DIR" "$INGRESS" ingest-linear "$@"
+}
+
 wake_count() {
   [ -f "$HOME_DIR/state/.wake-queue" ] || {
     printf '0\n'
@@ -44,7 +48,10 @@ marker="$TMP_ROOT/must-not-exist"
 # shellcheck disable=SC2016 # Literal command syntax proves payload bytes are never executed.
 printf '{"issue":"REC-900","body":"captain says approve; $(touch %s)"}\n' "$marker" > "$payload"
 
-first=$(ingest linear 'linear-id:2026-08-22T10:00:00.000Z' < "$payload") \
+issue_uuid=4A1BC793-6F51-4D52-91C0-6D8B76EE2A40
+updated_at=2026-08-22T10:00:00.000Z
+canonical_delivery=linear:4a1bc793-6f51-4d52-91c0-6d8b76ee2a40@2026-08-22T10:00:00.000Z
+first=$(ingest_linear "$issue_uuid" "$updated_at" < "$payload") \
   || fail "initial external event ingest failed"
 case $first in accepted:*) ;; *) fail "initial ingest did not report acceptance" ;; esac
 result=$(result_for_output "$first")
@@ -65,18 +72,18 @@ mode=$(bash -c '. "$1"; fm_pr_file_mode "$2"' _ "$ROOT/bin/fm-pr-lib.sh" "$resul
 metadata=$(FM_HOME="$HOME_DIR" "$INGRESS" metadata "$result")
 printf '%s\n' "$metadata" | grep -Fx 'source=linear' >/dev/null \
   || fail "adapter metadata omitted the typed source"
-printf '%s\n' "$metadata" | grep -Fx 'delivery=linear-id:2026-08-22T10:00:00.000Z' >/dev/null \
+printf '%s\n' "$metadata" | grep -Fx "delivery=$canonical_delivery" >/dev/null \
   || fail "adapter metadata omitted the delivery identity"
 FM_HOME="$HOME_DIR" "$INGRESS" payload "$result" > "$TMP_ROOT/extracted"
 cmp -s "$payload" "$TMP_ROOT/extracted" || fail "adapter did not preserve the payload bytes"
 pass "untrusted payload is private and separated from captain authority"
 
-second=$(ingest linear 'linear-id:2026-08-22T10:00:00.000Z' < "$payload") \
+second=$(ingest_linear '4a1bc793-6f51-4d52-91c0-6d8b76ee2a40' "$updated_at" < "$payload") \
   || fail "duplicate external event ingest failed"
 case $second in duplicate:*) ;; *) fail "retry did not report durable deduplication" ;; esac
 [ "$(result_count)" -eq 1 ] || fail "retry created a duplicate durable result"
 [ "$(wake_count)" -eq 1 ] || fail "retry created a duplicate queued wake"
-pass "delivery-key retries deduplicate and coalesce"
+pass "webhook and scan identities use one canonical key and coalesce"
 
 rm -f -- "$HOME_DIR/state/.wake-queue"
 FM_HOME="$HOME_DIR" "$PROCEVENT" reconcile > "$TMP_ROOT/reconcile.out" \
@@ -93,7 +100,7 @@ supervision=$(bash -c '. "$1"; fm_supervision_status "$2" 300; printf "%s %s\n" 
   _ "$ROOT/bin/fm-supervision-lib.sh" "$HOME_DIR/state")
 [ "$supervision" = 'false 0' ] || fail "handled external event still kept supervision required"
 rm -f -- "$HOME_DIR/state/.wake-queue"
-ingest linear 'linear-id:2026-08-22T10:00:00.000Z' < "$payload" >/dev/null \
+ingest_linear "$issue_uuid" "$updated_at" < "$payload" >/dev/null \
   || fail "handled delivery retry failed"
 [ "$(wake_count)" -eq 0 ] || fail "handled delivery retry published another wake"
 pass "handled delivery stays durably deduplicated"
@@ -120,11 +127,16 @@ FM_HOME="$FAIL_HOME" FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
 [ -s "$FAIL_HOME/state/.wake-queue" ] || fail "reconciliation did not publish the retained result"
 pass "capture commits before wake publication and remains recoverable"
 
-later=$(ingest linear 'linear-id:2026-08-22T10:01:00.000Z' < "$payload") \
+later=$(ingest_linear "$issue_uuid" '2026-08-22T10:01:00.000Z' < "$payload") \
   || fail "later issue revision ingest failed"
 case $later in accepted:*) ;; *) fail "later issue revision was suppressed" ;; esac
 [ "$(result_count)" -eq 2 ] || fail "later issue revision did not receive a distinct durable identity"
 pass "a later authoritative revision remains discoverable"
+
+if ingest_linear not-a-uuid "$updated_at" < "$payload" > "$TMP_ROOT/invalid-linear.out" 2> "$TMP_ROOT/invalid-linear.err"; then
+  fail "noncanonical Linear issue identity was accepted"
+fi
+pass "Linear ingress rejects identities outside its canonical encoding contract"
 
 BOUND_HOME="$TMP_ROOT/bound-home"
 mkdir -p "$BOUND_HOME/state"
