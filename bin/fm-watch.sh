@@ -386,8 +386,11 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 #     a status-declared window, and every emit site that reaches here excludes such a
 #     last line by other means, so no current path depends on this gate alone;
 #   - the record must be live: present, naming the pull request the task still
-#     records, and with the merge poll still armed. A withdrawn, superseded, or
-#     poll-less declaration fails on file tests alone, with no crew-state read;
+#     records, and with THIS task's merge poll for THAT pull request still armed,
+#     proved by the poll's own published registration rather than by anything merely
+#     occupying the check slot (merge_wait_poll_armed in bin/fm-classify-lib.sh). A
+#     withdrawn, superseded, or poll-less declaration fails on file reads alone, with
+#     no crew-state read;
 #   - authoritative crew state must still report the terminal checks-green outcome,
 #     from a verdict that is ALWAYS fresh for this alarm. A cached verdict may only
 #     ever make an alarm more likely than a fresh read would: reusing "do not
@@ -401,17 +404,16 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 #     one bounded read per new pane hash (the classification the branch already did)
 #     plus at most one per wedge window, with no read added by this function on any
 #     first-sighting path;
-# This function does NOT touch .wedge-escalations-<key>. The count must not climb for
-# an alarm nobody saw, but it must not be wiped either: the count file is per window
-# while suppression is per alarm class, so deleting it would erase a count the busy-turn
-# class earned, and that class's chain would restart at 1 and never reach
-# demand-deep-inspection on a genuinely hung call. Only wedge_timer_check bumps the
-# count, and it undoes exactly its own bump arithmetically (writing back the previous
-# value, removing the file only when that was 0) when its own emit was absorbed. Being
-# the only bumper is not on its own enough to make a DELETE safe there, because the
-# window it bumps may already carry another class's count; the arithmetic undo is what
-# makes it safe. The first-sighting emits never bump it and so never clear it, exactly
-# as they behave with no declaration.
+# This function does NOT touch .wedge-escalations-<key>, and needs no undo of anyone
+# else's write. The count must not climb for an alarm nobody saw, and it must not be
+# wiped either: the count file is per window while suppression is per alarm class, so
+# deleting it would erase a count the busy-turn class earned, and that class's chain
+# would restart at 1 and never reach demand-deep-inspection on a genuinely hung call.
+# wedge_timer_check, the only place the count is written at all, therefore persists it
+# only once its own alarm is known to have surfaced. An absorbed alarm writes nothing,
+# so there is nothing to undo after the fact, which matters because this function can
+# reach wake() and exit the process before any post-emit code would run. The
+# first-sighting emits never write the count either, exactly as with no declaration.
 #
 # What the crew-state verdict can and cannot catch: while the run is still open it is
 # live (nm_ci_checks_state re-derives greenness, so a red check flips the verdict back
@@ -421,31 +423,32 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 # (bin/fm-crew-state.sh), so no verdict can report a pull request that later goes red
 # or is closed at the same head, and the merge poll only ever reports `merged`.
 #
-# The pass-through below does NOT cover that case either, and deliberately is not made
-# to. It fires only where an owner attempts an alarm, so it reaches a pane whose hash
-# keeps changing and the non-terminal wedge window, but a byte-static pane on the
-# terminal branch attempts no alarm at all once its hash is recorded, so nothing calls
-# this function and no reminder can fire. What covers that pane, and why no timer is
-# added back here, is the merge poll: it stays armed and is what reports the merge, and
-# bin/fm-merge-wait.sh declare refuses outright without one. That is ONE cover, not two,
-# and it is thinner than two. The `heartbeat:` fleet review is NOT a second cover for
-# this population: the absorbed path marks the green line surfaced, so
-# heartbeat_scan_finds_actionable never becomes true for that task again while that line
-# is its last, and the whole-fleet review only happens in response to a heartbeat wake
-# that therefore never arrives. It reaches the pane only if unrelated fleet activity
-# happens to raise a heartbeat, which is luck rather than a guarantee.
-# The known exposure is therefore a declaration whose poll has died. A fleet-level check
-# that every declared merge wait still has a live poll is the right backstop for that
-# and is filed as separate work; deliberately no such mechanism is added here. Dropping
-# the surfaced mark to buy a backstop was refused, because it would produce one fleet
-# notification per cadence for every waiting pull request, which is the exact noise this
-# feature exists to remove.
+# THE ACCEPTED LIMIT, stated once and in full, because every other place that touches it
+# points here rather than restating it. The pass-through below fires only where an owner
+# attempts an alarm, so it reaches a pane whose hash keeps changing and the non-terminal
+# wedge window. A byte-static pane on the terminal branch attempts no alarm at all once
+# its hash is recorded, so nothing calls this function there: no reminder can fire, and a
+# WITHDRAWN declaration is likewise honored only at the next alarm attempt, which such a
+# pane never makes. Those are two faces of one limit, not two separate gaps.
 #
-# The same accepted limit has a second face, documented at the loop-top reconciliation
-# below: a WITHDRAWN declaration is likewise honored only at the next alarm attempt, so
-# a byte-static terminal pane that was absorbed stays quiet until its pane changes.
-# Both faces are covered by the two things named above, and neither is bought back with
-# a marker remembering which hash was absorbed, because that would cache toward silence.
+# The single cover is the merge poll: it stays armed and is what reports the merge, and
+# bin/fm-merge-wait.sh declare refuses outright without it. That is why the gate above
+# means this task's own poll and not any armed check: a registered custom check in that
+# slot would leave the pane silent with no cover at all. One cover is thinner than two,
+# and the `heartbeat:` fleet review is NOT a second one for this population: the
+# absorbed path marks the green line surfaced, so heartbeat_scan_finds_actionable never
+# becomes true for that task again while that line is its last, and the whole-fleet
+# review only happens in response to a heartbeat wake that therefore never arrives. It
+# reaches the pane only if unrelated fleet activity happens to raise a heartbeat, which
+# is luck rather than a guarantee. The known exposure is a declaration whose poll has
+# died; a fleet-level check that every declared merge wait still has a live poll is the
+# right backstop and is filed as separate work, so no such mechanism is added here.
+#
+# Two things were deliberately refused rather than overlooked. Dropping the surfaced mark
+# to buy a backstop would produce one fleet notification per cadence for every waiting
+# pull request, the exact noise this feature exists to remove. Remembering which hash was
+# absorbed, so a withdrawal could release it, would cache toward silence, which is the
+# forbidden direction and is the defect that removing the old cadence marker fixed.
 merge_wait_absorbs_alarm() {  # <window> <task> <alarm-class> [fresh-crew-class]
   local win=$1 task=$2 alarm=$3 class=${4-} key mtime age
   afk_present && return 1
@@ -479,10 +482,13 @@ merge_wait_absorbs_alarm() {  # <window> <task> <alarm-class> [fresh-crew-class]
 #
 # ONE exception to "the caller carries on either way": when the absorb is also due to
 # pass its bounded reminder through, merge_wait_absorbs_alarm reaches resurface_absorbed
-# and wake(), and wake() exits the process, so the caller's remaining bookkeeping does
-# NOT run on that cycle. That is benign and self-correcting rather than a lost update:
-# the hash was not recorded, so the next poll re-enters the same sighting, finds the
-# reminder throttle now fresh, absorbs quietly, and completes the bookkeeping then.
+# and wake(), and wake() exits the process, so the caller's code after this call does
+# NOT run on that cycle. What is skipped is the pane-hash record where the caller keeps
+# one, the since-file reset, and the write-tracking clear; the next poll re-enters the
+# same sighting and redoes them. No count update is skipped, because wedge_timer_check
+# writes .wedge-escalations-<key> only on the surfaced path, before its own wake().
+# Any accounting a caller adds here must follow that rule rather than sit after this
+# call: code placed after an emit that can exit is code that sometimes does not run.
 emit_stale_wake() {  # <window> <task> <reason> <alarm-class> [fresh-crew-class]
   local win=$1 task=$2 reason=$3 alarm=$4 class=${5-}
   merge_wait_absorbs_alarm "$win" "$task" "$alarm" "$class" && return 1
@@ -563,24 +569,20 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         prev=$(cat "$escalation_file" 2>/dev/null || echo 0)
         case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
         n=$(( prev + 1 ))
-        echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
         emitted=0
         emit_stale_wake "$win" "$task" "$reason" "$alarm" && emitted=1
-        # Undo exactly THIS call's own bump when its own emit was absorbed, so the count
-        # never climbs for an alarm nobody saw. An arithmetic undo, not a delete: the
-        # count file is per window while suppression is per alarm class, so deleting it
-        # would erase whatever the other class had already earned on this window and
-        # restart its chain at 1, and a genuinely hung foreground call would then never
-        # reach demand-deep-inspection. Writing back prev cannot destroy another class's
-        # count, and removing the file when prev was 0 keeps an absent file meaning no
-        # chain in progress, so a later genuine escalation still starts from 1.
-        if [ "$emitted" != 1 ]; then
-          if [ "$prev" -gt 0 ]; then echo "$prev" > "$escalation_file"; else rm -f "$escalation_file"; fi
-        fi
+        # Persist the count ONLY once this alarm is known to have surfaced, and before
+        # wake() below, because wake() exits the process. Nothing between the emit and
+        # here reads the count, so deferring the write is what makes the accounting
+        # exit-proof: on the absorbed path nothing is written and nothing is removed, so
+        # the count can never climb for an alarm nobody saw and a count the other alarm
+        # class earned on this window is never touched. An absent file still means no
+        # chain in progress, so a later genuine escalation starts from 1.
+        [ "$emitted" = 1 ] && echo "$n" > "$escalation_file"
         rm -f "$since_file"
         clear_write_tracking "$(window_key "$win")"
         [ "$emitted" = 1 ] || return 0
@@ -1357,15 +1359,11 @@ EOF
     # pane changes.
     #
     # DO NOT add a marker recording which hash was absorbed so a withdrawal could
-    # release it. That is caching in the direction of silence, which is the forbidden
-    # direction, and it is exactly the defect removing the old cadence marker fixed: a
-    # remembered "absorbed" answer suppressed an alarm on the very poll a fresh read
-    # already said the task was no longer green. The silence above is the same accepted
-    # limit merge_wait_absorbs_alarm's header documents for a byte-static terminal pane,
-    # showing up in a second place, and it has the same single cover: the merge poll stays
-    # armed (bin/fm-merge-wait.sh declare refuses outright without one). That header owns
-    # why the heartbeat review is not a second cover here and what the residual exposure
-    # is.
+    # release it: that caches toward silence, the forbidden direction. The silence above
+    # is one face of the accepted limit, which merge_wait_absorbs_alarm's header states in
+    # full: what covers it, why the heartbeat review does not, what the residual exposure
+    # is, and why this marker and the surfaced mark were both refused. Read it there
+    # rather than restating any of it here.
     if [ -e "$STATE/.merge-wait-resurfaced-$key" ]; then
       merge_wait_declared "$task" "$STATE" || clear_merge_wait_markers "$key"
     fi

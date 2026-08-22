@@ -26,9 +26,11 @@
 #        fm-merge-wait.sh show <id>
 #        fm-merge-wait.sh clear <id>
 #
-# declare refuses unless the task records a pull request AND its merge poll is
-# armed, because a declaration without the poll would suppress the alarm with
-# nothing left to report the merge - strictly worse than the noise it removes.
+# declare refuses unless the task records a pull request AND that pull request's own
+# merge poll is armed, because a declaration without the poll would suppress the alarm
+# with nothing left to report the merge - strictly worse than the noise it removes. An
+# armed check that is some other registered check, not this task's merge poll, is
+# refused for the same reason and says so, since it would cover nothing.
 # Re-declaring an already-declared task rewrites the record against the currently
 # recorded pull request, so a re-armed watch is picked up rather than inherited.
 set -u
@@ -82,8 +84,18 @@ case "$ACTION" in
       || { echo "error: $ID records no pull request to wait on" >&2; exit 1; }
     # The poll is what will report the merge. Without it the declaration would
     # remove the alarm and leave nothing watching, so its absence refuses here.
-    [ -f "$STATE/$ID.check.sh" ] && [ ! -L "$STATE/$ID.check.sh" ] \
-      || { echo "error: $ID has no armed merge poll (run bin/fm-pr-check.sh first)" >&2; exit 1; }
+    # Same predicate the classifier admits on (merge_wait_poll_armed), so declare and
+    # the watcher can never disagree about whether a merge poll exists. A check.sh that
+    # is a registered custom check rather than this task's merge poll is refused too,
+    # and named separately because the remedy differs.
+    if ! merge_wait_poll_armed "$ID" "$STATE" "$PR"; then
+      if [ -f "$STATE/$ID.check.sh" ] && [ ! -L "$STATE/$ID.check.sh" ]; then
+        echo "error: $ID has a check armed, but it is not this task's merge poll for $PR (re-arm with bin/fm-pr-check.sh)" >&2
+      else
+        echo "error: $ID has no armed merge poll (run bin/fm-pr-check.sh first)" >&2
+      fi
+      exit 1
+    fi
     umask 077
     TMP=$(mktemp "$STATE/.fm-merge-wait.XXXXXX") || exit 1
     trap '[ -z "${TMP:-}" ] || rm -f -- "$TMP"' EXIT HUP INT TERM

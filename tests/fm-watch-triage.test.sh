@@ -165,20 +165,46 @@ record_pi_busy() {  # <state-dir> <id>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
-# Arm <task>'s merge poll as far as the classifier and the watcher can tell it
-# apart from the real one bin/fm-pr-check.sh publishes: a registered check file
-# plus the migration markers the watcher's startup scan expects, so the poll a
-# merge-wait fixture depends on is not quarantined out from under the test. Every
-# merge-wait test asserts this file survives, because a declaration that silenced
-# the merge poll along with the alarms would be worse than the alarms.
-arm_merge_poll() {  # <state> <task>
-  local state=$1 task=$2
+# Arm <task>'s REAL merge poll for <pr-url>, published through the same library
+# bin/fm-pr-check.sh uses, plus the migration markers the watcher's startup scan
+# expects so the poll a merge-wait fixture depends on is not quarantined out from
+# under the test. Every merge-wait test asserts these artifacts survive, because a
+# declaration that silenced the merge poll along with the alarms would be worse
+# than the alarms. A hand-written stand-in check file would be the wrong fixture
+# now: the classifier admits a declaration only while this task's own merge poll
+# is armed, and only the published registration carries the evidence of that.
+# The task's <task>.meta must already exist, since publishing binds to it.
+arm_merge_poll() {  # <state> <task> <pr-url>
+  local state=$1 task=$2 pr=$3
   printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
   printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
   chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
+  # Subshell: fm_pr_poll_prepare sets umask 077 and a dozen FM_PR_POLL_* globals in
+  # whatever shell calls it, and no later case in this file should inherit either.
+  (
+    fm_pr_url_parse "$pr" || exit 1
+    fm_pr_poll_prepare "$state" "$task" "$FM_PR_PROVIDER" "$pr" "$FM_PR_HOST" \
+      "$FM_PR_PATH" "$FM_PR_NUMBER" "$ROOT/bin/fm-pr-poll.sh" || exit 1
+    fm_pr_poll_publish_prepared || exit 1
+  ) || return 1
+  # This is a real poll, so a watcher whose check cadence came due would RUN it, and
+  # bin/fm-pr-poll.sh asks the pull request host about the merge. Every case here is
+  # about triage rather than the poll's cadence, and each already pins the interval
+  # far beyond its own lifetime; a missing .last-check reads as due immediately, so
+  # mark the cadence fresh and keep the network out of these tests.
+  touch "$state/.last-check"
+}
+
+# Arm <task>'s check slot with a REGISTERED CUSTOM CHECK instead of its merge poll:
+# an ordinary check firstmate is entitled to write (AGENTS.md documents how), armed
+# and authenticated, but not the thing that reports this merge. The watcher accepts
+# it as a runnable check, which is exactly why a merge-wait declaration must not.
+arm_custom_check() {  # <state> <task>
+  local state=$1 task=$2
+  rm -f "$state/$task.pr-poll" "$state/$task.pr-poll-registration"
   cat > "$state/$task.check.sh" <<'SH'
 #!/usr/bin/env bash
-# Stand-in for the byte-static merge poll: silent until the merge lands.
+# A quiet custom check: reports nothing, and knows nothing about any merge.
 exit 0
 SH
   chmod 0700 "$state/$task.check.sh"
@@ -409,20 +435,26 @@ test_crew_absorb_class_classifier() {
 # request waits on a merge nobody in this fleet can perform is admissible. All three
 # of its conditions carry weight. The record must exist; it must name the pull
 # request the task's OWN metadata currently records, so a watch re-armed on another
-# pull request cannot inherit a declaration nobody made for it; and the merge poll
-# must still be armed, because a declaration outliving the poll would take the alarm
-# away with nothing left watching for the merge. bin/fm-merge-wait.sh is the writer
-# under test alongside it, so the record format has exactly one definition.
+# pull request cannot inherit a declaration nobody made for it; and THIS task's merge
+# poll for THAT pull request must still be armed, because a declaration outliving the
+# poll would take the alarm away with nothing left watching for the merge.
+# bin/fm-merge-wait.sh is the writer under test alongside it, so the record format
+# and the poll evidence each have exactly one definition.
 test_merge_wait_declared_classifier() {
-  local dir state pr other
+  local dir state pr other err
   dir=$(make_case merge-wait-record); state="$dir/state"
-  pr='https://example.test/pr/9'
-  other='https://example.test/pr/10'
+  pr='https://example.test/group/repo/-/merge_requests/9'
+  other='https://example.test/group/repo/-/merge_requests/10'
+
+  # Arming binds the poll to the pull request the metadata records, exactly as
+  # bin/fm-pr-check.sh does, so the no-pull-request case below is reached by taking that
+  # record away again rather than by arming a poll no real task could have.
+  printf 'window=test:fm-mw\nkind=ship\npr=%s\n' "$pr" > "$state/mw.meta"
+  arm_merge_poll "$state" mw "$pr" || fail "could not arm the fixture merge poll"
 
   # No pull request recorded: there is nothing to wait on, so the writer refuses
   # rather than leaving behind a record a reader would have to second-guess.
   printf 'window=test:fm-mw\nkind=ship\n' > "$state/mw.meta"
-  arm_merge_poll "$state" mw || fail "could not arm the fixture merge poll"
   ! merge_wait_declared mw "$state" || fail "a merge wait was admitted with no record at all"
   declare_merge_wait "$state" mw 2>/dev/null \
     && fail "a task recording no pull request was allowed to declare a merge wait"
@@ -458,12 +490,57 @@ test_merge_wait_declared_classifier() {
   declare_merge_wait "$state" mw || fail "declare refused a restored armed poll"
   merge_wait_declared mw "$state" || fail "a re-declared merge wait was not admitted"
 
+  # An armed check is not the same thing as this task's merge poll. firstmate may
+  # write a registered custom check for a task, and the watcher runs it happily, so a
+  # declaration that accepted any check would keep absorbing with nothing left to
+  # report the merge: silence with no cover at all. Only the published poll's own
+  # registration tells the two apart, and the refusal has to say which one it found,
+  # because re-arming a poll and removing a stray check are different remedies.
+  err="$dir/declare.err"
+  arm_custom_check "$state" mw
+  ! merge_wait_declared mw "$state" \
+    || fail "a registered custom check in the check slot was accepted as the merge poll"
+  declare_merge_wait "$state" mw 2> "$err" \
+    && fail "declare accepted a custom check in place of this task's merge poll"
+  grep -F "not this task's merge poll" "$err" >/dev/null \
+    || fail "declare's refusal did not distinguish a wrong check from no check: $(cat "$err")"
+  grep -F "bin/fm-pr-check.sh" "$err" >/dev/null \
+    || fail "declare's refusal did not name the tool that arms the poll: $(cat "$err")"
+  rm -f "$state/mw.check.sh"
+  declare_merge_wait "$state" mw 2> "$err" \
+    && fail "declare accepted a task with no armed check at all"
+  grep -F "no armed merge poll" "$err" >/dev/null \
+    || fail "declare's no-check refusal lost its own wording: $(cat "$err")"
+
+  # A registration left behind by a retired poll cannot vouch for whatever file later
+  # occupies the slot: it records the check it was published for by identity.
+  arm_merge_poll "$state" mw "$pr" || fail "could not re-arm the fixture merge poll"
+  declare_merge_wait "$state" mw || fail "declare refused a freshly re-armed merge poll"
+  cp "$state/mw.check.sh" "$state/mw.check.sh.new"
+  mv "$state/mw.check.sh.new" "$state/mw.check.sh"
+  ! merge_wait_declared mw "$state" \
+    || fail "a stale registration vouched for a file that replaced the one it names"
+  arm_merge_poll "$state" mw "$pr" || fail "could not re-arm the fixture merge poll"
+  declare_merge_wait "$state" mw || fail "declare refused a re-published merge poll"
+
+  # The armed poll must watch the pull request the task records, not merely be a poll of
+  # this task's. Metadata that moves to a new pull request while the old watch stays
+  # armed would otherwise let a declaration written against the new one be covered by a
+  # poll that will never report its merge.
+  printf 'window=test:fm-mw\nkind=ship\npr=%s\n' "$other" > "$state/mw.meta"
+  declare_merge_wait "$state" mw 2> "$err" \
+    && fail "declare accepted a pull request whose own merge poll is not armed"
+  grep -F "not this task's merge poll" "$err" >/dev/null \
+    || fail "declare's refusal did not name the mismatched poll: $(cat "$err")"
+  printf 'window=test:fm-mw\nkind=ship\npr=%s\n' "$pr" > "$state/mw.meta"
+  declare_merge_wait "$state" mw || fail "declare refused the restored pull request"
+
   # Withdrawal is immediate, and takes nothing else with it.
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-merge-wait.sh" clear mw >/dev/null \
     || fail "clearing a declared merge wait failed"
   ! merge_wait_declared mw "$state" || fail "a cleared merge wait stayed admitted"
   [ -e "$state/mw.check.sh" ] || fail "clearing a merge wait removed the merge poll"
-  pass "merge_wait_declared: admitted only with a record naming the currently recorded pull request and an armed merge poll"
+  pass "merge_wait_declared: admitted only with a record naming the currently recorded pull request and that pull request's own armed merge poll"
 }
 
 # crew_absorb_class's fourth token. A declared merge wait is admitted ONLY from the
@@ -476,14 +553,14 @@ test_merge_wait_declared_classifier() {
 test_crew_absorb_class_merge_wait() {
   local dir state fakebin pr
   dir=$(make_case absorb-class-merge-wait); state="$dir/state"; fakebin="$dir/fakebin"
-  pr='https://example.test/pr/9'
+  pr='https://example.test/group/repo/-/merge_requests/9'
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE
   # Exported so the wrappers below resolve the same state directory the explicit
   # calls pass, exactly as they do inside the watcher.
   export FM_STATE_OVERRIDE="$state"
   printf 'window=test:fm-mw\nkind=ship\npr=%s\n' "$pr" > "$state/mw.meta"
-  arm_merge_poll "$state" mw || fail "could not arm the fixture merge poll"
+  arm_merge_poll "$state" mw "$pr" || fail "could not arm the fixture merge poll"
   FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
 
   [ "$(crew_absorb_class mw "$state")" = none ] \
@@ -910,7 +987,7 @@ test_terminal_stale_surfaced() {
   window="test:fm-done"
   printf 'finished, awaiting review' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/done.meta"
-  printf 'done: PR https://example.test/pr/3\n' > "$state/done.status"
+  printf 'done: PR https://example.test/group/repo/-/merge_requests/3\n' > "$state/done.status"
   sig=$(seen_sig "$state/done.status"); printf '%s' "$sig" > "$state/.seen-done_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "finished, awaiting review")
@@ -999,7 +1076,7 @@ seed_green_merge_task() {  # <state> <task> <window> <pane-text> <pr>
   key=$(printf '%s' "$window" | tr ':/.' '___')
   printf '%s' "$(hash_text "$text")" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  arm_merge_poll "$state" "$task"
+  arm_merge_poll "$state" "$task" "$pr"
 }
 
 # Swap in a crew-state fake that records one line per invocation, so a test can assert
@@ -1055,7 +1132,7 @@ test_terminal_stale_merge_wait_absorbs_each_new_hash() {
   local dir state fakebin out capture_file window key pid pr first second
   dir=$(make_case terminal-merge-wait-churn); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-churn"; pr='https://example.test/pr/9'
+  window="test:fm-churn"; pr='https://example.test/group/repo/-/merge_requests/9'
   first='PR is green, waiting on the maintainer (00:01)'
   second='PR is green, waiting on the maintainer (00:02)'
   printf '%s' "$first" > "$capture_file"
@@ -1091,7 +1168,9 @@ test_terminal_stale_merge_wait_absorbs_each_new_hash() {
   [ ! -s "$out" ] || { reap "$pid"; fail "a churning declared merge wait printed a wake reason: $(cat "$out")"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a churning declared merge wait enqueued a wake"; }
   [ -s "$state/churn.check.sh" ] || { reap "$pid"; fail "the merge poll did not survive the absorb"; }
-  [ -s "$state/churn.check-trust" ] || { reap "$pid"; fail "the merge poll registration did not survive the absorb"; }
+  [ -s "$state/churn.pr-poll" ] || { reap "$pid"; fail "the merge poll's recorded pull request did not survive the absorb"; }
+  [ -s "$state/churn.pr-poll-registration" ] \
+    || { reap "$pid"; fail "the merge poll registration did not survive the absorb"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "a declared merge wait absorbs the stale wake on its first hash and on every later hash, so a churning green pane stops alarming"
@@ -1109,7 +1188,7 @@ test_terminal_stale_merge_wait_passes_one_reminder_through_per_window() {
   local dir state fakebin out drain_out capture_file window key pid pr text
   dir=$(make_case terminal-merge-wait-passthrough); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
-  window="test:fm-hourly"; pr='https://example.test/pr/10'
+  window="test:fm-hourly"; pr='https://example.test/group/repo/-/merge_requests/10'
   text='green, nobody has merged it yet'
   printf '%s' "$text" > "$capture_file"
   seed_green_merge_task "$state" hourly "$window" "$text" "$pr" \
@@ -1163,7 +1242,7 @@ test_terminal_stale_green_without_declaration_still_surfaces() {
   local dir state fakebin out drain_out capture_file window key pid pr text
   dir=$(make_case terminal-stale-green-undeclared); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
-  window="test:fm-undeclared"; pr='https://example.test/pr/11'
+  window="test:fm-undeclared"; pr='https://example.test/group/repo/-/merge_requests/11'
   text='PR is green, nobody declared anything'
   printf '%s' "$text" > "$capture_file"
   seed_green_merge_task "$state" undeclared "$window" "$text" "$pr" \
@@ -1199,7 +1278,7 @@ test_merge_wait_refusal_is_per_alarm_and_self_heals() {
   local dir state fakebin out capture_file window key pid pr text reads
   dir=$(make_case merge-wait-per-alarm-refusal); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; reads="$dir/reads.log"
-  window="test:fm-selfheal"; pr='https://example.test/pr/12'
+  window="test:fm-selfheal"; pr='https://example.test/group/repo/-/merge_requests/12'
   text='pane has not changed in hours'
   printf '%s' "$text" > "$capture_file"
   seed_green_merge_task "$state" selfheal "$window" "$text" "$pr" \
@@ -1265,7 +1344,7 @@ test_merge_wait_fresh_non_green_verdict_alarms_on_that_attempt() {
   local dir state fakebin out capture_file window key pid pr first second reads
   dir=$(make_case merge-wait-fresh-verdict); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; reads="$dir/reads.log"
-  window="test:fm-fresh"; pr='https://example.test/pr/20'
+  window="test:fm-fresh"; pr='https://example.test/group/repo/-/merge_requests/20'
   first='PR is green, waiting on the maintainer (00:01)'
   second='PR is green, waiting on the maintainer (00:02)'
   printf '%s' "$first" > "$capture_file"
@@ -1319,7 +1398,7 @@ test_merge_wait_superseded_or_poll_less_declaration_still_alarms() {
   local dir state fakebin out capture_file window key pid pr text reads
   dir=$(make_case merge-wait-superseded); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; reads="$dir/reads.log"
-  window="test:fm-superseded"; pr='https://example.test/pr/13'
+  window="test:fm-superseded"; pr='https://example.test/group/repo/-/merge_requests/13'
   text='green, but the record points elsewhere'
   printf '%s' "$text" > "$capture_file"
   seed_green_merge_task "$state" superseded "$window" "$text" "$pr" \
@@ -1329,7 +1408,7 @@ test_merge_wait_superseded_or_poll_less_declaration_still_alarms() {
   log_crew_state_reads "$fakebin"
   export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
   # The task's recorded pull request moves on; the declaration still names the old one.
-  printf 'window=%s\nkind=ship\npr=%s\n' "$window" 'https://example.test/pr/99' > "$state/superseded.meta"
+  printf 'window=%s\nkind=ship\npr=%s\n' "$window" 'https://example.test/group/repo/-/merge_requests/99' > "$state/superseded.meta"
 
   merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
     FM_FAKE_CREW_STATE_LOG="$reads" FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999
@@ -1346,7 +1425,8 @@ test_merge_wait_superseded_or_poll_less_declaration_still_alarms() {
   # Restore the pull request but retire the merge poll: the declaration must stop
   # absorbing the moment nothing is left to report the merge.
   printf 'window=%s\nkind=ship\npr=%s\n' "$window" "$pr" > "$state/superseded.meta"
-  rm -f "$state/superseded.check.sh" "$state/superseded.check-trust"
+  rm -f "$state/superseded.check.sh" "$state/superseded.pr-poll" \
+    "$state/superseded.pr-poll-registration"
   rm -f "$state/.stale-$key"
   : > "$reads"; : > "$out"
   merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
@@ -1361,18 +1441,78 @@ test_merge_wait_superseded_or_poll_less_declaration_still_alarms() {
   pass "a declaration naming a superseded pull request, or whose merge poll is gone, still alarms and costs no read beyond classification"
 }
 
+# --- an armed check that is not THIS task's merge poll covers nothing ------------
+# The poll gate is the feature's bound, so it has to mean the merge poll and not
+# merely "some check exists". firstmate is entitled to arm a registered custom check
+# for a task, and the watcher runs one as readily as a poll, so a gate satisfied by
+# any check would keep absorbing every alarm for a pane whose only cover is gone -
+# on a byte-static terminal pane, silence with nothing left to report the merge.
+# The same fixture is run twice, first with its real poll armed, so the swap is the
+# only difference between an absorbed pane and an alarming one.
+test_merge_wait_custom_check_in_the_poll_slot_still_alarms() {
+  local dir state fakebin out drain_out capture_file window key pid pr text
+  dir=$(make_case merge-wait-custom-check); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-customcheck"; pr='https://example.test/group/repo/-/merge_requests/29'
+  text='green, waiting on a merge nobody here can make'
+  printf '%s' "$text" > "$capture_file"
+  seed_green_merge_task "$state" customcheck "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  declare_merge_wait "$state" customcheck || fail "could not declare the fixture merge wait"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+
+  # With the real merge poll armed this exact pane IS absorbed, which is what makes
+  # the round below evidence about the swap rather than about the fixture.
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the fixture was not absorbable to begin with, so the swap proves nothing: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the armed-poll round already alarmed: $(cat "$out")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional absorb stop"
+
+  # The merge poll is replaced by a registered custom check: a runnable check remains,
+  # but the thing that would report this merge is gone, so the pane must age exactly as
+  # an undeclared one does.
+  arm_custom_check "$state" customcheck
+  rm -f "$state/.stale-$key"
+  : > "$out"
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a declaration whose merge poll was replaced by a custom check silenced its pane"; }
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "the pane did not alarm as an undeclared one would: $(cat "$out")"
+  grep -F "merge wait" "$out" >/dev/null \
+    && fail "a declaration with no merge poll was still absorbed as a merge wait"
+  [ ! -e "$state/.merge-wait-resurfaced-$key" ] \
+    || fail "an inadmissible declaration recorded merge-wait bookkeeping"
+  [ -s "$state/customcheck.merge-wait" ] || fail "the alarm removed the captain's declaration record"
+  [ -s "$state/customcheck.check.sh" ] || fail "the alarm disturbed the armed check"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the custom-check alarm failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "the alarm was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a declaration is admitted only while THIS task's merge poll is armed, so a custom check in that slot alarms like no declaration at all"
+}
+
 # --- suppression must not inflate the escalation count -------------------------
-# wedge_timer_check bumps .wedge-escalations-<key> BEFORE it emits, so a suppressor at
-# the emit arrives too late: left alone the count would climb invisibly for every
-# absorbed window and the first genuine escalation would surface pre-loaded at
-# "escalation 7, demand-deep-inspection", telling firstmate a one-off is a repeat
-# offender. wedge_timer_check undoes its own bump when its own emit was absorbed, so a
-# later real escalation starts from 1. The suppressor itself never touches the count.
+# Left alone the count would climb invisibly for every absorbed window, and the first
+# genuine escalation would surface pre-loaded at "escalation 7, demand-deep-inspection",
+# telling firstmate a one-off is a repeat offender. wedge_timer_check computes the next
+# count for its reason string but persists it only once its own alarm is known to have
+# surfaced, so an absorbed one records nothing and a later real escalation starts from 1.
+# The suppressor itself never touches the count.
 test_merge_wait_suppression_does_not_inflate_the_escalation_count() {
   local dir state fakebin out capture_file window key pid pr text sig i
   dir=$(make_case merge-wait-escalation-count); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-count"; pr='https://example.test/pr/14'
+  window="test:fm-count"; pr='https://example.test/group/repo/-/merge_requests/14'
   text='idle, declared, and aging'
   printf '%s' "$text" > "$capture_file"
   seed_green_merge_task "$state" count "$window" "$text" "$pr" \
@@ -1429,7 +1569,7 @@ test_nonterminal_stale_declaration_after_surface_goes_quiet() {
   local dir state fakebin out capture_file window key pane_hash pid pr text sig queued_before
   dir=$(make_case nonterminal-late-declaration); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-latedecl"; pr='https://example.test/pr/15'
+  window="test:fm-latedecl"; pr='https://example.test/group/repo/-/merge_requests/15'
   text='committed and pushed, nothing left to run'
   printf '%s' "$text" > "$capture_file"
   seed_green_merge_task "$state" latedecl "$window" "$text" "$pr" \
@@ -1492,7 +1632,7 @@ test_merge_wait_withdrawn_record_returns_to_aging() {
   local dir state fakebin out drain_out capture_file window key pid pr text
   dir=$(make_case merge-wait-withdrawn); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
-  window="test:fm-withdrawn"; pr='https://example.test/pr/16'
+  window="test:fm-withdrawn"; pr='https://example.test/group/repo/-/merge_requests/16'
   text='green, declaration about to be withdrawn'
   printf '%s' "$text" > "$capture_file"
   seed_green_merge_task "$state" withdrawn "$window" "$text" "$pr" \
@@ -1539,7 +1679,7 @@ test_nonterminal_stale_declared_pause_outranks_a_merge_wait_record() {
   local dir state fakebin out capture_file window key pane_hash sig pid pr text
   dir=$(make_case nonterminal-pause-over-merge-wait); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-pauseover"; pr='https://example.test/pr/17'
+  window="test:fm-pauseover"; pr='https://example.test/group/repo/-/merge_requests/17'
   text='idle, the crew declared its own wait'
   printf '%s' "$text" > "$capture_file"
   seed_green_merge_task "$state" pauseover "$window" "$text" "$pr" \
@@ -1601,7 +1741,7 @@ test_nonterminal_stale_declared_pause_first_surface_is_not_absorbed() {
   local dir state fakebin out capture_file window key pane_hash sig pid pr text
   dir=$(make_case nonterminal-pause-first-surface); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-livegate"; pr='https://example.test/pr/19'
+  window="test:fm-livegate"; pr='https://example.test/group/repo/-/merge_requests/19'
   text='idle external-decision gate'
   printf '%s' "$text" > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\npr=%s\n' "$window" "$pr" > "$state/livegate.meta"
@@ -1611,7 +1751,7 @@ test_nonterminal_stale_declared_pause_first_surface_is_not_absorbed() {
   pane_hash=$(hash_text "$text")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  arm_merge_poll "$state" livegate || fail "could not arm the fixture merge poll"
+  arm_merge_poll "$state" livegate "$pr" || fail "could not arm the fixture merge poll"
   declare_merge_wait "$state" livegate || fail "could not declare the fixture merge wait"
   # The run IS at the green outcome, so the declaration is admissible on its own terms.
   # FM_FAKE_TMUX_CURRENT_COMMAND=grok keeps the agent live, which is what makes this an
@@ -1648,7 +1788,7 @@ test_nonterminal_stale_captain_held_keeps_its_own_wording_over_a_merge_wait() {
   local dir state fakebin out capture_file window key pane_hash sig pid pr text
   dir=$(make_case nonterminal-hold-over-merge-wait); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-holdover"; pr='https://example.test/pr/18'
+  window="test:fm-holdover"; pr='https://example.test/group/repo/-/merge_requests/18'
   text='idle, a held decision is outstanding'
   printf '%s' "$text" > "$capture_file"
   seed_green_merge_task "$state" holdover "$window" "$text" "$pr" \
@@ -1692,7 +1832,7 @@ seed_busy_green_merge_task() {  # <state> <task> <window> <pane-text> <pr>
   printf '%s' "$(hash_text "$text")" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   record_pi_busy "$state" "$task"
-  arm_merge_poll "$state" "$task"
+  arm_merge_poll "$state" "$task" "$pr"
 }
 
 # --- a declaration never absorbs the busy-pane completed-turn bound -------------
@@ -1707,7 +1847,7 @@ test_busy_turn_bound_is_not_absorbed_by_a_merge_wait() {
   local dir state fakebin out drain_out capture_file window key pid pr text
   dir=$(make_case busy-turn-over-merge-wait); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
-  window="test:fm-busyhang"; pr='https://example.test/pr/21'
+  window="test:fm-busyhang"; pr='https://example.test/group/repo/-/merge_requests/21'
   text='Working... (3600.1s)'
   printf '%s' "$text" > "$capture_file"
   seed_busy_green_merge_task "$state" busyhang "$window" "$text" "$pr" \
@@ -1771,7 +1911,7 @@ test_merge_wait_away_mode_gate_refuses_before_any_read() {
   local dir state fakebin window pr text reads before
   dir=$(make_case merge-wait-away-gate); state="$dir/state"; fakebin="$dir/fakebin"
   reads="$dir/reads.log"
-  window="test:fm-awaygate"; pr='https://example.test/pr/25'
+  window="test:fm-awaygate"; pr='https://example.test/group/repo/-/merge_requests/25'
   text='idle and declared'
   seed_green_merge_task "$state" awaygate "$window" "$text" "$pr" \
     || fail "could not arm the fixture merge poll"
@@ -1806,7 +1946,7 @@ test_merge_wait_absorbs_nothing_in_away_mode() {
   dir=$(make_case merge-wait-away-mode); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   reads="$dir/reads.log"
-  window="test:fm-away"; pr='https://example.test/pr/22'
+  window="test:fm-away"; pr='https://example.test/group/repo/-/merge_requests/22'
   text='Working... (3600.1s)'
   printf '%s' "$text" > "$capture_file"
   seed_busy_green_merge_task "$state" away "$window" "$text" "$pr" \
@@ -1846,7 +1986,7 @@ test_idle_wedge_window_is_still_absorbed_by_a_merge_wait() {
   local dir state fakebin out capture_file window key pid pr text sig
   dir=$(make_case idle-wedge-still-absorbed); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-idlewedge"; pr='https://example.test/pr/23'
+  window="test:fm-idlewedge"; pr='https://example.test/group/repo/-/merge_requests/23'
   text='idle, committed, waiting on the maintainer'
   printf '%s' "$text" > "$capture_file"
   seed_green_merge_task "$state" idlewedge "$window" "$text" "$pr" \
@@ -1886,7 +2026,7 @@ test_merge_wait_reminder_passes_through_from_the_wedge_window() {
   local dir state fakebin out capture_file window key pid pr text sig
   dir=$(make_case merge-wait-wedge-reminder); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-wedgeremind"; pr='https://example.test/pr/24'
+  window="test:fm-wedgeremind"; pr='https://example.test/group/repo/-/merge_requests/24'
   text='idle, declared, and long overdue'
   printf '%s' "$text" > "$capture_file"
   seed_green_merge_task "$state" wedgeremind "$window" "$text" "$pr" \
@@ -1915,6 +2055,13 @@ test_merge_wait_reminder_passes_through_from_the_wedge_window() {
     && fail "the wedge-window reminder was reported as a possible wedge"
   [ -e "$state/.merge-wait-resurfaced-$key" ] || fail "the wedge-window reminder recorded no throttle"
   [ -s "$state/wedgeremind.check.sh" ] || fail "the merge poll did not survive the wedge-window reminder"
+  # This is the one absorbed cycle whose wake() exits before any code after the emit
+  # could run, so it is where accounting placed after the emit silently never happens.
+  # The alarm was absorbed, so no escalation was surfaced and none may be recorded:
+  # ABSENT rather than 0, because an existing file reads as a chain in progress to every
+  # other consumer and would pre-load the next genuine escalation.
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "the reminder cycle recorded an escalation nobody was shown: $(cat "$state/.wedge-escalations-$key")"
   unset FM_FAKE_CREW_STATE
   pass "the bounded reminder also passes through from the non-terminal wedge window, not only from a first sighting"
 }
@@ -1940,7 +2087,7 @@ test_absorbed_idle_stale_alarm_keeps_a_busy_turn_escalation_count() {
   local dir state fakebin out capture_file window key pid pr text
   dir=$(make_case busy-turn-count-survives-absorb); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-flap"; pr='https://example.test/pr/26'
+  window="test:fm-flap"; pr='https://example.test/group/repo/-/merge_requests/26'
   text='Working... (3600.1s)'
   printf '%s' "$text" > "$capture_file"
   seed_busy_green_merge_task "$state" flap "$window" "$text" "$pr" \
@@ -2003,15 +2150,15 @@ test_absorbed_idle_stale_alarm_keeps_a_busy_turn_escalation_count() {
 }
 
 # --- an absorbed idle-stale wedge alarm leaves no count of its own behind ---------
-# The original requirement, unregressed: wedge_timer_check bumps the count before it
-# emits, so when its own emit is absorbed the bump must not stand, or a later genuine
-# escalation would surface pre-loaded. This pins the case where that bump is the window's
-# ONLY contribution, so undoing it must leave no count file at all.
-test_absorbed_idle_stale_wedge_alarm_clears_its_own_count() {
+# The original requirement, unregressed: an escalation nobody was shown must not be
+# recorded, or a later genuine escalation would surface pre-loaded. This pins the case
+# where the absorbed alarm would have been the window's ONLY contribution, so nothing
+# may be written and no count file may exist afterwards.
+test_absorbed_idle_stale_wedge_alarm_writes_no_count() {
   local dir state fakebin out capture_file window key pid pr text sig
   dir=$(make_case idle-stale-count-cleared); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-idleclear"; pr='https://example.test/pr/27'
+  window="test:fm-idleclear"; pr='https://example.test/group/repo/-/merge_requests/27'
   text='idle, declared, aging on the wedge timer'
   printf '%s' "$text" > "$capture_file"
   seed_green_merge_task "$state" idleclear "$window" "$text" "$pr" \
@@ -2022,10 +2169,10 @@ test_absorbed_idle_stale_wedge_alarm_clears_its_own_count() {
   key=$(printf '%s' "$window" | tr ':/.' '___')
   printf '%s' "$(hash_text "$text")" > "$state/.stale-$key"
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  # No count on this window yet, so the absorbed bump below is the ONLY contribution and
-  # must leave nothing behind. A pre-seeded count would be a different case entirely, and
-  # no comment can tell the code which class earned it: see the sibling test that pins a
-  # busy-turn count surviving this same wedge-path absorb.
+  # No count on this window yet, so the absorbed alarm below would be the ONLY
+  # contribution and must leave nothing behind. A pre-seeded count would be a different
+  # case entirely, and no comment can tell the code which class earned it: see the sibling
+  # test that pins a busy-turn count surviving this same wedge-path absorb.
   [ ! -e "$state/.wedge-escalations-$key" ] || fail "the fixture started with a count, so this would prove nothing"
   export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
 
@@ -2037,9 +2184,9 @@ test_absorbed_idle_stale_wedge_alarm_clears_its_own_count() {
   fi
   [ ! -s "$out" ] || { reap "$pid"; fail "the absorbed idle-stale wedge alarm printed a wake: $(cat "$out")"; }
   # Absent, not zero: an existing count file means a chain is in progress to every other
-  # consumer, so undoing the only bump has to remove it rather than write a 0 into it.
+  # consumer, so the absorbed alarm has to write nothing at all rather than record a 0.
   [ ! -e "$state/.wedge-escalations-$key" ] \
-    || { reap "$pid"; fail "the absorbed idle-stale alarm left its own count behind as $(cat "$state/.wedge-escalations-$key")"; }
+    || { reap "$pid"; fail "the absorbed idle-stale alarm left a count behind as $(cat "$state/.wedge-escalations-$key")"; }
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional absorb stop"
 
@@ -2058,23 +2205,23 @@ test_absorbed_idle_stale_wedge_alarm_clears_its_own_count() {
     && fail "the first genuine escalation after an absorb demanded deep inspection"
   [ -s "$state/idleclear.check.sh" ] || fail "the merge poll did not survive the escalation"
   unset FM_FAKE_CREW_STATE
-  pass "an absorbed idle-stale wedge alarm leaves behind no count of its own, so a later genuine escalation starts from 1"
+  pass "an absorbed idle-stale wedge alarm records no count at all, so a later genuine escalation starts from 1"
 }
 
-# --- WEDGE-PATH arm: an absorbed idle-stale bump does not erase a busy-turn count ------
+# --- WEDGE-PATH arm: an absorbed idle-stale alarm does not erase a busy-turn count -----
 # The arm the first-sighting test above does NOT reach, and the one a whole-file delete
-# breaks. Here wedge_timer_check itself is the bumper: it bumps the shared per-window
-# count, its own emit is absorbed by the declaration, and it must undo exactly its own
-# bump. Deleting the file instead would erase whatever the busy-turn class had already
-# earned on this window, so the hung-call chain would restart at 1 and never reach
-# demand-deep-inspection, which is the loss the alarm-class separation exists to prevent.
-# The busy-turn count is established by driving the real busy-turn escalations rather than
-# by pre-seeding a number a comment merely labels, because the code cannot read a comment.
-test_absorbed_idle_stale_wedge_bump_keeps_a_busy_turn_count() {
+# breaks. Here wedge_timer_check itself is the writer: the count file is shared per
+# window, so an absorbed idle-stale alarm must leave whatever the busy-turn class already
+# earned exactly as it found it. Deleting or rewriting it would restart the hung-call
+# chain at 1 so it never reaches demand-deep-inspection, which is the loss the alarm-class
+# separation exists to prevent. The busy-turn count is established by driving the real
+# busy-turn escalations rather than by pre-seeding a number a comment merely labels,
+# because the code cannot read a comment.
+test_absorbed_idle_stale_wedge_alarm_keeps_a_busy_turn_count() {
   local dir state fakebin out capture_file window key pid pr text sig
   dir=$(make_case wedge-path-busy-count); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-wedgeflap"; pr='https://example.test/pr/28'
+  window="test:fm-wedgeflap"; pr='https://example.test/group/repo/-/merge_requests/28'
   text='Working... (3600.1s)'
   printf '%s' "$text" > "$capture_file"
   seed_busy_green_merge_task "$state" wedgeflap "$window" "$text" "$pr" \
@@ -2123,7 +2270,8 @@ test_absorbed_idle_stale_wedge_bump_keeps_a_busy_turn_count() {
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-B stop"
 
   # Phase C: the WEDGE arm. The recorded hash plus an elapsed since-file sends the repeat
-  # poll to wedge_timer_check idle-stale, which bumps 2 to 3 and has its emit absorbed.
+  # poll to wedge_timer_check idle-stale, whose emit is absorbed: it would have reported
+  # escalation 3, so 2 must still be on disk afterwards.
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
@@ -2136,7 +2284,7 @@ test_absorbed_idle_stale_wedge_bump_keeps_a_busy_turn_count() {
   [ ! -e "$state/.stale-since-$key" ] \
     || { reap "$pid"; fail "the wedge arm never reached its emit, so this proved nothing"; }
   [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq 2 ] \
-    || { reap "$pid"; fail "the absorbed idle-stale bump did not restore the busy-turn count, leaving $(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo absent)"; }
+    || { reap "$pid"; fail "the absorbed idle-stale alarm did not leave the busy-turn count alone, leaving $(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo absent)"; }
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-C stop"
 
@@ -2155,7 +2303,7 @@ test_absorbed_idle_stale_wedge_bump_keeps_a_busy_turn_count() {
     || fail "the resumed busy-turn chain never reached demand-deep-inspection: $(cat "$out")"
   [ -s "$state/wedgeflap.check.sh" ] || fail "the merge poll did not survive the flap"
   unset FM_FAKE_CREW_STATE
-  pass "an absorbed idle-stale wedge bump undoes only itself, so a busy-turn count survives and its hung-call chain still reaches demand-deep-inspection"
+  pass "an absorbed idle-stale wedge alarm writes nothing, so a busy-turn count survives and its hung-call chain still reaches demand-deep-inspection"
 }
 
 
@@ -3831,14 +3979,14 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   # per-poll signal scan stays quiet) but which was never surfaced (no
   # .hb-surfaced-* marker). This stands in for a per-wake-path miss; the heartbeat
   # fleet-scan backstop must catch it and wake firstmate.
-  printf 'done: PR https://example.test/pr/5\n' > "$state/miss.status"
+  printf 'done: PR https://example.test/group/repo/-/merge_requests/5\n' > "$state/miss.status"
   sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "heartbeat backstop did not surface an unsurfaced captain-relevant status"
   grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
-  [ "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" = "done: PR https://example.test/pr/5" ] \
+  [ "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" = "done: PR https://example.test/group/repo/-/merge_requests/5" ] \
     || fail "backstop did not record the status as surfaced (would re-fire next heartbeat)"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the backstop heartbeat failed"
   grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "backstop heartbeat was not queued"
@@ -3967,6 +4115,7 @@ test_terminal_stale_green_without_declaration_still_surfaces
 test_merge_wait_refusal_is_per_alarm_and_self_heals
 test_merge_wait_fresh_non_green_verdict_alarms_on_that_attempt
 test_merge_wait_superseded_or_poll_less_declaration_still_alarms
+test_merge_wait_custom_check_in_the_poll_slot_still_alarms
 test_merge_wait_suppression_does_not_inflate_the_escalation_count
 test_nonterminal_stale_declaration_after_surface_goes_quiet
 test_merge_wait_withdrawn_record_returns_to_aging
@@ -3979,8 +4128,8 @@ test_merge_wait_absorbs_nothing_in_away_mode
 test_idle_wedge_window_is_still_absorbed_by_a_merge_wait
 test_merge_wait_reminder_passes_through_from_the_wedge_window
 test_absorbed_idle_stale_alarm_keeps_a_busy_turn_escalation_count
-test_absorbed_idle_stale_wedge_alarm_clears_its_own_count
-test_absorbed_idle_stale_wedge_bump_keeps_a_busy_turn_count
+test_absorbed_idle_stale_wedge_alarm_writes_no_count
+test_absorbed_idle_stale_wedge_alarm_keeps_a_busy_turn_count
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

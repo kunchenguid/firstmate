@@ -48,6 +48,14 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$_FM_CLASSIFY_LIB_DIR/fm-timeout-lib.sh"
+# The PR-poll identity mechanics, for merge_wait_poll_armed below: it must recognise the
+# task's merge poll specifically rather than any armed check, and fm-pr-lib.sh is the one
+# owner of that registration format. Safe to source here: its top level only initialises
+# variables, it declares nothing readonly, and it does not source this library, so there
+# is no cycle.
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_CLASSIFY_LIB_DIR/fm-pr-lib.sh"
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
@@ -1199,22 +1207,55 @@ signal_reason_is_actionable() {  # <file> ...
 #   - the task's metadata still records that SAME pull request, so a re-armed
 #     watch on a different PR (or a task whose PR record is gone) drops the
 #     declaration instead of inheriting it;
-#   - the task's merge poll is still armed, because that poll is the thing that
-#     will actually wake firstmate when the merge lands. Gating on it is what
-#     bounds the declaration: it can never silence more than the poll covers, and
-#     a task whose poll was retired resumes ordinary wedge aging at once.
+#   - the task's MERGE POLL specifically is still armed (merge_wait_poll_armed
+#     below), because that poll is the thing that will actually wake firstmate
+#     when the merge lands. Gating on it is what bounds the declaration: it can
+#     never silence more than the poll covers, and a task whose poll was retired
+#     resumes ordinary wedge aging at once.
 # Deliberately NOT a green check: the caller supplies that from authoritative crew
-# state (crew_absorb_class below), so this stays a pure read of two small files and
+# state (crew_absorb_class below), so this stays a read of a few small files and
 # is cheap enough for a repeat-poll recheck.
 merge_wait_declared() {  # <id> <state>
   local id=${1-} state=${2-} declared recorded
   [ -n "$id" ] && [ -n "$state" ] || return 1
   [ -f "$state/$id.merge-wait" ] || return 1
-  [ -f "$state/$id.check.sh" ] || return 1
   declared=$(grep '^pr=' "$state/$id.merge-wait" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$declared" ] || return 1
   recorded=$(grep '^pr=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  [ "$declared" = "$recorded" ]
+  [ "$declared" = "$recorded" ] || return 1
+  merge_wait_poll_armed "$id" "$state" "$recorded"
+}
+
+# 0 when <id>'s state/<id>.check.sh slot holds THIS task's merge poll for <pr-url>.
+#
+# A bare `-f check.sh` test is not enough, and that gap is why this exists: the watcher
+# treats that slot as either a validated PR poll or a REGISTERED CUSTOM CHECK, and
+# AGENTS.md tells firstmate how to write the latter. A task whose merge poll was replaced
+# by a custom check therefore still had a check.sh, so the declaration kept absorbing
+# while the thing that would report the merge was gone. On a byte-static terminal pane
+# that is silence with no cover at all, since the armed poll is the only cover the
+# suppressor claims (see merge_wait_absorbs_alarm in bin/fm-watch.sh).
+#
+# The evidence is the same evidence the watcher itself uses to decide the slot is a poll
+# rather than a custom check, so this gate and the poll's own liveness cannot disagree:
+# both sidecars present as regular non-symlink files (the registration read enforces that
+# for its own file), a registration that parses, its recorded check identity still matching
+# the live check.sh (so a lingering sidecar from a retired poll cannot satisfy it), and its
+# recorded pull request being the one the task records.
+#
+# Cost is one small file read plus a few stats. Deliberately NOT fm_pr_poll_artifacts_valid
+# or fm_pr_poll_snapshot_capture: those hash the data and the template and compare against
+# the template file, which would break the cheap repeat-poll read this predicate promises.
+merge_wait_poll_armed() {  # <id> <state> <pr-url>
+  local id=${1-} state=${2-} pr=${3-} check
+  [ -n "$id" ] && [ -n "$state" ] && [ -n "$pr" ] || return 1
+  check="$state/$id.check.sh"
+  [ -f "$check" ] && [ ! -L "$check" ] || return 1
+  [ -f "$state/$id.pr-poll" ] && [ ! -L "$state/$id.pr-poll" ] || return 1
+  fm_pr_poll_registration_parse "$state/$id.pr-poll-registration" || return 1
+  [ "$FM_PR_REG_ID" = "$id" ] || return 1
+  [ "$FM_PR_REG_URL" = "$pr" ] || return 1
+  [ "$FM_PR_REG_CHECK_IDENTITY" = "$(fm_pr_file_identity "$check")" ]
 }
 
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
