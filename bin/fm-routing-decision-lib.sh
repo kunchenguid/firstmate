@@ -56,7 +56,7 @@ fm_routing_refuse() {
 fm_routing_private_input() {
   local path=$1 label=$2 unreadable_label=${3:-$2}
   [ -f "$path" ] && [ ! -L "$path" ] || {
-    fm_routing_refuse "$label" "required regular task-scoped file is absent"
+    fm_routing_refuse "$label" "required regular task-scoped file is absent: $path"
     return 1
   }
   [ -r "$path" ] || {
@@ -90,7 +90,11 @@ fm_routing_literal_words() {
             token+="${input:i:1}"
             token_started=1
             ;;
-          '$'|'`'|';'|'|'|'&'|'<'|'>') return 1 ;;
+          '$'|'`'|';'|'|'|'&'|'<'|'>'|'*'|'?'|'['|'{') return 1 ;;
+          '~')
+            [ "$token_started" -eq 1 ] || return 1
+            token+="$ch"
+            ;;
           *) token+="$ch"; token_started=1 ;;
         esac
         ;;
@@ -146,6 +150,7 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
         }
         continue
       fi
+      case "$word" in -*) break ;; esac
       FM_ROUTING_COMMAND_HARNESS=$(basename "$word")
       executable_seen=1
       continue

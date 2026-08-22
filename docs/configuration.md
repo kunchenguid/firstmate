@@ -327,6 +327,7 @@ It is not enabled by `config/crew-dispatch.json`, an environment variable, or a 
 The authoritative configuration input is always `<FM_HOME>/config/crew-dispatch.json`, independently of `FM_CONFIG_OVERRIDE`.
 The receipt explicitly attests whether that canonical file is present or absent, so relocating configuration or removing a file changes the attested input and never removes the requirement.
 Secondmate launches retain their separate provisioning, registry, host, and harness contract and do not consume this receipt.
+When a relaunch keeps the exact recorded harness, model, and effort tuple, its republished task metadata preserves the existing `routing_decision` pointer.
 
 Each covered task directory supplies `data/<task-id>/routing-intent.json` and `data/<task-id>/routing-decision.pending.json`.
 A multi-candidate route also supplies the exact one-intake `quota-axi --json` object as `data/<task-id>/quota-snapshot.json`.

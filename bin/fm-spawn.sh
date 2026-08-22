@@ -1008,6 +1008,9 @@ FIRSTMATE_HOME=
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_PRIOR_MODEL=
+RELAUNCH_PRIOR_EFFORT=
+RELAUNCH_PRIOR_ROUTING_DECISION=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1036,6 +1039,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  RELAUNCH_PRIOR_MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+  [ -n "$RELAUNCH_PRIOR_MODEL" ] || RELAUNCH_PRIOR_MODEL=default
+  RELAUNCH_PRIOR_EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+  [ -n "$RELAUNCH_PRIOR_EFFORT" ] || RELAUNCH_PRIOR_EFFORT=default
+  RELAUNCH_PRIOR_ROUTING_DECISION=$(fm_meta_get "$RELAUNCH_META" routing_decision)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1460,6 +1468,15 @@ effort_flag_for_harness() {
 # though its requested value is still recorded later in task metadata.
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "${MODEL:-default}")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "${EFFORT:-default}")
+
+# A relaunch that keeps the exact recorded route republishes the existing
+# inspectable receipt pointer alongside that unchanged tuple.
+if [ "$RELAUNCH" -eq 1 ] \
+  && [ "$HARNESS" = "$RELAUNCH_PRIOR_HARNESS" ] \
+  && [ "${MODEL:-default}" = "$RELAUNCH_PRIOR_MODEL" ] \
+  && [ "${EFFORT:-default}" = "$RELAUNCH_PRIOR_EFFORT" ]; then
+  FM_ROUTING_DECISION_FINAL=$RELAUNCH_PRIOR_ROUTING_DECISION
+fi
 
 # Routing-receipt enforcement is a source-code invariant for every crewmate and
 # scout route, not a feature enabled by a configuration file.

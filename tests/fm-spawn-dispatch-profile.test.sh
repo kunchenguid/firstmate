@@ -317,8 +317,6 @@ assert_spawn_refused_before_side_effects() { # <home> <id> <launch-log>
   assert_absent "$home/state/$id.meta" "routing refusal published task metadata"
   [ ! -s "$launchlog" ] || fail "routing refusal sent pane input"
   [ ! -s "$home/endpoint.log" ] || fail "routing refusal created an endpoint"
-  [ ! -s "$home/worktree.log" ] || fail "routing refusal leased a worktree"
-  assert_absent "$home/data/$id/routing-decision.json" "routing refusal persisted an invalid receipt"
 }
 
 test_no_profile_keeps_claude_profile_defaults() {

@@ -214,8 +214,8 @@ The focused emitted-command and integration run was:
 bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
 ```
 
-It exited `0` in 94,143 ms with no gate skip.
-The cases prove canonical configuration authority survives `FM_CONFIG_OVERRIDE`, enforcement remains active when canonical dispatch configuration is absent, every routing refusal precedes fake worktree, endpoint, launch, and metadata effects, and raw expansion, environment prefixes, non-standard model flags, and missing axes refuse.
+It exited `0` in 94,507 ms with no gate skip.
+The cases prove canonical configuration authority survives `FM_CONFIG_OVERRIDE`, enforcement remains active when canonical dispatch configuration is absent, every routing refusal precedes endpoint creation, pane input including the worktree-lease command, and metadata publication, and raw expansion, environment prefixes, non-standard model flags, and missing axes refuse.
 The same run checks the actual adapter fragments for claude, codex, grok, pi, pi-signed, opencode, Cursor, and the raw-command escape hatch.
 Codex `max`, grok `xhigh` and `max`, opencode effort, and Cursor effort remain requested metadata values while their persisted emitted effort is null.
 
@@ -225,6 +225,6 @@ The independent failure-direction run was:
 bin/fm-test-run.sh tests/fm-routing-decision-negative-battery.test.sh
 ```
 
-It exited `0` in 14,448 ms after all 36 constructed negatives refused before worktree lease, endpoint, and metadata sentinels.
-Each assertion then ran against a locally neutered validator and independently reached all three sentinels, producing 36 per-assertion firing counterexamples rather than one aggregate mutation result.
-The cases cover missing and malformed artifacts, task and byte-binding drift, stale and future timestamps, canonical configuration drift, emitted model and effort mismatch, raw launch ambiguity, quota provenance, authority identity, forbidden fallback, and hostile persistence targets.
+It exited `0` in 25,942 ms after all 60 constructed negatives refused before worktree lease, endpoint, and metadata sentinels.
+Each negative then ran against the same locally neutered whole-validator call and independently reached all three simulated downstream effects, proving the integration call site is load-bearing in 60 separate runs without claiming guard-by-guard mutation coverage inside the validator.
+The cases cover missing and malformed artifacts, task and byte-binding drift, stale, future, and non-RFC3339 timestamps, canonical configuration drift, emitted model and effort mismatch, raw launch expansion and tuple contradictions, every declared authority source, quota provenance and basis, forbidden fallback, and hostile persistence targets.

@@ -7,6 +7,26 @@ set -u
 # shellcheck source=bin/fm-routing-decision-lib.sh
 . "$ROOT/bin/fm-routing-decision-lib.sh"
 
+REAL_JQ=$(command -v jq)
+POST_BINDING_RECEIPT_FILTER=
+
+# One authority guard is defense in depth against the receipt changing after
+# its exact configuration binding is checked.
+# The fixture mutates at the later source read so that guard is independently
+# reachable without a production test bypass.
+jq() {
+  local tmp
+  if [ -n "$POST_BINDING_RECEIPT_FILTER" ] \
+    && [ "$#" -eq 3 ] \
+    && [ "$1" = -r ] \
+    && [ "$2" = '.matched_profile.source' ]; then
+    tmp="$3.post-binding"
+    "$REAL_JQ" "$POST_BINDING_RECEIPT_FILTER" "$3" > "$tmp" || return 1
+    mv "$tmp" "$3" || return 1
+  fi
+  "$REAL_JQ" "$@"
+}
+
 TMP_ROOT=$(fm_test_tmproot fm-routing-decision-negative-battery)
 LAB="$TMP_ROOT/lab"
 HOME_DIR="$LAB/home"
@@ -165,14 +185,15 @@ assert_no_effects() {
   fi
 }
 
-exercise_negative() { # <name> <predicate> <setup-function>
-  local name=$1 predicate=$2 setup=$3 out status
+exercise_negative() { # <name> <predicate> <setup-function> [exact-detail]
+  local name=$1 predicate=$2 setup=$3 detail=${4:-} out status
   write_fixture
   "$setup"
   out=$(run_validator_then_effects 2>&1)
   status=$?
   expect_code 1 "$status" "$name should refuse"
   assert_contains "$out" "ROUTING_DECISION $predicate" "$name named the wrong predicate"
+  [ -z "$detail" ] || assert_contains "$out" "$detail" "$name named the wrong refusal detail"
   assert_no_effects
   negative_count=$((negative_count + 1))
   pass "$name refuses before lease, endpoint, and metadata"
@@ -228,6 +249,23 @@ setup_nonstandard_raw() {
   update_intent '.authority = "EXPLICIT_RUNTIME_OVERRIDE"'
   update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\""
 }
+setup_raw_literal() { # <command>
+  RUN_RAW=1
+  RUN_LAUNCH=$1
+  update_receipt '.matched_profile = {source: "explicit_override", index: null}
+    | .launch_binding.kind = "raw_launch"'
+  update_intent '.authority = "EXPLICIT_RUNTIME_OVERRIDE"'
+  update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\""
+}
+setup_raw_glob() { setup_raw_literal 'claude --model R* --effort high'; }
+setup_raw_question() { setup_raw_literal 'claude --model R? --effort high'; }
+setup_raw_bracket() { setup_raw_literal 'claude --model R[1] --effort high'; }
+setup_raw_brace() { setup_raw_literal 'claude --model o{p,q} --effort high'; }
+setup_raw_tilde() { setup_raw_literal 'claude --model ~/m --effort high'; }
+setup_raw_no_executable() { setup_raw_literal '--model opus --effort high'; }
+setup_raw_harness_contradiction() { setup_raw_literal 'codex --model opus --effort high'; }
+setup_raw_model_contradiction() { setup_raw_literal 'claude --model sonnet --effort high'; }
+setup_raw_effort_contradiction() { setup_raw_literal 'claude --model opus --effort low'; }
 setup_unresolved_raw() {
   RUN_RAW=1
   RUN_LAUNCH='claude --model opus'
@@ -287,6 +325,91 @@ setup_wrong_quota_schema() {
   mv "$TASK_DIR/quota-wrong-schema.json" "$TASK_DIR/quota-snapshot.json"
   update_receipt ".quota.snapshot_sha256 = \"$(sha_file "$TASK_DIR/quota-snapshot.json")\""
 }
+setup_non_rfc3339_timestamp() { update_receipt '.generated_at = "not-a-timestamp"'; }
+setup_wrong_multi_quota_basis() {
+  write_multi_fixture
+  update_receipt '.quota_basis = "NOT_APPLICABLE_SINGLETON"'
+}
+setup_default_base() {
+  local config_hash
+  jq '.default = {harness: "claude", model: "opus", effort: "high"}' \
+    "$HOME_DIR/config/crew-dispatch.json" > "$HOME_DIR/config/crew-dispatch.default.json"
+  mv "$HOME_DIR/config/crew-dispatch.default.json" "$HOME_DIR/config/crew-dispatch.json"
+  config_hash=$(sha_file "$HOME_DIR/config/crew-dispatch.json")
+  update_receipt ".dispatch_config.sha256 = \"$config_hash\"
+    | .matched_profile = {source: \"default\", index: null}"
+}
+setup_default_wrong_index() {
+  setup_default_base
+  update_receipt '.matched_profile.index = 0'
+}
+setup_default_missing_profile() {
+  local config_hash
+  jq '.default = 42' "$HOME_DIR/config/crew-dispatch.json" > "$HOME_DIR/config/crew-dispatch.nodefault.json"
+  mv "$HOME_DIR/config/crew-dispatch.nodefault.json" "$HOME_DIR/config/crew-dispatch.json"
+  config_hash=$(sha_file "$HOME_DIR/config/crew-dispatch.json")
+  update_receipt ".dispatch_config.sha256 = \"$config_hash\"
+    | .matched_profile = {source: \"default\", index: null}"
+}
+setup_static_base() {
+  rm "$HOME_DIR/config/crew-dispatch.json"
+  update_intent '.authority = "STATIC_HARNESS"'
+  update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\"
+    | .dispatch_config = {kind: \"absent\", sha256: null}
+    | .matched_profile = {source: \"static_harness\", index: null}"
+}
+setup_static_with_config() {
+  update_intent '.authority = "STATIC_HARNESS"'
+  update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\"
+    | .matched_profile = {source: \"static_harness\", index: null}"
+}
+setup_static_wrong_index() {
+  setup_static_base
+  update_receipt '.matched_profile.index = 0'
+}
+setup_static_wrong_authority() {
+  setup_static_base
+  update_intent '.authority = "CONFIGURED_RULE"'
+  update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\""
+}
+setup_static_non_singleton() {
+  write_multi_fixture
+  rm "$HOME_DIR/config/crew-dispatch.json"
+  update_intent '.authority = "STATIC_HARNESS"'
+  update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\"
+    | .dispatch_config = {kind: \"absent\", sha256: null}
+    | .matched_profile = {source: \"static_harness\", index: null}"
+}
+setup_explicit_base() {
+  update_intent '.authority = "EXPLICIT_RUNTIME_OVERRIDE"'
+  update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\"
+    | .matched_profile = {source: \"explicit_override\", index: null}"
+}
+setup_explicit_wrong_index() {
+  setup_explicit_base
+  update_receipt '.matched_profile.index = 0'
+}
+setup_explicit_wrong_authority() {
+  update_receipt '.matched_profile = {source: "explicit_override", index: null}'
+}
+setup_explicit_non_singleton() {
+  write_multi_fixture
+  update_intent '.authority = "EXPLICIT_RUNTIME_OVERRIDE"'
+  update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\"
+    | .matched_profile = {source: \"explicit_override\", index: null}"
+}
+setup_unsupported_source() { update_receipt '.matched_profile = {source: "unregistered", index: null}'; }
+setup_rule_noninteger_index() { update_receipt '.matched_profile.index = "0"'; }
+setup_rule_malformed_profile() {
+  local config_hash
+  jq '.rules[0].use = 42' "$HOME_DIR/config/crew-dispatch.json" > "$HOME_DIR/config/crew-dispatch.badrule.json"
+  mv "$HOME_DIR/config/crew-dispatch.badrule.json" "$HOME_DIR/config/crew-dispatch.json"
+  config_hash=$(sha_file "$HOME_DIR/config/crew-dispatch.json")
+  update_receipt ".dispatch_config.sha256 = \"$config_hash\""
+}
+setup_rule_binding_kind_drift() {
+  POST_BINDING_RECEIPT_FILTER='.dispatch_config = {kind: "absent", sha256: null}'
+}
 
 exercise_negative "01 missing receipt" missing setup_missing_receipt
 exercise_negative "02 missing intent" missing setup_missing_intent
@@ -325,6 +448,53 @@ exercise_negative "34 selected tuple outside candidates" INCAPABLE_CANDIDATE set
 exercise_negative "35 rule index out of range" DISPATCH_CONFIG_MISMATCH setup_rule_index_out_of_range
 exercise_negative "36 wrong quota schema" 'NOT_VERIFIABLE(QUOTA)' setup_wrong_quota_schema
 
-[ "$negative_count" -eq 36 ] || fail "negative battery counted $negative_count refusals instead of 36"
-[ "$counterexample_count" -eq 36 ] || fail "negative battery counted $counterexample_count counterexamples instead of 36"
-echo "# all 36 ROUTING_DECISION negatives refused before effects with 36 firing counterexamples"
+exercise_negative "37 raw glob expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_glob
+exercise_negative "38 raw question expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_question
+exercise_negative "39 raw bracket expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_bracket
+exercise_negative "40 raw brace expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_brace
+exercise_negative "41 raw leading tilde expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_tilde
+exercise_negative "42 raw launch without executable" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_no_executable \
+  "launch has no executable harness word"
+exercise_negative "43 raw harness contradiction" RAW_LAUNCH_MISMATCH setup_raw_harness_contradiction \
+  "emitted harness contradicts the selected tuple"
+exercise_negative "44 raw model contradiction" RAW_LAUNCH_MISMATCH setup_raw_model_contradiction \
+  "emitted model contradicts the selected tuple"
+exercise_negative "45 raw effort contradiction" RAW_LAUNCH_MISMATCH setup_raw_effort_contradiction \
+  "emitted effort contradicts the selected tuple"
+exercise_negative "46 non-RFC3339 receipt timestamp" STALE setup_non_rfc3339_timestamp \
+  "timestamp is not RFC3339 UTC"
+exercise_negative "47 wrong multi-candidate quota basis" 'NOT_VERIFIABLE(QUOTA)' setup_wrong_multi_quota_basis \
+  "multi-candidate route lacks the required quota basis"
+exercise_negative "48 default source with index" DISPATCH_CONFIG_MISMATCH setup_default_wrong_index \
+  "default source requires canonical configuration and a null index"
+exercise_negative "49 default source without profile" DISPATCH_CONFIG_MISMATCH setup_default_missing_profile \
+  "default profile is absent or malformed in canonical configuration"
+exercise_negative "50 static source with config" AUTHORITY_MISMATCH setup_static_with_config \
+  "static harness source requires canonical configuration absence and matching intent authority"
+exercise_negative "51 static source with index" AUTHORITY_MISMATCH setup_static_wrong_index \
+  "static harness source requires canonical configuration absence and matching intent authority"
+exercise_negative "52 static source with wrong authority" AUTHORITY_MISMATCH setup_static_wrong_authority \
+  "static harness source requires canonical configuration absence and matching intent authority"
+exercise_negative "53 static source with multiple candidates" MALFORMED_SCHEMA setup_static_non_singleton \
+  "static harness source must be a singleton candidate set"
+exercise_negative "54 explicit source with index" AUTHORITY_MISMATCH setup_explicit_wrong_index \
+  "explicit runtime override is not present in the exact intent"
+exercise_negative "55 explicit source with wrong authority" AUTHORITY_MISMATCH setup_explicit_wrong_authority \
+  "explicit runtime override is not present in the exact intent"
+exercise_negative "56 explicit source with multiple candidates" MALFORMED_SCHEMA setup_explicit_non_singleton \
+  "explicit runtime override must be a singleton candidate set"
+exercise_negative "57 unsupported authority source" MALFORMED_SCHEMA setup_unsupported_source \
+  "matched_profile.source is unsupported"
+exercise_negative "58 rule source with noninteger index" MALFORMED_SCHEMA setup_rule_noninteger_index \
+  "rule match requires a non-negative integer index"
+
+# Pin the exact rule-resolution guard rather than accepting a later refusal with
+# the same broad predicate after the matched rule lookup is removed.
+exercise_negative "59 rule source with malformed profile" DISPATCH_CONFIG_MISMATCH setup_rule_malformed_profile \
+  "matched rule is absent or malformed in canonical configuration"
+exercise_negative "60 rule source with post-binding kind drift" DISPATCH_CONFIG_MISMATCH setup_rule_binding_kind_drift \
+  "rule source requires canonical dispatch configuration"
+
+[ "$negative_count" -eq 60 ] || fail "negative battery counted $negative_count refusals instead of 60"
+[ "$counterexample_count" -eq 60 ] || fail "negative battery counted $counterexample_count counterexamples instead of 60"
+echo "# all 60 ROUTING_DECISION negatives refused before effects with 60 call-site firing counterexamples"

@@ -274,14 +274,17 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
 }
 
 test_relaunch_preserves_durable_task_metadata() {
-  local dir out rc
+  local dir out rc receipt
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
+  receipt="$dir/home/data/rl19/routing-decision.json"
+  printf '{}\n' > "$receipt"
   {
     printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
     printf '%s\n' 'pr_head=feature/relaunch'
     printf '%s\n' 'x_request=request-19'
     printf '%s\n' 'decisions_reviewed=1'
+    printf 'routing_decision=%s\n' "$receipt"
   } >> "$dir/home/state/rl19.meta"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
@@ -294,6 +297,8 @@ test_relaunch_preserves_durable_task_metadata() {
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
+  [ "$(meta_field "$dir" rl19 routing_decision)" = "$receipt" ] \
+    || fail "an unchanged relaunch must preserve its routing receipt pointer"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 

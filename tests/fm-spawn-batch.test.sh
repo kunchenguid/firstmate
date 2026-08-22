@@ -96,7 +96,7 @@ test_projects_path_scoping() {
     fi
     status=$?
     [ "$status" -ne 0 ] || fail "$label: spawn with missing routing receipt should fail"
-    expected="error: ROUTING_DECISION missing: required regular task-scoped file is absent"
+    expected="error: ROUTING_DECISION missing: required regular task-scoped file is absent: $home/data/$id/routing-decision.pending.json"
     printf '%s\n' "$out" | grep -F "$expected" >/dev/null \
       || fail "$label: routing receipt was not resolved through the active home"
     printf '%s\n' "$out" | grep -F 'cd: projects/alpha' >/dev/null \
