@@ -220,6 +220,104 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_telegram_peer_authentication_binds_lock_to_process_start() {
+  local dir pi_bin pi_pid proc_root checker
+  dir="$TMP_ROOT/telegram-process-generation"
+  proc_root="$dir/proc"
+  checker="$ROOT/bin/fm-session-lock-check.sh"
+  mkdir -p "$dir/state" "$proc_root"
+  pi_bin="$dir/pi"
+  cp /bin/bash "$pi_bin"
+  chmod +x "$pi_bin"
+  "$pi_bin" -c 'sleep 30; :' &
+  pi_pid=$!
+  printf '%s\n' "$pi_pid" >"$dir/state/.lock"
+  mkdir -p "$proc_root/$pi_pid"
+  printf 'btime 1000\n' >"$proc_root/stat"
+  printf '%s (pi) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 1000\n' "$pi_pid" >"$proc_root/$pi_pid/stat"
+
+  touch -d '@1008' "$dir/state/.lock"
+  if FM_TELEGRAM_PROC_ROOT="$proc_root" "$checker" "$dir/state" "$pi_pid"; then
+    kill "$pi_pid" 2>/dev/null || true
+    wait "$pi_pid" 2>/dev/null || true
+    fail "a same-family Pi process started after the stale lock authenticated"
+  fi
+
+  touch -d '@1009' "$dir/state/.lock"
+  FM_TELEGRAM_PROC_ROOT="$proc_root" "$checker" "$dir/state" "$pi_pid" \
+    || { kill "$pi_pid" 2>/dev/null || true; wait "$pi_pid" 2>/dev/null || true; fail "the timestamp precision boundary was refused"; }
+
+  touch -d '@1010' "$dir/state/.lock"
+  FM_TELEGRAM_PROC_ROOT="$proc_root" "$checker" "$dir/state" "$pi_pid" \
+    || { kill "$pi_pid" 2>/dev/null || true; wait "$pi_pid" 2>/dev/null || true; fail "the genuine Pi lock owner was refused"; }
+
+  printf '%s (pi) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 malformed\n' "$pi_pid" >"$proc_root/$pi_pid/stat"
+  if FM_TELEGRAM_PROC_ROOT="$proc_root" "$checker" "$dir/state" "$pi_pid"; then
+    kill "$pi_pid" 2>/dev/null || true
+    wait "$pi_pid" 2>/dev/null || true
+    fail "a malformed kernel process start time authenticated"
+  fi
+  rm "$proc_root/$pi_pid/stat"
+  if FM_TELEGRAM_PROC_ROOT="$proc_root" "$checker" "$dir/state" "$pi_pid"; then
+    kill "$pi_pid" 2>/dev/null || true
+    wait "$pi_pid" 2>/dev/null || true
+    fail "an unreadable kernel process start time authenticated"
+  fi
+
+  kill "$pi_pid" 2>/dev/null || true
+  wait "$pi_pid" 2>/dev/null || true
+  pass "telegram session-lock: authentication binds a lock to its Pi process generation"
+}
+
+test_peer_authentication_rejects_stale_and_invalid_locks() {
+  local dir fakebin
+  dir="$TMP_ROOT/peer-auth"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_RECYCLED:-0}" in
+  300:comm=:*) printf '%s\n' node ;;
+  300:args=:*) printf '%s\n' 'node /opt/pi/session.js' ;;
+  300:ppid=:*) printf '%s\n' 700 ;;
+  700:comm=:0) printf '%s\n' pi ;;
+  700:args=:0) printf '%s\n' pi ;;
+  700:comm=:1) printf '%s\n' bash ;;
+  700:args=:1) printf '%s\n' bash ;;
+  700:ppid=:*) printf '%s\n' 1 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '700\n' > "$dir/state/.lock"
+
+  lib_eval "$fakebin" "fm_session_lock_owned_by_pid '$dir/state' 300" \
+    || fail "a peer beneath the verified live lock owner was refused"
+  if FM_TEST_RECYCLED=1 lib_eval "$fakebin" "fm_session_lock_owned_by_pid '$dir/state' 300"; then
+    fail "a recycled lock pid held by an ordinary process authenticated a peer"
+  fi
+  printf 'not-a-pid\n' > "$dir/state/.lock"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_pid '$dir/state' 300"; then
+    fail "a malformed session lock authenticated a peer"
+  fi
+  rm "$dir/state/.lock"
+  printf '700\n' > "$dir/elsewhere"
+  ln -s "$dir/elsewhere" "$dir/state/.lock"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_pid '$dir/state' 300"; then
+    fail "a symlinked session lock authenticated a peer"
+  fi
+  pass "session-lock: peer authentication rejects stale, recycled, malformed, and symlinked locks"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +458,8 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_telegram_peer_authentication_binds_lock_to_process_start
+test_peer_authentication_rejects_stale_and_invalid_locks
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

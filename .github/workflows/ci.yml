@@ -160,6 +160,12 @@ jobs:
             exit 1
           }
           tmux -V
+      - name: Install Mistune for Telegram formatting coverage
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes python3-mistune
+          python3 -c 'import mistune; print(mistune.__version__)'
       - name: Install tasks-axi for backlog-handoff delegation
         run: |
           set -eu
