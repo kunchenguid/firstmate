@@ -1450,12 +1450,15 @@ add_herdr_ship_task() {
 # make_herdr_stub <case-dir> <gone-pane-id>
 # A stateful fake `herdr` CLI in the case's fakebin. State files under
 # $FM_FAKE_DIR drive it:
-#   ws-ok      present -> workspace list reports the recorded workspace;
-#              absent -> workspace list emits unparseable output
+#   ws-ok        present -> workspace list reports the recorded workspace;
+#                absent -> workspace list emits unparseable output
+#   old-present  present -> pane get reports the recorded pane as existing
+#                (with foreground_cwd from cwd-<pane-id>) instead of gone,
+#                so its agent-free shell classifies as dead rather than missing
 #   tab create echoes its --cwd back as the new pane's foreground_cwd and
 #              records create-cwd/create-label/new-pane for assertions
 #   launched   created when a send carries the launch-brief literal, after
-#              which agent get reports the new pane's agent working
+#              which agent get reports any queried pane's agent working
 make_herdr_stub() {  # <dir> <gone-pane-id> <recorded-workspace-id>
   local fb="$1/fakebin" gonepane=$2 wsid=$3
   cat > "$fb/herdr" <<SH
@@ -1490,14 +1493,14 @@ case "\$cmd \$sub" in
     printf '%s' "\$cwd" > "\$D/cwd-hp-new"
     printf '{"result":{"tab":{"tab_id":"ht-new"},"root_pane":{"pane_id":"hp-new"}}}\n' ;;
   "pane get")
-    if [ "\${3:-}" = "$gonepane" ]; then
+    if [ "\${3:-}" = "$gonepane" ] && [ ! -f "\$D/old-present" ]; then
       printf '{"error":{"code":"pane_not_found","message":"gone"}}\n'
     else
       printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' "\${3:-}" "\$(cat "\$D/cwd-\${3:-}" 2>/dev/null)"
     fi ;;
   "agent get")
-    if [ "\${3:-}" = hp-new ] && [ -f "\$D/launched" ]; then
-      printf '{"result":{"agent":{"pane_id":"hp-new","agent_status":"working"}}}\n'
+    if [ -f "\$D/launched" ]; then
+      printf '{"result":{"agent":{"pane_id":"%s","agent_status":"working"}}}\n' "\${3:-}"
     else
       printf '{"error":{"code":"agent_not_found","message":"none"}}\n'
     fi ;;
@@ -1563,6 +1566,65 @@ test_recover_missing_refuses_an_ambiguous_herdr_workspace() {
   pass "fm-control relaunch: an ambiguous Herdr workspace refuses recovery and keeps the record"
 }
 
+test_recover_missing_rebuilds_a_dead_endpoint_only_with_the_marker() {
+  local dir out rc marker
+  dir=$(new_case recov-dead rl45)
+  add_herdr_ship_task "$dir" rl45 claude
+  make_herdr_stub "$dir" "hp-rl45-old" "hws-rl45"
+  marker="$dir/home/state/rl45.control-relaunch.recovery-attempt"
+  # The recorded pane still exists (a prior failed recovery left it agent-free):
+  # pane get succeeds but agent get reads agent_not_found, so the endpoint
+  # classifies as dead rather than missing. Only the durable recovery-attempt
+  # marker makes that dead endpoint a failed-recovery retry; with it seeded,
+  # relaunch must rebuild one replacement pane in the recorded workspace and
+  # rotate the record onto it, then remove the marker once the agent confirms.
+  : > "$dir/fake/ws-ok"
+  : > "$dir/fake/old-present"
+  printf '%s' "$dir/wt" > "$dir/fake/cwd-hp-rl45-old"
+  : > "$marker"
+  out=$(run_control "$dir" rl45 relaunch --note "retrying the failed recovery"); rc=$?
+  expect_code 0 "$rc" "a dead endpoint with a recovery-attempt marker should recover through a rebuilt pane"$'\n'"$out"
+  assert_contains "$out" "relaunched rl45" "the success line should name the task"
+  [ "$(cat "$dir/fake/create-label")" = "fm-rl45" ] \
+    || fail "the recovery should rebuild a replacement pane with the task's fm-<id> label"
+  [ "$(cat "$dir/fake/create-cwd")" = "$dir/wt" ] \
+    || fail "the rebuilt pane should be created in the recorded worktree"
+  [ "$(meta_field "$dir" rl45 window)" = "hses:hp-new" ] \
+    || fail "the record should rotate onto the rebuilt pane"
+  [ "$(meta_field "$dir" rl45 herdr_tab_id)" = "ht-new" ] \
+    || fail "the record should carry the replacement tab id"
+  [ ! -e "$marker" ] \
+    || fail "the confirmed recovery must remove its recovery-attempt marker"
+  pass "fm-control relaunch: a dead endpoint recovers through a rebuilt pane only when the recovery-attempt marker proves a failed recovery"
+}
+
+test_dead_endpoint_without_a_marker_stays_on_the_ordinary_path() {
+  local dir out rc
+  dir=$(new_case recov-plain rl47)
+  add_herdr_ship_task "$dir" rl47 claude
+  make_herdr_stub "$dir" "hp-rl47-old" "hws-rl47"
+  # The same agent-free pane shape as the failed-recovery retry, but with NO
+  # recovery-attempt marker: an ordinary failed relaunch leaves exactly this
+  # state behind, so the relaunch must adopt the SAME pane instead of rebuilding
+  # - no new tab, no rotated record - and launch the replacement into it.
+  : > "$dir/fake/old-present"
+  printf '%s' "$dir/wt" > "$dir/fake/cwd-hp-rl47-old"
+  out=$(run_control "$dir" rl47 relaunch --note "ordinary retry"); rc=$?
+  expect_code 0 "$rc" "an agent-free endpoint without a marker should relaunch ordinarily"$'\n'"$out"
+  assert_contains "$out" "relaunched rl47" "the success line should name the task"
+  [ ! -e "$dir/fake/create-label" ] \
+    || fail "an ordinary relaunch must not rebuild a replacement pane"
+  [ "$(meta_field "$dir" rl47 window)" = "hses:hp-rl47-old" ] \
+    || fail "an ordinary relaunch must keep the recorded endpoint"
+  [ "$(meta_field "$dir" rl47 herdr_pane_id)" = "hp-rl47-old" ] \
+    || fail "an ordinary relaunch must keep the recorded pane identity"
+  assert_grep "encode launch-brief" "$dir/fake/sends" \
+    "the replacement should have been launched into the adopted pane"
+  [ "$(journal_field "$dir" rl47 phase)" = complete ] \
+    || fail "the ordinary transaction should end complete"
+  pass "fm-control relaunch: an agent-free Herdr endpoint without a marker adopts its same pane"
+}
+
 test_ordinary_relaunch_failure_retry_stays_on_the_same_path() {
   local dir out rc before
   dir=$(new_case recov-retry rl46)
@@ -1608,6 +1670,8 @@ test_recover_missing_refuses_without_relaunch
 test_recover_missing_refuses_secondmate_kind
 test_recover_missing_recovers_a_missing_herdr_endpoint
 test_recover_missing_refuses_an_ambiguous_herdr_workspace
+test_recover_missing_rebuilds_a_dead_endpoint_only_with_the_marker
+test_dead_endpoint_without_a_marker_stays_on_the_ordinary_path
 test_ordinary_relaunch_failure_retry_stays_on_the_same_path
 test_recover_missing_refuses_alive_endpoint
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
