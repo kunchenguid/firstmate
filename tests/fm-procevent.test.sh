@@ -19,6 +19,10 @@ set -u
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TMP_ROOT=$(fm_test_tmproot fm-procevent-tests)
 export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims"
+# This portable suite supplies a fake native CLI; WSL routing is covered by
+# fm-lavish-route.test.sh.
+export FM_LAVISH_TESTING=1
+export FM_LAVISH_RUNTIME_OVERRIDE=native
 
 BLOCKER="$TMP_ROOT/blocker.sh"
 cat > "$BLOCKER" <<'SH'

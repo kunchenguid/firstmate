@@ -33,6 +33,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+export FM_LAVISH_TESTING=1
+export FM_LAVISH_RUNTIME_OVERRIDE=native
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 

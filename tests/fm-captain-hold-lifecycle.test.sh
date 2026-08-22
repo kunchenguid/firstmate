@@ -9,6 +9,11 @@ set -u
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# This portable suite supplies a fake native CLI; WSL routing is covered by
+# fm-lavish-route.test.sh.
+export FM_LAVISH_TESTING=1
+export FM_LAVISH_RUNTIME_OVERRIDE=native
+
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-captain-hold)

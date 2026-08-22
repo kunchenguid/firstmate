@@ -84,9 +84,9 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 - Every Captain's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.
 
 Run `build` once after composing the payload.
-Its serve-first sequence publishes the board, establishes or resumes its Lavish session with `lavish-axi`, and only then binds and arms the polling source; use the session URL it prints in the chat digest.
+Its serve-first sequence publishes the board, establishes or resumes its Lavish session through `bin/fm-lavish.sh`, and only then binds and arms the polling source; use the session URL it prints in the chat digest.
 Never bind or arm the board before that session exists.
-Never run `lavish-axi poll` for the board yourself: the armed source's supervised runner owns the blocking poll, and the watcher's ordinary reconcile restarts it, so no conversational turn ever blocks on the board.
+Never run a Lavish poll for the board yourself: the armed source's supervised runner owns the blocking poll through the tracked router, and the watcher's ordinary reconcile restarts it, so no conversational turn ever blocks on the board.
 
 ### Handling a board wake
 

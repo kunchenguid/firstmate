@@ -10,6 +10,10 @@ set -u
 
 BOARD="$ROOT/bin/fm-bearings-board.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings-board)
+# This portable suite supplies a fake native CLI; WSL routing is covered by
+# fm-lavish-route.test.sh.
+export FM_LAVISH_TESTING=1
+export FM_LAVISH_RUNTIME_OVERRIDE=native
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
