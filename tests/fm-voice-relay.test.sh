@@ -2199,11 +2199,18 @@ with and what it was asked. tests/fm-voice-relay.test.sh reads that record.
   FM_FAKE_STATE    file holding the turn counter across the relay's reconnects
   FM_FAKE_LOG      where to append the per-session record
   FM_FAKE_REQUEST  the words the captain uses when asking for real work
+  FM_FAKE_EARLY    1 to answer from the first audio in, not from the talk end
 
 A clean-end turn is a session the model finishes with while the captain is still
 speaking: the output stream simply ends, with no error and no answer. That is an
 ordinary end of a Bedrock session rather than a fault, and the relay has to
 survive it, so it is a turn kind here rather than a failure injection.
+
+FM_FAKE_EARLY stands in for the model's own end-of-speech detector firing inside
+a clip that already ends in silence: the answer begins before this end of the
+stream has said the turn is over. Nova Sonic really does that, and the relay's
+own timing figures are negative when it happens, which is the one case where a
+fast-looking number is meaningless.
 """
 
 import asyncio
@@ -2225,6 +2232,7 @@ SCRIPT = [s.strip() for s in os.environ.get("FM_FAKE_SCRIPT", "status").split(",
 STATE = os.environ.get("FM_FAKE_STATE", "")
 LOG = os.environ.get("FM_FAKE_LOG", "")
 REQUEST = os.environ.get("FM_FAKE_REQUEST", "open a pull request for the retry")
+EARLY = os.environ.get("FM_FAKE_EARLY", "") == "1"
 
 HEARD = {"status": "how is the fleet doing right now", "handover": REQUEST}
 
@@ -2369,6 +2377,12 @@ class _Stream:
                 self.record["audio_bytes_in"] += len(
                     base64.b64decode(body.get("content", "")))
                 self._maybe_end_cleanly()
+                if EARLY and not self._replied and not self._ended_early:
+                    # Answering while the captain's clip is still arriving, which
+                    # is what the model's own endpoint detector does to a clip
+                    # that ends in silence.
+                    self._replied = True
+                    self._reply_task = asyncio.create_task(self._reply())
             elif name == "toolResult":
                 self._tool_result(body)
             elif name == "contentEnd":
@@ -2868,5 +2882,129 @@ check("connection lost" not in transcript,
       "the connection should have outlived the session: %r" % transcript)
 PY
 pass "a model session that ends mid-conversation costs one turn, not the relay"
+
+# --- the desktop's own check, and the clock it refuses to lie about ----------
+#
+# `fm-voice-relay.py --self-test <clip.pcm>` is what docs/voice-relay.md tells the
+# captain to run before they touch the laptop, and it is also the instrument the
+# direct column of the latency table was measured with. Everything above drives
+# the relay through the client; this drives the desktop check itself, because a
+# broken --self-test is a captain who cannot tell a configured desktop from an
+# unconfigured one, and a number in a table that nobody can reproduce.
+#
+# The second case is the one worth having. A clip that already ends in silence
+# makes the model answer before this end of the stream has said the turn is over,
+# so every figure is measured from the wrong instant and comes out negative. The
+# reply really is fast and the number really is meaningless, which is the worst
+# combination to leave in a results file for someone who was not here. The guard
+# has to name the marks and say why, not print the figure.
+
+SELFTEST="$E2E/self-test"
+mkdir -p "$SELFTEST"
+printf '0\n' > "$SELFTEST/turn-counter"
+
+# The same two seconds of speech, with a second of silence glued on the end: the
+# shape the docs warn against, and the only way to reach the guard.
+cat "$E2E/clip.pcm" > "$SELFTEST/ends-in-silence.pcm"
+python3 - "$SELFTEST/ends-in-silence.pcm" <<'PY' \
+  || fail "could not write the silence-tailed clip"
+import sys
+with open(sys.argv[1], "ab") as handle:
+    handle.write(b"\x00\x00" * 16000)
+PY
+
+# The desktop, and only the desktop: the AWS credential and the SDK live here.
+relay_self_test() {
+  local clip=$1
+  shift
+  env -i PATH="$PATH" HOME="$E2E/desktop-home" PYTHONPATH="$E2E/fakesdk" \
+    PYTHONDONTWRITEBYTECODE=1 FM_HOME="$E2E/home" \
+    FM_FAKE_STATE="$SELFTEST/turn-counter" FM_FAKE_LOG="$SELFTEST/sessions.jsonl" \
+    FM_FAKE_THINK=0.4 FM_FAKE_REPLY_SECONDS=0.4 FM_FAKE_SCRIPT=status \
+    AWS_ACCESS_KEY_ID="$E2E_KEY" \
+    AWS_SECRET_ACCESS_KEY=desktop-secret-not-a-real-key \
+    "$@" python3 "$ROOT/bin/fm-voice-relay.py" --self-test "$clip"
+}
+
+set +e
+ok_out=$(relay_self_test "$E2E/clip.pcm" 2> "$SELFTEST/ok.err")
+ok_code=$?
+set -e
+expect_code 0 "$ok_code" "the documented desktop check should answer"
+printf '%s\n' "$ok_out" > "$SELFTEST/ok.json"
+
+python3 - "$SELFTEST/ok.json" "$E2E/independent.json" "$E2E_REGION" "$E2E_MODEL" \
+  <<'PY' || fail "the desktop check did not report a usable measurement"
+import json, sys
+
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+records = json.load(open(sys.argv[2], encoding="utf-8"))
+region, model = sys.argv[3:5]
+
+
+def check(cond, label):
+    if not cond:
+        sys.exit("self-test: %s -- %r" % (label, report))
+
+
+check(report["mode"] == "self-test", "not a self-test report")
+check(report["answered"] and report["reply_audio_seconds"] > 0, "it did not answer")
+check(report["relay_error"] is None, "it reported an error")
+check(report["region"] == region and report["model"] == model,
+      "it used the wrong account's model")
+check(report["tool_names"] == ["get_fleet_status"], "it called the wrong tool")
+# The words are the records, the same as over the relay.
+check("{} in flight".format(records["in_flight"]) in report["said"],
+      "the spoken answer did not carry the count")
+check(report["heard"], "it reported nothing heard")
+# The figure the direct column of the latency table is made of, measured from the
+# talk end: the clip is two seconds and the stand-in thinks for 0.4 s, so a clock
+# started at the wrong end lands near 2.4.
+check(report["clock_unusable"] == [], "it flagged a clip that ends on speech")
+for mark in ("tool_use_s", "first_audio_s", "reply_end_s"):
+    check(report[mark] is not None, "no %s figure" % mark)
+check(0.2 < report["first_audio_s"] < 1.6,
+      "first audio at %r is not measured from the talk end" % report["first_audio_s"])
+check(report["tool_use_s"] <= report["first_audio_s"] <= report["reply_end_s"],
+      "the figures are out of order")
+PY
+pass "the desktop's own check answers from the records and times it from the talk end"
+
+set +e
+early_out=$(relay_self_test "$SELFTEST/ends-in-silence.pcm" FM_FAKE_EARLY=1 \
+  2> "$SELFTEST/early.err")
+early_code=$?
+set -e
+expect_code 0 "$early_code" "an answered turn is still an answered turn"
+printf '%s\n' "$early_out" > "$SELFTEST/early.json"
+
+early_err=$(cat "$SELFTEST/early.err")
+assert_contains "$early_err" "measured from the wrong instant" \
+  "the guard must say why the timings cannot be used"
+assert_contains "$early_err" "ends on speech" \
+  "the guard must say what clip to pass instead"
+
+python3 - "$SELFTEST/early.json" <<'PY' \
+  || fail "a reply that beat the end of the clip was recorded as a good measurement"
+import json, sys
+
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+
+
+def check(cond, label):
+    if not cond:
+        sys.exit("wrong clock: %s -- %r" % (label, report))
+
+
+# It answered. That is exactly why the figure is dangerous rather than obviously
+# broken: a reader sees answered: true and a fast number.
+check(report["answered"] and report["reply_audio_seconds"] > 0,
+      "the turn was not answered at all, so this is not the case under test")
+check(report["first_audio_s"] < 0,
+      "the reply did not beat the end of the clip, so the guard was not reached")
+for mark in ("tool_use", "first_audio", "reply_end"):
+    check(mark in report["clock_unusable"], "%s is not named as unusable" % mark)
+PY
+pass "a reply that arrives before the end of the clip is named as an unusable clock"
 
 printf 'all voice relay cases passed\n'

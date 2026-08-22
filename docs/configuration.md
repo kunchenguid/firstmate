@@ -535,7 +535,8 @@ The voice handover depends on `note`, so it keeps working in a home that has con
 | `config/inbox-ask-model` | `FM_INBOX_ASK_MODEL` | Side-question model id, required by `fm-inbox.sh ask`. |
 | `config/inbox-profile` | `FM_INBOX_PROFILE` | AWS profile for those two calls; absent, or an explicitly empty variable, means whatever credentials are already in the environment. |
 
-Each file is read as its first line that is not blank and not a `#` comment, so a comment above the value is fine.
+Each account, model and voice file above is read as its first line that is not blank and not a `#` comment, so a comment above the value is fine.
+The two read files are parsed differently: `config/voice-read-scope` must hold the bare word and nothing but blank space around it, so a comment header there refuses instead of being skipped, while every line of `config/voice-read-deny` that is not blank and not a `#` comment is one more substring.
 `FM_VOICE_RELAY` and `FM_VOICE_PYTHON` belong to the laptop rather than to a home, so they have no config file: `bin/fm-voice-client.py` requires the relay path as a flag or that variable and carries no default path.
 
 ## Environment variables

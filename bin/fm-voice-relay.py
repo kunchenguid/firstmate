@@ -37,7 +37,8 @@ recorded in data/speech-to-speech-survey-s2/report.md section 10:
      silence is sent unpaced. The 400 ms default is margin that costs nothing.
 
 Read scope, deny list and the handover queue all belong to bin/fm_voice_records.py.
-docs/voice-relay.md is the operator-facing guide and owns the wire contract.
+bin/fm_voice_frame.py owns the wire contract between the two machines, and
+docs/voice-relay.md is the operator-facing guide.
 
 CONFIGURATION. The region, the model and the AWS profile name somebody's account
 and somebody's choices, so this file carries no default for them. Each is read

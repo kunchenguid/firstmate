@@ -101,9 +101,11 @@ cd <your firstmate home>
 
 The clip is headerless 16000 Hz mono signed 16-bit little-endian PCM and must end
 on speech, not silence. It prints one JSON line: what it heard, what it said, how
-long each stage took, and whether it answered at all. Feed it a clip that already
-ends in silence and it will tell you the timings are measured from the wrong
-instant rather than printing a number that looks fast.
+long each stage took, whether it answered at all, and, in `relay_error`, what
+broke when a turn broke rather than merely going unanswered, so an
+infrastructure failure is not read as a slow answer. Feed it a clip that
+already ends in silence and it will tell you the timings are measured from the
+wrong instant rather than printing a number that looks fast.
 
 ## Setting up the laptop
 
@@ -148,15 +150,18 @@ An unconfigured home gets the narrow scope: counts of what is in flight, what is
 Widening that is one line the captain of those records writes into `config/voice-read-scope` themselves.
 Two whole classes of record are excluded at every scope, and excluded by construction rather than filtered on the way out:
 
-- **Finished work**, because a spoken "what is happening" answer is about open
-  work, and old engagements accumulate in the history.
+- **Finished work in the backlog's done history**, because a spoken "what is
+  happening" answer is about open work, and old engagements accumulate there.
 - **Free-form note bodies**, because they are written for someone with the whole
   file in front of them, and they are where commercial detail gets quoted.
 
-Only open work and this home's own runtime records are ever assembled. Verified
-against the captain's live records on 2026-08-21: every occurrence of the one
-customer identifier those records contain sits in finished work or a note body,
-so nothing a status answer can say names a customer.
+Only open work and this home's own runtime records are ever assembled.
+A task keeps its runtime record until teardown, so the count of workers on deck
+and the states beside it still include one whose item is already done; both are a
+number and a state word, never anything written in a record.
+Verified against the captain's live records on 2026-08-21: every occurrence of
+the one customer identifier those records contain sits in finished work or a note
+body, so nothing a status answer can say names a customer.
 `tests/fm-voice-relay.test.sh` holds that boundary as an executable check, so
 widening the reader later fails a test instead of quietly widening what is sent.
 
@@ -208,6 +213,12 @@ asks for the records, takes them, and then never answers at all.
 Reconnecting costs 0.02 seconds and happens while the captain is pressing the
 talk key rather than while they are waiting for a reply, so it is invisible. With
 it, six turns in a row all answered.
+
+The same path covers a session the model ends on its own, mid-conversation: that
+costs the turn it was in and not the relay, and the next talk key builds a
+replacement. Either way the client hears about it at once rather than waiting out
+the whole reply timeout in silence, and a turn that broke rather than merely
+ending carries the reason on its own JSON record.
 
 **What it gives up is memory.** Every question starts fresh, so "and what about
 that one" will not work. Carrying context across turns means handling

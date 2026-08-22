@@ -27,7 +27,8 @@ Audio is raw PCM rather than base64 because base64 belongs to the Bedrock
 event protocol, not to this hop, and the extra third of the bytes would sit
 inside the latency this build exists to measure.
 
-docs/voice-relay.md is the owner of this contract and of the sample rates.
+This module is the owner of the contract above and of the sample rates;
+docs/voice-relay.md is the operator-facing guide and points here for the format.
 This module is copied to the laptop beside fm-voice-client.py, so it imports
 nothing outside the standard library.
 """
