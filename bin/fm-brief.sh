@@ -54,6 +54,11 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout briefs both carry a fixed budget note right after {TASK}: any
+# money or usage frame stated there for image, model, or measurement calls must
+# also name its invocation path (which gateway alias, the house channel, or
+# local with which key), so a worker never mistakes a deliberately absent local
+# key for a defect. It applies only when {TASK} actually states a budget.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -307,12 +312,16 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+BUDGET_NOTE='**Budget note:** if the task above states a money or usage frame for image, model, or measurement calls, it must also name the invocation path - a gateway alias (which one), the house channel, or local with a key (which variable/source). A budget without a stated path sends the worker hunting for a key that may not exist.'
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
 {TASK}
+
+$BUDGET_NOTE
 
 $HERDR_SECTION
 
@@ -425,6 +434,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+
+$BUDGET_NOTE
 
 $HERDR_SECTION
 
