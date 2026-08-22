@@ -927,8 +927,68 @@ test_empty_fleet_recovery_stays_silent_across_rearms() {
   pass "watch-arm: an empty fleet re-arms silently instead of resurfacing nothing"
 }
 
+# Start the real watcher on top of a lock a dead predecessor left behind, so
+# fm-watch.sh reclaims that lock ITSELF rather than being handed one an arm has
+# already cleared. That reclaim is the one path that reaches recovery without
+# any arm-side publication.
+start_reclaiming_watcher() {  # <home> <state> <fakebin> <watch-out>
+  local home=$1 state=$2 fakebin=$3 out=$4
+  mkdir -p "$state/.watch.lock"
+  dead_pid > "$state/.watch.lock/pid"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  ARM_PID=$!
+}
+
+# The worth-sending test must not depend on which recovery marker happens to be
+# pending. A watcher that reclaims a stale lock itself becomes recovery-pending
+# with no arm-published episode of its own, so it has to obey the same rule:
+# silent over an empty fleet, resurfacing when a source really holds something.
+test_reclaimed_stale_lock_obeys_the_presentable_test() {
+  local dir home state fakebin i lock_pid
+
+  dir=$(make_case reclaim-stale-lock-silence)
+  home="$dir/home"; state="$dir/state"; fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  start_reclaiming_watcher "$home" "$state" "$fakebin" "$dir/silent.out"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ "$lock_pid" = "$ARM_PID" ] && break
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$lock_pid" = "$ARM_PID" ] \
+    || fail "the watcher did not reclaim the stale lock itself, so this case proves nothing: $(cat "$dir/silent.out")"
+  expect_silent_arm "a stale-lock reclaim over an empty fleet" "$dir/silent.out"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/silent-drain.out" 2>/dev/null \
+    || fail "stale-lock reclaim drain failed"
+  [ ! -s "$dir/silent-drain.out" ] \
+    || fail "stale-lock reclaim presented work that does not exist: $(cat "$dir/silent-drain.out")"
+  close_live_watcher "$state"
+
+  dir=$(make_case reclaim-stale-lock-work)
+  home="$dir/home"; state="$dir/state"; fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  seed_open_decision "$state" reclaimed-lock-signoff
+  start_reclaiming_watcher "$home" "$state" "$fakebin" "$dir/work.out"
+  wait_for_exit "$ARM_PID" 80 \
+    || fail "a stale-lock reclaim holding an open decision did not resurface it"
+  grep -F 'check: rearm-resurface' "$dir/work.out" >/dev/null \
+    || fail "a stale-lock reclaim holding an open decision stayed silent: $(cat "$dir/work.out")"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/work-drain.out" 2>/dev/null \
+    || fail "stale-lock reclaim recovery drain failed"
+  grep -F 'held [key=reclaimed-lock-signoff] needs-decision:' "$dir/work-drain.out" >/dev/null \
+    || fail "the resurfaced stale-lock reclaim did not present the still-open decision"
+
+  pass "watch-arm: a watcher reclaiming a stale lock resurfaces only real work"
+}
+
 test_recovery_still_surfaces_every_presentable_source
 test_empty_fleet_recovery_stays_silent_across_rearms
+test_reclaimed_stale_lock_obeys_the_presentable_test
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver

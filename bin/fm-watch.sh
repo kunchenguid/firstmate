@@ -872,15 +872,22 @@ resurface_after_downtime() {
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
   fi
   if ! recovery_has_presentable_work; then
+    # Proving there is nothing to present is the whole test, so it decides the
+    # wake on its own, whatever the marker says: a recovery pending through the
+    # watcher's own stale-lock reclaim, or one already moved to handling, is
+    # just as empty as a published downtime episode. Retirement is a separate
+    # best-effort step because only a downtime generation is this watcher's to
+    # retire; a handling one belongs to the drain. A failed retirement is safe
+    # to ignore - it means a wake landed alongside this decision, and the next
+    # poll's arm check sees that non-empty queue and recovers it.
     fm_recovery_marker_snapshot "$WATCHER_DOWNTIME_MARKER" || true
     case "$FM_RECOVERY_MARKER_TOKEN" in
       pending:downtime:*)
-        if retire_empty_recovery_episode "${FM_RECOVERY_MARKER_TOKEN##*:}"; then
-          WATCHER_RECOVERY_PENDING=0
-          return 0
-        fi
+        retire_empty_recovery_episode "${FM_RECOVERY_MARKER_TOKEN##*:}" || true
         ;;
     esac
+    WATCHER_RECOVERY_PENDING=0
+    return 0
   fi
   wake "check: rearm-resurface"
 }
