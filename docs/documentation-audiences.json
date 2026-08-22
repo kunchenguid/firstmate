@@ -43,6 +43,21 @@
       "target": "docs/documentation-audiences.md"
     },
     {
+      "source": "AGENTS.md",
+      "target": "docs/configuration.md",
+      "fragment": "operational-home-layout-and-state",
+      "linkText": "operational home layout and state"
+    },
+    {
+      "source": "AGENTS.md",
+      "target": "docs/configuration.md",
+      "fragment": "agent-private-state-never-touch"
+    },
+    {
+      "source": "AGENTS.md",
+      "target": "bin/fm-search.sh"
+    },
+    {
       "source": "CONTRIBUTING.md",
       "target": "docs/documentation-audiences.md"
     },

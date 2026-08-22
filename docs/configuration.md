@@ -24,6 +24,14 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+### Agent-private state (never touch)
+
+Three `state/` families are agent-private runtime machinery, not catalog entries, and must never be edited, deleted, or hand-written by an agent; their producing scripts own both the format and the only safe mutation path.
+`.claude-autoarm.lock`, `.claude-autoarm-epoch`, `.claude-autoarm-failure-notified`, `.claude-autoarm-failure-alarmed`, `.turnend-claude-blocks`, and `.turnend-claude-blocks.lock` are Claude Stop auto-arm single-flight, epoch, failure-episode, attended-alarm, guard-budget, and budget-lock records.
+`.hash-*`, `.count-*`, `.stale-*`, `.stale-since-*`, `.paused-*`, `.wedge-escalations-*`, `.seen-*`, `.hb-surfaced-*`, `.last-*`, and `.heartbeat-streak` are watcher internals.
+`.subsuper-*` and `.supervise-daemon.*` are sub-supervisor internals.
+`AGENTS.md` keeps a concise inline stub of this prohibition because it fires on wakes the owning scripts are not loaded for.
+
 ## Local knowledge search (bin/fm-search.sh)
 
 Default repository-root ripgrep skips gitignored `data/`, `state/`, and `config/` plus hidden `.agents/skills/`, so a search from the operational home can miss the private corpus while still matching tracked non-hidden files.
@@ -365,7 +373,7 @@ Expired entries stop suppressing automatically but remain neutral history rather
 Dispatch consultation reads the file alongside current quota evidence.
 Before it creates an endpoint, `fm-spawn.sh` passes the catalog-established `--dispatch-provider` and `--dispatch-model-family` axes, and any `--dispatch-override-reason`, to `bin/fm-quota-cooldown.sh authorize` and relays its status: the operator-visible outcome is that a cooled spawn stops with exit 3 before any task state exists, while a captain-authorized one launches and leaves the departure on the record.
 That script's header owns which candidate is refused, which axes it demands, and how an override is recorded; a provider-scoped entry therefore stops automatic spawns in that home that omit `--dispatch-provider` until it expires.
-While this file exists, a crewmate or scout spawn records the same `dispatch=` attestation block that an active dispatch profile produces, plus `dispatch_provider=` and `dispatch_model_family=` for the axes it was passed (`AGENTS.md` section 2 owns the `state/<id>.meta` key inventory).
+While this file exists, a crewmate or scout spawn records the same `dispatch=` attestation block that an active dispatch profile produces, plus `dispatch_provider=` and `dispatch_model_family=` for the axes it was passed (the `state/<id>.meta` key inventory and mutation mechanics are owned by "Operational home layout and state" above together with each producing script header; `bin/fm-spawn.sh` owns the base fields it emits).
 When no active entry could apply, existing dispatches remain backward-compatible and do not need the extra axes.
 There is no daemon and no manual re-enable step.
 

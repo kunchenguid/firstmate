@@ -43,6 +43,11 @@ elif mode.name == "missing-owner-pointer":
         "source": "README.md",
         "target": "docs/sessionstart-nudge.md",
     }
+elif mode.name == "linktext-without-fragment":
+    for pointer in data["requiredOwnerPointers"]:
+        if pointer["target"] == "bin/fm-search.sh":
+            pointer["linkText"] = "search script"
+            break
 elif mode.name == "shrink-scope":
     data["scope"]["trackedPatterns"] = ["README.md"]
 else:
@@ -83,6 +88,14 @@ test_required_pointer_fails() {
   run_expect_failure "required owner pointer missing" \
     "$CHECK" --inventory "$missing_pointer"
   pass "required documentation owner pointers cannot silently disappear"
+}
+
+test_linktext_without_fragment_fails() {
+  local orphan_label="$TMP_ROOT/orphan-label.json"
+  mutate_inventory "$INVENTORY" "$orphan_label" linktext-without-fragment
+  run_expect_failure "linkText requires fragment" \
+    "$CHECK" --inventory "$orphan_label"
+  pass "an owner pointer cannot carry a linkText label without the fragment that enforces it"
 }
 
 write_fixture_inventory() {
@@ -135,7 +148,101 @@ MD
   pass "local links resolve while dates, versions, commands, and incident prose remain semantically reviewed"
 }
 
+write_pointer_fixture() {
+  local repo=$1
+  mkdir -p "$repo/docs" "$repo/bin"
+  git -C "$repo" init -q
+  printf '%s\n' '#!/usr/bin/env bash' > "$repo/bin/fm-search.sh"
+  printf '%s\n' '# README
+
+[Configuration](docs/configuration.md)' > "$repo/README.md"
+  cat > "$repo/AGENTS.md" <<'MD'
+# AGENTS
+
+Specific entries resolve through [operational home layout and state](docs/configuration.md#operational-home-layout-and-state) and the producing script headers named there.
+Metadata entries also resolve through [docs/configuration.md](docs/configuration.md#operational-home-layout-and-state).
+Three state families must never be touched directly; see [docs/configuration.md](docs/configuration.md#agent-private-state-never-touch) for the prohibition.
+To search that private and hidden corpus, use bin/fm-search.sh; docs/configuration.md "Local knowledge search" owns it.
+MD
+  cat > "$repo/docs/configuration.md" <<'MD'
+# Configuration
+
+## Operational home layout and state
+
+Owner of the top-level contract.
+
+### Agent-private state (never touch)
+
+Three state families are agent-private runtime machinery.
+MD
+  cat > "$repo/docs/documentation-audiences.json" <<'JSON'
+{
+  "version": 1,
+  "scope": {"trackedPatterns": ["*.md", "*.mdx", "*.rst", "*.txt", "docs/examples/*"]},
+  "allowedAudiences": ["public-product", "operator-current", "operator-example", "maintainer-architecture", "maintainer-verification", "agent-runtime"],
+  "setupAudiences": ["public-product", "operator-current", "operator-example"],
+  "readmeSetupTargets": ["docs/configuration.md"],
+  "requiredOwnerPointers": [
+    {"source": "AGENTS.md", "target": "docs/configuration.md", "fragment": "operational-home-layout-and-state", "linkText": "operational home layout and state"},
+    {"source": "AGENTS.md", "target": "docs/configuration.md", "fragment": "agent-private-state-never-touch"},
+    {"source": "AGENTS.md", "target": "bin/fm-search.sh"}
+  ],
+  "surfaces": [
+    {"path": "README.md", "audience": "public-product"},
+    {"path": "AGENTS.md", "audience": "agent-runtime"},
+    {"path": "docs/configuration.md", "audience": "operator-current"}
+  ]
+}
+JSON
+  git -C "$repo" add README.md AGENTS.md docs bin
+}
+
+remove_line_containing() {
+  local file=$1 needle=$2
+  grep -v -F -- "$needle" "$file" > "$file.tmp" && mv -f -- "$file.tmp" "$file"
+}
+
+test_anchored_owner_pointer_pins_collapsed_block() {
+  local repo="$TMP_ROOT/pointer-fixture"
+  write_pointer_fixture "$repo"
+  "$CHECK" --root "$repo" >/dev/null \
+    || fail "anchored owner-pointer contract rejected the intact collapsed block"
+  [ "$(grep -Fc 'docs/configuration.md#operational-home-layout-and-state' "$repo/AGENTS.md")" -eq 2 ] \
+    || fail "pointer fixture did not reproduce the duplicate layout fragment"
+  remove_line_containing "$repo/AGENTS.md" "[operational home layout and state](docs/configuration.md#operational-home-layout-and-state)"
+  git -C "$repo" add AGENTS.md
+  run_expect_failure "required owner pointer missing: AGENTS.md -> docs/configuration.md#operational-home-layout-and-state" \
+    "$CHECK" --root "$repo"
+  pass "deleting only the layout pointer fails while the duplicate metadata fragment remains"
+}
+
+test_never_touch_stub_is_pinned() {
+  local repo="$TMP_ROOT/stub-fixture"
+  write_pointer_fixture "$repo"
+  remove_line_containing "$repo/AGENTS.md" "agent-private-state-never-touch"
+  git -C "$repo" add AGENTS.md
+  run_expect_failure "required owner pointer missing: AGENTS.md -> docs/configuration.md#agent-private-state-never-touch" \
+    "$CHECK" --root "$repo"
+  pass "deleting the never-touch safety stub fails the anchored owner-pointer contract"
+}
+
+test_local_search_pointer_is_pinned() {
+  local repo="$TMP_ROOT/search-pointer-fixture"
+  write_pointer_fixture "$repo"
+  "$CHECK" --root "$repo" >/dev/null \
+    || fail "local search owner pointer rejected while intact"
+  remove_line_containing "$repo/AGENTS.md" "bin/fm-search.sh"
+  git -C "$repo" add AGENTS.md
+  run_expect_failure "required owner pointer missing: AGENTS.md -> bin/fm-search.sh" \
+    "$CHECK" --root "$repo"
+  pass "deleting the local search pointer fails the owner-pointer contract"
+}
+
 test_repository_inventory_passes
 test_duplicate_and_setup_classification_fail
 test_required_pointer_fails
+test_linktext_without_fragment_fails
 test_local_links_and_no_keyword_heuristic
+test_anchored_owner_pointer_pins_collapsed_block
+test_never_touch_stub_is_pinned
+test_local_search_pointer_is_pinned

@@ -20,7 +20,9 @@
 # authorization; before the merge attempt, the override is recorded in the
 # task metadata and disclosed on stderr. An ordinary merge that needs no
 # override instead clears a stale receipt before merging, and either write
-# failing refuses the merge rather than landing an untrue audit record.
+# failing refuses the merge rather than landing an untrue audit record. The
+# override is the missing_review_override_ts= line in state/<id>.meta, recorded
+# before a missing-Review merge attempt and cleared by an ordinary merge.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--allow-red] [--allow-missing-review] [-- <extra gh-axi pr merge args>]
 set -eu
 

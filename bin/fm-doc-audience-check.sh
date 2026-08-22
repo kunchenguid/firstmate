@@ -25,6 +25,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
+MARKDOWN_OWNER_LINK_RE = re.compile(r"!?\[([^\]]+)\]\(([^)]+)\)")
 HTML_LINK_RE = re.compile(r"\b(?:href|src)=[\"']([^\"']+)[\"']", re.IGNORECASE)
 REQUIRED_TRACKED_PATTERNS = ["*.md", "*.mdx", "*.rst", "*.txt", "docs/examples/*"]
 
@@ -107,6 +108,19 @@ def markdown_local_links(root: Path, source: Path) -> list[tuple[str, Path]]:
         target = resolve_local_target(root, source, raw)
         if target is not None:
             result.append((raw, target))
+    return result
+
+
+def markdown_owner_links(root: Path, source: Path) -> list[tuple[str, str, Path]]:
+    try:
+        text = source.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        fail(f"cannot read prose surface {source.relative_to(root)}: {exc}")
+    result: list[tuple[str, str, Path]] = []
+    for label, raw in MARKDOWN_OWNER_LINK_RE.findall(text):
+        target = resolve_local_target(root, source, raw)
+        if target is not None:
+            result.append((label, raw, target))
     return result
 
 
@@ -206,8 +220,18 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
             fail(f"requiredOwnerPointers[{index}] must be an object")
         source = pointer.get("source")
         target = pointer.get("target")
+        fragment = pointer.get("fragment")
+        link_text = pointer.get("linkText")
         if not isinstance(source, str) or not isinstance(target, str) or not source or not target:
             fail(f"requiredOwnerPointers[{index}] needs non-empty source and target")
+        if fragment is not None and (not isinstance(fragment, str) or not fragment):
+            fail(f"requiredOwnerPointers[{index}].fragment must be a non-empty string")
+        if link_text is not None and (not isinstance(link_text, str) or not link_text):
+            fail(f"requiredOwnerPointers[{index}].linkText must be a non-empty string")
+        if link_text is not None and fragment is None:
+            # linkText is only consulted by the anchored (fragment) branch, so
+            # accepting it without a fragment would silently ignore the label.
+            fail(f"requiredOwnerPointers[{index}].linkText requires fragment")
         source_path = root / source
         target_path = root / target
         if not source_path.exists():
@@ -218,14 +242,35 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
             source_text = source_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             fail(f"owner-pointer source is unreadable {source}: {exc}")
-        linked_targets: set[str] = set()
-        if source_path.suffix.lower() in {".md", ".mdx"}:
-            linked_targets = {
-                os.path.relpath(linked, root).replace(os.sep, "/")
-                for _, linked in markdown_local_links(root, source_path)
-            }
-        if target not in source_text and target not in linked_targets:
-            fail(f"required owner pointer missing: {source} -> {target}")
+        if fragment is not None:
+            # Anchored contract: require a markdown link whose target resolves
+            # to `target` and whose fragment equals `fragment`. Unlike the whole
+            # file substring match below, this fails when the specific link
+            # paragraph is deleted even if `target` appears elsewhere as prose.
+            if source_path.suffix.lower() not in {".md", ".mdx"}:
+                fail(f"requiredOwnerPointers[{index}].fragment needs a markdown source: {source}")
+            anchored = False
+            owner_links = markdown_owner_links(root, source_path)
+            for label, raw, linked in owner_links:
+                rel = os.path.relpath(linked, root).replace(os.sep, "/")
+                if (
+                    rel == target
+                    and unquote(urlsplit(normalized_link_value(raw)).fragment) == fragment
+                    and (link_text is None or label == link_text)
+                ):
+                    anchored = True
+                    break
+            if not anchored:
+                fail(f"required owner pointer missing: {source} -> {target}#{fragment}")
+        else:
+            linked_targets: set[str] = set()
+            if source_path.suffix.lower() in {".md", ".mdx"}:
+                linked_targets = {
+                    os.path.relpath(linked, root).replace(os.sep, "/")
+                    for _, linked in markdown_local_links(root, source_path)
+                }
+            if target not in source_text and target not in linked_targets:
+                fail(f"required owner pointer missing: {source} -> {target}")
 
     checked_links = 0
     anchor_cache: dict[Path, set[str]] = {}

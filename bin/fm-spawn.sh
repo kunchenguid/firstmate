@@ -146,7 +146,14 @@
 #   quota-axi reading that informed the choice) into the intake row, so the
 #   telemetry join can report per-subscription quota utilization. fm-spawn
 #   writes only what is passed and omits the rest, so a no-profile or legacy
-#   spawn stays byte-identical to before.
+#   spawn stays byte-identical to before. Those routing facts are recorded in
+#   state/<id>.meta as the keys matched_rule=, quota_decision=, quota_headroom=,
+#   quota_runway=, dispatch_provider=, dispatch_model_family=, routing_source=,
+#   dispatch= (resolved|override), and dispatch_override_reason=, each written
+#   only when set so a no-profile spawn stays byte-identical.
+#   A --secondmate spawn on a REMOTE route records remote_host=, remote_root=,
+#   remote_backend=, remote_herdr_session=, and remote_target= in state/<id>.meta
+#   so the route is reconciled from task metadata rather than a shared namespace.
 #   A --secondmate spawn is exempt and resolves the SECONDMATE harness
 #   (config/secondmate-harness -> config/crew-harness
 #   -> own), so the secondmate-vs-crewmate split is DURABLE across every respawn
@@ -234,6 +241,13 @@
 # Cursor Agent uses task-root-local .cursor/hooks.json, excluded through Git
 # info/exclude for writer worktrees so Firstmate machinery never enters project diffs.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [access=reader] [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+# Every spawn's state/<id>.meta opens with the same base inventory:
+# window=, endpoint_task_id=, worktree=, project=, harness=, kind=, tasktmp=,
+# model=, and effort= (model= and effort= record the literal default when the
+# axis is unset); busy_gen= is recorded when the busy-state contract was armed
+# for the harness. The conditional access=, dispatch, quota, remote-route,
+# backend, telemetry, and traceparent fields are owned by their own entries in
+# this header, and backend-specific fields resolve through bin/fm-backend.sh.
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
