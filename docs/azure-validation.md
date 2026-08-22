@@ -420,6 +420,11 @@ A missing pane, terminal, process, Run Command, or VM never authorizes a duplica
 `replace` first requires an exact Azure inventory to prove the old VM absent, the retained worktree disk present with its recorded id and ETag, the credential lease unchanged and detached, and a recoverable phase.
 It creates a new fenced VM/boot attempt but reuses the same cell identity, private container, encrypted worktree, no-mistakes home/database, credential lease, task, branch, and validation generation.
 
+The runtime and shard bridge live on the disposable OS disk, so a retained-run replacement hydrates them before reattach.
+A separate current-controller Run Command reads only the original private input object, verifies its original input and request digests, every sealed artifact digest, the new VM identity, and the retained worktree-disk binding, then restores only the exact runtime and shard bridge under `/opt`.
+The controller requires one digest-complete hydration marker before it launches the cell's unchanged digest-sealed guest.
+Hydration never replaces the retained repository, no-mistakes database, or agent home, and replacement remains `reattach`; it does not submit fresh intent or restart the test run.
+
 The replacement guest refuses unless the retained identity file matches the request, branch, current head, worktree disk, credential lease, and exact no-mistakes run id.
 It then requires `no-mistakes axi status` from the retained database to contain that exact run id before invoking `no-mistakes axi run` without an intent.
 A missing or ambiguous proof retains both disks and starts nothing.

@@ -28,15 +28,20 @@ INPUT_URL=${input_url:-}
 OUTPUT_URL=${output_url:-}
 RESPONSE=${response:-}
 GITHUB_TOKEN_VALUE=${github_token:-}
+HYDRATOR_DIGEST=${hydrator_digest:-}
 unset mode input_digest request_digest cell attempt vm_resource_id vm_instance_id
 unset worktree_disk_id storage_account storage_container identity_client_id auth_share
-unset input_url output_url response github_token
+unset input_url output_url response github_token hydrator_digest
 case "$MODE" in
   start)
     [ -n "$INPUT_URL" ] && [ -n "$OUTPUT_URL" ] || { echo "validation guest: start capability is absent" >&2; exit 125; }
     ;;
   reattach)
     [ -n "$OUTPUT_URL" ] || { echo "validation guest: reattach capability is absent" >&2; exit 125; }
+    ;;
+  hydrate)
+    [ -n "$INPUT_URL" ] || { echo "validation guest: hydration capability is absent" >&2; exit 125; }
+    case "$HYDRATOR_DIGEST" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "validation guest: hydrator digest is malformed" >&2; exit 125 ;; esac
     ;;
   respond)
     [ -n "$RESPONSE" ] || { echo "validation guest: response is absent" >&2; exit 125; }
@@ -50,11 +55,14 @@ case "$INPUT_DIGEST" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "validation guest: 
 case "$REQUEST_DIGEST" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "validation guest: request digest is malformed" >&2; exit 125 ;; esac
 case "$CELL" in azv-[a-z0-9][a-z0-9]*) ;; *) echo "validation guest: cell identity is malformed" >&2; exit 125 ;; esac
 case "$ATTEMPT" in ''|*[!0-9]*) echo "validation guest: attempt is malformed" >&2; exit 125 ;; esac
-case "$OUTPUT_URL" in https://*) ;; *) if [ "$MODE" != respond ]; then echo "validation guest: output capability is not HTTPS" >&2; exit 125; fi ;; esac
-case "$INPUT_URL" in https://*) ;; *) if [ "$MODE" = start ]; then echo "validation guest: input capability is not HTTPS" >&2; exit 125; fi ;; esac
-[ -n "$GITHUB_TOKEN_VALUE" ] || { echo "validation guest: GitHub token parameter is absent" >&2; exit 125; }
+case "$OUTPUT_URL" in https://*) ;; *) if [ "$MODE" = start ] || [ "$MODE" = reattach ]; then echo "validation guest: output capability is not HTTPS" >&2; exit 125; fi ;; esac
+case "$INPUT_URL" in https://*) ;; *) if [ "$MODE" = start ] || [ "$MODE" = hydrate ]; then echo "validation guest: input capability is not HTTPS" >&2; exit 125; fi ;; esac
+if [ "$MODE" != hydrate ]; then
+  [ -n "$GITHUB_TOKEN_VALUE" ] || { echo "validation guest: GitHub token parameter is absent" >&2; exit 125; }
+fi
 
 BOOTSTRAP=/var/lib/fm-azure-validation
+TRUSTED_ROOT=/opt/fm-azure-validation
 install -d -m 0700 -o root -g root "$BOOTSTRAP"
 
 missing=()
@@ -350,7 +358,8 @@ auth_home_push() {
   echo "validation guest: auth-home push failed; refreshed tokens stay cell-local" >&2
 }
 
-if [ "$MODE" = start ]; then
+# BEGIN SEALED INPUT HYDRATION
+if [ "$MODE" = start ] || [ "$MODE" = hydrate ]; then
   INPUT=$BOOTSTRAP/input.tar.gz
   CURL_CONFIG=$BOOTSTRAP/input.curl
   printf 'url = "%s"\nfail\nsilent\nshow-error\noutput = "%s"\n' "$INPUT_URL" "$INPUT" >"$CURL_CONFIG"
@@ -379,8 +388,8 @@ with tarfile.open(source, "r:gz") as archive:
             raise SystemExit("validation guest: unsafe input member")
     archive.extractall(destination, members=members)
 PY
-  REQUEST=$EXTRACT/request.json
-  python3 - "$REQUEST" "$REQUEST_DIGEST" "$CELL" "$WORKTREE_DISK_ID" "$EXTRACT/snapshot.bundle" "$EXTRACT/runtime.tar.gz" "$EXTRACT/credentials.tar.gz" "$EXTRACT/shard-bridge.py" <<'PY'
+  SEALED_REQUEST=$EXTRACT/request.json
+  python3 - "$SEALED_REQUEST" "$REQUEST_DIGEST" "$CELL" "$WORKTREE_DISK_ID" "$EXTRACT/snapshot.bundle" "$EXTRACT/runtime.tar.gz" "$EXTRACT/credentials.tar.gz" "$EXTRACT/shard-bridge.py" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -420,16 +429,23 @@ if digest(sys.argv[7]) != request["credentials"]["bundle_digest"]:
 if digest(sys.argv[8]) != request["protocol"]["shard_bridge_digest"]:
     raise SystemExit("validation guest: shard bridge digest mismatch")
 PY
-  cp "$REQUEST" "$STATE/request.json"
-  chmod 0600 "$STATE/request.json"
-  RUNTIME=/opt/fm-azure-validation/runtime
+  REQUEST=$STATE/request.json
+  if [ "$MODE" = start ]; then
+    cp "$SEALED_REQUEST" "$REQUEST"
+    chmod 0600 "$REQUEST"
+  else
+    [ -f "$REQUEST" ] || { echo "validation guest: retained request is absent" >&2; exit 125; }
+    [ "$(sha256sum "$SEALED_REQUEST" | awk '{print $1}')" = "$(sha256sum "$REQUEST" | awk '{print $1}')" ] \
+      || { echo "validation guest: staged request differs from retained exact request" >&2; exit 125; }
+  fi
+  RUNTIME=$TRUSTED_ROOT/runtime
   rm -rf "$RUNTIME"
   # install -d applies -m only to the directories it is given; implicit
   # parent components are created at the process umask, and this run-command
   # context runs at umask 077, which left /opt/fm-azure-validation itself
   # 0700 root-only and untraversable for fmvalidate even with a correct
   # runtime tree below it. Name the parent explicitly.
-  install -d -m 0755 -o root -g root /opt/fm-azure-validation "$RUNTIME"
+  install -d -m 0755 -o root -g root "$TRUSTED_ROOT" "$RUNTIME"
   tar -xzf "$EXTRACT/runtime.tar.gz" -C "$RUNTIME" --no-same-owner --no-same-permissions
   # --no-same-permissions applies this process's umask, and the Azure run
   # command context runs with umask 077, so every runtime file lands
@@ -665,7 +681,16 @@ for path in root.rglob("*"):
 if actual != seen:
     raise SystemExit("validation guest: runtime inventory mismatch")
 PY
-  install -m 0755 -o root -g root "$EXTRACT/shard-bridge.py" /opt/fm-azure-validation/shard-bridge.py
+  install -m 0755 -o root -g root "$EXTRACT/shard-bridge.py" "$TRUSTED_ROOT/shard-bridge.py"
+  if [ "$MODE" = hydrate ]; then
+    [ -d "$HOME_DIR" ] || { echo "validation guest: retained agent home is absent" >&2; exit 125; }
+    [ -d "$REPO" ] || { echo "validation guest: retained repository is absent" >&2; exit 125; }
+    printf 'FM_AZURE_VALIDATION_HYDRATED source=%s input=%s request=%s runtime=%s bridge=%s attempt=%s\n' \
+      "$HYDRATOR_DIGEST" "$INPUT_DIGEST" "$REQUEST_DIGEST" \
+      "$(jq -r '.runtime_digest' "$REQUEST")" \
+      "$(jq -r '.protocol.shard_bridge_digest' "$REQUEST")" "$ATTEMPT"
+    exit 0
+  fi
   if [ -e "$REPO" ]; then
     echo "validation guest: new cell found an existing repository" >&2
     exit 125
@@ -698,6 +723,7 @@ else
   [ -f "$REQUEST" ] || { echo "validation guest: retained request is absent" >&2; exit 125; }
   [ -d "$HOME_DIR" ] || { echo "validation guest: retained agent home is absent" >&2; exit 125; }
 fi
+# END SEALED INPUT HYDRATION
 
 # Overlay the persistent auth home on every attempt so refreshed tokens from
 # any earlier cell or runner win over the submit-time seed.
@@ -742,7 +768,7 @@ chmod 0600 "$GITHUB_TOKEN_FILE"
 # rest of the process; fmvalidate children inherit it harmlessly (own repo).
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=$REPO
 
-RUNTIME=/opt/fm-azure-validation/runtime
+RUNTIME=$TRUSTED_ROOT/runtime
 NM_BIN=$RUNTIME/$(jq -r '.runtime.no_mistakes_path' "$REQUEST")
 PROVIDER_BIN=$RUNTIME/$(jq -r '.runtime.provider_path' "$REQUEST")
 GH_BIN=$RUNTIME/$(jq -r '.runtime.gh_path' "$REQUEST")
@@ -780,7 +806,7 @@ ENV_FILE=$STATE/cell.env
   printf 'TMPDIR=%s\n' "$TMP"
   printf 'FM_AZURE_VALIDATION_CELL=1\n'
   printf 'FM_AZURE_VALIDATION_CELL_ID=%s\n' "$CELL"
-  printf 'FM_AZURE_VALIDATION_SHARD_BRIDGE=/opt/fm-azure-validation/shard-bridge.py\n'
+  printf 'FM_AZURE_VALIDATION_SHARD_BRIDGE=%s/shard-bridge.py\n' "$TRUSTED_ROOT"
   printf 'FM_AZURE_VALIDATION_SHARD_EXCHANGE=%s\n' "$SHARD_EXCHANGE"
   printf 'FM_AZURE_VALIDATION_SHARD_COUNT=%s\n' "$(jq -r '.limits.behavior_shards' "$REQUEST")"
   printf 'FM_AZURE_VALIDATION_STORAGE_ACCOUNT=%s\n' "$STORAGE_ACCOUNT"

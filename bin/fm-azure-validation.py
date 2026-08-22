@@ -121,6 +121,7 @@ LEGACY_MARKER = re.compile(
 # malformation of the attempt field satisfies "no stamped marker matched".
 GUEST_STAMPS_ATTEMPT = re.compile(r"^[^\n]*FM_AZURE_VALIDATION_RESULT[^\n]*attempt=", re.MULTILINE)
 MARKER_SETTLE_SECONDS = 300
+RUNTIME_HYDRATION_TIMEOUT_SECONDS = 1800
 # Shard transports legitimately run VM creation plus admission plus command
 # submission in one subprocess: near 300 seconds unloaded and well past it
 # under any operator-host load. The old 300-second cap manufactured
@@ -2802,6 +2803,25 @@ def sealed_guest_text(env, state):
     )
 
 
+def trusted_hydrator_text():
+    """Return the exact current guest bytes used only for replacement hydration.
+
+    A cell resume still executes its original digest-sealed guest. The current
+    guest is a separate root-side bootstrap whose only authority is to restore
+    the exact runtime and shard bridge from that cell's original sealed input.
+    Read once so the digest recorded by the controller binds the bytes sent to
+    Azure rather than a different read of a mutable working-tree file.
+    """
+    try:
+        if not GUEST.is_file() or GUEST.is_symlink():
+            raise ValidationError("replacement hydrator is not a regular file")
+        data = GUEST.read_bytes()
+        text = data.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValidationError("replacement hydrator is unreadable: {}".format(exc))
+    return text, sha256_bytes(data)
+
+
 def guest_text_stamps_attempt(text):
     """Does this exact guest text emit an attempt-stamped result marker?"""
     return bool(GUEST_STAMPS_ATTEMPT.search(text))
@@ -2912,6 +2932,166 @@ def create_run_command(env, state, mode, input_url=None, output_url=None, respon
     resources.setdefault("run_commands", []).append({
         "id": run_id,
         "identity": immutable_identity(run_command, "run-command"),
+    })
+    save_state(env, state)
+
+
+def hydration_marker(state, hydrator_digest):
+    return (
+        "FM_AZURE_VALIDATION_HYDRATED source={} input={} request={} "
+        "runtime={} bridge={} attempt={}".format(
+            hydrator_digest,
+            state["input_digest"],
+            state["request_digest"],
+            state["request"]["runtime_digest"],
+            state["request"]["protocol"]["shard_bridge_digest"],
+            state["attempt"],
+        )
+    )
+
+
+def hydration_command_binding_matches(resource, guest_text, arguments):
+    properties = resource.get("properties") or {}
+    source = properties.get("source") or {}
+    if source.get("script") != guest_text:
+        return False
+    observed = properties.get("parameters")
+    if not isinstance(observed, list):
+        return False
+    expected_by_name = {item["name"]: str(item["value"]) for item in arguments}
+    observed_by_name = {
+        item.get("name"): str(item.get("value"))
+        for item in observed
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    if (
+        len(expected_by_name) != len(arguments)
+        or len(observed_by_name) != len(observed)
+        or observed_by_name != expected_by_name
+    ):
+        return False
+    protected = properties.get("protectedParameters")
+    if protected is not None:
+        if not isinstance(protected, list):
+            return False
+        names = [
+            item.get("name")
+            for item in protected
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        ]
+        if names != ["input_url"]:
+            return False
+    return True
+
+
+def create_runtime_hydration_command(env, state, input_url):
+    """Restore OS-disk-only sealed tools before the unchanged guest resumes."""
+    resources = state["resources"]
+    guest_text, hydrator_digest = trusted_hydrator_text()
+    attempt = state["attempt"]
+    name = "hydrate-a{}".format(attempt)
+    run_id = resources["vm_id"] + "/runCommands/" + name
+    arguments = [
+        {"name": "mode", "value": "hydrate"},
+        {"name": "input_digest", "value": state["input_digest"]},
+        {"name": "request_digest", "value": state["request_digest"]},
+        {"name": "cell", "value": state["cell"]},
+        {"name": "attempt", "value": str(attempt)},
+        {"name": "vm_resource_id", "value": resources["vm_id"]},
+        {"name": "vm_instance_id", "value": resources["vm_instance_id"]},
+        {"name": "worktree_disk_id", "value": resources["worktree_disk_id"]},
+        {"name": "storage_account", "value": env["storage"]},
+        {"name": "storage_container", "value": state["staging"]["container"]},
+        {"name": "identity_client_id", "value": resources["identity_client_id"]},
+        {"name": "auth_share", "value": auth_share_name()},
+        {"name": "hydrator_digest", "value": hydrator_digest},
+    ]
+    selected = {
+        "sku": state["allocation"]["sku"],
+        "family": state["allocation"]["sku_family"],
+        "owner": env["owner"],
+    }
+    run_tags = expected_tags(state, selected)
+    run_tags["attempt"] = str(attempt)
+    body_value = {
+        "location": "eastus",
+        "tags": run_tags,
+        "properties": {
+            "source": {"script": guest_text},
+            "parameters": arguments,
+            "protectedParameters": [{"name": "input_url", "value": input_url}],
+            "asyncExecution": True,
+            "timeoutInSeconds": RUNTIME_HYDRATION_TIMEOUT_SECONDS,
+            "treatFailureAsDeploymentFailure": False,
+        },
+    }
+    body = write_private_json(env, ".cell-hydrate-", body_value)
+    try:
+        az_command(env, [
+            "rest", "--method", "put",
+            "--url", "https://management.azure.com{}?api-version={}".format(
+                run_id, RESOURCE_API["run-command"]
+            ),
+            "--body", "@" + str(body),
+        ])
+    finally:
+        body.unlink(missing_ok=True)
+    exists, run_command = read_resource(env, run_id, "run-command")
+    if not exists:
+        raise ValidationError("created runtime hydration command disappeared before identity adoption")
+    tags = run_command.get("tags") or {}
+    if (
+        tags.get("validation-cell") != state["cell"]
+        or tags.get("fence") != state["request"]["fence"]
+        or not hydration_command_binding_matches(run_command, guest_text, arguments)
+    ):
+        raise ValidationError("created runtime hydration command has foreign identity")
+    identity = immutable_identity(run_command, "run-command")
+    resources.setdefault("run_commands", []).append({
+        "id": run_id,
+        "identity": identity,
+        "purpose": "runtime-hydration",
+        "source_digest": hydrator_digest,
+    })
+    save_state(env, state)
+    execution, view = wait_run_command_terminal(
+        env, run_id, RUNTIME_HYDRATION_TIMEOUT_SECONDS
+    )
+    completed_exists, completed = read_resource(env, run_id, "run-command")
+    completed_tags = (completed.get("tags") or {}) if completed_exists else {}
+    if (
+        not completed_exists
+        or completed_tags.get("validation-cell") != state["cell"]
+        or completed_tags.get("fence") != state["request"]["fence"]
+        or not hydration_command_binding_matches(completed, guest_text, arguments)
+        or not same_stable_identity(
+            identity, immutable_identity(completed, "run-command"), "run-command"
+        )
+    ):
+        raise ValidationError(
+            "runtime hydration command identity changed before completion proof"
+        )
+    if execution != "Succeeded":
+        detail = str((view or {}).get("error", ""))[-2000:]
+        raise ValidationError(
+            "exact replacement runtime hydration {}: {}".format(
+                execution.lower(), detail
+            )
+        )
+    output = str((view or {}).get("output", ""))
+    expected = hydration_marker(state, hydrator_digest)
+    if output.splitlines().count(expected) != 1:
+        raise ValidationError("replacement runtime hydration returned no unique exact digest marker")
+    state.setdefault("runtime_hydrations", []).append({
+        "attempt": attempt,
+        "at": iso_utc(),
+        "run_command_id": run_id,
+        "run_command_identity": identity,
+        "hydrator_digest": hydrator_digest,
+        "input_digest": state["input_digest"],
+        "request_digest": state["request_digest"],
+        "runtime_digest": state["request"]["runtime_digest"],
+        "shard_bridge_digest": state["request"]["protocol"]["shard_bridge_digest"],
     })
     save_state(env, state)
 
@@ -3072,10 +3252,7 @@ def dispatch(env, args):
         ))
 
 
-def run_command_status(env, state):
-    run_id = state["resources"].get("run_command_id")
-    if not run_id:
-        return "missing", None
+def run_command_status_for_id(env, run_id):
     url = "https://management.azure.com{}?api-version={}&$expand=instanceView".format(run_id, RESOURCE_API["run-command"])
     value, rc, stderr = az_command(env, ["rest", "--method", "get", "--url", url], check=False)
     if rc != 0:
@@ -3084,6 +3261,32 @@ def run_command_status(env, state):
     view = properties.get("instanceView") or {}
     execution = str(view.get("executionState", "Unknown"))
     return execution, view
+
+
+def wait_run_command_terminal(env, run_id, timeout_seconds):
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        execution, view = run_command_status_for_id(env, run_id)
+        if execution in ("Succeeded", "Failed", "Canceled", "TimedOut"):
+            return execution, view
+        if execution == "unreadable":
+            raise ValidationError(
+                "runtime hydration status is unreadable; resume command was not started: {}".format(
+                    view
+                )
+            )
+        if time.monotonic() >= deadline:
+            raise ValidationError(
+                "runtime hydration did not finish inside its bounded timeout; resume command was not started"
+            )
+        time.sleep(5)
+
+
+def run_command_status(env, state):
+    run_id = state["resources"].get("run_command_id")
+    if not run_id:
+        return "missing", None
+    return run_command_status_for_id(env, run_id)
 
 
 def observe(env, args):
@@ -3500,16 +3703,22 @@ def replace(env, args):
             env, state["staging"]["result_blob"], "cw", hours=MAX_CELL_LIFETIME_HOURS,
             container=state["staging"]["container"],
         )
+        input_url = blob_sas(
+            env, state["staging"]["input_blob"], "r",
+            container=state["staging"]["container"],
+        )
         if run_mode == "start":
-            input_url = blob_sas(
-                env, state["staging"]["input_blob"], "r",
-                container=state["staging"]["container"],
-            )
             create_run_command(env, state, "start", input_url=input_url, output_url=output_url)
             note = "replacement VM freshly starting because no no-mistakes run id was recorded"
         else:
+            # The original guest remains byte-for-byte sealed, but its runtime
+            # and shard bridge lived on the disposable OS disk. A separate
+            # current-controller bootstrap restores those exact artifacts from
+            # the original digest-bound input, proves completion, and exits
+            # before the unchanged guest is allowed to reattach the run.
+            create_runtime_hydration_command(env, state, input_url)
             create_run_command(env, state, "reattach", output_url=output_url)
-            note = "replacement VM reattaching to the exact retained durable worktree"
+            note = "replacement VM hydrated exact sealed tools and reattached the retained run"
         transition(env, state, "running", note)
     print("AZURE VALIDATION REPLACED cell={} attempt={}".format(state["cell"], state["attempt"]))
 

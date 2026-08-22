@@ -280,7 +280,8 @@ assert 'runuser -u fmvalidate -- git -C "$REPO" config credential.helper "$GIT_H
 assert 'runuser -u fmvalidate -- git -C "$REPO" config user.name' in guest
 assert 'runuser -u fmvalidate -- git -C "$REPO" config user.email' in guest
 assert '"$LAUNCH" "$GIT_HELPER"' in guest
-assert 'install -d -m 0755 -o root -g root /opt/fm-azure-validation "$RUNTIME"' in guest
+assert 'TRUSTED_ROOT=/opt/fm-azure-validation' in guest
+assert 'install -d -m 0755 -o root -g root "$TRUSTED_ROOT" "$RUNTIME"' in guest
 assert guest.index("--no-same-permissions") < guest.index("0o755 if member.mode & 0o111")
 for value in ("fm.azure-validation-shard/v1","storage_token","vm_instance_id","boot_id","trusted_verify_manifests"):
     assert value in bridge
@@ -519,6 +520,339 @@ allowed,reason=m.replacement_allowed({"phase":"closed"},"absent-proven")
 assert not allowed and "recoverable work" in reason
 PY2
   pass "controller injects the boot-time GitHub token and fences replacement on VM absence plus recoverable phase"
+}
+
+
+replacement_runtime_hydration_contract() {
+  python3 - "$HOST" <<'PY' || fail "replacement runtime hydration contract failed"
+import contextlib
+import copy
+import hashlib
+import importlib.util
+import os
+import pathlib
+import sys
+import tempfile
+import types
+
+spec=importlib.util.spec_from_file_location("validation",sys.argv[1])
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+cell="azv-aaaaaaaaaaaa"
+fence="sha256:"+"f"*64
+input_digest="sha256:"+"1"*64
+request_digest="sha256:"+"2"*64
+runtime_digest="sha256:"+"3"*64
+bridge_digest="sha256:"+"4"*64
+env={
+  "subscription":"sub","resource_group":"rg","storage":"storage","owner":"owner",
+  "prefix":"fmtest","deployment_generation":"gen",
+}
+
+def seed():
+    return {
+      "cell":cell,"phase":"failed-retained","attempt":3,
+      "run_id":"01AAAAAAAAAAAAAAAAAAAAAAAA",
+      "input_digest":input_digest,"request_digest":request_digest,
+      "allocation":{"sku":"Standard_D8as_v6","sku_family":"standardDav6Family"},
+      "request":{
+        "fence":fence,"runtime_digest":runtime_digest,
+        "protocol":{
+          "guest_digest":m.sha256_file(m.GUEST),
+          "shard_bridge_digest":bridge_digest,
+        },
+        "limits":{"wall_seconds":60},
+      },
+      "resources":{
+        "vm_id":"/old/vm","vm_instance_id":"old-instance",
+        "worktree_disk_id":"/work","worktree_disk_name":"work",
+        "identity_name":"identity","identity_id":"/identity",
+        "identity_client_id":"client","identity_principal_id":"principal",
+        "identities":{"worktree":{"id":"/work"},"identity":{"id":"/identity"}},
+        "run_commands":[],
+      },
+      "staging":{
+        "container":"private-cell","input_blob":"control/input.tar.gz",
+        "result_blob":"control/result.tar.gz",
+      },
+      "events":[],
+    }
+
+# Admit-red regression: drive the real replacement operation with a retained
+# run id. The pre-fix controller calls reattach directly, so this exact test is
+# red there; the fixed controller must prove hydration completed first and must
+# never route the retained run through start.
+state=seed()
+calls=[]
+real_hydrate=getattr(m,"create_runtime_hydration_command",None)
+m.lock=lambda *_a,**_k:contextlib.nullcontext()
+m.require_cell=lambda value:value
+m.load_state=lambda *_a:state
+m.read_resource=lambda _env,rid,kind:(False,{}) if kind=="vm" else (True,{"id":rid})
+m.cleanup_compute=lambda *_a:None
+m.wait_exact_disk_detached=lambda *_a:{"id":"/work","etag":"work-etag"}
+m.resource_names=lambda *_a:{
+  "vm_id":"/new/vm","vm_instance_id":"new-instance","worktree_disk_id":"/new/work",
+  "worktree_disk_name":"new-work","identity_name":"new-identity","identity_id":"/new/identity",
+  "identity_client_id":"new-client","identity_principal_id":"new-principal",
+  "identities":{},"run_commands":[],
+}
+def create_cell(_env,value,_selected,replacement=False):
+    assert replacement is True
+    value["resources"]["vm_instance_id"]="new-instance"
+    calls.append(("create-cell",value["attempt"]))
+m.create_cell=create_cell
+m.blob_sas=lambda _env,blob,permission,**_kw:"https://exact.example/"+blob+"?"+permission
+m.create_runtime_hydration_command=lambda _env,_state,url:calls.append(("hydrate",url))
+m.create_run_command=lambda _env,_state,mode,**kwargs:calls.append((mode,kwargs))
+def transition(_env,value,phase,note,**_kw):
+    value["phase"]=phase
+    calls.append(("phase",phase,note))
+m.transition=transition
+args=types.SimpleNamespace(confirm_replace=True,confirm_subscription="sub",cell=cell)
+m.replace(env,args)
+hydrate_index=next(i for i,item in enumerate(calls) if item[0]=="hydrate")
+reattach_index=next(i for i,item in enumerate(calls) if item[0]=="reattach")
+assert hydrate_index < reattach_index, calls
+assert not any(item[0]=="start" for item in calls), calls
+assert calls[hydrate_index][1]=="https://exact.example/control/input.tar.gz?r"
+assert calls[reattach_index][1]=={
+  "output_url":"https://exact.example/control/result.tar.gz?cw"
+}
+assert real_hydrate is not None
+m.create_runtime_hydration_command=real_hydrate
+
+# The real hydration command is separately current-controller trusted, carries
+# only an exact-object read capability, records the one-read source digest, and
+# refuses to authorize reattach unless its digest-complete marker is unique.
+state=seed()
+state["attempt"]=4
+state["resources"].update({
+  "vm_id":"/new/vm","vm_instance_id":"new-instance",
+  "identity_client_id":"client","run_commands":[],
+})
+captured={}
+def write_private_json(_env,_prefix,value):
+    captured.clear(); captured.update(copy.deepcopy(value))
+    handle,name=tempfile.mkstemp(); os.close(handle); pathlib.Path(name).write_text("{}\n"); return pathlib.Path(name)
+m.write_private_json=write_private_json
+m.az_command=lambda *_a,**_k:({},0,"")
+m.read_resource=lambda _env,rid,_kind:(True,{
+  "id":rid,"etag":"etag","tags":{"validation-cell":cell,"fence":fence},
+  "properties":copy.deepcopy(captured["properties"]),
+})
+m.immutable_identity=lambda resource,_kind:{"id":resource["id"],"etag":resource["etag"]}
+m.expected_tags=lambda *_a:{"validation-cell":cell,"fence":fence}
+m.save_state=lambda *_a:None
+text,hydrator_digest=m.trusted_hydrator_text()
+m.wait_run_command_terminal=lambda *_a:(
+  "Succeeded",{"output":m.hydration_marker(state,hydrator_digest)+"\n"}
+)
+m.create_runtime_hydration_command(env,state,"https://exact.example/input?sig=secret")
+properties=captured["properties"]
+arguments={item["name"]:item["value"] for item in properties["parameters"]}
+protected={item["name"]:item["value"] for item in properties["protectedParameters"]}
+assert properties["source"]["script"]==text
+assert arguments["mode"]=="hydrate" and arguments["hydrator_digest"]==hydrator_digest
+assert arguments["input_digest"]==input_digest
+assert arguments["request_digest"]==request_digest
+assert arguments["vm_resource_id"]=="/new/vm"
+assert arguments["vm_instance_id"]=="new-instance"
+assert arguments["worktree_disk_id"]=="/work"
+assert protected=={"input_url":"https://exact.example/input?sig=secret"}
+assert "github_token" not in protected and "output_url" not in protected
+assert state["runtime_hydrations"][-1]["runtime_digest"]==runtime_digest
+assert state["runtime_hydrations"][-1]["shard_bridge_digest"]==bridge_digest
+assert state["runtime_hydrations"][-1]["hydrator_digest"]==hydrator_digest
+
+missing=seed()
+missing["attempt"]=4
+missing["resources"].update({
+  "vm_id":"/new/vm","vm_instance_id":"new-instance",
+  "identity_client_id":"client","run_commands":[],
+})
+m.wait_run_command_terminal=lambda *_a:("Succeeded",{"output":"hydration claimed success\n"})
+try:
+    m.create_runtime_hydration_command(env,missing,"https://exact.example/input?sig=secret")
+except m.ValidationError as exc:
+    assert "no unique exact digest marker" in str(exc), str(exc)
+else:
+    raise AssertionError("reattach was authorized without an exact hydration marker")
+assert "runtime_hydrations" not in missing
+
+changed=seed()
+changed["attempt"]=4
+changed["resources"].update({
+  "vm_id":"/new/vm","vm_instance_id":"new-instance",
+  "identity_client_id":"client","run_commands":[],
+})
+reads=[]
+def replaced_command(_env,rid,_kind):
+    reads.append(rid)
+    properties=copy.deepcopy(captured["properties"])
+    if len(reads)>1:
+        properties["source"]["script"]="#!/bin/sh\necho forged hydration\n"
+    return True,{
+      "id":rid,"etag":"etag","tags":{"validation-cell":cell,"fence":fence},
+      "properties":properties,
+    }
+m.read_resource=replaced_command
+m.wait_run_command_terminal=lambda *_a:(
+  "Succeeded",{"output":m.hydration_marker(changed,hydrator_digest)+"\n"}
+)
+try:
+    m.create_runtime_hydration_command(env,changed,"https://exact.example/input?sig=secret")
+except m.ValidationError as exc:
+    assert "identity changed" in str(exc), str(exc)
+else:
+    raise AssertionError("a same-id source replacement authorized reattach")
+assert "runtime_hydrations" not in changed
+
+# Source mutation between hashing and submission cannot substitute bytes: the
+# helper returns the digest of the same single read it returns as executable text.
+assert hydrator_digest=="sha256:"+hashlib.sha256(text.encode()).hexdigest()
+PY
+  local work block output rc
+  work=$(fm_test_tmproot fm-azure-validation-runtime-hydration)
+  make_runtime "$work"
+  # If hydration crosses into no-mistakes at all, leave an observable failure;
+  # a retained run must only be reattached later by the unchanged sealed guest.
+  cat >"$work/runtime/bin/no-mistakes" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >"$FM_FORBIDDEN_AXI"
+exit 99
+SH
+  chmod +x "$work/runtime/bin/no-mistakes"
+  python3 - "$work/runtime" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+root=Path(sys.argv[1])
+manifest=json.loads((root/"runtime.json").read_text())
+for record in manifest["files"]:
+    if record["path"]=="bin/no-mistakes":
+        record["digest"]="sha256:"+hashlib.sha256((root/record["path"]).read_bytes()).hexdigest()
+(root/"runtime.json").write_text(json.dumps(manifest,separators=(",",":"))+"\n")
+PY
+  COPYFILE_DISABLE=1 tar -czf "$work/runtime.tar.gz" -C "$work/runtime" runtime.json bin gh-axi
+  printf 'sealed snapshot\n' >"$work/snapshot.bundle"
+  mkdir -p "$work/credentials"
+  printf 'sealed credential fixture\n' >"$work/credentials/auth"
+  COPYFILE_DISABLE=1 tar -czf "$work/credentials.tar.gz" -C "$work/credentials" auth
+  printf '#!/usr/bin/env python3\nprint("sealed bridge")\n' >"$work/shard-bridge.py"
+  chmod +x "$work/shard-bridge.py"
+  python3 - "$work" <<'PY'
+import hashlib
+import io
+import json
+from pathlib import Path
+import sys
+import tarfile
+root=Path(sys.argv[1])
+def digest(path):
+    return "sha256:"+hashlib.sha256(path.read_bytes()).hexdigest()
+runtime=json.loads((root/"runtime/runtime.json").read_text())
+request={
+  "cell":"azv-aaaaaaaaaaaa",
+  "resource_bindings":{"worktree_disk_id":"/work"},
+  "repository":{
+    "snapshot_digest":digest(root/"snapshot.bundle"),
+    "branch":"fm/fixture","head":"a"*40,"slug":"o/r",
+  },
+  "runtime":runtime,
+  "runtime_digest":digest(root/"runtime.tar.gz"),
+  "credentials":{"provider":"codex","bundle_digest":digest(root/"credentials.tar.gz")},
+  "protocol":{"shard_bridge_digest":digest(root/"shard-bridge.py")},
+}
+canonical=json.dumps(request,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()
+request["request_digest"]="sha256:"+hashlib.sha256(canonical).hexdigest()
+(root/"request.json").write_text(json.dumps(request,sort_keys=True,separators=(",",":"),ensure_ascii=False)+"\n")
+with tarfile.open(root/"input.tar.gz","w:gz") as archive:
+    for name in ("request.json","snapshot.bundle","runtime.tar.gz","credentials.tar.gz","shard-bridge.py"):
+        archive.add(root/name,arcname=name,recursive=False)
+(root/"input.digest").write_text(digest(root/"input.tar.gz"))
+(root/"request.digest").write_text(request["request_digest"])
+PY
+  mkdir -p "$work/cell/state" "$work/cell/repo" "$work/cell/home" "$work/bootstrap" "$work/fakebin"
+  cp "$work/request.json" "$work/cell/state/request.json"
+  printf 'retained repo\n' >"$work/cell/repo/sentinel"
+  printf 'retained home\n' >"$work/cell/home/sentinel"
+  block="$work/hydrate.sh"
+  awk '/^# BEGIN SEALED INPUT HYDRATION/{copy=1;next} /^# END SEALED INPUT HYDRATION/{exit} copy{print}' \
+    "$GUEST" >"$block"
+  [ -s "$block" ] || fail "the guest hydration region was not found"
+  cat >"$work/fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = --config ]
+output=$(sed -n 's/^output = "\(.*\)"$/\1/p' "$2")
+[ -n "$output" ]
+cp "$FM_HYDRATE_INPUT" "$output"
+SH
+  cat >"$work/fakebin/install" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|-g) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+exec /usr/bin/install "${args[@]}"
+SH
+  cat >"$work/fakebin/tar" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+for value in "$@"; do
+  case "$value" in --no-same-owner|--no-same-permissions) ;; *) args+=("$value") ;; esac
+done
+exec /usr/bin/tar "${args[@]}"
+SH
+  chmod +x "$work/fakebin/curl" "$work/fakebin/install" "$work/fakebin/tar"
+  rc=0
+  # shellcheck disable=SC2016 # $1 belongs to the isolated bash, not this test shell.
+  output=$(env \
+    PATH="$work/fakebin:$PATH" \
+    MODE=hydrate BOOTSTRAP="$work/bootstrap" TRUSTED_ROOT="$work/trusted" \
+    INPUT_URL='https://exact.example/input?sig=fixture' FM_HYDRATE_INPUT="$work/input.tar.gz" \
+    INPUT_DIGEST="$(cat "$work/input.digest")" REQUEST_DIGEST="$(cat "$work/request.digest")" \
+    CELL=azv-aaaaaaaaaaaa WORKTREE_DISK_ID=/work STATE="$work/cell/state" \
+    HOME_DIR="$work/cell/home" REPO="$work/cell/repo" ATTEMPT=4 \
+    HYDRATOR_DIGEST="sha256:$(sha256sum "$GUEST" | awk '{print $1}')" \
+    FM_FORBIDDEN_AXI="$work/forbidden-axi" \
+    bash -c '. "$1"' hydrate "$block" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the real guest hydrate path failed: $output"
+  assert_contains "$output" 'FM_AZURE_VALIDATION_HYDRATED' \
+    "the real guest hydrate path emitted no completion marker"
+  [ ! -e "$work/forbidden-axi" ] || fail "hydration invoked no-mistakes instead of returning to reattach"
+  python3 - "$work" <<'PY' || fail "hydration did not restore only the exact sealed tools"
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+root=Path(sys.argv[1])
+request=json.loads((root/"request.json").read_text())
+runtime=root/"trusted/runtime"
+actual={path.relative_to(runtime).as_posix() for path in runtime.rglob("*") if path.is_file()}
+expected={record["path"] for record in request["runtime"]["files"]}|{"runtime.json"}
+assert actual==expected,(actual,expected)
+for record in request["runtime"]["files"]:
+    path=runtime/record["path"]
+    assert "sha256:"+hashlib.sha256(path.read_bytes()).hexdigest()==record["digest"]
+for field in ("no_mistakes_path","provider_path","gh_path","node_path","gh_axi_path"):
+    assert os.access(runtime/request["runtime"][field],os.X_OK),field
+bridge=root/"trusted/shard-bridge.py"
+assert "sha256:"+hashlib.sha256(bridge.read_bytes()).hexdigest()==request["protocol"]["shard_bridge_digest"]
+assert (root/"cell/state/request.json").read_bytes()==(root/"request.json").read_bytes()
+assert [path.relative_to(root/"cell/repo").as_posix() for path in (root/"cell/repo").rglob("*")]==["sentinel"]
+assert [path.relative_to(root/"cell/home").as_posix() for path in (root/"cell/home").rglob("*")]==["sentinel"]
+assert (root/"cell/repo/sentinel").read_text()=="retained repo\n"
+assert (root/"cell/home/sentinel").read_text()=="retained home\n"
+PY
+  pass "replacement hydrates the exact sealed runtime and bridge before reattaching the retained run"
 }
 
 
@@ -1715,6 +2049,7 @@ security_negative_contract
 resource_identity_contract
 storage_network_access_contract
 controller_recovery_contract
+replacement_runtime_hydration_contract
 retail_price_transport_contract
 admission_contract
 identity_and_recovery_contract
