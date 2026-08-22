@@ -162,6 +162,29 @@ fm_fake_exit0() {
   local fakebin=$1 tool
   shift
   for tool in "$@"; do
+    if [ "$tool" = treehouse ]; then
+      cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = get ]; then
+  if [ -n "${FM_FAKE_TREEHOUSE_PATH:-}" ]; then
+    printf '%s\n' "$FM_FAKE_TREEHOUSE_PATH"
+  elif [ -n "${FM_FAKE_PANE_PATH:-}" ]; then
+    printf '%s\n' "$FM_FAKE_PANE_PATH"
+  elif [ -n "${FM_FAKE_PANE_PATH_DIR:-}" ]; then
+    holder=
+    prev=
+    for arg in "$@"; do
+      [ "$prev" != --lease-holder ] || holder=$arg
+      prev=$arg
+    done
+    [ -z "$holder" ] || printf '%s/fm-%s\n' "$FM_FAKE_PANE_PATH_DIR" "$holder"
+  fi
+fi
+exit 0
+SH
+      chmod +x "$fakebin/$tool"
+      continue
+    fi
     cat > "$fakebin/$tool" <<'SH'
 #!/usr/bin/env bash
 exit 0

@@ -33,6 +33,9 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TREEHOUSE_LOG"
+if [ "${1:-}" = get ]; then
+  printf '%s\n' "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}"
+fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -204,7 +207,7 @@ test_direct_pr_and_scout_refresh_before_launch() {
   pass "direct-PR ships and scouts both refresh stale pooled worktrees before launch"
 }
 
-test_dirty_pool_refuses_without_discarding_work() {
+test_dirty_new_lease_aborts_and_returns() {
   local rec id out status before
   id='pool-dirty-refusal-r4'
   rec=$(make_case dirty-refusal "$id")
@@ -218,13 +221,15 @@ test_dirty_pool_refuses_without_discarding_work() {
   assert_contains "$out" "is not clean" "spawn did not clearly refuse a dirty pooled worktree"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD while refusing a dirty pooled worktree"
-  assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
-    "spawn discarded uncommitted work while refusing the pool"
+  assert_grep "return --force $POOL_DIR" "$CASE_DIR/treehouse.log" \
+    "spawn preserved an unpublished dirty lease outside the owner-conflict path"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "spawn published custody metadata for a dirty lease"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# observed dirty refusal: %s; preserved=%s\n' \
-      "$(printf '%s\n' "$out" | tail -n 1)" "$(cat "$POOL_DIR/uncommitted.txt")"
+    printf '# observed dirty refusal: %s; cleanup=%s\n' \
+      "$(printf '%s\n' "$out" | tail -n 1)" "$(tail -n 1 "$CASE_DIR/treehouse.log")"
   fi
-  pass "a dirty pooled worktree is refused without discarding its local work"
+  pass "a dirty newly acquired lease is aborted and returned"
 }
 
 test_unresolved_remote_default_refuses_pool() {
@@ -251,7 +256,7 @@ test_unresolved_remote_default_refuses_pool() {
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
-test_dirty_pool_refuses_without_discarding_work
+test_dirty_new_lease_aborts_and_returns
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 

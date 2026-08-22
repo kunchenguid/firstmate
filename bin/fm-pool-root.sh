@@ -40,6 +40,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+TRANSACTION_CREATED_DIRS=()
 
 die() {
   printf 'fm-pool-root.sh: %s\n' "$*" >&2
@@ -97,6 +98,42 @@ canonical_intended_path() {  # <path>
   printf '%s%s' "$anchor" "$suffix"
 }
 
+ensure_transaction_directory() {  # <path>
+  local target=$1 probe parent i
+  local -a missing=()
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    [ -d "$target" ] || return 1
+    return 0
+  fi
+  probe=$target
+  while [ ! -e "$probe" ] && [ ! -L "$probe" ]; do
+    missing+=("$probe")
+    parent=$(dirname "$probe")
+    [ "$parent" != "$probe" ] || return 1
+    probe=$parent
+  done
+  [ -d "$probe" ] || return 1
+  for ((i=${#missing[@]} - 1; i >= 0; i--)); do
+    if mkdir -- "${missing[$i]}"; then
+      TRANSACTION_CREATED_DIRS+=("${missing[$i]}")
+    elif [ ! -d "${missing[$i]}" ]; then
+      return 1
+    fi
+  done
+}
+
+rollback_transaction_directories() {
+  local i status=0 path
+  for ((i=${#TRANSACTION_CREATED_DIRS[@]} - 1; i >= 0; i--)); do
+    path=${TRANSACTION_CREATED_DIRS[$i]}
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      rmdir -- "$path" 2>/dev/null || status=1
+    fi
+  done
+  TRANSACTION_CREATED_DIRS=()
+  return "$status"
+}
+
 project_view() {  # <project>
   local project=$1 home project_real name
   home=$(canonical_home) \
@@ -110,7 +147,7 @@ project_view() {  # <project>
 
 toml_basic_string() {  # <value>
   command -v node >/dev/null 2>&1 || return 1
-  node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$1"
+  node -e 'process.stdout.write(JSON.stringify(process.argv[1]).replace(/\u007f/g, "\\u007F"))' "$1"
 }
 
 configured_root() {  # <toml>
@@ -142,7 +179,7 @@ write_config() {  # <view> <project-git-dir> <project-common-dir> <root>
   local status=0 rollback_status=0
   home=$(canonical_home) || return 1
   if [ ! -e "$requested_view" ] && [ ! -L "$requested_view" ]; then
-    mkdir -p "$requested_view" || return 1
+    ensure_transaction_directory "$requested_view" || return 1
     view_created=1
   fi
   [ -d "$requested_view" ] && [ ! -L "$requested_view" ] || return 1
@@ -279,6 +316,12 @@ write_config() {  # <view> <project-git-dir> <project-common-dir> <root>
     git -C "$real_view" check-ignore -q -- .gitignore 2>/dev/null || status=1
   fi
   if [ "$status" -eq 0 ]; then
+    command -v treehouse >/dev/null 2>&1 || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    (cd "$real_view" && treehouse status >/dev/null 2>&1) || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
     rm -f -- "$transaction/treehouse.toml" "$transaction/.gitignore" 2>/dev/null || true
     rm -f -- "$transaction/old.git" 2>/dev/null || true
     rmdir "$transaction" 2>/dev/null || true
@@ -355,10 +398,20 @@ esac
 
 # Create and canonicalize before recording it: one home must always resolve the
 # same string, or an every-spawn rewrite would churn the file for nothing.
-mkdir -p "$ROOT_VALUE" || die "could not create this home's pool root '$ROOT_VALUE'"
-ROOT_VALUE=$(cd "$ROOT_VALUE" && pwd -P) || die "could not resolve this home's pool root"
-write_config "$CONFIG_VIEW" "$PROJECT_GIT_DIR" "$PROJECT_GIT_COMMON_DIR" "$ROOT_VALUE" \
-  || die "could not write and verify this home's isolated Treehouse config view at '$CONFIG_VIEW'"
+if ! ensure_transaction_directory "$ROOT_VALUE"; then
+  rollback_transaction_directories || true
+  die "could not create this home's pool root '$ROOT_VALUE'"
+fi
+if ! ROOT_VALUE=$(cd "$ROOT_VALUE" && pwd -P); then
+  rollback_transaction_directories || true
+  die "could not resolve this home's pool root"
+fi
+if ! write_config "$CONFIG_VIEW" "$PROJECT_GIT_DIR" "$PROJECT_GIT_COMMON_DIR" "$ROOT_VALUE"; then
+  if ! rollback_transaction_directories; then
+    die "could not fully roll back failed Treehouse configuration at '$CONFIG_VIEW'"
+  fi
+  die "could not write and verify this home's isolated Treehouse config view at '$CONFIG_VIEW'"
+fi
 
 if [ "${VIEW_ONLY:-0}" = 1 ]; then
   printf '%s\n' "$CONFIG_VIEW"

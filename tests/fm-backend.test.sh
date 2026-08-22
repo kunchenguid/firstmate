@@ -785,7 +785,12 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" != get ] || printf '%s\n' "$wt"
+exit 0
+SH
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 
@@ -855,17 +860,27 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" != get ] || printf '%s\n' "$wt"
+exit 0
+SH
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 
 run_spawn_symlink_case() {  # <label> <physical|logical>
-  local label=$1 first_reply=$2 real_root link_root proj wt id fb data state config log out rc proj_phys initial_path
+  local label=$1 first_reply=$2 real_root link_root proj wt id fb data state config log out rc proj_phys initial_path home pool_root
   real_root="$TMP_ROOT/symlink-real-$label"; link_root="$TMP_ROOT/symlink-link-$label"
   mkdir -p "$real_root"
   ln -s "$real_root" "$link_root"
   proj="$link_root/proj"
-  wt="$TMP_ROOT/symlink-wt-$label"
+  home="$TMP_ROOT/symlink-home-$label"
+  mkdir -p "$home"
+  pool_root=$(FM_HOME="$home" FM_POOL_ROOT_BASE="$home/pools" \
+    "$ROOT/bin/fm-pool-root.sh" --print)
+  wt="$pool_root/.treehouse/fixture/1/project"
+  mkdir -p "$(dirname "$wt")"
   id="spawnsymlink$label"
   fm_git_worktree "$real_root/proj" "$wt" "fm/$id"
   # TMP_ROOT itself can already sit behind an OS-level symlink (e.g. macOS's
@@ -887,7 +902,8 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   mkdir -p "$state" "$config"
   log="$TMP_ROOT/symlink-spawn-$label.log"
 
-  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  out=$(FM_HOME="$home" FM_POOL_ROOT_BASE="$home/pools" \
+    run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
   rc=$?
   expect_code 0 "$rc" "fm-spawn.sh should succeed for a project reached through a symlinked prefix when the backend reports $first_reply cwd"$'\n'"$out"
   assert_contains "$out" "worktree=$wt" \
@@ -1037,9 +1053,15 @@ test_spawn_refuses_unknown_fm_backend_env() {
 }
 
 test_spawn_default_backend_writes_no_meta_field() {
-  local proj wt data id state config out
-  proj="$TMP_ROOT/nobackend-project"; wt="$TMP_ROOT/nobackend-wt"; data="$TMP_ROOT/nobackend-data"
+  local proj wt data id state config out home pool_root
+  proj="$TMP_ROOT/nobackend-project"; data="$TMP_ROOT/nobackend-data"
   id="nobackendz3"
+  home="$TMP_ROOT/nobackend-home"
+  mkdir -p "$home"
+  pool_root=$(FM_HOME="$home" FM_POOL_ROOT_BASE="$home/pools" \
+    "$ROOT/bin/fm-pool-root.sh" --print)
+  wt="$pool_root/.treehouse/fixture/1/project"
+  mkdir -p "$(dirname "$wt")"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   local fb
   fb=$(make_spawn_fakebin "$TMP_ROOT/nobackend-fake" "$wt")
@@ -1047,7 +1069,7 @@ test_spawn_default_backend_writes_no_meta_field() {
   state="$TMP_ROOT/nobackend-state"; config="$TMP_ROOT/nobackend-config"
   mkdir -p "$state" "$config"
 
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_POOL_ROOT_BASE="$home/pools" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_TMUX_LOG="$TMP_ROOT/nobackend.log" \
@@ -1060,9 +1082,15 @@ test_spawn_default_backend_writes_no_meta_field() {
 }
 
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
-  local proj wt data id state config out fb
-  proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt"; data="$TMP_ROOT/explicit-backend-data"
+  local proj wt data id state config out fb home pool_root
+  proj="$TMP_ROOT/explicit-backend-project"; data="$TMP_ROOT/explicit-backend-data"
   id="explicitbackendz4"
+  home="$TMP_ROOT/explicit-backend-home"
+  mkdir -p "$home"
+  pool_root=$(FM_HOME="$home" FM_POOL_ROOT_BASE="$home/pools" \
+    "$ROOT/bin/fm-pool-root.sh" --print)
+  wt="$pool_root/.treehouse/fixture/1/project"
+  mkdir -p "$(dirname "$wt")"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb=$(make_spawn_fakebin "$TMP_ROOT/explicit-backend-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
@@ -1071,7 +1099,7 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
 
   # HERDR_ENV=1 is present (as if firstmate itself were running under herdr),
   # but an explicit --backend tmux flag must still win outright.
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_POOL_ROOT_BASE="$home/pools" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
     FM_TMUX_LOG="$TMP_ROOT/explicit-backend.log" \
@@ -1084,9 +1112,15 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
 }
 
 test_spawn_autodetect_nesting_resolves_tmux_silently() {
-  local proj wt data id state config out fb
-  proj="$TMP_ROOT/nest-project"; wt="$TMP_ROOT/nest-wt"; data="$TMP_ROOT/nest-data"
+  local proj wt data id state config out fb home pool_root
+  proj="$TMP_ROOT/nest-project"; data="$TMP_ROOT/nest-data"
   id="nestbackendz5"
+  home="$TMP_ROOT/nest-home"
+  mkdir -p "$home"
+  pool_root=$(FM_HOME="$home" FM_POOL_ROOT_BASE="$home/pools" \
+    "$ROOT/bin/fm-pool-root.sh" --print)
+  wt="$pool_root/.treehouse/fixture/1/project"
+  mkdir -p "$(dirname "$wt")"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb=$(make_spawn_fakebin "$TMP_ROOT/nest-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
@@ -1098,7 +1132,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   # (tmux nested inside a herdr pane) - the full fm-spawn.sh pipeline, not just
   # fm_backend_name, must resolve this to tmux and stay completely silent about
   # it (today's default path, byte-identical).
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_POOL_ROOT_BASE="$home/pools" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
     FM_TMUX_LOG="$TMP_ROOT/nest.log" \

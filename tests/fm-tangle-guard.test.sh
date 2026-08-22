@@ -150,7 +150,7 @@ test_brief_assertion_precedes_branch() {
 
 # --- GUARD 1b: fm-spawn isolation abort -------------------------------------
 
-# A fake tmux that reports FM_FAKE_PANE_PATH as the post-`treehouse get` pane cwd
+# A fake tmux that reports FM_FAKE_PANE_PATH as the acquired pane cwd
 # (so the spawn's worktree-resolution loop resolves to a path we control), names
 # the session on '#S', and swallows window ops. Echoes the fakebin dir.
 make_spawn_fakebin() {
@@ -170,7 +170,12 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != get ] || printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -204,13 +209,13 @@ test_spawn_isolation_abort() {
   # Abort: the pane resolves to a plain non-git directory (not a worktree at all).
   out=$(run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn into a non-worktree dir should abort"
-  assert_contains "$out" "did not yield an isolated worktree" "non-worktree spawn lacked the isolation error"
+  assert_contains "$out" "outside this home's pool root" "non-worktree spawn lacked the pool-boundary error"
   assert_absent "$home/state/abort-notgit-dd4.meta" "aborted spawn must not record meta"
 
   # Abort: the pane resolves INTO the primary checkout (a subdir of PROJ_ABS).
   out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn landing inside the primary checkout should abort"
-  assert_contains "$out" "did not yield an isolated worktree" "primary-checkout spawn lacked the isolation error"
+  assert_contains "$out" "outside this home's pool root" "primary-checkout spawn lacked the pool-boundary error"
 
   # Proceed: the pane resolves to a genuine, isolated worktree.
   out=$(run_spawn "$home" ok-isolated-ff6 "$proj" "$spawn_wt" "$fakebin"); status=$?
@@ -254,7 +259,14 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ -n "${FM_TMUX_REC:-}" ] && printf 'treehouse %s\n' "$*" >> "$FM_TMUX_REC"
+[ -n "${FM_TMUX_REC:-}" ] && printf 'treehouse-cwd %s\n' "$PWD" >> "$FM_TMUX_REC"
+[ "${1:-}" != get ] || printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -302,13 +314,13 @@ test_spawn_tmux_window_construction() {
   assert_grep "set-window-option -t @spawnwid allow-rename off" "$rec" \
     "must disable allow-rename on the spawned window"
 
-  # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid FM_TREEHOUSE_LEASED_WORKTREE=" "$rec" \
-    "treehouse get must start from the home-private config view on the stable window id"
+  # Bug 2 fix (b): the acquired path and the worktree wait loop target the stable id.
+  assert_grep "treehouse get --lease --lease-holder rec-win-gg7" "$rec" \
+    "the parent must acquire a durable task-labelled lease"
   assert_grep "/state/treehouse-config/" "$rec" \
-    "treehouse get did not use the home-namespaced config view"
-  assert_grep "treehouse get --lease --lease-holder 'rec-win-gg7'" "$rec" \
-    "the config view must acquire a durable task-labelled lease"
+    "the parent must acquire from the home-private config view"
+  assert_grep "send-keys -t @spawnwid cd '$wt'" "$rec" \
+    "the acquired worktree must be delivered to the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
 

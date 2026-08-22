@@ -181,9 +181,10 @@ test_pool_root_preserves_a_nonregular_primary_config() {
 }
 
 test_pool_root_verifies_the_written_config() {
-  local case_dir clone fakebin out status generated
+  local case_dir clone fakebin out status generated relocated_base
   case_dir=$(make_two_homes_one_project verify-written-config)
   clone="$case_dir/homeA/project"
+  relocated_base="$case_dir/new/relocated/base"
   fakebin=$(fm_fakebin "$case_dir")
   cat > "$fakebin/mv" <<'SH'
 #!/usr/bin/env bash
@@ -191,7 +192,7 @@ exit 0
 SH
   chmod +x "$fakebin/mv"
 
-  out=$(FM_HOME="$case_dir/homeA" FM_POOL_ROOT_BASE="$case_dir/base" \
+  out=$(FM_HOME="$case_dir/homeA" FM_POOL_ROOT_BASE="$relocated_base" \
     PATH="$fakebin:$PATH" "$POOL_ROOT_BIN" "$clone" 2>&1)
   status=$?
   expect_code 1 "$status" "pool configuration should refuse when its write did not take effect"
@@ -200,8 +201,12 @@ SH
   [ -z "$generated" ] || fail "the no-op writer unexpectedly configured a pool root"
   generated=$(find "$case_dir/homeA/state/treehouse-config" -name .git -print -quit 2>/dev/null || true)
   [ -z "$generated" ] || fail "the failed generated write left a partial Git view"
+  assert_absent "$case_dir/new" \
+    "the failed generated write left newly created pool-root parents"
+  assert_absent "$case_dir/homeA/state" \
+    "the failed generated write left newly created config-view parents"
   assert_absent "$clone/treehouse.toml" "the failed generated write mutated the primary clone"
-  pass "pool configuration verifies the root that was actually written"
+  pass "pool configuration rolls back every newly created path after verification fails"
 }
 
 test_pool_root_rolls_back_an_existing_view_on_verification_failure() {
@@ -311,7 +316,7 @@ test_real_treehouse_accepts_encoded_pool_paths() {
     return 0
   fi
   case_dir=$(make_two_homes_one_project encoded-root)
-  special_base="$case_dir/"$'pool"back\\slash\nline'
+  special_base="$case_dir/"$'pool"back\\slash\nline\177del'
   mkdir -p "$special_base"
   root=$(pool_root_for_home "$case_dir/homeA" "$special_base" "$case_dir/homeA/project") \
     || fail "fm-pool-root.sh rejected a valid filesystem path requiring TOML escapes"
@@ -345,12 +350,7 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  send-keys)
-    case "${4:-}" in
-      *"treehouse get --lease"*) bash -c "$4" ;;
-    esac
-    exit 0
-    ;;
+  send-keys) exit 0 ;;
 esac
 exit 0
 SH
@@ -391,7 +391,7 @@ run_spawn_case() {  # <case-dir> <id> <args...>
 }
 
 test_spawn_returns_a_lease_when_endpoint_confirmation_fails() {
-  local case_dir id out status handoff
+  local case_dir id out status
   id='custody-unconfirmed-endpoint-r2'
   case_dir=$(make_spawn_case spawn-unconfirmed-endpoint "$id")
   cat > "$case_dir/fakebin/treehouse" <<SH
@@ -418,8 +418,6 @@ SH
     "spawn leaked the acquired lease when endpoint confirmation failed"
   assert_absent "$case_dir/home/state/$id.meta" \
     "spawn published custody metadata for an unconfirmed endpoint"
-  handoff=$(find "$case_dir/home/state" -maxdepth 1 -name ".$id.treehouse-lease.*" -print -quit)
-  [ -z "$handoff" ] || fail "spawn left its private lease handoff behind after abort cleanup"
   pass "an acquired lease is returned when endpoint confirmation fails"
 }
 
@@ -443,7 +441,8 @@ test_spawn_refuses_a_copy_another_task_claims() {
   expect_code 1 "$status" "spawn should refuse a copy another task already claims: $out"
   assert_contains "$out" "task other-task claims" "the refusal did not name the claiming task"
   assert_absent "$case_dir/home/state/$id.meta" "a refused spawn still published task metadata"
-  assert_absent "$case_dir/treehouse.log" "spawn asked Treehouse to recycle a copy already claimed by legacy metadata"
+  assert_no_grep 'get --lease' "$case_dir/treehouse.log" \
+    "spawn asked Treehouse to recycle a copy already claimed by legacy metadata"
   [ "$(git -C "$case_dir/pool" rev-parse HEAD)" = "$pool_head" ] \
     || fail "the refused spawn reset the other task's copy before refusing"
   [ "$(git -C "$case_dir/pool" rev-parse --abbrev-ref HEAD)" = "fm/other-task" ] \
@@ -471,7 +470,8 @@ test_spawn_refuses_ambiguous_worktree_metadata() {
   expect_code 1 "$status" "spawn should fail closed on ambiguous worktree metadata"
   assert_contains "$out" "ambiguous worktree metadata" "the refusal did not identify the ambiguous ownership record"
   assert_absent "$case_dir/home/state/$id.meta" "ambiguous metadata still allowed a second owner record"
-  assert_absent "$case_dir/treehouse.log" "ambiguous metadata was checked only after requesting a lease"
+  assert_no_grep 'get --lease' "$case_dir/treehouse.log" \
+    "ambiguous metadata was checked only after requesting a lease"
   [ "$(git -C "$case_dir/pool" rev-parse HEAD)" = "$pool_head" ] \
     || fail "ambiguous metadata allowed spawn to reset the claimed copy"
   [ "$(git -C "$case_dir/pool" rev-parse --abbrev-ref HEAD)" = "fm/ambiguous-owner" ] \
@@ -509,6 +509,33 @@ SH
   assert_absent "$case_dir/home/state/$id.meta" \
     "the owner-conflict refusal published a second custody record"
   pass "a post-acquire owner conflict preserves the contested lease"
+}
+
+test_spawn_does_not_return_a_published_lease_on_signal() {
+  local case_dir id out status real_mv
+  id='custody-published-signal-r3'
+  case_dir=$(make_spawn_case spawn-published-signal "$id")
+  real_mv=$(command -v mv)
+  cat > "$case_dir/fakebin/mv" <<SH
+#!/usr/bin/env bash
+"$real_mv" "\$@" || exit \$?
+case " \$* " in
+  *" $case_dir/home/state/$id.meta ") kill -TERM "\$PPID" ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/mv"
+
+  out=$(run_spawn_case "$case_dir" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the publication-boundary signal fixture did not stop spawn"
+  assert_present "$case_dir/home/state/$id.meta" \
+    "the signal fixture did not publish durable custody before stopping spawn"
+  assert_grep "treehouse_lease_holder=$id" "$case_dir/home/state/$id.meta" \
+    "the published record did not own the acquired durable lease"
+  assert_no_grep "return --force" "$case_dir/treehouse.log" \
+    "abort cleanup returned a lease after its custody record was published"
+  pass "a signal after atomic publication cannot return the published lease"
 }
 
 test_fresh_spawn_refuses_an_existing_task_record_before_side_effects() {
@@ -579,9 +606,12 @@ add_release_step() {  # <case-dir> <exit>
   printf '{\n  "name": "fixture",\n  "scripts": {\n    "pool:release-delivered": "node release.js"\n  }\n}\n' \
     > "$case_dir/project/package.json"
   git -C "$case_dir/project" add package.json
+  git -C "$case_dir/project" commit -qm "publish release housekeeping"
   cat > "$case_dir/fakebin/npm" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = run ] && [ "\${2:-}" = pool:release-delivered ]; then
+  printf '%s\n' "\$PWD" > "$case_dir/release-run-dir.log"
+  touch "\$PWD/release-artifact"
   printf '%s\\n' "\$*" >> "$case_dir/release.log"
   printf 'released 2 delivered copies\\n'
   exit $exit_code
@@ -596,6 +626,7 @@ add_hanging_release_step() {  # <case-dir>
   printf '{\n  "name": "fixture",\n  "scripts": {\n    "pool:release-delivered": "node release.js"\n  }\n}\n' \
     > "$case_dir/project/package.json"
   git -C "$case_dir/project" add package.json
+  git -C "$case_dir/project" commit -qm "publish hanging release housekeeping"
   cat > "$case_dir/fakebin/npm" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = run ] && [ "\${2:-}" = pool:release-delivered ]; then
@@ -608,7 +639,7 @@ SH
 }
 
 test_spawn_releases_delivered_copies_before_leasing() {
-  local case_dir id out status
+  local case_dir id out status run_dir
   id='custody-release-r1'
   case_dir=$(make_spawn_case spawn-release "$id")
   add_release_step "$case_dir" 0
@@ -619,7 +650,16 @@ test_spawn_releases_delivered_copies_before_leasing() {
   assert_present "$case_dir/release.log" "spawn never asked the project to release delivered copies"
   grep -qF -- '--yes' "$case_dir/release.log" \
     || fail "the release step was not run non-interactively"
-  pass "a spawn releases the project's delivered copies before asking for a slot"
+  run_dir=$(cat "$case_dir/release-run-dir.log")
+  [ "$run_dir" != "$case_dir/project" ] \
+    || fail "the release step executed inside the primary clone"
+  assert_absent "$case_dir/project/release-artifact" \
+    "the release step mutated the primary clone"
+  assert_absent "$run_dir" \
+    "the authenticated release snapshot was not cleaned up"
+  [ -z "$(git -C "$case_dir/project" status --porcelain)" ] \
+    || fail "release housekeeping dirtied the primary clone"
+  pass "a spawn runs release housekeeping from an authenticated isolated copy"
 }
 
 test_spawn_skips_projects_that_publish_no_release_step() {
@@ -1207,6 +1247,7 @@ test_spawn_refuses_a_copy_another_task_claims
 test_spawn_refuses_ambiguous_worktree_metadata
 test_spawn_returns_a_lease_when_endpoint_confirmation_fails
 test_spawn_preserves_a_post_acquire_owner_conflict
+test_spawn_does_not_return_a_published_lease_on_signal
 test_fresh_spawn_refuses_an_existing_task_record_before_side_effects
 test_spawn_claims_this_homes_pool_root_before_leasing
 test_spawn_releases_delivered_copies_before_leasing
