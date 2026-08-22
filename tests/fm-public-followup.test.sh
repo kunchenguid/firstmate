@@ -1567,6 +1567,54 @@ test_rechain_claims_delivered_source_once() {
   pass "concurrent rechains cannot fork one delivered source"
 }
 
+test_failed_rechain_retirement_keeps_source_claimed() {
+  local home log registry_file out
+  home=$(make_home rechain-retire-failure)
+  log="$home/curl.log"; : > "$log"
+  seed_repro_commitment "$home" public-final-retire-a req-retire-failure main scout-retire
+  "$EMIT" --home "$home" --obligation public-final-retire-a --relation rel-code \
+    --source-home main --work-id scout-retire --generation 1 \
+    --outcome report-ready --deliverable report_path=data/scout-retire/report.md \
+    --outcome-text 'Reproduced. A fix is waiting.' >/dev/null || fail "emit failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" deliver public-final-retire-a >/dev/null \
+    || fail "deliver failed"
+
+  registry_file="$home/state/public-followup/registry/public-final-retire-a"
+  cat > "$home/fakebin/rm" <<EOF
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  [ "\$arg" != '$registry_file' ] || exit 1
+done
+exec /bin/rm "\$@"
+EOF
+  chmod +x "$home/fakebin/rm"
+  expect_failure "rechain must surface a failed source retirement" \
+    run_pf "$home" rechain public-final-retire-b --from public-final-retire-a \
+      --work-home main --work-id ship-retire-b --expected pr-merged
+  assert_contains "$EXPECT_OUT" "public loop remains open" \
+    "failed retirement must report that the source remains open"
+
+  expect_failure "a failed retirement must not leave the source claimable by another destination" \
+    run_pf "$home" rechain public-final-retire-c --from public-final-retire-a \
+      --work-home main --work-id ship-retire-c --expected pr-merged
+  assert_contains "$EXPECT_OUT" "already claimed by rechain destination 'public-final-retire-b'" \
+    "a second destination must be refused after the first destination is published"
+  assert_absent "$home/state/public-followup/registry/public-final-retire-c" \
+    "a refused competing destination must not be registered"
+
+  /bin/rm "$home/fakebin/rm"
+  out=$(run_pf "$home" rechain public-final-retire-b --from public-final-retire-a \
+    --work-home main --work-id ship-retire-b --expected pr-merged) \
+    || fail "the claimed destination must remain resumable: $out"
+  assert_contains "$out" "retired public-final-retire-a" \
+    "resuming the claimed destination must finish source retirement"
+  assert_absent "$registry_file" "successful retry must retire the source"
+  assert_present "$home/state/public-followup/registry/public-final-retire-b" \
+    "successful retry must retain the one claimed destination"
+  pass "failed rechain retirement keeps the source claimed by one resumable destination"
+}
+
 test_registration_replay_preserves_delivery_and_retirement() {
   local home log
   home=$(make_home register-replay)
@@ -1659,8 +1707,8 @@ EOF
     "the retirement receipt must preserve the reason"
   assert_grep 'retired_at=' "$home/state/public-followup/retired/pf-retire" \
     "the retirement receipt must preserve its timestamp"
-  receipt_mode=$(stat -f %Lp "$home/state/public-followup/retired/pf-retire" 2>/dev/null \
-    || stat -c %a "$home/state/public-followup/retired/pf-retire" 2>/dev/null) \
+  receipt_mode=$(stat -c %a "$home/state/public-followup/retired/pf-retire" 2>/dev/null \
+    || stat -f %Lp "$home/state/public-followup/retired/pf-retire" 2>/dev/null) \
     || fail "could not inspect the retirement receipt mode"
   [ "$receipt_mode" = 600 ] || fail "the retirement receipt must be private"
   assert_absent "$home/state/public-followup/registry/pf-retire" \
@@ -1903,6 +1951,7 @@ test_control_registered_followon_is_guarded
 test_rechain_delivers_second_post_on_same_thread
 test_rechain_resumes_after_partial_add
 test_rechain_claims_delivered_source_once
+test_failed_rechain_retirement_keeps_source_claimed
 test_registration_replay_preserves_delivery_and_retirement
 test_redelivery_does_not_report_retired_loop_open
 test_retire_reason_closes_the_open_loop

@@ -288,7 +288,7 @@ cmd_register() {
     request_context_b64=$(printf '%s' "$request_json" | fm_pf_b64_encode)
   fi
 
-  local mkdir_target registry_state delivered_at retired_file
+  local mkdir_target registry_state delivered_at retired_file rechain_to
   for mkdir_target in "$(fm_pf_registry_dir "$STATE")" "$(fm_pf_events_dir "$STATE")" \
                       "$(fm_pf_consumed_dir "$STATE")" "$(fm_pf_rejected_dir "$STATE")"; do
     fmx_private_artifact_dir_prepare "$mkdir_target" >/dev/null \
@@ -303,10 +303,12 @@ cmd_register() {
   fi
   registry_state=$(fm_pf_registry_loop_state "$STATE" "$id")
   delivered_at=$(fm_pf_registry_get "$STATE" "$id" delivered_at)
+  rechain_to=$(fm_pf_registry_get "$STATE" "$id" rechain_to)
   if [ "$registry_state" = delivered ]; then
     printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=delivered\ndelivered_at=%s\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
       "$id" "$relation" "$work_home" "$work_id" "$generation" "$platform" "$request" \
       "$delivered_at" "$followup_expires_at" "$request_context_b64"
+    [ -z "$rechain_to" ] || printf 'rechain_to=%s\n' "$rechain_to"
   else
     printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
       "$id" "$relation" "$work_home" "$work_id" "$generation" "$platform" "$request" \
@@ -1053,7 +1055,7 @@ cmd_rechain() {
 
   pf_registry_lock_acquire "$from" \
     || die "could not lock source registration '$from' for rechain" 1
-  local src_file loop_state expires window ctx
+  local src_file loop_state expires window ctx rechain_to source_record
   src_file="$(fm_pf_registry_dir "$STATE")/$from"
   [ -f "$src_file" ] && [ ! -L "$src_file" ] \
     || die "no registration for '$from' in this home" 1
@@ -1082,6 +1084,21 @@ cmd_rechain() {
       ''|*[!a-z0-9_]*) die "deliverable key must be lowercase [a-z0-9_], got '$key'" ;;
     esac
   done
+
+  # Claim the delivered baton before publishing its destination. The claim is
+  # retained if any later retirement step fails, so a retry may resume the same
+  # destination but can never fork this thread into a second obligation.
+  rechain_to=$(fm_pf_registry_get "$STATE" "$from" rechain_to)
+  if [ -n "$rechain_to" ] && [ "$rechain_to" != "$new_id" ]; then
+    die "source '$from' is already claimed by rechain destination '$rechain_to'; resume that destination" 1
+  fi
+  if [ -z "$rechain_to" ]; then
+    source_record=$(grep -v -E '^rechain_to=' "$src_file" 2>/dev/null) \
+      || die "could not read source registration '$from' while claiming it" 1
+    printf '%s\nrechain_to=%s\n' "$source_record" "$new_id" \
+      | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$from" 600 \
+      || die "could not claim source registration '$from' for '$new_id'" 1
+  fi
 
   local ctx_file expected_file relation_file keys_json project src_payload
   ctx=$(fm_pf_registry_get "$STATE" "$from" request_context_b64)
