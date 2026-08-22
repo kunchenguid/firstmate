@@ -26,9 +26,10 @@
 #     already present in the secondmate backlog is reported and skipped, and if
 #     any key matches neither backlog nothing is moved;
 #   - warning, after a successful move, when a moved key still owes a public
-#     relay reply bound to main/<key>, because that binding no longer names the
-#     home that owns the work. The move is not blocked: rebinding the commitment
-#     to secondmate:<id> is a relay-side decision the caller makes.
+#     relay reply bound to main/<key>, or when this home has an open public loop
+#     with nothing owed, because routing work out does not close that loop. The
+#     move is not blocked: rebinding or rechain is a relay-side decision the
+#     caller makes.
 #
 # What `tasks-axi mv <id>... --to <dest>` owns: moving each full item BLOCK
 # byte-exact (header, body lines, blank separators, and indented pseudo-headings
@@ -58,6 +59,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REG="$DATA/secondmates.md"
 MAIN_BACKLOG="$DATA/backlog.md"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
@@ -66,6 +68,8 @@ MAIN_BACKLOG="$DATA/backlog.md"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-public-followup-lib.sh
+. "$SCRIPT_DIR/fm-public-followup-lib.sh"
 
 ACTIVE_HANDOFF_LOCK=
 ACTIVE_REGISTRY_LOCK=
@@ -288,6 +292,10 @@ warn_stale_public_commitments() { # <secondmate-id> <moved-key>...
     printf 'warning: %s still owes a public reply bound to main/%s; rebind it to secondmate:%s (tasks-axi public-followup bind-work, then bin/fm-public-followup.sh register <obligation-id> --relation <relation-id> --work-home secondmate:%s --work-id %s --generation <n>) or the promised reply will be reconciled against work this home no longer owns.\n' \
       "$key" "$key" "$id" "$id" "$key" >&2
   done
+  if fm_pf_relay_active "$FM_HOME" && fm_pf_has_delivered_open_loops "$STATE"; then
+    printf 'warning: this home has an open public loop with nothing owed; routing work to secondmate:%s does not close it. Hand it on with bin/fm-public-followup.sh rechain or close it with retire --reason.\n' \
+      "$id" >&2
+  fi
   # Reporting never changes the handoff's own success: the move already landed.
   return 0
 }

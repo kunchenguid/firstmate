@@ -2322,9 +2322,9 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
     exit 1
   fi
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null; then
-    echo "REFUSED: scout task $ID has not passed the unresolved-decision completion gate." >&2
-    echo "Inventory its report and any visual review through bin/fm-decision-hold.sh before teardown." >&2
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null; then
+    echo "REFUSED: scout task $ID has not passed the captain-call completion gate." >&2
+    echo "Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown." >&2
     exit 1
   fi
 fi
@@ -2349,6 +2349,22 @@ if [ "$FORCE" != "--force" ] \
     echo "Deliver it with bin/fm-public-followup.sh deliver <obligation-id>, waive it with tasks-axi public-followup waive, or use --force after explicit discard approval." >&2
     exit 1
   fi
+fi
+
+# Non-blocking: a delivered public loop is not a teardown refusal (guard-work
+# already passed), but tearing down a ship whose PR merged while a loop is still
+# open with nothing owed is the moment the drop is detectable.
+if [ "$KIND" = ship ] && [ -n "$PR_URL" ] \
+    && [ -n "$PUBLIC_FOLLOWUP_STATE" ] \
+    && [ "${PUBLIC_FOLLOWUP_RELAY_ACTIVE:-0}" = 1 ] \
+    && fm_pf_has_delivered_open_loops "$PUBLIC_FOLLOWUP_STATE"; then
+  echo "warning: an open public loop with nothing owed is still recorded in the consent-holding home while cleaning up ship task $ID. Hand it on with bin/fm-public-followup.sh rechain or close it with retire --reason." >&2
+fi
+
+# Non-blocking: the legacy Relay link is not guarded as a refusal.
+X_REQUEST=$(grep '^x_request=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+if [ -n "$X_REQUEST" ]; then
+  echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then

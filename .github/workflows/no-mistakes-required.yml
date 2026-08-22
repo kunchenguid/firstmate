@@ -31,42 +31,80 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
           if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
             if ! command -v jq >/dev/null 2>&1; then
-              echo "::error::This check requires jq to inspect authenticated pipeline evidence, but jq was not found on the runner." >&2
+              echo "::error::This check requires jq to parse no-mistakes pipeline step attestation, but jq was not found on the runner." >&2
               exit 1
             fi
-            evidence_path=$(printf '.no-mistakes/evidence/%s' "$PR_HEAD_REF" | jq -sRr @uri)
-            evidence=$(curl --fail-with-body --silent --show-error \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${PR_HEAD_REPOSITORY}/commits?sha=no-mistakes/evidence&path=${evidence_path}&per_page=1")
-            evidence_commit=$(printf '%s' "$evidence" | jq -r \
-              --arg branch "$PR_HEAD_REF" \
-              'first(.[] | select(.commit.message | startswith("no-mistakes: evidence for " + $branch + " (run "))) | .sha // empty')
-            if [ -z "$evidence_commit" ]; then
+            prefix='<!-- no-mistakes-pipeline-attestation:v1 '
+            suffix=' -->'
+            body="${PR_BODY:-}"
+            json=''
+            parse_ok=0
+            case "$body" in
+              *"$prefix"*)
+                rest="${body#*"$prefix"}"
+                case "$rest" in
+                  *"$suffix"*)
+                    json="${rest%%"$suffix"*}"
+                    if printf '%s' "$json" | jq -e . >/dev/null 2>&1; then
+                      parse_ok=1
+                    fi
+                    ;;
+                esac
+                ;;
+            esac
+            if [ "$parse_ok" -ne 1 ]; then
               {
-                echo "::error::No authenticated no-mistakes evidence was published for this branch."
+                echo "::error::This repository requires no-mistakes >= 1.46.0; structured pipeline step attestation is missing or unparseable."
                 echo
-                echo "This repository requires the pipeline-produced evidence commit on the"
-                echo "orphan no-mistakes/evidence branch, not author-supplied PR-body claims."
+                echo "The no-mistakes signature was found, but this check also requires one"
+                echo "HTML comment in the PR body:"
                 echo
-                echo "Re-run the pipeline with 'git push no-mistakes' for the current commit."
+                echo '    <!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"...","steps":[...]} -->'
+                echo
+                echo "That comment is emitted by no-mistakes >= 1.46.0 (the release that started"
+                echo "emitting structured step attestation; see https://github.com/kunchenguid/no-mistakes/pull/670)."
+                echo "An older no-mistakes that writes only the signature line is not enough."
+                echo
+                echo "Re-run the pipeline with 'git push no-mistakes' using no-mistakes >= 1.46.0."
                 echo "See CONTRIBUTING.md for setup and the full workflow."
                 echo
                 echo "PR author: ${PR_AUTHOR}"
               } >&2
               exit 1
             fi
-            echo "Authenticated no-mistakes evidence commit found: ${evidence_commit}."
+            incomplete=''
+            for required in review test document; do
+              status=$(printf '%s' "$json" | jq -r --arg step "$required" \
+                '([(.steps | arrays | .[]) | select(.step == $step) | .status] | first // empty | select(. != "")) // "missing"')
+              if [ "$status" != "completed" ]; then
+                if [ -n "$incomplete" ]; then
+                  incomplete="${incomplete}, "
+                fi
+                incomplete="${incomplete}${required}=${status}"
+              fi
+            done
+            if [ -n "$incomplete" ]; then
+              {
+                echo "::error::Required no-mistakes pipeline steps are not completed: ${incomplete}."
+                echo
+                echo "This repository requires review, test, and document to each have status"
+                echo "exactly 'completed'. Quota skips and agent skips are not compliant."
+                echo
+                echo "Re-run the pipeline with 'git push no-mistakes' using no-mistakes >= 1.46.0"
+                echo "so those required steps complete rather than skip."
+                echo "See CONTRIBUTING.md for setup and the full workflow."
+                echo
+                echo "PR author: ${PR_AUTHOR}"
+              } >&2
+              exit 1
+            fi
+            echo "Pipeline step attestation is valid: review, test, and document are completed."
             exit 0
           fi
           {

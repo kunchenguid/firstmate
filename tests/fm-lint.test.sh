@@ -534,6 +534,25 @@ test_installer_rejects_unsupported_platform() {
   pass "ShellCheck installer rejects an unsupported OS or architecture"
 }
 
+test_missing_shellcheck_fails_closed() {
+  local tmp fakebin out rc tool
+  tmp=$(fm_test_tmproot fm-lint-noshellcheck)
+  fakebin=$(fm_fakebin "$tmp")
+  for tool in bash dirname; do
+    ln -s "$(command -v "$tool")" "$fakebin/$tool"
+  done
+  rc=0
+  out=$(PATH="$fakebin" CI=true GITHUB_ACTIONS=true "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "missing ShellCheck expected exit 1, got $rc"$'\n'"$out"
+  assert_contains "$out" "ShellCheck not found" \
+    "missing ShellCheck did not name the required linter"
+  assert_contains "$out" "$REQUIRED" \
+    "missing ShellCheck did not name the pinned version"
+  assert_contains "$out" "fm-install-shellcheck.sh" \
+    "missing ShellCheck did not name the pinned installer"
+  pass "missing ShellCheck fails closed"
+}
+
 test_rejects_wrong_shellcheck_version() {
   # Version-independent: a fake shellcheck reporting a different version must be
   # refused before any lint, proving local and CI cannot silently diverge.
@@ -866,6 +885,7 @@ test_installer_rejects_wrong_checksum
 test_installer_falls_back_to_shasum
 test_installer_prefers_sha256sum_over_shasum
 test_installer_rejects_unsupported_platform
+test_missing_shellcheck_fails_closed
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts

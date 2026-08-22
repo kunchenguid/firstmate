@@ -74,19 +74,20 @@
 # backend or remote transport.
 #
 # Chat is also a channel that carries keyed captain answers, so the same flag
-# feeds bin/fm-decision-hold.sh's one keyed-answer intake for any key that names
-# a durable decision hold on the target task. fm-send maps nothing to a hold and
-# closes nothing itself; it hands the intake `<key>\t<answer>\t<label>` exactly
-# as every other channel does, and the intake owns what that means. This is what
-# lets an answer reach a decision that has already been transferred from the live
-# status log to its durable hold, which the status ledger alone can no longer
-# close.
+# feeds bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
+# a captain-held task in this home - the key as a task id itself, or through
+# the legacy `<task>-decision-<key>` identity for pre-collapse rows. fm-send
+# closes nothing itself; it hands the intake `<task-id>\t<answer>\t<label>`
+# exactly as every other channel does, and the intake owns what that means.
+# This is what lets an answer reach a decision that has already been
+# transferred from the live status log to its durable captain-held task, which
+# the status ledger alone can no longer close.
 #
 # Each named key must therefore currently be open in ONE of the two ledgers: open
 # in this home's status log per status_open_decisions (bin/fm-classify-lib.sh), or
-# an active captain hold for the target task. A key in neither is refused before
-# sending, so a mistyped key cannot deliver an answer while silently orphaning the
-# decision. A failed or unconfirmed send never closes a key (a remote
+# a still-open captain-held task resolved as above. A key in neither is refused
+# before sending, so a mistyped key cannot deliver an answer while silently
+# orphaning the decision. A failed or unconfirmed send never closes a key (a remote
 # delivered-with-pending-confirmation outcome counts as delivered - see the
 # remote paragraph above); a
 # delivered answer whose closing append fails exits nonzero with the exact
@@ -388,21 +389,32 @@ fi
 # silently leaves its decision open.
 RESOLVE_STATUS_FILE=
 # Which ledger each answered key belongs to. A key still open in the status log
-# is owned by the status log: fm-decision-hold's `complete` closes that live copy
-# at the moment it transfers a decision to its durable hold, so "still open in
-# status" and "already a hold" are the two sides of one transfer, never both at
-# once. Checking the hold only for keys the status log no longer owns also keeps
-# the common path free of any backlog read.
+# is owned by the status log: fm-captain-hold's `complete` closes that live copy
+# at the moment it transfers a decision to its durable captain-held task, so
+# "still open in status" and "already held" are the two sides of one transfer,
+# never both at once. Checking the backlog only for keys the status log no
+# longer owns also keeps the common path free of any backlog read.
 RESOLVE_STATUS_KEYS=
 RESOLVE_HOLD_KEYS=
 
-fm_send_hold_is_active() {  # <task-id> <decision-key>
-  local show
+# Resolve a --resolve-key key that the status log no longer owns to the
+# captain-held task that carries it: the key as a task id itself (the collapsed
+# identity - a captain call IS a task held for the captain), then the legacy
+# derived `<task>-decision-<key>` identity for pre-collapse rows. Answerable
+# means not closed and still carrying the captain-hold annotations tasks-axi
+# preserves even past a hold-until date.
+fm_send_hold_resolved_id() {  # <task-id> <decision-key>
+  local show id state hold_kind
   command -v tasks-axi >/dev/null 2>&1 || return 1
-  show=$( (cd "$FM_HOME" && tasks-axi show "$1-decision-$2" --full) 2>/dev/null ) || return 1
-  case "$show" in *"held: yes"*) : ;; *) return 1 ;; esac
-  case "$show" in *"hold_kind: captain"*) : ;; *) return 1 ;; esac
-  case "$show" in *"state: queued"*) return 0 ;; esac
+  for id in "$2" "$1-decision-$2"; do
+    show=$( (cd "$FM_HOME" && tasks-axi show "$id" --full) 2>/dev/null ) || continue
+    state=$(printf '%s\n' "$show" | sed -n 's/^  state: //p' | head -1)
+    hold_kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: //p' | head -1)
+    [ "$state" != "done" ] || continue
+    [ "$hold_kind" = captain ] || continue
+    printf '%s\n' "$id"
+    return 0
+  done
   return 1
 }
 
@@ -430,13 +442,13 @@ if [ -n "$RESOLVE_KEYS" ]; then
         ;;
     esac
     # Not open in the status log. A decision already transferred to its durable
-    # hold is exactly this case, and it is answerable - just through the other
-    # ledger - so check there before refusing.
-    if fm_send_hold_is_active "$RESOLVE_TASK_ID" "$k"; then
-      RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$k"
+    # captain-held task is exactly this case, and it is answerable - just
+    # through the other ledger - so check there before refusing.
+    if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
+      RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       continue
     fi
-    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no active captain decision $RESOLVE_TASK_ID-decision-$k (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
     exit 1
   done
 fi
@@ -463,9 +475,10 @@ fm_send_close_resolved_keys() {  # <answer-text>
   done
 }
 
-# Feed the answered hold keys to the ONE keyed-answer intake, as keyed lines,
-# exactly the way every other channel does. fm-send decides nothing here: it does
-# not map a key to a hold, build a decision record, or choose a close path.
+# Feed the answered captain-held tasks to the ONE keyed-answer intake, as keyed
+# lines, exactly the way every other channel does. fm-send decides nothing here:
+# it does not build a decision record or choose a close path; the keys were
+# already resolved to task ids above, so the intake needs no legacy origin.
 fm_send_feed_resolved_holds() {  # <answer-text>
   local note=$1 k lines=''
   [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
@@ -473,9 +486,9 @@ fm_send_feed_resolved_holds() {  # <answer-text>
   for k in $RESOLVE_HOLD_KEYS; do
     lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
   done
-  if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-decision-hold.sh" answers "$RESOLVE_TASK_ID" \
+  if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
     --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
-    echo "error: the answer was delivered to $T, but this captain decision could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-decision-hold.sh (answer, or resolve when it routes work) - do not resend the answer." >&2
+    echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
     return 1
   fi
 }

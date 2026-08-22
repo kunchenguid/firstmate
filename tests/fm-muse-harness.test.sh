@@ -13,6 +13,13 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# bin/fm-harness.sh checks verified ENV markers before ancestry. Muse is
+# markerless, so an inherited Cursor/Claude/Pi/Grok marker would outrank the
+# versioned muse-bin ancestor these detection cases launch. Drop the ambient
+# markers so the asserted verdict does not depend on which harness launched
+# the suite.
+unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 HARNESS="$ROOT/bin/fm-harness.sh"
@@ -154,9 +161,10 @@ run_muse_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
 # string, so each case launches an actual renamed executable and asks
 # fm-harness.sh from a child of it.
 #
-# The foreign env markers are cleared because muse is markerless and the marker
-# layer deliberately outranks ancestry: with one retained, these cases would
-# assert the marker's verdict instead of the ancestry match they exist to pin.
+# The foreign env markers, including Cursor's, are cleared because muse is
+# markerless and the marker layer deliberately outranks ancestry: with one
+# retained, these cases would assert the marker's verdict instead of the
+# ancestry match they exist to pin.
 # The command substitution around the probe is load-bearing: a bare `-c <cmd>`
 # lets the shell exec the probe in place, which REPLACES the muse-bin-* process
 # name the walk is supposed to find. Real muse keeps its TUI process alive and
@@ -167,7 +175,8 @@ test_detects_versioned_process_ancestor() {
   mkdir -p "$dir"
   for bin in muse-bin-0.1.0-R708.1 muse-bin-9.9.9-RZZZ.9 muse; do
     cp "$(command -v bash)" "$dir/$bin"
-    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
     [ "$out" = muse ] || fail "fm-harness.sh under process '$bin' reported '$out', expected muse"
   done
@@ -182,7 +191,8 @@ test_detection_is_anchored() {
   mkdir -p "$dir"
   for bin in musescore amuse notmuse-bin muse-binary muse-bind; do
     cp "$(command -v bash)" "$dir/$bin"
-    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
     [ "$out" != muse ] || fail "fm-harness.sh misdetected unrelated process '$bin' as muse"
   done
@@ -197,6 +207,7 @@ $rec
 EOF
   result="$case_dir/harness-result"
   out=$(CLAUDECODE=1 PI_CODING_AGENT=true GROK_AGENT=1 FM_PI_HARNESS=pi-signed \
+    CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent \
     FM_FAKE_EXECUTE_MUSE_LAUNCH=1 FM_FAKE_HARNESS_RESULT="$result" \
     run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
   status=$?

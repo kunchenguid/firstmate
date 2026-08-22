@@ -91,8 +91,6 @@ a { color: inherit; text-decoration: none; }
 .fm-btn--primary:hover { background: var(--rust-600); }
 .fm-btn--gold { background: var(--gold-500); color: var(--navy-700); border-color: var(--ink-900); box-shadow: var(--shadow-hard-sm); }
 .fm-btn--gold:hover { background: var(--gold-600); color: var(--white); }
-.fm-btn--ghost { background: transparent; color: var(--text-muted); border-color: var(--border-default); box-shadow: none; }
-.fm-btn--ghost:hover { background: var(--paper-100); color: var(--text-strong); border-color: var(--ink-300); }
 .fm-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
 
 /* ---- fm-card ---- */
@@ -221,9 +219,7 @@ a { color: inherit; text-decoration: none; }
   letter-spacing: 0.07em; color: var(--navy-700); background: var(--gold-300);
   border: 1px solid var(--gold-600); border-radius: var(--radius-xs); padding: 3px 7px 2px; }
 .bb-opt:has(input:checked) { border-color: var(--rust-500); background: var(--rust-050); box-shadow: inset 0 0 0 1px var(--rust-500); }
-.bb-decision__foot { display: flex; align-items: center; gap: 10px; margin-top: auto; flex-wrap: wrap; }
-.bb-drop { margin-left: auto; }
-.is-queued .bb-drop { display: none; }
+.bb-decision__foot { display: flex; align-items: center; gap: 10px; margin-top: auto; }
 .bb-queued {
   display: none; align-items: center; gap: 6px;
   font-size: var(--fs-2xs); font-weight: 800; text-transform: uppercase; letter-spacing: 0.07em;
@@ -521,14 +517,10 @@ __FM_BEARINGS_BOARD_DATA__
     });
     form.appendChild(opts);
 
-    /* Decision cards always keep a supplementary "something else" box; merge
-       and credential cards keep the payload's allow_freeform flag. */
-    if (item.type === "decision" || item.allow_freeform) {
+    if (item.allow_freeform) {
       var ff = document.createElement("input");
       ff.type = "text"; ff.name = "note"; ff.className = "bb-freeform";
-      ff.placeholder = item.freeform_hint || (item.type === "decision"
-        ? "or something else…"
-        : "or answer in your own words…");
+      ff.placeholder = item.freeform_hint || "or answer in your own words…";
       form.appendChild(ff);
     }
 
@@ -542,18 +534,16 @@ __FM_BEARINGS_BOARD_DATA__
     var answerLimit = el("span", "bb-limit");
     answerLimit.setAttribute("role", "alert");
     foot.appendChild(answerLimit);
-    var dropBtn = null;
-    if (item.type === "decision") {
-      dropBtn = el("button", "fm-btn fm-btn--sm fm-btn--ghost bb-drop", "Close / drop");
-      dropBtn.type = "button";
-      dropBtn.setAttribute("aria-label", "Close or drop this decision");
-      foot.appendChild(dropBtn);
-    }
     form.appendChild(foot);
 
-    function queueAnswer(answer) {
-      if (card.classList.contains("is-queued")) return;
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
       answerLimit.classList.remove("is-visible");
+      var fd = new FormData(form);
+      var value = fd.get("answer");
+      var note = (fd.get("note") || "").trim();
+      /* picked option, optionally annotated; a bare note is itself the answer */
+      var answer = value ? (note ? value + " - " + note : value) : note;
       if (!answer) return;
       if (utf8ByteLength(answer) > 512) {
         answerLimit.textContent = "Answer is too long to queue (512 bytes maximum).";
@@ -561,32 +551,20 @@ __FM_BEARINGS_BOARD_DATA__
         return;
       }
       if (window.lavish && window.lavish.queuePrompt) {
+        /* close carries the composer-declared close mode: "release" frees a
+           captain-gated work item instead of completing a question task */
+        var ctxData = { question: item.key, answer: answer };
+        if (item.close) ctxData.close = item.close;
         window.lavish.queuePrompt(
           "Captain's Call answer - " + item.title + ": " + answer,
           { tag: "choice", text: item.title + " -> " + answer, element: form,
-            data: { question: item.key, answer: answer } }
+            data: ctxData }
         );
       }
       card.classList.add("is-queued");
       /* deal the next card once this one is answered */
       setTimeout(function () { showCard(active < cards.length - 1 ? active + 1 : active); }, 450);
-    }
-
-    form.addEventListener("submit", function (ev) {
-      ev.preventDefault();
-      var fd = new FormData(form);
-      var value = fd.get("answer");
-      var note = (fd.get("note") || "").trim();
-      /* picked option, optionally annotated; a bare note is itself the answer */
-      var answer = value ? (note ? value + " - " + note : value) : note;
-      queueAnswer(answer);
     });
-    if (dropBtn) {
-      dropBtn.addEventListener("click", function () {
-        /* reserved close/drop encoding; the keyed-answer intake declines it */
-        queueAnswer("__drop__");
-      });
-    }
 
     pad.appendChild(form);
     card.appendChild(pad);

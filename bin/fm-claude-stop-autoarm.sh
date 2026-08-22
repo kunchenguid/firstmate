@@ -23,7 +23,10 @@
 #   - Single-flight: Claude does not dedupe async hooks, so a home-scoped owner
 #     lock (state/.claude-autoarm.lock) admits exactly one owner; every other
 #     concurrent firing exits 0 without translating, which keeps one event
-#     epoch on exactly one recovery turn.
+#     epoch on exactly one recovery turn. A lock left behind by a claim whose
+#     ledger outcome is already terminal, or whose recorded pid-identity no
+#     longer matches its live pid, is reclaimed once rather than deferred to
+#     forever (fm_autoarm_claim_abandoned in bin/fm-wake-lib.sh).
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
@@ -135,7 +138,24 @@ fi
 # Claude runs one background process per firing with no dedupe. Exactly one
 # owner foregrounds the arm and translates its close; every other firing exits
 # 0 so one watcher cycle maps to at most one exit-2 rewake.
-fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+#
+# A claim whose own ledger entry or recorded pid-identity proves its supervision
+# decision already finished is abandoned, not in flight: deferring to it forever
+# is what leaves a home unsupervised with no watcher and no lock
+# (fm_autoarm_claim_abandoned in bin/fm-wake-lib.sh owns that proof and its
+# race-free reclaim). Reclaim it once and retry; anything still genuinely
+# deciding keeps the lock and this firing stays inert.
+if ! fm_lock_try_acquire "$OWNER_LOCK"; then
+  fm_autoarm_release_abandoned "$STATE" || exit 0
+  fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+fi
+# Record WHO this claim is before publishing the role both Stop participants read
+# as ownership. A bare pid the operating system later hands to an unrelated live
+# process is exactly what makes a killed claim look in flight forever, in the two
+# shapes the ledger cannot settle: an entry still reading arming, and no entry at
+# all. Best effort; a home whose identity cannot be recorded keeps the ledger-only
+# boundary rather than losing its claim.
+fm_autoarm_claim_record_identity "$STATE" || true
 if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
   fm_lock_release "$OWNER_LOCK"
   exit 0

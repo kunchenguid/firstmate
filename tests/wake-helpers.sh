@@ -123,6 +123,11 @@ prime_status_seen() {  # <state> <file>
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
 }
 
+# Print the generation from a recovery marker token of any status/kind.
+recovery_marker_generation() {  # <marker-file>
+  sed -n 's/^[^:]*:[^:]*:\(.*\)$/\1/p' "$1"
+}
+
 # Acknowledge a drain from its captured stderr (the WAKE_ACK_REQUIRED line).
 ack_drain_err() {  # <state> <stderr-file>
   local state=$1 err=$2 sequence generation

@@ -11,7 +11,10 @@
 # verb, regardless of order or count. These tests drive the REAL
 # status_line_verb / status_open_decisions / status_open_decisions_incremental
 # functions over crafted status files and assert their folded output, never the
-# fold's own source text. Cross-drain cursor persistence and the incremental
+# fold's own source text. Also covers status_key_closing_verb, which reports how
+# the status side currently reads one key so a consumer can tell a settled key
+# from one handed to a durable captain-held task (bin/fm-captain-hold.sh
+# diverged). Cross-drain cursor persistence and the incremental
 # cost bound live in tests/fm-wake-drain-open-decisions-cursor.test.sh; the
 # drain wiring lives in tests/fm-wake-drain-open-decisions.test.sh.
 set -u
@@ -272,3 +275,66 @@ test_corr_only_tag_opens_as_default_like_a_bare_line
 test_key_only_before_colon_still_opens_no_regression
 test_blocked_and_resolved_are_tag_order_independent
 test_incremental_agrees_with_full_fold_across_appends
+
+# status_key_closing_verb reports HOW the status side currently reads one key,
+# which is what lets a consumer tell a settled key from a key handed to a
+# durable captain-held task. The two closing verbs must stay distinguishable:
+# `resolved` claims the question is settled outright, while `captain-held` is
+# the verified transfer to that task, so treating them alike would either lose
+# the record-divergence signal or invent one on every correct transfer.
+test_closing_verb_separates_resolution_from_durable_transfer() {
+  local dir f
+  dir=$(case_dir closing-verb)
+  f="$dir/a.status"
+  cat > "$f" <<'EOF'
+working: started
+needs-decision [key=route]: north or south
+resolved [key=route]: answered: north
+needs-decision [key=access]: open or restricted
+captain-held [key=access]: tracked by sample-access-call
+blocked [key=creds]: need the deploy token
+done: everything else shipped
+EOF
+  [ "$(status_key_closing_verb "$f" route)" = resolved ] \
+    || fail "a resolved key did not report the resolve verb: '$(status_key_closing_verb "$f" route)'"
+  [ "$(status_key_closing_verb "$f" access)" = captain-held ] \
+    || fail "a durable-transfer close reported the wrong verb: '$(status_key_closing_verb "$f" access)'"
+  [ "$(status_key_closing_verb "$f" creds)" = blocked ] \
+    || fail "a still-open key must report its opening verb: '$(status_key_closing_verb "$f" creds)'"
+  [ -z "$(status_key_closing_verb "$f" never-mentioned)" ] \
+    || fail "a key with no transition line reported a verb"
+  [ -z "$(status_key_closing_verb "$dir/absent.status" route)" ] \
+    || fail "an absent status file reported a verb"
+  pass "status_key_closing_verb separates resolution, durable transfer, and still-open"
+}
+
+# The reported verb is the LAST transition, read through the same fold rule as
+# everything else: the colon-first key position counts, a re-opened key reports
+# open again, and a prose mention is never a transition.
+test_closing_verb_tracks_the_last_transition_in_both_positions() {
+  local dir f
+  dir=$(case_dir closing-verb-last)
+  f="$dir/a.status"
+  cat > "$f" <<'EOF'
+needs-decision: [key=route] colon-first open
+resolved: [key=route] colon-first close
+EOF
+  [ "$(status_key_closing_verb "$f" route)" = resolved ] \
+    || fail "a colon-first resolution was not seen: '$(status_key_closing_verb "$f" route)'"
+
+  printf 'needs-decision [key=route]: re-opened after a bad answer\n' >> "$f"
+  [ "$(status_key_closing_verb "$f" route)" = needs-decision ] \
+    || fail "a re-opened key still reported closed: '$(status_key_closing_verb "$f" route)'"
+
+  printf 'resolved [key=route]: answered: south after all\n' >> "$f"
+  [ "$(status_key_closing_verb "$f" route)" = resolved ] \
+    || fail "the last of several transitions was not reported: '$(status_key_closing_verb "$f" route)'"
+
+  printf 'working: a later append that only mentions [key=route] as prose\n' >> "$f"
+  [ "$(status_key_closing_verb "$f" route)" = resolved ] \
+    || fail "a prose mention changed the reported verb: '$(status_key_closing_verb "$f" route)'"
+  pass "status_key_closing_verb reports the last real transition, in either key position"
+}
+
+test_closing_verb_separates_resolution_from_durable_transfer
+test_closing_verb_tracks_the_last_transition_in_both_positions
