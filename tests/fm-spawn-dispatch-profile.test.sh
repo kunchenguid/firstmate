@@ -96,6 +96,19 @@ SH
 shift
 exec "$@"
 SH
+  cat > "$fakebin/cp" <<'SH'
+#!/usr/bin/env bash
+set -u
+/bin/cp "$@" || exit 1
+if [ -n "${FM_TEST_MUTATE_BRIEF_SOURCE:-}" ] \
+  && [ "${1:-}" = "$FM_TEST_MUTATE_BRIEF_SOURCE" ]; then
+  case "${2:-}" in
+    */.routing-decision.validate.*/data/*/brief.md)
+      printf '%s\n' "${FM_TEST_BRIEF_REPLACEMENT:-replacement brief bytes}" > "$FM_TEST_MUTATE_BRIEF_SOURCE"
+      ;;
+  esac
+fi
+SH
   cat > "$fakebin/cursor-agent" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --list-models ]; then
@@ -104,7 +117,7 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/treehouse"
+  chmod +x "$fakebin/timeout" "$fakebin/cp" "$fakebin/cursor-agent" "$fakebin/treehouse"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -330,7 +343,7 @@ assert_spawn_refused_before_side_effects() { # <home> <id> <launch-log>
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
+  local rec id out status expected launch routing_brief
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
@@ -344,7 +357,8 @@ test_no_profile_keeps_claude_profile_defaults() {
     "successful spawn did not exercise the non-literal worktree-lease channel"
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  routing_brief=$(sed -n 's/^routing_brief=//p' "$HOME_DIR/state/$id.meta")
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$routing_brief')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -366,7 +380,7 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
-  local rec id out status launch home_real
+  local rec id out status launch home_real routing_brief
   id=profile-relative-paths-z1b
   rec=$(make_spawn_case profile-relative-paths pi "$id")
   read_case_record "$rec"
@@ -388,15 +402,16 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   status=$?
   expect_code 0 "$status" "spawn with relative home overrides should succeed"
   launch=$(cat "$LAUNCH_LOG")
+  routing_brief=$(sed -n 's/^routing_brief=//p' "$home_real/state/$id.meta")
   assert_contains "$launch" "-e '$home_real/state/$id.pi-ext.ts'" \
     "relative FM_STATE_OVERRIDE leaked into Pi's cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$id/brief.md'" \
+  assert_contains "$launch" "< '$routing_brief'" \
     "relative FM_DATA_OVERRIDE leaked into the cross-process brief path"
   pass "relative home overrides ignore CDPATH and become absolute before spawn launch construction"
 }
 
 test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
-  local rec relative_id absolute_id out status launch home_real linked_home
+  local rec relative_id absolute_id out status launch home_real linked_home routing_brief
   relative_id=profile-relative-home-defaults-z1c
   absolute_id=profile-absolute-home-defaults-z1d
   rec=$(make_spawn_case profile-home-defaults pi "$relative_id" "$absolute_id")
@@ -418,9 +433,10 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   status=$?
   expect_code 0 "$status" "spawn with relative FM_HOME defaults should succeed"
   launch=$(cat "$LAUNCH_LOG")
+  routing_brief=$(sed -n 's/^routing_brief=//p' "$home_real/state/$relative_id.meta")
   assert_contains "$launch" "-e '$home_real/state/$relative_id.pi-ext.ts'" \
     "relative FM_HOME leaked into Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
+  assert_contains "$launch" "< '$routing_brief'" \
     "relative FM_HOME leaked into the default cross-process brief path"
 
   linked_home="$CASE_DIR/home-link"
@@ -439,15 +455,16 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   status=$?
   expect_code 0 "$status" "spawn with absolute symlink-spelled FM_HOME defaults should succeed"
   launch=$(cat "$LAUNCH_LOG")
+  routing_brief=$(sed -n 's/^routing_brief=//p' "$linked_home/state/$absolute_id.meta")
   assert_contains "$launch" "-e '$linked_home/state/$absolute_id.pi-ext.ts'" \
     "absolute FM_HOME spelling changed in Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$absolute_id/brief.md'" \
+  assert_contains "$launch" "< '$routing_brief'" \
     "absolute FM_HOME spelling changed in the default cross-process brief path"
   pass "FM_HOME defaults resolve relative paths and preserve absolute spellings"
 }
 
 test_absolute_override_spelling_is_preserved_in_launch_paths() {
-  local rec id out status launch linked_home
+  local rec id out status launch linked_home routing_brief
   id=profile-absolute-paths-z1c
   rec=$(make_spawn_case profile-absolute-paths pi "$id")
   read_case_record "$rec"
@@ -468,9 +485,10 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
   status=$?
   expect_code 0 "$status" "spawn with absolute symlink-spelled overrides should succeed"
   launch=$(cat "$LAUNCH_LOG")
+  routing_brief=$(sed -n 's/^routing_brief=//p' "$linked_home/state/$id.meta")
   assert_contains "$launch" "-e '$linked_home/state/$id.pi-ext.ts'" \
     "absolute FM_STATE_OVERRIDE spelling changed in Pi's cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$id/brief.md'" \
+  assert_contains "$launch" "< '$routing_brief'" \
     "absolute FM_DATA_OVERRIDE spelling changed in the cross-process brief path"
   pass "absolute override spellings are preserved in spawn launch paths"
 }
@@ -619,6 +637,32 @@ test_duplicate_spawn_preserves_active_routing_provenance() {
   [ ! -s "$HOME_DIR/endpoint.log" ] || fail "duplicate spawn created an endpoint"
   [ ! -s "$HOME_DIR/worktree.log" ] || fail "duplicate spawn leased a worktree"
   pass "duplicate fresh spawn preserves active metadata and routing receipt bytes"
+}
+
+test_launch_uses_validated_brief_snapshot_after_source_replacement() {
+  local rec id out status routing_brief launch
+  id=profile-brief-snapshot-z12b3
+  rec=$(make_spawn_case profile-brief-snapshot claude "$id")
+  read_case_record "$rec"
+  /bin/cp "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/validated-brief.expected"
+
+  out=$(FM_TEST_MUTATE_BRIEF_SOURCE="$HOME_DIR/data/$id/brief.md" \
+    FM_TEST_BRIEF_REPLACEMENT="replacement after validation snapshot" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "source brief replacement should not change validated launch input"
+  routing_brief=$(sed -n 's/^routing_brief=//p' "$HOME_DIR/state/$id.meta")
+  [ -n "$routing_brief" ] || fail "spawn metadata omitted the validated brief snapshot"
+  cmp -s "$CASE_DIR/validated-brief.expected" "$routing_brief" \
+    || fail "persisted brief snapshot differs from the validated bytes"
+  [ "$(cat "$HOME_DIR/data/$id/brief.md")" = "replacement after validation snapshot" ] \
+    || fail "source brief replacement counterexample did not fire"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "< '$routing_brief'" \
+    "emitted launch did not read the persisted validated brief snapshot"
+  [ -z "$(find "$HOME_DIR/data/$id" -maxdepth 1 -type d -name '.routing-decision.validate.*' -print -quit)" ] \
+    || fail "validation snapshot directory survived successful persistence"
+  pass "launch reads immutable validated brief bytes after source replacement"
 }
 
 test_raw_launches_refuse_unobserved_runtime_selection() {
@@ -1159,6 +1203,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_routing_receipt_is_unconditional_without_dispatch_config
 test_config_override_cannot_relocate_receipt_authority
 test_duplicate_spawn_preserves_active_routing_provenance
+test_launch_uses_validated_brief_snapshot_after_source_replacement
 test_raw_launches_refuse_unobserved_runtime_selection
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness

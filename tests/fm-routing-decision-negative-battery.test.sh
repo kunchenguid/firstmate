@@ -652,6 +652,8 @@ config effort empty|codex --model opus -c model_reasoning_effort=|effort config 
 equals config effort duplicate|codex --model opus --effort high -c=model_reasoning_effort=low|effort flag is duplicated
 equals config effort empty|codex --model opus -c=model_reasoning_effort=|effort config has no fixed literal value
 command wrapper env|env ROUTE_MODEL=sonnet claude --model opus --effort high|raw launch begins with a command wrapper rather than the emitted harness
+command wrapper arch|arch claude --model opus --effort high|raw launch begins with a command wrapper rather than the emitted harness
+command wrapper taskset|taskset -c 0 claude --model opus --effort high|raw launch begins with a command wrapper rather than the emitted harness
 RAW_SHAPES
 
 exercise_negative "raw option terminator" RAW_LAUNCH_UNRESOLVED setup_raw_terminator \
@@ -717,7 +719,7 @@ run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement
   || fail "canonical config replacement counterexample did not fire"
 pass "canonical config replacement cannot change snapshotted candidate resolution"
 
-expected_count=$((86 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((88 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

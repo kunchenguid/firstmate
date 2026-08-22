@@ -22,6 +22,7 @@
 
 # shellcheck disable=SC2034 # consumed by the sourcing fm-spawn.sh process
 FM_ROUTING_DECISION_FINAL=
+FM_ROUTING_BRIEF_FINAL=
 FM_ROUTING_DECISION_MAX_AGE_SECONDS=300
 FM_ROUTING_DECISION_MAX_FUTURE_SECONDS=30
 
@@ -176,7 +177,7 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
       harness_word=$(basename "$word")
       if [ "$raw" -eq 1 ]; then
         case "$harness_word" in
-          env|command|exec|nohup|nice|setsid|stdbuf|sudo|doas|time|timeout|xargs|sh|bash|zsh|dash|ksh|fish)
+          arch|chroot|daemon|doas|env|command|exec|ionice|nohup|nice|prlimit|script|setsid|start-stop-daemon|stdbuf|sudo|taskset|time|timeout|xargs|sh|bash|zsh|dash|ksh|fish)
             fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch begins with a command wrapper rather than the emitted harness"
             return 1
             ;;
@@ -405,7 +406,7 @@ fm_routing_normalized_candidates() {
 fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment> <source-pending> <snapshot-dir>
   local data=$1 config_dir=$2 id=$3 harness=$4 model=$5 effort=$6 home=$7
   local raw_launch=$8 launch=$9 model_fragment=${10:-} effort_fragment=${11:-}
-  local source_pending=${12} snapshot_dir=${13} consumed_pending
+  local source_pending=${12} snapshot_dir=${13} consumed_pending brief_final
   local task_dir brief intent pending quota_snapshot final config_file brief_hash intent_hash
   local receipt_task generated_at required_gate intent_gate source index candidates chosen candidate_count
   local quota_basis quota_source quota_observed quota_hash actual_quota_hash snapshot_observed
@@ -682,6 +683,22 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
     fm_routing_refuse "PERSISTENCE_REFUSED" "existing final receipt is not a regular file"
     return 1
   fi
+  brief_final="$(dirname "$source_pending")/routing-brief.$brief_hash.md"
+  if [ -e "$brief_final" ] || [ -L "$brief_final" ]; then
+    [ -f "$brief_final" ] && [ ! -L "$brief_final" ] && cmp -s "$brief" "$brief_final" || {
+      fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief target does not contain the exact validated bytes"
+      return 1
+    }
+  else
+    ln "$brief" "$brief_final" 2>/dev/null || {
+      fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief snapshot could not be published at its hash-addressed path"
+      return 1
+    }
+  fi
+  chmod 0400 "$brief_final" || {
+    fm_routing_refuse "PERSISTENCE_REFUSED" "validated brief snapshot permissions could not be restricted"
+    return 1
+  }
   chmod 0600 "$pending" || {
     fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt permissions could not be restricted"
     return 1
@@ -720,6 +737,8 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
   rm -f -- "$consumed_pending"
   # shellcheck disable=SC2034 # consumed by the sourcing fm-spawn.sh process
   FM_ROUTING_DECISION_FINAL=$final
+  # shellcheck disable=SC2034 # consumed by the sourcing fm-spawn.sh process
+  FM_ROUTING_BRIEF_FINAL=$brief_final
 }
 
 fm_routing_decision_validate_and_persist() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment>
@@ -727,6 +746,7 @@ fm_routing_decision_validate_and_persist() { # <data> <canonical-config> <task-i
   local source_config source_quota snapshot_dir snapshot_data snapshot_config status
 
   FM_ROUTING_DECISION_FINAL=
+  FM_ROUTING_BRIEF_FINAL=
   task_dir="$data/$id"
   source_pending="$task_dir/routing-decision.pending.json"
   source_intent="$task_dir/routing-intent.json"

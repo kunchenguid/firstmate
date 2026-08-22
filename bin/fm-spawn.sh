@@ -155,7 +155,7 @@
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
-#     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __BRIEF__    absolute path to the validated task brief snapshot
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -767,6 +767,7 @@ spawn_abort_cleanup() {
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
             [ -z "$FM_ROUTING_DECISION_FINAL" ] || echo "routing_decision=$FM_ROUTING_DECISION_FINAL"
+            [ -z "$FM_ROUTING_BRIEF_FINAL" ] || echo "routing_brief=$FM_ROUTING_BRIEF_FINAL"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -1713,7 +1714,7 @@ if [ "$KIND" = secondmate ]; then
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
-  BRIEF="$DATA/$ID/brief.md"
+  BRIEF=${FM_ROUTING_BRIEF_FINAL:-$DATA/$ID/brief.md}
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
@@ -2725,6 +2726,7 @@ preserve_relaunch_meta() {
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "$FM_ROUTING_DECISION_FINAL" ] || echo "routing_decision=$FM_ROUTING_DECISION_FINAL"
+  [ -z "$FM_ROUTING_BRIEF_FINAL" ] || echo "routing_brief=$FM_ROUTING_BRIEF_FINAL"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.

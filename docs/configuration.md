@@ -350,7 +350,8 @@ A multi-candidate route also supplies the exact one-intake `quota-axi --json` ob
 
 Every string is non-empty, `brief_sha256` is the SHA-256 of the exact current `data/<task-id>/brief.md` bytes, and `forbidden_effects` is a non-empty string array.
 The receipt binds the SHA-256 of this exact intent file rather than trusting an unattached hash.
-The validator recomputes the brief hash before accepting the intent, so replacing the brief after receipt generation returns `BRIEF_HASH_MISMATCH`.
+The validator recomputes the brief hash against a private snapshot before accepting the intent, so replacing the brief before that snapshot returns `BRIEF_HASH_MISMATCH`.
+On acceptance, the exact validated bytes persist at `data/<task-id>/routing-brief.<brief_sha256>.md`, and every fresh adapter launch reads that hash-addressed snapshot rather than reopening mutable `brief.md`.
 
 `routing-decision.pending.json` schema version 1 has exactly this shape:
 
@@ -419,7 +420,7 @@ Missing, malformed, hash-mismatched, or older-than-five-minutes multi-candidate 
 
 The receipt and quota timestamps use RFC3339 UTC and are accepted for five minutes, with at most 30 seconds of future clock skew.
 The supervisor home and local host are represented by SHA-256 identities and are recomputed by the spawn process rather than trusted from caller prose.
-On success, `fm-spawn.sh` atomically consumes the pending receipt into `data/<task-id>/routing-decision.json`, records that path in task metadata, and continues into the established spawn path in the same invocation.
+On success, `fm-spawn.sh` atomically consumes the pending receipt into `data/<task-id>/routing-decision.json`, records the receipt and validated brief paths in task metadata, and continues into the established spawn path in the same invocation.
 Consumption happens before later delivery, worktree, and endpoint checks, so any later failure burns that pending receipt and a retry requires a fresh one.
 Any receipt refusal is terminal and occurs before a worktree lease, worker endpoint, task metadata, pane input, or model execution.
 An existing final directory, regular or dangling symlink, or other non-regular target is rejected before the atomic rename.
