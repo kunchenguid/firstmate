@@ -417,22 +417,27 @@ failure_episode_verified() {
 # One full evaluation is irreducible - the guard cannot know a proof is absent
 # without looking for all of them - and the claim above is what makes a short
 # wait sufficient once that evaluation is paid for.
+attempt_recovery_exit() {
+  autoarm_owns_recovery || return 1
+  if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+    fm_failure_episode_reset "$STATE" || exit 2
+  fi
+  exit 0
+}
 WAIT_DEADLINE_MS=$(( $(fm_timing_now_ms) + SYNC_WAIT_MS ))
 while :; do
-  if autoarm_owns_recovery; then
-    if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-      fm_failure_episode_reset "$STATE" || exit 2
-    fi
-    exit 0
-  fi
-  # Checked AFTER the evaluation above, so the loop always makes at least one
-  # complete attempt and the last thing it does before breaking is a full
-  # evaluation. That is why no re-evaluation follows this loop: one there would
-  # repeat the pass just completed, with no sleep in between, and pay a second
-  # round of the fork-heavy checks and their budget accounting for nothing.
+  attempt_recovery_exit
   [ "$(fm_timing_now_ms)" -lt "$WAIT_DEADLINE_MS" ] || break
   sleep 0.1
 done
+# The deadline can lapse in the gap between the loop's last evaluation and the
+# break above - exactly the moment a loaded host's auto-arm is likeliest to
+# land its claim, since that is when the guard has spent the longest waiting
+# for it. One more attempt here catches a claim published in that gap; unlike
+# a pass added inside the loop, it costs nothing when recovery is confirmed
+# early (the loop exits before ever reaching it) and only ever runs once, on
+# the path that was already about to block.
+attempt_recovery_exit
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
 # budget before considering the verified one-time attended fail-open.
