@@ -53,6 +53,12 @@ cp "$ROOT/bin/fm-remote-entrypoint.sh" "$ROOT/bin/fm-remote-job-lib.sh" \
   "$ROOT/bin/fm-remote-job-worker.sh" "$ROOT/bin/fm-remote-file.sh" \
   "$ROOT/bin/fm-backlog-receive.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
   "$ROOT/bin/fm-wake-lib.sh" "$REMOTE_ROOT/bin/"
+# Keep the fixture's copied wake library with its optional platform helper.
+# Downstream ports can add that source dependency while the canonical build
+# remains self-contained without the helper.
+if [ -f "$ROOT/bin/fm-ps-lib.sh" ]; then
+  cp "$ROOT/bin/fm-ps-lib.sh" "$REMOTE_ROOT/bin/"
+fi
 ln -s "$(command -v tasks-axi)" "$REMOTE_ROOT/bin/tasks-axi"
 ln -s "$(command -v node)" "$REMOTE_ROOT/bin/node"
 chmod +x "$REMOTE_ROOT/bin"/*.sh
