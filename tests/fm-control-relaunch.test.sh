@@ -1451,7 +1451,8 @@ add_herdr_ship_task() {
 # A secondmate task recorded on a Herdr endpoint, seeded in its own firstmate
 # home exactly like the tmux secondmate fixtures.
 add_herdr_secondmate_task() {  # <case-dir> <id>
-  local dir=$1 id=$2 home="$dir/home"
+  local dir=$1 id=$2
+  local home="$dir/home"
   fm_git_worktree "$dir/proj" "$dir/smhome" "sm-$id"
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin" "$home/config" "$home/data/$id"
   printf 'claude\n' > "$home/config/secondmate-harness"
