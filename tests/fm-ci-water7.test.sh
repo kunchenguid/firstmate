@@ -24,7 +24,7 @@ ci = yaml.safe_load(ci_path.read_text())
 required = yaml.safe_load(required_path.read_text())
 
 assert ci.get("permissions") == {"contents": "read"}
-assert required.get("permissions") == {"contents": "read"}
+assert required.get("permissions") == {"contents": "read", "pull-requests": "read"}
 assert list(ci["jobs"]) == ["suite"]
 assert list(required["jobs"]) == ["check"]
 
@@ -36,8 +36,17 @@ assert ci["env"] == {"FM_CI_MAX_LOAD": "12"}
 
 ci_job = ci["jobs"]["suite"]
 required_job = required["jobs"]["check"]
+water7_labels = labels
+hosted_label = "ubuntu-slim"
+required_timeout = 15
+
+assert ci_job["runs-on"] == water7_labels
+assert required_job["runs-on"] == hosted_label
+assert required_job["timeout-minutes"] == required_timeout
+for forbidden in ("self-hosted", "water-7"):
+    assert forbidden not in str(required_job["runs-on"]), forbidden
+
 for job in (ci_job, required_job):
-    assert job["runs-on"] == labels
     assert "strategy" not in job
     assert "needs" not in job
     assert job.get("continue-on-error") is None
@@ -97,26 +106,222 @@ assert len(required_runs) == 1
 assert "${{" not in required_runs[0]
 assert "Updates from [git push no-mistakes]" in required_runs[0]
 
+# The hosted body-compliance lane must stay checkout-free so it never queues
+# behind the Water 7 suite or needs repository checkout on a slim runner.
+required_uses = [step.get("uses") for step in required_job["steps"] if "uses" in step]
+assert required_uses == [], required_uses
+ci_uses = [step.get("uses") for step in ci_job["steps"] if "uses" in step]
+assert ci_uses == ["actions/checkout@v6"], ci_uses
+
 # Every remaining routing and command-policy property is asserted against the
-# parsed jobs and steps, never against the file text: only actions/checkout is
-# allowed to run, no step may soften its own failure, and no delivered command
-# or step environment may reach the upstream repository or mutate the runner's
-# ambient PATH/env across steps.
-for job in (ci_job, required_job):
-    for step in job["steps"]:
-        assert step.get("continue-on-error") is None
-        if "uses" in step:
-            assert step["uses"] == "actions/checkout@v6", step["uses"]
-        delivered = [step.get("run", "")]
-        delivered.extend(str(value) for value in (step.get("env") or {}).values())
-        for text in delivered:
-            for forbidden in ("GITHUB_PATH", "GITHUB_ENV", "kunchenguid/firstmate"):
-                assert forbidden not in text, forbidden
+# parsed jobs and steps, never against the file text: only the Water 7 suite may
+# run actions/checkout, no step may soften its own failure, and no delivered
+# command or step environment may reach the upstream repository or mutate the
+# runner's ambient PATH/env across steps.
+for step in ci_job["steps"]:
+    assert step.get("continue-on-error") is None
+    if "uses" in step:
+        assert step["uses"] == "actions/checkout@v6", step["uses"]
+    delivered = [step.get("run", "")]
+    delivered.extend(str(value) for value in (step.get("env") or {}).values())
+    for text in delivered:
+        for forbidden in ("GITHUB_PATH", "GITHUB_ENV", "kunchenguid/firstmate"):
+            assert forbidden not in text, forbidden
+for step in required_job["steps"]:
+    assert step.get("continue-on-error") is None
+    assert "uses" not in step
+    delivered = [step.get("run", "")]
+    delivered.extend(str(value) for value in (step.get("env") or {}).values())
+    for text in delivered:
+        for forbidden in ("GITHUB_PATH", "GITHUB_ENV", "kunchenguid/firstmate"):
+            assert forbidden not in text, forbidden
 PY
   then
     fail "workflow routing or command policy contract failed"
   fi
-  pass "both final workflows admit only trusted same-repository events to Water 7"
+  pass "ci stays on Water 7 while body-compliance runs on a hosted ubuntu-slim label"
+}
+
+test_body_compliance_command_distinguishes_signed_from_unsigned_bodies() {
+  local script out rc
+  if ! script=$(python3 - "$ROOT" <<'PY'
+import pathlib
+import sys
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    sys.exit(2)
+
+root = pathlib.Path(sys.argv[1])
+required = yaml.safe_load(
+    (root / ".github/workflows/no-mistakes-required.yml").read_text()
+)
+runs = [
+    step["run"]
+    for step in required["jobs"]["check"]["steps"]
+    if "run" in step
+]
+assert len(runs) == 1
+print(runs[0], end="")
+PY
+  ); then
+    fail "could not load the body-compliance delivered command from workflow YAML"
+  fi
+
+  marker='## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+
+  out=$(PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=42 bash -c "$script" 2>&1) || rc=$?
+  rc=${rc:-0}
+  [ "$rc" -eq 0 ] || fail "signed no-mistakes PR body was rejected: rc=$rc out=$out"
+  assert_contains "$out" "Found no-mistakes signature in PR #42 body."
+
+  out=$(PR_BODY='manual PR without the signature' PR_AUTHOR=test PR_NUMBER=7 bash -c "$script" 2>&1) && rc=0 || rc=$?
+  [ "$rc" -eq 1 ] || fail "unsigned PR body was accepted: rc=$rc out=$out"
+  assert_contains "$out" "::error::This PR was not raised through no-mistakes."
+
+  pass "body-compliance command accepts signed PR bodies and rejects unsigned ones"
+}
+
+test_body_compliance_polls_live_pr_body_when_opened_payload_is_stale() {
+  local script fakebin tmp out rc
+  tmp=$(fm_test_tmproot fm-ci-water7-opened-race)
+  if ! script=$(python3 - "$ROOT" <<'PY'
+import pathlib
+import sys
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    sys.exit(2)
+
+root = pathlib.Path(sys.argv[1])
+required = yaml.safe_load(
+    (root / ".github/workflows/no-mistakes-required.yml").read_text()
+)
+runs = [
+    step["run"]
+    for step in required["jobs"]["check"]["steps"]
+    if "run" in step
+]
+assert len(runs) == 1
+text = runs[0]
+assert "gh api" in text
+assert "attempt" in text
+print(text, end="")
+PY
+  ); then
+    fail "workflow must poll the live PR body before declaring a signature violation"
+  fi
+
+  marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+  fakebin="$tmp/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/gh" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = api ] && [ "\$2" = repos/pedromuller-del/firstmate/pulls/88 ] && [ "\$3" = --jq ] && [ "\$4" = .body ]; then
+  printf '%s' 'live body with ${marker}'
+  exit 0
+fi
+echo "unexpected gh call: \$*" >&2
+exit 1
+EOF
+  chmod +x "$fakebin/gh"
+
+  rc=0
+  out=$(
+    PATH="$fakebin:$PATH" \
+    GITHUB_REPOSITORY=pedromuller-del/firstmate \
+    PR_BODY='opened-event snapshot without the signature yet' \
+    PR_AUTHOR=test \
+    PR_NUMBER=88 \
+    bash -c "$script" 2>&1
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "stale opened payload should pass after live poll: rc=$rc out=$out"
+  assert_contains "$out" "Live PR body includes the no-mistakes signature"
+  assert_contains "$out" "Found no-mistakes signature in PR #88 body."
+  pass "body-compliance polls the live PR body when the opened event payload is stale"
+}
+
+test_pr88_signed_body_passes_body_compliance_command() {
+  local pr_json body script out rc
+  if ! command -v gh >/dev/null 2>&1; then
+    pass "pr 88 signed-body evidence skipped because gh is unavailable"
+    return
+  fi
+
+  pr_json=$(gh pr view 88 --repo pedromuller-del/firstmate --json body) \
+    || fail "could not fetch PR #88 body"
+  body=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["body"], end="")' \
+    <<< "$pr_json") || fail "could not decode PR #88 body"
+  if ! script=$(python3 - "$ROOT" <<'PY'
+import pathlib
+import sys
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    sys.exit(2)
+
+root = pathlib.Path(sys.argv[1])
+required = yaml.safe_load(
+    (root / ".github/workflows/no-mistakes-required.yml").read_text()
+)
+runs = [
+    step["run"]
+    for step in required["jobs"]["check"]["steps"]
+    if "run" in step
+]
+assert len(runs) == 1
+print(runs[0], end="")
+PY
+  ); then
+    fail "could not load the body-compliance delivered command from workflow YAML"
+  fi
+
+  rc=0
+  out=$(PR_BODY="$body" PR_AUTHOR=pedromuller-del PR_NUMBER=88 bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "PR #88 signed body was rejected: rc=$rc out=$out"
+  assert_contains "$out" "Found no-mistakes signature in PR #88 body."
+
+  pass "PR 88 body passes the delivered body-compliance command"
+}
+
+test_hosted_body_compliance_billing_refusal_is_not_signature_failure() {
+  local job annotations
+  if ! command -v gh >/dev/null 2>&1; then
+    pass "hosted billing-refusal evidence skipped because gh is unavailable"
+    return
+  fi
+
+  job=$(gh api repos/pedromuller-del/firstmate/actions/jobs/96949118566) \
+    || fail "could not fetch hosted body-compliance job 96949118566"
+  annotations=$(gh api repos/pedromuller-del/firstmate/check-runs/96949118566/annotations) \
+    || fail "could not fetch hosted body-compliance job annotations"
+  if ! python3 - "$job" "$annotations" <<'PY'
+import json
+import re
+import sys
+
+job = json.loads(sys.argv[1])
+annotations = json.loads(sys.argv[2])
+assert job["run_url"].endswith("/actions/runs/32538086320")
+assert "ubuntu-slim" in job["labels"]
+assert job["steps"] == []
+annotation_text = " ".join(
+    str(annotation.get(field, ""))
+    for annotation in annotations
+    for field in ("title", "message", "raw_details")
+)
+assert re.search(r"billing|spending limit", annotation_text, re.IGNORECASE)
+PY
+  then
+    fail "hosted job evidence did not prove a billing refusal before command execution"
+  fi
+
+  pass "hosted body-compliance failure was a pre-command billing refusal"
 }
 
 make_policy_fixture() {
@@ -658,6 +863,10 @@ chrome" ] || fail "bounded bootstrap did not use exactly the three tracked insta
 }
 
 test_workflows_are_static_and_water7_only
+test_body_compliance_command_distinguishes_signed_from_unsigned_bodies
+test_body_compliance_polls_live_pr_body_when_opened_payload_is_stale
+test_pr88_signed_body_passes_body_compliance_command
+test_hosted_body_compliance_billing_refusal_is_not_signature_failure
 test_policy_runs_every_family_serially
 test_policy_runs_pr_fast_lane_before_complete_suite
 test_policy_publishes_nonblocking_timing_summary
