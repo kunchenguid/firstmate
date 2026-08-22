@@ -1825,8 +1825,7 @@ if network_phase; then
     FORGE_AUTH_CHECKED="$FORGE_AUTH_CHECKED $_pair"
     fm_forge_check_auth "$_proj_provider" "${_proj_host:-}"
   done <<< "$FORGE_PROJECTS"
-    fm_timing_record phase forge-auth "$__fm_timing_stamp"
-  fi
+  fm_timing_record phase forge-auth "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config
 local_phase && [ -e "$CONFIG/record-hygiene" ] && record_hygiene_report
