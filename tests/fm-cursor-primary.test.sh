@@ -33,35 +33,13 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
 # Use a real executable whose own canonical basename is cursor-agent. A symlink
 # to bash is not sufficient on Linux: /proc resolves it to bash, so the real
 # Cursor ancestry classifier correctly rejects that process as an impostor.
-CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
-[ -n "$CC_BIN" ] || fail "a C compiler is required to build the fake Cursor process"
-cat > "$TMP_ROOT/fake-cursor.c" <<'C'
-#include <errno.h>
-#include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
-int main(int argc, char **argv) {
-  int status;
-  pid_t child;
-  if (argc != 3 || strcmp(argv[1], "-c") != 0) return 64;
-  child = fork();
-  if (child < 0) return 70;
-  if (child == 0) {
-    execl("/bin/bash", "bash", "-c", argv[2], (char *)0);
-    _exit(127);
-  }
-  while (waitpid(child, &status, 0) < 0) {
-    if (errno != EINTR) return 71;
-  }
-  if (WIFEXITED(status)) return WEXITSTATUS(status);
-  if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
-  return 72;
-}
-C
-"$CC_BIN" -o "$FAKEBIN/cursor-agent" "$TMP_ROOT/fake-cursor.c" \
-  || fail "could not build the fake Cursor process"
+# A private copy of the already-required Bash executable preserves `-c`
+# behavior while giving the kernel a distinct executable path, without making
+# this portable fixture depend on a C compiler.
 FAKE_CURSOR="$FAKEBIN/cursor-agent"
+cp "$(command -v bash)" "$FAKE_CURSOR" \
+  || fail "could not copy Bash into the fake Cursor process"
+chmod +x "$FAKE_CURSOR"
 
 CURSOR_PAYLOAD='{"session_id":"sess-cursor","generation_id":"gen-1","loop_count":0,"status":"completed","hook_event_name":"stop","cursor_version":"2026.08.11-e8db854"}'
 CLAUDE_STOP_PAYLOAD='{"session_id":"sess-claude","stop_hook_active":false}'
