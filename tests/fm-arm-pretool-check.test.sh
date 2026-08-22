@@ -205,8 +205,12 @@ test_full_acceptance_matrix() {
 }
 
 assert_policy() {
-  local id=$1 expected=$2 command=$3 output
-  output=$(node "$POLICY" --root "$ROOT" --home "$ROOT" --command "$command") \
+  assert_policy_file "$POLICY" "$@"
+}
+
+assert_policy_file() {
+  local policy=$1 id=$2 expected=$3 command=$4 output
+  output=$(node "$policy" --root "$ROOT" --home "$ROOT" --command "$command") \
     || fail "$id direct policy invocation failed"
   case "$output" in
     "$expected"|"$expected"$'\t'*) : ;;
@@ -215,8 +219,18 @@ assert_policy() {
   pass "direct policy $id: $expected"
 }
 
+assert_policy_mutation_detected() {
+  local policy=$1 id=$2 expected=$3 command=$4 output
+  output=$(node "$policy" --root "$ROOT" --home "$ROOT" --command "$command") \
+    || fail "$id mutated policy invocation failed"
+  case "$output" in
+    "$expected"|"$expected"$'\t'*) fail "$id mutation unexpectedly preserved $expected" ;;
+  esac
+  pass "direct policy $id: mutation detected"
+}
+
 test_direct_policy_contract() {
-  local heredoc_data heredoc_watcher
+  local heredoc_data heredoc_watcher mutant
   assert_policy direct-data-pkill allow "echo 'pkill -f fm-watch'"
   assert_policy direct-broad-pkill $'deny\tbroad-watcher-kill' "pkill -f '/bin/fm-watch.sh'"
   assert_policy direct-loop-broad-pkill $'deny\tbroad-watcher-kill' 'while true; do pkill -f fm-watch; done'
@@ -238,6 +252,18 @@ test_direct_policy_contract() {
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"
   assert_policy direct-heredoc-watcher $'deny\twatcher-redirection' "$heredoc_watcher"
+  assert_policy direct-bash-s-heredoc-protected $'deny\twatcher-nested' $'bash -s sentinel <<\'EOF\'\nbin/fm-watch-arm.sh &\nEOF'
+  assert_policy direct-bash-o-s-heredoc-protected $'deny\twatcher-nested' $'bash -o posix -s sentinel <<\'EOF\'\nbin/fm-watch-arm.sh &\nEOF'
+  assert_policy direct-bash-s-herestring-protected $'deny\twatcher-nested' "bash -s sentinel <<< 'bin/fm-watch-arm.sh &'"
+  assert_policy direct-bash-s-heredoc-harmless allow $'bash -s sentinel <<\'EOF\'\necho harmless\nEOF'
+  assert_policy direct-bash-n-watch-script $'deny\twatcher-nested' 'bash -n bin/fm-watch.sh'
+  assert_policy direct-pkill-fm-watch $'deny\tbroad-watcher-kill' "pkill -f bin/fm-watch.sh"
+  mutant="$MATRIX_TMP/fm-arm-command-policy-no-s.mjs"
+  perl -0pe 's@if \(/\^-\[A-Za-z\]\*s\[A-Za-z\]\*\$/\.test\(option\.value\)\) \{@if (false) {@' "$POLICY" >"$mutant"
+  cmp -s "$POLICY" "$mutant" && fail "direct policy mutation did not disable the -s condition"
+  assert_policy_mutation_detected "$mutant" mutation-bash-s-heredoc $'deny\twatcher-nested' $'bash -s sentinel <<\'EOF\'\nbin/fm-watch-arm.sh &\nEOF'
+  assert_policy_mutation_detected "$mutant" mutation-bash-s-herestring $'deny\twatcher-nested' "bash -s sentinel <<< 'bin/fm-watch-arm.sh &'"
+  assert_policy_file "$mutant" mutation-bash-s-harmless allow $'bash -s sentinel <<\'EOF\'\necho harmless\nEOF'
 }
 
 # --- CLI parsing -------------------------------------------------------------

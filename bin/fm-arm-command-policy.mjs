@@ -626,7 +626,14 @@ function shellInvocation(position) {
       if (words[payloadIndex]?.value === "--") payloadIndex += 1;
       return { kind: "command", payload: words[payloadIndex] || null };
     }
-    if (/^[-+]O$/.test(option.value)) {
+    if (/^-[A-Za-z]*s[A-Za-z]*$/.test(option.value)) {
+      return { kind: "stdin", payload: null };
+    }
+    if (/^[-+][oO]$/.test(option.value)) {
+      if (words[i + 1] && !/^[-+]/.test(words[i + 1].value)) i += 1;
+      continue;
+    }
+    if (["--init-file", "--rcfile", "--emulate"].includes(option.value)) {
       i += 1;
       continue;
     }

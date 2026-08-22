@@ -78,13 +78,15 @@ A direct `bin/fm-watch.sh` execution - relative, `<code-root>`-anchored, `$VAR`-
 The same bytes in an argument, comment, assertion, documentation query, Python string, `printf`, or `tmux send-keys` payload are data and do not make the outer command relevant.
 
 Literal `sh`, `bash`, or `zsh` `-c` payloads and literal `eval` payloads are recursively classified.
+A shell invocation that reads stdin recursively classifies literal heredoc and here-string payloads.
+For Bash, any short-option group containing `-s` selects stdin even when later operands follow; those operands populate positional parameters rather than naming a script.
 A literal nested payload that only runs a data-bearing command is allowed.
 A literal nested payload that executes a protected command is denied as `watcher-nested`, even when that inner protected call would be allowed at top level.
 
 Dynamic payloads such as `bash -lc "$WATCHER_COMMAND"` cannot be proven statically and remain the post-arm guard's responsibility.
 If the submitted command first constructs a protected literal assignment and then feeds a dynamic value to a recognized shell or `eval` sink, the classifier denies conservatively as `watcher-nested`.
 
-Comments and heredoc bodies are ignored as execution syntax.
+Comments and heredoc bodies are ignored as outer execution syntax unless a recognized stdin-reading shell sink recursively classifies the heredoc payload.
 An actual protected command with a heredoc still has a redirection and is denied.
 
 ## Blessed syntax tree
@@ -230,7 +232,7 @@ Every native-path automatic marker was present and every deny sentinel remained 
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
 Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
-The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
+The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, Bash `-s` heredoc and here-string payloads with later operands, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
 
 Run:
 
