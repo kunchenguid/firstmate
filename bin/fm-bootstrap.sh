@@ -9,6 +9,7 @@
 #                 "OUTDATED: <tool> (installed: <version|unparseable>; requires <floor|capability>; upgrade: <command>)",
 #                 "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=<floor>; install: <command>) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "NEEDS_GH_AUTH[: <host>]", "NEEDS_GLAB_AUTH[: <host>]",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -131,14 +132,14 @@
 #                 step. Unrecognized values fall back here on purpose: a typo
 #                 must never silently skip a safety sweep.
 #            skip - every LOCAL step, and none of the network ones. Skips
-#                 `gh auth status`, secondmate_liveness_sweep, secondmate_sync,
+#                 provider authentication, secondmate_liveness_sweep, secondmate_sync,
 #                 secondmate_handoff_resume, and fleet_sync.
 #            only - ONLY those network steps and nothing else. No tool detection,
 #                 no version floors, no tangle check, no backlog
 #                 reconciliation, no x_mode_setup: those already ran on the
 #                 local pass.
 #          FM_BOOTSTRAP_DETECT_ONLY composes with it unchanged, so `only` plus
-#          detect-only is the read-only `gh auth status` probe on its own.
+#          detect-only is the read-only provider authentication probe on its own.
 #          bin/fm-startup-network.sh owns the deferral: it runs the `only` phase
 #          in a detached bounded worker and publishes the result. This file stays
 #          the single owner of every sweep, and the split changes only WHEN each
@@ -187,6 +188,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-classify-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-forge-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-forge-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
@@ -920,13 +923,17 @@ missing_tool_diagnostic() {
 # with no verified dependency set is reported before the universal checks continue.
 COMMON_TOOLS="node git no-mistakes chrome-devtools-axi lavish-axi tasks-axi quota-axi"
 FORGE_PROJECTS=$(fm_forge_scan_registered_projects "$PROJECTS")
-FORGE_PROVIDERS_SEEN=$(printf '%s\n' "$FORGE_PROJECTS" | awk '{print $2}' | sort -u)
-if printf '%s\n' "$FORGE_PROVIDERS_SEEN" | grep -qx github; then
-  COMMON_TOOLS="$COMMON_TOOLS gh gh-axi"
-fi
-if printf '%s\n' "$FORGE_PROVIDERS_SEEN" | grep -qx gitlab; then
-  COMMON_TOOLS="$COMMON_TOOLS glab"
-fi
+FORGE_PROVIDERS_SEEN=$(printf '%s\n' "$FORGE_PROJECTS" | awk -F '\t' 'NF >= 2 {print $2}' | sort -u)
+while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
+  [ -n "${_proj_provider:-}" ] || continue
+  while read -r _forge_tool; do
+    [ -n "${_forge_tool:-}" ] || continue
+    case " $COMMON_TOOLS " in
+      *" $_forge_tool "*) ;;
+      *) COMMON_TOOLS="$COMMON_TOOLS $_forge_tool" ;;
+    esac
+  done < <(fm_forge_provider_tools "$_proj_provider" 2>/dev/null || true)
+done <<< "$FORGE_PROJECTS"
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -1569,23 +1576,11 @@ detect_local_tools() {
   if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
     echo "OUTDATED: tasks-axi (installed: $(tool_version tasks-axi); requires $(tasks_axi_requirement); upgrade: $(upgrade_cmd tasks-axi))"
   fi
-  FORGE_AUTH_CHECKED=""
-  while read -r _proj_id _proj_provider _proj_host; do
+  while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
     [ -n "${_proj_provider:-}" ] || continue
-    case "$_proj_provider" in
-      github|gitlab) : ;;
-      unknown)
-        echo "FORGE_UNSUPPORTED: $_proj_id (host: ${_proj_host:-unresolved})"
-        continue
-        ;;
-      *) continue ;;
-    esac
-    _pair="$_proj_provider:${_proj_host:-}"
-    case " $FORGE_AUTH_CHECKED " in
-      *" $_pair "*) continue ;;
-    esac
-    FORGE_AUTH_CHECKED="$FORGE_AUTH_CHECKED $_pair"
-    fm_forge_check_auth "$_proj_provider" "${_proj_host:-}"
+    if [ "$_proj_provider" = unknown ]; then
+      echo "FORGE_UNSUPPORTED: $_proj_id (host: ${_proj_host:-unresolved})"
+    fi
   done <<< "$FORGE_PROJECTS"
 }
 
@@ -1782,8 +1777,7 @@ detect_home_summary_publication() {
 
 # The order below is the order the diagnostics have always printed in, so a
 # `skip` run is the same output with the network lines removed rather than a
-# reshuffle. `gh auth status` sits between the two local blocks because that is
-# where it has always been.
+# reshuffle. Registered-forge authentication sits between the two local blocks.
 # Each network owner below is bracketed by an elapsed-time record, so a deferred
 # stage that ran long can be attributed to the phase that spent the time.
 # fm-timing-lib.sh discards the record unless the caller asked for timings, and
@@ -1796,8 +1790,24 @@ detect_home_summary_publication() {
 local_phase && detect_local_tools
 if network_phase; then
   __fm_timing_stamp=$(fm_timing_now_ms)
-  gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
-  fm_timing_record phase gh-auth "$__fm_timing_stamp"
+  # Authentication is checked for each registered supported forge. The deferred
+  # network phase must repeat the same provider-aware checks, not a global GitHub
+  # probe that mislabels GitLab-only and local homes.
+  FORGE_AUTH_CHECKED=""
+  while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
+    [ -n "${_proj_provider:-}" ] || continue
+    case "$_proj_provider" in
+      github|gitlab) : ;;
+      *) continue ;;
+    esac
+    _pair="$_proj_provider:${_proj_host:-}"
+    case " $FORGE_AUTH_CHECKED " in
+      *" $_pair "*) continue ;;
+    esac
+    FORGE_AUTH_CHECKED="$FORGE_AUTH_CHECKED $_pair"
+    fm_forge_check_auth "$_proj_provider" "${_proj_host:-}"
+  done <<< "$FORGE_PROJECTS"
+  fm_timing_record phase forge-auth "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config
 local_phase && [ -e "$CONFIG/record-hygiene" ] && record_hygiene_report

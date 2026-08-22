@@ -25,7 +25,6 @@ set -u
 # Exit: 0 always (the classification itself is the result; "unknown" is not
 #       a script failure)
 fm_forge_github_hosts() {
-  local host
   printf '%s\n' "${FM_GITHUB_HOSTS:-github.com}" \
     | tr ',' '\n' \
     | while IFS= read -r host; do
@@ -67,7 +66,7 @@ fm_forge_checkout_remote() {
 }
 
 fm_forge_detect_provider() {
-  local checkout=${1:-} remote_url host
+  local checkout=${1:-} remote_url raw_host host
 
   if [ -z "$checkout" ] || [ ! -d "$checkout" ]; then
     echo "unknown"
@@ -92,35 +91,27 @@ fm_forge_detect_provider() {
       return 0
       ;;
   esac
-  host=$(fm_forge_resolve_host "$remote_url" 2>/dev/null) || host=""
-  case "$host" in
-    *)
-      if fm_forge_host_is_github "$host"; then
-        echo "github"
-      elif fm_forge_host_is_gitlab "$host"; then
-        echo "gitlab"
-      else
-        echo "unknown"
-      fi
-      ;;
-  esac
+  raw_host=$(fm_forge_resolve_host "$remote_url" 0 2>/dev/null) || raw_host=""
+  host=$(fm_forge_resolve_host "$remote_url" 1 2>/dev/null) || host=""
+  if fm_forge_host_is_github "$raw_host" || fm_forge_host_is_github "$host"; then
+    echo "github"
+  elif fm_forge_host_is_gitlab "$raw_host" || fm_forge_host_is_gitlab "$host"; then
+    echo "gitlab"
+  else
+    echo "unknown"
+  fi
 }
 
-# fm_forge_resolve_host <remote-url-or-ssh-alias>
-# Resolves a git remote URL (scp-like SSH syntax, ssh:// URL, or https:// URL)
-# to its real hostname, following `~/.ssh/config` Host aliases via `ssh -G`
-# so aliases for self-managed GitLab instances classify by their real hostname.
-#
-# Output: one line, the resolved lowercase hostname, or empty on failure
-# Exit: 0 if resolved, 1 if the remote URL could not be parsed at all
+# fm_forge_resolve_host <remote-url-or-ssh-alias> [resolve-ssh]
+# Resolves a git remote URL to a lowercase hostname. The optional second
+# argument defaults to following SSH config aliases; callers can pass 0 to
+# preserve the raw host for provider classification.
 fm_forge_resolve_host() {
-  local remote_url=${1:-} host="" resolve_ssh=0
+  local remote_url=${1:-} host="" resolve_ssh=${2:-1}
 
   [ -n "$remote_url" ] || return 1
-
   case "$remote_url" in
     ssh://*)
-      resolve_ssh=1
       host=${remote_url#ssh://}
       host=${host#*@}
       host=${host%%/*}
@@ -134,78 +125,51 @@ fm_forge_resolve_host() {
         \[*\]*) host=${host#\[}; host=${host%%\]*} ;;
         *:*) host=${host%%:*} ;;
       esac
+      resolve_ssh=0
       ;;
     *:*)
-      resolve_ssh=1
       host=${remote_url%%:*}
       host=${host##*@}
       ;;
-    *)
-      return 1
-      ;;
+    *) return 1 ;;
   esac
-
   [ -n "$host" ] || return 1
-
-  # Follow SSH config aliases when possible. If ssh cannot resolve the alias,
-  # retain the parsed host; provider classification will fail closed unless
-  # it is explicitly listed in FM_GITLAB_HOSTS.
-  local resolved
   if [ "$resolve_ssh" -eq 1 ] && command -v ssh >/dev/null 2>&1; then
+    local resolved
     resolved=$(ssh -G -- "$host" 2>/dev/null | awk '$1=="hostname"{print $2; exit}')
     [ -n "$resolved" ] && host=$resolved
   fi
-
   printf '%s\n' "$host" | tr '[:upper:]' '[:lower:]'
-  return 0
 }
 
-# fm_forge_require_cli <provider>
-# Validates that the CLI tools required for this provider are on PATH.
-# Does not check auth (see fm_forge_check_auth) — only binary presence.
-#
-# Output: one MISSING line per absent tool (same shape as fm-bootstrap.sh's
-#         existing missing_tool_diagnostic lines), nothing when all present
-# Exit: 0 if all required tools present, 1 if any are missing
-fm_forge_require_cli() {
-  local provider=${1:-} missing=0 tool
 
-  case "$provider" in
+# fm_forge_provider_tools <provider>
+# Emits the provider-specific CLI tools required by the bootstrap contract.
+# Bootstrap owns the universal/backend checks; this function is the single
+# provider-to-CLI policy owner used to build that contract.
+#
+# Output: one tool name per line. Exit 0 for known providers, 5 for local or
+# unknown topologies, and 2 for an invalid provider name.
+fm_forge_provider_tools() {
+  case "${1:-}" in
     github)
-      for tool in gh gh-axi; do
-        command -v "$tool" >/dev/null 2>&1 || { echo "MISSING: $tool"; missing=1; }
-      done
+      printf '%s\n' gh gh-axi
       ;;
     gitlab)
-      if ! command -v glab >/dev/null 2>&1; then
-        echo "MISSING: glab"
-        missing=1
-      fi
+      printf '%s\n' glab
       ;;
-    local)
-      : # no forge CLI required
-      ;;
-    unknown)
-      echo "FORGE_UNSUPPORTED"
-      return 1
+    local|unknown)
+      return 5
       ;;
     *)
       return 2
       ;;
   esac
-
-  return "$missing"
 }
 
 # fm_forge_check_auth <provider> <host>
-# Checks forge authentication, scoped to the specific host (never an
-# unscoped "--all" check — a single stale unrelated credential must not
-# fail an otherwise-healthy host).
-#
-# Output: nothing on success; one diagnostic line on failure, matching the
-#         existing NEEDS_GH_AUTH convention so fm-session-start.sh's existing
-#         consumers keep working without modification
-# Exit: 0 authenticated, 1 not authenticated / check failed
+# Checks forge authentication, scoped to the specific host. Output is empty on
+# success and one actionable diagnostic on failure.
 fm_forge_check_auth() {
   local provider=${1:-} host=${2:-}
 
@@ -213,14 +177,12 @@ fm_forge_check_auth() {
     github)
       command -v gh >/dev/null 2>&1 || return 1
       if [ -n "$host" ]; then
-        gh auth status --hostname "$host" >/dev/null 2>&1 || { echo "NEEDS_GH_AUTH"; return 1; }
+        gh auth status --hostname "$host" >/dev/null 2>&1 || { echo "NEEDS_GH_AUTH: $host"; return 1; }
       else
         gh auth status >/dev/null 2>&1 || { echo "NEEDS_GH_AUTH"; return 1; }
       fi
       ;;
     gitlab)
-      # Missing CLI is already reported by fm-bootstrap.sh; do not emit a
-      # misleading auth diagnostic for an unavailable binary.
       command -v glab >/dev/null 2>&1 || return 1
       if [ -n "$host" ]; then
         glab auth status --hostname "$host" >/dev/null 2>&1 || { echo "NEEDS_GLAB_AUTH: $host"; return 1; }
@@ -228,44 +190,37 @@ fm_forge_check_auth() {
         glab auth status >/dev/null 2>&1 || { echo "NEEDS_GLAB_AUTH"; return 1; }
       fi
       ;;
-    local)
-      return 0
-      ;;
+    local) return 0 ;;
     unknown)
       echo "FORGE_UNSUPPORTED"
       return 1
       ;;
-    *)
-      return 2
-      ;;
+    *) return 2 ;;
   esac
-
-  return 0
 }
 
+
 # fm_forge_scan_registered_projects <projects-dir>
-# Scans every symlinked/real project checkout directly under the given
-# projects directory (matches $FM_HOME/projects layout) and prints one
-# "<project-id> <provider> <host>" line per entry. Used by fm-bootstrap.sh
-# to compute the required tool/auth union across the actual registry
-# instead of the previous unconditional GitHub-only assumption.
-#
-# Output: "<project-id> <provider> <host>" per line (host empty for
-#         local/unknown)
-# Exit: 0 always (per-project detection failures are reported inline via
-#       provider=unknown, not a fatal scan error)
+# Scans every registered checkout and emits tab-delimited records:
+# <project-id>\t<provider>\t<host>. Tabs cannot occur in normal Git checkout
+# directory names, so the record remains lossless for spaces in project IDs.
 fm_forge_scan_registered_projects() {
-  local projects_dir=${1:-} entry project_id provider remote_url host
+  local projects_dir=${1:-} entry project_id provider remote_url host raw_host
 
   [ -n "$projects_dir" ] && [ -d "$projects_dir" ] || return 0
-
   for entry in "$projects_dir"/*/; do
     [ -e "$entry" ] || continue
     project_id=$(basename "$entry")
     provider=$(fm_forge_detect_provider "$entry")
     host=""
     remote_url=$(fm_forge_checkout_remote "$entry" 2>/dev/null) || remote_url=""
-    [ -n "$remote_url" ] && host=$(fm_forge_resolve_host "$remote_url" 2>/dev/null || true)
-    printf '%s %s %s\n' "$project_id" "$provider" "${host:-}"
+    if [ -n "$remote_url" ]; then
+      raw_host=$(fm_forge_resolve_host "$remote_url" 0 2>/dev/null || true)
+      host=$(fm_forge_resolve_host "$remote_url" 1 2>/dev/null || true)
+      if fm_forge_host_is_github "$raw_host" || fm_forge_host_is_gitlab "$raw_host"; then
+        host=$raw_host
+      fi
+    fi
+    printf '%s\t%s\t%s\n' "$project_id" "$provider" "${host:-}"
   done
 }
