@@ -15,13 +15,14 @@
 #            template at the stable board path. Establish or resume the Lavish
 #            session on that board BEFORE binding and arming its answer source,
 #            so a registered poll can never race a session that does not exist.
-#            Bind to the any-origin keyed-answer intake ALWAYS precedes arm, so
-#            the board can never produce an answer that has nowhere to go
-#            (decision-hold-lifecycle's ordering rule, enforced here rather
-#            than left to agent memory). Output starts with `board: <path>`,
-#            then includes lavish-axi's session output and the remaining status:
+#            Bind to the keyed-answer intake (bin/fm-captain-hold.sh) ALWAYS
+#            precedes arm, so the board can never produce an answer that has
+#            nowhere to go (captain-hold-lifecycle's ordering rule, enforced
+#            here rather than left to agent memory). Output starts with
+#            `board: <path>`, then includes lavish-axi's session output and
+#            the remaining status:
 #              served: <path>
-#              bound: <source-id> (any-origin)
+#              bound: <source-id>
 #              armed: <source-id>            (first registration)
 #              already-armed: <source-id>    (registration already present)
 # path       Print the stable board path for this home.
@@ -96,6 +97,7 @@ validate_payload() {  # <data.json>
       and (optional_string("detail"))
       and (optional_https_url("pr_url"))
       and (optional_string("freeform_hint"))
+      and ((has("close") | not) or (.close == "done" or .close == "release"))
       and ((has("allow_freeform") | not) or (.allow_freeform | type == "boolean"))
       and ((has("recommend_value") | not)
         or ((.recommend_value | slug(128))
@@ -177,9 +179,9 @@ command_build() {
 
   sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \
     || fail "cannot derive the board source id"
-  "$SCRIPT_DIR/fm-decision-hold.sh" bind "$sid" --any-origin >/dev/null \
-    || fail "cannot bind the board source to the any-origin intake"
-  printf 'bound: %s (any-origin)\n' "$sid"
+  "$SCRIPT_DIR/fm-captain-hold.sh" bind "$sid" >/dev/null \
+    || fail "cannot bind the board source to the keyed-answer intake"
+  printf 'bound: %s\n' "$sid"
 
   if "$SCRIPT_DIR/fm-procevent.sh" list | awk 'NR > 1 { print $1 }' | grep -Fxq "$sid"; then
     printf 'already-armed: %s\n' "$sid"

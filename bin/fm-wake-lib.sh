@@ -476,6 +476,9 @@ fm_lock_recheck_stale_owner() {
 FM_RECOVERY_MARKER_TOKEN=
 FM_RECOVERY_MARKER_ACTION='none'
 
+# Token grammar (one owner): <pending|announced|acked>:<handling|downtime>:<generation>
+# docs/watcher-continuity.md owns the recovery-episode contract, including the
+# once-per-generation announcement rule for unacknowledged downtime.
 fm_recovery_marker_read() {
   local marker=$1 line count
   FM_RECOVERY_MARKER_TOKEN=
@@ -484,7 +487,7 @@ fm_recovery_marker_read() {
   [ "$count" = 1 ] || return 1
   IFS= read -r line < "$marker" || return 1
   case "$line" in
-    pending:handling:*|pending:downtime:*|acked:handling:*|acked:downtime:*) ;;
+    pending:handling:*|pending:downtime:*|announced:handling:*|announced:downtime:*|acked:handling:*|acked:downtime:*) ;;
     *) return 1 ;;
   esac
   case "${line##*:}" in
@@ -498,11 +501,12 @@ _fm_atomic_replace() {
 }
 
 _fm_recovery_marker_write_locked() {
-  local marker=$1 kind=$2 generation=${3:-} tmp
+  local marker=$1 kind=$2 generation=${3:-} status=${4:-pending} tmp
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
+  case "$status" in pending|announced) ;; *) return 1 ;; esac
   tmp=$(mktemp "${marker}.tmp.XXXXXX") || return 1
   [ -n "$generation" ] || generation="$(fm_current_pid).$(date +%s).${tmp##*.}"
-  if ! printf 'pending:%s:%s\n' "$kind" "$generation" > "$tmp" \
+  if ! printf '%s:%s:%s\n' "$status" "$kind" "$generation" > "$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! _fm_atomic_replace "$tmp" "$marker"; then
     rm -f -- "$tmp"
@@ -510,11 +514,13 @@ _fm_recovery_marker_write_locked() {
   fi
 }
 
-# Preserve a pending episode's generation across downtime republication so its
-# outstanding acknowledgement remains usable; docs/watcher-continuity.md owns
-# the recovery contract and sequence-safety rationale.
+# Preserve a pending or announced episode's generation across downtime
+# republication so its outstanding acknowledgement remains usable, and keep an
+# already-announced generation announced so it cannot be re-presented until a
+# new down stretch mints a new generation.
+# docs/watcher-continuity.md owns the recovery contract and sequence-safety rationale.
 _fm_recovery_marker_publish() {
-  local marker=$1 kind=${2:-downtime} lock saved_token generation=''
+  local marker=$1 kind=${2:-downtime} lock saved_token generation='' status=pending
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
   fm_lock_acquire_wait "$lock" || return 1
@@ -529,12 +535,19 @@ _fm_recovery_marker_publish() {
     saved_token=$FM_RECOVERY_MARKER_TOKEN
     if fm_recovery_marker_read "$marker"; then
       case "$FM_RECOVERY_MARKER_TOKEN" in
-        pending:handling:*|pending:downtime:*) generation=${FM_RECOVERY_MARKER_TOKEN##*:} ;;
+        pending:handling:*|pending:downtime:*)
+          generation=${FM_RECOVERY_MARKER_TOKEN##*:}
+          status=pending
+          ;;
+        announced:handling:*|announced:downtime:*)
+          generation=${FM_RECOVERY_MARKER_TOKEN##*:}
+          status=announced
+          ;;
       esac
     fi
     FM_RECOVERY_MARKER_TOKEN=$saved_token
   fi
-  if ! _fm_recovery_marker_write_locked "$marker" "$kind" "$generation"; then
+  if ! _fm_recovery_marker_write_locked "$marker" "$kind" "$generation" "$status"; then
     fm_lock_release "$lock"
     return 1
   fi
@@ -556,13 +569,20 @@ _fm_recovery_marker_begin_handling() {
     return 3
   fi
   case "$line" in
-    pending:handling:*) ;;
+    pending:handling:*|announced:handling:*) ;;
     pending:downtime:*)
       if ! _fm_recovery_marker_write_locked "$marker" handling "$generation"; then
         fm_lock_release "$lock"
         return 1
       fi
       FM_RECOVERY_MARKER_TOKEN="pending:handling:$generation"
+      ;;
+    announced:downtime:*)
+      if ! _fm_recovery_marker_write_locked "$marker" handling "$generation" announced; then
+        fm_lock_release "$lock"
+        return 1
+      fi
+      FM_RECOVERY_MARKER_TOKEN="announced:handling:$generation"
       ;;
     *) fm_lock_release "$lock"; return 1 ;;
   esac
@@ -590,8 +610,9 @@ _fm_recovery_marker_ack() {
   fi
   line=$FM_RECOVERY_MARKER_TOKEN
   case "$line" in
-    pending:*) line="acked:${line#pending:}" ;;
+    pending:*|announced:*) line="acked:${line#*:}" ;;
     acked:*) fm_lock_release "$lock"; return 0 ;;
+    *) fm_lock_release "$lock"; return 1 ;;
   esac
   tmp=$(mktemp "${marker}.tmp.XXXXXX") || { fm_lock_release "$lock"; return 1; }
   if ! printf '%s\n' "$line" > "$tmp" \
@@ -615,7 +636,7 @@ _fm_recovery_marker_arm_check() {
   fi
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     if [ -s "$FM_WAKE_QUEUE" ]; then
-      if ! _fm_recovery_marker_write_locked "$marker" downtime; then
+      if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
         fm_lock_release "$lock"
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
         return 1
@@ -634,7 +655,7 @@ _fm_recovery_marker_arm_check() {
         return 1
       }
     if ! mv -- "$marker" "$quarantine/marker" \
-      || ! _fm_recovery_marker_write_locked "$marker" downtime; then
+      || ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
       rmdir "$quarantine" 2>/dev/null || true
       fm_lock_release "$lock"
       fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -647,16 +668,24 @@ _fm_recovery_marker_arm_check() {
   fi
   line=$FM_RECOVERY_MARKER_TOKEN
   case "$line" in
-    pending:handling:*)
+    pending:handling:*|announced:handling:*|announced:downtime:*)
       FM_RECOVERY_MARKER_ACTION='wait'
       fm_lock_release "$lock"
       fm_lock_release "$FM_WAKE_QUEUE_LOCK"
       return 0
       ;;
-    pending:downtime:*) FM_RECOVERY_MARKER_ACTION='recover' ;;
+    pending:downtime:*)
+      if ! _fm_recovery_marker_write_locked "$marker" downtime "${line##*:}" announced; then
+        fm_lock_release "$lock"
+        fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+        return 1
+      fi
+      FM_RECOVERY_MARKER_TOKEN="announced:downtime:${line##*:}"
+      FM_RECOVERY_MARKER_ACTION='recover'
+      ;;
     acked:*)
       if [ -s "$FM_WAKE_QUEUE" ]; then
-        if ! _fm_recovery_marker_write_locked "$marker" downtime; then
+        if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
           fm_lock_release "$lock"
           fm_lock_release "$FM_WAKE_QUEUE_LOCK"
           return 1
@@ -670,6 +699,29 @@ _fm_recovery_marker_arm_check() {
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }
 
+# A non-successor watcher start after an announced-but-unacked episode is a new
+# down stretch: mint a fresh pending generation so a still-open decision or
+# buried note can be presented once more. Handling successors must not call
+# this, because Option B re-arm is not a new down stretch.
+_fm_recovery_marker_reopen_announced() {
+  local marker=$1 lock
+  lock="${marker}.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  if ! fm_recovery_marker_read "$marker"; then
+    fm_lock_release "$lock"
+    return 0
+  fi
+  case "$FM_RECOVERY_MARKER_TOKEN" in
+    announced:*)
+      if ! _fm_recovery_marker_write_locked "$marker" downtime ""; then
+        fm_lock_release "$lock"
+        return 1
+      fi
+      ;;
+  esac
+  fm_lock_release "$lock"
+}
+
 fm_recovery_transition() {
   local marker=$1 action=$2 target=${3:-} value=${4:-}
   case "$action" in
@@ -681,6 +733,9 @@ fm_recovery_transition() {
       ;;
     arm-check)
       _fm_recovery_marker_arm_check "$marker"
+      ;;
+    reopen-announced)
+      _fm_recovery_marker_reopen_announced "$marker"
       ;;
     release-lock)
       [ -n "$target" ] || return 1
@@ -721,6 +776,10 @@ fm_recovery_marker_begin_handling() {
 
 fm_recovery_marker_arm_check() {
   fm_recovery_transition "$1" arm-check
+}
+
+fm_recovery_marker_reopen_announced() {
+  fm_recovery_transition "$1" reopen-announced
 }
 
 fm_lock_try_acquire() {
@@ -921,6 +980,141 @@ fm_failure_episode_reset() {
   fi
   [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
   return 0
+}
+
+# --- Claude Stop auto-arm claim abandonment ----------------------------------
+# Both Stop-event participants (bin/fm-claude-stop-autoarm.sh and
+# bin/fm-turnend-guard.sh --claude) stand down for whoever holds the auto-arm's
+# single-flight owner lock, on the premise that a live holder is still deciding
+# supervision. A holder that has already FINISHED that decision but never
+# released the lock turns the courtesy into indefinite silence: every later
+# async firing exits at the lock, the epoch ledger freezes at its last outcome,
+# and each following turn end allows a blind stop while nothing re-arms the
+# watcher. Observed 2026-08-14: one delivered rewake, then a beacon that went
+# 40 minutes without a beat, no watcher lock at all, two workers in flight, and
+# both of their reports unread until an operator drained the queue by hand.
+#
+# One abandonment proof is the ledger, not pid liveness, because both ways a
+# finished claim keeps a live pid - reuse of the recorded pid, and a hook still
+# blocked writing its rewake banner - look alive:
+#
+#   1. the owner lock exists and carries the auto-arm role,
+#   2. its recorded pid is numeric,
+#   3. the ledger's owner_pid is exactly that pid, and
+#   4. the ledger's outcome is present and is not "arming".
+#
+# Condition 3 is what makes reclaiming race-free. A fresh claimant creates the
+# lock BEFORE it writes "arming", so until it does the ledger still names the
+# PREVIOUS owner and the two pids cannot match; a just-started claim is never
+# mistaken for an abandoned one. Condition 4 treats "arming" as in progress no
+# matter how old, because the owner foregrounds fm-watch-arm.sh for the whole
+# watcher cycle, which legitimately runs for hours.
+#
+# The ledger alone cannot prove every abandonment, though: an entry still reading
+# "arming", or no entry at all, says nothing about a recorded pid the operating
+# system has since handed to an unrelated live process - the same lapse, reached
+# when a session teardown kills a claim's whole process group before it can record
+# any outcome or run its release trap. So the claim also records the pid-identity
+# every other supervision lock in this repo records (fm_pid_identity above, used by
+# state/.watch.lock, the supervise-daemon lock, and the AFK launch lock), and a
+# recorded identity that no longer matches the live pid is abandonment on its own,
+# whatever the ledger says. That identity is written BEFORE the auto-arm role is
+# published, and every participant requires that role first, so a claim that is
+# genuinely mid-flight is never read as identity-less. A claim carrying no recorded
+# identity at all (an older build, a hand-edited lock) keeps exactly the
+# ledger-only reasoning above, and an identity that cannot be recomputed for the
+# live pid proves nothing either way, so it falls through to the ledger too.
+_fm_autoarm_epoch_field() {  # <epoch-file> <field>
+  local file=$1 field=$2 tok
+  local -a toks=()
+  [ -r "$file" ] || return 1
+  # 2> before <: a failed input redirection reports through whatever stderr is
+  # current when it runs, so the suppression has to be established first.
+  IFS=' ' read -r -a toks 2>/dev/null < "$file" || return 1
+  for tok in ${toks[@]+"${toks[@]}"}; do
+    case "$tok" in
+      "$field="?*) printf '%s\n' "${tok#*=}"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Record the claiming process's pid-identity inside the auto-arm owner lock, the
+# way every other supervision lock in this repo records it. Best effort by design:
+# a platform where fm_pid_identity cannot answer keeps the ledger-only reasoning
+# rather than losing the claim, and a record that cannot be completed leaves NO
+# identity file behind, so a partial write can never read as a mismatch against
+# its own live owner. Call it before publishing the auto-arm role.
+fm_autoarm_claim_record_identity() {  # <state-dir>
+  local state=$1 lock pid held identity back
+  lock="$state/.claude-autoarm.lock"
+  # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside the
+  # command substitution below would resolve it in that subshell, recording the
+  # identity of a process that exits immediately and leaving every later reader
+  # with a permanent mismatch against the real owner.
+  pid=${BASHPID:-$$}
+  # The identity must describe the pid the lock publishes, so record it only for a
+  # lock this process actually holds (the same ownership test as fm_lock_set_role).
+  held=$(cat "$lock/pid" 2>/dev/null || true)
+  [ "$held" = "$pid" ] || return 1
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$identity" ] || return 1
+  if ! printf '%s\n' "$identity" > "$lock/pid-identity" 2>/dev/null; then
+    rm -f "$lock/pid-identity" 2>/dev/null || true
+    return 1
+  fi
+  back=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  if [ "$back" != "$identity" ]; then
+    rm -f "$lock/pid-identity" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+fm_autoarm_claim_abandoned() {  # <state-dir>
+  local state=$1 epoch lock role pid owner outcome recorded current
+  lock="$state/.claude-autoarm.lock"
+  epoch="$state/.claude-autoarm-epoch"
+  [ -e "$lock" ] || [ -L "$lock" ] || return 1
+  role=$(fm_lock_role "$lock")
+  [ "$role" = autoarm ] || return 1
+  pid=$(cat "$lock/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  recorded=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  if [ -n "$recorded" ] && current=$(fm_pid_identity "$pid" 2>/dev/null) \
+    && [ -n "$current" ] && [ "$current" != "$recorded" ]; then
+    return 0
+  fi
+  owner=$(_fm_autoarm_epoch_field "$epoch" owner_pid) || return 1
+  [ "$owner" = "$pid" ] || return 1
+  outcome=$(_fm_autoarm_epoch_field "$epoch" outcome) || return 1
+  case "$outcome" in
+    ''|arming) return 1 ;;
+  esac
+  return 0
+}
+
+# Remove a proven-abandoned auto-arm claim so the next claimant can arm.
+# The proof is re-verified while holding the lock's steal mutex, which is the
+# same serialization fm_lock_try_acquire uses for stale-owner reclaim: while it
+# is held no other process can publish the primary lock, so the window between
+# proving abandonment and removing the lock cannot swallow a genuine new claim.
+fm_autoarm_release_abandoned() {  # <state-dir>
+  local state=$1 lock steal
+  lock="$state/.claude-autoarm.lock"
+  steal="$lock.steal"
+  fm_autoarm_claim_abandoned "$state" || return 1
+  fm_lock_try_acquire "$steal" || return 1
+  if ! fm_autoarm_claim_abandoned "$state"; then
+    fm_lock_release "$steal"
+    return 1
+  fi
+  fm_lock_remove_path "$lock" || true
+  fm_lock_release "$steal"
+  [ -e "$lock" ] || [ -L "$lock" ] || return 0
+  return 1
 }
 
 fm_wake_clean_field() {
