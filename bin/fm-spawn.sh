@@ -263,7 +263,7 @@ fm_refuse_if_gate_agent
 
 spawn_managed_endpoint_kill() {  # <backend> <target> <tab-id> <label> <kind> <secondmate-home> [recorded-scoped-target]
   local backend=$1 target=$2 tab_id=$3 label=$4 kind=$5 secondmate_home=${6:-} recorded_scoped_target=${7:-} endpoint_home
-  endpoint_home=$(fm_backend_endpoint_home "$backend" "$kind" "$FM_HOME" "$secondmate_home")
+  endpoint_home=$(fm_backend_endpoint_home "$backend" "$kind" "$TASK_HOME" "$secondmate_home")
   if [ "$endpoint_home" != "$FM_HOME" ]; then
     ( unset FM_ROOT_OVERRIDE; FM_HOME="$endpoint_home" FM_ROOT="$endpoint_home" fm_backend_kill "$backend" "$target" "$tab_id" "$label" "$recorded_scoped_target" )
   else
@@ -273,7 +273,7 @@ spawn_managed_endpoint_kill() {  # <backend> <target> <tab-id> <label> <kind> <s
 
 spawn_managed_endpoint_state() {  # <backend> <target> <label> <kind> <secondmate-home> [recorded-scoped-target]
   local backend=$1 target=$2 label=$3 kind=$4 secondmate_home=${5:-} recorded_scoped_target=${6:-} endpoint_home
-  endpoint_home=$(fm_backend_endpoint_home "$backend" "$kind" "$FM_HOME" "$secondmate_home")
+  endpoint_home=$(fm_backend_endpoint_home "$backend" "$kind" "$TASK_HOME" "$secondmate_home")
   if [ "$endpoint_home" != "$FM_HOME" ]; then
     ( unset FM_ROOT_OVERRIDE; FM_HOME="$endpoint_home" FM_ROOT="$endpoint_home" fm_backend_target_state "$backend" "$target" "$label" "$recorded_scoped_target" )
   else
@@ -2993,7 +2993,11 @@ if [ "$RECOVERY_ACCOUNT" = 0 ] && [ -f "$STATE/$ID.meta" ]; then
   }
   existing_backend=$(fm_backend_of_meta "$STATE/$ID.meta")
   existing_target=$(fm_backend_target_of_meta "$STATE/$ID.meta")
-  existing_endpoint_state=$(fm_backend_target_state "$existing_backend" "$existing_target" "fm-$ID" "$(fm_meta_get "$STATE/$ID.meta" tmux_session_target)" 2>/dev/null)
+  existing_kind=$(fm_meta_get "$STATE/$ID.meta" kind)
+  [ -n "$existing_kind" ] || existing_kind=ship
+  existing_home=$(fm_meta_get "$STATE/$ID.meta" home)
+  existing_endpoint_state=$(spawn_managed_endpoint_state "$existing_backend" "$existing_target" "fm-$ID" \
+    "$existing_kind" "$existing_home" "$(fm_meta_get "$STATE/$ID.meta" tmux_session_target)" 2>/dev/null)
   case "$existing_endpoint_state" in
     absent) ;;
     present) echo "error: endpoint is already alive for $ID; refusing duplicate spawn" >&2; exit 1 ;;
@@ -4167,17 +4171,14 @@ case "$BACKEND" in
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
-    # FM_HOME. For every KIND except secondmate, this process's own FM_HOME is
-    # already the right home (the primary spawning its own crewmate/scout, or
-    # a secondmate spawning ITS OWN crewmate/scout from its own process's
-    # FM_HOME - the latter needs no glue at all). A --secondmate spawn is the
-    # one case that does: it is the PRIMARY's own fm-spawn.sh process
-    # launching a DIFFERENT home (PROJ_ABS, already validated above as the
-    # secondmate's home), so FM_HOME here still names the primary. Shadow it
-    # to PROJ_ABS for just these two calls (bash restores it automatically
-    # after each prefixed simple-command call) so the secondmate's tab lands
-    # in the secondmate's own workspace, not the primary's "firstmate" one.
-    HERDR_LABEL_HOME=$FM_HOME
+    # FM_HOME. Ordinary task endpoints belong to TASK_HOME: normally that is
+    # FM_HOME, while a compartment child deliberately keeps FM_HOME on the
+    # primary money authority and routes its task files and endpoint to the
+    # seeded secondmate home. A --secondmate spawn is different: it creates
+    # the persistent home itself, so its endpoint belongs to PROJ_ABS. Shadow
+    # FM_HOME for only these adapter calls; the cloud monitor launch below
+    # still receives the primary FM_HOME so it can read the one controller.
+    HERDR_LABEL_HOME=$TASK_HOME
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
     fi

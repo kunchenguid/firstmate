@@ -1381,7 +1381,7 @@ test_compartment_child_spawn_splits_the_task_home_from_the_money_document() {
   # secondmate running in Azure obtains a crewmate. The child's task lives in
   # the SECONDMATE's home; the request is admitted into the PRIMARY's one
   # controller document; no second document is ever created.
-  local record id parent out status meta controller
+  local record id parent out status meta controller target endpoint_state
   id=child-c1
   parent=smc-e2e
   record=$(make_child_case child-lane "$id" "$parent")
@@ -1429,7 +1429,40 @@ parent_item = state["queue"]["{}@{}".format(parent, "gen-parent")]
 worker = state["workers"][str(parent_item["slot"])]
 assert int(worker.get("children_total", 0)) == 1, worker
 PY
-  pass "a compartment child is spawned into the secondmate's home and admitted by the primary's one controller"
+  # The tracking endpoint belongs to the same task home as the metadata, even
+  # though the primary home owns the one money document. Preserve the workspace
+  # while removing the exact pane: the ordinary release authority probes with
+  # FM_HOME=$SUB_DIR and must then receive the structural `absent` verdict. If
+  # spawn instead labeled the workspace from the primary home, Herdr correctly
+  # answers `unknown` here because the recorded workspace id still exists under
+  # the foreign `firstmate` label; that mismatch strands the worker forever.
+  target=$(sed -n 's/^window=//p' "$meta")
+  [ -n "$target" ] || fail "the compartment child metadata has no tracking endpoint target"
+  python3 - "$CASE_DIR/herdr-state.json" "$target" <<'PY' \
+    || fail "the fixture could not remove the exact tracking pane"
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+pane = sys.argv[2].split(":", 1)[1]
+state = json.loads(path.read_text(encoding="utf-8"))
+before = list(state["tabs"])
+state["tabs"] = [tab for tab in before if tab["pane_id"] != pane]
+assert len(before) - len(state["tabs"]) == 1, (pane, before)
+assert state["workspaces"], state
+path.write_text(json.dumps(state, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  endpoint_state=$(unset FM_ROOT_OVERRIDE; \
+    FM_HOME="$SUB_DIR" FM_ROOT="$SUB_DIR" \
+    FM_BACKEND_HERDR_TEST_LAB=firstmate-herdr-test-lab-v1 \
+    FM_HERDR_LOG="$CASE_DIR/herdr.log" FM_FAKE_HERDR_STATE="$CASE_DIR/herdr-state.json" \
+    PATH="$FAKEBIN_DIR:$PATH" bash -c \
+      '. "$1"; fm_backend_target_state herdr "$2" "$3"' \
+      _ "$ROOT/bin/fm-backend.sh" "$target" "fm-$id")
+  [ "$endpoint_state" = absent ] || fail \
+    "the secondmate-home endpoint authority returned $endpoint_state after exact pane absence"
+  pass "a compartment child uses its task-home workspace and the primary's one controller"
 }
 
 test_task_home_refusals_are_exact() {
