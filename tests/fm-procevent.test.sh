@@ -1012,10 +1012,10 @@ HV="$TMP_ROOT/hv"; new_home "$HV"
 mkdir -p "$HV/state/procevent-inbox"
 printf 'already captured\n' > "$HV/state/procevent-inbox/result-only.1.result"
 sup=$(bash -c '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$HV/state")
-assert_contains "$sup" no "registration-free results do not broaden continuous supervision"
+assert_contains "$sup" yes "registration-free unhandled results retain supervision"
 out=$(pe "$HV" sweep-home)
 assert_contains "$out" "swept: attempted=0" "result-only homes need no process cleanup"
-pass "healthy runtime behavior remains registration-only"
+pass "unhandled results retain supervision without requiring process cleanup"
 
 # --- argv boundaries, stderr, exit status, bounds, malformed output ---------
 HD="$TMP_ROOT/hd"; new_home "$HD"
