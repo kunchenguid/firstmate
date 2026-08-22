@@ -318,6 +318,18 @@ hash_text() {
   fi
 }
 
+# Satisfy bin/fm-pr-check-migrate.sh's marker short-circuit so it exits before
+# touching the watcher lock. Any suite that plants its own state/.watch.lock must
+# call this first: an unsatisfied migration runs ahead of every watcher and arm,
+# steals that lock itself, and publishes a downtime episode of its own, which
+# silently replaces whatever lock or recovery pre-state the case meant to set up.
+mark_pr_check_migration_complete() {  # <state>
+  local state=$1
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
+}
+
 dead_pid() {
   local p=999999
   while kill -0 "$p" 2>/dev/null; do

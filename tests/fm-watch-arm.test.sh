@@ -19,6 +19,7 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+MIGRATE="$ROOT/bin/fm-pr-check-migrate.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-arm-tests)
 
@@ -929,12 +930,25 @@ test_empty_fleet_recovery_stays_silent_across_rearms() {
 
 # Start the real watcher on top of a lock a dead predecessor left behind, so
 # fm-watch.sh reclaims that lock ITSELF rather than being handed one an arm has
-# already cleared. That reclaim is the one path that reaches recovery without
-# any arm-side publication.
+# already cleared.
+# The PR-check migration runs ahead of the watcher's own lock acquisition, and an
+# unsatisfied one would steal this planted lock first and publish a downtime
+# episode of its own - leaving the watcher an ordinary free lock and quietly
+# turning this case back into the published-episode case. The seeded markers stop
+# that, and running the very same migration binary here proves they did rather
+# than assuming it.
 start_reclaiming_watcher() {  # <home> <state> <fakebin> <watch-out>
-  local home=$1 state=$2 fakebin=$3 out=$4
+  local home=$1 state=$2 fakebin=$3 out=$4 dead
+  mark_pr_check_migration_complete "$state"
+  dead=$(dead_pid)
   mkdir -p "$state/.watch.lock"
-  dead_pid > "$state/.watch.lock/pid"
+  printf '%s\n' "$dead" > "$state/.watch.lock/pid"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$MIGRATE" --checks-safe >/dev/null 2>&1 \
+    || fail "the PR-check migration refused the stale-lock reclaim fixture"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$dead" ] \
+    || fail "the PR-check migration reclaimed the stale lock first, so this case proves nothing"
+  [ ! -e "$state/.watcher-down" ] \
+    || fail "the PR-check migration published the recovery episode, so this case proves nothing"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH" > "$out" &
