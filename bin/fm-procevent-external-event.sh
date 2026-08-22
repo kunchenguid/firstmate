@@ -20,6 +20,8 @@
 # The bytes are stored in the existing process-event inbox at mode 0600 before
 # a normalized `procevent external-event ...` wake is appended.
 # The payload never appears in the wake queue or captain inbox.
+# Ingress does not start supervision; prompt consumption requires the home's
+# existing watcher or away supervisor, while an idle home retains the event.
 # A source-scoped delivery key deduplicates retries durably; callers that want
 # webhook and reconciliation observations to coalesce must give the same
 # authoritative object revision the same delivery key.
@@ -212,7 +214,7 @@ action_ingest() {
     if ! publish_locked "$id" "$seq"; then status=1; fi
     fm_procevent_source_lock_release "$id"
     [ "$status" -eq 0 ] || die "event $id is durable but its wake could not be published"
-    printf 'duplicate: %s %s\n' "$id" "$seq"
+    printf 'duplicate: %s %s consumption=active-supervisor-required\n' "$id" "$seq"
     return 0
   fi
 
@@ -224,7 +226,7 @@ action_ingest() {
   if ! publish_locked "$id" "$seq"; then status=1; fi
   fm_procevent_source_lock_release "$id"
   [ "$status" -eq 0 ] || die "event $id is durable but its wake could not be published"
-  printf 'accepted: %s %s\n' "$id" "$seq"
+  printf 'accepted: %s %s consumption=active-supervisor-required\n' "$id" "$seq"
 }
 
 action_classify() {

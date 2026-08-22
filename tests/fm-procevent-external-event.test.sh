@@ -54,6 +54,10 @@ canonical_delivery=linear:4a1bc793-6f51-4d52-91c0-6d8b76ee2a40@2026-08-22T10:00:
 first=$(ingest_linear "$issue_uuid" "$updated_at" < "$payload") \
   || fail "initial external event ingest failed"
 case $first in accepted:*) ;; *) fail "initial ingest did not report acceptance" ;; esac
+case $first in
+  *' consumption=active-supervisor-required') ;;
+  *) fail "ingress output did not disclose its active-supervisor consumption boundary" ;;
+esac
 result=$(result_for_output "$first")
 [ -f "$result" ] || fail "accepted event did not create a durable result"
 [ "$(result_count)" -eq 1 ] || fail "accepted event created more than one result"
@@ -81,6 +85,10 @@ pass "untrusted payload is private and separated from captain authority"
 second=$(ingest_linear '4a1bc793-6f51-4d52-91c0-6d8b76ee2a40' "$updated_at" < "$payload") \
   || fail "duplicate external event ingest failed"
 case $second in duplicate:*) ;; *) fail "retry did not report durable deduplication" ;; esac
+case $second in
+  *' consumption=active-supervisor-required') ;;
+  *) fail "duplicate output did not retain the active-supervisor consumption boundary" ;;
+esac
 [ "$(result_count)" -eq 1 ] || fail "retry created a duplicate durable result"
 [ "$(wake_count)" -eq 1 ] || fail "retry created a duplicate queued wake"
 pass "webhook and scan identities use one canonical key and coalesce"
