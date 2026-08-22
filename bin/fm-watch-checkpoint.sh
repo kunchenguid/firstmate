@@ -5,6 +5,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
+CHECKPOINT_MAX=540
 
 usage() {
   cat <<'EOF'
@@ -13,6 +14,7 @@ Usage: fm-watch-checkpoint.sh [--seconds <n>]
 Run bin/fm-watch.sh in the foreground for a bounded checkpoint.
 On an actionable watcher wake, pass through the watcher output and exit 0.
 On a quiet checkpoint, print "checkpoint: no actionable wake within <n>s" and exit 124.
+Invalid or zero durations use the 180-second default, and values above 540 cap at 540.
 EOF
 }
 
@@ -40,9 +42,15 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$SECONDS_ARG" in
-  ''|*[!0-9]*) echo "error: --seconds must be a positive integer" >&2; exit 2 ;;
-  0) echo "error: --seconds must be greater than zero" >&2; exit 2 ;;
+  ''|*[!0-9]*|0) SECONDS_ARG=180 ;;
 esac
+while [ "${#SECONDS_ARG}" -gt 1 ] && [ "${SECONDS_ARG#0}" != "$SECONDS_ARG" ]; do
+  SECONDS_ARG=${SECONDS_ARG#0}
+done
+if [ "${#SECONDS_ARG}" -gt "${#CHECKPOINT_MAX}" ] \
+  || { [ "${#SECONDS_ARG}" -eq "${#CHECKPOINT_MAX}" ] && [ "$SECONDS_ARG" -gt "$CHECKPOINT_MAX" ]; }; then
+  SECONDS_ARG=$CHECKPOINT_MAX
+fi
 
 OUT=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.out.XXXXXX") || exit 1
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {

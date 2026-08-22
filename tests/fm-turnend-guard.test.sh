@@ -448,17 +448,21 @@ test_hook_codex_away_mode_uses_ordinary_loop_guard() {
 }
 
 test_hook_codex_caps_checkpoint_below_stop_timeout() {
-  local dir out status observed
+  local dir tool_dir out status observed
   dir=$(make_primary_dir "$TMP_ROOT/hook-codex-checkpoint-cap")
+  tool_dir="$dir/test-bin"
   : > "$dir/state/task1.meta"
-  cat > "$dir/bin/fm-watch-checkpoint.sh" <<'SH'
+  cp "$ROOT/bin/fm-watch-checkpoint.sh" "$dir/bin/fm-watch-checkpoint.sh"
+  mkdir -p "$tool_dir"
+  cat > "$tool_dir/timeout" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$2" > "$FM_HOME/checkpoint-seconds"
-printf '%s\n' "checkpoint: no actionable wake within $2s"
+printf '%s\n' "$1" > "${FM_CHECKPOINT_TEST_SECONDS:?}"
 exit 124
 SH
-  chmod +x "$dir/bin/fm-watch-checkpoint.sh"
-  out=$(printf '%s' '{"stop_hook_active":false}' | FM_HOME="$dir" FM_CODEX_WATCH_CHECKPOINT=600 bash "$dir/bin/fm-turnend-guard.sh" --codex 2>&1); status=$?
+  chmod 0700 "$tool_dir/timeout"
+  out=$(printf '%s' '{"stop_hook_active":false}' | FM_HOME="$dir" FM_CODEX_WATCH_CHECKPOINT=600 \
+    FM_CHECKPOINT_TEST_SECONDS="$dir/checkpoint-seconds" PATH="$tool_dir:$PATH" \
+    bash "$dir/bin/fm-turnend-guard.sh" --codex 2>&1); status=$?
   expect_code 2 "$status" "--codex must continue after a capped quiet checkpoint"
   observed=$(cat "$dir/checkpoint-seconds")
   [ "$observed" = 540 ] || fail "--codex checkpoint duration must leave hook timeout margin, got $observed"

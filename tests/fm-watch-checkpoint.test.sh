@@ -87,6 +87,38 @@ test_existing_singleton_watcher_is_not_success() {
   pass "checkpoint rejects an existing watcher singleton as unowned"
 }
 
+test_checkpoint_normalizes_and_caps_codex_duration() {
+  local home tool_dir out err status observed
+  home=$(make_home codex-duration)
+  tool_dir="$home/test-bin"
+  out="$home/out.txt"
+  err="$home/err.txt"
+  mkdir -p "$tool_dir"
+  cat > "$tool_dir/timeout" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" > "${FM_CHECKPOINT_TEST_SECONDS:?}"
+exit 124
+SH
+  chmod 0700 "$tool_dir/timeout"
+
+  status=0
+  FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=600 FM_CHECKPOINT_TEST_SECONDS="$home/seconds" \
+    PATH="$tool_dir:$PATH" "$CHECKPOINT" >"$out" 2>"$err" || status=$?
+  expect_code 124 "$status" "capped Codex checkpoint exit"
+  observed=$(cat "$home/seconds")
+  [ "$observed" = 540 ] || fail "Codex checkpoint must cap an initial cycle at 540 seconds, got $observed"
+  assert_contains "$(cat "$out")" "within 540s" "capped checkpoint line must report the effective duration"
+
+  status=0
+  FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=invalid FM_CHECKPOINT_TEST_SECONDS="$home/seconds" \
+    PATH="$tool_dir:$PATH" "$CHECKPOINT" >"$out" 2>"$err" || status=$?
+  expect_code 124 "$status" "normalized Codex checkpoint exit"
+  observed=$(cat "$home/seconds")
+  [ "$observed" = 180 ] || fail "invalid Codex checkpoint duration must use the 180-second default, got $observed"
+  assert_contains "$(cat "$out")" "within 180s" "normalized checkpoint line must report the default duration"
+  pass "checkpoint normalizes and caps Codex durations for direct and Stop-owned cycles"
+}
+
 test_codex_stop_recovers_terminal_signal_after_quiet_checkpoint() {
   local home fake_state checkpoint_out checkpoint_err quiet_hook_out quiet_hook_status hook_out hook_status drained
   home=$(make_home terminal-after-checkpoint)
@@ -148,4 +180,5 @@ test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
+test_checkpoint_normalizes_and_caps_codex_duration
 test_codex_stop_recovers_terminal_signal_after_quiet_checkpoint
