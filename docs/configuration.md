@@ -397,7 +397,8 @@ The requested effort remains in task metadata and the selected tuple when an ada
 For example, codex `max`, grok `xhigh` or `max`, and every opencode, Kimi, or Cursor effort produce a null emitted effort while retaining the requested metadata value.
 Muse's selected `max` emits and binds the adapter value `ultra`.
 
-For a raw command, `launch_binding.kind` is `raw_launch`, every axis must be observed through the fixed literal command itself, and the command head must be `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `muse`, or the canonical `cursor-agent` executable, optionally at an absolute path.
+For a raw command, `launch_binding.kind` is `raw_launch`, every axis must be observed through the fixed literal command itself, and the command head must be `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `muse`, or the canonical `cursor-agent` executable.
+The bare command must resolve through `PATH`, every relative path spelling is refused, and an absolute spelling is accepted only when it identifies the same executable as that supported bare command.
 Outside shell quotes, raw commands allow only alphanumerics, space separators, and `-`, `_`, `.`, `/`, `:`, `,`, `+`, `@`, or `%`, while `=` is accepted only after a word has begun so zsh cannot expand a leading `=command`.
 Single-quoted content is accepted literally except for control or non-ASCII input, while double-quoted content accepts alphanumerics, space, and `#`, `%`, `&`, `'`, `(`, `)`, `*`, `+`, `,`, `-`, `.`, `/`, `:`, `;`, `<`, `=`, `>`, `?`, `@`, `[`, `]`, `^`, `_`, `{`, `|`, `}`, or `~`.
 Double-quoted expansion, history, and backslash syntax are refused rather than interpreted or normalized.

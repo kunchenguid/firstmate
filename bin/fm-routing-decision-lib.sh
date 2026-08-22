@@ -145,15 +145,41 @@ FM_ROUTING_COMMAND_MODEL_SEEN=0
 FM_ROUTING_COMMAND_EFFORT_SEEN=0
 
 fm_routing_raw_harness_for_executable() { # <executable-word>
-  case "$(basename "$1")" in
+  local executable=$1 command_name harness expected
+  command_name=$(basename "$executable")
+  case "$command_name" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
-      basename "$1"
+      harness=$command_name
       ;;
     cursor-agent)
-      printf '%s\n' cursor
+      harness=cursor
       ;;
-    *) return 1 ;;
+    *)
+      fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch command head is not a supported harness executable"
+      return 1
+      ;;
   esac
+  case "$executable" in
+    */*)
+      case "$executable" in
+        /*) ;;
+        *)
+          fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch command head uses a relative path"
+          return 1
+          ;;
+      esac
+      ;;
+  esac
+  expected=$(type -P "$command_name" 2>/dev/null) || {
+    fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "supported raw harness executable cannot be resolved through PATH"
+    return 1
+  }
+  if [[ "$executable" == /* ]] \
+    && { [ ! -x "$executable" ] || [[ ! "$executable" -ef "$expected" ]]; }; then
+    fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "absolute raw harness path is not the supported executable resolved through PATH"
+    return 1
+  fi
+  printf '%s\n' "$harness"
 }
 
 fm_routing_set_codex_effort() { # <encoded-effort>
@@ -221,10 +247,7 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
       fi
       case "$word" in -*) break ;; esac
       if [ "$raw" -eq 1 ]; then
-        harness_word=$(fm_routing_raw_harness_for_executable "$word") || {
-          fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch command head is not a supported harness executable"
-          return 1
-        }
+        harness_word=$(fm_routing_raw_harness_for_executable "$word") || return 1
       else
         harness_word=$(basename "$word")
       fi

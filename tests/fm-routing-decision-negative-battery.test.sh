@@ -65,6 +65,14 @@ TMP_ROOT=$(fm_test_tmproot fm-routing-decision-negative-battery)
 LAB="$TMP_ROOT/lab"
 HOME_DIR="$LAB/home"
 TASK_DIR="$HOME_DIR/data/t1"
+RAW_HARNESS_BIN="$TMP_ROOT/raw-harness-bin"
+mkdir -p "$RAW_HARNESS_BIN"
+for executable in claude codex opencode pi pi-signed grok kimi muse cursor-agent; do
+  printf '#!/bin/sh\nexit 0\n' > "$RAW_HARNESS_BIN/$executable"
+  chmod +x "$RAW_HARNESS_BIN/$executable"
+done
+PATH="$RAW_HARNESS_BIN:$PATH"
+export PATH
 RUN_HARNESS=claude
 RUN_MODEL=opus
 RUN_EFFORT=high
@@ -75,6 +83,7 @@ RUN_EFFORT_FRAGMENT="--effort 'high' "
 negative_count=0
 counterexample_count=0
 PREEXISTING_FINAL=0
+RUN_CWD=
 
 sha_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -165,6 +174,7 @@ write_fixture() {
   POST_SNAPSHOT_SOURCE_FILTER=
   POST_SNAPSHOT_CONFIG_FILTER=
   POST_FINAL_DIRECTORY=0
+  RUN_CWD=
 }
 
 update_receipt() {
@@ -203,11 +213,19 @@ write_multi_fixture() {
     | .quota = {source: \"quota-axi --json\", observed_at: \"$now\", snapshot_sha256: \"$snapshot_hash\"}"
 }
 
-run_validator_then_effects() {
+run_validator() {
   fm_routing_decision_validate_and_persist \
     "$HOME_DIR/data" "$HOME_DIR/config" t1 \
     "$RUN_HARNESS" "$RUN_MODEL" "$RUN_EFFORT" "$HOME_DIR" "$RUN_RAW" "$RUN_LAUNCH" \
-    "$RUN_MODEL_FRAGMENT" "$RUN_EFFORT_FRAGMENT" || return 1
+    "$RUN_MODEL_FRAGMENT" "$RUN_EFFORT_FRAGMENT"
+}
+
+run_validator_then_effects() {
+  if [ -n "$RUN_CWD" ]; then
+    (cd "$RUN_CWD" && run_validator) || return 1
+  else
+    run_validator || return 1
+  fi
   mkdir -p "$LAB/worktree.lease" "$LAB/endpoint"
   printf 'published\n' > "$HOME_DIR/state/t1.meta"
 }
@@ -321,6 +339,20 @@ setup_raw_reserved_placeholder() {
 }
 setup_raw_cross_harness_codex_config() {
   setup_raw_literal 'claude --model opus -c model_reasoning_effort=high'
+}
+setup_raw_relative_harness_path() {
+  mkdir -p "$LAB/tools"
+  printf '#!/bin/sh\nexit 0\n' > "$LAB/tools/claude"
+  chmod +x "$LAB/tools/claude"
+  RUN_CWD=$LAB
+  setup_raw_literal 'tools/claude --model opus --effort high'
+}
+setup_raw_absolute_harness_impostor() {
+  local wrapper="$LAB/absolute-wrapper/claude"
+  mkdir -p "$(dirname "$wrapper")"
+  printf '#!/bin/sh\nexit 0\n' > "$wrapper"
+  chmod +x "$wrapper"
+  setup_raw_literal "$wrapper --model opus --effort high"
 }
 setup_raw_no_executable() { setup_raw_literal '--model opus --effort high'; }
 setup_raw_harness_contradiction() { setup_raw_literal 'codex --model opus --effort high'; }
@@ -670,6 +702,10 @@ exercise_negative "raw reserved placeholder" RAW_LAUNCH_NOT_VERIFIABLE setup_raw
   "raw launch contains a reserved template placeholder expanded after receipt validation"
 exercise_negative "raw cross-harness codex config" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_cross_harness_codex_config \
   "model_reasoning_effort config is only verifiable for the codex harness"
+exercise_negative "raw relative harness path" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_relative_harness_path \
+  "raw launch command head uses a relative path"
+exercise_negative "raw absolute harness impostor" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_absolute_harness_impostor \
+  "absolute raw harness path is not the supported executable resolved through PATH"
 
 exercise_negative "42 raw launch without executable" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_no_executable \
   "launch has no executable harness word"
@@ -727,7 +763,7 @@ run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement
   || fail "canonical config replacement counterexample did not fire"
 pass "canonical config replacement cannot change snapshotted candidate resolution"
 
-expected_count=$((94 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((96 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

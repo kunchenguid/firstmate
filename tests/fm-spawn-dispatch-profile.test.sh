@@ -109,6 +109,10 @@ if [ -n "${FM_TEST_MUTATE_BRIEF_SOURCE:-}" ] \
   esac
 fi
 SH
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
   cat > "$fakebin/cursor-agent" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --list-models ]; then
@@ -117,7 +121,7 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cp" "$fakebin/cursor-agent" "$fakebin/treehouse"
+  chmod +x "$fakebin/timeout" "$fakebin/cp" "$fakebin/claude" "$fakebin/cursor-agent" "$fakebin/treehouse"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
