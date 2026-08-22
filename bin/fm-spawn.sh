@@ -261,6 +261,21 @@ CHECKOUT_LOCK_ROOT=$(fm_checkout_lock_root "$CHECKOUT_STATE_BASE")
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 
+spawn_checkout_refresh() {  # <command> [args...]
+  # A compartment child keeps FM_HOME on the primary because that home owns
+  # the one elastic-worker controller and money document. Checkout refresh is
+  # different: its FM_HOME keys the managed source clone and Treehouse pool.
+  # Bind only this subprocess to the home that owns the child task, while the
+  # exact project argument remains the compartment home's selected project.
+  # Otherwise a same-named primary project can donate a foreign pool slot,
+  # which the post-acquisition Git-common-dir fence correctly refuses.
+  if [ "$TASK_HOME" != "$FM_HOME" ]; then
+    FM_HOME="$TASK_HOME" "$SCRIPT_DIR/fm-checkout-refresh.sh" "$@"
+  else
+    "$SCRIPT_DIR/fm-checkout-refresh.sh" "$@"
+  fi
+}
+
 spawn_managed_endpoint_kill() {  # <backend> <target> <tab-id> <label> <kind> <secondmate-home> [recorded-scoped-target]
   local backend=$1 target=$2 tab_id=$3 label=$4 kind=$5 secondmate_home=${6:-} recorded_scoped_target=${7:-} endpoint_home
   endpoint_home=$(fm_backend_endpoint_home "$backend" "$kind" "$TASK_HOME" "$secondmate_home")
@@ -1875,12 +1890,12 @@ spawn_return_created_worktree() {
     return "$return_status"
   fi
   if [ -z "$WORKTREE_EXPECTED_TIP" ] \
-    || ! "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-returnable "$WT" "${PROJ_ABS_REAL:-$PROJ_ABS}" "$WORKTREE_EXPECTED_TIP"; then
+    || ! spawn_checkout_refresh verify-returnable "$WT" "${PROJ_ABS_REAL:-$PROJ_ABS}" "$WORKTREE_EXPECTED_TIP"; then
     echo "warning: retained acquired worktree $WT because repository identity and its expected detached tip could not be re-proven" >&2
     return 1
   fi
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
-  if ! "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-returnable "$WT" "${PROJ_ABS_REAL:-$PROJ_ABS}" "$WORKTREE_EXPECTED_TIP"; then
+  if ! spawn_checkout_refresh verify-returnable "$WT" "${PROJ_ABS_REAL:-$PROJ_ABS}" "$WORKTREE_EXPECTED_TIP"; then
     echo "warning: retained acquired worktree $WT because post-cleanup repository safety could not be re-proven" >&2
     return 1
   fi
@@ -3284,7 +3299,7 @@ if [ "$KIND" = secondmate ]; then
       exit 1
       ;;
   esac
-  "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-home "$PROJ_ABS" "$FM_ROOT" || {
+  spawn_checkout_refresh verify-home "$PROJ_ABS" "$FM_ROOT" || {
     echo "error: refusing secondmate launch because its live default-tip freshness cannot be proved" >&2
     exit 1
   }
@@ -3376,7 +3391,7 @@ real_path_or_raw() {  # <path>
 # and resets the selected clean pool worktree from that remote-tracking ref.
 # The post-acquisition verification below is the fail-closed freshness proof.
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" != 1 ]; then
-  if CHECKOUT_PREFLIGHT_OUT=$("$SCRIPT_DIR/fm-checkout-refresh.sh" preflight "$PROJ_ABS_REAL" 2>&1); then
+  if CHECKOUT_PREFLIGHT_OUT=$(spawn_checkout_refresh preflight "$PROJ_ABS_REAL" 2>&1); then
     CHECKOUT_PREFLIGHT_STATUS=0
   else
     CHECKOUT_PREFLIGHT_STATUS=$?
@@ -3569,13 +3584,13 @@ if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
 fi
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" != 1 ]; then
-  "$SCRIPT_DIR/fm-checkout-refresh.sh" pool-preflight "$PROJ_ABS_REAL" || {
+  spawn_checkout_refresh pool-preflight "$PROJ_ABS_REAL" || {
     echo "error: refusing Treehouse acquisition because pool safety could not be inspected for $PROJ_ABS" >&2
     exit 1
   }
   create_worktree_acquisition_record || exit 1
   acquire_status=0
-  WT=$("$SCRIPT_DIR/fm-checkout-refresh.sh" acquire-worktree "$PROJ_ABS_REAL" "firstmate-$ID") || acquire_status=$?
+  WT=$(spawn_checkout_refresh acquire-worktree "$PROJ_ABS_REAL" "firstmate-$ID") || acquire_status=$?
   if [ "$acquire_status" -ne 0 ]; then
     if [ "$acquire_status" -eq 124 ]; then
       echo "error: refusing to spawn $ID after the bounded Treehouse acquisition timed out" >&2
@@ -3593,7 +3608,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" 
   record_acquired_worktree || exit 1
   validate_spawn_worktree "treehouse get --lease" "$PROJ_ABS"
   freshness_status=0
-  "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$WT" "$PROJ_ABS_REAL" || freshness_status=$?
+  spawn_checkout_refresh verify-worktree "$WT" "$PROJ_ABS_REAL" || freshness_status=$?
   if [ "$freshness_status" -ne 0 ]; then
     echo "error: refusing to launch fm-$ID from a leased worktree whose repository identity, cleanliness, or default-tip freshness could not be proved" >&2
     exit 1

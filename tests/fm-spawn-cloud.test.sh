@@ -170,7 +170,20 @@ SH
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = get ]; then
-  printf '%s\n' "${FM_FAKE_TREEHOUSE_WORKTREE:?}"
+  selected=${FM_FAKE_TREEHOUSE_WORKTREE:?}
+  # Compartment-child fixture: model Treehouse's root-scoped pool selection.
+  # The primary and task homes intentionally carry same-named repositories
+  # with different Git common identities. A managed source configured with the
+  # primary root therefore leases the foreign primary-pool worktree; only the
+  # task-home root returns the compartment project's exact worktree.
+  if [ -n "${FM_FAKE_TREEHOUSE_TASK_HOME:-}" ]; then
+    if grep -Fq "${FM_FAKE_TREEHOUSE_TASK_HOME}" treehouse.toml 2>/dev/null; then
+      selected=${FM_FAKE_TREEHOUSE_WORKTREE:?}
+    else
+      selected=${FM_FAKE_TREEHOUSE_FOREIGN_WORKTREE:?}
+    fi
+  fi
+  printf '%s\n' "$selected"
 fi
 exit 0
 SH
@@ -1273,11 +1286,14 @@ make_child_case() {  # <name> <child-id> <parent-id> -> record
   # document and the config, and a separate seeded SECONDMATE home that owns
   # this task's state, data and projects.
   local name=$1 id=$2 parent=$3 case_dir primary sub project worktree fakebin
+  local foreign_project foreign_worktree
   case_dir="$TMP_ROOT/$name"
   primary="$case_dir/primary"
   sub="$case_dir/secondmate-home"
   project="$case_dir/project"
   worktree="$case_dir/worktree"
+  foreign_project="$case_dir/primary-project"
+  foreign_worktree="$case_dir/primary-worktree"
   mkdir -p "$primary/data" "$primary/state" "$primary/config" \
     "$sub/data" "$sub/projects" "$sub/state" "$sub/treehouse-pools" \
     "$case_dir/codex-home" "$case_dir/pi-agent-home"
@@ -1287,6 +1303,8 @@ make_child_case() {  # <name> <child-id> <parent-id> -> record
   printf '%s\n' manual > "$primary/config/backlog-backend"
   fm_git_init_commit "$project"
   git -C "$project" worktree add --quiet --detach "$worktree"
+  fm_git_init_commit "$foreign_project"
+  git -C "$foreign_project" worktree add --quiet --detach "$foreign_worktree"
   touch "$sub/state/.last-watcher-beat"
   mkdir -p "$sub/data/$id"
   printf 'brief for %s\n' "$id" > "$sub/data/$id/brief.md"
@@ -1315,6 +1333,16 @@ $1
 EOF
 }
 
+fixture_git_common_dir() {  # <repository>
+  local repository=$1 common
+  common=$(git -C "$repository" rev-parse --git-common-dir) || return 1
+  case "$common" in
+    /*) : ;;
+    *) common="$repository/$common" ;;
+  esac
+  (cd "$common" 2>/dev/null && pwd -P)
+}
+
 run_child_spawn() {  # <case> <primary> <sub> <worktree> <fakebin> [extra env assignments...] -- args
   # Deliberately sets NO FM_STATE_OVERRIDE/FM_DATA_OVERRIDE/FM_PROJECTS_OVERRIDE:
   # the split derives them from the task home, and fm-spawn refuses the
@@ -1329,6 +1357,8 @@ run_child_spawn() {  # <case> <primary> <sub> <worktree> <fakebin> [extra env as
     FM_CHECKOUT_REFRESH_STATE_BASE="$case_dir/checkout-refresh-state" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$worktree" TMUX="fake,1,0" \
     FM_FAKE_TREEHOUSE_WORKTREE="$worktree" \
+    FM_FAKE_TREEHOUSE_TASK_HOME="$sub" \
+    FM_FAKE_TREEHOUSE_FOREIGN_WORKTREE="$case_dir/primary-worktree" \
     FM_TEST_LAUNCH_LOG="$case_dir/launch.log" \
     FM_TEST_TMUX_CALLS="$case_dir/tmux-calls.log" \
     FM_BACKEND_HERDR_TEST_LAB=firstmate-herdr-test-lab-v1 \
@@ -1381,7 +1411,7 @@ test_compartment_child_spawn_splits_the_task_home_from_the_money_document() {
   # secondmate running in Azure obtains a crewmate. The child's task lives in
   # the SECONDMATE's home; the request is admitted into the PRIMARY's one
   # controller document; no second document is ever created.
-  local record id parent out status meta controller target endpoint_state
+  local record id parent out status meta controller target endpoint_state source_config source_dir
   id=child-c1
   parent=smc-e2e
   record=$(make_child_case child-lane "$id" "$parent")
@@ -1402,6 +1432,19 @@ test_compartment_child_spawn_splits_the_task_home_from_the_money_document() {
   assert_present "$meta" "the child's task metadata did not land in the secondmate home"
   assert_absent "$PRIMARY_DIR/state/$id.meta" "the child's task metadata landed in the primary home"
   assert_grep 'placement=azure' "$meta" "the child spawn did not record placement=azure"
+  source_config=$(find "$SUB_DIR/state/treehouse-sources" -name treehouse.toml -type f -print -quit 2>/dev/null)
+  [ -n "$source_config" ] || fail "the compartment child did not create its managed Treehouse source under the task home"
+  assert_absent "$PRIMARY_DIR/state/treehouse-sources" \
+    "the compartment child created its managed Treehouse source under the primary money home"
+  assert_grep "$SUB_DIR" "$source_config" \
+    "the compartment child's managed source does not select the task-home Treehouse root"
+  source_dir=$(dirname "$source_config")
+  [ "$(fixture_git_common_dir "$source_dir")" = \
+    "$(fixture_git_common_dir "$PROJECT_DIR")" ] || fail \
+    "the managed Treehouse source and compartment project have different Git common identities"
+  [ "$(fixture_git_common_dir "$WORKTREE_DIR")" = \
+    "$(fixture_git_common_dir "$PROJECT_DIR")" ] || fail \
+    "the leased Treehouse worktree and compartment project have different Git common identities"
   # The money document is the primary's, and there is exactly one of them.
   assert_present "$controller" "the primary's controller document is gone"
   assert_absent "$SUB_DIR/state/azure-workers/controller.json" \
