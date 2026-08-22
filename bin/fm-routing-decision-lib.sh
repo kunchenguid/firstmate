@@ -23,6 +23,7 @@
 # shellcheck disable=SC2034 # consumed by the sourcing fm-spawn.sh process
 FM_ROUTING_DECISION_FINAL=
 FM_ROUTING_BRIEF_FINAL=
+FM_ROUTING_BRIEF_HASH=
 FM_ROUTING_DECISION_MAX_AGE_SECONDS=300
 FM_ROUTING_DECISION_MAX_FUTURE_SECONDS=30
 
@@ -789,6 +790,8 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
   FM_ROUTING_DECISION_FINAL=$final
   # shellcheck disable=SC2034 # consumed by the sourcing fm-spawn.sh process
   FM_ROUTING_BRIEF_FINAL=$brief_final
+  # shellcheck disable=SC2034 # consumed by the sourcing fm-spawn.sh process
+  FM_ROUTING_BRIEF_HASH=$brief_hash
 }
 
 fm_routing_decision_validate_and_persist() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment>
@@ -797,6 +800,7 @@ fm_routing_decision_validate_and_persist() { # <data> <canonical-config> <task-i
 
   FM_ROUTING_DECISION_FINAL=
   FM_ROUTING_BRIEF_FINAL=
+  FM_ROUTING_BRIEF_HASH=
   task_dir="$data/$id"
   source_pending="$task_dir/routing-decision.pending.json"
   source_intent="$task_dir/routing-intent.json"

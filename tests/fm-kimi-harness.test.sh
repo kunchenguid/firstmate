@@ -44,7 +44,7 @@ fake_screen() {
       printf 'context: 0%% (0/256k)\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
       ;;
     delivered)
-      printf '✨ Read the brief at %s and follow it exactly.\ncontext: 1%% (2k/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n' "$FM_FAKE_BRIEF_REAL"
+      printf '✨ Launch brief accepted.\ncontext: 1%% (2k/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
       ;;
     *)
       printf 'shell starting\n$ \n'
@@ -197,7 +197,7 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp
+  local id rec out rc launch input meta task_tmp
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -218,10 +218,11 @@ test_kimi_launch_then_send_is_verified() {
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
 
-  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
-  pointer=$(cat "$CASE_DIR/pointer.log")
-  [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
-    || fail "kimi pointer was not the exact absolute-path-only instruction: $pointer"
+  input=$(cat "$CASE_DIR/pointer.log")
+  assert_contains "$input" 'FIRSTMATE_OP: v1 launch-brief: brief for' \
+    "kimi did not receive the typed validated brief input"
+  assert_not_contains "$input" 'Read the brief at' \
+    "fresh kimi delivery still reopened a brief pathname"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'model=kimi-code/k3' "$meta" "kimi meta lost the requested model"
   assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
@@ -501,11 +502,11 @@ test_kimi_unconfirmed_delivery_fails_loudly() {
   out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail"
-  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+  assert_contains "$out" "kimi brief input delivery was not confirmed" \
     "unconfirmed kimi delivery lacked a loud diagnostic"
-  assert_grep 'failed: kimi brief pointer delivery was not confirmed' "$HOME_DIR/state/$id.status" \
+  assert_grep 'failed: kimi brief input delivery was not confirmed' "$HOME_DIR/state/$id.status" \
     "unconfirmed kimi delivery did not leave a supervisor-visible failure"
-  pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
+  pass "fm-spawn: kimi treats a silent brief-input drop as a failed spawn"
 }
 
 test_kimi_readiness_gate_precedes_pointer() {
@@ -519,8 +520,8 @@ test_kimi_readiness_gate_precedes_pointer() {
   [ "$rc" -ne 0 ] || fail "kimi spawn without a ready signal should fail"
   assert_contains "$out" "kimi did not show a verified ready signal" \
     "kimi readiness failure lacked a loud diagnostic"
-  [ ! -s "$CASE_DIR/pointer.log" ] || fail "kimi pointer was sent before readiness"
-  pass "fm-spawn: kimi never sends the brief pointer before an observable ready signal"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "kimi brief input was sent before readiness"
+  pass "fm-spawn: kimi never sends brief input before an observable ready signal"
 }
 
 test_kimi_detection_uses_ancestry_after_markers() {

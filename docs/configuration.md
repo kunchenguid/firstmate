@@ -351,7 +351,7 @@ A multi-candidate route also supplies the exact one-intake `quota-axi --json` ob
 Every string is non-empty, `brief_sha256` is the SHA-256 of the exact current `data/<task-id>/brief.md` bytes, and `forbidden_effects` is a non-empty string array.
 The receipt binds the SHA-256 of this exact intent file rather than trusting an unattached hash.
 The validator recomputes the brief hash against a private snapshot before accepting the intent, so replacing the brief before that snapshot returns `BRIEF_HASH_MISMATCH`.
-On acceptance, the exact validated bytes persist at `data/<task-id>/routing-brief.<brief_sha256>.md`, and every fresh adapter launch reads that hash-addressed snapshot rather than reopening mutable `brief.md`.
+On acceptance, the exact validated bytes persist at `data/<task-id>/routing-brief.<brief_sha256>.md`, and every fresh adapter consumer reads that path once, verifies those captured bytes against `brief_sha256`, and constructs its launch input from the same captured bytes.
 
 `routing-decision.pending.json` schema version 1 has exactly this shape:
 

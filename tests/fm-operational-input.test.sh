@@ -6,6 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 OWNER="$ROOT/bin/fm-operational-input.sh"
+TMP_ROOT=$(fm_test_tmproot fm-operational-input)
 # shellcheck source=/dev/null
 . "$OWNER"
 
@@ -151,6 +152,24 @@ test_invalid_current_encodings_are_rejected() {
   pass "operational input: current construction rejects legacy kinds and empty bodies"
 }
 
+test_verified_file_encoding_binds_one_read() {
+  local dir file hash encoded output
+  dir="$TMP_ROOT/verified-file"
+  file="$dir/brief.md"
+  mkdir -p "$dir"
+  printf 'validated body\nwith trailing newline\n' > "$file"
+  hash=$(fm_test_sha256_file "$file")
+  encoded=$("$OWNER" encode-verified-file launch-brief "$hash" "$file") \
+    || fail "verified file encoding refused matching bytes"
+  fm_operational_input_body "$encoded" output \
+    || fail "verified file encoding did not produce a current envelope"
+  [ "$output" = "$(cat "$file")" ] || fail "verified file encoding changed the captured body"
+  printf 'replacement bytes\n' > "$file"
+  "$OWNER" encode-verified-file launch-brief "$hash" "$file" >/dev/null 2>&1 \
+    && fail "verified file encoding accepted replacement bytes"
+  pass "operational input: verified file encoding binds captured bytes"
+}
+
 test_current_generic_matrix
 test_current_from_firstmate_carrier
 test_landed_untyped_prefix_is_explicitly_legacy
@@ -158,3 +177,4 @@ test_isolated_legacy_matrix
 test_genuine_near_misses_remain_unclassified
 test_cross_language_adapter_uses_the_owner
 test_invalid_current_encodings_are_rejected
+test_verified_file_encoding_binds_one_read
