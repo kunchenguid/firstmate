@@ -207,8 +207,25 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  exit 0
+if [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  case "${1:-}" in
+    get)
+      # fm-spawn executes the pool acquire itself since the slot-lease fix:
+      # answer `get --lease` with exactly the bogus cwd the wrapped pane get
+      # reports for these tasks, so the armed abort still happens at worktree
+      # validation ("did not yield an isolated worktree") instead of early at
+      # an empty acquisition.
+      if [ "${2:-}" = --lease ]; then
+        printf '%s\n' "$POST_CREATE_ABORT_CONTROL/not-a-worktree"
+      fi
+      exit 0
+      ;;
+    return)
+      # The post-validation abort releases its lease best-effort; there is no
+      # real pool slot behind the bogus path to return.
+      exit 0
+      ;;
+  esac
 fi
 exec "$REAL_TREEHOUSE" "$@"
 SH
