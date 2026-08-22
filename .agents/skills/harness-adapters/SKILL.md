@@ -57,6 +57,10 @@ When verifying a new adapter, record its env marker and command name in `bin/fm-
 For stuck recovery, the target window's harness is recorded as `harness=` in `state/<id>.meta`.
 Use that value for interrupt, exit, resume, and skill-invocation facts.
 
+`bin/fm-session-lock-lib.sh` separately recognizes an `omp` (Oh My Pi) process as Claude-identified for session-lock ownership only, gated strictly on `CLAUDECODE=1` (never a bare `omp` name match), because omp runs on the same underlying Claude Agent SDK but is not itself a verified harness.
+This is scoped narrowly to lock identity: omp's Stop/PreToolUse hook firing, watcher auto-rearm, and busy-state detection are unverified, and `omp` is not added to `FM_HARNESS_RE`/`FM_HARNESS_NAMES` or any verified-harness table used for spawning crewmates/secondmates.
+See `bin/fm-session-lock-lib.sh` and `tests/fm-session-lock-ancestry.test.sh`.
+
 ## Primary turn-end guard
 
 The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` have empirically validated hook paths for the "no turn ends blind" guard.

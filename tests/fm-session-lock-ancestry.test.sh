@@ -134,6 +134,61 @@ SH
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
 }
 
+test_omp_is_claude_identified_only_with_claudecode_marker() {
+  local dir fakebin got
+  dir="$TMP_ROOT/omp-marker"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  500:comm=) printf '%s\n' omp ;;
+  500:args=) printf '%s\n' omp ;;
+  500:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 500 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '500\n' > "$dir/state/.lock"
+
+  # Positive: an omp process carrying the CLAUDECODE=1 marker is Claude-identified,
+  # and the omp process's own pid is what the ancestry resolves to.
+  got=$(CLAUDECODE=1 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "an omp process with CLAUDECODE=1 was not recognized as a harness process"
+  [ "$got" = 500 ] || fail "ancestry resolved '$got', expected the omp process's own pid 500"
+  CLAUDECODE=1 lib_eval "$fakebin" 'fm_harness_pid_alive 500' \
+    || fail "a live omp process with CLAUDECODE=1 was not recognized as a harness"
+  CLAUDECODE=1 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "an omp session with CLAUDECODE=1 did not recognize itself as the lock owner"
+
+  # Negative: the identical omp-named process WITHOUT the marker must be rejected,
+  # proving this is marker-gated rather than a bare name match. CLAUDECODE is
+  # explicitly overridden to empty here rather than merely left unset, because
+  # this suite may itself be running inside a Claude Code session that already
+  # exports CLAUDECODE=1 into the ambient environment.
+  if CLAUDECODE='' lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
+    fail "an omp process without CLAUDECODE=1 was treated as a harness process"
+  fi
+  if CLAUDECODE='' lib_eval "$fakebin" 'fm_harness_pid_alive 500'; then
+    fail "an omp process without CLAUDECODE=1 passed the harness-liveness predicate"
+  fi
+  if CLAUDECODE='' lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "an omp process without CLAUDECODE=1 claimed the home's session lock"
+  fi
+  pass "session-lock: omp is Claude-identified for lock ownership only when CLAUDECODE=1 is set, never on bare name"
+}
+
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -358,6 +413,7 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
+test_omp_is_claude_identified_only_with_claudecode_marker
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home

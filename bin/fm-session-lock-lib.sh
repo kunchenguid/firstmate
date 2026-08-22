@@ -25,6 +25,14 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 # bin/fm-claude-stop-autoarm.sh.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
+# omp (Oh My Pi) is deliberately NOT added to the tables above. It is not
+# exclusively a Claude Agent SDK harness, so a bare process-name match here
+# would misclaim an omp session running a different backend. Its Claude
+# identity is instead recognized in fm_harness_process_matches() below, gated
+# strictly on the CLAUDECODE=1 marker the same way fm-harness.sh's own
+# detect_own() already trusts it (env markers before ancestry). Do not widen
+# this to a bare name match.
+
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
 #
@@ -69,6 +77,19 @@ fm_harness_process_matches() {  # <comm> <args>
   argv0=${args%% *}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    return 0
+  fi
+  # omp (Oh My Pi), treated as claude 2026-08-23: omp runs on the same
+  # underlying Claude Agent SDK and sets CLAUDECODE=1 for downstream
+  # compatibility, but its own process name is "omp" with no separate
+  # "claude"-named process anywhere in its ancestry - there is no nested
+  # worker chain to climb the way native Claude Code has one. Every caller in
+  # this file runs as a descendant of the primary session's own process tree
+  # (the Stop/PreToolUse hook scripts, fm-lock.sh, fm-session-start.sh), so
+  # the marker is reliably inherited here too. Gate strictly on the marker,
+  # never the bare name alone (see the FM_HARNESS_NAMES comment above).
+  if [ "$base" = omp ] && [ "${CLAUDECODE:-}" = "1" ]; then
+    FM_HARNESS_IS_CLAUDE=1
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
