@@ -139,6 +139,52 @@ ROWS
   pass "C1 fm-harness.sh secondmate-model/secondmate-effort resolve the optional tokens; bare harness stays empty (backward-compat)"
 }
 
+test_secondmate_source_and_concrete_tuple() {
+  local cfg="$TMP_ROOT/concrete-tuple/config" out status
+  mkdir -p "$cfg"
+  [ "$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-source)" = fallback ] \
+    || fail "absent secondmate config did not report fallback provenance"
+
+  printf '%s\n' 'cursor-agent cursor-grok-4.6-xhigh xhigh' > "$cfg/secondmate-harness"
+  printf '%s\n' '{"schemaVersion":1,"tuples":[{"harness":"cursor-agent","model":"cursor-grok-4.6-xhigh","provider":"cursor","modelFamily":"cursor-grok-4.6"}]}' > "$cfg/model-catalog.json"
+  [ "$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-source)" = secondmate-config ] \
+    || fail "concrete secondmate config did not report secondmate-config provenance"
+  [ "$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-tuple)" = $'cursor-agent\tcursor-grok-4.6-xhigh\txhigh' ] \
+    || fail "concrete secondmate tuple did not resolve byte-exact"
+  [ "$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-tuple-facts)" = $'cursor-agent\tcursor-grok-4.6-xhigh\txhigh\tcursor\tcursor-grok-4.6' ] \
+    || fail "concrete secondmate tuple did not bind through the catalog byte-exact"
+
+  printf '%s\n' '{"schemaVersion":1,"tuples":[{"harness":"cursor-agent","model":"cursor-grok-4.6-xhigh","provider":"cursor","modelFamily":"cursor-grok-4.6"},{"harness":"cursor-agent","model":"cursor-grok-4.6-xhigh","provider":"claude","modelFamily":"opus"}]}' > "$cfg/model-catalog.json"
+  out=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-tuple-facts 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "contradictory duplicate catalog facts were accepted"
+  assert_contains "$out" "does not uniquely bind" "contradictory catalog refusal did not name the binding contract"
+  printf '%s\n' '{"schemaVersion":1,"tuples":[{"harness":"cursor-agent","model":"cursor-grok-4.6-xhigh","provider":"cursor","modelFamily":"cursor-grok-4.6"}]}' > "$cfg/model-catalog.json"
+
+  printf '%s\n' 'cursor-agent cursor-grok-4.6-xhigh' > "$cfg/secondmate-harness"
+  [ "$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-source)" = fallback ] \
+    || fail "partial secondmate config falsely claimed complete durable provenance"
+  out=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-tuple 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "partial secondmate tuple was accepted for automatic lifecycle use"
+  assert_contains "$out" "exactly harness, model, and effort" "partial tuple refusal did not name the contract"
+
+  printf '%s\n' 'cursor-agent' > "$cfg/secondmate-harness"
+  [ "$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-source)" = fallback ] \
+    || fail "bare secondmate config falsely claimed complete durable provenance"
+
+  printf '%s\n' 'cursor-agent cursor-grok-4.6-xhigh max' > "$cfg/secondmate-harness"
+  out=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-tuple 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "max effort was accepted for automatic secondmate lifecycle use"
+  assert_contains "$out" "must not select max effort" "max tuple refusal did not name the floor"
+
+  rm -f "$cfg/secondmate-harness"
+  printf '%s\n' 'cursor-agent cursor-grok-4.6-xhigh xhigh' > "$cfg/target"
+  ln -s target "$cfg/secondmate-harness"
+  if FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-tuple >/dev/null 2>&1; then
+    fail "symlinked secondmate tuple was accepted"
+  fi
+  pass "C2 secondmate source and concrete tuple validation are durable, explicit, and safe"
+}
+
 # ===========================================================================
 # A/C) pi-signed process identity and shared Pi marker behavior
 # ===========================================================================
@@ -2516,6 +2562,7 @@ SH
 
 test_harness_resolution
 test_secondmate_model_effort_tokens
+test_secondmate_source_and_concrete_tuple
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_cursor_agent_process_ancestry_detection

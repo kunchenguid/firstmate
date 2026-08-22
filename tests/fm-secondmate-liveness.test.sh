@@ -99,7 +99,7 @@ SH
 test_tmux_agent_state_classifies() {
   local fb out
 
-  for harness in claude codex opencode grok kimi pi pi-signed pi-launcher Pi; do
+  for harness in claude codex opencode grok kimi cursor-agent pi pi-signed pi-launcher Pi; do
     fb=$(make_probe_tmux "$TMP_ROOT/tmux-$harness" "$harness")
     out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win' "$ROOT")
     [ "$out" = alive ] || fail "a live $harness foreground process should classify as alive, got '$out'"
@@ -110,6 +110,10 @@ test_tmux_agent_state_classifies() {
     out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win' "$ROOT")
     [ "$out" = dead ] || fail "a bare $shell foreground process should classify as dead, got '$out'"
   done
+
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-cursor-helper" cursor-agent-helper)
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win' "$ROOT")
+  [ "$out" = ambiguous ] || fail "a cursor-agent-helper lookalike should stay ambiguous, got '$out'"
 
   fb=$(make_probe_tmux "$TMP_ROOT/tmux-node" node)
   out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win' "$ROOT")

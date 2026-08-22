@@ -13,6 +13,19 @@
 #                                        config/secondmate-harness, or empty when absent.
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
+#        fm-harness.sh secondmate-source   print secondmate-config when a concrete
+#                                        config/secondmate-harness pin owns the
+#                                        tuple, otherwise fallback.
+#        fm-harness.sh secondmate-tuple    print the exact tab-separated
+#                                        harness/model/effort triple from a
+#                                        safe concrete config/secondmate-harness.
+#                                        It refuses absent, fallback, partial,
+#                                        unverified, malformed, or max tuples.
+#        fm-harness.sh secondmate-tuple-facts
+#                                        print the exact tab-separated
+#                                        harness/model/effort/provider/model-family
+#                                        tuple after binding the durable launch
+#                                        tuple through config/model-catalog.json.
 #        fm-harness.sh escalate <id> --class <substantive|injection|mechanical>
 #                                        resolve the relaunch routing tuple for a failed
 #                                        ordinary direct report through the classifying
@@ -60,7 +73,7 @@
 #     verdict=escalate-captain reason=harness-not-rotatable.
 # Precedence (AGENTS.md section 4) is enforced through the routing_source=
 # field fm-spawn.sh records from --routing-source: the ladder acts only on
-# routing_source=fallback. A captain or profile source resolves
+# routing_source=fallback. A captain, profile, or secondmate-config source resolves
 # verdict=report reason=routing-pinned, and an absent field resolves
 # verdict=report reason=unknown-provenance; both leave routing untouched but
 # still consume budget, because the caller relaunches the unchanged tuple by
@@ -207,6 +220,92 @@ resolve_secondmate_effort() {
   sm=$(secondmate_field 1)
   [ -n "$sm" ] && [ "$sm" != "default" ] || return 0
   secondmate_field 3
+}
+
+resolve_secondmate_source() {
+  if resolve_secondmate_tuple >/dev/null 2>&1; then
+    printf 'secondmate-config\n'
+  else
+    printf 'fallback\n'
+  fi
+}
+
+resolve_secondmate_tuple() {
+  local line harness model effort extra
+  [ -f "$CONFIG/secondmate-harness" ] && [ ! -L "$CONFIG/secondmate-harness" ] || {
+    echo "error: config/secondmate-harness must be a safe concrete tuple" >&2
+    return 1
+  }
+  line=$(secondmate_line)
+  [ -n "$line" ] || {
+    echo "error: config/secondmate-harness must name harness, model, and effort" >&2
+    return 1
+  }
+  # shellcheck disable=SC2086 # deliberate tokenization of the documented single-line format
+  set -- $line
+  harness=${1:-}
+  model=${2:-}
+  effort=${3:-}
+  extra=${4:-}
+  [ -n "$harness" ] && [ "$harness" != default ] && [ -n "$model" ] && [ -n "$effort" ] && [ -z "$extra" ] || {
+    echo "error: config/secondmate-harness must contain exactly harness, model, and effort" >&2
+    return 1
+  }
+  case "$harness" in
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor-agent) ;;
+    *) echo "error: config/secondmate-harness names an unverified harness" >&2; return 1 ;;
+  esac
+  case "$effort" in
+    low|medium|high|xhigh) ;;
+    max) echo "error: automatic secondmate tuple must not select max effort" >&2; return 1 ;;
+    *) echo "error: config/secondmate-harness effort is invalid" >&2; return 1 ;;
+  esac
+  [ "${#harness}" -le 96 ] && [ "${#model}" -le 160 ] || {
+    echo "error: config/secondmate-harness tuple is too long" >&2
+    return 1
+  }
+  printf '%s\t%s\t%s\n' "$harness" "$model" "$effort"
+}
+
+# Bind the durable secondmate launch tuple to provider and model-family facts
+# from the home-local catalog owner. The catalog carries explicit relations;
+# this command never infers either axis from a harness or model spelling.
+resolve_secondmate_tuple_facts() {
+  local tuple harness model effort catalog
+  tuple=$(resolve_secondmate_tuple) || return 1
+  IFS=$'\t' read -r harness model effort <<EOF
+$tuple
+EOF
+  catalog="$CONFIG/model-catalog.json"
+  [ -f "$catalog" ] && [ ! -L "$catalog" ] || {
+    echo "error: config/model-catalog.json must safely bind the durable secondmate tuple" >&2
+    return 1
+  }
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: jq is required to validate config/model-catalog.json" >&2
+    return 1
+  }
+  jq -er --arg harness "$harness" --arg model "$model" --arg effort "$effort" '
+    def bounded($n): type == "string" and length >= 1 and length <= $n and test("^[A-Za-z0-9._/-]+$");
+    def exact_tuple_keys: (keys | sort) == ["harness","model","modelFamily","provider"];
+    if (keys | sort) != ["schemaVersion","tuples"]
+       or .schemaVersion != 1 or (.tuples | type) != "array" or (.tuples | length) > 256
+       or ([.tuples[] | select((type != "object") or (exact_tuple_keys | not)
+            or (.harness | bounded(96) | not)
+            or (.model | bounded(160) | not)
+            or (.provider | bounded(96) | not)
+            or (.modelFamily | bounded(96) | not))] | length) != 0
+       or ([.tuples[] | [.harness,.model]] | unique | length) != (.tuples | length)
+    then error("invalid catalog")
+    else [.tuples[] | select(.harness == $harness and .model == $model)] as $matches
+      | if ($matches | length) != 1 then error("tuple is absent or contradictory")
+        else [$harness,$model,$effort,$matches[0].provider,$matches[0].modelFamily] | @tsv
+        end
+    end
+  ' "$catalog" 2>/dev/null || {
+    echo "error: config/model-catalog.json does not uniquely bind the durable secondmate tuple" >&2
+    return 1
+  }
 }
 
 # --- escalation ladder --------------------------------------------------------
@@ -428,6 +527,9 @@ case "${1:-}" in
   secondmate) resolve_secondmate ;;
   secondmate-model) resolve_secondmate_model ;;
   secondmate-effort) resolve_secondmate_effort ;;
+  secondmate-source) resolve_secondmate_source ;;
+  secondmate-tuple) resolve_secondmate_tuple ;;
+  secondmate-tuple-facts) resolve_secondmate_tuple_facts ;;
   escalate) shift; escalate_main "$@" ;;
   *) detect_own ;;
 esac

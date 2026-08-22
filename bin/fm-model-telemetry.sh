@@ -251,7 +251,7 @@ validate_intake() {
       has("matchedRule") and has("configSha256") and has("fitReasons") and has("candidateAssessments") and has("quota")
       and all(keys[]; . as $k | (["matchedRule","configSha256","fitReasons","candidateAssessments","quota","routingSource","dispatchAttestation","dispatchModelFamily"] | index($k)) != null);
     def dispatch_attestation:
-      (.routingSource==null or (.routingSource|oneof(["captain","profile","fallback"]))) and
+      (.routingSource==null or (.routingSource|oneof(["captain","profile","fallback","secondmate-config"]))) and
       (.dispatchModelFamily==null or (.dispatchModelFamily|type=="string" and length>=1 and length<=96)) and
       (.dispatchAttestation as $da | ($da==null or
         ($da|keys_are(["kind"]) and $da.kind=="resolved") or
@@ -424,7 +424,7 @@ validate_spawn_failure() {
       (.cliVersion==null or (.cliVersion|type=="string" and length<=160)) and
       (if has("accountProfile") then .harness=="claude" and (.accountProfile|accountprofile) else true end);
     def dispatch_attestation:
-      (.routingSource==null or (.routingSource|oneof(["captain","profile","fallback"]))) and
+      (.routingSource==null or (.routingSource|oneof(["captain","profile","fallback","secondmate-config"]))) and
       (.dispatchModelFamily==null or (.dispatchModelFamily|type=="string" and length>=1 and length<=96)) and
       (.dispatchAttestation==null or
         (.dispatchAttestation as $da | ($da==null or

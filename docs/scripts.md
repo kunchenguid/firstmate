@@ -86,6 +86,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
 | `fm-quota-axi-lib.sh`    | Shared `quota-axi` compatibility floor for the bootstrap diagnostic                  |
 | `fm-quota-utilization.sh` | Weekly quota utilization, binding-window reserve, and end-of-window outcome table     |
+| `fm-auto-quota-drain.sh` | Consume one watcher-cycle quota snapshot and own deduplicated warning and graceful secondmate-seat action episodes |
+| `fm-auto-quota-drain.mjs` | Validate and normalize quota snapshots plus configured position trigger/fact records without lifecycle writes |
 | `fm-quota-cooldown.sh`   | Own evidence-backed durable routing cooldowns, automatic expiry, and captain overrides |
 | `fm-vendor-auth-probe.sh`| Run one hard-bounded, non-destructive authentication probe of a named vendor CLI and report the fact |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes, emit bounded best-effort status-event annotations and a fleet-wide OPEN DECISIONS section, then assert supervision health |
@@ -108,7 +110,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-worktree-unique-content.sh` | Prove whether a worktree holds content reachable from no surviving ref, so dirty-state refusals judge held content instead of stale-index noise |
 | `fm-model-telemetry.sh`  | Sole validator, writer, sealer, recovery owner, routing-candidate evidence guard, and read-only sheet reader of the private model-attempt ledger |
-| `fm-harness.sh`          | Detect the running harness, resolve crew or secondmate harness, model, and effort, and resolve a failed report's relaunch tuple through the classifying escalation ladder (`escalate`) |
+| `fm-harness.sh`          | Detect the running harness, resolve crew or secondmate launch axes, bind exact secondmate tuples to catalog provider/family facts, and resolve failed-report relaunch tuples through `escalate` |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
 | `fm-x-poll.sh`           | One bounded X relay poll: stash newly offered mentions and emit their once-only wake |

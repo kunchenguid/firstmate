@@ -722,6 +722,22 @@ heartbeat_scan_finds_actionable() {
   return 1
 }
 
+# auto_quota_drain_surface publishes the threshold owner's one bounded result
+# through the existing durable watcher queue and remains silent on healthy data.
+auto_quota_drain_surface() {
+  local out reason
+  if out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-auto-quota-drain.sh" 2>/dev/null); then
+    :
+  else
+    out="diagnostic: auto-quota-drain internal evaluation failed; no lifecycle action taken"
+  fi
+  [ -n "$out" ] || return 0
+  out=$(printf '%s\n' "$out" | sed -n '1{s/[[:space:]][[:space:]]*/ /g;s/^ //;s/ $//;p;}' | cut -c1-480)
+  reason="check: auto-quota-drain: $out"
+  fm_wake_append check auto-quota-drain "$reason" || return 1
+  wake "$reason"
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -878,11 +894,19 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
-  # Parent-owned secondmate pending-reply reconciliation: resolve correlated
-  # parent reports, observe backend busy/idle turn completion, send one recovery
-  # repost after grace, and escalate once if the recovery turn is also missed.
+  # Parent-owned secondmate pending-reply reconciliation runs before automatic
+  # quota action progression so a correlated checkpoint receipt is resolved by
+  # its existing owner before the action journal inspects it on this cycle.
+  # It also observes backend busy/idle turn completion, sends one recovery repost
+  # after grace, and escalates once if the recovery turn is missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
+
+  # Automatic quota pressure is evaluated from exactly one quota-axi snapshot
+  # after pending-reply reconciliation and before any later cycle path can send
+  # another supervised agent invocation. Healthy snapshots are silent, while the
+  # threshold owner returns at most one bounded event for the existing queue.
+  auto_quota_drain_surface
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this

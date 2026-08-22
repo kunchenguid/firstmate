@@ -284,7 +284,7 @@ test_routing_source_recorded_only_when_declared() {
     --routing-source vibes)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted an unrecognized --routing-source"
-  assert_contains "$out" "--routing-source must be one of captain, profile, fallback" "invalid routing source refusal did not name the contract"
+  assert_contains "$out" "--routing-source must be one of captain, profile, fallback, secondmate-config" "invalid routing source refusal did not name the contract"
   [ ! -s "$LAUNCH_LOG" ] || fail "invalid routing source reached launch submission"
   assert_absent "$HOME_DIR/state/$id.meta" "invalid routing source published task metadata"
   pass "--routing-source records provenance in meta, stays absent when undeclared, and refuses unknown values"
@@ -1439,6 +1439,79 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_secondmate_recovery_records_durable_config_provenance() {
+  local rec id sm out status meta
+  id=profile-secondmate-config-z16b
+  rec=$(make_spawn_case profile-secondmate-config cursor-agent "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  printf '%s\n' 'cursor-agent cursor-grok-4.6-xhigh xhigh' > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "durably configured secondmate recovery should succeed"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "routing_source=secondmate-config" "$meta" "secondmate recovery lost its durable config provenance"
+  assert_no_grep "dispatch=resolved" "$meta" "secondmate config recovery falsely claimed crew-profile resolution"
+  assert_no_grep "matched_rule=" "$meta" "secondmate config recovery falsely claimed a crew-dispatch rule"
+  assert_meta_profile "$meta" cursor-agent cursor-grok-4.6-xhigh xhigh
+  jq -es 'map(select(.eventType=="attempt-intake")) | .[0].intake.selection.routingSource=="secondmate-config"' "$HOME_DIR/data/routing-outcomes.jsonl" >/dev/null \
+    || fail "secondmate-config provenance did not reach the validated telemetry intake"
+  pass "a no-argument secondmate recovery records durable secondmate-config provenance"
+}
+
+test_secondmate_config_provenance_requires_exclusive_complete_tuple() {
+  local spec label config_text axis id rec sm out status meta
+  for spec in \
+    'bare|cursor-agent|none' \
+    'partial|cursor-agent cursor-grok-4.6-xhigh|none' \
+    'harness-flag|cursor-agent cursor-grok-4.6-xhigh xhigh|harness' \
+    'model-flag|cursor-agent cursor-grok-4.6-xhigh xhigh|model' \
+    'effort-flag|cursor-agent cursor-grok-4.6-xhigh xhigh|effort' \
+    'positional-harness|cursor-agent cursor-grok-4.6-xhigh xhigh|positional'; do
+    label=${spec%%|*}; spec=${spec#*|}
+    config_text=${spec%%|*}; axis=${spec#*|}
+    id="profile-secondmate-source-$label-z16c"
+    rec=$(make_spawn_case "secondmate-source-$label" cursor-agent "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$config_text" > "$HOME_DIR/config/secondmate-harness"
+    sm="$CASE_DIR/secondmate-home"
+    make_seeded_secondmate_home "$sm" "$id"
+    case "$axis" in
+      none) out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate) ;;
+      harness) out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --harness codex --secondmate) ;;
+      model) out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --model composer-2.5 --secondmate) ;;
+      effort) out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --effort medium --secondmate) ;;
+      positional) out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" codex --secondmate) ;;
+    esac
+    status=$?
+    expect_code 0 "$status" "$label secondmate launch should retain its ordinary fallback/override behavior"
+    meta="$HOME_DIR/state/$id.meta"
+    assert_no_grep "routing_source=secondmate-config" "$meta" "$label launch falsely claimed exclusive durable-config provenance"
+    jq -es 'map(select(.eventType=="attempt-intake")) | length == 1 and (.[0].intake.selection | has("routingSource") | not)' "$HOME_DIR/data/routing-outcomes.jsonl" >/dev/null \
+      || fail "$label launch wrote false secondmate-config telemetry provenance"
+  done
+
+  id=profile-secondmate-source-explicit-z16d
+  rec=$(make_spawn_case secondmate-source-explicit cursor-agent "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'cursor-agent cursor-grok-4.6-xhigh xhigh' > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" \
+    --model composer-2.5 --routing-source secondmate-config --secondmate)
+  status=$?
+  [ "$status" -ne 0 ] || fail "explicit secondmate-config provenance bypassed a model override"
+  assert_contains "$out" "requires one complete durable tuple and no harness, model, effort, or positional harness override" "false explicit provenance refusal did not name the ownership contract"
+  assert_absent "$HOME_DIR/state/$id.meta" "false explicit provenance published task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "false explicit provenance reached endpoint launch"
+  [ ! -e "$HOME_DIR/data/routing-outcomes.jsonl" ] || ! jq -e 'select(.eventType=="attempt-intake")' "$HOME_DIR/data/routing-outcomes.jsonl" >/dev/null \
+    || fail "false explicit provenance reached telemetry intake"
+  pass "secondmate-config provenance requires one complete unoverridden durable tuple in meta and telemetry"
+}
+
 test_telemetry_precedes_submission_and_metadata_is_opaque() {
   local rec id out status meta ledger attempt terminal refusal_rec refusal_id
   id=profile-telemetry-z20
@@ -2263,6 +2336,7 @@ test_spawn_refuses_unfilled_bookends_before_endpoint_creation() {
 
 test_routing_source_recorded_only_when_declared
 test_spawn_writes_routing_facts_into_intake
+test_secondmate_config_provenance_requires_exclusive_complete_tuple
 test_recorded_default_axes_respawn_as_unset
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
@@ -3218,6 +3292,7 @@ test_selected_account_profile_wins_over_ambient_config_dir
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_secondmate_recovery_records_durable_config_provenance
 test_telemetry_precedes_submission_and_metadata_is_opaque
 test_exploration_requires_an_explicit_rotated_model_and_effort
 test_no_mistakes_spawn_requires_one_quota_eligible_reviewer

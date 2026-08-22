@@ -115,8 +115,11 @@ Pass `--task-class` on every crewmate and scout spawn, using the class that desc
 Omit it only when the task genuinely does not fit one of those classes; the flag then defaults to `unresolved`, which records the intake as unclassified rather than guessing.
 The class is telemetry, not routing: it never changes which harness, model, or effort you selected.
 
-Pass `--routing-source captain|profile|fallback` on every crewmate and scout spawn too, naming how you actually resolved the tuple you are passing: `captain` for an explicit per-task captain instruction, `profile` for a configured dispatch profile or pin, `fallback` for the generic effort and harness fallback.
+Pass `--routing-source captain|profile|fallback` on every crewmate and scout spawn too, naming how you actually resolved the tuple you are passing: `captain` for an explicit per-task captain instruction, `profile` for a configured crew-dispatch profile or non-secondmate pin, and `fallback` for the generic effort and harness fallback.
 It is provenance, not a routing choice, and the recovery escalation ladder (`bin/fm-harness.sh escalate`) is its consumer: it may raise effort or rotate a harness only where the fallback acted, so an omitted flag records unknown provenance and leaves every wedged task's routing frozen.
+A secondmate launch whose complete concrete tuple resolves from durable `config/secondmate-harness` records the separate schema-validated `secondmate-config` provenance automatically only when no explicit harness, model, effort, or positional harness override was supplied.
+Bare or partial durable config and every override remain outside that provenance.
+Callers do not pass that value as a one-shot substitute for persisting the tuple, and such a launch does not claim a crew-dispatch matched rule or resolved attestation.
 
 `--account-profile <name>` names one home-local native Claude account alias from `config/claude-account-profiles`; the verified `claude` adapter is its only consumer, and a non-Claude harness, a raw launch command, or a secondmate parent launch refuses it.
 Nothing selects an account for you: pass it only when the captain named the account for that task, or when re-passing an escalation verdict's emitted `account_profile=` alias unchanged (`stuck-crewmate-recovery`).

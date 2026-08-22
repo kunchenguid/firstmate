@@ -12,7 +12,7 @@ This section is the single owner of the top-level operational-home layout; produ
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
 `data/routing-outcomes.jsonl` is the private canonical model-attempt ledger owned exclusively by `bin/fm-model-telemetry.sh`, whose header and help own its event, receipt, recovery, and read-only sheet contracts.
-`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, automatic quota-threshold episodes and action journals under `state/auto-quota-drain/`, away-mode state, generated X-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
@@ -298,6 +298,9 @@ The first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort
 A bare `<harness>` preserves the previous behavior: harness only, with no model or effort launch flag.
 When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model or effort is read from that file.
 `fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
+`fm-harness.sh secondmate-source` distinguishes a complete concrete tuple from the fallback chain, while `secondmate-tuple` validates and prints the exact non-`max` three-token form required by automatic quota drain.
+A secondmate launch records `routing_source=secondmate-config` automatically only when that complete durable tuple owns harness, model, and effort and no explicit `--harness`, `--model`, `--effort`, or positional harness override was supplied.
+Bare or partial files and every override remain valid launch inputs but do not claim this provenance.
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
 An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
 Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
@@ -394,6 +397,70 @@ A missing or failed reader prints one skip line naming the exact cause and the c
 `AGENTS.md` section 4 and `quota-array-dispatch` consume binding-window reserve and usable runway at the intake that already reads quota; they never hold ready work or weaken the required reasoning class.
 End-of-window outcomes are a mechanically reproducible table from observation JSONL: expired unused percent versus exhausted-early seconds.
 The script header owns commands, flags, and the test-only clock.
+
+## Automatic quota drain (config/auto-quota-drain.json)
+
+Every ordinary watcher cycle asks `quota-axi --json` for one snapshot and passes those bytes to `bin/fm-auto-quota-drain.sh`.
+An absent config file leaves automatic monitoring disabled, while a present file that omits optional threshold fields defaults to a seven-percent warning threshold, a five-percent action threshold, and a five-minute snapshot-age ceiling.
+The file is home-local and gitignored, is not inherited into secondmate homes, and owns only thresholds plus each primary-managed position's trigger and post-drain provider facts.
+The exact post-drain harness, model, and effort remain solely owned by the existing durable [`config/secondmate-harness`](#harness-support) pin.
+The home-local `config/model-catalog.json` binds each exact harness/model pair to the provider and model-family facts that automatic quota drain checks against the position before it writes an action journal or checkpoint.
+It is gitignored, is not inherited into secondmate homes, and is an authority mapping rather than another selector.
+Its accepted schema is exact, duplicate harness/model pairs are invalid, and a selected durable tuple must have exactly one matching row:
+
+```json
+{
+  "schemaVersion": 1,
+  "tuples": [
+    {
+      "harness": "cursor-agent",
+      "model": "cursor-grok-4.6-xhigh",
+      "provider": "cursor",
+      "modelFamily": "cursor-grok-4.6"
+    }
+  ]
+}
+```
+The accepted schema is:
+
+```json
+{
+  "schemaVersion": 1,
+  "warningPercentRemaining": 7,
+  "actionPercentRemaining": 5,
+  "maxSnapshotAgeSeconds": 300,
+  "positions": [
+    {
+      "position": "primary-seat",
+      "seat": "toolsmith",
+      "provider": "claude",
+      "postDrainProvider": "cursor",
+      "postDrainModelFamily": "cursor-grok-4.6",
+      "requiredReasoningClass": "frontier",
+      "postDrainReasoningClass": "frontier"
+    }
+  ]
+}
+```
+
+`position` is a stable configuration key, `seat` is an exact registered secondmate id, and `provider` is the effective pool whose threshold episode governs that position.
+`postDrainProvider` and `postDrainModelFamily` are explicit quota/cooldown facts for the durable secondmate pin rather than another model selector, and they must exactly match that pin's authoritative catalog row.
+`postDrainReasoningClass` must exactly preserve `requiredReasoningClass`, and the concrete secondmate pin must contain exactly a verified harness, model, and non-`max` effort before automatic lifecycle work begins.
+The action threshold must be lower than the warning threshold, both must be percentages from zero through one hundred, and the age ceiling must be 30 through 3,600 seconds.
+Unknown keys, any former `fallbackLadder`, duplicate positions, seats, or trigger pools, missing trigger or post-drain pools, duplicate effective pools, stale readings, non-fresh provider state, unknown availability, and multiple `all_models` rows are refused as malformed, contradictory, or unmeasurable data.
+One unchanged diagnostic is emitted per bad-data episode, and no new threshold or lifecycle state advances until a complete fresh snapshot validates.
+A durable nonterminal action journal is resumed before current quota reset, config-disable, malformed-input, or unavailable-snapshot handling, so recovered or disappeared inputs cannot delete or abandon a planned, checkpoint-pending, checkpointed, parking, or parked lifecycle.
+A warning is emitted only on the transition from above to at-or-below the warning threshold and remains deduplicated until that pool rises above the warning threshold.
+A configured local seat acts only on a verified transition from above to at-or-below the action threshold while its post-drain pool remains above that threshold and its explicit provider/family facts are not under a durable routing cooldown.
+The first slice deliberately refuses remote secondmate lifecycle action and leaves the existing error-triggered liveness recovery unchanged.
+The selected local seat receives one marked request to run `/stow`, and its correlation id is persisted in the action journal before that watcher invocation returns.
+The existing `fm_pending_reply_tick` owner resolves the correlated sealed completion report on a later watcher cycle.
+Later cycles separately advance the checkpoint receipt, graceful harness-exit request, endpoint-death confirmation and park, and `fm-spawn.sh --secondmate` relaunch, with no lifecycle path sleeping while it waits for any of them.
+Planning binds the exact position, seat, home, required reasoning class, post-drain candidate, and old endpoint identity into the journal.
+Every mutating resume uses those bound identities and refuses seat, home, or still-present position/candidate drift without acting on a replacement seat or home.
+The no-argument relaunch re-resolves `config/secondmate-harness` through the existing secondmate launch owner, so a later bootstrap recovery after endpoint death reuses the same durable tuple instead of reverting to the drained provider.
+Such launches record `routing_source=secondmate-config` only under the complete, unoverridden durable-tuple contract and do not claim a crew-dispatch `matched_rule` or resolved profile attestation.
+The script header owns private episode and journal fields, exact lifecycle commands, and the test-only clock and adapter seam.
 
 ## Toolchain
 

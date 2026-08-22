@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, a reader
 # scout in checkout-free scratch, or a secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--exploration] [--backend <name>] [--routing-source <captain|profile|fallback>] [--matched-rule <default|rule-<n>>] [--quota-decision <selected|stopped|not-applicable|unknown>] [--quota-headroom <sufficient|tight|exhausted|unmeasurable|unknown>] [--quota-runway <sufficient|tight|exhausted|unmeasurable|unknown>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--access <reader|writer>] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--backend <name>] [--routing-source <captain|profile|fallback>] [--matched-rule <default|rule-<n>>] [--quota-decision <selected|stopped|not-applicable|unknown>] [--quota-headroom <sufficient|tight|exhausted|unmeasurable|unknown>] [--quota-runway <sufficient|tight|exhausted|unmeasurable|unknown>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--exploration] [--backend <name>] [--routing-source <captain|profile|fallback|secondmate-config>] [--matched-rule <default|rule-<n>>] [--quota-decision <selected|stopped|not-applicable|unknown>] [--quota-headroom <sufficient|tight|exhausted|unmeasurable|unknown>] [--quota-runway <sufficient|tight|exhausted|unmeasurable|unknown>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--access <reader|writer>] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--backend <name>] [--routing-source <captain|profile|fallback|secondmate-config>] [--matched-rule <default|rule-<n>>] [--quota-decision <selected|stopped|not-applicable|unknown>] [--quota-headroom <sufficient|tight|exhausted|unmeasurable|unknown>] [--quota-runway <sufficient|tight|exhausted|unmeasurable|unknown>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--routing-source <captain|profile|fallback|secondmate-config>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -41,14 +41,17 @@
 #   CLAUDE_CONFIG_DIR value. An absent axis leaves all prior launch bytes unchanged.
 #   A secondmate parent launch refuses this axis; run the same portable mechanism
 #   inside that home rather than transferring home-local paths.
-#   --routing-source <captain|profile|fallback> records how this task's routing
-#   tuple was authorized at intake: an explicit per-task captain instruction, a
-#   configured dispatch profile or pin, or the generic fallback. The value lands
-#   in the task meta as routing_source= and is the escalation ladder's
-#   precedence guard (bin/fm-harness.sh escalate acts only on fallback); an
-#   absent value is unknown provenance and fails closed there. A ladder-driven
-#   relaunch re-passes --routing-source fallback so the task stays
-#   ladder-eligible across respawns.
+#   --routing-source <captain|profile|fallback|secondmate-config> records how this
+#   task's routing tuple was authorized at intake: an explicit per-task captain
+#   instruction, a configured dispatch profile, the generic fallback, or the
+#   persistent secondmate tuple owner. The value lands in task metadata as
+#   routing_source= and is the escalation ladder's precedence guard
+#   (bin/fm-harness.sh escalate acts only on fallback); absent provenance leaves
+#   routing untouched there. A ladder-driven relaunch re-passes fallback.
+#   A --secondmate recovery records secondmate-config automatically only when a
+#   complete config/secondmate-harness tuple owns harness, model, and effort and
+#   no explicit or positional tuple override was supplied. Bootstrap recovery
+#   therefore preserves truthful provenance without relying on caller flags.
 #   --task-class records the intake classification in model telemetry; absent stays
 #   unresolved for compatibility. --exploration records firstmate's deliberate
 #   model/effort rotation, requires both axes explicitly, and is accepted only
@@ -399,7 +402,7 @@ fm_record_spawn_failure() {
     account_profile=
   fi
   routing_axis=${ROUTING_SOURCE:-}
-  case "$routing_axis" in ''|captain|profile|fallback) ;; *) routing_axis= ;; esac
+  case "$routing_axis" in ''|captain|profile|fallback|secondmate-config) ;; *) routing_axis= ;; esac
   payload=$(jq -cn \
     --arg attemptedAt "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     --arg harness "$harness" \
@@ -595,9 +598,14 @@ fi
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
 [ "$ROUTING_SOURCE_SET" -eq 0 ] || [ -n "$ROUTING_SOURCE" ] || { echo "error: --routing-source requires a non-empty value" >&2; exit 1; }
 case "$ROUTING_SOURCE" in
-  ''|captain|profile|fallback) ;;
-  *) echo "error: --routing-source must be one of captain, profile, fallback" >&2; fm_record_spawn_failure validation "--routing-source must be one of captain, profile, fallback"; exit 1 ;;
+  ''|captain|profile|fallback|secondmate-config) ;;
+  *) echo "error: --routing-source must be one of captain, profile, fallback, secondmate-config" >&2; fm_record_spawn_failure validation "--routing-source must be one of captain, profile, fallback, secondmate-config"; exit 1 ;;
 esac
+if [ "$ROUTING_SOURCE" = secondmate-config ] && [ "$KIND" != secondmate ]; then
+  echo "error: --routing-source secondmate-config is valid only for --secondmate" >&2
+  fm_record_spawn_failure validation "--routing-source secondmate-config is valid only for --secondmate"
+  exit 1
+fi
 [ -z "$TELEMETRY_TASK_ROOT" ] || printf '%s' "$TELEMETRY_TASK_ROOT" | grep -Eq '^mrt_[0-9a-f-]{36}$' || { echo "error: --telemetry-task-root requires an opaque mrt UUID" >&2; exit 1; }
 [ -z "$TELEMETRY_PARENT" ] || printf '%s' "$TELEMETRY_PARENT" | grep -Eq '^mra_[0-9a-f-]{36}$' || { echo "error: --telemetry-parent requires an opaque mra UUID" >&2; exit 1; }
 [ -z "$TELEMETRY_PARENT" ] || [ -n "$TELEMETRY_TASK_ROOT" ] || { echo "error: --telemetry-parent requires --telemetry-task-root" >&2; exit 1; }
@@ -1355,6 +1363,20 @@ else
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+if [ "$KIND" = secondmate ]; then
+  SECONDMATE_CONFIG_OWNS_TUPLE=0
+  if [ "$HARNESS_SET" -eq 0 ] && [ "$MODEL_SET" -eq 0 ] && [ "$EFFORT_SET" -eq 0 ] && [ -z "$ARG3" ] \
+    && "$SCRIPT_DIR/fm-harness.sh" secondmate-tuple >/dev/null 2>&1; then
+    SECONDMATE_CONFIG_OWNS_TUPLE=1
+  fi
+  if [ "$ROUTING_SOURCE_SET" -eq 0 ] && [ "$SECONDMATE_CONFIG_OWNS_TUPLE" -eq 1 ]; then
+    ROUTING_SOURCE=secondmate-config
+    ROUTING_SOURCE_SET=1
+  elif [ "$ROUTING_SOURCE" = secondmate-config ] && [ "$SECONDMATE_CONFIG_OWNS_TUPLE" -ne 1 ]; then
+    echo "error: routing_source=secondmate-config requires one complete durable tuple and no harness, model, effort, or positional harness override" >&2
+    exit 1
+  fi
+fi
 
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
@@ -3279,9 +3301,10 @@ TELEMETRY_TASK_ROOT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.taskRootId | se
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "$ACCOUNT_PROFILE" ] || echo "account_profile=$ACCOUNT_PROFILE"
-  # routing_source= is written only when the caller declared it, so a legacy
-  # meta stays byte-identical and the escalation ladder (fm-harness.sh
-  # escalate) reads absent as unknown provenance and fails closed.
+  # routing_source= is written when the caller declared it or when a no-argument
+  # secondmate recovery resolved a concrete config/secondmate-harness pin.
+  # Other legacy metas stay byte-identical, and the escalation ladder
+  # (fm-harness.sh escalate) reads absent as unknown provenance and stops.
   [ -z "$ROUTING_SOURCE" ] || echo "routing_source=$ROUTING_SOURCE"
   echo "telemetry_attempt=$TELEMETRY_ATTEMPT"
   echo "telemetry_task_root=$TELEMETRY_TASK_ROOT"
@@ -3315,12 +3338,15 @@ TELEMETRY_TASK_ROOT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.taskRootId | se
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-  # Dispatch attestation record (AGENTS.md section 4): written only when the
-  # dispatch profiles are active, so the no-profile path stays byte-identical.
-  # --dispatch-resolved records that the profiles were consulted; --dispatch-override-reason
-  # records a deliberate departure and its reason, so the departure is visible
-  # rather than silent. The guard above refused the bare-hand-pick case.
-  if { [ -f "$CONFIG/crew-dispatch.json" ] || [ -f "$DATA/quota-cooldowns.json" ]; } && [ "$KIND" != secondmate ]; then
+  # Dispatch attestation record (AGENTS.md section 4): written when the
+  # dispatch profiles or cooldowns are active, or when a secondmate relaunch
+  # explicitly carries the same selection facts from the automatic quota owner.
+  # A spawn with no applicable routing evidence stays byte-identical.
+  # --dispatch-resolved records that the configured selection point was used;
+  # --dispatch-override-reason records a deliberate departure and its reason.
+  if [ -f "$CONFIG/crew-dispatch.json" ] || [ -f "$DATA/quota-cooldowns.json" ] \
+    || [ "$DISPATCH_RESOLVED" -eq 1 ] || [ "$DISPATCH_OVERRIDE_REASON_SET" -eq 1 ] \
+    || [ "$DISPATCH_PROVIDER_SET" -eq 1 ] || [ "$DISPATCH_MODEL_FAMILY_SET" -eq 1 ]; then
     if [ "$DISPATCH_RESOLVED" -eq 1 ]; then
       echo "dispatch=resolved"
     elif [ "$DISPATCH_OVERRIDE_REASON_SET" -eq 1 ]; then
