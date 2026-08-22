@@ -2639,6 +2639,16 @@ def same_stable_identity(recorded, live, kind):
     )
 
 
+def disk_is_attached(resource):
+    properties = resource.get("properties", resource)
+    return bool(
+        resource.get("managedBy")
+        or properties.get("managedBy")
+        or resource.get("managedByExtended")
+        or properties.get("managedByExtended")
+    )
+
+
 def expected_tags(state, selected):
     request = state["request"]
     return {
@@ -3843,8 +3853,7 @@ def wait_exact_disk_detached(env, disk_id, recorded, label):
         live = immutable_identity(disk, "disk")
         if not same_stable_identity(recorded, live, "disk"):
             raise ValidationError("{} disk stable identity changed".format(label))
-        managed_by = disk.get("managedBy") or disk.get("properties", {}).get("managedBy")
-        if not managed_by:
+        if not disk_is_attached(disk):
             return live
         time.sleep(5)
     raise ValidationError("{} disk did not detach after bounded reconciliation".format(label))
@@ -4538,15 +4547,12 @@ def build_purge_plan(env, state):
         raise ValidationError("retained worktree disk is absent before purge planning")
     verify_cleanup_resource(state, worktree, "disk", "worktree")
     worktree_identity = immutable_identity(worktree, "disk")
-    worktree_etag = worktree.get("etag") or worktree.get("properties", {}).get("etag")
     if (
         not same_stable_identity(recorded_worktree, worktree_identity, "disk")
-        or not worktree_etag
-        or worktree.get("managedBy")
-        or worktree.get("properties", {}).get("managedBy")
+        or not worktree_identity.get("etag")
+        or disk_is_attached(worktree)
     ):
         raise ValidationError("retained worktree disk is not exact and detached")
-    worktree_identity["etag"] = worktree_etag
     identity_id = state["resources"].get("identity_id")
     exists, identity_resource = read_resource(env, identity_id, "identity")
     if not exists:
@@ -4698,11 +4704,9 @@ def delete_planned_purge_resource(env, state, resource_id, kind, planned_identit
     live = immutable_identity(resource, kind)
     if not same_stable_identity(planned_identity, live, kind):
         raise ValidationError("planned {} stable identity changed".format(label))
-    if planned_identity.get("etag"):
-        raw_etag = resource.get("etag") or resource.get("properties", {}).get("etag")
-        if raw_etag != planned_identity["etag"]:
-            raise ValidationError("planned {} ETag changed".format(label))
-    if kind == "disk" and (resource.get("managedBy") or resource.get("properties", {}).get("managedBy")):
+    if planned_identity.get("etag") and live.get("etag") != planned_identity["etag"]:
+        raise ValidationError("planned {} mutation identity changed".format(label))
+    if kind == "disk" and disk_is_attached(resource):
         raise ValidationError("planned {} disk reattached before deletion".format(label))
     arguments = [
         "rest", "--method", "delete",

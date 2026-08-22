@@ -1180,7 +1180,7 @@ state={
    "ttl_schedule_id":"/control/ttl","safety_run_command_id":"/control/safety",
    "worktree_disk_id":worktree_id,"identity_id":identity_id,"identity_principal_id":principal,
    "identities":{
-     "worktree":{"id":worktree_id.lower(),"etag":"work-etag","unique_id":"work-unique"},
+     "worktree":{"id":worktree_id.lower(),"etag":"work-unique","unique_id":"work-unique"},
      "identity":{"id":identity_id.lower(),"etag":None,"client_id":client,"principal_id":principal},
    },
  },
@@ -1222,7 +1222,7 @@ retry_runner["shared_capacity_reservation"]={"reservation_id":retry_one,
  "cleanup_receipt":"sha256:"+"8"*64}
 (runner_dir/(retry_one+".json")).write_text(json.dumps(retry_runner))
 resources={
- worktree_id:{"id":worktree_id,"etag":"work-etag","properties":{"uniqueId":"work-unique"},
+ worktree_id:{"id":worktree_id,"properties":{"uniqueId":"work-unique"},
               "tags":{"validation-cell":cell,"fence":fence}},
  identity_id:{"id":identity_id,"properties":{"clientId":client,"principalId":principal},
               "tags":{"validation-cell":cell,"fence":fence}},
@@ -1258,7 +1258,7 @@ def az(_env,args,**kwargs):
   assert_sealed_before_mutation(); url=args[args.index("--url")+1]
   wanted=next(resource_id for resource_id in list(resources) if resource_id in url)
   if wanted==worktree_id:
-   assert "If-Match=work-etag" in args
+   assert "If-Match=work-unique" in args
    # Reproduce the former TOCTOU at the exact first irreversible artifact
    # mutation. The allocator must already have made this fence permanently
    # inadmissible, so the attempted reserve cannot enter the fresh census.
@@ -1383,6 +1383,27 @@ else: raise AssertionError("purge admitted a passed result under a corrupt retai
 assert not mutations
 state=m.load_state(env,cell); state.pop("result"); m.save_state(env,state)
 
+# The live managed-disk shape carries no raw body ETag. Its exact id, tags,
+# stable uniqueId, and detached state remain mandatory before plan sealing.
+resources[worktree_id]["properties"]["uniqueId"]="foreign-unique"
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "immutable identity changed" in str(exc)
+else: raise AssertionError("purge admitted a retained disk with the wrong uniqueId")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+resources[worktree_id]["properties"]["uniqueId"]="work-unique"
+resources[worktree_id]["managedBy"]="/foreign/vm"
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "not exact and detached" in str(exc)
+else: raise AssertionError("purge admitted a reattached retained disk")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+resources[worktree_id].pop("managedBy")
+resources[worktree_id]["managedByExtended"]=["/foreign/shared-vm"]
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "not exact and detached" in str(exc)
+else: raise AssertionError("purge admitted a shared disk with an extended attachment")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+resources[worktree_id].pop("managedByExtended")
+
 # Provider inventory is not fence-bound, so an active id without an exact
 # controller row cannot be classified as unrelated and must refuse. The
 # unrelated active id above remains admissible because its controller fence is
@@ -1468,11 +1489,26 @@ else: raise AssertionError("injected destructive boundary did not fail")
 partial=m.load_state(env,cell); assert partial["phase"]=="purging"
 sealed=copy.deepcopy(partial["purge"]["plan"]); digest=partial["purge"]["plan_digest"]
 assert digest==m.sha256_bytes(m.canonical_bytes(sealed))
+assert sealed["worktree"]["identity"]=={
+ "id":worktree_id.lower(),"etag":"work-unique","unique_id":"work-unique",
+}
 assert partial["purge"]["progress"]=={
  "worktree_absent":False,"container_roles_absent":False,"container_absent":False,
  "auth_share_roles_absent":False,"identity_absent":False,
  "capacity_fence_retired":False,"released_capacity":[],
 }
+# A shared-disk attachment appearing after plan sealing must be caught by the
+# fresh pre-delete read before the Azure mutation call.
+resources[worktree_id]["managedByExtended"]=["/foreign/shared-vm"]
+before_extended=copy.deepcopy(mutations)
+try:
+ m.delete_planned_purge_resource(
+  env,partial,worktree_id,"disk",sealed["worktree"]["identity"],"worktree"
+ )
+except m.ValidationError as exc: assert "reattached before deletion" in str(exc)
+else: raise AssertionError("pre-delete recheck admitted an extended disk attachment")
+assert mutations==before_extended
+resources[worktree_id].pop("managedByExtended")
 assert m.replacement_allowed(partial,"absent-proven")[0] is False
 assert set(resources)=={worktree_id,identity_id,container_scope} and len(roles)==3
 assert lock_events[-4:]==[("enter",cell+"-shards"),("enter",cell),("exit",cell),("exit",cell+"-shards")]

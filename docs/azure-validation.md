@@ -98,8 +98,11 @@ Its digest binds all of these identities before queueing:
 - Trusted guest and shard-bridge digests.
 
 Azure tags repeat the non-secret home, task, generation, validation, cell, fence, branch, head, worktree, credential-lease, SKU-family, processor-reservation, and cost-attribution bindings.
-The host records every resource id, ETag, VM instance id, NIC `resourceGuid`, disk `uniqueId`, identity client/principal id, and guest boot id before accepting a result or deleting anything.
-ETags guard the current mutation, while stable VM/NIC/disk identities remain authoritative across legitimate attach, detach, and power-state ETag changes.
+The host records every resource id, every ETag Azure returns, VM instance id, NIC `resourceGuid`, disk `uniqueId`, identity client/principal id, and guest boot id before accepting a result or deleting anything.
+Where Azure returns an ETag, it guards the current mutation, while stable VM/NIC/disk identities remain authoritative across legitimate attach, detach, and power-state ETag changes.
+Managed-disk GETs can omit an ETag from both the body and response headers, so the disk `uniqueId` is stored in the identity record's `etag` compatibility field and sent through the existing `If-Match` deletion path.
+The pinned Azure Compute [`2023-10-02` Disk Delete contract](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/compute/resource-manager/Microsoft.Compute/Compute/stable/2023-10-02/disk.json) declares no `If-Match` parameter, so this fallback is a stable identity pin and not a claim of provider-enforced atomic ETag compare-and-swap.
+A successful delete with that extra header proves only that Azure accepted the request, not that it compared the value instead of ignoring it.
 The guest independently re-reads IMDS and requires the exact VM instance plus worktree and credential disk ids before unlocking either disk.
 The credential disk's recorded LUKS UUID is checked after unlock.
 The newly created worktree LUKS UUID is retained in the durable run identity, re-proved on every response or replacement, and repeated in every result.
@@ -476,14 +479,15 @@ The pinned shared-provider inventory must show every exact censused reservation 
 Because provider inventory is not fence-bound, any provider-active id without an exact controller reservation also refuses; an unrelated active reservation is ignored only when its controller record proves a different fence.
 An already-released exact constituent is accepted with its cleanup receipt, while any admitted constituent with no dispatch lineage and a queued or reserved status is listed separately for exact release.
 
-It then proves the worktree disk is detached with its recorded stable identity and current ETag, proves the private container and its complete two-role inventory, and proves the cell identity has only its exact container and auth-share grants.
+It then proves the worktree disk is detached with its recorded stable identity under the managed-disk limitation above, requiring both the single-owner `managedBy` field and the shared-disk `managedByExtended` attachment list to be empty.
+It proves the private container and its complete two-role inventory, and proves the cell identity has only its exact container and auth-share grants.
 Those identities, every verified shard lineage, and only the remaining capacity constituents are sealed into an immutable purge plan.
 The state durably enters non-replaceable `purging` with the plan digest before the first deletion.
 Any remaining exact capacity constituent is released first and then read back as durably released and provider-inactive or absent before the retained disk, RBAC, container, or identity is touched.
 Every retry repeats the complete fresh allocator/provider census before attempting a remaining release, and the census is repeated after release before artifact deletion, so a new same-fence reservation can never fall outside the sealed plan.
 
 Retries never rebuild or widen that plan.
-They accept only remaining subsets of its disk, role, container, identity, and capacity identities, use the stored ETags for conditional deletion, and persist progress after every boundary.
+They accept only remaining subsets of its disk, role, container, identity, and capacity identities, use the stored mutation identities through the existing deletion-header path, and persist progress after every boundary.
 A partial or ambiguous attempt remains `purging`; `replace` and `retain-failure` cannot reclaim it.
 Completion retains the local state as a `purged` tombstone with the immutable plan and digest, and repeating the exact command is a no-op.
 
