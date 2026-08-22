@@ -280,13 +280,22 @@ cmd_register() {
   [ -n "$request" ] || request=$(pf_field "$payload" '.public_followup.request.request_id')
   [ -z "$request" ] || fm_pf_slug_valid "$request" || die "unsafe request id: $request"
 
-  local followup_expires_at request_json request_context_b64
+  local followup_expires_at request_json request_context_b64 work_home_path
   followup_expires_at=$(pf_field "$payload" '.public_followup.request.followup_expires_at')
   request_json=$(printf '%s' "$payload" | jq -c '.public_followup.request // empty' 2>/dev/null || true)
   request_context_b64=
   if [ -n "$request_json" ]; then
     request_context_b64=$(printf '%s' "$request_json" | fm_pf_b64_encode)
   fi
+  work_home_path=
+  case "$work_home" in
+    secondmate:*)
+      work_home_path=$(public_followup_secondmate_home "${work_home#secondmate:}" 2>/dev/null || true)
+      case "$work_home_path" in
+        *$'\n'*|*$'\r'*) work_home_path= ;;
+      esac
+      ;;
+  esac
 
   local mkdir_target registry_state retired_file
   for mkdir_target in "$(fm_pf_registry_dir "$STATE")" "$(fm_pf_events_dir "$STATE")" \
@@ -307,8 +316,8 @@ cmd_register() {
     printf 'already registered %s state=delivered\n' "$id"
     return 0
   fi
-  printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
-    "$id" "$relation" "$work_home" "$work_id" "$generation" "$platform" "$request" \
+  printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_home_path=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
+    "$id" "$relation" "$work_home" "$work_home_path" "$work_id" "$generation" "$platform" "$request" \
     "$followup_expires_at" "$request_context_b64" \
     | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$id" 600 \
     || die "could not write the registration record" 1
@@ -674,7 +683,7 @@ public_followup_secondmate_home() {
     return 2
   fi
   home=${meta_home:-$registry_home}
-  [ -n "$home" ] || return 3
+  [ -n "$home" ] || return 4
   case "$home" in /*) ;; *) return 2 ;; esac
   if [ ! -e "$home" ]; then
     [ ! -L "$home" ] || return 2
@@ -688,7 +697,7 @@ public_followup_secondmate_home() {
 }
 
 clear_public_followup_link() {
-  local id=$1 work_home work_id home state rc
+  local id=$1 work_home work_home_path work_id home state rc
   public_followup_registration_valid "$id" || return 1
   work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
   work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
@@ -702,6 +711,12 @@ clear_public_followup_link() {
       rc=0
       home=$(public_followup_secondmate_home "${work_home#secondmate:}") || rc=$?
       [ "$rc" -ne 3 ] || return 0
+      if [ "$rc" -eq 4 ]; then
+        work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)
+        case "$work_home_path" in /*) ;; *) return 1 ;; esac
+        [ ! -e "$work_home_path" ] && [ ! -L "$work_home_path" ] || return 1
+        return 0
+      fi
       [ "$rc" -eq 0 ] || return 1
       state="$home/state"
       ;;

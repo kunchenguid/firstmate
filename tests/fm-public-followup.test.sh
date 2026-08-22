@@ -1721,6 +1721,41 @@ test_retire_after_secondmate_home_removal() {
   pass "retire closes delivered loops after secondmate home removal"
 }
 
+test_retire_refuses_unbound_existing_secondmate() {
+  local home child log
+  home=$(make_home retire-unbound-secondmate)
+  child="$home/unbound-mate"
+  mkdir -p "$child/state"
+  child=$(cd "$child" && pwd -P)
+  printf 'mate\n' > "$child/.fm-secondmate-home"
+  fm_write_meta "$home/state/mate.meta" "kind=secondmate" "home=$child"
+  log="$home/curl.log"; : > "$log"
+  seed_repro_commitment "$home" pf-unbound-mate req-unbound-mate secondmate:mate scout-unbound
+  "$EMIT" --home "$home" --obligation pf-unbound-mate --relation rel-code \
+    --source-home secondmate:mate --work-id scout-unbound --generation 1 \
+    --outcome report-ready --deliverable report_path=data/scout-unbound/report.md \
+    --outcome-text 'The unbound child completed its investigation.' >/dev/null || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-unbound-mate >/dev/null || fail "deliver failed"
+  fm_write_meta "$child/state/scout-unbound.meta" "status=working" "x_request=req-unbound-mate"
+  assert_grep "work_home_path=$child" \
+    "$home/state/public-followup/registry/pf-unbound-mate" \
+    "registration must retain the canonical secondmate path"
+  rm -f "$home/state/mate.meta"
+
+  expect_failure "retire must not assume an unbound existing child link is cleared" \
+    run_pf "$home" retire pf-unbound-mate --reason "child binding disappeared"
+  assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
+    "retire must report an unverifiable secondmate legacy link"
+  assert_present "$home/state/public-followup/registry/pf-unbound-mate" \
+    "an unverifiable child link must retain the registration"
+  assert_absent "$home/state/public-followup/retired/pf-unbound-mate" \
+    "an unverifiable child link must not create a retirement receipt"
+  assert_grep 'x_request=req-unbound-mate' "$child/state/scout-unbound.meta" \
+    "failed retirement must preserve the unresolved legacy link"
+  pass "retire fails closed for an unbound existing secondmate"
+}
+
 test_rechain_refuses_unclaimed_existing_destination() {
   local home log out
   home=$(make_home rechain-existing-destination)
@@ -2102,6 +2137,7 @@ test_failed_rechain_retirement_keeps_source_claimed
 test_registration_replay_preserves_delivery_and_retirement
 test_redelivery_does_not_report_retired_loop_open
 test_retire_after_secondmate_home_removal
+test_retire_refuses_unbound_existing_secondmate
 test_rechain_refuses_unclaimed_existing_destination
 test_pending_skips_concurrent_retirement
 test_retire_reason_closes_the_open_loop
