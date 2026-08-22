@@ -28,11 +28,18 @@ When a question arrives under three paragraphs of reasoning, the captain has to 
 Splitting the same words across more paragraphs makes that worse, not better, which is why the rule counts paragraphs and sentences rather than lines.
 Compression is the work: if two sentences will not hold it, the surplus is evidence that belongs in an artifact, not a third sentence.
 
-## The one standing exception
+## The standing exceptions
+
+There are exactly two, and both are named modes rather than a general licence to run long.
 
 An escalation must still stand alone and carry its evidence, which `AGENTS.md` section 9 requires and this skill does not override.
 It still obeys the shape - concrete evidence first, then the consequence and the decision being asked for, with options and supporting detail in the artifact the message points at.
 Only where an escalation genuinely cannot be acted on without one more fact does the sentence count yield, and it yields by exactly that fact.
+
+A `/updatethecaptain` worker report keeps its own per-worker format for as long as that mode is active, and that format wins over the shape above.
+The captain enters that mode deliberately to get one structured entry per worker, so the report is not compressed to fit this contract and this contract is not weakened to accommodate the report.
+[`.agents/skills/updatethecaptain/SKILL.md`](../updatethecaptain/SKILL.md) is the single owner of what that report contains and how it is laid out.
+Ordinary conversation in the same session, including the message that starts or stops the loop, is not part of the report and keeps the shape above.
 
 ## How the reminder arrives
 
@@ -40,6 +47,7 @@ Only where an escalation genuinely cannot be acted on without one more fact does
 Its header owns the mechanism and the reasoning for that event: no harness fires a hook between composing a reply and the captain reading it, so the rule has to arrive before composition rather than gate the output.
 Claude is the tracked transport, registered in `.claude/settings.json`; a primary on a harness with no prompt-submission context injection simply operates on this contract from `AGENTS.md` section 9 with no reminder.
 The reminder is inert outside a genuine primary home, so a crewmate in its own task worktree never sees it.
+No reminder is injected at all while away mode is active, for the reason its header records.
 
 ## Turning it off
 

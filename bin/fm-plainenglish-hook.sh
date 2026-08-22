@@ -13,14 +13,23 @@
 #
 # The single line this prints is the compressed reminder.
 # `.agents/skills/plainenglish/SKILL.md` is the single owner of the full
-# contract, its rationale, the escalation exception, and the off switch.
+# contract, its rationale, the standing exceptions, and the off switch.
 #
 # The reminder is deliberately NOT wrapped in the operational-input protocol
-# (bin/fm-operational-input.sh). That marker means "this text is Firstmate
-# machinery talking, not the captain", and away mode exits on the first UNMARKED
-# captain message (AGENTS.md section 8). Marking a line that rides along with
-# every captain turn would make every captain message look marked and could
-# strand a home in away mode.
+# (bin/fm-operational-input.sh), and it is also suppressed entirely while away
+# mode is active, because that marker cuts both ways. The marker means "this
+# text is Firstmate machinery talking, not the captain", and away mode exits on
+# the first UNMARKED captain message (AGENTS.md section 8), so marking a line
+# that rides along with every captain turn would make every captain message look
+# marked and could strand a home in away mode. Leaving it unmarked is only safe
+# while away mode is off: the sub-supervisor daemon delivers its marked
+# away-supervisor injections into the primary's pane, which is a prompt
+# submission, so an unmarked line would ride along on that turn and read as the
+# captain returning. The reminder is therefore unmarked AND silent while
+# state/.afk exists. The accepted cost is one turn: bin/fm-afk-return.sh is what
+# clears the flag, so the captain's own returning message arrives while the flag
+# is still present and goes without the reminder, which is the right trade
+# against dropping a fleet out of supervision.
 #
 # Usage:
 #   <UserPromptSubmit JSON on stdin> | bin/fm-plainenglish-hook.sh
@@ -29,7 +38,8 @@
 #   REMIND - exit 0 and one line of stdout, which the harness adds to context.
 #   SILENT - exit 0 with no output: this home switched the reminder off, this is
 #            not a genuine primary home (a crewmate/scout task worktree or a
-#            non-firstmate repo), or this is a no-mistakes gate agent.
+#            non-firstmate repo), this is a no-mistakes gate agent, or away mode
+#            is active.
 #   Every path exits 0 and writes nothing. Claude blocks and erases the
 #   captain's prompt on hook exit 2, so this script never returns non-zero, and
 #   the registration in .claude/settings.json additionally pins the exit to 0 so
@@ -54,6 +64,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# Away mode: stay silent so no unmarked line rides along with the daemon's
+# marked injections. The header owns the reasoning.
+[ -e "$STATE/.afk" ] && exit 0
+
 # The off switch: only the exact word "off" disables the reminder, read with the
 # whitespace-stripped, case-folded convention the other scalar config items use.
 # Absence means on, because the rule it carries is already AGENTS.md section 9's
@@ -65,5 +79,5 @@ if [ -f "$CONFIG/plainenglish" ]; then
   [ "$preference" != off ] || exit 0
 fi
 
-printf '%s\n' "[plain-english] Answer the captain in one paragraph of at most two sentences that leads with the ask or the answer, keeping evidence, options, and detail in a file or task note rather than in the message; an escalation keeps that shape and still leads with the evidence and consequence that let it stand alone. Load the plainenglish skill for the full contract."
+printf '%s\n' "[plain-english] Answer the captain in one paragraph of at most two sentences that leads with the ask or the answer, keeping evidence, options, and detail in a file or task note rather than in the message. An escalation keeps that shape while still leading with the evidence and consequence that let it stand alone, an /updatethecaptain worker report keeps its own per-worker format, and the plainenglish skill owns the full contract."
 exit 0

@@ -5,8 +5,8 @@
 # Two properties matter and they fail for different reasons.
 #
 # 1. The reminder reaches a genuine primary home's turn and nowhere else: not a
-#    crewmate's task worktree, not a no-mistakes gate agent, and not a home that
-#    switched it off.
+#    crewmate's task worktree, not a no-mistakes gate agent, not a home that
+#    switched it off, and not a turn taken while away mode is active.
 # 2. The registration cannot wedge a captain's turn. Claude blocks and erases the
 #    prompt when a UserPromptSubmit hook exits 2, and bash itself exits 2 on a
 #    syntax error, so the tracked command string - not the script's own care - is
@@ -80,6 +80,7 @@ test_reminder_reaches_a_primary_turn() {
   assert_contains "$OUT" "one paragraph" "the reminder must carry the paragraph rule"
   assert_contains "$OUT" "two sentences" "the reminder must carry the sentence rule"
   assert_contains "$OUT" "escalation" "the reminder must carry the escalation exception"
+  assert_contains "$OUT" "/updatethecaptain" "the reminder must carry the worker-report exception"
   assert_contains "$OUT" "plainenglish" "the reminder must point at the skill that owns the contract"
   pass "the reminder reaches a primary turn as one line and exits 0"
 }
@@ -126,6 +127,44 @@ test_off_switch() {
   [ -n "$OUT" ] || fail "an absent config file must keep the reminder"
 
   pass "config/plainenglish=off silences the reminder and every other value keeps it"
+}
+
+# Away mode is the case where an UNMARKED line is the hazard. The sub-supervisor
+# daemon delivers its marked away-supervisor messages into the primary's pane,
+# which is a prompt submission, so this hook fires on that turn; anything
+# unmarked it printed would read as the captain returning and drop the fleet out
+# of supervision. The marked message is built by the protocol's own owner rather
+# than hand-written so the case cannot drift from the real wire form.
+test_silent_while_away() {
+  local marked payload
+  # shellcheck source=bin/fm-operational-input.sh
+  . "$ROOT/bin/fm-operational-input.sh"
+  fm_operational_input_encode away-supervisor \
+    'Supervisor escalate (1 event): a worker is waiting on a decision.' marked ||
+    fail "could not build a marked away-supervisor message"
+  payload=$(jq -nc --arg prompt "$marked" \
+    '{session_id:"s1",hook_event_name:"UserPromptSubmit",prompt:$prompt}')
+
+  run_away_hook() {
+    set +e
+    OUT=$(printf '%s' "$payload" | "$PRIMARY/bin/fm-plainenglish-hook.sh" 2>/dev/null)
+    STATUS=$?
+    set -e
+  }
+
+  : > "$PRIMARY/state/.afk"
+  run_away_hook
+  expect_code 0 "$STATUS" "an away-mode turn must exit 0"
+  [ -z "$OUT" ] || fail "away mode must add nothing unmarked to the turn, got: $OUT"
+
+  # Scoped to away mode, not permanent: the same daemon-shaped turn reminds again
+  # once the flag is gone.
+  rm -f "$PRIMARY/state/.afk"
+  run_away_hook
+  expect_code 0 "$STATUS" "the turn after away mode must exit 0"
+  [ -n "$OUT" ] || fail "the reminder must return once away mode ends"
+
+  pass "the reminder is silent while away mode is active and returns after it"
 }
 
 test_inert_outside_a_primary_home() {
@@ -234,6 +273,7 @@ test_broken_hook_cannot_block_a_turn() {
 test_reminder_reaches_a_primary_turn
 test_reminder_writes_nothing
 test_off_switch
+test_silent_while_away
 test_inert_outside_a_primary_home
 test_inert_for_a_gate_agent
 test_transport_failures_stay_silent_and_zero
