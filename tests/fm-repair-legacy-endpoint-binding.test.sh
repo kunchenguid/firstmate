@@ -376,6 +376,27 @@ test_no_mistakes_gate_agent_cannot_drive_repair() {
   pass "legacy endpoint repair: no-mistakes gate agents cannot drive fleet recovery"
 }
 
+test_gate_worktree_path_backstop_anchors_to_repair_root() {
+  local dir before rc
+  dir=$(make_case gate-path-backstop)
+  mkdir -p "$dir/outside"
+  before=$(cat "$dir/home/state/legacy-task.meta")
+  set +e
+  (
+    cd "$dir/outside" || exit 111
+    env -u FM_GATE_REFUSE_BYPASS -u NO_MISTAKES_GATE \
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$PATH" \
+      "$REPAIR" legacy-task > "$dir/stdout" 2> "$dir/stderr"
+  )
+  rc=$?
+  set -e
+  expect_code 3 "$rc" "gate-worktree path backstop from outside the worktree"
+  [ "$(cat "$dir/home/state/legacy-task.meta")" = "$before" ] \
+    || fail "gate-worktree path refusal changed metadata"
+  [ ! -s "$dir/herdr.log" ] || fail "gate-worktree path refusal reached Herdr"
+  pass "legacy endpoint repair: gate-worktree path backstop survives an outside cwd"
+}
+
 test_legacy_record_reproduces_the_metadata_only_refusal
 test_exact_live_identity_repairs_only_the_binding
 test_existing_binding_is_idempotent_without_runtime_access
@@ -387,3 +408,4 @@ test_metadata_drift_refuses_without_overwriting_concurrent_state
 test_control_lock_contention_refuses_before_runtime_access
 test_task_inventory_lock_contention_refuses_before_runtime_access
 test_no_mistakes_gate_agent_cannot_drive_repair
+test_gate_worktree_path_backstop_anchors_to_repair_root
