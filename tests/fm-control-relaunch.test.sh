@@ -635,12 +635,16 @@ test_late_expiry_refuses_before_agent_exit() {
 }
 
 test_committed_handoff_does_not_revalidate_after_exit() {
-  local dir out rc
+  local dir out rc old_receipt new_receipt
   dir=$(new_case committed-handoff rl42)
   add_ship_task "$dir" rl42 claude
+  old_receipt="$dir/home/data/rl42/routing-decision.prior.json"
+  printf '{}\n' > "$old_receipt"
+  printf 'routing_decision=%s\n' "$old_receipt" >> "$dir/home/state/rl42.meta"
   printf 'codex' > "$dir/fake/becomes"
   prepare_relaunch_receipt "$dir" rl42 codex default default "committed handoff"
   age_relaunch_receipt "$dir" rl42 299
+  new_receipt=$(fm_test_routing_decision_path "$dir/home" rl42)
   FM_FAKE_DATE_FIRST_EPOCH=$ROUTING_TEST_NOW
   FM_FAKE_DATE_LATE_EPOCH=$((ROUTING_TEST_NOW + 2))
   FM_FAKE_DATE_STATE="$dir/fake/date-count"
@@ -650,10 +654,14 @@ test_committed_handoff_does_not_revalidate_after_exit() {
   expect_code 0 "$rc" "a committed routing handoff must not revalidate after exit"$'\n'"$out"
   [ "$(cat "$dir/fake/command")" = codex ] \
     || fail "committed routing handoff did not launch the replacement"
-  [ -f "$dir/home/data/rl42/routing-decision.json" ] \
-    && [ ! -e "$dir/home/data/rl42/routing-decision.pending.json" ] \
-    || fail "control preflight did not consume the committed routing receipt"
-  pass "fm-control relaunch: committed routing handoff is not revalidated"
+  [ "$(meta_field "$dir" rl42 routing_decision)" = "$new_receipt" ] \
+    || fail "route-changing relaunch did not point metadata at its new generation"
+  assert_present "$old_receipt" "route-changing relaunch deleted its prior receipt generation"
+  assert_present "$new_receipt" "control preflight did not publish the committed receipt generation"
+  assert_present "${new_receipt%.json}.consumed" "control preflight did not burn the committed generation"
+  assert_present "$dir/home/data/rl42/routing-decision.pending.json" \
+    "control preflight deleted the retained pending receipt pathname"
+  pass "fm-control relaunch: committed handoff publishes a new durable generation"
 }
 
 # --- 2. harness switch -------------------------------------------------------

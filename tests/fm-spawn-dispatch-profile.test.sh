@@ -127,9 +127,20 @@ SH
 #!/usr/bin/env bash
 set -u
 target=${!#}
+receipt_target=
+for candidate in "$@"; do
+  case "$candidate" in
+    */routing-decision.*.json)
+      case "$candidate" in
+        */routing-decision.pending.json) ;;
+        *) receipt_target=$candidate ;;
+      esac
+      ;;
+  esac
+done
 if [ -n "${FM_TEST_REPLACE_BRIEF_TARGET:-}" ]; then
-  case "$target" in
-    */routing-decision.json)
+  case "$receipt_target" in
+    ?*)
       rm -f -- "$FM_TEST_REPLACE_BRIEF_TARGET"
       printf '%s\n' "${FM_TEST_BRIEF_TARGET_REPLACEMENT:-replacement target bytes}" \
         > "$FM_TEST_REPLACE_BRIEF_TARGET"
@@ -137,8 +148,8 @@ if [ -n "${FM_TEST_REPLACE_BRIEF_TARGET:-}" ]; then
   esac
 fi
 if [ -n "${FM_TEST_FAIL_RECEIPT_LINK_MARKER:-}" ]; then
-  case "$target" in
-    */routing-decision.json)
+  case "$receipt_target" in
+    ?*)
       if [ ! -e "$FM_TEST_FAIL_RECEIPT_LINK_MARKER" ]; then
         : > "$FM_TEST_FAIL_RECEIPT_LINK_MARKER"
         exit 1
@@ -666,8 +677,9 @@ assert_preflight_kept_retryable_receipt() {
   local home=$1 id=$2 launchlog=$3
   assert_present "$home/data/$id/routing-decision.pending.json" \
     "preflight refusal consumed the retryable routing receipt"
-  assert_absent "$home/data/$id/routing-decision.json" \
-    "preflight refusal published the final routing receipt"
+  if fm_test_existing_routing_decision_path "$home" "$id" >/dev/null; then
+    fail "preflight refusal published the final routing receipt"
+  fi
   assert_spawn_refused_before_side_effects "$home" "$id" "$launchlog"
   [ ! -s "$home/worktree.log" ] || fail "preflight refusal leased a worktree"
 }
@@ -688,7 +700,7 @@ test_project_preflight_keeps_receipt_retryable() {
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "corrected project retry should consume the original receipt"
-  assert_present "$HOME_DIR/data/$id/routing-decision.json" \
+  assert_present "$(fm_test_routing_decision_path "$HOME_DIR" "$id")" \
     "corrected project retry did not publish the routing receipt"
   pass "project preflight leaves the routing receipt retryable"
 }
@@ -712,7 +724,7 @@ test_delivery_preflight_keeps_receipt_retryable() {
       "$id" "$PROJ_DIR" --mode direct-PR --yolo off)
   status=$?
   expect_code 0 "$status" "corrected delivery retry should consume the original receipt"
-  assert_present "$HOME_DIR/data/$id/routing-decision.json" \
+  assert_present "$(fm_test_routing_decision_path "$HOME_DIR" "$id")" \
     "corrected delivery retry did not publish the routing receipt"
   pass "delivery preflight leaves the routing receipt retryable"
 }
@@ -737,7 +749,7 @@ test_muse_credential_preflight_keeps_receipt_retryable() {
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "credentialed Muse retry should consume the original receipt"
-  assert_present "$HOME_DIR/data/$id/routing-decision.json" \
+  assert_present "$(fm_test_routing_decision_path "$HOME_DIR" "$id")" \
     "credentialed Muse retry did not publish the routing receipt"
   pass "Muse credential preflight leaves the routing receipt retryable"
 }
@@ -752,7 +764,7 @@ test_duplicate_spawn_preserves_active_routing_provenance() {
   status=$?
   expect_code 0 "$status" "initial spawn should establish active routing provenance"
   cp "$HOME_DIR/state/$id.meta" "$CASE_DIR/active.meta"
-  cp "$HOME_DIR/data/$id/routing-decision.json" "$CASE_DIR/active-routing-decision.json"
+  cp "$(sed -n 's/^routing_decision=//p' "$HOME_DIR/state/$id.meta")" "$CASE_DIR/active-routing-decision.json"
 
   write_test_routing_decision "$HOME_DIR" "$id" claude default default 0
   pending_tmp="$HOME_DIR/data/$id/routing-decision.pending.json.tmp"
@@ -768,7 +780,7 @@ test_duplicate_spawn_preserves_active_routing_provenance() {
     "duplicate refusal did not identify the active task record"
   cmp -s "$CASE_DIR/active.meta" "$HOME_DIR/state/$id.meta" \
     || fail "duplicate spawn changed active task metadata"
-  cmp -s "$CASE_DIR/active-routing-decision.json" "$HOME_DIR/data/$id/routing-decision.json" \
+  cmp -s "$CASE_DIR/active-routing-decision.json" "$(sed -n 's/^routing_decision=//p' "$HOME_DIR/state/$id.meta")" \
     || fail "duplicate spawn changed the active routing receipt bytes"
   assert_present "$HOME_DIR/data/$id/routing-decision.pending.json" \
     "duplicate spawn consumed its unaccepted pending receipt"
@@ -815,13 +827,13 @@ test_launch_uses_validated_brief_snapshot_after_source_replacement() {
 }
 
 test_launch_refuses_replaced_validated_brief_target() {
-  local rec id out status routing_brief brief_hash
+  local rec id out status routing_brief
   id=profile-brief-target-race-z12b4
   rec=$(make_spawn_case profile-brief-target-race claude "$id")
   read_case_record "$rec"
-  brief_hash=$(test_sha256_file "$HOME_DIR/data/$id/brief.md")
-  routing_brief="$HOME_DIR/data/$id/routing-brief.$brief_hash.md"
+  routing_brief=$(fm_test_routing_brief_path "$HOME_DIR" "$id")
   /bin/cp "$HOME_DIR/data/$id/brief.md" "$routing_brief"
+  chmod 0400 "$routing_brief"
 
   out=$(FM_TEST_REPLACE_BRIEF_TARGET="$routing_brief" \
     FM_TEST_BRIEF_TARGET_REPLACEMENT="attacker replacement after validator comparison" \
@@ -861,7 +873,7 @@ test_late_commit_failure_keeps_receipt_retryable() {
   [ "$routing_brief_count" -eq 1 ] || fail "late commit retry left $routing_brief_count durable brief links"
   routing_brief=$(sed -n 's/^routing_brief=//p' "$HOME_DIR/state/$id.meta")
   assert_present "$routing_brief" "late commit retry left its durable brief link orphaned"
-  assert_present "$HOME_DIR/data/$id/routing-decision.json" \
+  assert_present "$(fm_test_routing_decision_path "$HOME_DIR" "$id")" \
     "late commit retry did not publish the routing receipt"
   pass "late commit failure leaves a retryable receipt and adoptable brief"
 }
@@ -1032,7 +1044,7 @@ test_codex_omits_invalid_max_effort() {
   assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
-  jq -e '.launch_binding.effort == null' "$HOME_DIR/data/$id/routing-decision.json" >/dev/null \
+  jq -e '.launch_binding.effort == null' "$(fm_test_routing_decision_path "$HOME_DIR" "$id")" >/dev/null \
     || fail "codex max receipt laundered the requested effort as emitted"
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
@@ -1069,7 +1081,7 @@ test_grok_omits_invalid_max_reasoning_effort() {
     "grok launch did not preserve the model flag and typed brief when max effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
-  jq -e '.launch_binding.effort == null' "$HOME_DIR/data/$id/routing-decision.json" >/dev/null \
+  jq -e '.launch_binding.effort == null' "$(fm_test_routing_decision_path "$HOME_DIR" "$id")" >/dev/null \
     || fail "grok max receipt laundered the requested effort as emitted"
   pass "grok omits unsupported max reasoning effort"
 }
@@ -1090,7 +1102,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
     "grok launch did not preserve the model flag and typed brief when xhigh effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported xhigh reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
-  jq -e '.launch_binding.effort == null' "$HOME_DIR/data/$id/routing-decision.json" >/dev/null \
+  jq -e '.launch_binding.effort == null' "$(fm_test_routing_decision_path "$HOME_DIR" "$id")" >/dev/null \
     || fail "grok xhigh receipt laundered the requested effort as emitted"
   pass "grok omits unsupported xhigh reasoning effort"
 }
@@ -1127,7 +1139,7 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   assert_grep 'harness=cursor' "$HOME_DIR/state/$id.meta" "cursor harness was not recorded in meta"
   assert_grep 'model=cursor-grok-4.5-high' "$HOME_DIR/state/$id.meta" "cursor model was recorded as default"
   jq -e '.launch_binding.model == "cursor-grok-4.5-high" and .launch_binding.effort == null' \
-    "$HOME_DIR/data/$id/routing-decision.json" >/dev/null \
+    "$(fm_test_routing_decision_path "$HOME_DIR" "$id")" >/dev/null \
     || fail "cursor receipt did not distinguish emitted model from metadata-only effort"
   pass "cursor receives its model-qualified reasoning class and exact task workspace"
 }
@@ -1185,7 +1197,7 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
   jq -e '.launch_binding.model == "anthropic/claude-sonnet-4-5" and .launch_binding.effort == null' \
-    "$HOME_DIR/data/$id/routing-decision.json" >/dev/null \
+    "$(fm_test_routing_decision_path "$HOME_DIR" "$id")" >/dev/null \
     || fail "opencode receipt did not distinguish emitted model from metadata-only effort"
   pass "opencode receives --model and omits the unsupported effort axis"
 }

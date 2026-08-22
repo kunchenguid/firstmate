@@ -102,10 +102,10 @@
 #   --harness, --model, or --effort requires a task-scoped ROUTING_INTENT and
 #   pending ROUTING_DECISION under data/<id>/.
 #   The gate is unconditional; canonical config presence or absence is attested,
-#   and FM_CONFIG_OVERRIDE cannot relocate the requirement. The pending receipt
-#   is consumed before hook installation, worktree lease, endpoint creation,
-#   metadata publication, pane input, or model execution. Fresh secondmate
-#   spawns are exempt.
+#   and FM_CONFIG_OVERRIDE cannot relocate the requirement. Its deterministic
+#   generation is published before hook installation, worktree lease, endpoint
+#   creation, metadata publication, pane input, or model execution. Fresh
+#   secondmate spawns are exempt.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -1576,6 +1576,7 @@ if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
 fi
 if [ "$ROUTING_PREFLIGHT_ONLY" -eq 1 ]; then
   fm_routing_decision_persist_prepared || exit 1
+  fm_routing_decision_consume_prepared || exit 1
   fm_routing_decision_seal_prepared || {
     echo "error: validated relaunch routing preflight could not be sealed" >&2
     exit 1

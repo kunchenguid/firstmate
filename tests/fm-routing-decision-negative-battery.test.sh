@@ -9,46 +9,12 @@ set -u
 
 REAL_JQ=$(command -v jq)
 REAL_PERL=$(command -v perl)
-REAL_CMP=$(command -v cmp)
 SPAWN="$ROOT/bin/fm-spawn.sh"
 POST_BINDING_RECEIPT_FILTER=
 POST_SNAPSHOT_SOURCE_FILTER=
 POST_SNAPSHOT_CONFIG_FILTER=
-POST_FINAL_DIRECTORY=0
-POST_BRIEF_LINK_DIRECTORY=0
-POST_FINAL_LINK_DIRECTORY=0
 POST_PENDING_DIRECTORY=0
-POST_CONSUMED_INPLACE_MUTATION=0
 POST_PENDING_RECREATE=0
-
-cmp() {
-  local status arg
-  "$REAL_CMP" "$@"
-  status=$?
-  if [ "$status" -eq 0 ] && [ "$POST_CONSUMED_INPLACE_MUTATION" -eq 1 ] \
-    && [[ "$*" == *pending.consumed.json* ]]; then
-    for arg in "$@"; do
-      case "$arg" in
-        */pending.consumed.json) printf '\n' >> "$arg" ;;
-      esac
-    done
-    POST_CONSUMED_INPLACE_MUTATION=0
-  fi
-  return "$status"
-}
-
-chmod() {
-  local target=${!#}
-  command chmod "$@" || return 1
-  if [ "$POST_FINAL_DIRECTORY" -eq 1 ]; then
-    case "$target" in
-      */routing-decision.pending.json)
-        mkdir "$TASK_DIR/routing-decision.json" || return 1
-        POST_FINAL_DIRECTORY=0
-        ;;
-    esac
-  fi
-}
 
 # One authority guard is defense in depth against the receipt changing after
 # its exact configuration binding is checked.
@@ -86,53 +52,24 @@ jq() {
 }
 
 perl() {
-  local target=${!#} external status
+  local target=${!#} status
   if [ "$POST_PENDING_RECREATE" -eq 1 ] \
-    && [[ "$target" == */pending.consumed.json ]]; then
+    && [[ "$target" == */pending.current.json ]]; then
     mv "$TASK_DIR/routing-decision.pending.json" "$TASK_DIR/routing-decision.original.json" || return 1
     mkdir "$TASK_DIR/routing-decision.pending.json" || return 1
     printf 'replacement directory sentinel\n' > "$TASK_DIR/routing-decision.pending.json/sentinel" || return 1
-    FM_TEST_RENAME_SOURCE="$TASK_DIR/routing-decision.pending.json" \
-      FM_TEST_RENAME_TARGET="$target" \
-      PERL5LIB="$TASK_DIR/perl-lib${PERL5LIB:+:$PERL5LIB}" \
-      PERL5OPT=-MFMTestRenameHook \
-      "$REAL_PERL" "$@"
+    "$REAL_PERL" "$@"
     status=$?
     POST_PENDING_RECREATE=0
     return "$status"
   fi
-  if [ "$POST_FINAL_DIRECTORY" -eq 1 ] \
-    && [[ "$target" == */pending.consumed.json ]]; then
-    mkdir "$TASK_DIR/routing-decision.json" || return 1
-    POST_FINAL_DIRECTORY=0
-  fi
   if [ "$POST_PENDING_DIRECTORY" -eq 1 ] \
-    && [[ "$target" == */pending.consumed.json ]]; then
+    && [[ "$target" == */pending.current.json ]]; then
     mv "$TASK_DIR/routing-decision.pending.json" "$TASK_DIR/routing-decision.original.json" || return 1
     mkdir "$TASK_DIR/routing-decision.pending.json" || return 1
     printf 'replacement directory sentinel\n' > "$TASK_DIR/routing-decision.pending.json/sentinel" || return 1
     POST_PENDING_DIRECTORY=0
   fi
-  case "$target" in
-    */routing-brief.*.md)
-      if [ "$POST_BRIEF_LINK_DIRECTORY" -eq 1 ]; then
-        external="$LAB/external-brief-target"
-        mkdir -p "$external" || return 1
-        printf 'external brief sentinel\n' > "$external/sentinel" || return 1
-        ln -s "$external" "$target" || return 1
-        POST_BRIEF_LINK_DIRECTORY=0
-      fi
-      ;;
-    */routing-decision.json)
-      if [ "$POST_FINAL_LINK_DIRECTORY" -eq 1 ]; then
-        external="$LAB/external-receipt-target"
-        mkdir -p "$external" || return 1
-        printf 'external receipt sentinel\n' > "$external/routing-decision.pending.json" || return 1
-        ln -s "$external" "$target" || return 1
-        POST_FINAL_LINK_DIRECTORY=0
-      fi
-      ;;
-  esac
   "$REAL_PERL" "$@"
 }
 
@@ -444,11 +381,7 @@ write_fixture() {
   POST_BINDING_RECEIPT_FILTER=
   POST_SNAPSHOT_SOURCE_FILTER=
   POST_SNAPSHOT_CONFIG_FILTER=
-  POST_FINAL_DIRECTORY=0
-  POST_BRIEF_LINK_DIRECTORY=0
-  POST_FINAL_LINK_DIRECTORY=0
   POST_PENDING_DIRECTORY=0
-  POST_CONSUMED_INPLACE_MUTATION=0
   POST_PENDING_RECREATE=0
   RUN_CWD=
 }
@@ -511,7 +444,9 @@ assert_no_effects() {
   assert_absent "$LAB/endpoint" "routing refusal created an endpoint"
   assert_absent "$HOME_DIR/state/t1.meta" "routing refusal published task metadata"
   if [ "$PREEXISTING_FINAL" -eq 0 ]; then
-    assert_absent "$TASK_DIR/routing-decision.json" "invalid receipt was persisted"
+    if fm_test_existing_routing_decision_path "$HOME_DIR" t1 >/dev/null; then
+      fail "invalid receipt was persisted"
+    fi
   else
     assert_present "$TASK_DIR/routing-decision.pending.json" "hostile final target consumed the pending receipt"
   fi
@@ -666,23 +601,33 @@ setup_singleton_quota() {
   update_receipt '.quota_basis = "FRESH_QUOTA_COMPARISON"
     | .quota = {source: "quota-axi --json", observed_at: .generated_at, snapshot_sha256: ("0" * 64)}'
 }
-setup_final_directory() { PREEXISTING_FINAL=1; mkdir "$TASK_DIR/routing-decision.json"; }
+receipt_generation() { sha_file "$TASK_DIR/routing-decision.pending.json"; }
+receipt_final() { printf '%s/routing-decision.%s.json\n' "$TASK_DIR" "$(receipt_generation)"; }
+brief_final() { printf '%s/routing-brief.%s.md\n' "$TASK_DIR" "$(receipt_generation)"; }
+setup_final_directory() { PREEXISTING_FINAL=1; mkdir "$(receipt_final)"; }
 setup_final_symlink() {
   PREEXISTING_FINAL=1
   printf '{}\n' > "$TASK_DIR/attacker-target.json"
-  ln -s "$TASK_DIR/attacker-target.json" "$TASK_DIR/routing-decision.json"
+  ln -s "$TASK_DIR/attacker-target.json" "$(receipt_final)"
 }
 setup_final_directory_after_check() {
   PREEXISTING_FINAL=1
-  POST_FINAL_DIRECTORY=1
+  mkdir "$(receipt_final)"
 }
-setup_brief_link_directory_race() { POST_BRIEF_LINK_DIRECTORY=1; }
+setup_brief_link_directory_race() {
+  PREEXISTING_FINAL=1
+  mkdir -p "$LAB/external-brief-target"
+  printf 'external brief sentinel\n' > "$LAB/external-brief-target/sentinel"
+  ln -s "$LAB/external-brief-target" "$(brief_final)"
+}
 setup_final_link_directory_race() {
   PREEXISTING_FINAL=1
-  POST_FINAL_LINK_DIRECTORY=1
+  mkdir -p "$LAB/external-receipt-target"
+  printf 'external receipt sentinel\n' > "$LAB/external-receipt-target/routing-decision.pending.json"
+  ln -s "$LAB/external-receipt-target" "$(receipt_final)"
 }
 assert_brief_link_directory_race() {
-  [ -L "$TASK_DIR/routing-brief.$(sha_file "$TASK_DIR/brief.md").md" ] \
+  [ -L "$(brief_final)" ] \
     || fail "brief destination race did not install its symlink-to-directory counterexample"
   printf 'external brief sentinel\n' | cmp -s - "$LAB/external-brief-target/sentinel" \
     || fail "brief publication race changed the unrelated external file"
@@ -690,7 +635,7 @@ assert_brief_link_directory_race() {
     "brief publication race created a file through the directory symlink"
 }
 assert_final_link_directory_race() {
-  [ -L "$TASK_DIR/routing-decision.json" ] \
+  [ -L "$(receipt_final)" ] \
     || fail "receipt destination race did not install its symlink-to-directory counterexample"
   printf 'external receipt sentinel\n' | cmp -s - "$LAB/external-receipt-target/routing-decision.pending.json" \
     || fail "receipt publication race changed or deleted the unrelated external file"
@@ -705,39 +650,21 @@ setup_pending_replaced_after_snapshot() {
   POST_SNAPSHOT_SOURCE_FILTER='.rationale = "replacement after validation began"'
 }
 setup_pending_directory_after_snapshot() { POST_PENDING_DIRECTORY=1; }
-setup_pending_mutated_in_place_after_compare() { POST_CONSUMED_INPLACE_MUTATION=1; }
-setup_pending_recreated_after_relocation() {
-  mkdir -p "$TASK_DIR/perl-lib"
-  cat > "$TASK_DIR/perl-lib/FMTestRenameHook.pm" <<'PM'
-package FMTestRenameHook;
-use strict;
-use warnings;
-BEGIN {
-  *CORE::GLOBAL::rename = sub {
-    my ($source, $target) = @_;
-    my $status = CORE::rename($source, $target);
-    if ($status && defined $ENV{FM_TEST_RENAME_TARGET}
-        && $target eq $ENV{FM_TEST_RENAME_TARGET}) {
-      mkdir $ENV{FM_TEST_RENAME_SOURCE} or die "mkdir: $!";
-      open my $sentinel, ">", "$ENV{FM_TEST_RENAME_SOURCE}/recreated-sentinel" or die "open: $!";
-      print {$sentinel} "recreated source sentinel\n";
-      close $sentinel or die "close: $!";
-    }
-    return $status;
-  };
+setup_pending_mutated_in_place_after_compare() {
+  PREEXISTING_FINAL=1
+  printf '{"collision":true}\n' > "$(receipt_final)"
 }
-1;
-PM
+setup_pending_recreated_after_relocation() {
   POST_PENDING_RECREATE=1
 }
 setup_preexisting_writable_brief() {
-  cp "$TASK_DIR/brief.md" "$TASK_DIR/routing-brief.$(sha_file "$TASK_DIR/brief.md").md"
-  chmod 0600 "$TASK_DIR/routing-brief.$(sha_file "$TASK_DIR/brief.md").md"
+  PREEXISTING_FINAL=1
+  printf 'different brief bytes\n' > "$(brief_final)"
 }
 setup_preexisting_hardlinked_brief() {
-  cp "$TASK_DIR/brief.md" "$TASK_DIR/preexisting-brief.md"
-  chmod 0400 "$TASK_DIR/preexisting-brief.md"
-  ln "$TASK_DIR/preexisting-brief.md" "$TASK_DIR/routing-brief.$(sha_file "$TASK_DIR/brief.md").md"
+  PREEXISTING_FINAL=1
+  cp "$TASK_DIR/routing-decision.pending.json" "$(receipt_final)"
+  ln "$(receipt_final)" "${TASK_DIR}/routing-decision.$(receipt_generation).consumed"
 }
 
 assert_pending_directory_preserved() {
@@ -751,9 +678,8 @@ assert_pending_replacement_never_relocated() {
     || fail "pending receipt directory replacement left its source pathname"
   printf 'replacement directory sentinel\n' | cmp -s - "$TASK_DIR/routing-decision.pending.json/sentinel" \
     || fail "pending receipt directory replacement contents changed"
-  if find "$TASK_DIR" -path '*/pending.consumed.json' -print -quit | grep -q .; then
-    fail "pending receipt directory replacement was relocated into the validation snapshot"
-  fi
+  assert_present "$TASK_DIR/routing-decision.original.json" \
+    "pending replacement counterexample did not preserve the validated source inode"
 }
 setup_selection_order_tamper() { update_receipt '.selection_order |= reverse'; }
 setup_quota_byte_mutation() { write_multi_fixture; printf '\n' >> "$TASK_DIR/quota-snapshot.json"; }
@@ -1151,21 +1077,32 @@ exercise_negative "61 pending receipt replaced after snapshot" PERSISTENCE_REFUS
 exercise_negative "62 pending receipt directory after snapshot" PERSISTENCE_REFUSED setup_pending_directory_after_snapshot \
   "pending receipt changed or disappeared after its validation snapshot" assert_pending_directory_preserved
 exercise_negative "63 final directory raced after target check" PERSISTENCE_REFUSED setup_final_directory_after_check \
-  "validated receipt could not be persisted atomically"
+  "receipt generation target is not the same validated bytes"
 exercise_negative "64 brief target raced to directory symlink" PERSISTENCE_REFUSED setup_brief_link_directory_race \
-  "validated brief snapshot could not be published at its hash-addressed path" assert_brief_link_directory_race
+  "brief generation target is not the same validated bytes" assert_brief_link_directory_race
 exercise_negative "65 receipt target raced to directory symlink" PERSISTENCE_REFUSED setup_final_link_directory_race \
-  "validated receipt could not be persisted atomically" assert_final_link_directory_race
-exercise_negative "66 pending receipt mutated in place after comparison" PERSISTENCE_REFUSED \
+  "receipt generation target is not the same validated bytes" assert_final_link_directory_race
+exercise_negative "66 same-generation receipt collision" PERSISTENCE_REFUSED \
   setup_pending_mutated_in_place_after_compare \
-  "validated receipt was not published as the exact regular-file target"
-exercise_negative "67 pending replacement recreated after relocation" PERSISTENCE_REFUSED \
+  "receipt generation target is not the same validated bytes"
+exercise_negative "67 pending replacement remains at its pathname" PERSISTENCE_REFUSED \
   setup_pending_recreated_after_relocation \
   "pending receipt changed or disappeared after its validation snapshot" assert_pending_replacement_never_relocated
-exercise_negative "68 pre-existing writable routing brief" PERSISTENCE_REFUSED \
-  setup_preexisting_writable_brief "validated brief target already exists"
-exercise_negative "69 pre-existing hard-linked routing brief" PERSISTENCE_REFUSED \
-  setup_preexisting_hardlinked_brief "validated brief target already exists"
+exercise_negative "68 same-generation brief collision" PERSISTENCE_REFUSED \
+  setup_preexisting_writable_brief "brief generation target is not the same validated bytes"
+exercise_negative "69 consumed generation reuse" PERSISTENCE_REFUSED \
+  setup_preexisting_hardlinked_brief "receipt generation was already consumed"
+
+write_fixture
+cp "$TASK_DIR/routing-decision.pending.json" "$(receipt_final)"
+cp "$TASK_DIR/brief.md" "$(brief_final)"
+chmod 0400 "$(receipt_final)" "$(brief_final)"
+run_validator_then_effects >/dev/null 2>&1 \
+  || fail "byte-identical generation publication was not idempotent"
+assert_present "$LAB/worktree.lease" "idempotent generation did not reach the worktree lease"
+assert_present "${TASK_DIR}/routing-decision.$(receipt_generation).consumed" \
+  "idempotent generation was not consumed"
+pass "byte-identical generation publication is idempotent"
 
 write_fixture
 setup_final_directory
@@ -1184,7 +1121,7 @@ write_fixture
 expected_config_hash=$(jq -r '.dispatch_config.sha256' "$TASK_DIR/routing-decision.pending.json")
 POST_SNAPSHOT_CONFIG_FILTER='.rules[0].use.model = "sonnet"'
 run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement escaped its validation snapshot"
-[ "$(jq -r '.dispatch_config.sha256' "$TASK_DIR/routing-decision.json")" = "$expected_config_hash" ] \
+[ "$(jq -r '.dispatch_config.sha256' "$(receipt_final)")" = "$expected_config_hash" ] \
   || fail "persisted receipt did not retain the validated canonical config snapshot hash"
 [ "$(sha_file "$HOME_DIR/config/crew-dispatch.json")" != "$expected_config_hash" ] \
   || fail "canonical config replacement counterexample did not fire"

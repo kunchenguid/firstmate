@@ -141,7 +141,7 @@ set -u
 "$FM_REAL_CHMOD" "$@" || exit 1
 target=${!#}
 if [ "${FM_FAKE_KIMI_INSTALL_FAIL:-no}" = yes ] \
-  && [[ "$target" == */pending.validated.json ]]; then
+  && [[ "$target" == */brief.anchor.md ]]; then
   : > "$HOME/.kimi-code/fm-turn-end.d"
 fi
 SH
@@ -465,7 +465,7 @@ test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation() {
 }
 
 test_kimi_install_failure_restores_pending_receipt() {
-  local id rec out rc brief_hash
+  local id rec out rc decision brief
   id=kimi-install-rollback-z9
   rec=$(make_spawn_case install-rollback "$id")
   read_spawn_record "$rec"
@@ -477,15 +477,18 @@ test_kimi_install_failure_restores_pending_receipt() {
     "Kimi hook installation failure omitted its concrete refusal"
   assert_present "$HOME_DIR/data/$id/routing-decision.pending.json" \
     "Kimi hook installation failure burned the retryable pending receipt"
-  assert_absent "$HOME_DIR/data/$id/routing-decision.json" \
-    "Kimi hook installation failure left a committed final receipt"
-  brief_hash=$(fm_test_sha256_file "$HOME_DIR/data/$id/brief.md")
-  assert_absent "$HOME_DIR/data/$id/routing-brief.$brief_hash.md" \
-    "Kimi hook installation failure left a failed-attempt routing brief"
+  decision=$(fm_test_routing_decision_path "$HOME_DIR" "$id")
+  brief=$(fm_test_routing_brief_path "$HOME_DIR" "$id")
+  assert_present "$decision" "Kimi hook installation failure lost its idempotent receipt generation"
+  assert_present "$brief" "Kimi hook installation failure lost its idempotent brief generation"
   if grep -Eq '(^| )new-(session|window)( |$)' "$CASE_DIR/tmux-calls.log"; then
     fail "Kimi hook installation failure created a tmux container or pane"
   fi
-  pass "fm-spawn: Kimi hook installation failure restores the pending receipt"
+  rm "$HOME_DIR/.kimi-code/fm-turn-end.d"
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "Kimi retry should adopt the byte-identical generation"$'\n'"$out"
+  pass "fm-spawn: Kimi hook failure leaves an idempotent retry generation"
 }
 
 test_kimi_secondmate_skips_global_hook_installation() {

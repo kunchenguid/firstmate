@@ -278,6 +278,35 @@ fm_test_sha256_text() {
   fi
 }
 
+fm_test_routing_generation() { # <home> <id> [data]
+  local home=$1 id=$2 data=${3:-$1/data}
+  fm_test_sha256_file "$data/$id/routing-decision.pending.json"
+}
+
+fm_test_routing_decision_path() { # <home> <id> [data]
+  local home=$1 id=$2 data=${3:-$1/data} generation
+  generation=$(fm_test_routing_generation "$home" "$id" "$data") || return 1
+  printf '%s/%s/routing-decision.%s.json\n' "$data" "$id" "$generation"
+}
+
+fm_test_routing_brief_path() { # <home> <id> [data]
+  local home=$1 id=$2 data=${3:-$1/data} generation
+  generation=$(fm_test_routing_generation "$home" "$id" "$data") || return 1
+  printf '%s/%s/routing-brief.%s.md\n' "$data" "$id" "$generation"
+}
+
+fm_test_existing_routing_decision_path() { # <home> <id> [data]
+  local home=$1 id=$2 data=${3:-$1/data} candidate
+  for candidate in "$data/$id"/routing-decision.*.json; do
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    if [[ "$candidate" =~ /routing-decision\.[0-9a-f]{64}\.json$ ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # fm_test_write_routing_receipt <home> <id> <harness> [model] [effort] [data]
 # writes one explicit test-only schema-v1 receipt for a verified template.
 # Production code never calls this helper and every fixture still exercises the
