@@ -546,21 +546,29 @@ class Client:
         turn's talk end to it, and the captain's entire next question was dropped
         as audio arriving with no turn open. It answered a question nobody had
         finished asking.
+
+        A closed connection is a dead uplink for talk start and talk end just as
+        much as for audio, so all three are sent through the same guard. Sending
+        the control frames outside it cost the rest of the session: the write
+        raised, this thread died with a traceback, and every later turn queued
+        frames nobody was left to send, so it waited out the full timeout with
+        no answer instead of reporting the lost connection the downlink had
+        already seen.
         """
         while True:
             item = self.up_q.get()
             if item is None:
                 return
             if item is START:
-                self.uplink.send(frame.TALK_START)
-                continue
-            if item is END:
+                kind, payload = frame.TALK_START, b""
+            elif item is END:
                 with self.lock:
                     self.turn["wire_end"] = time.monotonic()
-                self.uplink.send(frame.TALK_END)
-                continue
+                kind, payload = frame.TALK_END, b""
+            else:
+                kind, payload = frame.AUDIO, item
             try:
-                self.uplink.send(frame.AUDIO, item)
+                self.uplink.send(kind, payload)
             except (BrokenPipeError, OSError):
                 return
 
@@ -570,6 +578,14 @@ class Client:
                 got = self.reader.read()
             except (frame.FrameError, OSError) as exc:
                 say("client: connection lost: {}".format(exc))
+                # Recorded as well as said, because the turn record is what a
+                # latency figure is read from later and stderr is not. A dropped
+                # connection that only says answered: false is indistinguishable
+                # there from a turn the model declined to answer. setdefault
+                # because a relay that named the failure first said it better.
+                with self.lock:
+                    self.turn.setdefault(
+                        "failed", "the connection was lost: {}".format(exc))
                 break
             if got is None:
                 break
@@ -681,9 +697,10 @@ class Client:
             "tool_calls": turn.get("tool_calls", 0),
             "queued_note": turn.get("queued"),
             "interrupted": bool(turn.get("interrupted")),
-            # Why a turn has no answer, when the relay knows. A results file
-            # that only says answered: false invites the reader to average an
-            # infrastructure failure into a latency figure.
+            # Why a turn has no answer, when either end knows: the relay names a
+            # failed turn, and this end names a connection that went during one.
+            # A results file that only says answered: false invites the reader to
+            # average an infrastructure failure into a latency figure.
             "relay_error": turn.get("failed"),
             # The number this build exists to produce: the captain stopped
             # talking, and this many seconds later sound came out.

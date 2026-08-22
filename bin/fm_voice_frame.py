@@ -110,26 +110,38 @@ class Reader:
     def __init__(self, stream):
         self._stream = stream
 
-    def _exact(self, count):
+    def _exact(self, count, what):
+        """Return exactly count bytes, or None if the stream ended before any.
+
+        Ending part way through raises rather than returning None, because the
+        two are not the same fault and only the caller reading a header can
+        treat nothing-at-all as end of input. A partial header returned as None
+        would be read as a clean close, and a dropped connection would be
+        recorded as a turn the model simply did not answer.
+        """
         parts = []
         have = 0
         while have < count:
             chunk = self._stream.read(count - have)
             if not chunk:
+                if have:
+                    raise FrameError(
+                        "stream ended after {} of the {} bytes of a {}".format(
+                            have, count, what))
                 return None
             parts.append(chunk)
             have += len(chunk)
         return b"".join(parts)
 
     def read(self):
-        head = self._exact(HEADER.size)
+        head = self._exact(HEADER.size, "frame header")
         if head is None:
             return None
         kind, length = HEADER.unpack(head)
         check_header(kind, length)
         if length == 0:
             return kind, b""
-        payload = self._exact(length)
+        payload = self._exact(length, "payload")
         if payload is None:
             raise FrameError("stream ended inside a {} byte payload".format(length))
         return kind, payload

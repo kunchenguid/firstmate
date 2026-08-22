@@ -127,6 +127,26 @@ try:
 except frame.FrameError:
     pass
 
+# A payload that never starts at all is the same fault, one byte earlier.
+try:
+    frame.Reader(io.BytesIO(frame.HEADER.pack(frame.AUDIO, 5))).read()
+    sys.exit("frame: a header with no payload behind it was accepted")
+except frame.FrameError:
+    pass
+
+# A stream cut inside the HEADER is a dropped connection too, and must NOT come
+# back as the clean close checked above. A lost SSH connection does not politely
+# end on a frame boundary, and a partial header read as end of input records the
+# turn as unanswered with no error, which puts a transport failure into a results
+# file as an ordinary turn the model did not answer.
+for cut in range(1, frame.HEADER.size):
+    try:
+        frame.Reader(io.BytesIO(frame.encode(frame.BYE)[:cut])).read()
+        sys.exit("frame: %d header bytes then EOF was read as a clean close" % cut)
+    except frame.FrameError as exc:
+        check("header" in str(exc),
+              "a truncated header should name itself: %s" % exc)
+
 # Audio bytes that happen to look like a header must not be trusted.
 for bad in (b"\xffZZZZ", frame.HEADER.pack(frame.AUDIO, frame.MAX_PAYLOAD + 1)):
     try:
@@ -1393,6 +1413,106 @@ except SystemExit as exc:
 check(timed_out is not None, "a silent relay was treated as ready")
 check("never reported ready" in timed_out,
       "a silent relay should time out with its own message: %s" % timed_out)
+
+# The uplink can die mid-session - the SSH connection drops, or the relay exits -
+# and the next talk start or talk end is then a write to a dead pipe. Every frame
+# a turn is made of goes through the one sender thread, so that write has to end
+# the thread the same quiet way a dead audio write does. Raising instead killed
+# the thread with a traceback and left the queue unserved, so each remaining run
+# sat out the full timeout with nothing sending its frames and was reported as an
+# unanswered turn rather than as the lost connection the downlink had already seen.
+class DeadPipe:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, kind, payload=b""):
+        self.sent.append(kind)
+        raise BrokenPipeError(32, "Broken pipe")
+
+for label, opening in (("talk start", client.START), ("talk end", client.END),
+                       ("audio", b"\x00\x00")):
+    sending = client.Client(client.parse_args(["--host", "desk"]))
+    sending.uplink = DeadPipe()
+    sending.up_q.put(opening)
+    sending.up_q.put(b"\x01\x01")
+    sending.up_q.put(None)
+    try:
+        sending._sender()
+    except BaseException as exc:               # noqa: BLE001
+        sys.exit("client: a broken pipe on %s killed the sender thread: %s: %s"
+                 % (label, type(exc).__name__, exc))
+    check(sending.uplink.sent and len(sending.uplink.sent) == 1,
+          "the sender should stop at the broken pipe on %s rather than keep "
+          "writing into it: %r" % (label, sending.uplink.sent))
+    if opening is client.END:
+        # Talk end stamps the moment it reached the wire before the write is
+        # attempted, so uplink_drain_s survives a turn the connection cut short.
+        check("wire_end" in sending.turn,
+              "talk end must still record when it reached the wire: %r"
+              % sending.turn)
+
+# A connection that drops mid-turn does not wait for a frame boundary, so the
+# downlink meets a header cut in half. That is a transport failure and the turn
+# record has to say so: a run that only reports answered: false reads in
+# runs.jsonl exactly like a turn the model declined, and the latency spread
+# docs/voice-relay.md publishes is computed from that file.
+import threading as thread_lib
+
+
+class CutStream:
+    """A downlink that drops mid-header once the turn is under way.
+
+    Held closed until the client has actually opened the turn, so the cut lands
+    inside the turn being measured rather than before it, which is the sequence
+    a dropped SSH connection produces and the only one whose record matters.
+    """
+
+    def __init__(self, gate):
+        self._gate = gate
+        self._half = frame.encode(frame.BYE)[:2]
+        self._at = 0
+
+    def read(self, count):
+        check(self._gate.wait(10), "the turn never opened, so nothing was cut")
+        chunk = self._half[self._at:self._at + count]
+        self._at += len(chunk)
+        return chunk
+
+
+opened = thread_lib.Event()
+
+
+class GateOpeningUplink:
+    """Discards the uplink and reports when the turn's first frame went out."""
+
+    def send(self, kind, payload=b""):
+        if kind == frame.TALK_START:
+            opened.set()
+
+
+cut = client.Client(client.parse_args(
+    ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+     "--out-file", os.path.join(TMP, "reply-cut.pcm"), "--timeout", "5"]))
+cut.reader = frame.Reader(CutStream(opened))
+cut.uplink = GateOpeningUplink()
+cut.playback = client.FilePlayback(os.path.join(TMP, "reply-cut.pcm"))
+cut.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
+cut.capture.start(cut.up_q, cut.talking)
+thread_lib.Thread(target=cut._sender, daemon=True).start()
+thread_lib.Thread(target=cut._downlink, daemon=True).start()
+cut_record = cut.take_turn(1)
+cut.up_q.put(None)
+cut.playback.close()
+
+check(cut.closed.wait(10), "a cut header must end the downlink, not hang it")
+check(not cut_record["answered"], "a cut connection cannot have answered: %r"
+      % cut_record)
+check(cut_record["relay_error"],
+      "a dropped connection must be reported in the turn record rather than "
+      "leaving it indistinguishable from a turn nobody answered: %r"
+      % cut_record)
+check("connection" in cut_record["relay_error"],
+      "and it should say the connection went: %r" % cut_record["relay_error"])
 
 # A startup that refuses part way through releases what it already started, and
 # close() therefore has to survive a half-built client. The real devices cannot be
