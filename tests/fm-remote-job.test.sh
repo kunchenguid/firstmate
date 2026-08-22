@@ -625,12 +625,22 @@ pass "quarantine clears only after recorded execution has stopped"
 
 # A replacement stops a Linux worker by signalling its whole isolated group, and
 # the supervisor in that group forwards a second stop signal to the same serving
-# child, so the serving child is always signalled more than once. Keep signalling
-# until it is gone: the first signal starts the shutdown and every later one
-# lands inside it, the same way the group signal and the forwarded signal do. A
-# shutdown that dies part way through leaves its ownership lock behind holding a
-# half-written temp file no later worker can clear, and every replacement then
-# fails to report ready.
+# child, so the serving child is always signalled more than once. Signal a small
+# bounded burst and then keep signalling until it is gone: the first signal
+# starts the shutdown and every later one lands inside it, the same way the group
+# signal and the forwarded signal do. A shutdown that dies part way through
+# leaves its ownership lock behind holding a half-written temp file no later
+# worker can clear, and every replacement then fails to report ready.
+#
+# The burst is bounded and the follow-up signals are paced deliberately. An
+# unpaced signal loop delivers hundreds of thousands of signals per second,
+# which corrupts the signalled bash's own pending-trap bookkeeping ("warning:
+# run_pending_traps: bad value in trap_list[15]") and then kills it part way
+# through the shutdown with SIGTERM or SIGSEGV. That reports a shutdown defect
+# this worker does not have. Ten back-to-back signals still all land inside the
+# shutdown's first file operation, so the repeat this pins is unchanged: with
+# the default disposition restored instead of ignored, the ownership lock is
+# left behind every run.
 REPEAT_HOME="$TMP_ROOT/repeat-signal-account"
 REPEAT_STATE="$TMP_ROOT/repeat-signal-jobs"
 mkdir -p "$REPEAT_HOME"
@@ -645,8 +655,14 @@ for _ in $(seq 1 300); do
 done
 assert_present "$REPEAT_STATE/worker.ready" "the repeated-signal worker did not become ready"
 REPEAT_DEADLINE=$((SECONDS + 30))
+REPEAT_BURST=0
+while [ "$REPEAT_BURST" -lt 10 ]; do
+  kill -TERM "$REPEAT_WORKER_PID" 2>/dev/null || true
+  REPEAT_BURST=$((REPEAT_BURST + 1))
+done
 while kill -0 "$REPEAT_WORKER_PID" 2>/dev/null && [ "$SECONDS" -lt "$REPEAT_DEADLINE" ]; do
   kill -TERM "$REPEAT_WORKER_PID" 2>/dev/null || true
+  sleep 0.05
 done
 if kill -0 "$REPEAT_WORKER_PID" 2>/dev/null; then
   kill -KILL "$REPEAT_WORKER_PID" 2>/dev/null || true
