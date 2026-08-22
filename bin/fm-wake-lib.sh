@@ -420,10 +420,36 @@ fm_lock_abs_path() {
   printf '%s/%s\n' "$dir" "$base"
 }
 
+# Not exported: each call runs inside its own command-substitution subshell
+# regardless, so BASHPID is already unique per call and there is no state here
+# that would need to survive past that subshell.
+FM_LOCK_OWNER_SEQ=0
+
+# fm_lock_owner_path <lock-abs-path>
+# Compute a not-yet-existing owner directory path without creating anything.
+# Pure bash - no fork, no disk write - so it is safe to call through a command
+# substitution: unlike mktemp -d, nothing here needs to survive past the
+# subshell that runs it. Callers that must track the path before it exists on
+# disk (fm_lock_try_create) get their own BASHPID from that subshell, which is
+# enough entropy on its own; FM_LOCK_OWNER_SEQ just adds cheap insurance for
+# shells where BASHPID falls back to the static $$.
+fm_lock_owner_path() {
+  local lock_abs=$1
+  FM_LOCK_OWNER_SEQ=$((FM_LOCK_OWNER_SEQ + 1))
+  printf '%s.owner.%x.%x.%x\n' "$lock_abs" "${BASHPID:-$$}" "$FM_LOCK_OWNER_SEQ" "$RANDOM"
+}
+
+# Convenience wrapper for callers that just want an owner directory handed
+# back already created (tests, mainly). fm_lock_try_create does NOT use this:
+# it must record the path as pending before the directory exists, and this
+# function's mkdir would already be on disk by the time a command substitution
+# returned it, reopening the same race fm_lock_try_create exists to close.
 fm_lock_owner_dir() {
-  local lockdir=$1 lock_abs
+  local lockdir=$1 lock_abs ownerdir
   lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
-  mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
+  ownerdir=$(fm_lock_owner_path "$lock_abs") || return 1
+  mkdir "$ownerdir" 2>/dev/null || return 1
+  printf '%s\n' "$ownerdir"
 }
 
 fm_lock_prepare_owner() {
@@ -503,12 +529,20 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} lock_abs ownerdir
   FM_LOCK_OWNER_DIR=
-  # mktemp -d has already put the owner directory on disk by the time this
-  # returns, so it is recorded before anything else can interrupt us.
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  # fm_lock_owner_path only computes a path - nothing is on disk yet - so it is
+  # recorded as pending before the mkdir below, not after. mkdir still forks,
+  # but the record is already in place by then: a signal landing anywhere from
+  # here through mkdir's fork leaves at worst a path recorded for a directory
+  # that never existed, which fm_lock_discard_owner's rmdir treats as a no-op.
+  lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
+  ownerdir=$(fm_lock_owner_path "$lock_abs") || return 1
   _fm_lock_track_pending_owner "$ownerdir"
+  if ! mkdir "$ownerdir" 2>/dev/null; then
+    _fm_lock_untrack_pending_owner "$ownerdir"
+    return 1
+  fi
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
