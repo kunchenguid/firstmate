@@ -514,7 +514,7 @@ Observed output, last four lines:
 ```text
 ok - fm-turnend-guard --claude: the early claim is the whole difference in the pre-identity window (incident regression)
 ok - fm-turnend-guard --claude: an in-progress claim is trusted only while its publisher is alive and unchanged
-ok - fm-turnend-guard --claude: a fresh arming epoch is recovery under way, not a missing claim
+ok - fm-turnend-guard --claude: a fresh arming epoch with no live arm, watcher or claim still blocks
 ok - fm-turnend-guard --claude: the cooperative wait is bounded by elapsed time, not by a pass count
 ```
 
@@ -523,7 +523,7 @@ Each of the four fails against an unpacked pre-fix tree, checked by running them
 ```text
 not ok - no in-progress claim appeared before the auto-arm's identity gate: firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after 2 bounded attempts, and no live watcher with a fresh beacon was verified.
 not ok - a live identity-matched claim must be accepted as recovery under way: expected exit 0, got 2
-not ok - --claude must not force a turn against a fresh arming epoch: expected exit 0, got 2
+not ok - --claude must force a turn against a fresh arming epoch with no live arm, watcher, or claim: expected exit 2, got 0
 not ok - the cooperative wait spent 24818ms of 3s sleeps for an 800ms budget (baseline 1887ms, total 26705ms): it is counting passes, not elapsed time
 ```
 
