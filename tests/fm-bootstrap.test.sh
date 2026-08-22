@@ -1187,6 +1187,96 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# --- leaked browser stacks (BROWSER_LEAK) -----------------------------------
+#
+# A headless Chrome stack left behind by a finished worker wears ordinary
+# Chrome's clothes, so nothing that looked for firstmate's own processes ever
+# noticed one; two were found alive at 16.6 hours and 6 days only because the
+# captain asked what was burning the CPU. Session start is where firstmate will
+# actually see it, and the line has to appear for a real leak and never
+# otherwise. These cases drive the real detector against a REAL process.
+
+# browser_session_for <case-dir> <task-id>: the session name the home under test
+# binds to that task. Asked of the reaper with the SAME home env bootstrap runs
+# under, so the fixture cannot drift from the real derivation.
+browser_session_for() {  # <case-dir> <task-id>
+  FM_HOME="$1/home" FM_ROOT_OVERRIDE="$1/home" "$ROOT/bin/fm-browser-reaper.sh" --session-name "$2"
+}
+
+start_leaked_browser_stack() {  # <case-dir> <session-name>
+  local dir=$1 session=$2 pid
+  mkdir -p "$dir/sessions/$session"
+  # An inline -c program, not a script file: a long-running `bash somefile`
+  # re-reads that file as it runs, so a fixture backed by the suite's temp root
+  # dies unpredictably once cleanup removes it.
+  bash -c 'while :; do sleep 0.5; done' \
+    "$dir/node_modules/chrome-devtools-axi/dist/bin/chrome-devtools-axi-bridge.js" \
+    >/dev/null 2>&1 </dev/null &
+  pid=$!
+  printf '{"pid":%s,"port":9999}\n' "$pid" > "$dir/sessions/$session/bridge.pid"
+  printf '%s\n' "$pid"
+}
+
+run_browser_leak_bootstrap() {  # <case-dir> <fakebin>
+  local dir=$1 fakebin=$2
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_BROWSER_SESSIONS_ROOT="$dir/sessions" \
+    FM_STATE_OVERRIDE="$dir/home/state" \
+    FM_BROWSER_OWNED_GRACE_SECS=0 \
+    "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_session_start_reports_a_leaked_browser_stack() {
+  local case_dir fakebin pid out
+  case_dir="$TMP_ROOT/browser-leak"
+  mkdir -p "$case_dir/home/state"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  pid=$(start_leaked_browser_stack "$case_dir" "$(browser_session_for "$case_dir" task-gone)")
+  # No state/task-gone.meta: the task is finished and its browser outlived it.
+
+  set +e
+  out=$(run_browser_leak_bootstrap "$case_dir" "$fakebin")
+  set -e
+  kill -KILL "$pid" 2>/dev/null || true
+
+  printf '%s\n' "$out" | grep -q '^BROWSER_LEAK:' \
+    || fail "session start did not report a leaked browser stack, got: $out"
+  printf '%s\n' "$out" | grep -q 'task-gone' \
+    || fail "BROWSER_LEAK line did not name the finished task, got: $out"
+  pass "session start reports a browser stack that outlived its task"
+}
+
+test_session_start_is_silent_while_the_browser_owner_lives() {
+  local case_dir fakebin pid out
+  case_dir="$TMP_ROOT/browser-live"
+  mkdir -p "$case_dir/home/state"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  pid=$(start_leaked_browser_stack "$case_dir" "$(browser_session_for "$case_dir" task-live)")
+  : > "$case_dir/home/state/task-live.meta"
+
+  set +e
+  out=$(run_browser_leak_bootstrap "$case_dir" "$fakebin")
+  set -e
+  kill -KILL "$pid" 2>/dev/null || true
+
+  [ -z "$out" ] || fail "session start should stay silent for a live task's browser, got: $out"
+  pass "session start prints nothing for a browser stack whose task is still live"
+}
+
+test_session_start_is_silent_with_no_browser_stack_at_all() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/browser-none"
+  mkdir -p "$case_dir/home/state" "$case_dir/sessions"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  set +e
+  out=$(run_browser_leak_bootstrap "$case_dir" "$fakebin")
+  set -e
+  [ -z "$out" ] || fail "session start should stay silent with no browser stack, got: $out"
+  pass "session start prints nothing when no browser stack exists"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1216,3 +1306,6 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_session_start_reports_a_leaked_browser_stack
+test_session_start_is_silent_while_the_browser_owner_lives
+test_session_start_is_silent_with_no_browser_stack_at_all

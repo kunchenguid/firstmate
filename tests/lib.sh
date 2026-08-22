@@ -34,6 +34,15 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Pin the chrome-devtools-axi session registry that bin/fm-browser-reaper.sh
+# reads to a path that does not exist, so the leaked-browser check bootstrap runs
+# is inert by default. Without this, a genuinely leaked browser stack on the
+# developer's own machine would inject a BROWSER_LEAK line into every suite that
+# runs bootstrap and break the ones asserting silence - a real finding, but not
+# the one those tests are making. A case that wants a stack points this variable
+# at its own fixture.
+export FM_BROWSER_SESSIONS_ROOT="${FM_BROWSER_SESSIONS_ROOT:-/nonexistent/fm-browser-sessions}"
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

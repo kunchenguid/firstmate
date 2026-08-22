@@ -357,6 +357,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/browser-stack-reap.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/dispatch-auth.md",
       "audience": "maintainer-verification"
     },

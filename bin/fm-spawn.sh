@@ -269,6 +269,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$SCRIPT_DIR/fm-backend-hometag-lib.sh"
 # shellcheck source=bin/fm-worktree-claim-lib.sh
 . "$SCRIPT_DIR/fm-worktree-claim-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -3318,6 +3320,19 @@ spawn_record_traceparent() {
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Bind this task's browser work to this task. chrome-devtools-axi runs its
+# bridge detached at ppid 1 and keeps ONE bridge per session name for the whole
+# machine, so a stack it leaves behind belongs to no process tree and cannot be
+# attributed after the fact - which is how headless Chrome stacks survived for
+# days with no worker behind them. Naming the session for the task is the
+# attribution: every stack this worker launches carries its task id, so
+# bin/fm-browser-reaper.sh can reap exactly this task's browser at cleanup and
+# recognize it as leaked if it outlives the task. The home tag scopes that name
+# to this installation, because chrome-devtools-axi's session registry is one
+# machine-wide namespace and a sibling home must never read this task's stack as
+# an unowned leak. Sent on the same channel as GOTMPDIR so every backend and
+# harness gets it before launch.
+spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_SESSION=fm-$(fm_backend_hometag)-$ID"
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.

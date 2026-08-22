@@ -562,6 +562,80 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
+# --- the task's browser (script header Fix 2) --------------------------------
+#
+# chrome-devtools-axi runs its bridge DETACHED at ppid 1 and keeps one bridge per
+# session name for the whole machine, so a leaked headless Chrome stack belongs
+# to no worker's process tree at all - which is how stacks survived 16.6 hours
+# and 6 days with nothing behind them, each spinning a core. Ownership is
+# declared instead: bin/fm-spawn.sh names the session fm-<task-id>, and cleanup
+# reaps exactly that session. This drives the real reaper against a REAL process.
+# The session name teardown's reap resolves for a task, asked of the reaper with
+# the same home env run_teardown uses, so the fixture cannot drift from the real
+# derivation shared with bin/fm-spawn.sh.
+browser_session_for() {  # <task-id>
+  FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-browser-reaper.sh" --session-name "$1"
+}
+
+start_task_browser_stack() {  # <case-dir> <session-name>
+  local case_dir=$1 session=$2 pid
+  mkdir -p "$case_dir/browser/sessions/$session"
+  # An inline -c program, not a script file: a long-running `bash somefile`
+  # re-reads that file as it runs, so a fixture backed by the suite's temp root
+  # dies unpredictably once cleanup removes it.
+  bash -c 'while :; do sleep 0.5; done' \
+    "$case_dir/browser/node_modules/chrome-devtools-axi/dist/bin/chrome-devtools-axi-bridge.js" \
+    >/dev/null 2>&1 </dev/null &
+  pid=$!
+  printf '{"pid":%s,"port":9999}\n' "$pid" \
+    > "$case_dir/browser/sessions/$session/bridge.pid"
+  printf '%s\n' "$pid"
+}
+
+browser_pid_gone() {  # <pid>
+  local pid=$1 waited=0
+  while [ "$waited" -lt 100 ]; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
+test_teardown_reaps_the_tasks_browser() {
+  local case_dir pid other rc
+  case_dir=$(make_case browser-reap)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "browsed the web"
+  add_fork_with_pushed_branch "$case_dir"
+
+  pid=$(start_task_browser_stack "$case_dir" "$(browser_session_for task-x1)")
+  # A second task's browser, to prove cleanup stays scoped to its own task.
+  other=$(start_task_browser_stack "$case_dir" "$(browser_session_for task-other)")
+
+  set +e
+  FM_BROWSER_SESSIONS_ROOT="$case_dir/browser/sessions" \
+  FM_BROWSER_REAP_GRACE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  if [ "$rc" -ne 0 ]; then
+    kill -KILL "$pid" "$other" 2>/dev/null || true
+    fail "teardown of landed work refused (rc=$rc): $(cat "$case_dir/stderr")"
+  fi
+  if ! browser_pid_gone "$pid"; then
+    kill -KILL "$pid" "$other" 2>/dev/null || true
+    fail "teardown left the task's browser stack running:"$'\n'"$(cat "$case_dir/stderr")"
+  fi
+  if ! kill -0 "$other" 2>/dev/null; then
+    kill -KILL "$pid" "$other" 2>/dev/null || true
+    fail "teardown reaped a DIFFERENT task's browser stack"
+  fi
+  kill -KILL "$other" 2>/dev/null || true
+  pass "teardown closes the task's own browser stack and leaves another task's alone"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -2591,6 +2665,7 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_teardown_reaps_the_tasks_browser
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present

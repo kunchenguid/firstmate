@@ -247,6 +247,9 @@ family_for_basename() {
     fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
+    fm-browser-reaper.test.sh)
+      printf '%s\n' session-bootstrap
+      ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
       printf '%s\n' afk
       ;;
@@ -440,6 +443,7 @@ tests/fm-backend.test.sh 17502
 tests/fm-backlog-handoff.test.sh 2975
 tests/fm-bearings-snapshot.test.sh 67058
 tests/fm-bootstrap.test.sh 36697
+tests/fm-browser-reaper.test.sh 5000
 tests/fm-busy-adapter-wiring.test.sh 14847
 tests/fm-busy-state.test.sh 679
 tests/fm-calm-pi-extension.test.sh 410
@@ -1032,6 +1036,13 @@ families_for_changed_path() {
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
+      printf '%s\n' pr-forge
+      ;;
+    bin/fm-browser-reaper.sh)
+      # Two consumers: teardown's per-task reap (pr-forge) and bootstrap's
+      # detect-only leak line (session-bootstrap), plus the reaper's own
+      # identification and refusal contract.
+      printf '%s\n' session-bootstrap
       printf '%s\n' pr-forge
       ;;
     bin/fm-nm-run-lib.sh)

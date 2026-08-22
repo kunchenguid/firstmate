@@ -116,7 +116,22 @@
 #     that verified run instance. A run already terminal
 #     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
 #     an already-aborted run reads back terminal and is skipped on retry.
-#   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
+#   Fix 2 - close the task's browser. chrome-devtools-axi runs its bridge
+#     DETACHED at ppid 1, and keeps ONE bridge per session name for the whole
+#     machine rather than one per invocation, so a headless Chrome stack it
+#     leaves behind sits in no worker's process tree at all (observed
+#     2026-08-22: two stacks, 16.6 hours and 6 days 13 hours old, each ten
+#     processes deep, their Chrome gpu-process helpers pinning a full core
+#     apiece with no live task behind either). Fix 3's cwd sweep cannot own
+#     this: the bridge's working directory is frozen to whichever directory
+#     started it first, which makes a cwd match a coincidence rather than
+#     ownership - unsafe when a still-live task shares the bridge, and useless
+#     when the starting directory is already gone. bin/fm-spawn.sh instead
+#     declares the ownership by exporting CHROME_DEVTOOLS_AXI_SESSION=fm-<id>
+#     into the pane, and bin/fm-browser-reaper.sh owns the reap plus the
+#     two-signal identification that refuses anything it cannot positively
+#     prove is ours. Best effort: a reap failure never blocks this teardown.
+#   Fix 3 - reap leaked descendant processes. A backgrounded/disowned process
 #     started under the worktree (or its per-task tasktmp) does not receive the
 #     SIGHUP/SIGTERM that closing the backend pane sends to its own foreground
 #     process group, so it survives reparented to init (observed 2026-08-03:
@@ -130,9 +145,9 @@
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
-#   Fix 3 - sweep abandoned remote job workers. A remote job worker started
+#   Fix 4 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
-#     being reachable by Fix 2, because its working directory is wherever it
+#     being reachable by Fix 3, because its working directory is wherever it
 #     was launched rather than the task worktree (observed 2026-08-07: 29
 #     workers at ppid 1, 1-2 days old, each still polling and appending to a
 #     log in a pruned no-mistakes gate worktree). bin/fm-remote-job-reap-orphans.sh
@@ -1331,7 +1346,7 @@ conclude_task_no_mistakes_run() {  # <worktree>
   return 1
 }
 
-# Fix 2 (see script header): pids of every process whose CURRENT WORKING
+# Fix 3 (see script header): pids of every process whose CURRENT WORKING
 # DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
 # -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
 # documents as slow). Never $$ (this script's own pid). Empty output when
@@ -2426,9 +2441,9 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
+# them). Fix 1, Fix 2, and Fix 3 (see script header) run here, unconditionally
+# on --force, and before ANY destructive step below - a still-parked run, a
+# leaked browser, or a leaked process can own live work in this exact worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
@@ -2507,12 +2522,17 @@ fi
 
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
+  # Fix 2 (see script header) runs BEFORE Fix 3's cwd sweep so the browser is
+  # closed through chrome-devtools-axi's own supported shutdown rather than
+  # being signalled blind by whichever of its ten processes happens to share
+  # this worktree's cwd. Best effort - a reap failure never blocks teardown.
+  "$SCRIPT_DIR/fm-browser-reaper.sh" --reap "$ID" >&2 || true
   if [ "$_td_wt_collision" -eq 0 ]; then
     reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
   fi
 fi
 
-# Fix 3 (see script header): sweep remote job workers abandoned by an already
+# Fix 4 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 

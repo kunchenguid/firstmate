@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, UPGRADE, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, LIVE_TEST_VERSIONS_CHANGED, or FMX - or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, UPGRADE, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, LIVE_TEST_VERSIONS_CHANGED, BROWSER_LEAK, or FMX - or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -70,5 +70,10 @@ When any diagnostic needs captain attention, report the plain consequence and re
   The nine are: `fm-agy-model-switch-live-e2e`, `fm-claude-stop-autoarm-live-e2e`, `fm-harness-liveness-drift-live-e2e`, `fm-submit-latency-live-e2e`, `fm-quota-array-dispatch-live-e2e`, `fm-herdr-version-floor-live-e2e`, `fm-composer-matrix-live-e2e`, `fm-sessionstart-hook-live-e2e`, `fm-sessionstart-instruction-refresh-live-e2e`.
   The baseline was already updated by the check, so the next session will not re-trigger for these same versions.
   If a test fails, report the failure with the tool name and version rather than blocking the entire fleet.
+- `BROWSER_LEAK: <leaked browser stack and how to close it>` - a headless Chrome stack from the browser tool is still running with nothing behind it, burning CPU until something closes it.
+  Each line names one stack and the exact command that closes it; `bin/fm-browser-reaper.sh` owns the identification and refuses to touch anything it cannot positively prove is the fleet's, including the captain's editor and their own browser.
+  When the line names a finished task, run the printed `--reap <task-id>`: it is the same reap cleanup performs, so a stack surfacing here means that task's cleanup did not run or predates the reap.
+  When the line reports an unattributed stack, the session name is the only ownership evidence the browser tool offers and no task claims it, so confirm with the captain before closing it rather than assuming it is abandoned - it may be a session someone is still using.
+  Report the CPU consequence, not the mechanism, and never close anything the printed line did not name.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local Relay poll artifacts (`docs/configuration.md` "Relay (.env)"); the emitted line still carries Relay's former `X mode` wording.
   Only when a running watcher needs the cadence transition applied immediately, restart the home-scoped watcher through the emitted harness supervision protocol; bootstrap deliberately never restarts the watcher itself.

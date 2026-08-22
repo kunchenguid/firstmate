@@ -20,6 +20,7 @@
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "LIVE_TEST_VERSIONS_CHANGED: <tool> (<old> -> <new>)[, ...]",
+#                 "BROWSER_LEAK: <leaked browser stack and how to close it>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
@@ -1259,6 +1260,16 @@ detect_local_config() {
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
   fi
+  # Leaked-browser check: a headless Chrome stack left behind by a finished
+  # worker wears ordinary Chrome's clothes, so nothing that looks for
+  # firstmate's own processes ever noticed one - they were found only when the
+  # captain asked what was burning the CPU, by which point one was six days
+  # old. bin/fm-browser-reaper.sh owns the two-signal identification and prints
+  # nothing at all when there is nothing leaked. Detect-only and cheap: a few
+  # small reads of chrome-devtools-axi's session registry plus one `ps` bounded
+  # by the number of registered sessions, never a process-table or file-tree
+  # scan.
+  "$SCRIPT_DIR/fm-browser-reaper.sh" --detect 2>/dev/null || true
 }
 
 # The order below is the order the diagnostics have always printed in, so a
