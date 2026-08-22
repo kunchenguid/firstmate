@@ -31,10 +31,10 @@
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context plus the optional `jj` opt-in token that
 # selects jj bookmarks for jj-managed projects when the jj/jjhouse tooling is
-# installed (without it the scaffold warns and falls back to the git branch step,
-# so the token never emits a mandatory command the worker cannot run); the
-# delivery mode itself is never read from it here - the explicit --mode is
-# authoritative:
+# installed (a jj-managed project without that tooling refuses to scaffold: its
+# AGENTS.md forbids raw git writes, so no branch command this host could emit
+# would be runnable and the token must never mandate one); the delivery mode
+# itself is never read from it here - the explicit --mode is authoritative:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
@@ -424,9 +424,10 @@ DOD=${DOD%$'\n'}
 # The token takes effect only when the tooling that makes the step executable
 # is present on this host (the same host the crew worktrees live on): `jj`
 # runs the bookmark command and `jjhouse` provisions the jj workspace pool.
-# A project marked jj-managed before that tooling is installed falls back to
-# the git branch step with a loud warning - never a mandatory command the
-# worker cannot run, and never a silent misconfiguration.
+# A jj-managed project without that tooling cannot be worked on from this host
+# at all: `jj bookmark create` would fail and the git fallback would violate
+# the project's raw-git-write ban, so the scaffold refuses instead of emitting
+# a mandatory first action the worker cannot run.
 JJ_MANAGED=0
 if [ -f "$DATA/projects.md" ]; then
   # The token is read only from the documented registry line format: the mode
@@ -447,12 +448,14 @@ if [ -f "$DATA/projects.md" ]; then
   ' "$DATA/projects.md")
   [ "$JJ_TOKEN" = jj ] && JJ_MANAGED=1
 fi
-if [ "$JJ_MANAGED" = 1 ] && command -v jj >/dev/null 2>&1 && command -v jjhouse >/dev/null 2>&1; then
-  BRANCH_STEP="1. First action: create your branch. This repo is jj-managed (its AGENTS.md forbids raw git write commands): run \`jj bookmark create fm/$ID\`."
-else
-  if [ "$JJ_MANAGED" = 1 ]; then
-    echo "warn: $REPO is registered jj-managed but jj/jjhouse is not on PATH; falling back to the git branch step (provision jjhouse to activate the jj path)" >&2
+if [ "$JJ_MANAGED" = 1 ]; then
+  if command -v jj >/dev/null 2>&1 && command -v jjhouse >/dev/null 2>&1; then
+    BRANCH_STEP="1. First action: create your branch. This repo is jj-managed (its AGENTS.md forbids raw git write commands): run \`jj bookmark create fm/$ID\`."
+  else
+    echo "error: $REPO is registered jj-managed in data/projects.md but jj/jjhouse is not on PATH; a jj-managed project forbids raw git writes, so there is no branch step this host can run - provision jjhouse here or remove the jj token, then re-scaffold" >&2
+    exit 1
   fi
+else
   BRANCH_STEP="1. First action: create your branch: \`git checkout -b fm/$ID\`"
 fi
 

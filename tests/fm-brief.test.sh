@@ -337,12 +337,13 @@ EOF
   pass "fm-brief.sh: jj registry token selects the jj branch step through FM_DATA_OVERRIDE"
 }
 
-# The jj token never emits a mandatory command the worker cannot run: when the
-# token is present but the jj/jjhouse tooling is absent from PATH, the scaffold
-# falls back to the git branch step and warns loudly instead of scaffolding a
-# first action that would fail on launch.
-test_jj_token_without_tooling_falls_back_to_git() {
-  local home data brief out
+# The jj token never emits a mandatory command the worker cannot run: a
+# jj-managed project's AGENTS.md forbids raw git writes, so when the token is
+# present but the jj/jjhouse tooling is absent from PATH there is no branch
+# step this host can run and the scaffold refuses outright (exit 1, no brief)
+# instead of degrading to a forbidden git command.
+test_jj_token_without_tooling_refuses_scaffold() {
+  local home data out rc
   home="$TMP_ROOT/jj-no-tooling-home"
   data="$TMP_ROOT/jj-no-tooling-data"
   make_tooling_bin "$TMP_ROOT/jj-no-toolbin"
@@ -351,16 +352,15 @@ test_jj_token_without_tooling_falls_back_to_git() {
 - jj-proj [no-mistakes] jj - fixture for jj-managed (added 2026-07-01)
 EOF
   out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" PATH="$TMP_ROOT/jj-no-toolbin" \
-    "$ROOT/bin/fm-brief.sh" brief-nool-d1 jj-proj --mode no-mistakes 2>&1)
-  brief="$data/brief-nool-d1/brief.md"
-  assert_present "$brief" "brief should still scaffold without jj tooling"
-  assert_grep 'git checkout -b fm/brief-nool-d1' "$brief" \
-    "jj token without jj tooling must fall back to the git branch step"
-  assert_no_grep 'jj bookmark create fm/brief-nool-d1' "$brief" \
-    "jj token without jj tooling still scaffolded the mandatory jj command"
-  assert_contains "$out" "warn: jj-proj is registered jj-managed but jj/jjhouse is not on PATH" \
-    "jj token without jj tooling must warn loudly instead of silently degrading"
-  pass "fm-brief.sh: jj token without jj/jjhouse tooling falls back to git with a warning"
+    "$ROOT/bin/fm-brief.sh" brief-nool-d1 jj-proj --mode no-mistakes 2>&1); rc=$?
+  expect_code 1 "$rc" "jj token without jj tooling must refuse the scaffold (got $rc)"
+  assert_contains "$out" "jj-proj is registered jj-managed" \
+    "jj token without jj tooling must name the misconfigured project"
+  assert_contains "$out" "jjhouse" \
+    "jj token without jj tooling must point at the missing tooling"
+  assert_absent "$data/brief-nool-d1/brief.md" \
+    "jj token without jj tooling must not scaffold a brief with an unrunnable first action"
+  pass "fm-brief.sh: jj token without jj/jjhouse tooling refuses the scaffold instead of a git fallback"
 }
 
 # The jj scan reads only the documented registry line format: the mode bracket
@@ -850,7 +850,7 @@ test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_jj_token_selects_jj_branch_step
-test_jj_token_without_tooling_falls_back_to_git
+test_jj_token_without_tooling_refuses_scaffold
 test_jj_scan_ignores_legacy_description_brackets
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review

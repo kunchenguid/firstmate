@@ -34,8 +34,9 @@
 #   project's AGENTS.md forbids raw git write commands. The token implies
 #   captain-side jjhouse provisioning and is ignored by this parser, so the
 #   emitted mode/yolo are unaffected. fm-brief.sh honours the token only when
-#   the jj/jjhouse tooling is on PATH, else it warns and falls back to the git
-#   branch step.
+#   the jj/jjhouse tooling is on PATH, else it refuses the scaffold: a jj-managed
+#   project without that tooling has no runnable branch step (its AGENTS.md
+#   forbids the raw-git fallback), so no brief is emitted.
 #
 # --raw prints the registered annotation unmapped, so a caller that must tell a
 # conditional policy apart from a flat mode sees "no-mistakes-prod-only" itself.
