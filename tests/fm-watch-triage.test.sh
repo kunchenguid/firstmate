@@ -120,6 +120,25 @@ wait_numeric_file() {
   return 1
 }
 
+# Wait until <file> is gone, for the one thing a bigger wait_numeric_file budget cannot
+# buy: a poll that writes the file a test waits ON before removing the file the test
+# asserts on. wedge_timer_check repairs the idle-window timer and only THEN calls
+# clear_write_tracking, so a wait that returns the instant the timer turns numeric can
+# reach the write-chain assertion while the same poll is still one statement away from
+# dropping it - which is a spurious failure at any budget, and did fail 2 runs in 8 on
+# a host at load average 70. Waiting for the removal itself removes that race without
+# softening what is asserted: the caller still asserts absence afterwards, so a poll
+# that never drops the chain runs the budget out and fails exactly as before.
+wait_absent() {  # <file> [limit-ticks]
+  local file=$1 limit=${2:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$file" ] || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
 # fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
 file_mtime() {
@@ -3638,6 +3657,10 @@ test_timer_repair_drops_a_finished_write_deferral_chain() {
   pid=$!
   wait_numeric_file "$state/.stale-since-$key" 100 \
     || { reap "$pid"; fail "the corrupt idle-window timer was not repaired"; }
+  # The repair writes the timer and drops the chain in that order, so synchronize on
+  # the drop rather than on the timer (see wait_absent) - then assert it, so a repair
+  # that keeps the chain still fails here.
+  wait_absent "$state/.writing-since-$key" 100
   [ ! -e "$state/.writing-since-$key" ] \
     || { reap "$pid"; fail "an idle-window timer repair kept a finished write-deferral chain"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the idle-window timer repair enqueued a wake"; }
