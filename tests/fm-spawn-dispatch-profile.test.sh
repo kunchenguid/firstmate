@@ -148,6 +148,10 @@ if [ -n "${FM_FAKE_HARNESS_INPUT_LOG:-}" ]; then
 fi
 exit 0
 SH
+  cat > "$fakebin/muse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
   cat > "$fakebin/cursor-agent" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --list-models ]; then
@@ -156,7 +160,7 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cp" "$fakebin/chmod" "$fakebin/perl" "$fakebin/claude" "$fakebin/cursor-agent" "$fakebin/treehouse"
+  chmod +x "$fakebin/timeout" "$fakebin/cp" "$fakebin/chmod" "$fakebin/perl" "$fakebin/claude" "$fakebin/muse" "$fakebin/cursor-agent" "$fakebin/treehouse"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -351,6 +355,8 @@ run_spawn() {
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     FM_TEST_REAL_PERL="$REAL_PERL" \
+    XDG_CONFIG_HOME="${FM_TEST_XDG_CONFIG_HOME:-$home/xdgconfig}" \
+    XDG_DATA_HOME="${FM_TEST_XDG_DATA_HOME:-$home/xdgdata}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -644,6 +650,86 @@ test_config_override_cannot_relocate_receipt_authority() {
     "FM_CONFIG_OVERRIDE relocated the routing requirement out of existence"
   assert_spawn_refused_before_side_effects "$HOME_DIR" "$id" "$LAUNCH_LOG"
   pass "FM_CONFIG_OVERRIDE cannot relocate routing receipt authority"
+}
+
+assert_preflight_kept_retryable_receipt() {
+  local home=$1 id=$2 launchlog=$3
+  assert_present "$home/data/$id/routing-decision.pending.json" \
+    "preflight refusal consumed the retryable routing receipt"
+  assert_absent "$home/data/$id/routing-decision.json" \
+    "preflight refusal published the final routing receipt"
+  assert_spawn_refused_before_side_effects "$home" "$id" "$launchlog"
+  [ ! -s "$home/worktree.log" ] || fail "preflight refusal leased a worktree"
+}
+
+test_project_preflight_keeps_receipt_retryable() {
+  local rec id out status missing_project
+  id=profile-project-preflight-z12b1
+  rec=$(make_spawn_case profile-project-preflight claude "$id")
+  read_case_record "$rec"
+  missing_project="$CASE_DIR/missing-project"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$missing_project")
+  status=$?
+  expect_code 1 "$status" "missing project should refuse during preflight"
+  assert_preflight_kept_retryable_receipt "$HOME_DIR" "$id" "$LAUNCH_LOG"
+
+  out=$(FM_TEST_ROUTING_PRESERVE=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "corrected project retry should consume the original receipt"
+  assert_present "$HOME_DIR/data/$id/routing-decision.json" \
+    "corrected project retry did not publish the routing receipt"
+  pass "project preflight leaves the routing receipt retryable"
+}
+
+test_delivery_preflight_keeps_receipt_retryable() {
+  local rec id out status
+  id=profile-delivery-preflight-z12b2
+  rec=$(make_spawn_case profile-delivery-preflight claude "$id")
+  read_case_record "$rec"
+  printf 'Delivery contract: mode=direct-PR\n' > "$HOME_DIR/data/$id/brief.md"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 1 "$status" "delivery mismatch should refuse during preflight"
+  assert_contains "$out" "delivery mismatch" "delivery preflight refusal did not fire"
+  assert_preflight_kept_retryable_receipt "$HOME_DIR" "$id" "$LAUNCH_LOG"
+
+  out=$(FM_TEST_ROUTING_PRESERVE=1 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" "corrected delivery retry should consume the original receipt"
+  assert_present "$HOME_DIR/data/$id/routing-decision.json" \
+    "corrected delivery retry did not publish the routing receipt"
+  pass "delivery preflight leaves the routing receipt retryable"
+}
+
+test_muse_credential_preflight_keeps_receipt_retryable() {
+  local rec id out status config_home
+  id=profile-muse-preflight-z12b3
+  rec=$(make_spawn_case profile-muse-preflight muse "$id")
+  read_case_record "$rec"
+  config_home="$CASE_DIR/muse-config"
+  mkdir -p "$config_home/muse"
+
+  out=$(FM_TEST_XDG_CONFIG_HOME="$config_home" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "missing Muse credential should refuse during preflight"
+  assert_contains "$out" "no worker-reachable credential" "Muse credential refusal did not fire"
+  assert_preflight_kept_retryable_receipt "$HOME_DIR" "$id" "$LAUNCH_LOG"
+
+  printf '{"schema_version":1}\n' > "$config_home/muse/auth.json"
+  out=$(FM_TEST_ROUTING_PRESERVE=1 FM_TEST_XDG_CONFIG_HOME="$config_home" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "credentialed Muse retry should consume the original receipt"
+  assert_present "$HOME_DIR/data/$id/routing-decision.json" \
+    "credentialed Muse retry did not publish the routing receipt"
+  pass "Muse credential preflight leaves the routing receipt retryable"
 }
 
 test_duplicate_spawn_preserves_active_routing_provenance() {
@@ -1292,6 +1378,9 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_routing_receipt_is_unconditional_without_dispatch_config
 test_config_override_cannot_relocate_receipt_authority
+test_project_preflight_keeps_receipt_retryable
+test_delivery_preflight_keeps_receipt_retryable
+test_muse_credential_preflight_keeps_receipt_retryable
 test_duplicate_spawn_preserves_active_routing_provenance
 test_launch_uses_validated_brief_snapshot_after_source_replacement
 test_launch_refuses_replaced_validated_brief_target

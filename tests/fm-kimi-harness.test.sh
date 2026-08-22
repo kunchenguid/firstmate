@@ -272,6 +272,11 @@ model = "some/model"
 EOF
   cp "$config" "$original"
 
+  HOME="$home" "$KIMI_HOOK" check || fail "Kimi hook preflight refused a realistic config"
+  cmp -s "$original" "$config" || fail "Kimi hook preflight changed config bytes"
+  assert_absent "$home/.kimi-code/fm-turn-end.sh" "Kimi hook preflight installed the hook script"
+  assert_absent "$home/.kimi-code/fm-turn-end.d" "Kimi hook preflight created the registry"
+
   HOME="$home" "$KIMI_HOOK" install || fail "Kimi hook install refused a realistic config"
   cp "$config" "$once"
   HOME="$home" "$KIMI_HOOK" install || fail "second Kimi hook install failed"

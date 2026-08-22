@@ -706,6 +706,12 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "${FM_ROUTING_PREPARED_DIR:-}" ]; then
+    fm_routing_decision_discard_prepared || {
+      echo "warning: could not roll back the prepared routing receipt for $ID" >&2
+      status=1
+    }
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -1493,11 +1499,11 @@ fi
 # scout route, not a feature enabled by a configuration file.
 # Canonical config presence or absence is attested inside the receipt, while an
 # override directory is deliberately irrelevant to the decision authority.
-# Validate and consume before hook installation, worktree lease, endpoint
-# creation, metadata publication, pane input, or model execution.
+# Validate and snapshot before fallible spawn preflight, then consume only after
+# that preflight succeeds and immediately before the first spawn side effect.
 # Secondmate routing retains its separate provisioning and registry contract.
 if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
-  fm_routing_decision_validate_and_persist \
+  fm_routing_decision_validate_and_prepare \
     "$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
     "$RAW_LAUNCH" "$LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
     || exit 1
@@ -1533,8 +1539,8 @@ case "$LAUNCH" in
     KIMI_BIN=$(resolve_kimi_binary) || exit 1
     LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
     if [ "$KIND" != secondmate ]; then
-      "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
-        echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
+      "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" check || {
+        echo "error: refusing Kimi spawn because the global turn-end hook cannot be installed safely" >&2
         exit 1
       }
     fi
@@ -1928,6 +1934,20 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       ;;
   esac
 }
+
+if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
+  fm_routing_decision_persist_prepared || exit 1
+  if [ -n "${KIMI_BIN:-}" ]; then
+    "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
+      echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
+      exit 1
+    }
+  fi
+  fm_routing_decision_seal_prepared || {
+    echo "error: validated routing transaction could not be sealed" >&2
+    exit 1
+  }
+fi
 
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then

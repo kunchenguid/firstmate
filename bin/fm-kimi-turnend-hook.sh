@@ -13,18 +13,19 @@
 # token in $HOME/.kimi-code/fm-turn-end.d/.
 #
 # Usage:
+#   fm-kimi-turnend-hook.sh check
 #   fm-kimi-turnend-hook.sh install
 #   fm-kimi-turnend-hook.sh remove
 set -u
 
 case "${1:-}" in
-  install|remove) ACTION=$1 ;;
+  check|install|remove) ACTION=$1 ;;
   -h|--help)
     sed -n '2,18{s/^# \{0,1\}//;p;}' "$0"
     exit 0
     ;;
   *)
-    printf 'usage: %s install|remove\n' "${0##*/}" >&2
+    printf 'usage: %s check|install|remove\n' "${0##*/}" >&2
     exit 2
     ;;
 esac
@@ -37,7 +38,7 @@ if ! command -v python3 >/dev/null 2>&1; then
   printf 'fm-kimi-turnend-hook: refused: python3 with tomllib is required to validate config.toml.\n' >&2
   exit 1
 fi
-if [ "$ACTION" = install ] && ! command -v jq >/dev/null 2>&1; then
+if [ "$ACTION" != remove ] && ! command -v jq >/dev/null 2>&1; then
   printf 'fm-kimi-turnend-hook: refused: jq is required by the installed Kimi turn-end hook.\n' >&2
   exit 1
 fi
@@ -229,7 +230,7 @@ try:
     if HOOK_NAME in outside:
         refuse("config.toml references fm-turn-end.sh outside the Firstmate-owned region.")
 
-    if ACTION == "install":
+    if ACTION in ("check", "install"):
         if os.path.lexists(REGISTRY):
             info = os.lstat(REGISTRY)
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
@@ -251,16 +252,17 @@ try:
                 (b"\n" if region[2] == BEGIN_OWNS_NEWLINE else b"") + block(region[2])
             ) + original[region[1] :]
         parse_toml(candidate, "updated config.toml")
-        os.makedirs(REGISTRY, mode=0o700, exist_ok=True)
-        os.chmod(REGISTRY, 0o700)
-        installed_hook = None
-        if os.path.exists(HOOK):
-            with open(HOOK, "rb") as stream:
-                installed_hook = stream.read()
-        if installed_hook != HOOK_BYTES or stat.S_IMODE(os.stat(HOOK).st_mode) != 0o700:
-            atomic_write(HOOK, HOOK_BYTES, 0o700)
-        if candidate != original:
-            atomic_write(CONFIG, candidate, stat.S_IMODE(config_info.st_mode))
+        if ACTION == "install":
+            os.makedirs(REGISTRY, mode=0o700, exist_ok=True)
+            os.chmod(REGISTRY, 0o700)
+            installed_hook = None
+            if os.path.exists(HOOK):
+                with open(HOOK, "rb") as stream:
+                    installed_hook = stream.read()
+            if installed_hook != HOOK_BYTES or stat.S_IMODE(os.stat(HOOK).st_mode) != 0o700:
+                atomic_write(HOOK, HOOK_BYTES, 0o700)
+            if candidate != original:
+                atomic_write(CONFIG, candidate, stat.S_IMODE(config_info.st_mode))
     else:
         validate_firstmate_files_for_remove()
         candidate = outside
