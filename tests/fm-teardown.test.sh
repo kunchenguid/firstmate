@@ -119,10 +119,40 @@ SH
 
 # Echoes the case dir.
 make_case() {
-  local name=$1 case_dir fakebin
+  local name=$1 case_dir fakebin occupancy_bin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  occupancy_bin="$case_dir/occupancy-bin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin" "$occupancy_bin"
+
+  cat > "$occupancy_bin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ]; then
+  jq -n --arg path "${FM_FAKE_TREEHOUSE_WORKTREE:?}" '[{
+    name: "slot-task-x1",
+    path: $path,
+    status: "leased",
+    lease_id: "lease-task-x1",
+    lease_holder: "task-x1",
+    leased_at: null,
+    processes: []
+  }]'
+  exit 0
+fi
+if [ "${1:-}" = return ]; then
+  shift
+  args=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --if-lease-id|--if-lease-holder) shift 2 ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  exec "${FM_FAKE_TREEHOUSE_DELEGATE:?}" return "${args[@]}"
+fi
+exec "${FM_FAKE_TREEHOUSE_DELEGATE:?}" "$@"
+SH
+  chmod +x "$occupancy_bin/treehouse"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -619,6 +649,8 @@ write_meta() {
     "endpoint_task_id=task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
+    "treehouse_slot=slot-task-x1" \
+    "treehouse_lease=lease-task-x1" \
     "kind=$kind" \
     "mode=$mode"
 }
@@ -686,6 +718,7 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *" --json state "*) printf '%s\n' 'MERGED' ; exit 0 ;;
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
@@ -976,7 +1009,9 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
-  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+  FM_FAKE_TREEHOUSE_WORKTREE="$case_dir/wt" \
+  FM_FAKE_TREEHOUSE_DELEGATE="$case_dir/fakebin/treehouse" \
+  PATH="$case_dir/occupancy-bin:$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
 
@@ -993,8 +1028,8 @@ run_local_merge() {
 make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
-  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id jq ln \
+    mkdir mktemp mv perl ps python3 readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
@@ -1024,6 +1059,7 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   add_compatible_tasks_axi "$case_dir"
+  add_gh_pr_state_for_url "$case_dir" MERGED
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
   printf '%s\n' "$out" | grep -F 'tasks-axi done task-x1 --pr https://github.com/example/repo/pull/7' >/dev/null \
@@ -1044,6 +1080,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   add_compatible_tasks_axi "$case_dir"
+  add_gh_pr_state_for_url "$case_dir" MERGED
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
   printf '%s\n' "$out" | grep -F 'Update data/backlog.md - move task-x1 to Done' >/dev/null \
@@ -1489,7 +1526,9 @@ test_missing_classifier_keeps_dirty_refusal() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
-  PATH="$case_dir/fakebin:$PATH" \
+  FM_FAKE_TREEHOUSE_WORKTREE="$case_dir/wt" \
+  FM_FAKE_TREEHOUSE_DELEGATE="$case_dir/fakebin/treehouse" \
+  PATH="$case_dir/occupancy-bin:$case_dir/fakebin:$PATH" \
     "$binmut/fm-teardown.sh" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -2026,8 +2065,9 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes() {
   closed="$case_dir/closed"
   : > "$case_dir/state/task-x1.status"
   : > "$case_dir/state/task-x1.turn-ended"
-  # Record every treehouse invocation: the contended-lock refusal must fire
-  # BEFORE the isolated copy is returned, so phase 1 may not invoke it at all.
+  # Occupancy may query `treehouse status --json` before the Herdr lock; that is
+  # a read, not a return. The contended-lock refusal must still fire before
+  # `treehouse return`.
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
@@ -2064,7 +2104,7 @@ SH
   [ -e "$case_dir/state/task-x1.turn-ended" ] || { : > "$release"; fail "herdr-orphan-refusal: refusal erased the turn-end record"; }
   assert_grep "presentation lock is contended" "$case_dir/stderr" \
     "herdr-orphan-refusal: the pre-return refusal was not explained visibly"
-  if [ -s "$thlog" ]; then
+  if grep -E '(^|[[:space:]])return($|[[:space:]])' "$thlog" >/dev/null 2>&1; then
     : > "$release"; fail "herdr-orphan-refusal: the contended refusal still returned the isolated copy: $(cat "$thlog")"
   fi
   [ -d "$case_dir/wt" ] || { : > "$release"; fail "herdr-orphan-refusal: the contended refusal removed the isolated copy"; }
@@ -2127,6 +2167,10 @@ assert_herdr_teardown_preflight_refuses_before_changes() {
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then
+  jq -n --arg path '$case_dir/wt' '[{name:"slot-task-x1",path:\$path,status:"leased",lease_id:"lease-task-x1",lease_holder:"task-x1",leased_at:null,processes:[]}]'
+  exit 0
+fi
 printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
@@ -2169,7 +2213,9 @@ SH
     || fail "herdr-preflight-$mode: refusal erased the task status record"
   [ -e "$case_dir/state/task-x1.turn-ended" ] \
     || fail "herdr-preflight-$mode: refusal erased the turn-end record"
-  [ ! -s "$thlog" ] || fail "herdr-preflight-$mode: refusal returned the isolated copy"
+  if grep -E '(^|[[:space:]])return($|[[:space:]])' "$thlog" >/dev/null 2>&1; then
+    fail "herdr-preflight-$mode: refusal returned the isolated copy: $(cat "$thlog")"
+  fi
   [ ! -e "$closed" ] || fail "herdr-preflight-$mode: refusal attempted an unlocked pane close"
 }
 
@@ -2653,7 +2699,13 @@ test_parked_own_run_refuses_when_abort_is_unconfirmed() {
 
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-printf 'return\n' >> "$case_dir/treehouse.log"
+if [ "\${1:-}" = return ]; then
+  printf 'return\n' >> "$case_dir/treehouse.log"
+fi
+if [ "\${1:-}" = status ]; then
+  printf '%s\n' '[]'
+fi
+exit 0
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
 
@@ -2823,7 +2875,13 @@ exit 1
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-printf 'return\n' >> "$case_dir/treehouse.log"
+if [ "\${1:-}" = return ]; then
+  printf 'return\n' >> "$case_dir/treehouse.log"
+fi
+if [ "\${1:-}" = status ]; then
+  printf '%s\n' '[]'
+fi
+exit 0
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
 
@@ -3049,7 +3107,13 @@ exec "$REAL_PS_FOR_TEST" "$@"
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-printf 'returned\n' > "$case_dir/treehouse.log"
+if [ "\${1:-}" = return ]; then
+  printf 'returned\n' > "$case_dir/treehouse.log"
+fi
+if [ "\${1:-}" = status ]; then
+  printf '%s\n' '[]'
+fi
+exit 0
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps" "$case_dir/fakebin/treehouse"
 
@@ -3085,8 +3149,13 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   # real observed state, not a source-text or line-number correlation.
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
-if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
+if [ "\${1:-}" = return ]; then
+  if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
+  if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
+fi
+if [ "\${1:-}" = status ]; then
+  printf '%s\n' '[]'
+fi
 exit 0
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
@@ -3573,7 +3642,9 @@ test_returned_ship_with_recorded_unmerged_pr_stays_incomplete() {
 
   rc=0
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    run_teardown "$case_dir" \
+    --acknowledge-open-pr-without-watch "test: unmerged recorded PR seals incomplete" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" \
     "returned-slot-unmerged-pr: teardown should clean up without claiming acceptance: $(cat "$case_dir/stderr")"
@@ -3646,7 +3717,9 @@ probe_returned_ship_recorded_pr_result() {  # <teardown> <case> <forge-state> <a
 
   rc=0
   TEARDOWN="$teardown" FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    run_teardown "$case_dir" \
+    --acknowledge-open-pr-without-watch "test: recorded-PR telemetry classification" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -eq 0 ] || return 1
   [ ! -e "$case_dir/state/task-x1.meta" ] || return 1
   [ ! -e "$case_dir/state/task-x1.status" ] || return 1

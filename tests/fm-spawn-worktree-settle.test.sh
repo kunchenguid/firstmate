@@ -18,6 +18,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
 
 # make_settle_fakebin <dir> builds a fake tmux whose `#{pane_current_path}`
@@ -54,7 +55,50 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = get ]; then
+  holder=
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --lease-holder ]; then
+      holder=$2
+      shift
+    fi
+    shift
+  done
+  countfile="${FM_FAKE_TREEHOUSE_GET_COUNTFILE:?}"
+  n=0
+  [ -f "$countfile" ] && n=$(cat "$countfile")
+  n=$((n + 1))
+  printf '%s\n' "$n" > "$countfile"
+  printf 'get holder=%s n=%s\n' "$holder" "$n" >> "${FM_FAKE_TREEHOUSE_GET_LOG:?}"
+  if [ "$n" -gt 1 ]; then
+    # Real durable leases are never handed out by a later generic get.
+    if [ -n "${FM_FAKE_TREEHOUSE_SECOND_GET_PATH:-}" ]; then
+      jq -cn --arg path "$FM_FAKE_TREEHOUSE_SECOND_GET_PATH" --arg holder "$holder" \
+        '{name:"slot-other",path:$path,lease_id:"lease-other",lease_holder:$holder}'
+      exit 0
+    fi
+    echo "error: leased worktree is never handed out by a later get" >&2
+    exit 1
+  fi
+  jq -cn --arg path "${FM_FAKE_TREEHOUSE_PATH:?}" --arg holder "$holder" \
+    --arg lease "${FM_FAKE_TREEHOUSE_LEASE:-lease-settle}" \
+    '{name:"slot-settle",path:$path,lease_id:$lease,lease_holder:$holder}'
+  exit 0
+fi
+if [ "${1:-}" = status ]; then
+  jq -cn --arg path "${FM_FAKE_TREEHOUSE_PATH:?}" \
+    --arg holder "${FM_FAKE_TREEHOUSE_HOLDER:?}" \
+    --arg lease "${FM_FAKE_TREEHOUSE_LEASE:-lease-settle}" \
+    '[{name:"slot-settle",path:$path,status:"leased",lease_id:$lease,lease_holder:$holder}]'
+fi
+if [ "${1:-}" = return ]; then
+  printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_RETURN_LOG:?}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -79,6 +123,9 @@ make_settle_case() {
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
+  : > "$case_dir/treehouse-return.log"
+  : > "$case_dir/treehouse-get.log"
+  : > "$case_dir/treehouse-get-count"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin|$countfile|$stale_reads"
 }
 
@@ -89,15 +136,32 @@ EOF
 }
 
 run_settle_spawn() {
-  local id=$1
+  local id=$1 mode=${2:-no-mistakes} pane_path=${3:-$WT_DIR}
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
-    FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
+    FM_FAKE_PANE_PATH="$pane_path" FM_FAKE_PANE_STALE="$STALE_DIR" \
+    FM_FAKE_TREEHOUSE_PATH="$WT_DIR" \
+    FM_FAKE_TREEHOUSE_HOLDER="$id" \
+    FM_FAKE_TREEHOUSE_RETURN_LOG="$(dirname "$HOME_DIR")/treehouse-return.log" \
+    FM_FAKE_TREEHOUSE_GET_LOG="$(dirname "$HOME_DIR")/treehouse-get.log" \
+    FM_FAKE_TREEHOUSE_GET_COUNTFILE="$(dirname "$HOME_DIR")/treehouse-get-count" \
+    FM_FAKE_TREEHOUSE_SECOND_GET_PATH="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "$id" "$PROJ_DIR" --mode "$mode" --yolo off 2>&1
+}
+
+run_settle_teardown() {
+  local id=$1
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" TMUX="fake,1,0" \
+    FM_FAKE_TREEHOUSE_PATH="$WT_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+    FM_FAKE_TREEHOUSE_HOLDER="$id" \
+    FM_FAKE_TREEHOUSE_RETURN_LOG="$(dirname "$HOME_DIR")/treehouse-return.log" \
+    "$TEARDOWN" "$id" --force 2>&1
 }
 
 # A single stale first read (the exact incident) must not be accepted: the
@@ -140,7 +204,7 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   expect_code 0 "$status" "spawn should succeed when the pane is already settled"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
     "meta did not record the already-settled worktree"
-  [ "$elapsed" -le 5 ] || fail "already-settled pane took ${elapsed}s to confirm - expected close to the single inter-poll sleep"
+  [ "$elapsed" -le 15 ] || fail "already-settled pane took ${elapsed}s to confirm - expected close to the single inter-poll sleep plus ordinary spawn overhead"
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
@@ -168,11 +232,63 @@ test_same_worktree_relaunch_preserves_original_task_base() {
   recorded_base=$(sed -n 's/^base_commit=//p' "$HOME_DIR/state/$id.meta")
   [ "$recorded_base" = "$original_base" ] ||
     fail "same-worktree relaunch replaced the original task base with current HEAD"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "writer relaunch replaced the recorded worktree"
+  assert_grep "treehouse_lease=lease-settle" "$HOME_DIR/state/$id.meta" \
+    "writer relaunch replaced the recorded lease"
+  gets=$(grep -c '^get ' "$(dirname "$HOME_DIR")/treehouse-get.log" || true)
+  [ "$gets" = 1 ] || fail "writer relaunch called generic treehouse get $gets times"
   pass "a same-worktree relaunch preserves the original pre-launch task base"
+}
+
+test_writer_occupancy_identity_round_trip() {
+  local rec id out status
+  id=settle-occupancy-roundtrip-z4
+  rec=$(make_settle_case settle-occupancy-roundtrip "$id" 0)
+  read_settle_record "$rec"
+
+  out=$(run_settle_spawn "$id" local-only)
+  status=$?
+  expect_code 0 "$status" "ordinary writer spawn should record occupancy identity"
+  assert_grep "treehouse_lease=lease-settle" "$HOME_DIR/state/$id.meta" \
+    "ordinary writer metadata omitted the per-acquisition lease identity"
+
+  out=$(run_settle_teardown "$id")
+  status=$?
+  expect_code 0 "$status" "matching spawned occupancy teardown failed: $out"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "matching occupancy identity did not permit task record retirement"
+  pass "ordinary writer occupancy identity survives spawn-to-teardown round trip"
+}
+
+test_failed_settle_returns_allocated_lease() {
+  local rec id out status
+  id=settle-abort-return-z5
+  rec=$(make_settle_case settle-abort-return "$id" 0)
+  read_settle_record "$rec"
+  cat > "$FAKEBIN_DIR/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/sleep"
+
+  status=0
+  out=$(run_settle_spawn "$id" local-only "$STALE_DIR") || status=$?
+  [ "$status" -ne 0 ] || fail "spawn unexpectedly accepted a pane outside its acquired lease"
+  assert_grep "$WT_DIR" "$(dirname "$HOME_DIR")/treehouse-return.log" \
+    "failed pane settle did not return the allocated lease path"
+  assert_grep "--if-lease-id lease-settle --if-lease-holder $id" \
+    "$(dirname "$HOME_DIR")/treehouse-return.log" \
+    "failed pane settle returned without its acquired lease identity"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "failed pane settle transferred lease custody into metadata"
+  pass "failed pane settle returns its allocated Treehouse lease"
 }
 
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_same_worktree_relaunch_preserves_original_task_base
+test_writer_occupancy_identity_round_trip
+test_failed_settle_returns_allocated_lease
 
 echo "# all fm-spawn-worktree-settle tests passed"

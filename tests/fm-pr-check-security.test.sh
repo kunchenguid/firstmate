@@ -110,6 +110,33 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
+# Missing path is not stale by itself. Successful --force teardown of these
+# PR-check fixtures needs recorded lease/slot identity, a unique available
+# occupancy row for that slot, and a missing recorded path so later artifact
+# guards still run without treating occupancy as live ownership.
+install_stale_treehouse_occupancy() {
+  local dir=$1 id=$2 wt=$3 meta abs parent
+  meta=$dir/home/state/$id.meta
+  grep -qxF 'treehouse_slot=slot-prcheck' "$meta" \
+    || printf '%s\n' 'treehouse_slot=slot-prcheck' 'treehouse_lease=lease-prcheck' >> "$meta"
+  parent=$(dirname -- "$wt")
+  if [ -d "$parent" ]; then
+    abs=$(CDPATH='' cd -- "$parent" && pwd -P)/$(basename -- "$wt")
+  else
+    abs=$wt
+  fi
+  cat > "$dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then
+  jq -cn --arg path '$abs' --arg slot 'slot-prcheck' \\
+    '[{name:\$slot,path:\$path,status:"available",lease_id:"",lease_holder:""}]'
+  exit 0
+fi
+exit 0
+EOF
+  chmod 0700 "$dir/fakebin/treehouse"
+}
+
 write_poll_meta() {
   local state=$1 id=$2 url=$3
   fm_write_meta "$state/$id.meta" \
@@ -582,6 +609,7 @@ test_valid_recording_and_merge_derivation() {
   fm_pr_poll_artifacts_valid "$dir/home/state" Task_A.1 "$POLL" \
     || fail "safe lifecycle-compatible task ID did not publish an authenticated poll"
   rm -rf "$dir/wt"
+  install_stale_treehouse_occupancy "$dir" Task_A.1 "$dir/wt"
   cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -589,6 +617,7 @@ SH
   chmod 0700 "$dir/fakebin/tmux"
   touch "$dir/home/state/.last-watcher-beat"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    FM_TEST_GH_STATE=MERGED \
     "$TEARDOWN" Task_A.1 --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
     || fail "safe lifecycle-compatible task ID could not be torn down"
   [ ! -e "$dir/home/state/Task_A.1.meta" ] \
@@ -615,6 +644,7 @@ SH
     chmod 0700 "$dir/fakebin/tmux"
     touch "$dir/home/state/.last-watcher-beat"
     mkdir "$dir/home/state/$id.check.sh"
+    install_stale_treehouse_occupancy "$dir" "$id" "$dir/missing-worktree"
     set +e
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
       "$TEARDOWN" "$id" --force > "$dir/unsafe-teardown.out" 2> "$dir/unsafe-teardown.err"
@@ -636,6 +666,7 @@ SH
     fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
       || fail "path-safe legacy task ID did not publish an authenticated poll"
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+      FM_TEST_GH_STATE=MERGED \
       "$TEARDOWN" "$id" --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
       || fail "legacy path-safe task ID could not be torn down"
     [ ! -e "$dir/home/state/$id.meta" ] || fail "legacy task teardown retained metadata"
@@ -1700,6 +1731,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   touch "$state/.last-watcher-beat"
+  install_stale_treehouse_occupancy "$dir" task-a "$dir/missing-worktree"
   set +e
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
     "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err"
@@ -1855,6 +1887,7 @@ exit 0
 SH
   chmod 0700 "$dir/fakebin/tmux"
   touch "$state/.last-watcher-beat"
+  install_stale_treehouse_occupancy "$dir" _noncanonical "$dir/missing-worktree"
   set +e
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
     "$TEARDOWN" _noncanonical --force > "$dir/teardown.out" 2> "$dir/teardown.err"
@@ -2631,6 +2664,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   touch "$dir/home/state/.last-watcher-beat"
+  install_stale_treehouse_occupancy "$dir" task-a "$dir/missing-worktree"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
     "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
@@ -2651,6 +2685,8 @@ SH
     "project=$dir/project" \
     'kind=ship' \
     'mode=local-only' \
+    'treehouse_slot=slot-prcheck' \
+    'treehouse_lease=lease-prcheck' \
     'pr=https://github.com/o/r/pull/18'
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/18
   fm_pr_poll_snapshot_capture "$dir/home/state" task-a "$POLL" \
@@ -2664,7 +2700,9 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   touch "$dir/home/state/.last-watcher-beat"
+  install_stale_treehouse_occupancy "$dir" task-a "$dir/missing-worktree"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
+    FM_TEST_GH_STATE=MERGED \
     "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
     || fail "teardown could not finish a valid crash-left retirement receipt"
   assert_poll_absent "$dir/home/state" task-a
@@ -2691,6 +2729,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   touch "$dir/home/state/.last-watcher-beat"
+  install_stale_treehouse_occupancy "$dir" invalid "$dir/missing-worktree"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
     "$TEARDOWN" invalid --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
@@ -2725,6 +2764,7 @@ exit 0
 SH
     chmod +x "$fakebin/tmux"
     touch "$dir/home/state/.last-watcher-beat"
+    install_stale_treehouse_occupancy "$dir" task-a "$dir/missing-worktree"
     set +e
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_TMUX_LOG="$dir/tmux.log" \
       PATH="$fakebin:$BASE_PATH" "$TEARDOWN" task-a --force \
@@ -2764,6 +2804,7 @@ exit 0
 SH
     chmod +x "$fakebin/tmux"
     touch "$dir/home/state/.last-watcher-beat"
+    install_stale_treehouse_occupancy "$dir" task-a "$dir/missing-worktree"
     set +e
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
       "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err"

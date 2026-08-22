@@ -50,7 +50,7 @@
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
-#          "treehouse get --lease" support.
+#          Treehouse durable JSON lease and conditional-return support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
@@ -764,8 +764,15 @@ NO_MISTAKES_MIN=1.31.2
 GH_AXI_MIN=0.1.29
 LAVISH_AXI_MIN=0.1.45
 
-treehouse_supports_lease() {
-  treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
+treehouse_supports_task_leases() {
+  local get_help return_help
+  get_help=$(treehouse get --help 2>&1) || return 1
+  return_help=$(treehouse return --help 2>&1) || return 1
+  printf '%s\n' "$get_help" | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)' \
+    && printf '%s\n' "$get_help" | grep -Eq '(^|[^[:alnum:]_-])--json([^[:alnum:]_-]|$)' \
+    && printf '%s\n' "$get_help" | grep -Eq '(^|[^[:alnum:]_-])--lease-holder([^[:alnum:]_-]|$)' \
+    && printf '%s\n' "$return_help" | grep -Eq '(^|[^[:alnum:]_-])--if-lease-id([^[:alnum:]_-]|$)' \
+    && printf '%s\n' "$return_help" | grep -Eq '(^|[^[:alnum:]_-])--if-lease-holder([^[:alnum:]_-]|$)'
 }
 
 # Shared semantic-version floor for the tool gates below. A version string that
@@ -1267,7 +1274,7 @@ done
 # backend actually requires treehouse (every backend except orca, which owns its
 # own worktrees); an orca home must not be told to upgrade a provider it never uses.
 if fm_backend_list_contains "$TOOLS" treehouse \
-  && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
+  && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_task_leases; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
 if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then

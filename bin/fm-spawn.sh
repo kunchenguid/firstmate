@@ -189,7 +189,9 @@
 #   firstmate at intake exactly like --task-class, and refused on ship and
 #   secondmate spawns (a ship delivers a project change through an isolated
 #   worktree by definition). writer, the default, keeps today's scout contract
-#   and metadata byte-identical. reader dispatches the scout SLOT-FREE: no
+#   and metadata byte-identical. A same-task writer relaunch reuses the recorded
+#   Treehouse lease, holder, slot, and path under the acquisition lock and never
+#   calls generic `treehouse get`. reader dispatches the scout SLOT-FREE: no
 #   `treehouse get`, no pool worktree. The task pane starts in a disposable
 #   scratch directory at a home-scoped <tasktmp>/scratch, spawn creates a bare shared-object
 #   read handle at scratch/repo.git (git clone --bare --shared of the project;
@@ -1146,6 +1148,12 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+TREEHOUSE_ABORT_CLEANUP=0
+TREEHOUSE_ACQUIRED_PATH=
+TREEHOUSE_LEASE=
+TREEHOUSE_SLOT=
+TREEHOUSE_ACQUISITION_LOCK="$STATE/.treehouse-acquisition.lock"
+TREEHOUSE_ACQUISITION_LOCK_HELD=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -1221,6 +1229,20 @@ spawn_abort_cleanup() {
         fi
       fi
     fi
+  fi
+  if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
+    TREEHOUSE_ABORT_CLEANUP=0
+    if [ -n "$TREEHOUSE_ACQUIRED_PATH" ] \
+       && [ -n "${TREEHOUSE_LEASE:-}" ] \
+       && [ -n "${TREEHOUSE_HOLDER:-}" ]; then
+      treehouse return --if-lease-id "$TREEHOUSE_LEASE" \
+        --if-lease-holder "$TREEHOUSE_HOLDER" \
+        "$TREEHOUSE_ACQUIRED_PATH" >/dev/null 2>&1 || true
+    fi
+  fi
+  if [ "$TREEHOUSE_ACQUISITION_LOCK_HELD" = 1 ]; then
+    TREEHOUSE_ACQUISITION_LOCK_HELD=0
+    fm_lock_release "$TREEHOUSE_ACQUISITION_LOCK" || true
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -2743,13 +2765,128 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+# Reuse a recorded writer lease under the acquisition lock. A later generic
+# `treehouse get` cannot return that same durable lease, so recovery must not
+# allocate a second slot.
+spawn_reuse_recorded_writer_lease() {
+  local meta=$STATE/$ID.meta json matches count entry path lease holder slot
+  local recorded_wt recorded_lease recorded_slot recorded_real entry_real status
+  recorded_wt=$(fm_meta_get "$meta" worktree)
+  recorded_lease=$(fm_meta_get "$meta" treehouse_lease)
+  recorded_slot=$(fm_meta_get "$meta" treehouse_slot)
+  if [ -z "$recorded_wt" ] || [ -z "$recorded_lease" ] || [ -z "$recorded_slot" ]; then
+    echo "error: recorded writer recovery is missing treehouse lease identity; refusing a generic allocation that would split the task" >&2
+    return 1
+  fi
+  json=$(CDPATH='' cd -- "$PROJ_ABS" && treehouse status --json 2>/dev/null) || {
+    echo "error: treehouse occupancy for recorded writer $ID is unreadable; refusing to allocate another slot" >&2
+    return 1
+  }
+  [ -n "$json" ] || json='[]'
+  recorded_real=$(real_path_or_raw "$recorded_wt")
+  matches=$(printf '%s\n' "$json" | jq -c --arg path "$recorded_real" --arg raw "$recorded_wt" \
+    --arg lease "$recorded_lease" --arg holder "$ID" --arg slot "$recorded_slot" \
+    '[.[] | select((.lease_id|tostring)==$lease
+        and (.lease_holder|tostring)==$holder
+        and ((.path|tostring)==$path or (.path|tostring)==$raw)
+        and ((.name|tostring)==$slot))]') || {
+    echo "error: treehouse occupancy for recorded writer $ID is unreadable; refusing to allocate another slot" >&2
+    return 1
+  }
+  count=$(printf '%s\n' "$matches" | jq -r 'length') || {
+    echo "error: treehouse occupancy for recorded writer $ID is unreadable; refusing to allocate another slot" >&2
+    return 1
+  }
+  [ "$count" = 1 ] || {
+    echo "error: recorded writer $ID does not uniquely occupy its treehouse lease; refusing to allocate another slot" >&2
+    return 1
+  }
+  entry=$(printf '%s\n' "$matches" | jq -c '.[0]') || return 1
+  path=$(printf '%s\n' "$entry" | jq -er '.path | strings | select(length>0)') || {
+    echo "error: recorded writer occupancy omitted its worktree path" >&2
+    return 1
+  }
+  lease=$(printf '%s\n' "$entry" | jq -er '.lease_id | strings | select(length>0)') || {
+    echo "error: recorded writer occupancy omitted its lease identity" >&2
+    return 1
+  }
+  holder=$(printf '%s\n' "$entry" | jq -er '.lease_holder | strings | select(length>0)') || {
+    echo "error: recorded writer occupancy omitted its task holder" >&2
+    return 1
+  }
+  slot=$(printf '%s\n' "$entry" | jq -er '.name | strings | select(length>0)') || {
+    echo "error: recorded writer occupancy omitted its slot identity" >&2
+    return 1
+  }
+  status=$(printf '%s\n' "$entry" | jq -r '.status // empty')
+  case "$status" in
+    leased|in-use) ;;
+    *)
+      echo "error: recorded writer $ID is not occupying its leased worktree; refusing to allocate another slot" >&2
+      return 1
+      ;;
+  esac
+  entry_real=$(real_path_or_raw "$path")
+  if [ "$holder" = "$ID" ] && [ "$lease" = "$recorded_lease" ] && [ "$slot" = "$recorded_slot" ] \
+    && { [ "$entry_real" = "$recorded_real" ] || [ "$path" = "$recorded_wt" ]; }; then
+    :
+  else
+    echo "error: recorded writer occupancy does not match the saved treehouse lease identity" >&2
+    return 1
+  fi
+  WT=$path
+  TREEHOUSE_ACQUIRED_PATH=$WT
+  TREEHOUSE_LEASE=$lease
+  TREEHOUSE_HOLDER=$holder
+  TREEHOUSE_SLOT=$slot
+  TREEHOUSE_ABORT_CLEANUP=0
+}
+
 # A reader already sits in its validated scratch directory (WT was set above),
 # so it never runs `treehouse get` - that is the whole point of the slot-free
 # path - and skips the pool worktree settle/validation below.
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$ACCESS" != reader ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fm_lock_acquire_wait "$TREEHOUSE_ACQUISITION_LOCK" || {
+    echo "error: treehouse acquisition exclusion could not be acquired" >&2
+    exit 1
+  }
+  TREEHOUSE_ACQUISITION_LOCK_HELD=1
+  if [ -f "$STATE/$ID.meta" ]; then
+    spawn_reuse_recorded_writer_lease || exit 1
+  else
+    TREEHOUSE_ALLOCATION=$(CDPATH='' cd -- "$PROJ_ABS" \
+      && treehouse get --lease --json --lease-holder "$ID" 2>/dev/null) || {
+      echo "error: treehouse could not acquire a durable task lease" >&2
+      exit 1
+    }
+    WT=$(printf '%s\n' "$TREEHOUSE_ALLOCATION" | jq -er '.path | strings | select(length>0)') || {
+      echo "error: treehouse acquisition omitted its worktree path" >&2
+      exit 1
+    }
+    TREEHOUSE_ACQUIRED_PATH=$WT
+    TREEHOUSE_ABORT_CLEANUP=1
+    TREEHOUSE_LEASE=$(printf '%s\n' "$TREEHOUSE_ALLOCATION" | jq -er '.lease_id | strings | select(length>0)') || {
+      echo "error: treehouse acquisition omitted its lease identity" >&2
+      exit 1
+    }
+    TREEHOUSE_HOLDER=$(printf '%s\n' "$TREEHOUSE_ALLOCATION" | jq -er '.lease_holder | strings | select(length>0)') || {
+      echo "error: treehouse acquisition omitted its task holder" >&2
+      exit 1
+    }
+    [ "$TREEHOUSE_HOLDER" = "$ID" ] || {
+      echo "error: treehouse acquisition returned a contradictory task holder" >&2
+      exit 1
+    }
+    TREEHOUSE_SLOT=$(printf '%s\n' "$TREEHOUSE_ALLOCATION" | jq -r '.name // empty') || {
+      echo "error: treehouse acquisition returned an unreadable slot identity" >&2
+      exit 1
+    }
+  fi
+  spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$WT")"
+  TREEHOUSE_ACQUIRED_REAL=$(real_path_or_raw "$WT")
+  WT=
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the pane's cwd to move from the project to the leased worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -2774,7 +2911,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$ACCESS" != reader 
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+      if [ "$p_real" = "$TREEHOUSE_ACQUIRED_REAL" ]; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
           break
@@ -2794,6 +2931,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$ACCESS" != reader 
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+
 fi
 
 if [ "$HARNESS" = kimi ]; then
@@ -3289,6 +3427,8 @@ TELEMETRY_TASK_ROOT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.taskRootId | se
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
+  [ -z "${TREEHOUSE_SLOT:-}" ] || echo "treehouse_slot=$TREEHOUSE_SLOT"
+  [ -z "${TREEHOUSE_LEASE:-}" ] || echo "treehouse_lease=$TREEHOUSE_LEASE"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
@@ -3361,6 +3501,12 @@ TELEMETRY_TASK_ROOT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.taskRootId | se
     [ "$QUOTA_RUNWAY_SET" -eq 0 ] || echo "quota_runway=$QUOTA_RUNWAY"
   fi
 } > "$STATE/$ID.meta"
+TREEHOUSE_ABORT_CLEANUP=0
+TREEHOUSE_ACQUIRED_PATH=
+if [ "$TREEHOUSE_ACQUISITION_LOCK_HELD" = 1 ]; then
+  TREEHOUSE_ACQUISITION_LOCK_HELD=0
+  fm_lock_release "$TREEHOUSE_ACQUISITION_LOCK" || true
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

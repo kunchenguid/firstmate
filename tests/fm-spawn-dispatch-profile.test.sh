@@ -104,7 +104,35 @@ fi
 exit "$status"
 SH
   chmod +x "$fakebin/bwrap"
-  fm_fake_exit0 "$fakebin" treehouse pi-signed no-mistakes gh-axi gh tasks-axi
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+store=$(dirname "$0")/occupancy.json
+[ -f "$store" ] || printf '[]\n' > "$store"
+if [ "${1:-}" = get ]; then
+  holder=
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --lease-holder ]; then holder=$2; shift; fi
+    shift
+  done
+  path=${FM_FAKE_PANE_PATH:-}
+  name=slot-$holder
+  lease=lease-$holder
+  tmp=$store.tmp
+  jq --arg path "$path" --arg holder "$holder" --arg name "$name" --arg lease "$lease" \
+    'map(select((.path|tostring) != $path)) + [{name:$name,path:$path,status:"leased",lease_id:$lease,lease_holder:$holder}]' \
+    "$store" > "$tmp" && mv "$tmp" "$store"
+  jq -cn --arg path "$path" --arg holder "$holder" --arg name "$name" --arg lease "$lease" \
+    '{name:$name,path:$path,lease_id:$lease,lease_holder:$holder}'
+  exit 0
+fi
+if [ "${1:-}" = status ]; then
+  cat "$store"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" pi-signed no-mistakes gh-axi gh tasks-axi
   cat > "$fakebin/claude" <<'SH'
 #!/usr/bin/env bash
 set -u

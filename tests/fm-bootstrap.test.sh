@@ -38,7 +38,7 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
 
 # A fake toolchain where every required tool is present and gh is authenticated.
-# treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
+# Treehouse advertises the complete task-lease surface when its fake feature flag is enabled.
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -65,9 +65,21 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
-    printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+    printf '%s\n' 'Usage: treehouse get [--lease]'
+    if [ "${FM_FAKE_TREEHOUSE_FULL_HELP:-1}" = 1 ]; then
+      printf '%s\n' 'Flags: --json --lease-holder <holder>'
+    fi
   else
     printf '%s\n' 'Usage: treehouse get'
+  fi
+  exit 0
+fi
+if [ "${1:-}" = return ] && [ "${2:-}" = --help ]; then
+  if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ] \
+     && [ "${FM_FAKE_TREEHOUSE_FULL_HELP:-1}" = 1 ]; then
+    printf '%s\n' 'Flags: --if-lease-id <id> --if-lease-holder <holder>'
+  else
+    printf '%s\n' 'Usage: treehouse return'
   fi
   exit 0
 fi
@@ -715,6 +727,20 @@ test_treehouse_lease_check_follows_resolved_backend() {
   pass "bootstrap: the treehouse lease check follows the resolved backend's worktree provider"
 }
 
+test_treehouse_task_lease_probe_rejects_partial_surface() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/treehouse-partial-task-lease"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_TREEHOUSE_FULL_HELP=0 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: treehouse" \
+    "bootstrap accepted Treehouse without JSON acquisition and conditional return"
+  pass "bootstrap rejects a partial Treehouse task-lease surface"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -1109,6 +1135,7 @@ test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
+test_treehouse_task_lease_probe_rejects_partial_surface
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins

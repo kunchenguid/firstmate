@@ -28,6 +28,12 @@ SH
 printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
+if [ "${1:-}" = status ]; then
+  if [ -n "${FM_FAKE_TREEHOUSE_STATUS_JSON:-}" ]; then
+    printf '%s\n' "$FM_FAKE_TREEHOUSE_STATUS_JSON"
+  fi
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$TMP_ROOT/$dir/fakebin/tmux" "$TMP_ROOT/$dir/fakebin/treehouse"
@@ -50,7 +56,13 @@ assert_refused_without_mutation() {  # <case> <id> <description>
   [ "$rc" -ne 0 ] || fail "$description: teardown unexpectedly succeeded"
   assert_present "$dir/home/state/$id.meta" "$description: metadata changed before refusal"
   assert_present "$dir/worktree/sentinel" "$description: worktree changed before refusal"
-  [ ! -s "$dir/runtime.log" ] || fail "$description: runtime command ran before refusal: $(cat "$dir/runtime.log")"
+  if [ -s "$dir/runtime.log" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -z "$line" ] && continue
+      [ "$line" = 'treehouse <status> <--json>' ] \
+        || fail "$description: mutating runtime command ran before refusal: $line"
+    done < "$dir/runtime.log"
+  fi
 }
 
 test_invalid_endpoint_records_refuse_before_mutation() {
@@ -223,7 +235,9 @@ SH
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "isolated invalid endpoint unexpectedly succeeded"
-  [ ! -s "$dir/runtime.log" ] || fail "isolated invalid endpoint reached tmux"
+  if grep -E '^tmux ' "$dir/runtime.log" >/dev/null 2>&1; then
+    fail "isolated invalid endpoint reached tmux: $(cat "$dir/runtime.log")"
+  fi
   isolated_tmux_window_exists "$dir" "$socket" "$session" "$control" || fail "invalid cleanup removed control window"
   isolated_tmux_window_exists "$dir" "$socket" "$session" "$target" || fail "invalid cleanup removed target window"
 
@@ -252,8 +266,12 @@ SH
     "window=$session:$target" "endpoint_task_id=$target_id" \
     "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
     "kind=scout" "mode=no-mistakes"
+  mkdir -p "$dir/nonexistent-worktree" "$dir/nonexistent-project"
+  occupancy_json=$(jq -cn --arg path "$dir/nonexistent-worktree" --arg holder "$target_id" \
+    '[{name:"slot-endpoint",path:$path,status:"leased",lease_id:"lease-endpoint",lease_holder:$holder}]')
   env -u TMUX -u TMUX_PANE FM_TEST_TMUX_SOCKET="$socket_id" \
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    FM_FAKE_TREEHOUSE_STATUS_JSON="$occupancy_json" \
     PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$target_id" --force \
     > "$dir/valid.out" 2> "$dir/valid.err" \
     || fail "isolated valid endpoint teardown failed: $(cat "$dir/valid.err")"

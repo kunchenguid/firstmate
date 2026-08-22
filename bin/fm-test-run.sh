@@ -231,7 +231,7 @@ family_for_basename() {
       printf '%s\n' backend-dispatch
       ;;
     fm-check-register.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\
-    fm-teardown.test.sh|fm-x-mode.test.sh|fm-slack-captain-channel.test.sh|fm-slack-socket.test.sh|\
+    fm-teardown.test.sh|fm-teardown-custody.test.sh|fm-x-mode.test.sh|fm-slack-captain-channel.test.sh|fm-slack-socket.test.sh|\
     fm-slack-captain-comms-guard.test.sh)
       printf '%s\n' pr-forge
       ;;
@@ -470,6 +470,7 @@ tests/fm-subagent-pretool-check.test.sh 901
 tests/fm-supervision-events.test.sh 413
 tests/fm-tangle-guard.test.sh 7230
 tests/fm-teardown-endpoint-safety.test.sh 1073
+tests/fm-teardown-custody.test.sh 8000
 tests/fm-teardown.test.sh 23237
 tests/fm-test-isolation-proof.test.sh 326
 tests/fm-turnend-guard.test.sh 5986

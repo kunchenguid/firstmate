@@ -251,7 +251,9 @@ That distinction exists because dirtiness is a proxy that inverts in one support
 Until that worktree is reconciled with `git reset --hard HEAD`, its status output describes the stale index, not held work, and no consumer may read it as "uncommitted work to preserve"; teardown no longer needs the reconciliation because the classifier proves content reachability directly, and its proof can only narrow the refusal, never approve discarding content that is reachable from no surviving ref.
 Ship and scout teardowns also refuse while a linked Spec Kit run is still unsealed, and firstmate decides that by calling the kit's own `_unsealed_linked_run` predicate rather than reading its run records or translating PR state, so the seal contract keeps its owner outside this repo.
 That gate is bypassable only by `--force` after a durable append to `data/teardown-kit-seal-forces.jsonl`, and a failed append refuses the teardown instead of discarding the bypass silently.
-[`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, kit-seal refusal wording with its reseal commands, and stale-lock recovery procedure.
+[`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, kit-seal refusal wording with its reseal commands, stale-lock recovery procedure, the open-PR-without-watch acknowledgement timing, and the worktree-occupancy custody proofs including the pre-schema writer transition.
+Occupancy may query treehouse status before endpoint identity validation so a rebound lease is not inspected through stale endpoint metadata.
+Invalid endpoints still refuse before tmux or treehouse return.
 
 ## Model-run telemetry informs judgment but never auto-tunes
 

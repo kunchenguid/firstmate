@@ -54,6 +54,35 @@
 # device. It refuses and preserves task state when that proof fails; otherwise
 # it removes the task's check, trust record, PR sidecar, publication record, and
 # quarantine entries with the rest of the volatile state.
+# Before any ship cleanup retires metadata or PR-poll artifacts, teardown
+# resolves the canonical recorded pr= through the forge identity in
+# bin/fm-pr-lib.sh. MERGED or CLOSED may proceed. OPEN, unreadable, or otherwise
+# unproven state refuses with one actionable line unless an identity-bound
+# replacement watch already covers that same repository and PR, or
+# --acknowledge-open-pr-without-watch carries a nonempty reason that is
+# staged during preflight and written to
+# data/teardown-open-pr-without-watch.jsonl only after every later refusal
+# gate has passed, immediately before watch and metadata retirement. A random
+# check.sh is not replacement proof. --force does not bypass this guard.
+# Ship tasks without a PR, scouts, and merged or closed PRs keep current
+# behavior. The header of this script owns the acknowledgement record.
+# Occupancy may query treehouse status before endpoint identity validation so a
+# rebound lease is refused without inspecting stale endpoint metadata. Missing,
+# empty, malformed, or mismatched endpoints still refuse before tmux, treehouse
+# return, or any other mutating runtime call. Before endpoint kill, process
+# reap, branch deletion, or treehouse return, teardown then proves that the
+# worktree's current treehouse lease or slot identity still belongs to this
+# task. Path equality is not ownership because pooled
+# paths are reused. Pre-schema writer metadata that lacks treehouse_lease and
+# treehouse_slot may still complete when a unique occupancy row is leased or
+# in-use with lease_holder equal to this task id; teardown uses that live
+# occupancy for return and does not rewrite the old record. Missing path,
+# missing occupancy, or status=available alone is not stale completion:
+# record-only retirement requires the recorded slot/lease identity, a unique
+# available occupancy row for that slot, a missing recorded path, and
+# affirmative endpoint-gone evidence. A slot leased to a different task is
+# not inspected, closed, reaped, reset, or returned through the old record.
+# Unreadable or contradictory occupancy fails closed without mutation.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -73,12 +102,21 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--terminal-payload <json>]
+#                      [--acknowledge-open-pr-without-watch <reason>]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, skips the reader grown-checkout refusal, discards secondmate child
 #   work for kind=secondmate, and bypasses an
 #   unsealed linked kit-run outcome seal after recording the bypass in
 #   data/teardown-kit-seal-forces.jsonl. Only use it when the captain has
-#   explicitly said to discard the work.
+#   explicitly said to discard the work. It does not bypass the open-PR watch
+#   guard or the worktree occupancy proof.
+#   --acknowledge-open-pr-without-watch stages a nonempty reason during
+#   preflight and is the only explicit bypass for an OPEN, unreadable, or
+#   unproven recorded PR when no identity-bound replacement watch exists.
+#   The durable row is appended and fsync'ed only after every later refusal
+#   gate has passed, immediately before watch and metadata retirement, so a
+#   later refusal writes no row and a retry stays exact-once. An empty
+#   reason refuses.
 #   --terminal-payload is a compatibility fallback for a task with no observable
 #   delivery-gate result. A matching no-mistakes run always supplies mechanical
 #   quality facts instead, and says on stderr that the payload was not recorded.
@@ -206,12 +244,20 @@ ID=$1
 shift
 FORCE=
 TERMINAL_PAYLOAD=
+ACK_OPEN_PR_WITHOUT_WATCH=
+ACK_OPEN_PR_WITHOUT_WATCH_SET=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --terminal-payload)
       [ "$#" -ge 2 ] || { echo "error: --terminal-payload requires a value" >&2; exit 2; }
       TERMINAL_PAYLOAD=$2
+      shift
+      ;;
+    --acknowledge-open-pr-without-watch)
+      [ "$#" -ge 2 ] || { echo "error: --acknowledge-open-pr-without-watch requires a reason" >&2; exit 2; }
+      ACK_OPEN_PR_WITHOUT_WATCH=$2
+      ACK_OPEN_PR_WITHOUT_WATCH_SET=1
       shift
       ;;
     *) echo "error: unknown teardown argument $1" >&2; exit 2 ;;
@@ -431,12 +477,8 @@ else
 fi
 [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 
-# This is the first cleanup authorization check. It is metadata-only and must
-# complete before fm-guard, a backend command, file removal, branch deletion,
-# worktree return, registry change, or process termination can run.
-fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
-BACKEND=$FM_BACKEND_VALIDATED_BACKEND
-T=$FM_BACKEND_VALIDATED_TARGET
+BACKEND=$(fm_backend_of_meta "$META")
+T=$(fm_backend_target_of_meta "$META")
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 BASE_COMMIT=$(fm_meta_get "$META" base_commit)
@@ -823,6 +865,390 @@ remove_pr_poll_artifacts() {
       done
       rmdir "$quarantine" 2>/dev/null || true
     fi
+  fi
+}
+
+TEARDOWN_OPEN_PR_ACK_LOG="$DATA/teardown-open-pr-without-watch.jsonl"
+TEARDOWN_OPEN_PR_ACK_PENDING=
+TEARDOWN_WORKTREE_OWNED=0
+TEARDOWN_WORKTREE_STALE=0
+TEARDOWN_OCCUPANCY_LEASE=
+TEARDOWN_OCCUPANCY_HOLDER=
+
+teardown_recorded_pr_watch_state() {
+  local target=$1 state raw
+  [ -n "$target" ] || return 1
+  fm_pr_url_parse "$target" || return 1
+  case "$FM_PR_PROVIDER" in
+    github)
+      state=$(gh pr view "$target" --json state -q .state 2>/dev/null) || return 1
+      case "$state" in
+        MERGED|merged) printf '%s\n' MERGED ;;
+        CLOSED|closed) printf '%s\n' CLOSED ;;
+        OPEN|open) printf '%s\n' OPEN ;;
+        *) return 1 ;;
+      esac
+      ;;
+    gitlab)
+      raw=$(glab mr view "$FM_PR_NUMBER" -R "https://$FM_PR_HOST/$FM_PR_PATH" 2>/dev/null) || return 1
+      state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1)
+      case "$state" in
+        merged) printf '%s\n' MERGED ;;
+        closed) printf '%s\n' CLOSED ;;
+        open|opened) printf '%s\n' OPEN ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+teardown_open_pr_ack_record() {
+  local reason=$1 record log=$TEARDOWN_OPEN_PR_ACK_LOG
+  if ! mkdir -p "$DATA"; then
+    echo "REFUSED: cannot create data directory for open-PR acknowledgement record: $DATA" >&2
+    return 1
+  fi
+  if [ -L "$log" ] || { [ -e "$log" ] && [ ! -f "$log" ]; }; then
+    echo "REFUSED: open-PR acknowledgement record is not a regular non-symlink file: $log" >&2
+    return 1
+  fi
+  if ! record=$(jq -cn \
+    --arg task "$ID" \
+    --arg pr "$PR_URL" \
+    --arg reason "$reason" \
+    --arg acknowledgedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{task:$task,pr:$pr,reason:$reason,acknowledgedAt:$acknowledgedAt}'); then
+    echo "REFUSED: cannot build open-PR acknowledgement record" >&2
+    return 1
+  fi
+  if [ ! -e "$log" ]; then
+    if ! (umask 077 && : > "$log"); then
+      echo "REFUSED: cannot create open-PR acknowledgement record at $log" >&2
+      return 1
+    fi
+  elif ! chmod 0600 "$log" 2>/dev/null; then
+    echo "REFUSED: cannot tighten open-PR acknowledgement record mode to 600 at $log" >&2
+    return 1
+  fi
+  if jq -e --arg task "$ID" 'select(.task==$task)' "$log" >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! python3 - "$log" "$record" <<'PY'
+import os
+import sys
+
+path, record = sys.argv[1:3]
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+try:
+    os.write(fd, (record + "\n").encode("utf-8"))
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+  then
+    echo "REFUSED: cannot append open-PR acknowledgement record to $log" >&2
+    return 1
+  fi
+}
+
+teardown_identity_bound_replacement_watch() {
+  local want_provider=$1 want_host=$2 want_path=$3 want_number=$4
+  local registration other_id
+  for registration in "$STATE"/*.pr-poll-registration; do
+    [ -e "$registration" ] || [ -L "$registration" ] || continue
+    other_id=$(basename "$registration" .pr-poll-registration)
+    [ "$other_id" != "$ID" ] || continue
+    fm_pr_task_id_valid "$other_id" || continue
+    fm_pr_poll_artifacts_valid "$STATE" "$other_id" "$SCRIPT_DIR/fm-pr-poll.sh" || continue
+    [ "$FM_PR_REG_PROVIDER" = "$want_provider" ] || continue
+    [ "$FM_PR_REG_HOST" = "$want_host" ] || continue
+    [ "$FM_PR_REG_PATH" = "$want_path" ] || continue
+    [ "$FM_PR_REG_NUMBER" = "$want_number" ] || continue
+    return 0
+  done
+  return 1
+}
+
+teardown_refuse_open_pr_without_watch() {
+  local state want_provider want_host want_path want_number
+  [ "$KIND" = ship ] || return 0
+  [ -n "$PR_URL" ] || return 0
+  if ! fm_pr_url_parse "$PR_URL"; then
+    if [ "$ACK_OPEN_PR_WITHOUT_WATCH_SET" = 1 ]; then
+      if [ -z "$ACK_OPEN_PR_WITHOUT_WATCH" ]; then
+        echo "REFUSED: --acknowledge-open-pr-without-watch requires a nonempty reason; preserving metadata and merge watch." >&2
+        return 1
+      fi
+      TEARDOWN_OPEN_PR_ACK_PENDING=$ACK_OPEN_PR_WITHOUT_WATCH
+      return 0
+    fi
+    echo "REFUSED: task $ID records an unreadable pr=; preserving metadata and merge watch." >&2
+    return 1
+  fi
+  want_provider=$FM_PR_PROVIDER
+  want_host=$FM_PR_HOST
+  want_path=$FM_PR_PATH
+  want_number=$FM_PR_NUMBER
+  if state=$(teardown_recorded_pr_watch_state "$PR_URL"); then
+    case "$state" in
+      MERGED|CLOSED) return 0 ;;
+      OPEN) ;;
+      *)
+        echo "REFUSED: task $ID records an unproven PR state; preserving metadata and merge watch." >&2
+        return 1
+        ;;
+    esac
+  else
+    state=unproven
+  fi
+  if teardown_identity_bound_replacement_watch \
+      "$want_provider" "$want_host" "$want_path" "$want_number"; then
+    return 0
+  fi
+  if [ "$ACK_OPEN_PR_WITHOUT_WATCH_SET" = 1 ]; then
+    if [ -z "$ACK_OPEN_PR_WITHOUT_WATCH" ]; then
+      echo "REFUSED: --acknowledge-open-pr-without-watch requires a nonempty reason; preserving metadata and merge watch." >&2
+      return 1
+    fi
+    TEARDOWN_OPEN_PR_ACK_PENDING=$ACK_OPEN_PR_WITHOUT_WATCH
+    return 0
+  fi
+  echo "REFUSED: task $ID still records an open PR ($PR_URL) without an identity-bound replacement watch; preserving metadata and merge watch. Re-run with --acknowledge-open-pr-without-watch <reason> after explicit discard approval, or leave the watch armed." >&2
+  return 1
+}
+
+teardown_worktree_abs() {
+  local target=$1 parent
+  [ -n "$target" ] || return 1
+  if [ -d "$target" ]; then
+    ( CDPATH='' cd -- "$target" && pwd -P )
+    return 0
+  fi
+  parent=$(dirname -- "$target")
+  if [ -d "$parent" ]; then
+    printf '%s/%s\n' "$(CDPATH='' cd -- "$parent" && pwd -P)" "$(basename -- "$target")"
+    return 0
+  fi
+  printf '%s\n' "$target"
+}
+
+teardown_other_task_claims_worktree() {
+  local abs=$1 meta other_id other_wt other_abs
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    other_id=$(basename "$meta" .meta)
+    [ "$other_id" != "$ID" ] || continue
+    other_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$other_wt" ] || continue
+    other_abs=$(teardown_worktree_abs "$other_wt") || continue
+    [ "$other_abs" = "$abs" ] || continue
+    return 0
+  done
+  return 1
+}
+
+teardown_occupancy_identity_mismatch() {
+  local current_holder=$1 current_lease=$2 current_slot=$3
+  local recorded_lease=$4 recorded_slot=$5
+  if [ "$current_holder" != "$ID" ]; then
+    return 0
+  fi
+  if [ -z "$recorded_lease" ] || [ -z "$current_lease" ] \
+      || [ "$recorded_lease" != "$current_lease" ]; then
+    return 0
+  fi
+  if [ -n "$recorded_slot" ] && [ -n "$current_slot" ] \
+      && [ "$recorded_slot" != "$current_slot" ]; then
+    return 0
+  fi
+  return 1
+}
+
+teardown_occupancy_identity_matches() {
+  local current_holder=$1 current_lease=$2 current_slot=$3
+  local recorded_lease=$4 recorded_slot=$5
+  [ -n "$recorded_lease" ] && [ -n "$current_lease" ] \
+    && [ "$recorded_lease" = "$current_lease" ] \
+    && [ "$current_holder" = "$ID" ] && return 0
+  return 1
+}
+
+teardown_treehouse_status_entry() {
+  local abs=$1 json matches count
+  json=$(treehouse status --json 2>/dev/null) || return 2
+  [ -n "$json" ] || json='[]'
+  if ! printf '%s\n' "$json" | jq -e 'type=="array"' >/dev/null 2>&1; then
+    return 2
+  fi
+  matches=$(printf '%s\n' "$json" | jq -c --arg path "$abs" --arg raw "$WT" \
+    '[.[] | select((.path|tostring)==$path or (.path|tostring)==$raw)]') || return 2
+  count=$(printf '%s\n' "$matches" | jq -r 'length') || return 2
+  [ "$count" -ne 0 ] || return 1
+  [ "$count" -eq 1 ] || return 3
+  printf '%s\n' "$matches" | jq -c '.[0]'
+}
+
+TEARDOWN_TREEHOUSE_LOCK_HELD=0
+TEARDOWN_TREEHOUSE_LOCK="$STATE/.treehouse-acquisition.lock"
+
+teardown_treehouse_lock_release() {
+  if [ "$TEARDOWN_TREEHOUSE_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$TEARDOWN_TREEHOUSE_LOCK" || true
+    TEARDOWN_TREEHOUSE_LOCK_HELD=0
+  fi
+}
+
+teardown_treehouse_lock_acquire() {
+  [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] || return 0
+  [ "$BACKEND" != orca ] || return 0
+  [ "$KIND" != secondmate ] || return 0
+  [ "$ACCESS" != reader ] || return 0
+  fm_lock_acquire_wait "$TEARDOWN_TREEHOUSE_LOCK" || return 1
+  TEARDOWN_TREEHOUSE_LOCK_HELD=1
+}
+
+teardown_recorded_endpoint_is_gone() {
+  local state
+  fm_backend_validate_task_endpoint "$META" "$ID" || return 1
+  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+  T=$FM_BACKEND_VALIDATED_TARGET
+  state=$(fm_backend_agent_state "$BACKEND" "$T" 2>/dev/null) || state=unreadable
+  case "$state" in
+    dead|missing) return 0 ;;
+  esac
+  echo "REFUSED: task $ID still has a live or unproven endpoint ($state); preserving metadata and merge watch." >&2
+  return 1
+}
+
+teardown_mark_owned_occupancy() {
+  TEARDOWN_WORKTREE_OWNED=1
+  TEARDOWN_WORKTREE_STALE=0
+  TEARDOWN_OCCUPANCY_LEASE=$1
+  TEARDOWN_OCCUPANCY_HOLDER=$2
+}
+
+teardown_prove_available_occupancy_is_stale() {
+  local current_slot=$1 recorded_lease=$2 recorded_slot=$3
+  if [ -z "$recorded_lease" ] || [ -z "$recorded_slot" ]; then
+    echo "REFUSED: available occupancy for $ID has no recorded lease identity; preserving task state." >&2
+    return 1
+  fi
+  if [ -z "$current_slot" ] || [ "$current_slot" != "$recorded_slot" ]; then
+    echo "REFUSED: available occupancy for $ID does not match its recorded slot identity; preserving task state." >&2
+    return 1
+  fi
+  if [ -d "$WT" ]; then
+    echo "REFUSED: recorded worktree path for $ID still exists while occupancy is available; preserving task state." >&2
+    return 1
+  fi
+  teardown_recorded_endpoint_is_gone || return 1
+  TEARDOWN_WORKTREE_STALE=1
+  TEARDOWN_WORKTREE_OWNED=0
+}
+
+teardown_prove_worktree_occupancy() {
+  local abs recorded_lease recorded_slot entry lookup_rc status current_lease current_holder current_slot
+  TEARDOWN_WORKTREE_OWNED=0
+  TEARDOWN_WORKTREE_STALE=0
+  TEARDOWN_OCCUPANCY_LEASE=
+  TEARDOWN_OCCUPANCY_HOLDER=
+  if [ "$BACKEND" = orca ]; then
+    if [ -n "$WT" ] && teardown_other_task_claims_worktree "$(teardown_worktree_abs "$WT")"; then
+      echo "REFUSED: worktree $WT is now recorded for another task; preserving $ID and leaving the live slot untouched." >&2
+      return 1
+    fi
+    TEARDOWN_WORKTREE_OWNED=1
+    return 0
+  fi
+  if [ "$KIND" = secondmate ] || [ "$ACCESS" = reader ]; then
+    TEARDOWN_WORKTREE_OWNED=1
+    return 0
+  fi
+  recorded_lease=$(fm_meta_get "$META" treehouse_lease)
+  recorded_slot=$(fm_meta_get "$META" treehouse_slot)
+  if [ -z "$WT" ]; then
+    echo "REFUSED: task $ID has no recorded worktree path; preserving task state." >&2
+    return 1
+  fi
+  abs=$(teardown_worktree_abs "$WT") || abs=$WT
+  if teardown_other_task_claims_worktree "$abs"; then
+    echo "REFUSED: worktree $WT is now recorded for another task; preserving $ID and leaving the live slot untouched." >&2
+    return 1
+  fi
+  if [ -d "$WT" ] || [ -n "$recorded_lease" ] || [ -n "$recorded_slot" ]; then
+    if ! command -v treehouse >/dev/null 2>&1; then
+      echo "REFUSED: treehouse occupancy for $ID is unreadable; preserving task state." >&2
+      return 1
+    fi
+    if entry=$(teardown_treehouse_status_entry "$abs"); then
+      lookup_rc=0
+    else
+      lookup_rc=$?
+    fi
+    case "$lookup_rc" in
+      2)
+        echo "REFUSED: treehouse occupancy for $ID is unreadable; preserving task state." >&2
+        return 1
+        ;;
+      1)
+        echo "REFUSED: treehouse occupancy for $ID has no matching identity entry; preserving task state." >&2
+        return 1
+        ;;
+      3)
+        echo "REFUSED: treehouse occupancy for $ID has contradictory duplicate entries; preserving task state." >&2
+        return 1
+        ;;
+    esac
+    status=$(printf '%s\n' "$entry" | jq -r '.status // empty') || {
+      echo "REFUSED: treehouse occupancy for $ID is unreadable; preserving task state." >&2
+      return 1
+    }
+    current_lease=$(printf '%s\n' "$entry" | jq -r '.lease_id // empty') || current_lease=
+    current_holder=$(printf '%s\n' "$entry" | jq -r '.lease_holder // empty') || current_holder=
+    current_slot=$(printf '%s\n' "$entry" | jq -r '.name // empty') || current_slot=
+    if [ "$status" = available ] && [ -z "$current_holder" ] && [ -z "$current_lease" ]; then
+      teardown_prove_available_occupancy_is_stale \
+        "$current_slot" "$recorded_lease" "$recorded_slot" || return 1
+      return 0
+    fi
+    if [ -z "$recorded_lease" ] && [ -z "$recorded_slot" ]; then
+      case "$status" in
+        leased|in-use)
+          if [ "$current_holder" = "$ID" ] && [ -n "$current_lease" ]; then
+            teardown_mark_owned_occupancy "$current_lease" "$current_holder"
+            return 0
+          fi
+          ;;
+      esac
+      echo "REFUSED: treehouse occupancy for $ID has no affirmative task-bound lease identity; preserving task state." >&2
+      return 1
+    fi
+    if teardown_occupancy_identity_mismatch \
+        "$current_holder" "$current_lease" "$current_slot" \
+        "$recorded_lease" "$recorded_slot"; then
+      echo "REFUSED: worktree $WT is leased to ${current_holder:-another identity}, not $ID; preserving task state and leaving the live slot untouched." >&2
+      return 1
+    fi
+    if ! teardown_occupancy_identity_matches \
+        "$current_holder" "$current_lease" "$current_slot" \
+        "$recorded_lease" "$recorded_slot"; then
+      echo "REFUSED: treehouse occupancy for $ID has no affirmative task-bound lease identity; preserving task state." >&2
+      return 1
+    fi
+    teardown_mark_owned_occupancy "$current_lease" "$current_holder"
+    return 0
+  fi
+  echo "REFUSED: treehouse occupancy for $ID has no matching identity entry; preserving task state." >&2
+  return 1
+}
+
+teardown_revalidate_worktree_occupancy() {
+  [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] || return 0
+  teardown_prove_worktree_occupancy || return 1
+  if [ "$TEARDOWN_WORKTREE_OWNED" != 1 ]; then
+    echo "REFUSED: worktree lease ownership changed during teardown; preserving remaining task state." >&2
+    return 1
   fi
 }
 
@@ -1323,11 +1749,16 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
+  local lease_id=${5:-} lease_holder=${6:-}
   local out lock attempt=0 max_retries lock_desc
+  local -a lease_args=()
+
+  [ -z "$lease_id" ] || lease_args+=(--if-lease-id "$lease_id")
+  [ -z "$lease_holder" ] || lease_args+=(--if-lease-holder "$lease_holder")
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$( ( cd "$cd_dir" && treehouse return --force "${lease_args[@]}" "$dir" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -1352,7 +1783,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$( ( cd "$cd_dir" && treehouse return --force "${lease_args[@]}" "$dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -1379,7 +1810,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$( ( cd "$cd_dir" && treehouse return --force "${lease_args[@]}" "$dir" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
@@ -2395,14 +2826,16 @@ validate_firstmate_home_children_removal() {
 TEARDOWN_HERDR_LOCK_RECORDS=
 teardown_release_herdr_locks() {
   local lock_session lock_path
-  [ -n "$TEARDOWN_HERDR_LOCK_RECORDS" ] || return 0
-  while IFS=$'\t' read -r lock_session lock_path; do
-    [ -n "$lock_path" ] || continue
-    fm_lock_release "$lock_path" || true
-  done <<FMEOF
+  if [ -n "$TEARDOWN_HERDR_LOCK_RECORDS" ]; then
+    while IFS=$'\t' read -r lock_session lock_path; do
+      [ -n "$lock_path" ] || continue
+      fm_lock_release "$lock_path" || true
+    done <<FMEOF
 $TEARDOWN_HERDR_LOCK_RECORDS
 FMEOF
+  fi
   TEARDOWN_HERDR_LOCK_RECORDS=
+  teardown_treehouse_lock_release
 }
 
 teardown_herdr_session_lock_held() {  # <session>
@@ -2728,6 +3161,23 @@ if [ "$FORCE" != "--force" ] \
   fi
 fi
 
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$ACCESS" != reader ]; then
+  fm_lock_acquire_wait "$TEARDOWN_TREEHOUSE_LOCK" || exit 1
+  TEARDOWN_TREEHOUSE_LOCK_HELD=1
+  trap teardown_release_herdr_locks EXIT
+fi
+teardown_prove_worktree_occupancy || exit 1
+if [ "$TEARDOWN_WORKTREE_STALE" != 1 ]; then
+  fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+  T=$FM_BACKEND_VALIDATED_TARGET
+fi
+teardown_refuse_open_pr_without_watch || exit 1
+if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$TEARDOWN_TREEHOUSE_LOCK_HELD" != 1 ]; then
+  teardown_treehouse_lock_acquire || exit 1
+  trap teardown_release_herdr_locks EXIT
+fi
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
@@ -2738,7 +3188,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -2755,7 +3205,7 @@ fi
 # Linked kit-run outcome seals are ordinary refusals: they run with the other
 # landed-work gates above, before process reaping, telemetry sealing, or any
 # destructive cleanup.
-if [ "$KIND" != secondmate ] && [ -d "$WT" ]; then
+if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$KIND" != secondmate ] && [ -d "$WT" ]; then
   teardown_enforce_kit_outcome_seal || exit 1
 fi
 
@@ -2766,8 +3216,10 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
-if [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ] && [ "$TEARDOWN_WORKTREE_OWNED" = 1 ]; then
+  teardown_revalidate_worktree_occupancy || exit 1
   conclude_task_no_mistakes_run "$WT"
+  teardown_revalidate_worktree_occupancy || exit 1
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
@@ -2780,13 +3232,13 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
+if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$BACKEND" = herdr ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
-if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ] && [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
+if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ] && [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
   require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
   ORCA_PATH_MATCH_VERIFIED=1
 fi
@@ -2929,7 +3381,9 @@ elif [ -n "$TERMINAL_PAYLOAD" ]; then
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
+if [ "$TEARDOWN_WORKTREE_STALE" = 1 ] || [ "$TEARDOWN_WORKTREE_OWNED" != 1 ]; then
+  :
+elif [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   teardown_before_worktree_removal
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -2950,35 +3404,15 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$ACCESS" = reader ]; then
   # reminders every other kind gets before its work directory is destroyed.
   teardown_before_worktree_removal
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  teardown_before_worktree_removal
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-    fi
-  fi
-  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project. teardown_treehouse_return tolerates transient and stale git locks
-  # left by a killed crew process; see the script header for retry and stale-lock proof.
-  post_lock_cleanup_check=
-  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
-    post_lock_cleanup_check=validate_worktree_teardown_safety
-  fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
+  :
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
+if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] \
+   && [ "$BACKEND" = herdr ] \
    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   fm_backend_source herdr || true
   HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
@@ -2995,10 +3429,16 @@ if [ "$BACKEND" = herdr ] \
   fi
 fi
 
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  # The presentation lock was acquired before the worktree return above; a
+if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ]; then
+  teardown_revalidate_worktree_occupancy || exit 1
+fi
+if [ "$TEARDOWN_WORKTREE_OWNED" != 1 ]; then
+  rm -f "$HERDR_PRESENTATION_JOURNAL"
+elif [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+  # The presentation lock was acquired before the endpoint close below; a
   # contended lock already refused this teardown while everything was intact.
   if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
+    teardown_revalidate_worktree_occupancy || exit 1
     fm_backend_herdr_projection_close_pane_focus_preserving \
       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" 2>/dev/null || true
   else
@@ -3006,11 +3446,13 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   fi
 elif [ "$BACKEND" = herdr ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
+    teardown_revalidate_worktree_occupancy || exit 1
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
 elif [ "$BACKEND" != orca ]; then
+  teardown_revalidate_worktree_occupancy || exit 1
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
@@ -3029,7 +3471,7 @@ fi
 # the locked close. Only a structured not-found proves the pane gone; unknown
 # presence, missing or malformed endpoint identity, and missing confirmation
 # machinery all refuse.
-if [ "$BACKEND" = herdr ]; then
+if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$BACKEND" = herdr ]; then
   fm_backend_source herdr || true
   if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
     echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
@@ -3040,6 +3482,34 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] \
+   && [ "$BACKEND" != orca ] \
+   && [ "$KIND" != secondmate ] \
+   && [ "$ACCESS" != reader ] \
+   && [ -d "$WT" ]; then
+  teardown_revalidate_worktree_occupancy || exit 1
+  teardown_before_worktree_removal
+  teardown_revalidate_worktree_occupancy || exit 1
+  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  if [ "$branch" != "HEAD" ]; then
+    if git -C "$WT" checkout --detach -q 2>/dev/null; then
+      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+    fi
+  fi
+  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  post_lock_cleanup_check=
+  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ]; then
+    post_lock_cleanup_check=validate_worktree_teardown_safety
+  fi
+  teardown_revalidate_worktree_occupancy || exit 1
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" \
+    "$TEARDOWN_OCCUPANCY_LEASE" "$TEARDOWN_OCCUPANCY_HOLDER" || {
+    echo "error: conditional treehouse return failed for worktree $WT; teardown aborted" >&2
+    exit 1
+  }
+  teardown_treehouse_lock_release
+fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
@@ -3047,11 +3517,19 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
-fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ]; then
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+fi
 # Remove the recorded per-task temp root, including its gotmp and any reader scratch.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-reader_refuse_grown_checkout || exit 1
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ]; then
+  reader_refuse_grown_checkout || exit 1
+  [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+fi
+if [ -n "$TEARDOWN_OPEN_PR_ACK_PENDING" ]; then
+  teardown_open_pr_ack_record "$TEARDOWN_OPEN_PR_ACK_PENDING" || exit 1
+  echo "note: recorded open-PR-without-watch acknowledgement for $ID in data/teardown-open-pr-without-watch.jsonl" >&2
+fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
