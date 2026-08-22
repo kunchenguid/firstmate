@@ -30,20 +30,24 @@ fm_branch_worktree_branches() {
   git -C "$repo" worktree list --porcelain 2>/dev/null | sed -n 's#^branch refs/heads/##p'
 }
 
-# fm_branch_is_safely_merged <repo> <branch> <merged_into_ref>: the proof
-# itself (see header). Never inspects or changes anything but refs. Refuses a
+# fm_branch_is_safely_merged <repo> <branch> <merged_into_ref> [expected_tip]:
+# the proof itself (see header). When <expected_tip> is supplied, it additionally
+# proves that is still the branch's current tip, binding a caller's later
+# expected-old-value deletion to precisely the tip this proof examined. Never
+# inspects or changes anything but refs. Refuses a
 # <branch> that IS the "merged into" ref itself as a defensive guard against a
 # caller accidentally naming the protected/default branch - every branch is
 # trivially its own ancestor, so without this guard that self-comparison would
 # otherwise look "safely merged".
 fm_branch_is_safely_merged() {
-  local repo=$1 branch=$2 merged_into=$3
+  local repo=$1 branch=$2 merged_into=$3 expected_tip=${4:-} tip
   [ -n "$branch" ] || return 1
   [ "refs/heads/$branch" != "$merged_into" ] || return 1
-  git -C "$repo" show-ref --verify --quiet "refs/heads/$branch" || return 1
+  tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch") || return 1
+  [ -z "$expected_tip" ] || [ "$tip" = "$expected_tip" ] || return 1
   fm_branch_worktree_branches "$repo" | grep -Fxq -- "$branch" && return 1
   if [ -n "$merged_into" ] \
-    && git -C "$repo" merge-base --is-ancestor "$branch" "$merged_into" 2>/dev/null; then
+    && git -C "$repo" merge-base --is-ancestor "$tip" "$merged_into" 2>/dev/null; then
     return 0
   fi
   return 1
@@ -61,7 +65,7 @@ fm_branch_is_safely_merged() {
 # for anything the proof does not cover.
 fm_branch_delete_if_safely_merged() {
   local repo=$1 branch=$2 merged_into=$3 tip
-  fm_branch_is_safely_merged "$repo" "$branch" "$merged_into" || return 1
   tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch") || return 1
+  fm_branch_is_safely_merged "$repo" "$branch" "$merged_into" "$tip" || return 1
   git -C "$repo" update-ref -d "refs/heads/$branch" "$tip" >/dev/null 2>&1
 }
