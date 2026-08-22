@@ -55,17 +55,13 @@ fm_branch_is_safely_merged() {
 
 # fm_branch_delete_if_safely_merged <repo> <branch> <merged_into_ref>: delete
 # <branch> in <repo> only when fm_branch_is_safely_merged proves it, printing
-# nothing itself (callers report their own outcome). The expected-old-value
-# delete makes this atomic with respect to a concurrent ref update: a branch
-# that moved after the ancestor proof is left intact. We use update-ref rather
-# than `branch -d` because Git's `branch -d` tests the caller's current HEAD
-# (or upstream), which can differ from <merged_into> while fleet sync is
-# recovering a detached or non-default checkout. Thus both the proof and the
-# delete apply to the same explicit merge target. Returns non-zero, unchanged,
+# nothing itself (callers report their own outcome). The final `branch -d` is
+# deliberately Git's safe deletion rather than a raw ref deletion: it repeats
+# Git's own mergedness check and, crucially, refuses deletion if another
+# worktree checked out the branch after our proof. Returns non-zero, unchanged,
 # for anything the proof does not cover.
 fm_branch_delete_if_safely_merged() {
-  local repo=$1 branch=$2 merged_into=$3 tip
-  tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch") || return 1
-  fm_branch_is_safely_merged "$repo" "$branch" "$merged_into" "$tip" || return 1
-  git -C "$repo" update-ref -d "refs/heads/$branch" "$tip" >/dev/null 2>&1
+  local repo=$1 branch=$2 merged_into=$3
+  fm_branch_is_safely_merged "$repo" "$branch" "$merged_into" || return 1
+  git -C "$repo" branch -d -- "$branch" >/dev/null 2>&1
 }
