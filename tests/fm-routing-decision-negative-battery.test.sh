@@ -266,6 +266,7 @@ setup_raw_double_history() { setup_raw_literal 'claude --model "!!" --effort hig
 setup_raw_double_backslash() { setup_raw_literal 'claude --model "a\b" --effort high'; }
 setup_raw_leading_equals() { setup_raw_literal 'claude --model =ls --effort high'; }
 setup_raw_single_control() { setup_raw_literal $'claude --model \'aa\027bb\' --effort high'; }
+setup_raw_plain_tab() { setup_raw_literal $'claude --model opus\t--effort high'; }
 setup_raw_single_tab() { setup_raw_literal $'claude --model \'aa\tbb\' --effort high'; }
 setup_raw_double_tab() { setup_raw_literal $'claude --model "aa\tbb" --effort high'; }
 setup_raw_plain_nonascii() { setup_raw_literal $'claude --model mod\303\250le --effort high'; }
@@ -570,8 +571,9 @@ exercise_negative "D1 raw double-quoted history expansion" RAW_LAUNCH_NOT_VERIFI
 exercise_negative "D2 raw double-quoted backslash" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_backslash
 exercise_negative "A1 raw leading equals" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_leading_equals
 exercise_negative "C1 raw single-quoted control byte" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_single_control
-exercise_negative "C2 raw single-quoted tab" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_single_tab
-exercise_negative "C3 raw double-quoted tab" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_tab
+exercise_negative "C2 raw plain-state tab" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_plain_tab
+exercise_negative "C3 raw single-quoted tab" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_single_tab
+exercise_negative "C4 raw double-quoted tab" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_tab
 exercise_negative "N1 raw plain non-ASCII" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_plain_nonascii
 exercise_negative "N2 raw single-quoted non-ASCII" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_single_nonascii
 exercise_negative "N3 raw double-quoted non-ASCII" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_nonascii
@@ -637,7 +639,7 @@ exercise_negative "59 rule source with malformed profile" DISPATCH_CONFIG_MISMAT
 exercise_negative "60 rule source with post-binding kind drift" DISPATCH_CONFIG_MISMATCH setup_rule_binding_kind_drift \
   "rule source requires canonical dispatch configuration"
 
-expected_count=$((79 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((80 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

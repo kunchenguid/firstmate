@@ -214,7 +214,7 @@ The focused emitted-command and integration run was:
 bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
 ```
 
-It exited `0` in 97,536 ms with no gate skip.
+It exited `0` in 97,547 ms with no gate skip.
 The cases prove canonical configuration authority survives `FM_CONFIG_OVERRIDE`, enforcement remains active when canonical dispatch configuration is absent, every routing refusal precedes endpoint creation, literal launch input, non-literal pane input carrying the worktree-lease command, and metadata publication, and raw expansion, environment prefixes, non-standard model flags, and missing axes refuse.
 The same run checks the actual adapter fragments for claude, codex, grok, pi, pi-signed, opencode, Cursor, and the raw-command escape hatch.
 Codex `max`, grok `xhigh` and `max`, opencode effort, and Cursor effort remain requested metadata values while their persisted emitted effort is null.
@@ -225,12 +225,13 @@ The independent failure-direction run was:
 bin/fm-test-run.sh tests/fm-routing-decision-negative-battery.test.sh
 ```
 
-It exited `0` in 47,620 ms after all 99 constructed negatives refused before worktree lease, endpoint, and metadata sentinels.
-Each negative then ran against the same locally neutered whole-validator call and independently reached all three simulated downstream effects, proving the integration call site is load-bearing in 99 separate runs without claiming guard-by-guard mutation coverage inside the validator.
-The cases cover missing and malformed artifacts, task and byte-binding drift, stale, future, and non-RFC3339 timestamps, canonical configuration drift, emitted model and effort mismatch, the complete plain-state punctuation complement of the raw allowlist, embedded line breaks, quoted control bytes and tabs, non-ASCII input in every parser state, double-quoted history and backslash syntax, leading zsh equals expansion, every surviving raw flag-shape guard, raw tuple contradictions, every declared authority source, quota provenance and basis, forbidden fallback, and hostile persistence targets.
+It exited `0` in 48,217 ms after all 100 constructed negatives refused before worktree lease, endpoint, and metadata sentinels.
+Each negative then ran against the same locally neutered whole-validator call and independently reached all three simulated downstream effects, proving the integration call site is load-bearing in 100 separate runs without claiming guard-by-guard mutation coverage inside the validator.
+The cases cover missing and malformed artifacts, task and byte-binding drift, stale, future, and non-RFC3339 timestamps, canonical configuration drift, emitted model and effort mismatch, the complete plain-state punctuation complement of the raw allowlist, embedded line breaks, control bytes and tabs in every parser state, non-ASCII input in every parser state, double-quoted history and backslash syntax, leading zsh equals expansion, every surviving raw flag-shape guard, raw tuple contradictions, every declared authority source, quota provenance and basis, forbidden fallback, and hostile persistence targets.
 The same run used GNU bash 3.2.57 and zsh 5.9 as real shells in noninteractive `-c` mode and true interactive mode with commands delivered through stdin, serializing full argv with null delimiters and comparing it byte-for-byte with the parser output.
 The differential derives its corpus by probing the production parser over every printable ASCII character from 32 through 126 at plain mid-word, plain word-start, single-quoted, double-quoted mid-word, and double-quoted word-start positions.
+The raw byte guard accepts exactly that printable ASCII range, so the parser accepts no byte outside the differential corpus.
 It combined the 419 accepted state-position cases into five commands and completed 20 state-position-shell-mode comparisons with zero divergence.
 As a firing counterexample, temporarily admitting `!` to the production double-quoted allowlist and changing no test mirror made the same command exit `1` in 2,567 ms at `double-mid parser words differ from bash interactive argv`.
 For a raw launch composed of printable ASCII and accepted by the parser, the model and effort recorded in the persisted receipt are the values default bash or zsh passes as argv in noninteractive or stdin-driven interactive mode.
-This evidence does not establish route quality, non-default shell options, plain-tab behavior through a line editor, other terminal-layer transformations, non-tmux backends, a real harness process, or unforgeability against an actor who can write `FM_HOME`.
+This evidence does not establish route quality, non-default shell options, other terminal-layer transformations, non-tmux backends, a real harness process, or unforgeability against an actor who can write `FM_HOME`.

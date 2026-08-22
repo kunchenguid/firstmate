@@ -72,7 +72,7 @@ fm_routing_raw_ascii_text() { # <command>
   for ((i = 0; i < ${#input}; i++)); do
     ch=${input:i:1}
     case "$ch" in
-      $'\t'|[[:print:]]) ;;
+      [[:print:]]) ;;
       *) return 1 ;;
     esac
   done
@@ -112,11 +112,9 @@ fm_routing_literal_words() { # <command> <raw:0|1>
         ;;
       single)
         # POSIX shells treat every character inside single quotes literally;
-        # the raw byte guard and this tab check also exclude line-editor controls.
+        # only the closing quote changes parser state.
         if [ "$ch" = "'" ]; then
           state=plain
-        elif [ "$raw" -eq 1 ] && [ "$ch" = $'\t' ]; then
-          return 1
         else
           token+="$ch"
         fi
