@@ -184,7 +184,7 @@ A refusal means Telegram sent nothing, so the retry cannot double-post.
 
 ## Reply threading
 
-Every status the bot itself produces replies to the exact Telegram message it describes: `Transcribing…`, the transcript card, `Pi · Sent to Firstmate.`, and the mirror-off and offline notices.
+Every status the bot itself produces replies to the exact Telegram message it describes: `Transcribing…` and the transcript card it becomes, `Pi · Sent to Firstmate.`, and the mirror-off and offline notices.
 
 Firstmate's own replies are always sent as ordinary unthreaded messages.
 Pi batches back-to-back submissions into one run, so a reply belongs to no single source message, and threading it would attach answers to the wrong one.
@@ -194,12 +194,15 @@ Threading is presentation only and never changes what Firstmate sees or how Pi p
 
 1. Send a voice note; the bot replies `Transcribing…` to it.
 2. The audio is downloaded to owner-only temporary storage under `~/.firstmate-telegram/audio/` and transcribed with the local Parakeet command.
-3. The transcript replies to the voice note with `Send to Firstmate`, `Edit`, and `Cancel`.
+3. That same `Transcribing…` message becomes the transcript card in place, with `Send to Firstmate`, `Edit`, and `Cancel`.
 4. Nothing reaches Pi until you tap `Send to Firstmate`.
+
+A voice note normally occupies one bot message: the `Transcribing…` placeholder is edited into whatever ends the note, whether that is the transcript card, a transcription failure, or an over-length refusal.
+If sending the placeholder or editing it in place fails, the result is sent as a separate message instead so the transcript or terminal outcome is not lost.
 
 `Edit` replaces the buttons with `Copy text` and `Back` and opens a reply prompt bound to that transcript.
 Copy the text, paste it into the reply, correct it, and send: the original transcript message updates and the main buttons return, as often as you like.
-A transcript card is limited to 3,800 characters so it always remains one editable message; longer transcriptions are refused and their temporary audio is removed.
+A transcript card is limited to 3,800 characters so it always remains one editable message; longer transcriptions are refused in that same message and their temporary audio is removed.
 `Back` leaves the transcript unchanged and restores the main buttons.
 Telegram limits a copy button to 256 characters, so a longer transcript shows only `Back`; copy that text from the transcript message itself.
 

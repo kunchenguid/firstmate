@@ -74,6 +74,7 @@ class FakeTelegram:
         # Telegram refuses markup it cannot parse; the bot must recover.
         self.reject_parse_mode = False
         self.format_rejection = "can't parse entities: unsupported start tag"
+        self.reject_next_edit = False
         self.next_message_id = 1000
         self.next_update_id = 1
         self.files: dict[str, bytes] = {}
@@ -191,6 +192,9 @@ class FakeTelegram:
                 return message
         if method == "editMessageText":
             with self.lock:
+                if self.reject_next_edit:
+                    self.reject_next_edit = False
+                    raise ParseModeRejected("message can't be edited")
                 self.edits.append(dict(params))
                 return dict(params)
         if method == "answerCallbackQuery":
@@ -275,15 +279,20 @@ class FakeTelegram:
             time.sleep(0.02)
         raise AssertionError(f"no sent message matched; saw {self.sent_texts()}")
 
-    def wait_edit(self, predicate, timeout: float = DEADLINE) -> dict[str, Any]:
+    def wait_edit(self, predicate, timeout: float = DEADLINE,
+                  after: int = 0) -> dict[str, Any]:
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self.lock:
-                for edit in self.edits:
+                for edit in self.edits[after:]:
                     if predicate(edit):
                         return edit
             time.sleep(0.02)
         raise AssertionError(f"no edit matched; saw {[e.get('text') for e in self.edits]}")
+
+    def edit_count(self) -> int:
+        with self.lock:
+            return len(self.edits)
 
     def wait_call(self, method: str, timeout: float = DEADLINE) -> dict[str, Any]:
         deadline = time.time() + timeout
@@ -447,8 +456,25 @@ class MirrorTestCase(unittest.TestCase):
         self.assertIn("Mirror is on", frame["text"])
 
     def card_id_for(self, text: str) -> int:
-        message = self.telegram.wait_sent(lambda m: m.get("text") == text and m.get("reply_markup"))
-        return int(message["message_id"])
+        """The transcript card is the edited placeholder, never a second message."""
+        edit = self.telegram.wait_edit(
+            lambda e: e.get("text") == text
+            and (e.get("reply_markup") or {}).get("inline_keyboard")
+        )
+        return int(edit["message_id"])
+
+    def placeholder_id_for(self, voice_id: int) -> int:
+        placeholder = self.telegram.wait_sent(
+            lambda m: m.get("text") == "Transcribing…"
+            and m.get("reply_parameters", {}).get("message_id") == voice_id
+        )
+        return int(placeholder["message_id"])
+
+    def voice_messages(self, voice_id: int) -> list[str]:
+        """Every bot message threaded to one voice note, in order."""
+        with self.telegram.lock:
+            return [str(message.get("text")) for message in self.telegram.sent
+                    if message.get("reply_parameters", {}).get("message_id") == voice_id]
 
     # --- scenarios ---
 
@@ -613,21 +639,26 @@ class MirrorTestCase(unittest.TestCase):
         )
         self.assertEqual(starts.read_text().splitlines(), ["start"])
         gate.touch()
-        self.telegram.wait_sent(
-            lambda m: m.get("text") == "finished transcript" and m.get("reply_markup")
+        self.telegram.wait_edit(
+            lambda e: e.get("text") == "finished transcript"
+            and (e.get("reply_markup") or {}).get("inline_keyboard")
         )
 
     def test_abandoned_transcripts_do_not_accumulate(self) -> None:
         pi = self.connect_pi()
         self.enable_mirror(pi)
         # Cards nobody taps must not retain their text and audio forever.
+        oldest_placeholder = 0
         for index in range(40):
             message_id = 500 + index
             self.telegram.push_voice(message_id)
-            self.telegram.wait_sent(
-                lambda m, expected=message_id:
-                m.get("reply_parameters", {}).get("message_id") == expected
-                and m.get("reply_markup") is not None
+            placeholder = self.placeholder_id_for(message_id)
+            if index == 0:
+                oldest_placeholder = placeholder
+            self.telegram.wait_edit(
+                lambda e, expected=placeholder:
+                int(e.get("message_id", 0)) == expected
+                and (e.get("reply_markup") or {}).get("inline_keyboard")
             )
         deadline = time.time() + DEADLINE
         while time.time() < deadline:
@@ -638,6 +669,11 @@ class MirrorTestCase(unittest.TestCase):
         self.assertLessEqual(len(retained), 32, f"retained {len(retained)} voice files")
         self.assertIn("539", retained, "the newest transcript was dropped instead of the oldest")
         self.assertNotIn("500", retained, "the oldest transcript was never retired")
+        retired = self.telegram.wait_edit(
+            lambda e: int(e.get("message_id", 0)) == oldest_placeholder
+            and e.get("text") == "This transcript is no longer active."
+        )
+        self.assertEqual(retired["reply_markup"], {"inline_keyboard": []})
 
     def test_replies_are_formatted_as_telegram_html(self) -> None:
         pi = self.connect_pi()
@@ -1537,17 +1573,20 @@ class MirrorTestCase(unittest.TestCase):
         self.telegram.push_voice(71)
         progress = self.telegram.wait_sent(lambda m: m.get("text") == "Transcribing…")
         self.assertEqual(progress["reply_parameters"]["message_id"], 71)
-        card = self.telegram.wait_sent(
-            lambda m: m.get("text") == "please rebase the branch" and m.get("reply_markup")
+        card_id = int(progress["message_id"])
+        card = self.telegram.wait_edit(
+            lambda e: e.get("text") == "please rebase the branch"
+            and int(e.get("message_id", 0)) == card_id
         )
-        self.assertEqual(card["reply_parameters"]["message_id"], 71)
         buttons = [button["text"] for row in card["reply_markup"]["inline_keyboard"] for button in row]
         self.assertEqual(buttons, ["Send to Firstmate", "Edit", "Cancel"])
-        card_id = int(card["message_id"])
         pi.expect_nothing()
 
-        self.telegram.push_callback(f"v:71:1:edit", card_id, "cb-edit")
-        edit_view = self.telegram.wait_edit(lambda e: e.get("message_id") == card_id)
+        before_edit_view = self.telegram.edit_count()
+        self.telegram.push_callback("v:71:1:edit", card_id, "cb-edit")
+        edit_view = self.telegram.wait_edit(
+            lambda e: int(e.get("message_id", 0)) == card_id, after=before_edit_view
+        )
         edit_buttons = [b["text"] for row in edit_view["reply_markup"]["inline_keyboard"] for b in row]
         self.assertEqual(edit_buttons, ["Copy text", "Back"])
         prompt = self.telegram.wait_sent(
@@ -1637,18 +1676,22 @@ class MirrorTestCase(unittest.TestCase):
 
         self.transcript_file.write_text("😀" * 1901, encoding="utf-8")
         self.telegram.push_voice(791)
-        refusal = self.telegram.wait_sent(
-            lambda m: m.get("reply_parameters", {}).get("message_id") == 791
-            and "3,800 characters" in str(m.get("text", ""))
+        placeholder = self.placeholder_id_for(791)
+        refusal = self.telegram.wait_edit(
+            lambda e: int(e.get("message_id", 0)) == placeholder
+            and "3,800 characters" in str(e.get("text", ""))
         )
-        self.assertTrue(refusal)
+        self.assertEqual(refusal["reply_markup"], {"inline_keyboard": []})
         pi.expect_nothing()
 
         self.transcript_file.write_text("😀" * 128, encoding="utf-8")
         self.telegram.push_voice(792)
         card_id = self.card_id_for("😀" * 128)
+        before_edit_view = self.telegram.edit_count()
         self.telegram.push_callback("v:792:1:edit", card_id, "cb-copy-limit")
-        edit_view = self.telegram.wait_edit(lambda e: e.get("message_id") == card_id)
+        edit_view = self.telegram.wait_edit(
+            lambda e: int(e.get("message_id", 0)) == card_id, after=before_edit_view
+        )
         buttons = [button["text"] for row in edit_view["reply_markup"]["inline_keyboard"]
                    for button in row]
         self.assertEqual(buttons, ["Copy text", "Back"])
@@ -1665,8 +1708,11 @@ class MirrorTestCase(unittest.TestCase):
         self.transcript_file.write_text("😀" * 129, encoding="utf-8")
         self.telegram.push_voice(794)
         second_card_id = self.card_id_for("😀" * 129)
+        before_second_view = self.telegram.edit_count()
         self.telegram.push_callback("v:794:1:edit", second_card_id, "cb-copy-over")
-        second_edit = self.telegram.wait_edit(lambda e: e.get("message_id") == second_card_id)
+        second_edit = self.telegram.wait_edit(
+            lambda e: int(e.get("message_id", 0)) == second_card_id, after=before_second_view
+        )
         second_buttons = [
             button["text"] for row in second_edit["reply_markup"]["inline_keyboard"]
             for button in row
@@ -1678,11 +1724,12 @@ class MirrorTestCase(unittest.TestCase):
         self.enable_mirror(pi)
         self.transcript_file.write_text("v" * 3801, encoding="utf-8")
         self.telegram.push_voice(79)
-        refusal = self.telegram.wait_sent(
-            lambda m: m.get("reply_parameters", {}).get("message_id") == 79
-            and "3,800 characters" in str(m.get("text", ""))
+        placeholder = self.placeholder_id_for(79)
+        refusal = self.telegram.wait_edit(
+            lambda e: int(e.get("message_id", 0)) == placeholder
+            and "3,800 characters" in str(e.get("text", ""))
         )
-        self.assertNotIn("reply_markup", refusal)
+        self.assertEqual(refusal["reply_markup"], {"inline_keyboard": []})
         self.assertFalse(any(m.get("reply_markup") for m in self.telegram.sent
                              if m.get("reply_parameters", {}).get("message_id") == 79))
         deadline = time.time() + DEADLINE
@@ -1695,12 +1742,90 @@ class MirrorTestCase(unittest.TestCase):
         pi = self.connect_pi()
         self.enable_mirror(pi)
         self.telegram.push_voice(81)
+        placeholder = self.placeholder_id_for(81)
         card_id = self.card_id_for("please rebase the branch")
+        self.assertEqual(card_id, placeholder)
         self.telegram.push_callback("v:81:1:cancel", card_id, "cb-cancel")
         cancelled = self.telegram.wait_edit(lambda e: str(e.get("text", "")).endswith("Cancelled"))
+        self.assertEqual(int(cancelled["message_id"]), placeholder)
         self.assertEqual(cancelled["reply_markup"], {"inline_keyboard": []})
+        # The cancelled note owns exactly one bot message, so no "Transcribing…"
+        # is left standing beside the outcome.
+        self.assertEqual(self.voice_messages(81), ["Transcribing…"])
         self.assertFalse((self.home / "audio" / "81.ogg").exists())
         pi.expect_nothing()
+
+    def test_a_failed_terminal_edit_falls_back_to_a_plain_message(self) -> None:
+        pi = self.connect_pi()
+        self.enable_mirror(pi)
+        self.telegram.push_voice(82)
+        card_id = self.card_id_for("please rebase the branch")
+        self.telegram.reject_next_edit = True
+        self.telegram.push_callback("v:82:1:send", card_id, "cb-rejected-terminal-edit")
+        fallback = self.telegram.wait_sent(
+            lambda m: m.get("text") == "please rebase the branch\n\nSent to Firstmate"
+            and m.get("reply_parameters", {}).get("message_id") == 82
+        )
+        self.assertNotIn("reply_markup", fallback)
+        self.assertEqual(pi.read()["text"], "please rebase the branch")
+
+    def test_a_voice_note_uses_one_message_from_placeholder_to_card(self) -> None:
+        pi = self.connect_pi()
+        self.enable_mirror(pi)
+        self.telegram.push_voice(73)
+        placeholder = self.placeholder_id_for(73)
+        card = self.telegram.wait_edit(
+            lambda e: e.get("text") == "please rebase the branch"
+            and int(e.get("message_id", 0)) == placeholder
+        )
+        # The placeholder became the card: same message, transcript actions intact.
+        buttons = [button["text"] for row in card["reply_markup"]["inline_keyboard"]
+                   for button in row]
+        self.assertEqual(buttons, ["Send to Firstmate", "Edit", "Cancel"])
+        self.assertEqual(self.voice_messages(73), ["Transcribing…"])
+        with self.telegram.lock:
+            transcripts = [message for message in self.telegram.sent
+                           if message.get("text") == "please rebase the branch"]
+        self.assertEqual(transcripts, [], "the transcript arrived as a second message")
+        pi.expect_nothing()
+
+        # The buttons address that same message, so the whole flow stays on it.
+        self.telegram.push_callback("v:73:1:send", placeholder, "cb-one-message")
+        sent_card = self.telegram.wait_edit(
+            lambda e: int(e.get("message_id", 0)) == placeholder
+            and str(e.get("text", "")).endswith("Sent to Firstmate")
+        )
+        self.assertEqual(sent_card["reply_markup"], {"inline_keyboard": []})
+        self.assertEqual(pi.read()["text"], "please rebase the branch")
+
+    def test_a_failed_transcription_replaces_its_own_placeholder(self) -> None:
+        pi = self.connect_pi()
+        self.enable_mirror(pi)
+        self.transcript_file.write_text("", encoding="utf-8")
+        self.telegram.push_voice(74)
+        placeholder = self.placeholder_id_for(74)
+        failure = self.telegram.wait_edit(
+            lambda e: int(e.get("message_id", 0)) == placeholder
+            and e.get("text") == "Transcription failed. Nothing was sent to Firstmate."
+        )
+        self.assertEqual(failure["reply_markup"], {"inline_keyboard": []})
+        self.assertEqual(self.voice_messages(74), ["Transcribing…"])
+        deadline = time.time() + DEADLINE
+        while time.time() < deadline and (self.home / "audio" / "74.ogg").exists():
+            time.sleep(0.05)
+        self.assertFalse((self.home / "audio" / "74.ogg").exists())
+        pi.expect_nothing()
+
+        # A failed note never blocks the next one, and that one is its own
+        # single message too.
+        self.transcript_file.write_text("try again please", encoding="utf-8")
+        self.telegram.push_voice(75)
+        second = self.placeholder_id_for(75)
+        self.telegram.wait_edit(
+            lambda e: int(e.get("message_id", 0)) == second
+            and e.get("text") == "try again please"
+        )
+        self.assertEqual(self.voice_messages(75), ["Transcribing…"])
 
     def test_a_restart_loses_the_in_memory_queue_and_resets_mirror_mode(self) -> None:
         pi = self.connect_pi()

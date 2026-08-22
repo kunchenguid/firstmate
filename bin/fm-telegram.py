@@ -131,6 +131,7 @@ TRANSCRIPT_TOO_LONG_REPLY = (
     "That transcript is over 3,800 characters. Nothing was sent to Firstmate."
 )
 TRANSCRIPT_EDIT_TOO_LONG_REPLY = "Transcript edits must be 3,800 characters or fewer."
+STALE_TRANSCRIPT_REPLY = "This transcript is no longer active."
 UNSUPPORTED_REPLY = "Only text, voice notes, and images are mirrored."
 UNSUPPORTED_IMAGE_REPLY = "That file type is not supported. Send a PNG, JPEG, or WebP image."
 OVERSIZED_IMAGE_REPLY = "That image is too large to send to Firstmate."
@@ -560,7 +561,7 @@ class MirrorBot:
         return result
 
     async def edit_card(self, message_id: int, text: str,
-                        markup: Optional[dict[str, Any]]) -> None:
+                        markup: Optional[dict[str, Any]]) -> bool:
         params: dict[str, Any] = {
             "chat_id": self.config.chat_id,
             "message_id": message_id,
@@ -571,6 +572,8 @@ class MirrorBot:
             await self.api.call("editMessageText", params)
         except TelegramError as exc:
             log(str(exc))
+            return False
+        return True
 
     async def answer_callback(self, callback_id: str, text: str = "") -> None:
         params: dict[str, Any] = {"callback_query_id": callback_id}
@@ -749,7 +752,11 @@ class MirrorBot:
 
     async def handle_voice(self, message: dict[str, Any]) -> None:
         voice_id = int(message["message_id"])
-        await self.send(TRANSCRIBING_REPLY, reply_to=voice_id)
+        # When Telegram accepts edits, one message covers the whole voice note:
+        # this placeholder becomes the transcript card or terminal outcome.
+        # A failed edit falls back to sending the result rather than losing it.
+        placeholder = await self.send(TRANSCRIBING_REPLY, reply_to=voice_id)
+        card_id = int(placeholder["message_id"]) if placeholder is not None else None
         audio = audio_dir(self.config.home) / f"{voice_id}.ogg"
         started: list[Any] = []
         try:
@@ -764,10 +771,12 @@ class MirrorBot:
             remove_file(audio)
             if self._stopping:
                 # Its child was ended by the stop; that is not a captain-facing
-                # failure and the chat is going quiet anyway.
+                # failure and the chat is going quiet anyway. The placeholder is
+                # deliberately left alone: the stop is bounded and the process is
+                # already tearing its API access down.
                 return
             log(str(exc))
-            await self.send(TRANSCRIBE_FAILED_REPLY, reply_to=voice_id)
+            await self.retire_placeholder(card_id, voice_id, TRANSCRIBE_FAILED_REPLY)
             return
         finally:
             for process in started:
@@ -775,16 +784,31 @@ class MirrorBot:
         self.active_transcription = False
         if utf16_length(transcript) > TRANSCRIPT_CARD_LIMIT:
             remove_file(audio)
-            await self.send(TRANSCRIPT_TOO_LONG_REPLY, reply_to=voice_id)
+            await self.retire_placeholder(card_id, voice_id, TRANSCRIPT_TOO_LONG_REPLY)
             return
-        card = await self.send(transcript, reply_to=voice_id, markup=main_markup(voice_id, 1))
-        if card is None:
-            remove_file(audio)
-            return
+        if card_id is not None and not await self.edit_card(
+            card_id, transcript, main_markup(voice_id, 1),
+        ):
+            # The placeholder is unreachable, so the transcript gets its own card
+            # rather than being lost with it.
+            card_id = None
+        if card_id is None:
+            card = await self.send(transcript, reply_to=voice_id, markup=main_markup(voice_id, 1))
+            if card is None:
+                remove_file(audio)
+                return
+            card_id = int(card["message_id"])
         self.voices[voice_id] = Voice(
-            voice_id=voice_id, card_id=int(card["message_id"]), text=transcript, audio=audio
+            voice_id=voice_id, card_id=card_id, text=transcript, audio=audio
         )
-        self.retire_stale_voices()
+        await self.retire_stale_voices()
+
+    async def retire_placeholder(self, card_id: Optional[int], voice_id: int,
+                                 text: str) -> None:
+        """Prefer ending a voice note in its placeholder, with a sent fallback."""
+        if card_id is not None and await self.edit_card(card_id, text, None):
+            return
+        await self.send(text, reply_to=voice_id)
 
     def register_transcriber(self, started: list) -> Any:
         def register(process: Any) -> None:
@@ -800,13 +824,16 @@ class MirrorBot:
             end_process_group(process)
         self.transcribers.clear()
 
-    def retire_stale_voices(self) -> None:
+    async def retire_stale_voices(self) -> None:
         """Keep the newest transcripts only; an untouched card is not durable."""
         while len(self.voices) > MAX_PENDING_VOICES:
             oldest = min(self.voices)
             entry = self.voices.pop(oldest)
             self.clear_prompt(entry)
             remove_file(entry.audio)
+            await self.retire_placeholder(
+                entry.card_id, entry.voice_id, STALE_TRANSCRIPT_REPLY,
+            )
 
     async def handle_callback(self, callback: dict[str, Any]) -> None:
         callback_id = str(callback.get("id"))
@@ -818,7 +845,7 @@ class MirrorBot:
         voice_id, revision, action = parsed
         entry = self.voices.get(voice_id)
         if entry is None:
-            await self.answer_callback(callback_id, "This transcript is no longer active.")
+            await self.answer_callback(callback_id, STALE_TRANSCRIPT_REPLY)
             return
         if revision != entry.revision:
             await self.answer_callback(callback_id, "This transcript has already moved on.")
@@ -869,7 +896,9 @@ class MirrorBot:
         self.voices.pop(entry.voice_id, None)
         remove_file(entry.audio)
         entry.audio = None
-        await self.edit_card(entry.card_id, f"{entry.text}\n\n{footer}", None)
+        await self.retire_placeholder(
+            entry.card_id, entry.voice_id, f"{entry.text}\n\n{footer}",
+        )
 
     def clear_prompt(self, entry: Voice) -> None:
         if entry.prompt_id is not None:
