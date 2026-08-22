@@ -37,7 +37,8 @@ export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 # them once so the suite resolves the tmux reference backend unless a case says
 # otherwise - the same hermeticity discipline as pinning PATH via BASE_PATH.
 unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
-  CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
+  CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID \
+  FM_BACKEND FM_BACKEND_CONFIG_DIR 2>/dev/null || true
 
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
@@ -356,8 +357,10 @@ test_gh_axi_min_version() {
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/gh-axi-$n"
-    mkdir -p "$case_dir/home/config"
+    mkdir -p "$case_dir/home/config" "$case_dir/home/projects/github"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    git -C "$case_dir/home/projects/github" init -q
+    git -C "$case_dir/home/projects/github" remote add origin https://github.com/example/project.git
     fakebin=$(make_fake_toolchain "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
@@ -623,6 +626,127 @@ test_herdr_install_requires_manual_action() {
     || fail "install herdr should return actionable manual-install guidance, got: $out"
   pass "bootstrap: Herdr manual-install guidance is never executed as a shell command"
 }
+
+test_forge_provider_cli_policy_and_auth_host() {
+  local case_dir fakebin out project calls
+
+  case_dir="$TMP_ROOT/forge-github-enterprise"
+  project="$case_dir/home/projects/enterprise"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.enterprise.example/team/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_GITHUB_HOSTS=github.com,github.enterprise.example FM_FAKE_GH_CALLS="$calls" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "NEEDS_GH_AUTH: github.enterprise.example" ] \
+    || fail "GitHub Enterprise auth must preserve its host, got: $out"
+  [ "$(cat "$calls")" = "auth status --hostname github.enterprise.example" ] \
+    || fail "GitHub Enterprise auth must be scoped to its host, got: $(cat "$calls")"
+
+  case_dir="$TMP_ROOT/forge-gitlab-stale-gh-axi"
+  project="$case_dir/home/projects/gitlab"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://gitlab.example/team/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] && printf '%s\n' 0.0.1
+SH
+  chmod +x "$fakebin/gh-axi"
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/glab"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_GITLAB_HOSTS=gitlab.example FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "GitLab-only homes must ignore stale gh-axi, got: $out"
+
+  case_dir="$TMP_ROOT/forge-local-stale-gh-axi"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] && printf '%s\n' 0.0.1
+SH
+  chmod +x "$fakebin/gh-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "local/no-project homes must ignore stale gh-axi, got: $out"
+
+  case_dir="$TMP_ROOT/forge-ssh-github-config"
+  project="$case_dir/home/projects/github-ssh"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin git@github.com:example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'hostname ssh.github.com'
+SH
+  chmod +x "$fakebin/ssh"
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+[ "${1:-}" = auth ] && [ "${2:-}" = status ] && [ "${4:-}" = github.com ] && exit 0
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_GH_CALLS="$calls" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$(cat "$calls")" = "auth status --hostname github.com" ] \
+    || fail "GitHub SSH origin must authenticate against canonical host, got: $(cat "$calls")"
+  [ -z "$out" ] || fail "recognized GitHub SSH host must keep canonical auth host, got: $out"
+
+  case_dir="$TMP_ROOT/forge-space-project-id"
+  project="$case_dir/home/projects/project with spaces"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.com/example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_GH_CALLS="$calls" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$(wc -l < "$calls" | tr -d ' ')" = 1 ] \
+    || fail "a space-containing project ID must produce one GitHub auth check, got: $(cat "$calls")"
+  [ "$out" = "NEEDS_GH_AUTH: github.com" ] \
+    || fail "space-containing project IDs must retain one GitHub auth diagnostic, got: $out"
+
+  mkdir -p "$case_dir/home/projects/github-two"
+  git -C "$case_dir/home/projects/github-two" init -q
+  git -C "$case_dir/home/projects/github-two" remote add origin https://github.com/example/other.git
+  : > "$calls"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_GH_CALLS="$calls" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$(wc -l < "$calls" | tr -d ' ')" = 1 ] \
+    || fail "same-host auth checks must be deduplicated, got: $(cat "$calls")"
+  [ "$out" = "NEEDS_GH_AUTH: github.com" ] \
+    || fail "same-host GitHub projects must retain one auth diagnostic, got: $out"
+  pass "bootstrap applies provider-specific CLI and host-scoped auth policy"
+}
+
 
 test_forge_provider_bootstrap_contracts() {
   local case_dir fakebin out project
@@ -1108,7 +1232,7 @@ test_network_phases_record_per_step_elapsed_times() {
     "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
 
   assert_present "$log" "the network phase recorded no elapsed times at all"
-  assert_timing_record "$log" phase gh-auth '' "the GitHub auth probe was not timed"
+  assert_timing_record "$log" phase forge-auth '' "the forge auth probe was not timed"
   assert_timing_record "$log" phase secondmate-liveness '' "the dead-secondmate relaunch sweep was not timed"
   assert_timing_record "$log" phase secondmate-sync '' "the secondmate convergence sweep was not timed"
   assert_timing_record "$log" phase handoff-delivery '' "the pending handoff sweep was not timed"
@@ -1339,6 +1463,7 @@ test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
+test_forge_provider_cli_policy_and_auth_host
 test_tasks_axi_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction
