@@ -103,7 +103,8 @@ fm_forge_detect_provider() {
 }
 
 # fm_forge_resolve_host <remote-url-or-ssh-alias> [resolve-ssh]
-# Resolves a git remote URL to a lowercase hostname. The optional second
+# Resolves HTTPS, Git, SSH, and git+{http,https,ssh} remote URLs to a lowercase
+# hostname. The optional second
 # argument defaults to following SSH config aliases; callers can pass 0 to
 # preserve the raw host for provider classification.
 fm_forge_resolve_host() {
@@ -111,13 +112,13 @@ fm_forge_resolve_host() {
 
   [ -n "$remote_url" ] || return 1
   case "$remote_url" in
-    ssh://*)
-      host=${remote_url#ssh://}
+    ssh://*|git+ssh://*)
+      host=${remote_url#*://}
       host=${host#*@}
       host=${host%%/*}
       host=${host%%:*}
       ;;
-    https://*|http://*)
+    https://*|http://*|git://*|git+https://*|git+http://*)
       host=${remote_url#*://}
       host=${host%%/*}
       host=${host##*@}
