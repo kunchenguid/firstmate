@@ -211,6 +211,15 @@ class FilePlayback:
         # own turn lock, so nothing slow may ever be done under it. _handle_lock
         # covers the file itself, so a write and a close cannot overlap. The
         # ordering is always _handle_lock then _lock and never the reverse.
+        #
+        # What close() needing _handle_lock costs: the exit is now only as bounded
+        # as one write to --out-file, so on a hung or full filesystem the five
+        # second downlink join in Client.close no longer bounds it. The wedged relay
+        # that join was written for is unaffected, being another process while this
+        # write is local. That cost belongs to the filed teardown-ordering work,
+        # whose other half is the same five second join being shorter than the ten
+        # seconds the relay may spend draining its own reply stream, which is why
+        # audio can arrive after the output is released at all.
         self._handle_lock = threading.Lock()
         self._lock = threading.Lock()
         self.first_played = None
@@ -299,8 +308,14 @@ class SpeakerPlayback:
         self._lock = threading.Lock()
         self.first_played = None
         self.turn_bytes = 0
+        # The same diagnostic the file path keeps, for the same reason. A counter
+        # that can only ever read zero is indistinguishable from one that measured
+        # zero, and this is the path the captain will actually use, so the write
+        # after close that the counter exists to catch has to be visible here too.
+        self.discarded = 0
         self._turn = None
         self._earlier = 0
+        self._closed = False
         self._stream = sounddevice.RawOutputStream(
             samplerate=OUT_RATE, channels=1, dtype="int16",
             blocksize=OUT_BLOCK, device=device, latency="low",
@@ -325,6 +340,17 @@ class SpeakerPlayback:
 
     def write(self, pcm, turn):
         with self._lock:
+            # close() stops the stream, and after that no callback drains the
+            # buffer, so a chunk arriving here was never going to be heard however
+            # it is stored. Discarded and counted rather than queued and credited
+            # to the turn, which is what the file path does: queued, it is a
+            # measurement the captain never heard, and silent, the write after
+            # close outside teardown that this counts for would be invisible on the
+            # one path they use. Counted and nothing more, so it stamps no clock
+            # and reaches neither answered, first_audio_s nor the exit code.
+            if self._closed:
+                self.discarded += 1
+                return
             if turn == self._turn:
                 self.turn_bytes += len(pcm)
             else:
@@ -352,6 +378,13 @@ class SpeakerPlayback:
         time.sleep(0.2)
 
     def close(self):
+        # Marked before the stream is stopped and not while the lock is held: the
+        # device callback takes this lock, and stop() waits for a callback already
+        # running, so holding it across the stop is a deadlock. Marking first
+        # instead leaves no instant where the stream is gone and a write still
+        # queues for it.
+        with self._lock:
+            self._closed = True
         try:
             self._stream.stop()
             self._stream.close()
@@ -660,9 +693,17 @@ class Client:
 
         Expected while this end is shutting down and said nowhere else, so a count
         appearing on a session that has not ended is the logic bug it is kept for.
-        Diagnostic only: it names nothing in the record and decides no exit code.
+        That holds on both output paths, because both count it. Diagnostic only: it
+        names nothing in the record and decides no exit code.
+
+        Read straight off the playback rather than through a default, so a playback
+        that cannot answer is a failure here rather than a zero indistinguishable
+        from having measured none. The None check is close()'s own, for the startup
+        that refused before there was an output at all.
         """
-        dropped = getattr(self.playback, "discarded", 0)
+        if self.playback is None:
+            return
+        dropped = self.playback.discarded
         if dropped:
             log(self.verbose,
                 "discarded {} reply audio chunk(s) that arrived after the output "

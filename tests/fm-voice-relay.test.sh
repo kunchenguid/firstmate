@@ -2167,7 +2167,12 @@ def audio_after_close(label, extra):
         late.playback.close()
         released.set()
         check(handled.wait(10), "fixture: the late chunk never reached the output")
-        late._say_dropped()
+        # Through close(), not the reporting method directly, so the wiring is
+        # covered as well as the report: nothing else drives the only production
+        # caller, and hand-calling it would pass with that call deleted. Returns at
+        # once here, because the uplink stand-in swallows the quit, no downlink
+        # thread or relay process was ever assigned, and the file drain is a no-op.
+        late.close()
     late.up_q.put(None)
     records = [json_lib.loads(line) for line in out.getvalue().splitlines()
                if line.strip()]
@@ -2620,6 +2625,49 @@ check(pull(speaker, 300) == b"\x0a\x0a" * 100 + b"\x00" * 400,
       "a short earlier tail is padded rather than repeated")
 check(speaker.first_played is None, "and the padding stamps nothing")
 
+# A chunk arriving after close, which is the same teardown race the file path
+# already discards and counts. Nothing here goes near a device: the stream is the
+# same stub, and stopping it is what makes the chunk unplayable, so queuing it
+# would be recording a measurement the captain never heard.
+speaker = fresh_speaker()
+speaker.turn_reset(1)
+speaker.write(b"\x0b\x0b" * 300, 1)
+speaker.turn_reset(2)
+speaker.write(b"\x0c\x0c" * 150, 2)
+was = (speaker.turn_bytes, speaker._earlier, speaker.first_played,
+       bytes(speaker._buffer))
+check(was == (300, 600, None, b"\x0b\x0b" * 300 + b"\x0c\x0c" * 150),
+      "fixture: turn two should be owed its own bytes behind turn one's tail: %r"
+      % (was,))
+speaker.close()
+speaker.write(b"\x0d\x0d" * 300, 2)
+check(speaker.discarded == 1,
+      "a chunk arriving after close must be counted, not silently swallowed: %r"
+      % speaker.discarded)
+check(bytes(speaker._buffer) == was[3],
+      "and must not be queued for a stream that has already stopped")
+check((speaker.turn_bytes, speaker._earlier, speaker.first_played) == was[:3],
+      "and must leave every per-turn figure exactly as it was: %r"
+      % ((speaker.turn_bytes, speaker._earlier, speaker.first_played),))
+
+# And the count reaches the captain on this path through the same close() that
+# reports it on the file path, so the counter is not merely present here.
+heard = fresh_speaker()
+heard.turn_reset(1)
+heard.write(b"\x0e\x0e" * 300, 1)
+check(pull(heard, 300) == b"\x0e\x0e" * 300,
+      "fixture: the turn's own reply should drain before the output is released")
+heard.close()
+heard.write(b"\x0f\x0f" * 300, 1)
+reported = client.Client(client.parse_args(["--host", "desk", "--verbose"]))
+reported.playback = heard
+speaker_said = io.StringIO()
+with contextlib.redirect_stderr(speaker_said):
+    reported.close()
+check("discarded 1 reply audio chunk" in speaker_said.getvalue(),
+      "--verbose must report the count on this path as it does on the file one: %r"
+      % speaker_said.getvalue())
+
 del sys.modules["sounddevice"]
 
 
@@ -2633,6 +2681,7 @@ class Recorder:
         self._closed = closed
         self.first_played = None
         self.device_latency = None
+        self.discarded = 0
 
     def drain(self, timeout=5):
         pass
