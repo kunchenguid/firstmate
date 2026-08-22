@@ -7,16 +7,17 @@ One rule up front:
 We require this to reduce the maintainer's burden of reviewing and merging contributions.
 
 `no-mistakes` puts a local git proxy in front of your real remote.
-Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
+Pushing through it runs an AI-driven review/test/document/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
+A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and requires both the deterministic signature and structured attestation that no-mistakes writes.
+The attestation must report the review, test, and document steps as completed; a missing or skipped required step fails the check.
 It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
+GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without both proofs will not be reviewed or merged.
 
 ## Workflow
 
 1. Fork the repo, then clone the parent repo or set your local `origin` to the parent (`git@github.com:kunchenguid/firstmate.git`).
-2. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (firstmate expects **no-mistakes v1.31.2+**; without a fork, plain `no-mistakes init` still works for maintainers with push access).
+2. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (this contribution workflow requires **no-mistakes v1.46.0+**; without a fork, plain `no-mistakes init` still works for maintainers with push access).
 3. If this clone will run permanently from your fork main, use `gh-axi repo fork --remote` after gate initialization so the fork becomes `origin` and the parent becomes `upstream`, then follow [`docs/fork-main.md`](docs/fork-main.md).
 4. Create the topic branch from the oldest integration branch it targets, normally official `main`, and make your changes.
 5. Commit your changes.

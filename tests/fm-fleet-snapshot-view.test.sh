@@ -456,6 +456,9 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [ ] parenthetical-title - Refresh sidebar (mobile) (repo: beta) (kind: ship)
 - [ ] blocked-reason - Blocked Reason (repo: beta) (kind: ship) blocked-by: queued-comma - waits on queued-comma
 - [ ] sample-decision-route - Choose sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: captain route choice pending) (hold-kind: captain)
+- [ ] dated-route - Deferred sample route (repo: sample) (kind: ship) (hold: captain sent this to later) (hold-kind: captain) (hold-until: 2026-09-01)
+- [ ] captain-gated-work - Captain-gated ship work (repo: sample) (kind: ship) (hold: captain go pending) (hold-kind: captain)
+- [ ] parked-prose - Parked captain call (repo: sample) (kind: ship) (hold: DEFERRED by captain) (hold-kind: captain)
 
 ## Done
 - [x] done-comma - Done Comma Task https://github.com/kunchenguid/firstmate/pull/42 (repo: gamma, merged 2026-07-09) (kind: ship)
@@ -474,7 +477,8 @@ EOF
   record_claude_idle "$home/state" bold-task
   printf 'done: report ready\n' > "$home/state/bold-task.status"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" \
+    FM_SNAPSHOT_NOW=2026-07-14T00:00:00Z "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e --arg data "$data" --arg projects "$projects" '
     .roots.data == $data
       and .roots.projects == $projects
@@ -514,7 +518,23 @@ EOF
       and .kind == "captain"
       and .hold_reason == "captain route choice pending"
       and .hold_kind == "captain"
+      and .captain_actionable == true
   ' >/dev/null || fail "tasks-axi captain-hold metadata did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "dated-route")
+    | .title == "Deferred sample route"
+      and .hold_until == "2026-09-01"
+      and .captain_actionable == false
+      and .deferred_marker == false
+  ' >/dev/null || fail "a dated captain hold did not defer or strip its hold-until from the title"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-gated-work")
+    | .kind == "ship" and .captain_actionable == true and .deferred_marker == false
+  ' >/dev/null || fail "captain actionability must not depend on the row kind"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "parked-prose")
+    | .captain_actionable == true and .deferred_marker == true
+  ' >/dev/null || fail "a prose-deferred captain hold did not carry the presentation marker"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-comma")
     | .repo == "gamma"
@@ -560,6 +580,33 @@ EOF
   assert_contains "$view" "| done-note | Done Note | delta | ship | - | local main |" \
     "view should render local-only done artifact outside the title"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
+}
+
+test_deferred_marker_requires_dedicated_marker() {
+  local home out
+  home=$(make_home deferred-marker-boundary)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] reason-prose - Choose loading strategy (repo: sample) (kind: ship) (hold: choose eager or deferred loading) (hold-kind: captain)
+- [ ] body-prose - Choose rendering strategy (repo: sample) (kind: ship) (hold: captain choice pending) (hold-kind: captain)
+  Compare eager or deferred rendering before answering.
+- [ ] reason-marker - Parked captain call (repo: sample) (kind: ship) (hold: DEFERRED by captain) (hold-kind: captain)
+- [ ] body-marker - Obsolete captain call (repo: sample) (kind: ship) (hold: captain choice pending) (hold-kind: captain)
+  NOT REQUIRED - the replacement call owns this choice.
+
+## Done
+EOF
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.backlog.records[] | select(.id == "reason-prose") | .deferred_marker == false)
+      and (.backlog.records[] | select(.id == "body-prose") | .deferred_marker == false)
+      and (.backlog.records[] | select(.id == "reason-marker") | .deferred_marker == true)
+      and (.backlog.records[] | select(.id == "body-marker") | .deferred_marker == true)
+  ' >/dev/null || fail "ordinary deferred prose and dedicated markers were not distinguished: $out"
+  pass "only dedicated deferred or superseded markers suppress captain-held rows"
 }
 
 test_view_renders_snapshot() {
@@ -792,5 +839,6 @@ test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
+test_deferred_marker_requires_dedicated_marker
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
