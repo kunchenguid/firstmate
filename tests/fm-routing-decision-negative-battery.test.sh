@@ -340,6 +340,9 @@ setup_raw_reserved_placeholder() {
 setup_raw_cross_harness_codex_config() {
   setup_raw_literal 'claude --model opus -c model_reasoning_effort=high'
 }
+setup_raw_unexpressible_effort() {
+  setup_raw_literal 'opencode --model opus'
+}
 setup_raw_relative_harness_path() {
   mkdir -p "$LAB/tools"
   printf '#!/bin/sh\nexit 0\n' > "$LAB/tools/claude"
@@ -355,7 +358,7 @@ setup_raw_absolute_harness_impostor() {
   setup_raw_literal "$wrapper --model opus --effort high"
 }
 setup_raw_no_executable() { setup_raw_literal '--model opus --effort high'; }
-setup_raw_harness_contradiction() { setup_raw_literal 'codex --model opus --effort high'; }
+setup_raw_harness_contradiction() { setup_raw_literal 'codex --model opus -c model_reasoning_effort=high'; }
 setup_raw_model_contradiction() { setup_raw_literal 'claude --model sonnet --effort high'; }
 setup_raw_effort_contradiction() { setup_raw_literal 'claude --model opus --effort low'; }
 setup_unresolved_raw() {
@@ -613,6 +616,24 @@ pass "$shell_differential_character_count parser-derived printable ASCII state-p
 run_real_shell_differential separate-option-like-axis \
   "$SHELL_DIFF_PROBE --model -p --effort -q"
 
+assert_raw_effort_binding() { # <harness> <command> <effort>
+  local harness=$1 command=$2 effort=$3
+  fm_routing_parse_command_axes "$command" 1 \
+    || fail "$harness supported raw effort syntax was refused"
+  [ "$FM_ROUTING_COMMAND_HARNESS" = "$harness" ] \
+    || fail "$harness supported raw effort syntax changed harness identity"
+  [ "$FM_ROUTING_COMMAND_EFFORT" = "$effort" ] \
+    || fail "$harness supported raw effort syntax produced '$FM_ROUTING_COMMAND_EFFORT'"
+}
+
+assert_raw_effort_binding claude 'claude --model opus --effort high' high
+assert_raw_effort_binding codex "codex --model opus -c 'model_reasoning_effort=\"high\"'" high
+assert_raw_effort_binding grok 'grok --model opus --reasoning-effort high' high
+assert_raw_effort_binding pi 'pi --model opus --thinking max' max
+assert_raw_effort_binding pi-signed 'pi-signed --model opus --thinking xhigh' xhigh
+assert_raw_effort_binding muse 'muse --model opus --reasoning-effort ultra' ultra
+pass "supported raw effort syntax remains adapter-specific and observable"
+
 exercise_negative "01 missing receipt" missing setup_missing_receipt
 exercise_negative "02 missing intent" missing setup_missing_intent
 exercise_negative "03 empty receipt" MALFORMED_SCHEMA setup_empty_receipt
@@ -683,10 +704,10 @@ effort short option value|claude --model opus --effort -p|effort flag has no fix
 effort equals duplicate|claude --model opus --effort high --effort=low|effort flag is duplicated
 effort equals empty|claude --model opus --effort=|effort flag has no fixed literal value
 config missing value|claude --model opus -c|config flag has no fixed literal value
-config effort duplicate|codex --model opus --effort high -c model_reasoning_effort=low|effort flag is duplicated
+config effort duplicate|codex --model opus -c model_reasoning_effort=high -c model_reasoning_effort=low|effort flag is duplicated
 config effort empty|codex --model opus -c model_reasoning_effort=|effort config has no fixed literal value
 config effort unmatched quote|codex --model opus -c 'model_reasoning_effort="high'|effort config quote pair is unmatched
-equals config effort duplicate|codex --model opus --effort high -c=model_reasoning_effort=low|effort flag is duplicated
+equals config effort duplicate|codex --model opus -c=model_reasoning_effort=high -c=model_reasoning_effort=low|effort flag is duplicated
 equals config effort empty|codex --model opus -c=model_reasoning_effort=|effort config has no fixed literal value
 equals config effort unmatched quote|codex --model opus '-c=model_reasoning_effort="high'|effort config quote pair is unmatched
 command wrapper env|env ROUTE_MODEL=sonnet claude --model opus --effort high|raw launch command head is not a supported harness executable
@@ -694,6 +715,12 @@ command wrapper arch|arch claude --model opus --effort high|raw launch command h
 command wrapper taskset|taskset -c 0 claude --model opus --effort high|raw launch command head is not a supported harness executable
 command wrapper caffeinate|caffeinate claude --model opus --effort high|raw launch command head is not a supported harness executable
 command wrapper xcrun|xcrun claude --model opus --effort high|raw launch command head is not a supported harness executable
+claude thinking spelling|claude --model opus --thinking high|effort spelling is not supported by the selected raw harness
+codex effort spelling|codex --model opus --effort high|effort spelling is not supported by the selected raw harness
+opencode effort spelling|opencode --model opus --effort high|effort spelling is not supported by the selected raw harness
+pi effort spelling|pi --model opus --effort high|effort spelling is not supported by the selected raw harness
+muse thinking spelling|muse --model opus --thinking high|effort spelling is not supported by the selected raw harness
+grok unsupported value|grok --model opus --reasoning-effort xhigh|effort value is not supported by the selected raw harness
 RAW_SHAPES
 
 exercise_negative "raw option terminator" RAW_LAUNCH_UNRESOLVED setup_raw_terminator \
@@ -706,6 +733,8 @@ exercise_negative "raw relative harness path" RAW_LAUNCH_NOT_VERIFIABLE setup_ra
   "raw launch command head uses a relative path"
 exercise_negative "raw absolute harness impostor" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_absolute_harness_impostor \
   "absolute raw harness path is not the supported executable resolved through PATH"
+exercise_negative "raw harness without effort syntax" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_unexpressible_effort \
+  "selected raw harness cannot express the required effort axis"
 
 exercise_negative "42 raw launch without executable" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_no_executable \
   "launch has no executable harness word"
@@ -763,7 +792,7 @@ run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement
   || fail "canonical config replacement counterexample did not fire"
 pass "canonical config replacement cannot change snapshotted candidate resolution"
 
-expected_count=$((96 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((103 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

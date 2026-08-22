@@ -213,7 +213,26 @@ fm_routing_set_codex_effort() { # <encoded-effort>
     fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort config has no fixed literal value"
     return 1
   }
-  FM_ROUTING_COMMAND_EFFORT=$encoded
+  fm_routing_set_raw_effort config "$encoded"
+}
+
+fm_routing_set_raw_effort() { # <spelling> <effort>
+  local spelling=$1 effort=$2
+  case "$FM_ROUTING_COMMAND_HARNESS:$spelling" in
+    claude:--effort|codex:config|grok:--reasoning-effort|pi:--thinking|pi-signed:--thinking|muse:--reasoning-effort) ;;
+    *)
+      fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort spelling is not supported by the selected raw harness"
+      return 1
+      ;;
+  esac
+  case "$FM_ROUTING_COMMAND_HARNESS:$effort" in
+    claude:low|claude:medium|claude:high|claude:xhigh|claude:max|codex:low|codex:medium|codex:high|codex:xhigh|grok:low|grok:medium|grok:high|pi:low|pi:medium|pi:high|pi:xhigh|pi:max|pi-signed:low|pi-signed:medium|pi-signed:high|pi-signed:xhigh|pi-signed:max|muse:low|muse:medium|muse:high|muse:xhigh|muse:ultra) ;;
+    *)
+      fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort value is not supported by the selected raw harness"
+      return 1
+      ;;
+  esac
+  FM_ROUTING_COMMAND_EFFORT=$effort
   FM_ROUTING_COMMAND_EFFORT_SEEN=1
 }
 
@@ -226,7 +245,7 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
   FM_ROUTING_COMMAND_EFFORT_SEEN=0
   if [ "$raw" -eq 1 ]; then
     case "$input" in
-      *'__MODELFLAG__'*|*'__EFFORTFLAG__'*|*'__BRIEF__'*|*'__TURNEND__'*|*'__PIEXT__'*|*'__PITURNEND__'*|*'__PIWATCH__'*|*'__OPINPUT__'*|*'__WORKTREE__'*|*'__PIBIN__'*|*'__PITUIMODE__'*|*'__CURSORBIN__'*|*'__KIMIBIN__'*|*'__MUSEBIN__'*|*'__MUSECONFIG__'*|*'__MUSEDATA__'*)
+      *'__MODELFLAG__'*|*'__EFFORTFLAG__'*|*'__BRIEF__'*|*'__TURNEND__'*|*'__PIEXT__'*|*'__PITURNEND__'*|*'__PIWATCH__'*|*'__OPINPUT__'*|*'__WORKTREE__'*|*'__LAUNCHINPUT__'*|*'__PIBIN__'*|*'__PITUIMODE__'*|*'__CURSORBIN__'*|*'__KIMIBIN__'*|*'__MUSEBIN__'*|*'__MUSECONFIG__'*|*'__MUSEDATA__'*)
         fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch contains a reserved template placeholder expanded after receipt validation"
         return 1
         ;;
@@ -299,24 +318,24 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
           return 1
         }
         i=$((i + 1))
-        FM_ROUTING_COMMAND_EFFORT=${FM_ROUTING_WORDS[$i]}
-        case "$FM_ROUTING_COMMAND_EFFORT" in -*|'')
+        value=${FM_ROUTING_WORDS[$i]}
+        case "$value" in -*|'')
           fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag has no fixed literal value"
           return 1
         esac
-        FM_ROUTING_COMMAND_EFFORT_SEEN=1
+        fm_routing_set_raw_effort "$word" "$value" || return 1
         ;;
       --effort=*|--reasoning-effort=*|--thinking=*)
         [ "$FM_ROUTING_COMMAND_EFFORT_SEEN" -eq 0 ] || {
           fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag is duplicated"
           return 1
         }
-        FM_ROUTING_COMMAND_EFFORT=${word#*=}
-        [ -n "$FM_ROUTING_COMMAND_EFFORT" ] || {
+        value=${word#*=}
+        [ -n "$value" ] || {
           fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag has no fixed literal value"
           return 1
         }
-        FM_ROUTING_COMMAND_EFFORT_SEEN=1
+        fm_routing_set_raw_effort "${word%%=*}" "$value" || return 1
         ;;
       -c)
         [ $((i + 1)) -lt "${#FM_ROUTING_WORDS[@]}" ] || {
@@ -369,6 +388,14 @@ fm_routing_expected_launch_binding() { # <raw:0|1> <launch> <harness> <model> <e
     kind=verified_template
   fi
   fm_routing_parse_command_axes "$parse_input" "$raw" || return 1
+  if [ "$raw" -eq 1 ]; then
+    case "$FM_ROUTING_COMMAND_HARNESS" in
+      opencode|kimi|cursor)
+        fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "selected raw harness cannot express the required effort axis"
+        return 1
+        ;;
+    esac
+  fi
   [ "$FM_ROUTING_COMMAND_HARNESS" = "$harness" ] || {
     fm_routing_refuse "RAW_LAUNCH_MISMATCH" "emitted harness contradicts the selected tuple"
     return 1

@@ -1153,21 +1153,21 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$FM_LAUNCH_INPUT"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG____LAUNCHINPUT__' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$FM_LAUNCH_INPUT"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox __LAUNCHINPUT__'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$FM_LAUNCH_INPUT"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" __LAUNCHINPUT__'
       fi
       ;;
-    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$FM_LAUNCH_INPUT"' ;;
+    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt __LAUNCHINPUT__' ;;
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'
       if [ "$kind" = secondmate ]; then
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$FM_LAUNCH_INPUT"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ __LAUNCHINPUT__'
       else
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$FM_LAUNCH_INPUT"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ __LAUNCHINPUT__'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1177,7 +1177,7 @@ launch_template() {
     # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
-    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$FM_LAUNCH_INPUT"' ;;
+    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG____LAUNCHINPUT__' ;;
     # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
     # --yolo does NOT cover and which would otherwise block every spawn, since
     # each task gets a fresh worktree path cursor has never seen. --yolo is the
@@ -1190,7 +1190,7 @@ launch_template() {
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
     # only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$FM_LAUNCH_INPUT"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ __LAUNCHINPUT__' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # its verified typed brief after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -1217,7 +1217,7 @@ launch_template() {
     # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
-    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$FM_LAUNCH_INPUT"' ;;
+    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG____LAUNCHINPUT__' ;;
     *) return 1 ;;
   esac
 }
@@ -1499,6 +1499,11 @@ if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
     "$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
     "$RAW_LAUNCH" "$LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
     || exit 1
+  FM_ROUTING_LAUNCH_INPUT=$("$FM_ROOT/bin/fm-operational-input.sh" encode-verified-file \
+    launch-brief "$FM_ROUTING_BRIEF_HASH" "$FM_ROUTING_BRIEF_FINAL") || {
+    echo "error: validated routing brief changed before launch input construction" >&2
+    exit 1
+  }
 fi
 
 case "$LAUNCH" in
@@ -2792,8 +2797,7 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
-  sq_brief_hash=$(shell_quote "$FM_ROUTING_BRIEF_HASH")
-  launch_prelude="FM_LAUNCH_INPUT=\$($sq_opinput encode-verified-file launch-brief $sq_brief_hash $sq_brief) || exit; "
+  sq_launch_input=$(shell_quote "$FM_ROUTING_LAUNCH_INPUT")
 else
   launch_prelude="FM_LAUNCH_INPUT=\$($sq_opinput encode launch-brief < $sq_brief) || exit; "
 fi
@@ -2810,6 +2814,14 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
+if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
+  LAUNCH=${LAUNCH//__LAUNCHINPUT__/$sq_launch_input}
+  if [ "$RAW_LAUNCH" -eq 1 ]; then
+    LAUNCH="$LAUNCH $sq_launch_input"
+  fi
+else
+  LAUNCH=${LAUNCH//__LAUNCHINPUT__/\"\$FM_LAUNCH_INPUT\"}
+fi
 case "$HARNESS" in
   claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
@@ -2870,7 +2882,7 @@ spawn_record_traceparent() {
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-if [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" != kimi ]; then
+if { [ "$KIND" = secondmate ] || [ "$RELAUNCH" -eq 1 ]; } && [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" != kimi ]; then
   LAUNCH="$launch_prelude$LAUNCH"
 fi
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
@@ -2905,11 +2917,7 @@ if [ "$HARNESS" = kimi ]; then
     exit 1
   fi
   if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
-    KIMI_INPUT=$("$FM_ROOT/bin/fm-operational-input.sh" encode-verified-file \
-      launch-brief "$FM_ROUTING_BRIEF_HASH" "$BRIEF") || {
-      kimi_spawn_fail "kimi validated brief input could not be constructed"
-      exit 1
-    }
+    KIMI_INPUT=$FM_ROUTING_LAUNCH_INPUT
   else
     KIMI_INPUT="Read the brief at $BRIEF_REAL and follow it exactly."
   fi

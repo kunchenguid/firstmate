@@ -351,7 +351,7 @@ A multi-candidate route also supplies the exact one-intake `quota-axi --json` ob
 Every string is non-empty, `brief_sha256` is the SHA-256 of the exact current `data/<task-id>/brief.md` bytes, and `forbidden_effects` is a non-empty string array.
 The receipt binds the SHA-256 of this exact intent file rather than trusting an unattached hash.
 The validator recomputes the brief hash against a private snapshot before accepting the intent, so replacing the brief before that snapshot returns `BRIEF_HASH_MISMATCH`.
-On acceptance, the exact validated bytes persist at `data/<task-id>/routing-brief.<brief_sha256>.md`, and every fresh adapter consumer reads that path once, verifies those captured bytes against `brief_sha256`, and constructs its launch input from the same captured bytes.
+On acceptance, the exact validated bytes persist at `data/<task-id>/routing-brief.<brief_sha256>.md`, and `fm-spawn.sh` synchronously reads that path once, verifies those captured bytes against `brief_sha256` before any worktree lease, endpoint creation, launch input, or metadata publication, and retains the typed launch input from the same captured bytes for every verified or raw adapter consumer.
 
 `routing-decision.pending.json` schema version 1 has exactly this shape:
 
@@ -397,14 +397,16 @@ The requested effort remains in task metadata and the selected tuple when an ada
 For example, codex `max`, grok `xhigh` or `max`, and every opencode, Kimi, or Cursor effort produce a null emitted effort while retaining the requested metadata value.
 Muse's selected `max` emits and binds the adapter value `ultra`.
 
-For a raw command, `launch_binding.kind` is `raw_launch`, every axis must be observed through the fixed literal command itself, and the command head must be `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `muse`, or the canonical `cursor-agent` executable.
+For a raw command, `launch_binding.kind` is `raw_launch`, every axis must be observed through the fixed literal command itself, and the accepted command head must be `claude`, `codex`, `pi`, `pi-signed`, `grok`, or `muse`.
 The bare command must resolve through `PATH`, every relative path spelling is refused, and an absolute spelling is accepted only when it identifies the same executable as that supported bare command.
 Outside shell quotes, raw commands allow only alphanumerics, space separators, and `-`, `_`, `.`, `/`, `:`, `,`, `+`, `@`, or `%`, while `=` is accepted only after a word has begun so zsh cannot expand a leading `=command`.
 Single-quoted content is accepted literally except for control or non-ASCII input, while double-quoted content accepts alphanumerics, space, and `#`, `%`, `&`, `'`, `(`, `)`, `*`, `+`, `,`, `-`, `.`, `/`, `:`, `;`, `<`, `=`, `>`, `?`, `@`, `[`, `]`, `^`, `_`, `{`, `|`, `}`, or `~`.
 Double-quoted expansion, history, and backslash syntax are refused rather than interpreted or normalized.
 Every other character refuses, including non-ASCII input and all control characters, and a home-relative raw binary such as `~/bin/claude` must be written as an absolute path.
 The only accepted raw model spelling is `--model <literal>` or `--model=<literal>`, and a separate value beginning with `-` is refused while the equals form remains unambiguous.
-The accepted raw effort spellings are `--effort`, `--reasoning-effort`, `--thinking`, and codex `-c model_reasoning_effort=`, with fixed literal values and applicable equals forms; separate axis values beginning with `-` and unmatched Codex config quotes are refused.
+Raw effort syntax is adapter-specific: Claude accepts `--effort` with `low`, `medium`, `high`, `xhigh`, or `max`; Codex accepts `-c model_reasoning_effort=` with `low`, `medium`, `high`, or `xhigh`; Grok accepts `--reasoning-effort` with `low`, `medium`, or `high`; Pi and Pi Signed accept `--thinking` with `low`, `medium`, `high`, `xhigh`, or `max`; and Muse accepts `--reasoning-effort` with `low`, `medium`, `high`, `xhigh`, or emitted `ultra` for selected `max`.
+OpenCode, Kimi, and Cursor raw launches are refused because their interactive adapters cannot express the separately required effort axis.
+Applicable equals forms remain accepted, while separate axis values beginning with `-` and unmatched Codex config quotes are refused.
 Raw commands with shell expansion, command substitution, control operators, environment-assignment prefixes, duplicate or missing values, non-standard model spellings such as `-m` or `--model-name`, or either model or effort axis absent return `RAW_LAUNCH_NOT_VERIFIABLE` or `RAW_LAUNCH_UNRESOLVED`.
 An observed raw harness, model, or effort that contradicts the selected tuple returns `RAW_LAUNCH_MISMATCH`.
 
