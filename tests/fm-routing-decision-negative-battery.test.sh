@@ -9,6 +9,8 @@ set -u
 
 REAL_JQ=$(command -v jq)
 POST_BINDING_RECEIPT_FILTER=
+POST_SNAPSHOT_SOURCE_FILTER=
+POST_SNAPSHOT_CONFIG_FILTER=
 
 # One authority guard is defense in depth against the receipt changing after
 # its exact configuration binding is checked.
@@ -16,6 +18,24 @@ POST_BINDING_RECEIPT_FILTER=
 # reachable without a production test bypass.
 jq() {
   local tmp
+  if [ -n "$POST_SNAPSHOT_SOURCE_FILTER" ] \
+    && [ "$#" -eq 3 ] \
+    && [ "$1" = -r ] \
+    && [ "$2" = '.matched_profile.source' ]; then
+    tmp="$TASK_DIR/routing-decision.pending.json.replacement"
+    "$REAL_JQ" "$POST_SNAPSHOT_SOURCE_FILTER" "$TASK_DIR/routing-decision.pending.json" > "$tmp" || return 1
+    mv "$tmp" "$TASK_DIR/routing-decision.pending.json" || return 1
+    POST_SNAPSHOT_SOURCE_FILTER=
+  fi
+  if [ -n "$POST_SNAPSHOT_CONFIG_FILTER" ] \
+    && [ "$#" -ge 1 ] \
+    && [ "${!#}" != "$HOME_DIR/config/crew-dispatch.json" ] \
+    && [[ "$*" == *'.rules[$index].use'* ]]; then
+    tmp="$HOME_DIR/config/crew-dispatch.json.replacement"
+    "$REAL_JQ" "$POST_SNAPSHOT_CONFIG_FILTER" "$HOME_DIR/config/crew-dispatch.json" > "$tmp" || return 1
+    mv "$tmp" "$HOME_DIR/config/crew-dispatch.json" || return 1
+    POST_SNAPSHOT_CONFIG_FILTER=
+  fi
   if [ -n "$POST_BINDING_RECEIPT_FILTER" ] \
     && [ "$#" -eq 3 ] \
     && [ "$1" = -r ] \
@@ -127,6 +147,9 @@ write_fixture() {
   RUN_MODEL_FRAGMENT="--model 'opus' "
   RUN_EFFORT_FRAGMENT="--effort 'high' "
   PREEXISTING_FINAL=0
+  POST_BINDING_RECEIPT_FILTER=
+  POST_SNAPSHOT_SOURCE_FILTER=
+  POST_SNAPSHOT_CONFIG_FILTER=
 }
 
 update_receipt() {
@@ -273,6 +296,7 @@ setup_raw_plain_nonascii() { setup_raw_literal $'claude --model mod\303\250le --
 setup_raw_single_nonascii() { setup_raw_literal $'claude --model \'mod\303\250le\' --effort high'; }
 setup_raw_double_nonascii() { setup_raw_literal $'claude --model "mod\303\250le" --effort high'; }
 setup_raw_flag_shape() { setup_raw_literal "$RAW_SHAPE_COMMAND"; }
+setup_raw_terminator() { setup_raw_literal 'claude -- --model opus --effort high'; }
 setup_raw_no_executable() { setup_raw_literal '--model opus --effort high'; }
 setup_raw_harness_contradiction() { setup_raw_literal 'codex --model opus --effort high'; }
 setup_raw_model_contradiction() { setup_raw_literal 'claude --model sonnet --effort high'; }
@@ -316,6 +340,9 @@ setup_config_byte_mutation() { printf '\n' >> "$HOME_DIR/config/crew-dispatch.js
 setup_pending_symlink() {
   mv "$TASK_DIR/routing-decision.pending.json" "$TASK_DIR/receipt-target.json"
   ln -s "$TASK_DIR/receipt-target.json" "$TASK_DIR/routing-decision.pending.json"
+}
+setup_pending_replaced_after_snapshot() {
+  POST_SNAPSHOT_SOURCE_FILTER='.rationale = "replacement after validation began"'
 }
 setup_selection_order_tamper() { update_receipt '.selection_order |= reverse'; }
 setup_quota_byte_mutation() { write_multi_fixture; printf '\n' >> "$TASK_DIR/quota-snapshot.json"; }
@@ -595,7 +622,11 @@ config effort duplicate|claude --model opus --effort high -c model_reasoning_eff
 config effort empty|claude --model opus -c model_reasoning_effort=|effort config has no fixed literal value
 equals config effort duplicate|claude --model opus --effort high -c=model_reasoning_effort=low|effort flag is duplicated
 equals config effort empty|claude --model opus -c=model_reasoning_effort=|effort config has no fixed literal value
+command wrapper env|env ROUTE_MODEL=sonnet claude --model opus --effort high|raw launch begins with a command wrapper rather than the emitted harness
 RAW_SHAPES
+
+exercise_negative "raw option terminator" RAW_LAUNCH_UNRESOLVED setup_raw_terminator \
+  "raw launches must expose fixed literal model and effort selections"
 
 exercise_negative "42 raw launch without executable" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_no_executable \
   "launch has no executable harness word"
@@ -638,8 +669,20 @@ exercise_negative "59 rule source with malformed profile" DISPATCH_CONFIG_MISMAT
   "matched rule is absent or malformed in canonical configuration"
 exercise_negative "60 rule source with post-binding kind drift" DISPATCH_CONFIG_MISMATCH setup_rule_binding_kind_drift \
   "rule source requires canonical dispatch configuration"
+exercise_negative "61 pending receipt replaced after snapshot" PERSISTENCE_REFUSED setup_pending_replaced_after_snapshot \
+  "pending receipt changed after its validation snapshot"
 
-expected_count=$((80 + ${#PLAIN_FORBIDDEN_PUNCT}))
+write_fixture
+expected_config_hash=$(jq -r '.dispatch_config.sha256' "$TASK_DIR/routing-decision.pending.json")
+POST_SNAPSHOT_CONFIG_FILTER='.rules[0].use.model = "sonnet"'
+run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement escaped its validation snapshot"
+[ "$(jq -r '.dispatch_config.sha256' "$TASK_DIR/routing-decision.json")" = "$expected_config_hash" ] \
+  || fail "persisted receipt did not retain the validated canonical config snapshot hash"
+[ "$(sha_file "$HOME_DIR/config/crew-dispatch.json")" != "$expected_config_hash" ] \
+  || fail "canonical config replacement counterexample did not fire"
+pass "canonical config replacement cannot change snapshotted candidate resolution"
+
+expected_count=$((83 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

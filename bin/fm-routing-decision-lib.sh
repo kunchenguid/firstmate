@@ -144,7 +144,7 @@ FM_ROUTING_COMMAND_MODEL_SEEN=0
 FM_ROUTING_COMMAND_EFFORT_SEEN=0
 
 fm_routing_parse_command_axes() { # <command> <raw:0|1>
-  local input=$1 raw=$2 word value i executable_seen=0
+  local input=$1 raw=$2 word value i executable_seen=0 harness_word
   FM_ROUTING_COMMAND_HARNESS=
   FM_ROUTING_COMMAND_MODEL=
   FM_ROUTING_COMMAND_EFFORT=
@@ -165,11 +165,25 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
         continue
       fi
       case "$word" in -*) break ;; esac
-      FM_ROUTING_COMMAND_HARNESS=$(basename "$word")
+      harness_word=$(basename "$word")
+      if [ "$raw" -eq 1 ]; then
+        case "$harness_word" in
+          env|command|exec|nohup|nice|setsid|stdbuf|sudo|doas|time|timeout|xargs|sh|bash|zsh|dash|ksh|fish)
+            fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch begins with a command wrapper rather than the emitted harness"
+            return 1
+            ;;
+        esac
+      fi
+      FM_ROUTING_COMMAND_HARNESS=$harness_word
       executable_seen=1
       continue
     fi
+    if [ "$raw" -eq 1 ] && [[ "$word" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch environment assignments can select an unobserved runtime"
+      return 1
+    fi
     case "$word" in
+      --) break ;;
       --model)
         [ "$FM_ROUTING_COMMAND_MODEL_SEEN" -eq 0 ] \
           && [ $((i + 1)) -lt "${#FM_ROUTING_WORDS[@]}" ] || {
@@ -372,9 +386,10 @@ fm_routing_normalized_candidates() {
   esac
 }
 
-fm_routing_decision_validate_and_persist() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment>
+fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment> <source-pending> <snapshot-dir>
   local data=$1 config_dir=$2 id=$3 harness=$4 model=$5 effort=$6 home=$7
   local raw_launch=$8 launch=$9 model_fragment=${10:-} effort_fragment=${11:-}
+  local source_pending=${12} snapshot_dir=${13} consumed_pending
   local task_dir brief intent pending quota_snapshot final config_file brief_hash intent_hash
   local receipt_task generated_at required_gate intent_gate source index candidates chosen candidate_count
   local quota_basis quota_source quota_observed quota_hash actual_quota_hash snapshot_observed
@@ -386,7 +401,7 @@ fm_routing_decision_validate_and_persist() { # <data> <canonical-config> <task-i
   intent="$task_dir/routing-intent.json"
   pending="$task_dir/routing-decision.pending.json"
   quota_snapshot="$task_dir/quota-snapshot.json"
-  final="$task_dir/routing-decision.json"
+  final="${source_pending%.pending.json}.json"
   config_file="$config_dir/crew-dispatch.json"
 
   fm_routing_private_input "$pending" "missing" "UNREADABLE_RECEIPT" || return 1
@@ -655,10 +670,95 @@ fm_routing_decision_validate_and_persist() { # <data> <canonical-config> <task-i
     fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt permissions could not be restricted"
     return 1
   }
+  consumed_pending="$snapshot_dir/pending.consumed.json"
+  mv -- "$source_pending" "$consumed_pending" 2>/dev/null || {
+    fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt changed or disappeared after its validation snapshot"
+    return 1
+  }
+  if ! cmp -s "$pending" "$consumed_pending"; then
+    if [ ! -e "$source_pending" ] && [ ! -L "$source_pending" ]; then
+      mv -- "$consumed_pending" "$source_pending" 2>/dev/null || true
+    fi
+    fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt changed after its validation snapshot"
+    return 1
+  fi
   mv -f -- "$pending" "$final" || {
+    if [ ! -e "$source_pending" ] && [ ! -L "$source_pending" ]; then
+      mv -- "$consumed_pending" "$source_pending" 2>/dev/null || true
+    fi
     fm_routing_refuse "PERSISTENCE_REFUSED" "validated receipt could not be persisted atomically"
     return 1
   }
+  rm -f -- "$consumed_pending"
   # shellcheck disable=SC2034 # consumed by the sourcing fm-spawn.sh process
   FM_ROUTING_DECISION_FINAL=$final
+}
+
+fm_routing_decision_validate_and_persist() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment>
+  local data=$1 config_dir=$2 id=$3 task_dir source_pending source_intent source_brief
+  local source_config source_quota snapshot_dir snapshot_data snapshot_config status
+
+  FM_ROUTING_DECISION_FINAL=
+  task_dir="$data/$id"
+  source_pending="$task_dir/routing-decision.pending.json"
+  source_intent="$task_dir/routing-intent.json"
+  source_brief="$task_dir/brief.md"
+  source_config="$config_dir/crew-dispatch.json"
+  source_quota="$task_dir/quota-snapshot.json"
+
+  fm_routing_private_input "$source_pending" "missing" "UNREADABLE_RECEIPT" || return 1
+  fm_routing_private_input "$source_intent" "missing" "UNREADABLE_INTENT" || return 1
+  fm_routing_private_input "$source_brief" "missing" "NOT_VERIFIABLE(BRIEF)" || return 1
+  command -v jq >/dev/null 2>&1 || {
+    fm_routing_refuse "NOT_VERIFIABLE(SCHEMA)" "jq is unavailable"
+    return 1
+  }
+
+  snapshot_dir=$(mktemp -d "$task_dir/.routing-decision.validate.XXXXXX") || {
+    fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "private validation snapshot could not be created"
+    return 1
+  }
+  chmod 0700 "$snapshot_dir" || {
+    rm -rf -- "$snapshot_dir"
+    fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "private validation snapshot permissions could not be restricted"
+    return 1
+  }
+  snapshot_data="$snapshot_dir/data"
+  snapshot_config="$snapshot_dir/config"
+  mkdir -p "$snapshot_data/$id" "$snapshot_config" || {
+    rm -rf -- "$snapshot_dir"
+    fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "private validation snapshot layout could not be created"
+    return 1
+  }
+  if ! cp "$source_pending" "$snapshot_data/$id/routing-decision.pending.json" \
+    || ! cp "$source_intent" "$snapshot_data/$id/routing-intent.json" \
+    || ! cp "$source_brief" "$snapshot_data/$id/brief.md"; then
+    rm -rf -- "$snapshot_dir"
+    fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "required authority inputs could not be snapshotted"
+    return 1
+  fi
+  if [ -e "$source_config" ] || [ -L "$source_config" ]; then
+    [ -f "$source_config" ] && [ ! -L "$source_config" ] && [ -r "$source_config" ] \
+      && cp "$source_config" "$snapshot_config/crew-dispatch.json" || {
+      rm -rf -- "$snapshot_dir"
+      fm_routing_refuse "NOT_VERIFIABLE(CONFIG)" "canonical dispatch configuration could not be snapshotted as a readable regular file"
+      return 1
+    }
+  fi
+  if [ -e "$source_quota" ] || [ -L "$source_quota" ]; then
+    if [ -f "$source_quota" ] && [ ! -L "$source_quota" ] && [ -r "$source_quota" ]; then
+      cp "$source_quota" "$snapshot_data/$id/quota-snapshot.json" || {
+        rm -rf -- "$snapshot_dir"
+        fm_routing_refuse "NOT_VERIFIABLE(QUOTA)" "quota snapshot could not be snapshotted"
+        return 1
+      }
+    fi
+  fi
+
+  fm_routing_decision_validate_snapshot \
+    "$snapshot_data" "$snapshot_config" "$id" "$4" "$5" "$6" "$7" "$8" "$9" \
+    "${10:-}" "${11:-}" "$source_pending" "$snapshot_dir"
+  status=$?
+  rm -rf -- "$snapshot_dir"
+  return "$status"
 }

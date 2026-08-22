@@ -585,13 +585,15 @@ test_config_override_cannot_relocate_receipt_authority() {
 }
 
 test_raw_launches_refuse_unobserved_runtime_selection() {
-  local rec dynamic env_prefix nonstandard unresolved id out status command predicate
+  local rec dynamic env_prefix env_wrapper terminator nonstandard unresolved id out status command predicate
   dynamic=profile-raw-dynamic-z12c
   env_prefix=profile-raw-env-z12d
+  env_wrapper=profile-raw-env-wrapper-z12d2
+  terminator=profile-raw-terminator-z12d3
   nonstandard=profile-raw-nonstandard-z12e
   unresolved=profile-raw-unresolved-z12f
   rec=$(make_spawn_case profile-raw-unobserved claude \
-    "$dynamic" "$env_prefix" "$nonstandard" "$unresolved")
+    "$dynamic" "$env_prefix" "$env_wrapper" "$terminator" "$nonstandard" "$unresolved")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
 
@@ -600,6 +602,8 @@ test_raw_launches_refuse_unobserved_runtime_selection() {
     case "$id" in
       "$dynamic") command='claude --model "$ROUTE_MODEL" --effort high'; predicate=RAW_LAUNCH_NOT_VERIFIABLE ;;
       "$env_prefix") command='MODEL=opus claude --model opus --effort high'; predicate=RAW_LAUNCH_NOT_VERIFIABLE ;;
+      "$env_wrapper") command='env ROUTE_MODEL=sonnet claude --model opus --effort high'; predicate=RAW_LAUNCH_NOT_VERIFIABLE ;;
+      "$terminator") command='claude -- --model opus --effort high'; predicate=RAW_LAUNCH_UNRESOLVED ;;
       "$nonstandard") command='claude -m opus --effort high'; predicate=RAW_LAUNCH_NOT_VERIFIABLE ;;
       *) command='claude --model opus'; predicate=RAW_LAUNCH_UNRESOLVED ;;
     esac
