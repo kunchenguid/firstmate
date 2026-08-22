@@ -493,6 +493,29 @@ test_unmerged_task_branch_is_left_alone() {
   pass "the backstop sweep leaves an unmerged/diverged fm/* branch untouched"
 }
 
+test_gone_unmerged_task_branch_is_left_alone() {
+  local home clone remote out
+  home=$(new_home)
+  clone=$(build_pair "$home" upsilon)
+  remote="$home/remotes/upsilon.git"
+  git -C "$clone" checkout -q -b fm/task-gone
+  commit_file "$clone" feature.txt hello "unmerged work"
+  git -C "$clone" push -q -u origin fm/task-gone
+  git --git-dir="$remote" update-ref -d refs/heads/fm/task-gone
+  git -C "$clone" fetch -q --prune origin
+  mkdir -p "$home/data"
+  printf -- '- upsilon [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_not_contains "$out" "pruned fm/task-gone" "a [gone] upstream without a merge must never be reported as pruned"
+  branch_exists "$clone" fm/task-gone \
+    || fail "gone-unmerged-prune: fm/task-gone was deleted despite never being merged"
+  [ "$(git -C "$clone" for-each-ref --format='%(upstream:track)' refs/heads/fm/task-gone)" = "[gone]" ] \
+    || fail "gone-unmerged-prune: expected pruned tracking branch to report [gone]"
+  pass "the backstop sweep leaves an unmerged fm/* branch with a [gone] upstream untouched"
+}
+
 test_checked_out_task_branch_is_left_alone() {
   local home clone out wt
   home=$(new_home)
@@ -835,6 +858,7 @@ test_local_only_skipped
 test_local_only_prunes_merged_task_branch
 test_no_origin_prunes_merged_task_branch
 test_unmerged_task_branch_is_left_alone
+test_gone_unmerged_task_branch_is_left_alone
 test_checked_out_task_branch_is_left_alone
 test_prune_never_targets_the_default_branch
 test_single_project_by_bare_name_resolves
