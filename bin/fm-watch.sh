@@ -1040,6 +1040,10 @@ watcher_bootstrap_cleanup() {
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
     cleanup_status=1
   fi
+  # WATCH_LOCK is excluded from this sweep because fm_lock_prepare_owner stamps
+  # our pid into the owner dir before fm_lock_try_create ever publishes the
+  # symlink, so the instant this lock is visible on disk it already reads as
+  # ours; the recovery-marker branch above is what owns releasing it.
   fm_lock_release_all_held "$WATCH_LOCK"
   return "$cleanup_status"
 }
