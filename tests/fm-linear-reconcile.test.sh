@@ -22,6 +22,14 @@ case $* in
     printf '%s\n' '{"ok":true,"result":{"teams":[{"workspace":{"id":"workspace-a"}},{"workspace":{"id":"workspace-a"}},{"workspace":{"id":"workspace-b"}}]}}'
     ;;
   *'--workspace workspace-a --json')
+    if [ "${FM_LINEAR_TEST_MODE:-}" = missing-cursor ]; then
+      printf '%s\n' '{"ok":true,"result":{"issues":[],"meta":{"hasMore":true}}}'
+      exit 0
+    fi
+    if [ "${FM_LINEAR_TEST_MODE:-}" = invalid-issue ]; then
+      printf '%s\n' '{"ok":true,"result":{"issues":[{"id":null,"updatedAt":"2026-08-22T10:00:00.000Z","state":{"type":"started"}}],"meta":{"hasMore":false}}}'
+      exit 0
+    fi
     case $* in
       *'--cursor page-two'*)
         printf '%s\n' '{"ok":true,"result":{"issues":[{"id":"22222222-2222-4222-8222-222222222222","updatedAt":"2026-08-22T11:00:00.000Z","state":{"type":"started"},"title":"second page"}],"meta":{"hasMore":false}}}'
@@ -63,3 +71,26 @@ FM_HOME="$HOME_DIR" FM_LINEAR_CLI="$FAKE_BIN/orca-linear-fixture" \
 [ "$(find "$HOME_DIR/state/procevent-inbox" -name 'event-*.result' | wc -l | tr -d ' ')" -eq 2 ] \
   || fail "repeated Linear reconciliation duplicated unchanged issue revisions"
 pass "reconciliation and immediate delivery share durable revision deduplication"
+
+if FM_HOME="$HOME_DIR" FM_LINEAR_CLI="$FAKE_BIN/orca-linear-fixture" \
+  FM_LINEAR_TEST_CALLS="$CALLS" FM_LINEAR_TEST_MODE=invalid-issue \
+  "$RECONCILE" >/dev/null 2>&1; then
+  fail "Linear reconciliation accepted invalid issue metadata"
+fi
+pass "reconciliation fails closed on invalid issue metadata"
+
+if FM_HOME="$HOME_DIR" FM_LINEAR_CLI="$FAKE_BIN/orca-linear-fixture" \
+  FM_LINEAR_TEST_CALLS="$CALLS" FM_LINEAR_TEST_MODE=missing-cursor \
+  "$RECONCILE" >/dev/null 2>&1; then
+  fail "Linear reconciliation accepted a missing pagination cursor"
+fi
+pass "reconciliation fails closed on missing pagination cursors"
+
+BLOCKED_HOME="$TMP_ROOT/blocked-home"
+mkdir -p "$BLOCKED_HOME/state"
+: > "$BLOCKED_HOME/state/procevent-inbox"
+if FM_HOME="$BLOCKED_HOME" FM_LINEAR_CLI="$FAKE_BIN/orca-linear-fixture" \
+  FM_LINEAR_TEST_CALLS="$CALLS" "$RECONCILE" >/dev/null 2>&1; then
+  fail "Linear reconciliation ignored a failed canonical ingress"
+fi
+pass "reconciliation fails closed when canonical ingress fails"

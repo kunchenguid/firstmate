@@ -48,6 +48,11 @@ json_ok() {
 issue_list_ok() {
   jq -e '.ok == true
     and (.result.issues | type == "array")
+    and (all(.result.issues[];
+      (.id | type == "string" and length > 0)
+      and (.updatedAt | type == "string" and length > 0)
+      and (.state.type | type == "string")))
+    and (.result.meta.hasMore | type == "boolean")
     and (.result.meta.partial != true)
     and ((.result.meta.workspaceErrors // []) | length == 0)' >/dev/null 2>&1
 }
@@ -64,7 +69,7 @@ list_workspaces() {
 }
 
 reconcile_workspace() {
-  local workspace=$1 cursor response next_cursor issue issue_id updated_at count
+  local workspace=$1 cursor response has_more next_cursor issue issue_id updated_at count
   cursor=
   count=0
   while :; do
@@ -95,10 +100,13 @@ reconcile_workspace() {
       | select(.state.type != "completed" and .state.type != "canceled")
       | {id, updatedAt}')
 
-    next_cursor=$(printf '%s\n' "$response" | jq -r \
-      'if .result.meta.hasMore == true then (.result.meta.nextCursor // empty) else empty end') \
+    has_more=$(printf '%s\n' "$response" | jq -r '.result.meta.hasMore') \
       || die 'could not read Linear pagination metadata'
-    [ -n "$next_cursor" ] || break
+    [ "$has_more" = true ] || break
+    next_cursor=$(printf '%s\n' "$response" | jq -r '.result.meta.nextCursor // empty') \
+      || die 'could not read Linear pagination cursor'
+    [ -n "$next_cursor" ] \
+      || die "Linear pagination cursor is missing for workspace $workspace"
     [ "$next_cursor" != "$cursor" ] || die "Linear pagination did not advance for workspace $workspace"
     cursor=$next_cursor
   done
