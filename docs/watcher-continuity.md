@@ -19,6 +19,9 @@ A cycle-end failure is benign when that live-watcher predicate is true, and the 
 Only an exhausted failure with no verified watcher emits one last-resort notice for the continuous failure episode; later consecutive Stop cycles exit 2 to guarantee another Stop-owned retry without repeating the notice until the turn-end guard consumes the attended fail-open.
 The Claude turn-end guard owns the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
+Codex's synchronous `.codex/hooks.json` Stop hook owns the gap between bounded foreground checkpoints.
+It runs one checkpoint inside each Stop, forces a continuation after either an actionable wake or a quiet bound, and lets the next Stop start the successor checkpoint without a model-authored command.
+Every checkpoint remains a foreground descendant of the hook; Codex uses no detached watcher or parallel loop.
 
 ## Actionable wake ordering
 
@@ -39,11 +42,11 @@ The model no longer re-arms after ordinary wakes.
 No PreToolUse hook denies fleet commands based on watcher status.
 A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
-Codex retains its bounded foreground checkpoint protocol.
+Codex retains its bounded foreground checkpoint protocol, with successor checkpoints owned deterministically by its synchronous Stop hook.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
 
-The turn-end guard remains the final backstop rather than the normal continuity mechanism and cooperates with the auto-arm in its `--claude` mode.
+The turn-end guard remains the final backstop for other harnesses and cooperates with the auto-arm in its `--claude` mode; its explicit `--codex` mode is also Codex's normal checkpoint-continuity owner.
 
 ## Recovery episode acknowledgement
 
@@ -95,6 +98,6 @@ It also covers abandoned single-flight claims: a claim the ledger shows already 
 The goal is continuity without a Pi or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
-Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
+Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains synchronous Stop-owned bounded foreground checkpoints.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.

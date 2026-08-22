@@ -87,7 +87,65 @@ test_existing_singleton_watcher_is_not_success() {
   pass "checkpoint rejects an existing watcher singleton as unowned"
 }
 
+test_codex_stop_recovers_terminal_signal_after_quiet_checkpoint() {
+  local home fake_state checkpoint_out checkpoint_err quiet_hook_out quiet_hook_status hook_out hook_status drained
+  home=$(make_home terminal-after-checkpoint)
+  fake_state="$home/fm-crew-state.sh"
+  checkpoint_out="$home/checkpoint.out"
+  checkpoint_err="$home/checkpoint.err"
+  mkdir -p "$home/bin"
+  : > "$home/AGENTS.md"
+  git init -q "$home"
+  cat > "$fake_state" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_FAKE_CREW_STATE:?}"
+SH
+  chmod +x "$fake_state"
+  printf 'kind=ship\n' > "$home/state/task.meta"
+  printf 'working: validation is still running\n' > "$home/state/task.status"
+
+  hook_status=0
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CREW_STATE_BIN="$fake_state" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$CHECKPOINT" --seconds 20 > "$checkpoint_out" 2> "$checkpoint_err" || hook_status=$?
+  expect_code 124 "$hook_status" "initial quiet checkpoint exit"
+  assert_absent "$home/state/.wake-queue" "active working signal was queued instead of absorbed"
+  assert_present "$home/state/.seen-task_status" "active working signal suppressor was not advanced"
+
+  quiet_hook_status=0
+  quiet_hook_out=$(printf '%s' '{"stop_hook_active":false,"session_id":"codex-continuity"}' \
+    | FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CREW_STATE_BIN="$fake_state" \
+      FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+      FM_CODEX_WATCH_CHECKPOINT=20 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$ROOT/bin/fm-turnend-guard.sh" --codex 2>&1) || quiet_hook_status=$?
+  expect_code 2 "$quiet_hook_status" "quiet Codex Stop checkpoint continuation"
+  assert_not_contains "$quiet_hook_out" "signal:" "quiet Codex Stop checkpoint fabricated a terminal wake"
+  assert_absent "$home/state/.wake-queue" "quiet Codex Stop checkpoint queued active progress"
+
+  printf 'blocked: validation requires a credential\n' >> "$home/state/task.status"
+  touch "$home/state/task.turn-ended"
+  hook_status=0
+  hook_out=$(printf '%s' '{"stop_hook_active":true,"session_id":"codex-continuity"}' \
+    | FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CREW_STATE_BIN="$fake_state" \
+      FM_FAKE_CREW_STATE='state: blocked · source: status-log · validation requires a credential' \
+      FM_CODEX_WATCH_CHECKPOINT=20 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$ROOT/bin/fm-turnend-guard.sh" --codex 2>&1) || hook_status=$?
+  expect_code 2 "$hook_status" "Codex Stop recovery exit"
+  case "$hook_out" in
+    *"signal:"*|*"check: rearm-resurface"*) ;;
+    *) fail "Codex Stop recovery did not surface the waiting watcher boundary: $hook_out" ;;
+  esac
+  drained=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-wake-drain.sh" 2>/dev/null)
+  assert_contains "$drained" "blocked: validation requires a credential" \
+    "Codex Stop recovery did not leave the real terminal result for the primary"
+  pass "Codex Stop recovers a terminal status written after an absorbed working signal and quiet checkpoint"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
+test_codex_stop_recovers_terminal_signal_after_quiet_checkpoint
