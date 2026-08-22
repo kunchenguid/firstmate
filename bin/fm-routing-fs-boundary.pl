@@ -210,6 +210,9 @@ sub consume_generation {
     $offset += $count;
   }
   $fh->sync or fail("LEDGER_SYNC:$name:$!");
+  if ($created) {
+    $task->sync or fail("LEDGER_DIR_SYNC:$name:$!");
+  }
   my @path_st = lstat($name);
   @path_st && $path_st[0] == $st[0] && $path_st[1] == $st[1]
     or fail("LEDGER_IDENTITY:$name");
