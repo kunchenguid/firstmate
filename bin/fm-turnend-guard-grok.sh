@@ -50,7 +50,10 @@ ROOT=${ROOT%/}
 [ -x "$ROOT/bin/fm-turnend-guard.sh" ] || exit 0
 
 if [ "$CAPABILITY" = native ]; then
-  printf '%s' "$PAYLOAD" | "$ROOT/bin/fm-turnend-guard.sh"
+  # Grok's Stop hook stdout schema is unverified, and Codex was measured
+  # rejecting exactly this envelope, so the delegation declares no stdout reader
+  # until a live run promotes that row. Exit status and stderr still delegate.
+  printf '%s' "$PAYLOAD" | FM_TURNEND_STDOUT_SINK=none "$ROOT/bin/fm-turnend-guard.sh"
   RC=$?
   case "$RC" in
     0|2) exit "$RC" ;;
@@ -68,11 +71,22 @@ command -v grok >/dev/null 2>&1 || exit 0
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-grok.XXXXXX") || exit 0
 trap 'rm -f "$ERR"' EXIT
 
-printf '%s' "$PAYLOAD" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
+# A pre-native Grok process consumes neither this hook's exit status nor its
+# stdout. The bounded resume prompt below is this path's only display surface,
+# and it exists only when the shared predicate blocks, so the guard is told its
+# stdout has no reader: it then neither writes an envelope into a sink nor
+# spends an advisory warning's one delivery on a stream nobody reads.
+printf '%s' "$PAYLOAD" \
+  | FM_TURNEND_STDOUT_SINK=none "$ROOT/bin/fm-turnend-guard.sh" >/dev/null 2>"$ERR"
 RC=$?
 [ "$RC" -eq 2 ] || exit 0
 
-REASON=$(cat "$ERR" 2>/dev/null || true)
+# The shared guard's stderr carries the supervision banner, an advisory line
+# delivered alongside that banner, and stand-down diagnostics that belong to
+# neither. A pre-native Grok process reads neither this hook's exit status nor
+# its stdout, so this bounded resume prompt is the only surface that can carry
+# both marked kinds; the unmarked diagnostics stay out of it.
+REASON=$(grep -E '^(●|○)' "$ERR" 2>/dev/null || true)
 [ -n "$REASON" ] || REASON='tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'
 # shellcheck source=bin/fm-operational-input.sh
 . "$ROOT/bin/fm-operational-input.sh"

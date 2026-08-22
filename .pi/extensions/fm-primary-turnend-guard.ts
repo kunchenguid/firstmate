@@ -7,6 +7,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
 let guardFollowupActive = false;
+let triggerText = "";
+let replyText = "";
+let replyID = "";
 
 type LockOwnership = "owned" | "missing" | "other";
 
@@ -61,19 +64,86 @@ function runSessionstartNudge(): string {
   return result.stdout.trim();
 }
 
-function runGuard(): Promise<{ code: number; stderr: string }> {
+function runGuard(payload: Record<string, unknown>): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolveResult) => {
     const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
-      stdio: ["pipe", "ignore", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
+    let stdout = "";
     let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    child.on("error", () => resolveResult({ code: 0, stderr: "" }));
-    child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
-    child.stdin.end('{"stop_hook_active":false}');
+    child.on("error", () => resolveResult({ code: 0, stdout: "", stderr: "" }));
+    child.on("close", (code) => resolveResult({ code: code ?? 0, stdout, stderr }));
+    child.stdin.end(JSON.stringify({ stop_hook_active: false, ...payload }));
   });
+}
+
+function assistantText(message: unknown): string {
+  if (!message || typeof message !== "object") return "";
+  const content = (message as { content?: unknown }).content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part): part is { type: "text"; text: string } =>
+      part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("");
+}
+
+function sessionIDFromContext(ctx: unknown): string {
+  const manager = (ctx as { sessionManager?: { getSessionId?: () => unknown } } | undefined)?.sessionManager;
+  const sessionID = manager?.getSessionId?.();
+  return typeof sessionID === "string" && sessionID ? sessionID : "unknown";
+}
+
+function guardPayload(sessionID: string): Record<string, unknown> {
+  if (!replyText || !replyID) return {};
+  return {
+    fm_reply_text: replyText,
+    fm_reply_id: replyID,
+    fm_trigger_text: triggerText,
+    session_id: sessionID,
+  };
+}
+
+// The guard declares the envelope kind, so routing never depends on the
+// message's wording. An envelope without the discriminator is an ordinary
+// turn-end notice.
+function deliverSystemMessages(pi: ExtensionAPI, ctx: unknown, stdout: string): void {
+  if (!stdout) return;
+  for (const line of stdout.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line) as { systemMessage?: unknown; kind?: unknown };
+      if (typeof parsed.systemMessage !== "string" || !parsed.systemMessage) continue;
+      const isCaptainWarning = parsed.kind === "captain-comms-warning";
+      if (isCaptainWarning) {
+        const notify = (ctx as { ui?: { notify?: (message: string, type: string) => void } } | undefined)?.ui?.notify;
+        if (typeof notify === "function") notify(parsed.systemMessage, "warning");
+        continue;
+      }
+      pi.sendMessage({
+        customType: "firstmate-turnend-guard-notice",
+        content: parsed.systemMessage,
+        display: true,
+        details: { kind: "turn-end-guard" },
+      });
+    } catch {
+    }
+  }
+}
+
+// Only the supervision banner belongs in a forced continuation; the guard's
+// advisory diagnostics reach their audience on their own channel.
+function bannerOnly(stderr: string): string {
+  return (stderr ?? "")
+    .split("\n")
+    .filter((line) => line.startsWith("\u25cf"))
+    .join("\n");
 }
 
 // PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
@@ -122,6 +192,25 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  pi.on("input", (event) => {
+    triggerText = String((event as { text?: unknown }).text ?? "");
+    replyText = "";
+    replyID = "";
+  });
+
+  pi.on("turn_end", (event, ctx) => {
+    const message = (event as { message?: unknown }).message;
+    const text = assistantText(message);
+    if (!text) return;
+    const timestamp = (message as { timestamp?: unknown } | undefined)?.timestamp;
+    const turnIndex = (event as { turnIndex?: unknown }).turnIndex;
+    const suffix = typeof timestamp === "number" || typeof timestamp === "string"
+      ? String(timestamp)
+      : String(turnIndex ?? "unknown");
+    replyText = text;
+    replyID = `${sessionIDFromContext(ctx)}:${suffix}`;
+  });
+
   pi.on("tool_call", async (event) => {
     if (event.type !== "tool_call" || event.toolName !== "bash") return {};
     const command = String((event.input as { command?: unknown })?.command ?? "");
@@ -135,13 +224,14 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
-  pi.on("agent_settled", async () => {
+  pi.on("agent_settled", async (_event, ctx) => {
     if (guardFollowupActive) {
       guardFollowupActive = false;
       return;
     }
 
-    const result = await runGuard();
+    const result = await runGuard(guardPayload(sessionIDFromContext(ctx)));
+    deliverSystemMessages(pi, ctx, result.stdout);
     if (result.code !== 2) return;
 
     guardFollowupActive = true;
@@ -150,7 +240,7 @@ export default function (pi: ExtensionAPI) {
         "turn-end-guard",
         "TURN WOULD END BLIND - supervision is off. " +
           "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-          result.stderr,
+          bannerOnly(result.stderr),
       );
       await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch {

@@ -242,6 +242,40 @@ Observed output:
 fm-claude-stop-autoarm: ok
 ```
 
+### Captain-facing reply length warning delivery
+
+The non-blocking captain reply length warning added to the same turn-end family was measured against every harness installed on the maintainer machine on 2026-08-20, through the tracked hook registrations in a scratch primary checkout per harness.
+Grok and OpenCode were not installed on that machine, so their rows stay unverified.
+
+| Harness | Version verified | Delivery surface | Observed result |
+| --- | --- | --- | --- |
+| Claude | 2.1.237 (Claude Code) | `Stop` hook stdout `systemMessage` on exit 0 | The completed twenty-line reply produced one rendered warning in the pane. The Stop payload carries `last_assistant_message`, `transcript_path`, `session_id`, and `prompt_id`, and `prompt_id` is what supplies the reply identity: at Stop time the transcript holds the triggering user record but no assistant record yet, so `.assistant.id` and `.assistant.text` are never available to this hook on Claude. |
+| Codex | codex-cli 0.147.0 | None on the non-blocking path | The `Stop` hook fires and its payload carries `last_assistant_message`, `transcript_path`, `session_id`, and `turn_id`, but Codex validates Stop hook stdout against its own schema and answered a `systemMessage` envelope with `Stop hook (failed) error: hook returned invalid stop hook JSON output`. `.codex/hooks.json` therefore declares `FM_TURNEND_STDOUT_SINK=none`, which restores a silent stdout and a clean turn end; the warning reaches Codex only through the blocked-stop stderr banner. |
+| Pi | 0.84.2 | `ctx.ui.notify(message, "warning")` - a UI-only notification; the warning never goes through `pi.sendMessage`, so it stays out of model context | The completed twenty-line reply produced one displayed warning notification and no extra turn; re-measured 2026-08-21 after the delivery surface moved off `sendMessage`. |
+| Grok | not installed | None on the non-blocking path, pending measurement | Unverified live. Because Codex was measured rejecting this envelope and Grok's Stop stdout schema has never been measured, both Grok delegations declare `FM_TURNEND_STDOUT_SINK=none`; the warning reaches Grok only through the blocked-stop banner until a live run promotes this row. |
+| OpenCode | not installed | `client.tui.showToast` from the `session.idle` plugin, with no `promptAsync` call | Unverified live; deterministic coverage only; headless has no toast surface. |
+
+Every verified surface is a rendered display read by a person, not a model-context channel.
+The one path the model itself reads is the blocked-stop stderr banner, so the warning is a single neutral measurement sentence on every channel: it never instructs the agent, and it never points anyone at the operator-owned cap file from a channel the agent reads.
+
+Deterministic coverage in `tests/fm-turnend-guard.test.sh` pins the guard's own decision logic, the envelope's `kind` discriminator, the stderr advisory line on a blocking invocation, and each adapter's routing of that envelope, none of which depends on a harness binary.
+The command that establishes and refreshes the live rows is opt-in because standard CI has neither harness binaries nor credentials:
+
+```sh
+FM_TURNEND_CAPTAIN_COMMS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-turnend-captain-comms-live-e2e.test.sh
+```
+
+Observed output on 2026-08-20:
+
+```text
+ok - captain comms warning delivery: claude 2.1.237 (Claude Code)
+ok - captain comms warning containment: codex codex-cli 0.147.0
+ok - captain comms warning delivery: pi 0.84.2
+```
+
+That guard drives every INSTALLED harness through one over-cap captain-facing reply, answers the first-run directory and hook consent prompts through the TUI rather than by seeding a harness's user-level config, reports an absent harness explicitly rather than passing over it, refuses a pass that checked nothing, and fails naming the harness and version when a surface stops displaying the warning or when a harness starts rejecting the guard's turn-end output.
+Run it after every harness upgrade, and update the rows above with the observed versions and results before any delivery claim is stated as established.
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.

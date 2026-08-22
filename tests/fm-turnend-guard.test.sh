@@ -110,6 +110,8 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-slack-lib.sh" "$dir/bin/fm-slack-lib.sh"
+  cp "$ROOT/bin/fm-x-lib.sh" "$dir/bin/fm-x-lib.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
@@ -857,7 +859,7 @@ test_opencode_plugin_anchors_guard_to_worktree() {
   cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
-printf 'guard-fired\n' >&2
+printf '●  guard-fired\n' >&2
 exit 2
 EOF
   chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
@@ -904,6 +906,34 @@ EOF
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
 }
 
+test_opencode_plugin_scopes_supervision_skip_to_session() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/opencode-session-scoped-skip")
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '●  TURN WOULD END BLIND - SUPERVISION IS OFF' >&2
+exit 2
+SH
+  chmod +x "$dir/bin/fm-turnend-guard.sh"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js" \
+    WORKTREE="$dir" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompts = 0;
+const client = { session: { promptAsync: async () => { prompts += 1; } } };
+const hooks = await mod.FmPrimaryTurnendGuard({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-a" } } });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-b" } } });
+if (prompts !== 2) throw new Error(`session B did not receive supervision recovery: ${prompts} prompts`);
+EOF
+  ); status=$?
+  expect_code 0 "$status" "OpenCode supervision skip markers must be session-scoped"
+  [ -z "$out" ] || fail "OpenCode session-scoped skip test printed output: $out"
+  pass ".opencode primary plugin: session A cannot suppress session B supervision"
+}
+
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
@@ -918,7 +948,7 @@ test_pi_extension_injects_once_per_logical_agent_run() {
 #!/usr/bin/env bash
 cat >/dev/null
 printf 'guard\n' >> "${FM_GUARD_LOG:?}"
-printf 'logical-run guard fired\n' >&2
+printf '●  logical-run guard fired\n' >&2
 exit 2
 SH
   cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
@@ -948,7 +978,6 @@ const pi = {
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-if (handlers.has("turn_end")) throw new Error("guard still treats internal Pi turns as logical runs");
 const settled = handlers.get("agent_settled");
 if (!settled) throw new Error("agent_settled handler was not registered");
 
@@ -983,7 +1012,7 @@ test_pi_extension_retries_after_followup_delivery_failure() {
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
 cat >/dev/null
-printf 'delivery failure guard\n' >&2
+printf '●  delivery failure guard\n' >&2
 exit 2
 SH
   cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
@@ -1018,6 +1047,749 @@ EOF
   expect_code 0 "$status" "Pi guard latch must reset after follow-up delivery failure"
   [ -z "$out" ] || fail "Pi delivery-failure guard test printed output: $out"
   pass ".pi primary extension: delivery failure resets the logical-run latch"
+}
+
+# --- Captain-facing reply length warning -------------------------------------
+
+reply_with_lines() {
+  local count=$1 i=1
+  while [ "$i" -le "$count" ]; do
+    printf 'line %s' "$i"
+    [ "$i" -eq "$count" ] || printf '\n'
+    i=$((i + 1))
+  done
+}
+
+append_transcript_exchange() {
+  local transcript=$1 user_id=$2 user_text=$3 assistant_id=$4 assistant_text=$5
+  jq -cn --arg id "$user_id" --arg text "$user_text" \
+    '{type:"user",uuid:$id,message:{role:"user",content:$text}}' >> "$transcript"
+  jq -cn --arg id "$assistant_id" --arg text "$assistant_text" \
+    '{type:"assistant",uuid:$id,message:{role:"assistant",content:[{type:"text",text:$text}]}}' >> "$transcript"
+}
+
+captain_reply_payload() {
+  local transcript=$1 reply=$2 session=${3:-captain-session}
+  jq -cn --arg transcript "$transcript" --arg reply "$reply" --arg session "$session" \
+    '{hook_event_name:"Stop",session_id:$session,transcript_path:$transcript,last_assistant_message:$reply,stop_hook_active:false}'
+}
+
+test_captain_reply_warning_boundary_and_lifetime() {
+  local dir transcript at_cap oversized payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-boundary")
+  transcript="$dir/transcript.jsonl"
+  at_cap=$(reply_with_lines 12)
+  oversized=$(reply_with_lines 13)
+
+  append_transcript_exchange "$transcript" captain-1 'Please report the result.' assistant-1 "$at_cap"
+  payload=$(captain_reply_payload "$transcript" "$at_cap")
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "reply exactly at the captain line cap must remain non-blocking"
+  [ -z "$out" ] || fail "reply exactly at the cap warned: $out"
+
+  append_transcript_exchange "$transcript" captain-2 'Please report the next result.' assistant-2 "$oversized"
+  payload=$(captain_reply_payload "$transcript" "$oversized")
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "oversized captain reply warning must never block"
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' "oversized captain reply did not warn"
+  assert_contains "$out" '13 lines' "warning did not report the measured line count"
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "repeat stop for one reply must remain non-blocking"
+  [ -z "$out" ] || fail "same oversized reply warned twice: $out"
+
+  append_transcript_exchange "$transcript" captain-3 'Please report one more result.' assistant-3 "$oversized"
+  payload=$(captain_reply_payload "$transcript" "$oversized")
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "later oversized captain reply warning must remain non-blocking"
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' "later distinct oversized reply did not warn"
+  pass "fm-turnend-guard: captain reply line cap is inclusive and warning lifetime is one reply"
+}
+
+test_captain_reply_warning_operational_and_failure_fail_open() {
+  local dir oversized operational configured_at_cap configured_over payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-fail-open")
+  mkdir -p "$dir/config"
+  oversized=$(reply_with_lines 13)
+  operational=$'\xE2\x81\xA3FIRSTMATE_OP: v1 watcher: internal machinery message'
+  payload=$(jq -cn --arg reply "$oversized" --arg trigger "$operational" \
+    '{stop_hook_active:false,fm_reply_text:$reply,fm_reply_id:"operational-1",fm_trigger_text:$trigger}')
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "operational reply payload must not block"
+  [ -z "$out" ] || fail "operational reply payload warned: $out"
+
+  payload=$(jq -cn --arg reply "$oversized" \
+    '{stop_hook_active:false,fm_reply_text:$reply,fm_reply_id:"non-captain-1",fm_captain_facing:false}')
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "explicit non-captain reply payload must not block"
+  [ -z "$out" ] || fail "explicit non-captain reply payload warned: $out"
+
+  configured_at_cap=$(reply_with_lines 2)
+  configured_over=$(reply_with_lines 3)
+  printf '2\n' > "$dir/config/slack-captain-comms-lines"
+  payload=$(jq -cn --arg reply "$configured_at_cap" \
+    '{stop_hook_active:false,fm_reply_text:$reply,fm_reply_id:"configured-at-cap",fm_captain_facing:true}')
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "operator-configured captain line cap must remain non-blocking"
+  [ -z "$out" ] || fail "reply at the operator-configured cap warned: $out"
+  payload=$(jq -cn --arg reply "$configured_over" \
+    '{stop_hook_active:false,fm_reply_text:$reply,fm_reply_id:"configured-over",fm_captain_facing:true}')
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "operator-configured captain line warning must remain non-blocking"
+  assert_contains "$out" '2-line captain comms cap' "warning ignored the operator-owned shared line cap"
+  rm -f "$dir/config/slack-captain-comms-lines"
+
+  ln -s "$dir/config/missing-cap" "$dir/config/slack-captain-comms-lines"
+  payload=$(jq -cn --arg reply "$oversized" \
+    '{stop_hook_active:false,fm_reply_text:$reply,fm_reply_id:"config-failure-1",fm_captain_facing:true}')
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "captain line-cap configuration failure must fail open"
+  assert_contains "$out" 'captain-comms warning stood down' "configuration failure omitted bounded diagnostic evidence"
+  assert_not_contains "$out" 'CAPTAIN COMMS WARNING' "configuration failure emitted a wording warning"
+  rm -f "$dir/config/slack-captain-comms-lines"
+
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" FMS_CAPTAIN_COMMS_MEASURE_AWK=missing-measurer \
+    bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "captain reply measurement failure must fail open"
+  assert_contains "$out" 'captain-comms warning stood down' "measurement failure omitted bounded diagnostic evidence"
+  assert_not_contains "$out" 'CAPTAIN COMMS WARNING' "measurement failure emitted a wording warning"
+  pass "fm-turnend-guard: operational payloads are exempt and configuration or measurement failure steps aside"
+}
+
+test_codex_shaped_payload_reaches_the_shared_warning_predicate() {
+  local dir transcript oversized payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/codex-captain-reply-warning")
+  transcript="$dir/rollout.jsonl"
+  oversized=$(reply_with_lines 13)
+  jq -cn '{type:"response_item",payload:{type:"message",role:"user",content:[{type:"input_text",text:"Report the result."}]}}' > "$transcript"
+  jq -cn --arg reply "$oversized" \
+    '{type:"response_item",payload:{id:"codex-assistant-1",type:"message",role:"assistant",content:[{type:"output_text",text:$reply}]}}' >> "$transcript"
+  payload=$(jq -cn --arg transcript "$transcript" --arg reply "$oversized" \
+    '{hook_event_name:"Stop",session_id:"codex-session",turn_id:"codex-turn-1",stop_hook_active:false,transcript_path:$transcript,last_assistant_message:$reply}')
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "Codex captain reply warning must preserve non-blocking Stop status"
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' "Codex Stop payload did not reach the shared warning predicate"
+  pass "fm-turnend-guard: a Codex-shaped Stop payload reaches the shared warning predicate"
+}
+
+test_codex_registration_keeps_stop_hook_stdout_empty() {
+  local settings command dir transcript oversized payload stdout_file stderr_file status
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
+  dir=$(make_primary_dir "$TMP_ROOT/codex-registration-sink")
+  mark_codex_hook_root "$dir"
+  transcript="$dir/rollout.jsonl"
+  oversized=$(reply_with_lines 13)
+  append_transcript_exchange "$transcript" codex-user 'Report the result.' codex-assistant "$oversized"
+  payload=$(jq -cn --arg cwd "$dir" --arg transcript "$transcript" --arg reply "$oversized" \
+    '{cwd:$cwd,hook_event_name:"Stop",session_id:"codex-session",turn_id:"codex-turn-1",stop_hook_active:false,transcript_path:$transcript,last_assistant_message:$reply}')
+  stdout_file="$dir/stdout.txt"
+  stderr_file="$dir/stderr.txt"
+  # Drive the tracked registration itself: Codex validates Stop hook stdout and
+  # reports a failed hook for an envelope it does not recognise.
+  printf '%s' "$payload" | (cd "$dir" && FM_HOME="$dir" bash -c "$command") \
+    > "$stdout_file" 2> "$stderr_file"
+  status=$?
+  expect_code 0 "$status" "the tracked Codex Stop registration must stay non-blocking"
+  [ ! -s "$stdout_file" ] \
+    || fail "the Codex Stop registration wrote to a stdout channel Codex rejects: $(cat "$stdout_file")"
+  assert_absent "$dir/state/.turnend-captain-comms-warning" \
+    "the Codex registration spent the reply's one warning on a channel with no reader"
+  pass ".codex/hooks.json: the tracked Stop registration keeps hook stdout empty"
+}
+
+test_grok_native_delegation_keeps_stop_hook_stdout_empty() {
+  local dir transcript oversized payload stdout_file stderr_file status out
+  dir=$(make_primary_dir "$TMP_ROOT/grok-captain-reply-warning")
+  transcript="$dir/transcript.jsonl"
+  oversized=$(reply_with_lines 13)
+  append_transcript_exchange "$transcript" captain-grok 'Report the result.' assistant-grok "$oversized"
+  payload=$(jq -cn --arg transcript "$transcript" --arg reply "$oversized" \
+    '{sessionId:"grok-captain",hookEventName:"stop",stopHookActive:false,transcriptPath:$transcript,lastAssistantMessage:$reply}')
+  stdout_file="$dir/stdout.txt"
+  stderr_file="$dir/stderr.txt"
+  # Grok's Stop stdout schema is unmeasured and a sibling harness was measured
+  # rejecting this envelope, so the native delegation must stay silent there.
+  printf '%s' "$payload" | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" \
+    > "$stdout_file" 2> "$stderr_file"
+  status=$?
+  expect_code 0 "$status" "the native Grok delegation must preserve its non-blocking status"
+  [ ! -s "$stdout_file" ] \
+    || fail "the native Grok delegation wrote an unverified envelope to Stop hook stdout: $(cat "$stdout_file")"
+  assert_absent "$dir/state/.turnend-captain-comms-warning" \
+    "the native Grok delegation spent the reply's one warning on a channel with no established reader"
+
+  # The same reply must still warn on a harness whose stdout is read.
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>/dev/null)
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' \
+    "a reply the Grok delegation could not warn about lost its warning everywhere"
+  pass "fm-turnend-guard-grok: the native delegation keeps Stop hook stdout empty and the warning eligible"
+}
+
+test_opencode_plugin_warns_without_continuation() {
+  local dir plugin oversized out status
+  dir=$(make_primary_dir "$TMP_ROOT/opencode-captain-reply-warning")
+  plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  oversized=$(reply_with_lines 13)
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" WORKTREE="$dir" OVERSIZED="$oversized" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompts = 0;
+let warnings = 0;
+const client = {
+  session: { promptAsync: async () => { prompts += 1; } },
+  tui: {
+    showToast: async ({ body }) => {
+      if (!body.message.includes("CAPTAIN COMMS WARNING")) throw new Error(`unexpected toast: ${body.message}`);
+      warnings += 1;
+    },
+  },
+};
+const hooks = await mod.FmPrimaryTurnendGuard({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+const emit = (event) => hooks.event({ event });
+await emit({ type: "message.updated", properties: { info: { id: "user-1", sessionID: "session-1", role: "user" } } });
+await emit({ type: "message.part.updated", properties: { part: { messageID: "user-1", sessionID: "session-1", type: "text", text: "Report the result." } } });
+await emit({ type: "message.updated", properties: { info: { id: "assistant-1", sessionID: "session-1", role: "assistant" } } });
+await emit({ type: "message.part.updated", properties: { part: { messageID: "assistant-1", sessionID: "session-1", type: "text", text: process.env.OVERSIZED } } });
+await emit({ type: "message.updated", properties: { info: { id: "assistant-1", sessionID: "session-1", role: "assistant" } } });
+await emit({ type: "session.idle", properties: { sessionID: "session-1" } });
+await emit({ type: "session.idle", properties: { sessionID: "session-1" } });
+if (warnings !== 1) throw new Error(`expected one warning toast, saw ${warnings}`);
+if (prompts !== 0) throw new Error(`wording warning started ${prompts} continuation turns`);
+EOF
+); status=$?
+  expect_code 0 "$status" "OpenCode adapter must warn once without prompting a continuation"
+  [ -z "$out" ] || fail "OpenCode captain warning test printed output: $out"
+  pass ".opencode primary plugin: captain reply warning uses no continuation loop"
+}
+
+test_pi_extension_warns_without_followup() {
+  local repo home ext oversized out status
+  repo=$(make_primary_dir "$TMP_ROOT/pi-captain-reply-warning")
+  home="$repo"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.pi/extensions/lib"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  oversized=$(reply_with_lines 13)
+  out=$(PLUGIN="$ext" FM_HOME="$home" OVERSIZED="$oversized" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let warningMessages = 0;
+let followups = 0;
+let modelMessages = 0;
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  async sendUserMessage() { followups += 1; },
+  sendMessage() { modelMessages += 1; },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const ctx = {
+  sessionManager: { getSessionId: () => "pi-session" },
+  ui: {
+    notify(message, type) {
+      if (!message.includes("CAPTAIN COMMS WARNING")) throw new Error(`unexpected warning: ${message}`);
+      if (type !== "warning") throw new Error(`unexpected warning type: ${type}`);
+      warningMessages += 1;
+    },
+  },
+};
+await handlers.get("input")?.({ type: "input", text: "Report the result.", source: "interactive" }, ctx);
+await handlers.get("turn_end")?.({ type: "turn_end", message: { role: "assistant", timestamp: 100, content: [{ type: "text", text: process.env.OVERSIZED }] } }, ctx);
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, ctx);
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, ctx);
+if (warningMessages !== 1) throw new Error(`expected one UI warning, saw ${warningMessages}`);
+if (modelMessages !== 0) throw new Error(`captain warning entered model context through sendMessage (${modelMessages})`);
+if (followups !== 0) throw new Error(`wording warning started ${followups} follow-up turns`);
+EOF
+); status=$?
+  expect_code 0 "$status" "Pi adapter must warn once without sending a follow-up"
+  [ -z "$out" ] || fail "Pi captain warning test printed output: $out"
+  pass ".pi primary extension: captain reply warning uses no continuation loop"
+}
+
+test_captain_reply_warning_survives_a_blocking_supervision_verdict() {
+  local dir transcript oversized payload out status stdout_file stderr_file
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-with-block")
+  transcript="$dir/transcript.jsonl"
+  oversized=$(reply_with_lines 13)
+  append_transcript_exchange "$transcript" captain-blk 'Please report the result.' assistant-blk "$oversized"
+  # A task in flight with no live watcher makes the same invocation block.
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  payload=$(captain_reply_payload "$transcript" "$oversized" blocking-session)
+  stdout_file="$dir/stdout.txt"
+  stderr_file="$dir/stderr.txt"
+  printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" \
+    > "$stdout_file" 2> "$stderr_file"
+  status=$?
+  expect_code 2 "$status" "a coincident warning must not weaken the blocking supervision verdict"
+  out=$(cat "$stderr_file")
+  assert_contains "$out" 'TURN WOULD END BLIND - SUPERVISION IS OFF' \
+    "the harness-neutral supervision banner must survive a coincident warning"
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' \
+    "a warning claimed on a blocking invocation must still reach the direct harness stderr channel"
+  out=$(cat "$stdout_file")
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' \
+    "the stdout envelope must still carry the warning for adapters that read it regardless of exit status"
+  pass "fm-turnend-guard: a warning coincident with a block is delivered on both consumers' channels"
+}
+
+test_captain_reply_warning_envelope_declares_its_kind() {
+  local dir oversized payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-envelope-kind")
+  oversized=$(reply_with_lines 13)
+  payload=$(jq -cn --arg reply "$oversized" \
+    '{stop_hook_active:false,fm_reply_text:$reply,fm_reply_id:"kind-1",fm_captain_facing:true}')
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>/dev/null); status=$?
+  expect_code 0 "$status" "the warning envelope must remain non-blocking"
+  out=$(printf '%s' "$out" | jq -r '.kind // empty') \
+    || fail "the warning envelope is not a single JSON object"
+  [ "$out" = captain-comms-warning ] \
+    || fail "the warning envelope must declare kind=captain-comms-warning, got: $out"
+  pass "fm-turnend-guard: the warning envelope carries an explicit routing discriminator"
+}
+
+test_captain_reply_falls_back_to_the_transcript_reply() {
+  local dir transcript oversized payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-transcript-fallback")
+  transcript="$dir/transcript.jsonl"
+  oversized=$(reply_with_lines 13)
+  append_transcript_exchange "$transcript" captain-tf 'Please report the result.' assistant-tf "$oversized"
+  # A direct-harness Stop payload that carries no completed-reply field at all.
+  payload=$(jq -cn --arg transcript "$transcript" \
+    '{hook_event_name:"Stop",session_id:"transcript-session",transcript_path:$transcript,stop_hook_active:false}')
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "the transcript reply fallback must remain non-blocking"
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' \
+    "a Stop payload without a reply field must measure the transcript's completed reply"
+  assert_contains "$out" '13 lines' "the transcript fallback must measure the whole completed reply"
+
+  # Nothing to measure and no transcript is silence, not a diagnostic.
+  payload=$(jq -cn '{hook_event_name:"Stop",session_id:"empty-session",stop_hook_active:false}')
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "a payload with nothing to measure must not block"
+  [ -z "$out" ] || fail "a payload with nothing to measure produced output: $out"
+  pass "fm-turnend-guard: the transcript supplies the direct-harness completed reply"
+}
+
+test_opencode_plugin_measures_the_whole_multipart_reply() {
+  local dir oversized_head oversized_tail out status
+  dir=$(make_primary_dir "$TMP_ROOT/opencode-multipart-reply")
+  # Split so no single part exceeds the cap: only the joined reply does.
+  oversized_head=$(reply_with_lines 8)
+  oversized_tail=$(reply_with_lines 6)
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js" \
+    WORKTREE="$dir" HEAD_TEXT="$oversized_head" TAIL_TEXT="$oversized_tail" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let warnings = 0;
+let warningText = "";
+const client = {
+  session: { promptAsync: async () => {} },
+  tui: {
+    showToast: async ({ body }) => {
+      warnings += 1;
+      warningText = body.message;
+    },
+  },
+};
+const hooks = await mod.FmPrimaryTurnendGuard({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+const emit = (event) => hooks.event({ event });
+await emit({ type: "message.updated", properties: { info: { id: "user-1", sessionID: "s1", role: "user" } } });
+await emit({ type: "message.part.updated", properties: { part: { id: "up-1", messageID: "user-1", sessionID: "s1", type: "text", text: "Report " } } });
+await emit({ type: "message.part.updated", properties: { part: { id: "up-2", messageID: "user-1", sessionID: "s1", type: "text", text: "the result." } } });
+await emit({ type: "message.updated", properties: { info: { id: "assistant-1", sessionID: "s1", role: "assistant" } } });
+await emit({ type: "message.part.updated", properties: { part: { id: "ap-1", messageID: "assistant-1", sessionID: "s1", type: "text", text: `${process.env.HEAD_TEXT}\n` } } });
+await emit({ type: "message.part.updated", properties: { part: { id: "tool-1", messageID: "assistant-1", sessionID: "s1", type: "tool", text: "ignored" } } });
+await emit({ type: "message.part.updated", properties: { part: { id: "ap-2", messageID: "assistant-1", sessionID: "s1", type: "text", text: process.env.TAIL_TEXT } } });
+await emit({ type: "session.idle", properties: { sessionID: "s1" } });
+if (warnings !== 1) throw new Error(`expected one warning for the joined reply, saw ${warnings}`);
+if (!warningText.includes("14 lines")) throw new Error(`reply was measured on one fragment only: ${warningText}`);
+EOF
+); status=$?
+  expect_code 0 "$status" "OpenCode must measure every ordered text part of a split reply"
+  [ -z "$out" ] || fail "OpenCode multipart reply test printed output: $out"
+  pass ".opencode primary plugin: a reply split around a tool part is measured whole"
+}
+
+test_opencode_plugin_keeps_advisory_diagnostics_out_of_the_continuation() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/opencode-banner-only")
+  # A stub guard puts both stderr line kinds on the wire deliberately, so the
+  # filter is measured against a marked banner line that must survive and an
+  # unmarked advisory line that must not, rather than against whatever the real
+  # guard happens to emit on this path today.
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+{
+  printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
+  printf '●  marked recovery instruction\n'
+  printf 'fm-turnend-guard: captain-comms warning stood down: unmarked advisory line\n'
+} >&2
+exit 2
+SH
+  chmod +x "$dir/bin/fm-turnend-guard.sh"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js" \
+    WORKTREE="$dir" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let promptText = "";
+const client = {
+  session: { promptAsync: async (request) => { promptText = request.body.parts[0].text; } },
+  tui: { showToast: async () => {} },
+};
+const hooks = await mod.FmPrimaryTurnendGuard({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "s1" } } });
+if (!promptText) throw new Error("the supervision block produced no continuation");
+if (!promptText.includes("TURN WOULD END BLIND")) throw new Error(`continuation lost the supervision banner: ${promptText}`);
+if (!promptText.includes("marked recovery instruction")) {
+  throw new Error(`continuation dropped a marked banner line: ${promptText}`);
+}
+if (promptText.includes("unmarked advisory line")) {
+  throw new Error(`an unmarked advisory line leaked into the continuation: ${promptText}`);
+}
+EOF
+); status=$?
+  expect_code 0 "$status" "OpenCode continuation must keep every marked banner line and no unmarked line"
+  [ -z "$out" ] || fail "OpenCode banner-only test printed output: $out"
+  pass ".opencode primary plugin: the forced continuation carries every banner line and nothing else"
+}
+
+test_captain_reply_warning_and_terminal_fail_open_share_one_envelope() {
+  local dir oversized payload out status objects message
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-terminal-failopen")
+  : > "$dir/state/task1.meta"
+  seed_claude_failure "$dir"
+  seed_claude_budget "$dir" 3
+  oversized=$(reply_with_lines 13)
+  payload=$(jq -cn --arg reply "$oversized" \
+    '{stop_hook_active:true,session_id:"sess-claude-mode",fm_reply_text:$reply,fm_reply_id:"failopen-1",fm_captain_facing:true}')
+  out=$(printf '%s' "$payload" | CLAUDECODE=1 FM_HOME="$dir" FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 \
+    bash "$dir/bin/fm-turnend-guard.sh" --claude 2>/dev/null); status=$?
+  expect_code 0 "$status" "the bounded attended fail-open must still exit 0 with a coincident warning"
+  objects=$(printf '%s\n' "$out" | grep -c '^{') \
+    || fail "the fail-open path emitted no stdout envelope"
+  [ "$objects" -eq 1 ] || fail "stdout carried $objects JSON objects; a direct harness parses it as one document"
+  message=$(printf '%s' "$out" | jq -er '.systemMessage') \
+    || fail "stdout is not a single valid JSON envelope: $out"
+  assert_contains "$message" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' \
+    "the combined envelope dropped the safety-critical attended fail-open notice"
+  assert_contains "$message" 'CAPTAIN COMMS WARNING' \
+    "the combined envelope dropped the coincident captain reply warning"
+  pass "fm-turnend-guard: a warning coincident with the attended fail-open shares one stdout envelope"
+}
+
+test_captain_reply_warning_survives_an_undeliverable_banner_less_block() {
+  local dir oversized payload stderr_file stdout_file status out
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-bannerless-block")
+  : > "$dir/state/task1.meta"
+  record_watcher_lock "$dir" "$$" "$(watcher_identity "$dir" "$$")"
+  touch "$dir/state/.last-watcher-beat"
+  # The Stop-owned auto-arm holds the same budget lock on this Stop event, so
+  # the healthy-watcher reset loses it and the guard exits 2 with no banner.
+  mkdir -p "$dir/state/.turnend-claude-blocks.lock"
+  printf '%s\n' "$$" > "$dir/state/.turnend-claude-blocks.lock/pid"
+  printf 'autoarm\n' > "$dir/state/.turnend-claude-blocks.lock/role"
+  oversized=$(reply_with_lines 13)
+  payload=$(jq -cn --arg reply "$oversized" \
+    '{stop_hook_active:false,session_id:"sess-claude-mode",fm_reply_text:$reply,fm_reply_id:"contended-1",fm_captain_facing:true}')
+  stdout_file="$dir/stdout.txt"
+  stderr_file="$dir/stderr.txt"
+  printf '%s' "$payload" | CLAUDECODE=1 FM_HOME="$dir" FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 \
+    bash "$dir/bin/fm-turnend-guard.sh" --claude > "$stdout_file" 2> "$stderr_file"
+  status=$?
+  expect_code 2 "$status" "budget-lock contention on a healthy watcher must still block"
+  assert_not_contains "$(cat "$stderr_file")" 'CAPTAIN COMMS WARNING' \
+    "an advisory warning became the stated reason for a block that emitted no supervision banner"
+  assert_not_contains "$(cat "$stdout_file")" 'CAPTAIN COMMS WARNING' \
+    "a blocked direct harness discards stdout, so the warning must not be emitted into it there"
+  assert_absent "$dir/state/.turnend-captain-comms-warning" \
+    "an undeliverable warning recorded its identity and spent the reply's one warning"
+
+  # The same reply must still warn once a turn end can reach a channel.
+  rm -rf "$dir/state/.turnend-claude-blocks.lock"
+  out=$(printf '%s' "$payload" | CLAUDECODE=1 FM_HOME="$dir" FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 \
+    bash "$dir/bin/fm-turnend-guard.sh" --claude 2>/dev/null); status=$?
+  expect_code 0 "$status" "an uncontended healthy watcher must allow the stop"
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' \
+    "the reply that could not be warned about earlier never warned at all"
+  out=$(printf '%s' "$payload" | CLAUDECODE=1 FM_HOME="$dir" FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 \
+    bash "$dir/bin/fm-turnend-guard.sh" --claude 2>/dev/null)
+  assert_not_contains "$out" 'CAPTAIN COMMS WARNING' "a delivered warning repeated for the same reply"
+  pass "fm-turnend-guard: an undeliverable warning is neither shown as a block reason nor spent"
+}
+
+test_grok_legacy_healthy_turn_keeps_the_warning_eligible() {
+  local dir fakebin log oversized payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/grok-legacy-healthy-warning")
+  fakebin=$(fm_fakebin "$TMP_ROOT/grok-legacy-healthy-fakebin")
+  log="$TMP_ROOT/grok-legacy-healthy.log"
+  cat > "$fakebin/grok" <<EOF
+#!/usr/bin/env bash
+printf 'called\n' >> "$log"
+EOF
+  chmod +x "$fakebin/grok"
+  oversized=$(reply_with_lines 13)
+  payload=$(jq -cn --arg reply "$oversized" \
+    '{sessionId:"grok-healthy-session",hookEventName:"stop",fm_reply_text:$reply,fm_reply_id:"grok-healthy-1",fm_captain_facing:true}')
+  # No work in flight: the shared predicate allows, so this path never builds
+  # the bounded resume prompt that is its only display surface.
+  out=$(printf '%s' "$payload" | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" \
+    bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "a healthy pre-native Grok turn must end normally"
+  [ -z "$out" ] || fail "grok legacy adapter printed output on a healthy turn: $out"
+  [ ! -e "$log" ] || fail "grok legacy adapter started a resume on a healthy turn"
+  assert_absent "$dir/state/.turnend-captain-comms-warning" \
+    "the pre-native Grok path spent the reply's one warning on a stream it discards"
+
+  # The identical reply must still warn on a harness whose stdout is read.
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>/dev/null)
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' \
+    "a reply the pre-native Grok path could not warn about lost its warning everywhere"
+  pass "fm-turnend-guard-grok: a pre-native turn with no display surface leaves the warning eligible"
+}
+
+test_captain_reply_warning_fails_open_on_a_broken_hasher() {
+  local dir fakebin oversized payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-broken-hasher")
+  # Only the hashers are replaced: an installed-but-failing hasher (a broken
+  # perl install behind shasum) is the case a missing binary does not cover.
+  fakebin=$(fm_fakebin "$TMP_ROOT/captain-reply-hasher-fakebin")
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/shasum"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/sha256sum"
+  chmod +x "$fakebin/shasum" "$fakebin/sha256sum"
+  oversized=$(reply_with_lines 13)
+  payload=$(jq -cn --arg reply "$oversized" \
+    '{stop_hook_active:false,fm_reply_text:$reply,fm_reply_id:"broken-hasher-1",fm_captain_facing:true}')
+  out=$(printf '%s' "$payload" | PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "an unavailable identity hasher must fail open"
+  assert_contains "$out" 'cannot hash the warning identity' \
+    "a failing hasher was silently swallowed instead of leaving bounded evidence"
+  assert_not_contains "$out" 'CAPTAIN COMMS WARNING' "a warning was emitted without a usable identity"
+  assert_absent "$dir/state/.turnend-captain-comms-warning" \
+    "a failed identity hash still wrote a warning record"
+  pass "fm-turnend-guard: a failing identity hasher steps aside with bounded evidence"
+}
+
+test_block_banner_marks_every_reason_line() {
+  local dir out status marked total
+  dir=$(make_primary_dir "$TMP_ROOT/banner-multiline-reason")
+  : > "$dir/state/task1.meta"
+  cat > "$dir/bin/fm-supervision-instructions.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'first repair line\nsecond repair line\n'
+SH
+  chmod +x "$dir/bin/fm-supervision-instructions.sh"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "a multi-line repair reason must still block"
+  assert_contains "$out" 'first repair line' "banner dropped the first repair line"
+  assert_contains "$out" 'second repair line' "banner dropped the continuation repair line"
+  total=$(printf '%s\n' "$out" | grep -c 'repair line')
+  marked=$(printf '%s\n' "$out" | grep -c '^●  .*repair line')
+  [ "$marked" -eq "$total" ] \
+    || fail "only $marked of $total repair lines carry the banner mark a passive adapter keeps"
+  pass "fm-turnend-guard: every supervision reason line survives passive-adapter banner filtering"
+}
+
+test_grok_legacy_resume_carries_the_coincident_warning() {
+  local dir fakebin log oversized payload out status prompt
+  dir=$(make_primary_dir "$TMP_ROOT/grok-legacy-warning")
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/grok-legacy-warning-fakebin")
+  log="$TMP_ROOT/grok-legacy-warning.log"
+  cat > "$fakebin/grok" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+EOF
+  chmod +x "$fakebin/grok"
+  oversized=$(reply_with_lines 13)
+  payload=$(jq -cn --arg reply "$oversized" \
+    '{sessionId:"grok-legacy-session",hookEventName:"stop",fm_reply_text:$reply,fm_reply_id:"grok-legacy-1",fm_captain_facing:true}')
+  out=$(printf '%s' "$payload" | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" \
+    bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "the pre-native Grok adapter must fail open after queuing its one resume"
+  [ -z "$out" ] || fail "grok legacy adapter printed output: $out"
+  prompt=$(cat "$log")
+  assert_contains "$prompt" 'TURN WOULD END BLIND' "the bounded resume lost the supervision banner"
+  assert_contains "$prompt" 'CAPTAIN COMMS WARNING' \
+    "the pre-native resume is the only surface this warning can reach, and it was dropped"
+  assert_not_contains "$prompt" 'captain-comms warning stood down' \
+    "a stand-down diagnostic leaked into the bounded resume prompt"
+  pass "fm-turnend-guard-grok: the pre-native resume carries a warning coincident with a block"
+}
+
+test_captain_reply_identity_uses_the_payload_turn_id() {
+  local dir transcript oversized payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-prompt-id")
+  transcript="$dir/transcript.jsonl"
+  oversized=$(reply_with_lines 13)
+  # A real Claude Stop payload names the turn with prompt_id, and at Stop time
+  # the transcript holds the triggering user record but no assistant record.
+  jq -cn --arg text 'Please report the result.' \
+    '{type:"user",uuid:"claude-user-1",message:{role:"user",content:$text}}' > "$transcript"
+  payload=$(jq -cn --arg transcript "$transcript" --arg reply "$oversized" \
+    '{hook_event_name:"Stop",session_id:"claude-session",prompt_id:"prompt-1",transcript_path:$transcript,last_assistant_message:$reply,stop_hook_active:false}')
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "a payload-identified reply must remain non-blocking"
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' \
+    "a turn whose transcript has no assistant record yet must still resolve a reply identity"
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1)
+  assert_not_contains "$out" 'CAPTAIN COMMS WARNING' "the payload turn id did not dedup a repeated stop"
+
+  # A later distinct reply on the same turn identity still warns.
+  payload=$(jq -cn --arg transcript "$transcript" --arg reply "$(reply_with_lines 14)" \
+    '{hook_event_name:"Stop",session_id:"claude-session",prompt_id:"prompt-1",transcript_path:$transcript,last_assistant_message:$reply,stop_hook_active:false}')
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1)
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' "a later distinct oversized reply did not warn"
+  pass "fm-turnend-guard: the payload turn id identifies a reply the transcript has not flushed"
+}
+
+test_declared_stdout_sink_none_keeps_the_turn_end_silent() {
+  local dir transcript oversized payload stdout_file stderr_file status
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-sink-none")
+  transcript="$dir/transcript.jsonl"
+  oversized=$(reply_with_lines 13)
+  append_transcript_exchange "$transcript" sink-user 'Please report the result.' sink-assistant "$oversized"
+  payload=$(jq -cn --arg transcript "$transcript" --arg reply "$oversized" \
+    '{hook_event_name:"Stop",session_id:"codex-session",turn_id:"codex-turn-1",transcript_path:$transcript,last_assistant_message:$reply,stop_hook_active:false}')
+  stdout_file="$dir/stdout.txt"
+  stderr_file="$dir/stderr.txt"
+  printf '%s' "$payload" | FM_HOME="$dir" FM_TURNEND_STDOUT_SINK=none \
+    bash "$dir/bin/fm-turnend-guard.sh" > "$stdout_file" 2> "$stderr_file"
+  status=$?
+  expect_code 0 "$status" "a declared stdout sink must not change the turn-end verdict"
+  [ ! -s "$stdout_file" ] \
+    || fail "a harness that rejects hook stdout still received output: $(cat "$stdout_file")"
+  assert_absent "$dir/state/.turnend-captain-comms-warning" \
+    "a warning with no accepting channel still spent the reply's one warning"
+
+  # The same reply must still warn on a harness whose stdout is read.
+  stdout_file=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>/dev/null)
+  assert_contains "$stdout_file" 'CAPTAIN COMMS WARNING' \
+    "a reply the sink-less harness could not warn about lost its warning everywhere"
+  pass "fm-turnend-guard: a declared stdout sink stays silent and leaves the warning eligible"
+}
+
+test_captain_reply_warning_survives_an_interleaved_session() {
+  local dir reply_a reply_b payload_a payload_b out status
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-interleaved")
+  reply_a=$(reply_with_lines 13)
+  reply_b=$(reply_with_lines 14)
+  payload_a=$(jq -cn --arg reply "$reply_a" \
+    '{stop_hook_active:false,session_id:"session-a",fm_reply_text:$reply,fm_reply_id:"A1",fm_captain_facing:true}')
+  payload_b=$(jq -cn --arg reply "$reply_b" \
+    '{stop_hook_active:false,session_id:"session-b",fm_reply_text:$reply,fm_reply_id:"B1",fm_captain_facing:true}')
+
+  out=$(printf '%s' "$payload_a" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>/dev/null); status=$?
+  expect_code 0 "$status" "the first oversized reply must remain non-blocking"
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' "the first oversized reply did not warn"
+  out=$(printf '%s' "$payload_a" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>/dev/null)
+  assert_not_contains "$out" 'CAPTAIN COMMS WARNING' "an immediately repeated reply warned twice"
+
+  # A different session's oversized reply must not evict the first identity.
+  out=$(printf '%s' "$payload_b" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>/dev/null)
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' "a later distinct oversized reply did not warn"
+  out=$(printf '%s' "$payload_a" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>/dev/null)
+  assert_not_contains "$out" 'CAPTAIN COMMS WARNING' \
+    "an interleaved session evicted the first identity and warned about that reply a second time"
+  out=$(printf '%s' "$payload_b" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>/dev/null)
+  assert_not_contains "$out" 'CAPTAIN COMMS WARNING' "the interleaved session's own reply warned twice"
+  pass "fm-turnend-guard: interleaved sessions each keep their own warned identity"
+}
+
+test_captain_reply_warning_fails_open_on_malformed_dedup_state() {
+  local dir oversized payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-malformed-state")
+  oversized=$(reply_with_lines 13)
+  payload=$(jq -cn --arg reply "$oversized" \
+    '{stop_hook_active:false,session_id:"session-m",fm_reply_text:$reply,fm_reply_id:"M1",fm_captain_facing:true}')
+  # The record is guard-owned persisted state; a truncated or garbled file must
+  # not suppress every future warning.
+  printf 'not-a-record\nsession-m\n\n   \n' > "$dir/state/.turnend-captain-comms-warning"
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>/dev/null); status=$?
+  expect_code 0 "$status" "malformed warning state must remain non-blocking"
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' "malformed warning state suppressed a warning"
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>/dev/null)
+  assert_not_contains "$out" 'CAPTAIN COMMS WARNING' \
+    "the rewritten record did not dedup the reply it had just warned about"
+  pass "fm-turnend-guard: malformed warning state fails open and is repaired in place"
+}
+
+test_captain_reply_under_cap_skips_the_transcript() {
+  local dir short_reply payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-under-cap-fast")
+  short_reply=$(reply_with_lines 2)
+  # An unreadable transcript would stand the warning down if it were parsed; a
+  # reply under the cap can never warn, so it must not consult one at all.
+  payload=$(jq -cn --arg reply "$short_reply" \
+    '{hook_event_name:"Stop",session_id:"fast-session",prompt_id:"fast-1",transcript_path:"/nonexistent/transcript.jsonl",last_assistant_message:$reply,stop_hook_active:false}')
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "an under-cap reply must remain non-blocking"
+  [ -z "$out" ] || fail "an under-cap reply consulted the transcript and produced output: $out"
+  pass "fm-turnend-guard: an under-cap reply never consults the turn transcript"
+}
+
+test_captain_reply_warning_survives_a_torn_transcript_record() {
+  local dir transcript oversized payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/captain-reply-torn-record")
+  transcript="$dir/transcript.jsonl"
+  oversized=$(reply_with_lines 13)
+  jq -cn --arg text 'Please report the result.' \
+    '{type:"user",uuid:"torn-user-1",message:{role:"user",content:$text}}' > "$transcript"
+  # The live session appends to this file while the hook reads it, so a torn
+  # trailing record must not discard every valid record beside it.
+  printf '%s\n' '{"type":"assistant","uuid":"a1","message":{"role":"assist' >> "$transcript"
+  payload=$(jq -cn --arg transcript "$transcript" --arg reply "$oversized" \
+    '{hook_event_name:"Stop",session_id:"torn-session",prompt_id:"torn-1",transcript_path:$transcript,last_assistant_message:$reply,stop_hook_active:false}')
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "a torn transcript record must remain non-blocking"
+  assert_contains "$out" 'CAPTAIN COMMS WARNING' \
+    "one unreadable transcript record discarded every valid record beside it"
+  pass "fm-turnend-guard: a torn transcript record does not discard the readable ones"
+}
+
+test_opencode_plugin_recovers_supervision_despite_a_hung_toast() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/opencode-hung-toast")
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '{"systemMessage":"FIRSTMATE CAPTAIN COMMS WARNING: synthetic oversized reply","kind":"captain-comms-warning"}'
+printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n' >&2
+exit 2
+SH
+  chmod +x "$dir/bin/fm-turnend-guard.sh"
+  # The toast is a TUI surface with no headless equivalent, so a request that
+  # never settles must not be able to swallow the supervision recovery prompt.
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js" \
+    WORKTREE="$dir" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let promptText = "";
+const client = {
+  session: { promptAsync: async (request) => { promptText = request.body.parts[0].text; } },
+  tui: { showToast: () => new Promise(() => {}) },
+};
+const hooks = await mod.FmPrimaryTurnendGuard({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "s1" } } });
+if (!promptText.includes("TURN WOULD END BLIND")) {
+  throw new Error(`a hung advisory display swallowed the supervision recovery prompt: ${promptText}`);
+}
+EOF
+); status=$?
+  expect_code 0 "$status" "a hung advisory display must not block supervision recovery"
+  [ -z "$out" ] || fail "OpenCode hung-toast test printed output: $out"
+  pass ".opencode primary plugin: supervision recovery never waits on the advisory display"
 }
 
 # --- --claude cooperative mode -----------------------------------------------
@@ -1578,8 +2350,34 @@ test_grok_adapter_missing_jq_and_no_supervision_allow
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
+test_opencode_plugin_scopes_supervision_skip_to_session
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
+test_captain_reply_warning_boundary_and_lifetime
+test_captain_reply_warning_operational_and_failure_fail_open
+test_codex_shaped_payload_reaches_the_shared_warning_predicate
+test_codex_registration_keeps_stop_hook_stdout_empty
+test_grok_native_delegation_keeps_stop_hook_stdout_empty
+test_opencode_plugin_warns_without_continuation
+test_pi_extension_warns_without_followup
+test_captain_reply_warning_survives_a_blocking_supervision_verdict
+test_captain_reply_warning_envelope_declares_its_kind
+test_captain_reply_falls_back_to_the_transcript_reply
+test_opencode_plugin_measures_the_whole_multipart_reply
+test_opencode_plugin_keeps_advisory_diagnostics_out_of_the_continuation
+test_captain_reply_warning_and_terminal_fail_open_share_one_envelope
+test_captain_reply_warning_survives_an_undeliverable_banner_less_block
+test_grok_legacy_healthy_turn_keeps_the_warning_eligible
+test_captain_reply_warning_fails_open_on_a_broken_hasher
+test_captain_reply_warning_survives_an_interleaved_session
+test_captain_reply_warning_fails_open_on_malformed_dedup_state
+test_captain_reply_under_cap_skips_the_transcript
+test_captain_reply_warning_survives_a_torn_transcript_record
+test_opencode_plugin_recovers_supervision_despite_a_hung_toast
+test_captain_reply_identity_uses_the_payload_turn_id
+test_declared_stdout_sink_none_keeps_the_turn_end_silent
+test_block_banner_marks_every_reason_line
+test_grok_legacy_resume_carries_the_coincident_warning
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive

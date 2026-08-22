@@ -551,10 +551,13 @@ fms_poll_cursor_write() {
   :
 }
 
-# Captain-facing outbound message size guard for bin/fm-slack-post.sh, which
-# owns the guard contract. This file owns the built-in defaults, the optional
-# operator-owned caps, and the measurement; the post client calls
-# fms_captain_comms_guard before message and update only (board stays exempt).
+# Captain-facing message size guard for bin/fm-slack-post.sh, whose header owns
+# the contract for both consumers: that post client, and the non-blocking
+# turn-end reply warning in bin/fm-turnend-guard.sh, which shares this line cap
+# and this measurement without delivering anything. This file owns the built-in
+# defaults, the optional operator-owned caps, and the measurement; the post
+# client calls fms_captain_comms_guard before message and update only (board
+# stays exempt).
 FMS_CAPTAIN_COMMS_LINES_DEFAULT=12
 FMS_CAPTAIN_COMMS_CHARS_DEFAULT=1200
 FMS_CAPTAIN_COMMS_LINES_MAX=

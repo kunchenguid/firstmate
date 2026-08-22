@@ -17,6 +17,48 @@ When work, a process-event source, or X-mode relay polling needs supervision at 
 The mid-turn pull warning uses the model-aware supervision verdict described below, while the turn-end guard keeps the PID-strict watcher predicate.
 The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
 
+## Captain-facing reply length warning
+
+The same primary turn-end family measures only a completed reply whose triggering input is captain-facing.
+Current typed Firstmate operational input, its narrow legacy compatibility forms, explicit non-captain adapter payloads, missing reply content, and child crewmate or scout worktrees are outside the warning boundary.
+The warning is wording-length feedback only; it does not inspect factual quality or general prose style.
+
+The line cap is inclusive: a reply at the cap passes, and a reply over it emits a warning after the reply has already completed.
+The cap contract - its built-in default of 12 lines, the positive-integer format of the gitignored operator-owned `config/slack-captain-comms-lines` override, its unreadable-file and dangling-symlink rules, and the measurement knob - is owned by the header of `bin/fm-slack-post.sh`, which names this warning as its second consumer.
+This guard only calls that contract's implementation in `bin/fm-slack-lib.sh`, so an operator override moves both the Slack captain guard and this warning together.
+The Slack character cap and `--long` override do not apply to this turn-end warning.
+
+One reply identity can emit at most one warning, even when the harness attempts Stop or idle delivery again for that reply.
+That identity is recorded only at the moment the guard puts the warning on a channel the invoking adapter reads, serialized by `state/.turnend-captain-comms-warning.lock` and held in `state/.turnend-captain-comms-warning`; a later distinct oversized reply can warn again.
+That record keeps one warned identity per session, most recently warned first, bounded to the same number of sessions the OpenCode adapter itself retains, so two sessions ending turns in one home cannot evict each other and re-warn a reply that already warned.
+A line of that record the guard cannot read is treated as no claim at all, so damaged state warns once more rather than silencing the check.
+An invocation that cannot deliver records nothing, so the same reply stays eligible to warn at a later turn end rather than being silently spent.
+The warning never blocks, truncates, rewrites, delays, or retries the reply, and it never creates a continuation loop.
+
+On its ordinary non-blocking path the warning is an operator-facing notice, not an instruction to the model: every surface measured so far is a rendered display, so it states only what the reply measured against the cap and that nothing was truncated, retried, or blocked.
+The blocked-stop stderr mirror below is the one path the model itself reads, and the same neutral wording holds there.
+
+A direct harness parses this hook's stdout as one JSON document, so the guard emits at most one envelope per invocation.
+The warning alone is `{"systemMessage": ..., "kind": "captain-comms-warning"}`; the `kind` discriminator is the declared routing contract, so an adapter never classifies the warning by its wording.
+When the attended fail-open notice fires in the same invocation, both texts are joined into that one envelope, notice first, and the envelope carries no `kind` because it is no longer only the warning.
+When the supervision predicate emits its blocking banner in the same invocation, the guard also appends the warning to that banner on stderr, because a direct harness reads stderr and discards stdout on a blocked stop.
+Every banner line is marked `●` and that appended advisory line is marked `○`.
+The passive adapters read stdout regardless of exit status and keep only `●` lines out of stderr, so no consumer receives the warning twice and no stand-down diagnostic enters a forced continuation.
+Three registrations declare `FM_TURNEND_STDOUT_SINK=none` because their stdout has no established reader, and the guard then emits no envelope and spends no warning there: the pre-native Grok resume in `bin/fm-turnend-guard-grok.sh`, whose process reads neither the hook's exit status nor its stdout and whose bounded resume prompt keeps both `●` and `○` lines; the Codex `Stop` hook, measured rejecting the envelope outright; and the native Grok delegation, whose Stop stdout schema has never been measured, so it stays silent rather than risk the failure Codex was measured producing.
+That prompt exists only when the shared predicate blocks, so on a pre-native Grok turn that does not block the warning has no display surface at all: it is not delivered, not recorded, and remains eligible.
+The `--claude` exit-2 paths that print no banner - the healthy-watcher cases where `state/.turnend-claude-blocks.lock` is held by the Stop-owned auto-arm firing on the same Stop event - likewise have no channel, because the blocked direct harness discards stdout.
+Those paths emit no warning and record no identity; the reply warns at the next turn end that can reach a channel.
+Per-harness delivery surfaces are recorded, with their verification status, in [`verification/supervision.md`](verification/supervision.md); do not restate a delivery claim here without that evidence.
+
+Reply extraction, audience classification, transcript parsing, cap loading, line measurement, identity hashing, state contention, state publication, and warning encoding all fail open.
+A failure emits at most one `fm-turnend-guard: captain-comms warning stood down: <reason>` diagnostic for that hook invocation, then preserves the adapter's ordinary Stop or continuation semantics.
+A payload carrying neither reply text nor a transcript has nothing to measure and is silent rather than diagnostic.
+A reply the payload already carries is measured against the cap before anything else, so a reply at or under the cap costs no transcript parse and produces no diagnostic about one.
+Transcript extraction is bounded to two seconds through `timeout`, `gtimeout`, or the repository's portable Perl fallback, so this advisory check cannot wedge the primary session.
+Records are decoded one line at a time, because the file is the live session's own transcript and the harness is still appending to it; a torn or unrecognised line is skipped rather than discarding every valid record beside it.
+It is also bounded to the last 200 transcript records, which keeps an hours-long session from re-parsing megabytes on every turn end: a turn whose triggering input has already been pushed out of that window yields no trigger, so the warning steps aside with the audience diagnostic rather than guessing.
+A warning failure does not weaken the separate supervision predicate later in the same hook invocation.
+
 ## Guard predicates
 
 The guard first calls the shared primary scope.
@@ -44,10 +86,14 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 ## Harness integrations
 
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
+  The shared warning predicate reads its snake-case Stop payload and falls back to `transcript_path` for the completed reply, its identity, and the triggering input, so it does not depend on any single optional payload field.
 - Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
-- OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
-- Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
-- Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
+  Its snake-case Stop payload supplies the completed reply and a `turn_id`, but Codex validates Stop hook stdout against its own schema and reports a failed hook for a `systemMessage` envelope, so that registration declares `FM_TURNEND_STDOUT_SINK=none`.
+  Codex therefore has no non-blocking warning surface: the warning reaches it only through the blocked-stop banner, and a turn it cannot reach records nothing and stays eligible.
+- OpenCode listens for message and text-part updates in `.opencode/plugins/fm-primary-turnend-guard.js`, normalizes the completed reply for `session.idle`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once only when the supervision predicate returns 2.
+- Pi records input and final assistant text through `input` and `turn_end` in `.pi/extensions/fm-primary-turnend-guard.ts`, evaluates the normalized reply at `agent_settled`, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once only when the supervision predicate returns 2.
+- Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json`, delegates capability selection to `bin/fm-turnend-guard-grok.sh`, and accepts its camel-case reply and transcript fields in the shared warning predicate.
+  Both its native and pre-native paths declare `FM_TURNEND_STDOUT_SINK=none` until a live run establishes that Grok accepts the envelope, so Grok has no non-blocking warning surface today and the warning reaches it only through the blocked-stop banner.
   The tracked Claude Stop entries are inert when `GROK_AGENT` is present, so Grok's Claude-compatible settings loading cannot create a second continuation path.
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
@@ -106,6 +152,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 ## Regression coverage
 
 `tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+The same executable suite covers the captain reply boundary at and over the cap, warn-once identity lifetime, a later distinct oversized reply, typed operational and explicit non-captain payloads, configuration and measurement fail-open, the transcript reply fallback for a direct Stop payload without a reply field, the envelope's `kind` discriminator, the stderr mirror on an invocation that also blocks, snake-case direct Stop payloads, camel-case Grok payloads, OpenCode ordered multipart reply measurement, banner-only forced continuations, OpenCode and Pi warning delivery without a continuation, per-session warned identities across interleaved sessions, malformed warning-state repair, the under-cap transcript skip, a torn transcript record, and OpenCode supervision recovery that never waits on the advisory display.
+`tests/fm-turnend-captain-comms-live-e2e.test.sh` is the opt-in live counterpart that drives every installed harness through one over-cap captain-facing reply; [`verification/supervision.md`](verification/supervision.md) records its per-harness status and refresh command.
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and its stale-beacon alarm, the true-reason banner wording, and the reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.

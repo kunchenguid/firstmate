@@ -25,7 +25,12 @@
 #
 # Captain message size guard (this header is the contract owner):
 # The captain-facing message and update paths cap size before delivery at 12
-# lines and 1200 characters by default. An operator overrides either cap with a
+# lines and 1200 characters by default. The line cap has a second consumer that
+# does not deliver anything: bin/fm-turnend-guard.sh measures a completed
+# captain-facing reply against it at turn end and emits one non-blocking
+# advisory warning over it (docs/turnend-guard.md), sharing this default, this
+# override file, this format, this fail-open rule, and FMS_CAPTAIN_COMMS_MEASURE_AWK.
+# The character cap and --long apply to Slack delivery only. An operator overrides either cap with a
 # single positive integer in gitignored config/slack-captain-comms-lines or
 # config/slack-captain-comms-chars; an absent or malformed file keeps that
 # built-in default. Characters are counted as characters, not bytes, so UTF-8

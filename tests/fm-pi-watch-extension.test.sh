@@ -1991,24 +1991,41 @@ test_opencode_watch_arm_coordinates_with_turnend_guard() {
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: started pid=1 (beacon fresh)\n'
 SH
+  # The stub records the ordering itself: whether the watch arm had already run
+  # when the guard was invoked. Asserting only that both logs exist cannot fail
+  # if the guard is moved ahead of the coordinator, because both still exist by
+  # the time the polling loop reads them.
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'guard\n' >> "${FM_GUARD_LOG:?}"
-printf 'guard should not run\n' >&2
+cat >/dev/null
+if [ -s "${FM_ARM_LOG:?}" ]; then
+  printf 'guard-after-arm\n' >> "${FM_GUARD_LOG:?}"
+else
+  printf 'guard-before-arm\n' >> "${FM_GUARD_LOG:?}"
+fi
+printf '%s\n' '{"systemMessage":"FIRSTMATE CAPTAIN COMMS WARNING: synthetic oversized reply"}'
+printf 'synthetic supervision block\n' >&2
 exit 2
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
   out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const armMod = await import(pathToFileURL(process.env.ARM_PLUGIN).href);
 const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
 let promptBody = "";
+let warnings = 0;
 const client = {
   session: {
     promptAsync: async (request) => {
       promptBody = request.body.parts[0].text;
+    },
+  },
+  tui: {
+    showToast: async ({ body }) => {
+      if (!body.message.includes("CAPTAIN COMMS WARNING")) throw new Error(`unexpected toast: ${body.message}`);
+      warnings += 1;
     },
   },
 };
@@ -2031,8 +2048,20 @@ if (!existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm did not run");
   process.exit(1);
 }
-if (existsSync(process.env.FM_GUARD_LOG)) {
-  console.error("turn-end guard ran before the watch arm could establish supervision");
+if (!existsSync(process.env.FM_GUARD_LOG)) {
+  console.error("turn-end guard did not run after the watch arm established supervision");
+  process.exit(1);
+}
+const observedOrder = readFileSync(process.env.FM_GUARD_LOG, "utf8").trim();
+if (observedOrder !== "guard-after-arm") {
+  console.error(`turn-end guard ran before the watch arm established supervision: ${observedOrder}`);
+  process.exit(1);
+}
+for (let i = 0; i < 250 && warnings === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (warnings !== 1) {
+  console.error(`expected one non-continuing warning after coordinator arm, saw ${warnings}`);
   process.exit(1);
 }
 if (promptBody) {
@@ -2044,7 +2073,7 @@ EOF
   status=$?
   expect_code 0 "$status" "OpenCode turn-end guard must let the auto-arm plugin establish supervision first"
   [ -z "$out" ] || fail "OpenCode coordination test printed output: $out"
-  pass "OpenCode watcher plugin coordinates with the turn-end guard"
+  pass "OpenCode watcher plugin arms first, then runs the non-continuing turn-end checks"
 }
 
 test_opencode_healthy_arm_output_does_not_suppress_guard() {

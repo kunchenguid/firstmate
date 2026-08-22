@@ -15,8 +15,12 @@
 # follow-up because their turn-end events are passive. Grok delegates native
 # blocking when its running Stop payload advertises that capability, with one
 # bounded resume fallback for payloads from pre-native processes.
-# See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
-# and fail-open tradeoffs.
+# The same hook family also measures the completed captain-facing reply against
+# the fleet's configured line cap. It emits one non-blocking warning for one
+# oversized reply and never manufactures another continuation. Extraction,
+# configuration, measurement, identity, or warning-state failure emits one
+# bounded diagnostic and steps aside. See docs/turnend-guard.md for the full
+# warning boundary and per-harness delivery mechanics.
 #
 # Ships with TRACKED harness hook files at the repo root, so this file is
 # checked out into every worktree of this repo: the primary checkout, every
@@ -124,10 +128,377 @@ fi
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
-# --- the actual predicate ----------------------------------------------------
+# --- non-blocking captain-facing reply warning -------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-operational-input.sh
+. "$SCRIPT_DIR/fm-operational-input.sh"
 
+# The documented tail window this advisory check reads from a turn transcript.
+CAPTAIN_COMMS_TRANSCRIPT_WINDOW=200
+
+# A direct harness parses this hook's stdout as one JSON document, so the guard
+# emits at most one envelope per invocation. Both advisory messages it can
+# produce - the attended fail-open notice and the captain reply warning - are
+# held here and joined into that single envelope at exit, notice first.
+GUARD_STDOUT_NOTICE=
+CAPTAIN_COMMS_WARNING_TEXT=
+CAPTAIN_COMMS_WARNING_DIGEST=
+CAPTAIN_COMMS_WARNING_SESSION_KEY=
+CAPTAIN_COMMS_WARNING_TAKEN=0
+
+# An adapter that reads none of this hook's stdout declares that here, so the
+# guard neither emits an envelope into a sink nor spends the warning's one
+# delivery on it. docs/turnend-guard.md lists the registrations that declare
+# it and why each one has no established stdout reader.
+GUARD_STDOUT_SINK=${FM_TURNEND_STDOUT_SINK:-reader}
+
+# The supervision banner marks every line it owns with BANNER_MARK; a warning
+# delivered alongside that banner uses ADVISORY_MARK. A passive adapter keeps
+# only banner lines out of stderr, because it already received the warning on
+# stdout; the legacy Grok resume, which has no stdout consumer, keeps both.
+BANNER_MARK='●'
+ADVISORY_MARK='○'
+
+# The single warn-once boundary: the identity is recorded only when this
+# invocation is about to put the warning on a channel its caller reads. Delivery
+# that cannot happen leaves the reply eligible to warn at a later turn end.
+captain_comms_warning_take() {
+  [ -n "$CAPTAIN_COMMS_WARNING_TEXT" ] || return 1
+  [ "$CAPTAIN_COMMS_WARNING_TAKEN" -eq 0 ] || return 0
+  if ! captain_comms_warning_claim "$CAPTAIN_COMMS_WARNING_SESSION_KEY" "$CAPTAIN_COMMS_WARNING_DIGEST"; then
+    CAPTAIN_COMMS_WARNING_TEXT=
+    return 1
+  fi
+  CAPTAIN_COMMS_WARNING_TAKEN=1
+  return 0
+}
+
+guard_stdout_emit() {  # <exit-status>
+  local status=$1 message kind json
+  [ "$GUARD_STDOUT_SINK" != none ] || return 0
+  message=$GUARD_STDOUT_NOTICE
+  kind=
+  # A direct harness discards stdout on a blocked stop, and only block_stop has
+  # a stderr channel for the warning there, so a block that printed no banner
+  # must not spend the warning on a stream nobody will read.
+  if { [ "$status" -eq 0 ] || [ "$CAPTAIN_COMMS_WARNING_TAKEN" -eq 1 ]; } \
+    && captain_comms_warning_take; then
+    if [ -n "$message" ]; then
+      message=$(printf '%s\n\n%s' "$message" "$CAPTAIN_COMMS_WARNING_TEXT")
+    else
+      message=$CAPTAIN_COMMS_WARNING_TEXT
+      kind=captain-comms-warning
+    fi
+  fi
+  [ -n "$message" ] || return 0
+  json=$(jq -cn --arg message "$message" --arg kind "$kind" \
+    'if $kind == "" then {systemMessage:$message} else {systemMessage:$message, kind:$kind} end') || {
+      captain_comms_stand_down 'cannot encode the turn-end advisory message'
+      return 0
+    }
+  printf '%s\n' "$json"
+}
+
+guard_exit() {  # <status>
+  guard_stdout_emit "$1"
+  exit "$1"
+}
+
+captain_comms_stand_down() {
+  printf 'fm-turnend-guard: captain-comms warning stood down: %s\n' "$1" >&2
+}
+
+captain_comms_run_bounded() {  # <seconds> <command...>
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+  else
+    return 127
+  fi
+}
+
+captain_comms_transcript_summary() {  # <transcript-path> <result-var>
+  local transcript=$1 result_var=$2 parsed_summary jq_program
+  if [ ! -f "$transcript" ] || [ ! -r "$transcript" ]; then
+    captain_comms_stand_down 'cannot read the turn transcript'
+    return 1
+  fi
+  # shellcheck disable=SC2016 # jq expands $items; the outer shell must not.
+  jq_program='
+      def text_content:
+        if type == "string" then .
+        elif type == "array" then
+          map(
+            if type == "string" then .
+            elif ((.type? == "text" or .type? == "input_text" or .type? == "output_text")
+                  and ((.text? | type) == "string")) then .text
+            else empty
+            end
+          ) | join("")
+        else ""
+        end;
+      def conversation_item:
+        if (.type? == "user" and .message?.role? == "user") then
+          {role:"user", text:(.message.content | text_content), id:(.uuid? // .id? // "")}
+        elif (.type? == "assistant" and .message?.role? == "assistant") then
+          {role:"assistant", text:(.message.content | text_content), id:(.uuid? // .id? // "")}
+        elif (.type? == "response_item" and .payload?.type? == "message"
+              and (.payload.role? == "user" or .payload.role? == "assistant")) then
+          {role:.payload.role, text:(.payload.content | text_content), id:(.payload.id? // .id? // "")}
+        elif (.type? == "event_msg" and .payload?.type? == "user_message") then
+          {role:"user", text:(.payload.message? // ""), id:(.payload.id? // .id? // "")}
+        elif (.type? == "event_msg" and .payload?.type? == "agent_message") then
+          {role:"assistant", text:(.payload.message? // ""), id:(.payload.id? // .id? // "")}
+        else empty
+        end;
+      [split("\n")[] | fromjson? | conversation_item
+       | select((.text | type) == "string" and (.text | length) > 0)] as $items
+      | {
+          trigger: ([$items[] | select(.role == "user")] | last // null),
+          assistant: ([$items[] | select(.role == "assistant")] | last // null)
+        }
+    '
+  # Read only the tail of the transcript so an hours-long session cannot make
+  # this advisory check re-parse megabytes on every turn end. The window is a
+  # documented fail-open bound: a turn whose triggering input has been pushed
+  # out of it yields no trigger, and the warning steps aside. The file is the
+  # live session's own transcript, still being appended while this hook runs, so
+  # records are decoded one line at a time and an unreadable line is skipped
+  # rather than discarding every valid record beside it.
+  # shellcheck disable=SC2016 # The bounded child bash expands its positional parameters.
+  parsed_summary=$(captain_comms_run_bounded 2 bash -c \
+    'set -o pipefail; tail -n "$3" -- "$2" 2>/dev/null | jq -Rsc "$1" 2>/dev/null' \
+    _ "$jq_program" "$transcript" "$CAPTAIN_COMMS_TRANSCRIPT_WINDOW") || {
+      captain_comms_stand_down 'cannot parse the turn transcript within the measurement bound'
+      return 1
+    }
+  printf -v "$result_var" '%s' "$parsed_summary"
+}
+
+# bin/fm-slack-lib.sh owns the captain-comms cap format, its built-in default,
+# its dangling-symlink and unreadable-file rules, and the line measurement. This
+# guard only calls that owner; it never restates any part of the contract.
+captain_comms_owner_load() {
+  [ -z "${FMS_CAPTAIN_COMMS_LINES_DEFAULT:-}" ] || return 0
+  # shellcheck source=bin/fm-slack-lib.sh
+  if ! . "$SCRIPT_DIR/fm-slack-lib.sh" 2>/dev/null; then
+    captain_comms_stand_down 'cannot load the shared captain-comms configuration owner'
+    return 1
+  fi
+}
+
+captain_comms_line_cap_load() {
+  local value
+  captain_comms_owner_load || return 1
+  value=$(fms_captain_comms_cap_read \
+    "$CONFIG/slack-captain-comms-lines" "$FMS_CAPTAIN_COMMS_LINES_DEFAULT") || {
+      captain_comms_stand_down 'cannot load the captain-comms line cap'
+      return 1
+    }
+  CAPTAIN_COMMS_LINE_CAP=$value
+}
+
+captain_comms_line_count() {  # <reply> <result-var>
+  local reply=$1 result_var=$2
+  captain_comms_owner_load || return 1
+  fms_captain_comms_line_count "$reply" || {
+    captain_comms_stand_down 'cannot count reply lines'
+    return 1
+  }
+  printf -v "$result_var" '%s' "$FMS_CAPTAIN_COMMS_LINE_COUNT"
+}
+
+captain_comms_digest() {  # stdin
+  if command -v shasum >/dev/null 2>&1; then
+    (set -o pipefail; shasum -a 256 2>/dev/null | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    (set -o pipefail; sha256sum 2>/dev/null | awk '{print $1}')
+  else
+    return 1
+  fi
+}
+
+# The warned-identity record holds one line per session, most recently warned
+# first, so concurrent sessions in one home cannot evict each other's identity
+# and re-warn a reply that already warned. The bound matches the OpenCode
+# adapter's own retained-session cap. A line that is not exactly a key and a
+# digest is ignored, so malformed state degrades to "not yet warned" instead of
+# suppressing every future warning.
+CAPTAIN_COMMS_WARNING_SESSIONS_MAX=32
+
+captain_comms_session_key() {  # <session-id> <result-var>
+  local key=${1//[^A-Za-z0-9._-]/_}
+  [ -n "$key" ] || key=unknown
+  printf -v "$2" '%s' "${key:0:64}"
+}
+
+captain_comms_warning_claim() {  # <session-key> <reply-digest>
+  local session_key=$1 digest=$2 claim_file lock tmp previous
+  claim_file="$STATE/.turnend-captain-comms-warning"
+  lock="$STATE/.turnend-captain-comms-warning.lock"
+  if ! fm_lock_try_acquire "$lock"; then
+    captain_comms_stand_down 'cannot acquire the warning identity claim without waiting'
+    return 1
+  fi
+  previous=$(awk -v key="$session_key" \
+    'NF == 2 && $1 == key { print $2; exit }' "$claim_file" 2>/dev/null || true)
+  if [ "$previous" = "$digest" ]; then
+    fm_lock_release "$lock"
+    return 2
+  fi
+  tmp="$claim_file.tmp.${BASHPID:-$$}"
+  if ! {
+    printf '%s %s\n' "$session_key" "$digest"
+    awk -v key="$session_key" 'NF == 2 && $1 != key { print }' "$claim_file" 2>/dev/null || true
+  } | head -n "$CAPTAIN_COMMS_WARNING_SESSIONS_MAX" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$claim_file" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$lock"
+    captain_comms_stand_down 'cannot record the warning identity'
+    return 1
+  fi
+  fm_lock_release "$lock"
+  return 0
+}
+
+captain_comms_warn_if_needed() {
+  local normalized reply reply_id trigger transcript summary explicit_facing
+  local assistant_id assistant_text trigger_text trigger_id need_summary summary_loaded
+  # shellcheck disable=SC2034 # Output variable populated by fm_operational_input_classify.
+  local session_id line_count='' identity digest operational_kind
+  normalized=$(printf '%s' "$PAYLOAD" | jq -cer '
+    def optional_string($name):
+      if has($name) then
+        if (.[$name] | type) == "string" then .[$name] else error($name) end
+      else null
+      end;
+    def optional_boolean($name):
+      if has($name) then
+        if (.[$name] | type) == "boolean" then .[$name] else error($name) end
+      else null
+      end;
+    {
+      reply: (optional_string("fm_reply_text") // optional_string("last_assistant_message")
+              // optional_string("lastAssistantMessage")),
+      reply_id: (optional_string("fm_reply_id") // optional_string("turn_id")
+                 // optional_string("turnId") // optional_string("prompt_id")
+                 // optional_string("promptId")),
+      trigger: optional_string("fm_trigger_text"),
+      transcript: (optional_string("transcript_path") // optional_string("transcriptPath")),
+      captain_facing: optional_boolean("fm_captain_facing"),
+      session_id: (optional_string("session_id") // optional_string("sessionId") // "unknown")
+    }
+  ' 2>/dev/null) || {
+    captain_comms_stand_down 'reply metadata is malformed'
+    return 0
+  }
+  # One NUL-separated read keeps every multi-line field intact while spawning a
+  # single jq on the turn-end hot path instead of one per field.
+  reply='' reply_id='' trigger='' transcript='' explicit_facing='' session_id=''
+  {
+    IFS= read -r -d '' reply || true
+    IFS= read -r -d '' reply_id || true
+    IFS= read -r -d '' trigger || true
+    IFS= read -r -d '' transcript || true
+    IFS= read -r -d '' explicit_facing || true
+    IFS= read -r -d '' session_id || true
+  } < <(printf '%s' "$normalized" | jq -j '
+      (.reply // ""), "\u0000",
+      (.reply_id // ""), "\u0000",
+      (.trigger // ""), "\u0000",
+      (.transcript // ""), "\u0000",
+      (if .captain_facing == null then "" else (.captain_facing | tostring) end), "\u0000",
+      (.session_id // "unknown"), "\u0000"
+    ' 2>/dev/null)
+  [ -n "$session_id" ] || session_id=unknown
+
+  [ "$explicit_facing" != false ] || return 0
+
+  # A reply the payload already carries is measured before anything else: a
+  # reply at or under the cap can never warn, so it must not pay for a
+  # transcript parse or leave a stand-down diagnostic about one.
+  if [ -n "$reply" ]; then
+    captain_comms_line_cap_load || return 0
+    captain_comms_line_count "$reply" line_count || return 0
+    [ "$line_count" -gt "$CAPTAIN_COMMS_LINE_CAP" ] || return 0
+  fi
+
+  # The transcript is the direct harnesses' authoritative source for the
+  # completed reply, its identity, and the triggering input. Parse it only when
+  # the payload left one of those unresolved.
+  need_summary=0
+  summary_loaded=0
+  [ -n "$reply" ] || need_summary=1
+  [ -n "$reply_id" ] || need_summary=1
+  if [ "$explicit_facing" != true ] && [ -z "$trigger" ]; then
+    need_summary=1
+  fi
+  if [ "$need_summary" -eq 1 ] && [ -n "$transcript" ]; then
+    captain_comms_transcript_summary "$transcript" summary || return 0
+    assistant_text='' assistant_id='' trigger_text='' trigger_id=''
+    {
+      IFS= read -r -d '' assistant_text || true
+      IFS= read -r -d '' assistant_id || true
+      IFS= read -r -d '' trigger_text || true
+      IFS= read -r -d '' trigger_id || true
+    } < <(printf '%s' "$summary" | jq -j '
+        (.assistant.text // ""), "\u0000",
+        (.assistant.id // ""), "\u0000",
+        (.trigger.text // ""), "\u0000",
+        (.trigger.id // ""), "\u0000"
+      ' 2>/dev/null)
+    [ -n "$reply" ] || reply=$assistant_text
+    [ -n "$reply_id" ] || reply_id=$assistant_id
+    [ -n "$reply_id" ] || reply_id=$trigger_id
+    [ -n "$trigger" ] || trigger=$trigger_text
+    summary_loaded=1
+  fi
+
+  if [ -z "$reply" ]; then
+    # A payload that carries no reply and no transcript has nothing to measure;
+    # that is silence, not a failure. A transcript that yielded no completed
+    # assistant text is a genuine extraction failure and leaves evidence.
+    [ "$summary_loaded" -eq 0 ] || captain_comms_stand_down 'cannot extract the completed reply'
+    return 0
+  fi
+  if [ "$explicit_facing" != true ]; then
+    [ -n "$trigger" ] || {
+      captain_comms_stand_down 'cannot identify the reply audience'
+      return 0
+    }
+    if fm_operational_input_classify "$trigger" operational_kind; then
+      return 0
+    fi
+  fi
+  [ -n "$reply_id" ] || {
+    captain_comms_stand_down 'cannot identify the completed reply'
+    return 0
+  }
+
+  if [ -z "$line_count" ]; then
+    captain_comms_line_cap_load || return 0
+    captain_comms_line_count "$reply" line_count || return 0
+    [ "$line_count" -gt "$CAPTAIN_COMMS_LINE_CAP" ] || return 0
+  fi
+  captain_comms_session_key "$session_id" CAPTAIN_COMMS_WARNING_SESSION_KEY
+  identity=$(printf '%s\n%s\n%s' "$session_id" "$reply_id" "$reply")
+  digest=$(printf '%s' "$identity" | captain_comms_digest) && [ -n "$digest" ] || {
+    captain_comms_stand_down 'cannot hash the warning identity'
+    return 0
+  }
+  CAPTAIN_COMMS_WARNING_DIGEST=$digest
+  CAPTAIN_COMMS_WARNING_TEXT="FIRSTMATE CAPTAIN COMMS WARNING: the reply that just completed is $line_count lines, over the $CAPTAIN_COMMS_LINE_CAP-line captain comms cap. Nothing was truncated, retried, or blocked."
+}
+
+captain_comms_warn_if_needed
+
+# --- the actual supervision predicate ----------------------------------------
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
@@ -144,16 +515,16 @@ budget_reset() {
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
-  exit 0
+  guard_exit 0
 fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-  [ "$CLAUDE_MODE" -eq 1 ] || exit 0
-  fm_failure_episode_reset "$STATE" && exit 0
-  exit 2
+  [ "$CLAUDE_MODE" -eq 1 ] || guard_exit 0
+  fm_failure_episode_reset "$STATE" && guard_exit 0
+  guard_exit 2
 fi
 
 block_stop() {
-  local afk x_mode reason rule
+  local afk x_mode reason rule reason_line
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
@@ -162,22 +533,28 @@ block_stop() {
     || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
-    printf '●%s\n' "$rule"
-    printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
+    printf '%s%s\n' "$BANNER_MARK" "$rule"
+    printf '%s  TURN WOULD END BLIND - SUPERVISION IS OFF\n' "$BANNER_MARK"
     if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
-      printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+      printf '%s  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$BANNER_MARK" "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
     elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
-      printf '●  %s process-event source(s) registered, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SOURCES" "$FM_SUP_BEACON_DESC"
+      printf '%s  %s process-event source(s) registered, but no live watcher holds this home lock (last beat: %s).\n' "$BANNER_MARK" "$FM_SUP_SOURCES" "$FM_SUP_BEACON_DESC"
     else
-      printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
+      printf '%s  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$BANNER_MARK" "$FM_SUP_BEACON_DESC"
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
-      printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
+      printf '%s  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n' "$BANNER_MARK"
     fi
-    printf '●  %s\n' "$reason"
-    printf '●%s\n' "$rule"
+    while IFS= read -r reason_line; do
+      printf '%s  %s\n' "$BANNER_MARK" "$reason_line"
+    done <<REASON
+$reason
+REASON
+    printf '%s%s\n' "$BANNER_MARK" "$rule"
+    ! captain_comms_warning_take \
+      || printf '%s  %s\n' "$ADVISORY_MARK" "$CAPTAIN_COMMS_WARNING_TEXT"
   } >&2
-  exit 2
+  guard_exit 2
 }
 
 if [ "$CLAUDE_MODE" -eq 0 ]; then
@@ -342,18 +719,18 @@ i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-      fm_failure_episode_reset "$STATE" || exit 2
+      fm_failure_episode_reset "$STATE" || guard_exit 2
     fi
-    exit 0
+    guard_exit 0
   fi
   sleep 0.1
   i=$((i + 1))
 done
 if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-    fm_failure_episode_reset "$STATE" || exit 2
+    fm_failure_episode_reset "$STATE" || guard_exit 2
   fi
-  exit 0
+  guard_exit 0
 fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
@@ -369,8 +746,8 @@ if [ "$terminal_status" -eq 0 ]; then
   else
     NEED_DESC="X-mode relay polling active"
   fi
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
-  exit 0
+  GUARD_STDOUT_NOTICE="FIRSTMATE SUPERVISION IS GENUINELY DOWN: $NEED_DESC, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."
+  guard_exit 0
 fi
-[ "$terminal_status" -eq 2 ] && exit 0
+[ "$terminal_status" -eq 2 ] && guard_exit 0
 block_stop
