@@ -810,17 +810,24 @@ do_relaunch() {
   else
     note_line="note=none"
   fi
-  # Route Herdr endpoints onto the missing-endpoint path. A missing endpoint
-  # recovers directly. A dead one does so ONLY when this task's durable
-  # recovery-attempt marker proves a prior fm-control recovery committed here:
-  # an ordinary relaunch failure leaves the same dead-pane-plus-failed-journal
-  # shape behind, and its retry must stay on the ordinary same-endpoint path.
+  # Route Herdr endpoints onto the missing-endpoint path - for ship and scout
+  # tasks only, mirroring fm-spawn's own --recover-missing kind reservation, so
+  # an unsupported kind keeps the ordinary path and never persists an attempt
+  # marker its launch could not honor. A missing endpoint recovers directly.
+  # A dead one does so ONLY when this task's durable recovery-attempt marker
+  # proves a prior fm-control recovery committed here: an ordinary relaunch
+  # failure leaves the same dead-pane-plus-failed-journal shape behind, and its
+  # retry must stay on the ordinary same-endpoint path.
   state=$(agent_state)
-  if [ "$BACKEND" = herdr ] && [ "$state" = missing ]; then
-    recover_missing=1
-  elif [ "$BACKEND" = herdr ] && [ "$state" = dead ] && [ -f "$RECOVERY_ATTEMPT_MARKER" ]; then
-    recover_missing=1
-  fi
+  case "$KIND" in
+    ship|scout)
+      if [ "$BACKEND" = herdr ] && [ "$state" = missing ]; then
+        recover_missing=1
+      elif [ "$BACKEND" = herdr ] && [ "$state" = dead ] && [ -f "$RECOVERY_ATTEMPT_MARKER" ]; then
+        recover_missing=1
+      fi
+      ;;
+  esac
   safe_checkpoint
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1

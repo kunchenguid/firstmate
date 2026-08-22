@@ -1447,6 +1447,39 @@ add_herdr_ship_task() {
   TASK_TMPS+=("/tmp/fm-$id")
 }
 
+# add_herdr_secondmate_task <case-dir> <id>
+# A secondmate task recorded on a Herdr endpoint, seeded in its own firstmate
+# home exactly like the tmux secondmate fixtures.
+add_herdr_secondmate_task() {  # <case-dir> <id>
+  local dir=$1 id=$2 home="$dir/home"
+  fm_git_worktree "$dir/proj" "$dir/smhome" "sm-$id"
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin" "$home/config" "$home/data/$id"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  printf '# charter for %s\n' "$id" > "$home/data/$id/brief.md"
+  printf '%s\n' "$id" > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "backend=herdr"
+    echo "window=hses:hp-$id-old"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "tasktmp=/tmp/fm-$id"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+    echo "herdr_session=hses"
+    echo "herdr_workspace_id=hws-$id"
+    echo "herdr_tab_id=ht-$id-old"
+    echo "herdr_pane_id=hp-$id-old"
+  } > "$home/state/$id.meta"
+  TASK_TMPS+=("/tmp/fm-$id")
+}
+
 # make_herdr_stub <case-dir> <gone-pane-id>
 # A stateful fake `herdr` CLI in the case's fakebin. State files under
 # $FM_FAKE_DIR drive it:
@@ -1663,6 +1696,34 @@ test_ordinary_relaunch_failure_retry_stays_on_the_same_path() {
   pass "fm-control relaunch: a tmux failed-launching retry stays on the ordinary path"
 }
 
+test_unsupported_kind_with_a_stranded_marker_stays_ordinary() {
+  local dir out rc marker
+  dir=$(new_case recov-smkind rl50)
+  add_herdr_secondmate_task "$dir" rl50
+  make_herdr_stub "$dir" "hp-rl50-old" "hws-rl50"
+  marker="$dir/home/state/rl50.control-relaunch.recovery-attempt"
+  # A prior routing bug could persist a recovery-attempt marker for a kind the
+  # launch owner refuses to recover, stranding every later relaunch behind it.
+  # With that marker present and the pane back present-but-agent-free, the
+  # relaunch must take the ORDINARY path - adopt the same pane and succeed -
+  # instead of being refused at the recovery kind reservation forever.
+  : > "$dir/fake/old-present"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd-hp-rl50-old"
+  : > "$marker"
+  out=$(run_control "$dir" rl50 relaunch); rc=$?
+  expect_code 0 "$rc" "a stranded marker must not lock a secondmate out of relaunch"$'\n'"$out"
+  assert_contains "$out" "relaunched rl50" "the success line should name the task"
+  [ ! -e "$dir/fake/create-label" ] \
+    || fail "an ordinary relaunch must not rebuild a replacement pane"
+  [ "$(meta_field "$dir" rl50 window)" = "hses:hp-rl50-old" ] \
+    || fail "an ordinary relaunch must keep the recorded endpoint"
+  assert_grep "encode launch-brief" "$dir/fake/sends" \
+    "the replacement should have been launched into the adopted pane"
+  [ "$(journal_field "$dir" rl50 phase)" = complete ] \
+    || fail "the ordinary transaction should end complete"
+  pass "fm-control relaunch: a secondmate with a stranded recovery-attempt marker relaunches ordinarily onto its same pane"
+}
+
 test_recovery_pane_survives_an_empty_first_cwd_read() {
   local dir out rc
   dir=$(new_case recov-cwdwait rl48)
@@ -1726,7 +1787,7 @@ test_recover_missing_refuses_an_ambiguous_herdr_workspace
 test_recover_missing_rebuilds_a_dead_endpoint_only_with_the_marker
 test_recovery_pane_survives_an_empty_first_cwd_read
 test_dead_endpoint_without_a_marker_stays_on_the_ordinary_path
-test_ordinary_relaunch_failure_retry_stays_on_the_same_path
+test_unsupported_kind_with_a_stranded_marker_stays_ordinary
 test_recover_missing_refuses_an_unauthorized_caller
 test_recover_missing_refuses_alive_endpoint
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
