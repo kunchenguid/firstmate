@@ -121,16 +121,21 @@ switch ($Action) {
     }
 
     $Url = $null
+    $Status = $null
     foreach ($Line in $Output) {
       if ([string]$Line -match '^\s*url:\s*"([^"]+)"\s*$') {
         $Url = $Matches[1]
-        break
+      }
+      if ([string]$Line -match '^\s*status:\s*"?([^"\s]+)"?\s*$') {
+        $Status = $Matches[1]
       }
     }
     if (-not $Url) {
       throw 'Windows lavish-axi did not return a session URL'
     }
-    Start-Process $Url | Out-Null
+    if (($Status -ne 'user-ended') -and ($ExtraArgs -notcontains '--no-open')) {
+      Start-Process $Url | Out-Null
+    }
   }
   'poll' {
     & $Lavish poll $Artifact @ExtraArgs

@@ -63,8 +63,50 @@ windows_prerequisites() {
     || die "wslpath is unavailable; install the WSL path utilities"
 }
 
+toon_escape() { # <value>
+  local value=$1
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '%s' "$value"
+}
+
+windows_rewrite_output() { # <output> <windows-path> <wsl-path>...
+  local output=$1 windows_path wsl_path windows_encoded wsl_encoded
+  local command_prefix='`lavish-axi' routed_prefix
+  local line prefix encoded_path suffix decoded_path converted_path converted_encoded
+  local windows_path_pattern='^(.*)"([[:alpha:]]:\\\\[^"]*)"(.*)$'
+  shift
+  while [ "$#" -gt 0 ]; do
+    windows_path=$1
+    wsl_path=$2
+    shift 2
+    windows_encoded=$(toon_escape "$windows_path")
+    wsl_encoded=$(toon_escape "$wsl_path")
+    output=${output//"$windows_encoded"/"$wsl_encoded"}
+  done
+  routed_prefix="\`$SCRIPT_DIR/fm-lavish.sh"
+  output=${output//"$command_prefix"/"$routed_prefix"}
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    while [[ $line =~ $windows_path_pattern ]]; do
+      prefix=${BASH_REMATCH[1]}
+      encoded_path=${BASH_REMATCH[2]}
+      suffix=${BASH_REMATCH[3]}
+      decoded_path=${encoded_path//\\\\/\\}
+      converted_path=$(wslpath -u "$decoded_path" 2>/dev/null) || break
+      converted_encoded=$(toon_escape "$converted_path")
+      line="${prefix}\"${converted_encoded}\"${suffix}"
+    done
+    printf '%s\n' "$line"
+  done <<< "$output"
+}
+
 windows_invoke() { # <action> [artifact] [args...]
-  local action=$1 windows_bridge artifact real windows_artifact
+  local action=$1 windows_bridge artifact real windows_artifact output rc
+  local arg out real_out windows_out
+  local -a windows_args output_paths
   shift
   windows_prerequisites
   windows_bridge=$(wslpath -w "$WINDOWS_BRIDGE") \
@@ -84,8 +126,43 @@ windows_invoke() { # <action> [artifact] [args...]
   [ -f "$real" ] || die "artifact does not exist: $artifact"
   windows_artifact=$(wslpath -w "$real") \
     || die "cannot convert the artifact path for Windows: $real"
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$windows_bridge" \
-    "$action" "$windows_artifact" "$@"
+
+  windows_args=()
+  output_paths=("$windows_artifact" "$real")
+  while [ "$#" -gt 0 ]; do
+    arg=$1
+    shift
+    if [ "$action" = export ] && [ "$arg" = --out ] && [ "$#" -gt 0 ]; then
+      out=$1
+      shift
+      real_out=$(realpath -m -- "$out" 2>/dev/null) \
+        || die "cannot resolve the export output path: $out"
+      windows_out=$(wslpath -w "$real_out") \
+        || die "cannot convert the export output path for Windows: $real_out"
+      windows_args+=("--out" "$windows_out")
+      output_paths+=("$windows_out" "$real_out")
+    elif [ "$action" = export ] && [[ $arg == --out=* ]] && [ -n "${arg#--out=}" ]; then
+      out=${arg#--out=}
+      real_out=$(realpath -m -- "$out" 2>/dev/null) \
+        || die "cannot resolve the export output path: $out"
+      windows_out=$(wslpath -w "$real_out") \
+        || die "cannot convert the export output path for Windows: $real_out"
+      windows_args+=("--out=$windows_out")
+      output_paths+=("$windows_out" "$real_out")
+    else
+      windows_args+=("$arg")
+    fi
+  done
+
+  set +e
+  output=$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$windows_bridge" \
+    "$action" "$windows_artifact" "${windows_args[@]}")
+  rc=$?
+  set -e
+  if [ -n "$output" ]; then
+    windows_rewrite_output "$output" "${output_paths[@]}"
+  fi
+  return "$rc"
 }
 
 native_doctor() {
@@ -158,11 +235,11 @@ case "${1-}" in
     ;;
   stop)
     shift
-    [ "$#" -eq 0 ] || { usage; exit 2; }
     if [ "$(runtime)" = windows ]; then
+      [ "$#" -eq 0 ] || { usage; exit 2; }
       windows_invoke stop
     else
-      run_native stop
+      run_native stop "$@"
     fi
     exit $?
     ;;

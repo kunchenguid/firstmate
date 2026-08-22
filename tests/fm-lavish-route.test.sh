@@ -15,14 +15,41 @@ make_windows_stubs() { # <dir>
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/wslpath" <<'SH'
 #!/usr/bin/env bash
-[ "${1-}" = -w ] || exit 2
-printf 'WIN::%s\n' "$2"
+case "${1-}" in
+  -w) printf 'WIN::%s\n' "$2" ;;
+  -u)
+    path=$2
+    drive=${path%%:*}
+    rest=${path#?:}
+    rest=${rest//\\//}
+    printf '/mnt/%s%s\n' "${drive,,}" "$rest"
+    ;;
+  *) exit 2 ;;
+esac
 SH
   cat > "$fakebin/powershell.exe" <<'SH'
 #!/usr/bin/env bash
 : "${FM_LAVISH_TEST_LOG:?}"
 printf '<call>\n' >> "$FM_LAVISH_TEST_LOG"
 for arg in "$@"; do printf '<%s>\n' "$arg" >> "$FM_LAVISH_TEST_LOG"; done
+if [ "${FM_LAVISH_TEST_OUTPUT:-0}" = 1 ]; then
+  action=${6-}
+  artifact=${7-}
+  case "$action" in
+    open)
+      printf 'session:\n  file: "%s"\n  url: "http://127.0.0.1:4388/session/test"\n  status: active\n' "$artifact"
+      printf 'next_step: "Run `lavish-axi poll %s` now."\n' "$artifact"
+      ;;
+    poll)
+      printf 'session:\n  file: "%s"\n  status: feedback\n' "$artifact"
+      printf 'prompts[1]:\n  - target:\n'
+      printf '%s\n' '      scenePath: "C:\\Users\\Captain\\.lavish-axi\\whiteboards\\review #1.excalidraw"'
+      printf '    attachments[1]{path}:\n'
+      printf '%s\n' '      "C:\\Users\\Captain\\.lavish-axi\\attachments\\marked #1.png"'
+      printf 'next_step: "Run `lavish-axi poll %s --agent-reply answer` again."\n' "$artifact"
+      ;;
+  esac
+fi
 exit "${FM_LAVISH_TEST_POWERSHELL_EXIT:-0}"
 SH
   cat > "$fakebin/lavish-axi" <<'SH'
@@ -69,6 +96,64 @@ test_wsl_lifecycle_uses_one_windows_route() {
   ! grep -Fq 'linux-cli-was-called' "$log" \
     || fail "WSL silently started the competing Linux Lavish CLI"
   pass "WSL open and poll preserve artifact identity on one Windows runtime route"
+}
+
+test_wsl_output_keeps_followup_on_router_and_exposes_feedback_paths() {
+  local dir fakebin artifact real log out
+  dir="$TMP_ROOT/windows-output"
+  mkdir -p "$dir/reviews with spaces"
+  artifact="$dir/reviews with spaces/review #1.html"
+  printf '<h1>review</h1>\n' > "$artifact"
+  real=$(realpath "$artifact")
+  fakebin=$(make_windows_stubs "$dir")
+  log="$dir/calls.log"
+  : > "$log"
+
+  out=$(FM_LAVISH_RUNTIME_OVERRIDE=windows FM_LAVISH_TEST_LOG="$log" \
+    FM_LAVISH_TEST_OUTPUT=1 PATH="$fakebin:$BASE_PATH" \
+    "$ROUTER" open "$artifact") \
+    || fail "the WSL open output route failed"
+  printf '%s\n' "$out" | grep -F "$ROUTER poll $real" >/dev/null \
+    || fail "open output did not direct follow-up through the router and original WSL artifact"
+  ! printf '%s\n' "$out" | grep -F 'WIN::' >/dev/null \
+    || fail "open output exposed the Windows artifact path"
+  ! printf '%s\n' "$out" | grep -F '`lavish-axi poll' >/dev/null \
+    || fail "open output could start a competing Linux Lavish session"
+
+  out=$(FM_LAVISH_RUNTIME_OVERRIDE=windows FM_LAVISH_TEST_LOG="$log" \
+    FM_LAVISH_TEST_OUTPUT=1 PATH="$fakebin:$BASE_PATH" \
+    "$ROUTER" poll "$artifact") \
+    || fail "the WSL poll output route failed"
+  printf '%s\n' "$out" | grep -F '/mnt/c/Users/Captain/.lavish-axi/whiteboards/review #1.excalidraw' >/dev/null \
+    || fail "poll output did not expose the whiteboard scene through a WSL path"
+  printf '%s\n' "$out" | grep -F '/mnt/c/Users/Captain/.lavish-axi/attachments/marked #1.png' >/dev/null \
+    || fail "poll output did not expose the image attachment through a WSL path"
+  printf '%s\n' "$out" | grep -F "$ROUTER poll $real" >/dev/null \
+    || fail "poll output did not keep subsequent feedback on the same routed session"
+  ! printf '%s\n' "$out" | grep -F 'C:\\Users' >/dev/null \
+    || fail "poll output exposed a Windows-only feedback path"
+  pass "WSL output keeps follow-up routed and converts feedback paths"
+}
+
+test_wsl_export_converts_output_path() {
+  local dir fakebin artifact output real_output log
+  dir="$TMP_ROOT/windows-export"
+  mkdir -p "$dir/reviews with spaces"
+  artifact="$dir/reviews with spaces/review #1.html"
+  output="$dir/reviews with spaces/export #1.html"
+  real_output=$(realpath -m "$output")
+  printf '<h1>review</h1>\n' > "$artifact"
+  fakebin=$(make_windows_stubs "$dir")
+  log="$dir/calls.log"
+  : > "$log"
+
+  FM_LAVISH_RUNTIME_OVERRIDE=windows FM_LAVISH_TEST_LOG="$log" \
+    PATH="$fakebin:$BASE_PATH" "$ROUTER" export "$artifact" --out "$output" \
+    || fail "the WSL export route failed"
+
+  assert_line_count "$log" '<--out>' 1 "export did not preserve the path-valued option"
+  assert_line_count "$log" "<WIN::$real_output>" 1 "export did not convert its output path for Windows"
+  pass "WSL export writes to the requested converted output path"
 }
 
 test_wsl_routes_every_lifecycle_action() {
@@ -181,9 +266,15 @@ SH
   FM_LAVISH_RUNTIME_OVERRIDE=native FM_LAVISH_TEST_LOG="$log" \
     PATH="$fakebin:$BASE_PATH" "$ROUTER" poll "$artifact" \
     || fail "native poll failed"
+  FM_LAVISH_RUNTIME_OVERRIDE=native FM_LAVISH_TEST_LOG="$log" \
+    PATH="$fakebin:$BASE_PATH" "$ROUTER" stop --port 4390 \
+    || fail "native stop with a published port argument failed"
 
   assert_line_count "$log" "<$artifact>" 2 "native artifact argv changed"
   assert_line_count "$log" '<poll>' 1 "native poll did not preserve the published subcommand"
+  assert_line_count "$log" '<stop>' 1 "native stop did not preserve the published subcommand"
+  assert_line_count "$log" '<--port>' 1 "native stop dropped its port option"
+  assert_line_count "$log" '<4390>' 1 "native stop changed its port value"
   assert_line_count "$log" '<Native # title>' 1 "native argv containing spaces and # changed"
   ! grep -Fq '<open>' "$log" \
     || fail "native open gained a subcommand that lavish-axi does not use"
@@ -191,6 +282,8 @@ SH
 }
 
 test_wsl_lifecycle_uses_one_windows_route
+test_wsl_output_keeps_followup_on_router_and_exposes_feedback_paths
+test_wsl_export_converts_output_path
 test_wsl_routes_every_lifecycle_action
 test_wsl_missing_prerequisite_refuses_without_fallback
 test_windows_runtime_failure_refuses_without_fallback
