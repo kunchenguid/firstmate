@@ -219,6 +219,7 @@ local_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != only ]; }
 network_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != skip ]; }
 
 FORGE_UNSUPPORTED_REPORTED=0
+FORGE_NETWORK_ALLOWED=1
 forge_report_unsupported() {
   local unsupported=0
   while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
@@ -1565,7 +1566,8 @@ detect_home_summary_publication() {
 # bash's dynamic scoping would let them overwrite a stamp held by a caller.
 local_phase && detect_local_tools
 if network_phase; then
-  __fm_timing_stamp=$(fm_timing_now_ms)
+  if forge_report_unsupported; then
+    __fm_timing_stamp=$(fm_timing_now_ms)
   # Authentication is checked for each registered supported forge. An unknown
   # origin is reported by the local pass, but must not suppress authentication
   # remediation for an unrelated supported project in the same home.
@@ -1585,7 +1587,8 @@ if network_phase; then
     FORGE_AUTH_CHECKED="$FORGE_AUTH_CHECKED $_pair"
     fm_forge_check_auth "$_proj_provider" "${_proj_host:-}"
   done <<< "$FORGE_PROJECTS"
-  fm_timing_record phase forge-auth "$__fm_timing_stamp"
+    fm_timing_record phase forge-auth "$__fm_timing_stamp"
+  fi
 fi
 local_phase && detect_local_config
 
