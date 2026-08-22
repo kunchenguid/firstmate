@@ -1179,7 +1179,6 @@ The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`]
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
-
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
 
 **Universal requirements**
@@ -1213,9 +1212,10 @@ The per-backend delta is required only for the backend resolved from `FM_BACKEND
 | `orca` | `orca` |
 | `cmux` | `cmux`, `jq`, `treehouse` |
 
-The JSON-emitting adapters (`herdr`, `zellij`, `cmux`) need `jq` because their spawn and liveness paths parse backend JSON.
-Every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`) uses `treehouse` for worktrees.
+ The JSON-emitting adapters (`herdr`, `zellij`, `cmux`) need `jq` because their spawn and liveness paths parse backend JSON.
+ Every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`) uses `treehouse` for worktrees.
 
+The provider delta is required only for registered origins discovered under `projects/`; GitHub projects add `gh`, GitHub auth, and compatible `gh-axi`, while GitLab projects add `glab` and GitLab auth. Local-only homes need neither forge delta.
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 

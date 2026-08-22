@@ -218,6 +218,26 @@ esac
 local_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != only ]; }
 network_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != skip ]; }
 
+FORGE_UNSUPPORTED_REPORTED=0
+FORGE_NETWORK_ALLOWED=1
+forge_report_unsupported() {
+  local unsupported=0
+  while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
+    [ -n "${_proj_provider:-}" ] || continue
+    if [ "$_proj_provider" = unknown ]; then
+      unsupported=1
+      if [ "$FORGE_UNSUPPORTED_REPORTED" -eq 0 ]; then
+        echo "FORGE_UNSUPPORTED: $_proj_id (host: ${_proj_host:-unresolved})"
+      fi
+    fi
+  done <<< "$FORGE_PROJECTS"
+  if [ "$unsupported" -eq 1 ]; then
+    FORGE_UNSUPPORTED_REPORTED=1
+    return 1
+  fi
+  return 0
+}
+
 network_mutation_authorized() {
   local expected=${FM_BOOTSTRAP_NETWORK_LOCK_PID:-} current
   [ -n "$expected" ] || return 0
@@ -1427,12 +1447,7 @@ detect_local_tools() {
   if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
     echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
   fi
-  while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
-    [ -n "${_proj_provider:-}" ] || continue
-    if [ "$_proj_provider" = unknown ]; then
-      echo "FORGE_UNSUPPORTED: $_proj_id (host: ${_proj_host:-unresolved})"
-    fi
-  done <<< "$FORGE_PROJECTS"
+  forge_report_unsupported || true
 }
 
 detect_local_config() {
@@ -1551,7 +1566,8 @@ detect_home_summary_publication() {
 # bash's dynamic scoping would let them overwrite a stamp held by a caller.
 local_phase && detect_local_tools
 if network_phase; then
-  __fm_timing_stamp=$(fm_timing_now_ms)
+  if forge_report_unsupported; then
+    __fm_timing_stamp=$(fm_timing_now_ms)
   # Authentication is checked for each registered supported forge. The deferred
   # network phase must repeat the same provider-aware checks, not a global GitHub
   # probe that mislabels GitLab-only and local homes.
@@ -1569,7 +1585,8 @@ if network_phase; then
     FORGE_AUTH_CHECKED="$FORGE_AUTH_CHECKED $_pair"
     fm_forge_check_auth "$_proj_provider" "${_proj_host:-}"
   done <<< "$FORGE_PROJECTS"
-  fm_timing_record phase forge-auth "$__fm_timing_stamp"
+    fm_timing_record phase forge-auth "$__fm_timing_stamp"
+  fi
 fi
 local_phase && detect_local_config
 
@@ -1579,7 +1596,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # depend on them, so it starts in the background and overlaps their wall clock.
   fleet_sync_pid=
   fleet_sync_out=
-  if network_phase && network_sweep_authorized 'project clone refresh'; then
+  if network_phase && forge_report_unsupported && network_sweep_authorized 'project clone refresh'; then
     fleet_sync_out=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-fleet.XXXXXX") || fleet_sync_out=
     if [ -n "$fleet_sync_out" ]; then
       (
@@ -1594,7 +1611,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
       fm_timing_record phase fleet-sync "$__fm_timing_stamp"
     fi
   fi
-  if network_phase; then
+  if network_phase && forge_report_unsupported; then
     if network_sweep_authorized 'dead-secondmate relaunch'; then
       __fm_timing_stamp=$(fm_timing_now_ms)
       secondmate_liveness_sweep
