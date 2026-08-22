@@ -33,7 +33,11 @@
 # `hold` places an existing task under an active captain hold, or creates the
 # task first when no work item exists to hold (--title required to create; the
 # optional --origin records provenance in the new task's body and supplies the
-# default repo from that origin's metadata). Prefer holding the work item the
+# default repo from that origin's metadata). When --origin belongs to an epic, a
+# created task is born a recognized epic member: its title gets the origin's
+# `[<epic-slug>]` tag and, when data/<origin>/report.md exists, its body gets a
+# `Report:` line - so it is never a lint orphan firstmate hand-patches later
+# (report dcen-09). Prefer holding the work item the
 # question gates over minting a new row. Repeating `hold` with the same id is
 # idempotent; a task already closed is refused rather than reopened. `--until`
 # records the captain's own deferral date through `tasks-axi hold --until`, so
@@ -140,6 +144,11 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# epic_fm_get is the one owner of epic/story frontmatter reading; reuse it for the
+# plan-dir epic-membership derivation below rather than parsing frontmatter twice.
+# shellcheck source=bin/fm-epic-status-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-epic-status-lib.sh"
 
 CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
@@ -376,8 +385,57 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
   fail "no captain-held task $entry in $FM_HOME/data/backlog.md"
 }
 
+# The epic slug the origin task belongs to, or empty when it cannot be determined.
+# Membership is read exactly the way bin/fm-epic-status-lib.sh reads it (reports
+# dcen-04/dcen-05): a task carries its epic as an `[<slug>]` title tag or a
+# `parent:<slug>` token. We look, in order, at the origin task's own `[<slug>]`
+# title tag, a `parent:<slug>` token on that title, then the plan dir under
+# data/plans/ whose story file declares `id: <origin>`. Empty output means the
+# caller degrades to the historical untagged behavior rather than failing.
+origin_epic_slug() {  # <origin-id>
+  local origin=$1 show title tag tok sf sid slug
+  [ -n "$origin" ] || return 0
+  show=$(task_show "$origin") || show=''
+  if [ -n "$show" ]; then
+    title=$(show_field_value "$show" title)
+    case "$title" in
+      '['*']'*)
+        tag=${title#\[}; tag=${tag%%\]*}
+        case "$tag" in
+          ''|*[!A-Za-z0-9._-]*) : ;;
+          *) printf '%s' "$tag"; return 0 ;;
+        esac
+        ;;
+    esac
+    case "$title" in
+      *parent:*)
+        tok=${title#*parent:}
+        tok=${tok#"${tok%%[![:space:]]*}"}   # trim leading whitespace
+        tok=${tok%%[[:space:]]*}             # keep up to the next whitespace
+        tok=${tok%%\)*}                      # drop a trailing ) from an edge list
+        case "$tok" in
+          ''|*[!A-Za-z0-9._-]*) : ;;
+          *) printf '%s' "$tok"; return 0 ;;
+        esac
+        ;;
+    esac
+  fi
+  for sf in "$DATA"/plans/*/stories/*.md; do
+    [ -f "$sf" ] || continue
+    sid=$(epic_fm_get "$sf" id)
+    [ "$sid" = "$origin" ] || continue
+    slug=$(epic_fm_get "$(dirname "$(dirname "$sf")")/epic.md" epic)
+    if [ -n "$slug" ]; then
+      printf '%s' "$slug"
+      return 0
+    fi
+  done
+  return 0
+}
+
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind
+  local epic_slug=''
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -422,7 +480,34 @@ command_hold() {
     fi
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
-    [ -z "$origin" ] || body=$(printf 'Origin: %s' "$origin")
+    # Stamp epic membership at creation so a decision task is born a recognized
+    # epic member, not a lint orphan firstmate hand-patches later (report dcen-09).
+    # The `[<slug>]` title tag is the durable, format-stable membership pointer
+    # bin/fm-epic-status-lib.sh reads (it also accepts a `parent:<slug>` edge, but
+    # tasks-axi 0.2.5 has no parent-edge type: the only place such a token could
+    # live in a task line is the title, which would defeat the clean-title goal, so
+    # the tag is the one clean signal we stamp). No epic derivable -> untagged.
+    if [ -n "$origin" ]; then
+      epic_slug=$(origin_epic_slug "$origin")
+      if [ -n "$epic_slug" ]; then
+        case "$title" in
+          *"[$epic_slug]"*) : ;;
+          *) title="[$epic_slug] $title" ;;
+        esac
+        validate_one_line title "$title"
+      fi
+    fi
+    # Provenance and, when it exists, the originating report both go in the BODY.
+    # tasks-axi 0.2.5 stores a --report/--pr link by appending it to the title text
+    # (there is no separate link field in the markdown backend), so --report would
+    # pollute the title and re-orphan the record. A body line keeps the title clean
+    # and is still readable from the decision item via `tasks-axi show --full`.
+    if [ -n "$origin" ]; then
+      body=$(printf 'Origin: %s' "$origin")
+      if [ -f "$DATA/$origin/report.md" ]; then
+        body=$(printf '%s\nReport: data/%s/report.md' "$body" "$origin")
+      fi
+    fi
     if [ -n "$body" ]; then
       tasks_axi add "$id" "$title" --repo "$repo" --body "$body" >/dev/null \
         || fail "could not create task $id"

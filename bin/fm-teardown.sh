@@ -1137,8 +1137,19 @@ backlog_refresh_reminder() {
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
       scout)
+        # Link the scout's report on completion so firstmate never hand-patches it
+        # (report dcen-09). tasks-axi 0.2.5's `done --report <path>` is buggy: it
+        # appends the path to the TITLE (there is no separate link field in the
+        # markdown backend), re-orphaning the record. `--note` records the same
+        # reference cleanly under the Done line and leaves the title intact, so we
+        # emit that instead. Switch back to --report once tasks-axi stores links
+        # out of the title.
         report_path="data/$ID/report.md"
-        done_cmd="tasks-axi done $ID --report $report_path"
+        if [ -f "$DATA/$ID/report.md" ]; then
+          done_cmd="tasks-axi done $ID --note \"report: $report_path\""
+        else
+          done_cmd="tasks-axi done $ID"
+        fi
         ;;
       *)
         if [ "$MODE" = local-only ]; then

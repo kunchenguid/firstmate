@@ -1168,6 +1168,106 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
+# --- report dcen-09: a captain hold is born an epic member -------------------
+# A decision hold for an epic-tagged origin must be created already carrying the
+# epic membership tag AND the originating report, with a CLEAN title - so it is
+# never a lint orphan firstmate hand-patches later. Membership is derived from the
+# origin's own [<slug>] title tag, then a parent:<slug> token on that title, then
+# the plan dir; an undeterminable epic degrades to the historical untagged shape.
+test_captain_hold_is_born_an_epic_member() {
+  local home show line status
+  home=$(make_home dcen09-membership)
+  mkdir -p "$home/data/plans/demo-epic/stories" "$home/data/origin-tag"
+  cat > "$home/data/plans/demo-epic/epic.md" <<'EOF'
+---
+epic: demo
+title: Demo Epic
+---
+# Demo Epic
+EOF
+  cat > "$home/data/plans/demo-epic/stories/origin.md" <<'EOF'
+---
+id: origin-tag
+repo: alpha
+kind: ship
+---
+# origin story
+EOF
+  cat > "$home/data/plans/demo-epic/stories/origin-plan.md" <<'EOF'
+---
+id: origin-plan
+repo: alpha
+kind: ship
+---
+# plan-only origin
+EOF
+  printf '# report\n' > "$home/data/origin-tag/report.md"
+  tasks_in "$home" add origin-tag "[demo] origin story" --repo alpha --kind ship >/dev/null
+  tasks_in "$home" add origin-plan "plain untagged origin" --repo alpha --kind ship >/dev/null
+  tasks_in "$home" add origin-none "unrelated origin" --repo alpha --kind ship >/dev/null
+
+  # (1) origin carries the [demo] tag: the hold inherits tag + report, clean title.
+  run_captain "$home" hold demo-hold-a --title "resolve credential choice" \
+    --reason "captain credential choice pending" --origin origin-tag >/dev/null \
+    || fail "could not create the epic-origin captain hold"
+  show=$(tasks_in "$home" show demo-hold-a --full)
+  assert_contains "$show" 'title: "[demo] resolve credential choice"' \
+    "the decision title did not inherit the origin epic tag"
+  assert_contains "$show" "Origin: origin-tag" "the decision body lost origin provenance"
+  assert_contains "$show" "Report: data/origin-tag/report.md" \
+    "the decision body did not link the originating report"
+  assert_contains "$show" "links: none" "the report reference polluted the tasks-axi link/title field"
+  line=$(grep demo-hold-a "$home/data/backlog.md")
+  assert_not_contains "$line" "report.md" "the report path leaked into the clean backlog title line"
+  assert_contains "$line" "[demo]" "the backlog line lost the epic membership tag"
+
+  # (2) origin has no tag but a plan-dir story file: the epic is still derived.
+  run_captain "$home" hold demo-hold-b --title "resolve Y" \
+    --reason "captain Y pending" --origin origin-plan >/dev/null \
+    || fail "could not create the plan-dir-origin captain hold"
+  assert_contains "$(tasks_in "$home" show demo-hold-b --full)" 'title: "[demo] resolve Y"' \
+    "the plan-dir epic membership was not derived"
+
+  # (3) no epic determinable: degrade to the historical untagged shape.
+  run_captain "$home" hold demo-hold-c --title "resolve Z" \
+    --reason "captain Z pending" --origin origin-none >/dev/null \
+    || fail "could not create the no-epic captain hold"
+  show=$(tasks_in "$home" show demo-hold-c --full)
+  assert_contains "$show" "title: resolve Z" "an undeterminable epic wrongly stamped a tag"
+  assert_not_contains "$show" "Report:" "a missing report was wrongly linked"
+
+  # Membership is recognized the same way the merged epic view reads it.
+  status=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-epic-status.sh" demo 2>&1)
+  assert_contains "$status" "demo-hold-a" "epic-status did not recognize the tag-origin hold"
+  assert_contains "$status" "demo-hold-b" "epic-status did not recognize the plan-dir-origin hold"
+  assert_not_contains "$status" "demo-hold-c" "epic-status wrongly claimed the no-epic hold"
+  pass "a captain hold for an epic origin is born tagged, report-linked, clean-titled, and recognized"
+}
+
+# A completed scout is closed with its report linked - via a clean note, never the
+# title-polluting `done --report` (tasks-axi 0.2.5 has no separate link field).
+test_scout_completion_links_report_without_polluting_title() {
+  local home id out
+  home=$(make_home dcen09-scout-report)
+  id=sample-scout
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the scout task"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample scout\n\nNo captain choice remains.\n' > "$home/data/$id/report.md"
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "could not attest the empty captain-call inventory"
+  out=$(run_teardown "$home" "$id" 2>&1) \
+    || fail "scout teardown failed: $out"
+  assert_contains "$out" "tasks-axi done $id --note \"report: data/$id/report.md\"" \
+    "the completion reminder did not link the report through a clean note"
+  assert_not_contains "$out" "done $id --report" \
+    "the reminder still used the title-polluting --report flag"
+  pass "a completed scout is closed with its report linked cleanly, not by polluting the title"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
@@ -1185,3 +1285,5 @@ test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
+test_captain_hold_is_born_an_epic_member
+test_scout_completion_links_report_without_polluting_title
