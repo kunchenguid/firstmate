@@ -55,13 +55,21 @@ fm_branch_is_safely_merged() {
 
 # fm_branch_delete_if_safely_merged <repo> <branch> <merged_into_ref>: delete
 # <branch> in <repo> only when fm_branch_is_safely_merged proves it, printing
-# nothing itself (callers report their own outcome). The final `branch -d` is
-# deliberately Git's safe deletion rather than a raw ref deletion: it repeats
-# Git's own mergedness check and, crucially, refuses deletion if another
-# worktree checked out the branch after our proof. Returns non-zero, unchanged,
-# for anything the proof does not cover.
+# nothing itself (callers report their own outcome). `git branch -d` always
+# judges mergedness against its checkout's HEAD, rather than an explicit ref.
+# Use a short-lived detached worktree at <merged_into> so its final safe delete
+# repeats the SAME proof as the caller, while still letting Git refuse deletion
+# if another worktree checked out the branch after our proof. Returns non-zero,
+# unchanged, for anything the proof does not cover.
 fm_branch_delete_if_safely_merged() {
-  local repo=$1 branch=$2 merged_into=$3
+  local repo=$1 branch=$2 merged_into=$3 git_dir prune_worktree delete_status
   fm_branch_is_safely_merged "$repo" "$branch" "$merged_into" || return 1
-  git -C "$repo" branch -d -- "$branch" >/dev/null 2>&1
+  git_dir=$(git -C "$repo" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  prune_worktree=$(mktemp -d "$git_dir/fm-branch-prune.XXXXXX") || return 1
+  rmdir "$prune_worktree" || return 1
+  git -C "$repo" worktree add --detach -q "$prune_worktree" "$merged_into" || return 1
+  git -C "$prune_worktree" branch -d -- "$branch" >/dev/null 2>&1
+  delete_status=$?
+  git -C "$repo" worktree remove "$prune_worktree" >/dev/null 2>&1 || true
+  return "$delete_status"
 }
