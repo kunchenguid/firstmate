@@ -1435,7 +1435,7 @@ test_control_registered_followon_is_guarded() {
 }
 
 test_rechain_delivers_second_post_on_same_thread() {
-  local parent log out posts
+  local parent log out posts command command_log
   parent=$(make_home rechain-parent)
   log="$parent/curl.log"; : > "$log"
   seed_repro_commitment "$parent" public-final-a req-rechain main scout-a
@@ -1454,6 +1454,26 @@ test_rechain_delivers_second_post_on_same_thread() {
     "rechain must retire the source loop"
   assert_contains "$out" "--deliverable pr_url=<value>" \
     "rechain brief must name the actual required deliverable key"
+  command_log="$parent/brief-command.args"
+  cat > "$parent/fakebin/record-emit" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$RECORD_ARGS"
+SH
+  chmod +x "$parent/fakebin/record-emit"
+  command=$(printf '%s\n' "$out" | awk '
+    index($0, "/bin/fm-public-followup-emit.sh") { capture=1 }
+    capture { if ($0 == "") exit; print }
+  ')
+  assert_contains "$command" "--outcome-text" \
+    "the exact rechain command must remain continuous through outcome text"
+  command=${command/"$ROOT/bin/fm-public-followup-emit.sh"/"$parent/fakebin/record-emit"}
+  command=${command//<value>/https://github.com/example/repo/pull/99}
+  RECORD_ARGS="$command_log" bash -c "$command" \
+    || fail "the exact rechain command must execute after filling its deliverable value"
+  assert_grep '--deliverable' "$command_log" \
+    "the executable rechain command must pass its deliverable option"
+  assert_grep '--outcome-text' "$command_log" \
+    "the executable rechain command must pass its outcome text option"
   assert_absent "$parent/state/public-followup/registry/public-final-a" \
     "the source registration must be gone after rechain"
   assert_present "$parent/state/public-followup/registry/public-final-b" \
@@ -1987,7 +2007,7 @@ test_retention_creates_no_false_teardown_refusal() {
 }
 
 test_expiry_escalation_uses_now_override() {
-  local home out exp now_closing now_expired
+  local home out exp now_closing now_expired registry tmp
   home=$(make_home expiry-window)
   seed_repro_commitment "$home" pf-exp req-exp main work-exp
   exp=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' '2026-08-28T01:12:00Z' +%s 2>/dev/null) \
@@ -2016,6 +2036,18 @@ test_expiry_escalation_uses_now_override() {
   FMX_NOW_OVERRIDE="$now_expired" expect_failure "rechain past expiry must refuse" \
     run_pf "$home" rechain pf-exp-next --from pf-exp --work-home main --work-id work-next --expected pr-merged
   assert_contains "$EXPECT_OUT" "can no longer be reached" "rechain must name the closed window"
+  registry="$home/state/public-followup/registry/pf-exp"
+  tmp="$registry.tmp"
+  awk '
+    /^followup_expires_at=/ { print "followup_expires_at=not-a-time"; next }
+    { print }
+  ' "$registry" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$registry"
+  expect_failure "rechain with an unknown expiry window must refuse" \
+    run_pf "$home" rechain pf-exp-next --from pf-exp --work-home main --work-id work-next --expected pr-merged
+  assert_contains "$EXPECT_OUT" "thread window cannot be checked" \
+    "rechain must fail closed when its retained expiry cannot be parsed"
   pass "expiry escalation is pinned by FMX_NOW_OVERRIDE"
 }
 

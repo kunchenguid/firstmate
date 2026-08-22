@@ -358,7 +358,7 @@ cmd_brief() {
   deliverable_flags=
   while IFS= read -r key; do
     [ -n "$key" ] || continue
-    deliverable_flags="${deliverable_flags}    --deliverable ${key}=<value> \\\\
+    deliverable_flags="${deliverable_flags}    --deliverable ${key}=<value> \\
 "
   done <<EOF
 $keys
@@ -376,8 +376,7 @@ When this work reaches its promised terminal outcome, report it as typed data
     --work-id $work_id \\
     --generation $generation \\
     --outcome $outcome \\
-$deliverable_flags
-    --outcome-text '<one bounded public-safe sentence>'
+${deliverable_flags}    --outcome-text '<one bounded public-safe sentence>'
 
 Do not post anything publicly yourself and do not look for the public thread:
 the home above owns the reply.
@@ -1103,9 +1102,15 @@ cmd_rechain() {
   expires=$(fm_pf_registry_get "$STATE" "$from" followup_expires_at)
   [ -n "$expires" ] || die "source '$from' has no followup_expires_at; the thread window cannot be checked" 1
   window=$(fm_pf_followup_window_class "$expires")
-  if [ "$window" = expired ]; then
-    die "followup_expires_at $expires is in the past: the thread can no longer be reached, so this loop cannot be closed publicly. This is a captain decision." 1
-  fi
+  case "$window" in
+    ok|closing) ;;
+    expired)
+      die "followup_expires_at $expires is in the past: the thread can no longer be reached, so this loop cannot be closed publicly. This is a captain decision." 1
+      ;;
+    *)
+      die "followup_expires_at $expires could not be parsed: the thread window cannot be checked, so this loop cannot be rechained" 1
+      ;;
+  esac
 
   if [ "${#deliverable_keys[@]}" -eq 0 ]; then
     local default_key
