@@ -75,7 +75,7 @@ case "${1:-}" in
           printf 'zsh' > "$D/command"
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
-        *'encode launch-brief'*)
+        *'encode launch-brief'*|*claude*|*codex*|*opencode*|*grok*|*kimi*|*cursor*|*muse*)
           cat "$D/becomes" > "$D/command"
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
@@ -158,6 +158,86 @@ add_ship_task() {
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
   TASK_TMPS+=("/tmp/fm-$id")
+}
+
+routing_sha_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+routing_sha_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    sha256sum | awk '{print $1}'
+  fi
+}
+
+prepare_relaunch_receipt() { # <case-dir> <id> <harness> <model> <effort> [note] [authority]
+  local dir=$1 id=$2 harness=$3 model=$4 effort=$5 note=${6:-}
+  local authority=${7:-EXPLICIT_RUNTIME_OVERRIDE} source=explicit_override
+  local task_dir="$dir/home/data/$id" brief="$dir/home/data/$id/brief.md"
+  local brief_hash intent_hash home_hash host_hash now model_json=null effort_json=null binding_effort=$effort
+  [ -z "$note" ] || printf '\n## Progress note\n\n%s\n' "$note" >> "$brief"
+  [ "$authority" != STATIC_HARNESS ] || source=static_harness
+  brief_hash=$(routing_sha_file "$brief")
+  jq -n --arg id "$id" --arg brief_hash "$brief_hash" --arg authority "$authority" '{
+    schema_version: 1,
+    task_id: $id,
+    brief_sha256: $brief_hash,
+    hard_capability: "transactional relaunch",
+    ambiguity: "LOW",
+    risk: "LOCAL_FAIL_CLOSED",
+    authority: $authority,
+    gate: "no-mistakes",
+    forbidden_effects: ["push", "merge"]
+  }' > "$task_dir/routing-intent.json"
+  intent_hash=$(routing_sha_file "$task_dir/routing-intent.json")
+  home_hash=$(printf '%s' "$dir/home" | routing_sha_text)
+  host_hash=$(uname -n | routing_sha_text)
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  [ "$model" = default ] || model_json=$(jq -cn --arg value "$model" '$value')
+  case "$harness:$effort" in
+    *:default|opencode:*|kimi:*|cursor:*) ;;
+    codex:max|grok:xhigh|grok:max) ;;
+    muse:max) effort_json=$(jq -cn --arg value ultra '$value') ;;
+    *) effort_json=$(jq -cn --arg value "$binding_effort" '$value') ;;
+  esac
+  jq -n \
+    --arg id "$id" \
+    --arg intent_hash "$intent_hash" \
+    --arg home_hash "$home_hash" \
+    --arg host_hash "$host_hash" \
+    --arg source "$source" \
+    --arg harness "$harness" \
+    --arg model "$model" \
+    --arg effort "$effort" \
+    --arg now "$now" \
+    --argjson binding_model "$model_json" \
+    --argjson binding_effort "$effort_json" '{
+      schema_version: 1,
+      task_id: $id,
+      intent_sha256: $intent_hash,
+      dispatch_config: {kind: "absent", sha256: null},
+      matched_profile: {source: $source, index: null},
+      supervisor: {kind: "current-firstmate-home", home_sha256: $home_hash},
+      host: {kind: "local", identity_sha256: $host_hash},
+      launch_binding: {kind: "verified_template", harness: $harness, model: $binding_model, effort: $binding_effort},
+      harness: $harness,
+      model: $model,
+      effort: $effort,
+      candidates_considered: [{harness: $harness, model: $model, effort: $effort}],
+      quota: {source: "NOT_APPLICABLE_SINGLETON", observed_at: null, snapshot_sha256: null},
+      quota_basis: "NOT_APPLICABLE_SINGLETON",
+      fallback: "NONE",
+      rationale: "single attested relaunch route",
+      required_gate: "no-mistakes",
+      selection_order: ["hard_capability", "ambiguity_complexity", "fresh_quota_among_capable"],
+      generated_at: $now
+    }' > "$task_dir/routing-decision.pending.json"
 }
 
 run_control() {  # <case-dir> <args...>
@@ -390,7 +470,7 @@ test_disabled_relaunch_clears_prior_trace_context() {
   expect_code 0 "$rc" "disabled relaunch should succeed"$'\n'"$out"
   [ -z "$(meta_field "$dir" rl33 traceparent)" ] \
     || fail "disabled relaunch must remove the prior trace carrier from metadata"
-  grep -q '^unset TRACEPARENT; .*claude' "$dir/fake/literal" \
+  grep -q 'unset TRACEPARENT; .*claude' "$dir/fake/literal" \
     || fail "disabled relaunch must clear the pane carrier before replacement launch"
   ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
     || fail "disabled relaunch must not export a replacement trace carrier"
@@ -427,6 +507,29 @@ test_relaunch_requires_a_note_for_a_ship_task() {
   pass "fm-control relaunch: a ship task refuses without the progress note its replacement needs"
 }
 
+test_explicit_same_route_requires_a_receipt_before_control_effects() {
+  local dir out rc
+  dir=$(new_case explicit-same-missing rl37)
+  add_ship_task "$dir" rl37 claude
+  printf '\n## Progress note\n\nreceipt must precede control effects\n' \
+    >> "$dir/home/data/rl37/brief.md"
+  cp "$dir/home/state/rl37.meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl37 relaunch --harness claude \
+    --note "receipt must precede control effects"); rc=$?
+  expect_code 1 "$rc" "an explicit same-value route without a receipt should refuse"
+  assert_contains "$out" "ROUTING_DECISION missing" \
+    "the refusal should come from the fresh routing-decision gate"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl37.meta" \
+    || fail "a routing preflight refusal must leave metadata byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a routing preflight refusal must leave the old agent running"
+  [ ! -s "$dir/fake/literal" ] && [ ! -s "$dir/fake/keys" ] \
+    || fail "a routing preflight refusal must deliver no lifecycle input"
+  [ ! -e "$dir/home/state/rl37.control-relaunch" ] \
+    || fail "a routing preflight refusal must create no transaction journal"
+  pass "fm-control relaunch: an explicit same-value route needs a receipt before control effects"
+}
+
 # --- 2. harness switch -------------------------------------------------------
 
 test_harness_switch_moves_the_record_and_clears_prior_wiring() {
@@ -437,6 +540,7 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   mkdir -p "$dir/wt/.claude"
   printf '{"hooks":{}}\n' > "$dir/wt/.claude/settings.local.json"
   printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl4 codex default default "switching runtime"
   out=$(run_control "$dir" rl4 relaunch --harness codex --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
   assert_contains "$out" "harness=codex from=claude" "the outcome should name both harnesses"
@@ -457,6 +561,7 @@ test_harness_switch_does_not_carry_the_old_profile_axes() {
     "$dir/home/state/rl5.meta" > "$dir/home/state/rl5.meta.tmp"
   mv "$dir/home/state/rl5.meta.tmp" "$dir/home/state/rl5.meta"
   printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl5 codex default default "switching runtime"
   out=$(run_control "$dir" rl5 relaunch --harness codex --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
   [ "$(meta_field "$dir" rl5 model)" = default ] \
@@ -477,6 +582,7 @@ test_harness_switch_resolves_a_prefixed_recorded_harness() {
   printf '%s\n' "$dir/home/state/rl32.turn-ended" > "$auth"
   printf 'token=fm.abcdefabcdef\n' > "$dir/wt/.fm-grok-turnend"
 
+  prepare_relaunch_receipt "$dir" rl32 claude default default "switching runtime"
   out=$(run_control "$dir" rl32 relaunch --harness claude --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "relaunch should resolve a prefixed recorded harness"$'\n'"$out"
   [ "$(sed -n '1p' "$dir/fake/literal")" = /exit ] \
@@ -542,6 +648,7 @@ test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
   add_ship_task "$dir" rl7 claude
+  prepare_relaunch_receipt "$dir" rl7 claude sonnet low "dialling down"
   out=$(run_control "$dir" rl7 relaunch --model sonnet --effort low --note "dialling down"); rc=$?
   expect_code 0 "$rc" "relaunch with explicit axes should succeed"$'\n'"$out"
   [ "$(meta_field "$dir" rl7 model)" = sonnet ] || fail "an explicit model should be recorded"
@@ -649,6 +756,7 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   printf '%s\n' "fm-sm3" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" sm3 codex some-model high "" STATIC_HARNESS
   out=$(run_control "$dir" sm3 relaunch); rc=$?
   expect_code 0 "$rc" "a configured secondmate harness should relaunch"$'\n'"$out"
   [ "$(journal_field "$dir" sm3 to_harness)" = codex ] \
@@ -688,6 +796,7 @@ test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
   printf '%s\n' "fm-sm6" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" sm6 codex some-model default "" STATIC_HARNESS
   out=$(run_control "$dir" sm6 relaunch); rc=$?
   expect_code 0 "$rc" "an invalid configured effort should be ignored before stop"$'\n'"$out"
   assert_contains "$out" "effort token 'impossible'" \
@@ -767,6 +876,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes() {
   printf '%s\n' "fm-sm4" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" sm4 codex default default
   out=$(run_control "$dir" sm4 relaunch --harness codex); rc=$?
   expect_code 0 "$rc" "an explicit secondmate harness should relaunch"$'\n'"$out"
   [ "$(meta_field "$dir" sm4 model)" = default ] \
@@ -819,6 +929,7 @@ test_prefixed_prior_harness_wiring_is_still_retired() {
   printf '%s\n' "$dir/home/state/rl30.turn-ended" > "$auth"
   printf 'token=fm.abcdefabcdef\n' > "$dir/wt/.fm-grok-turnend"
   printf 'zsh' > "$dir/fake/command"
+  prepare_relaunch_receipt "$dir" rl30 claude default default
   run_spawn "$dir" rl30 --relaunch --harness claude >/dev/null
   [ ! -e "$auth" ] \
     || fail "a prefixed prior harness must still have its turn-end registry entry revoked"
@@ -841,6 +952,7 @@ test_muse_session_binding_is_retired_on_a_harness_switch() {
     > "$dir/home/state/rl31.muse-session"
   printf '/nonexistent/session.jsonl\n' > "$dir/home/state/rl31.muse-session-current"
   printf 'zsh' > "$dir/fake/command"
+  prepare_relaunch_receipt "$dir" rl31 claude default default
   run_spawn "$dir" rl31 --relaunch --harness claude >/dev/null
   [ ! -e "$dir/home/state/rl31.muse-session" ] \
     || fail "the retired muse incarnation's session binding must not outlive it"
@@ -856,6 +968,7 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
   printf 'workspace=%s\nprior_conversation=old-conversation\n' "$dir/wt" \
     > "$dir/home/state/rl35.cursor-session"
   printf 'zsh' > "$dir/fake/command"
+  prepare_relaunch_receipt "$dir" rl35 claude default default
   run_spawn "$dir" rl35 --relaunch --harness claude >/dev/null
   [ ! -e "$dir/home/state/rl35.cursor-session" ] \
     || fail "the retired cursor incarnation's session binding must not outlive it"
@@ -935,6 +1048,7 @@ test_launch_failure_keeps_the_prior_record_and_reports_it() {
   # The endpoint's shell is not in the recorded worktree, so the launch owner
   # refuses AFTER the previous agent has already been stopped.
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  prepare_relaunch_receipt "$dir" rl13 codex default default "carry this forward"
   out=$(run_control "$dir" rl13 relaunch --harness codex --note "carry this forward"); rc=$?
   expect_code 1 "$rc" "a failed launch should fail closed"$'\n'"$out"
   assert_contains "$out" "no agent is running" "the failure should say no agent is running"
@@ -955,6 +1069,7 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
   dir=$(new_case rollback-race rl30)
   add_ship_task "$dir" rl30 claude
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  prepare_relaunch_receipt "$dir" rl30 codex default default "preserve concurrent metadata"
   FM_FAKE_CWD_RACE_READY="$dir/cwd-race-ready" \
     run_control "$dir" rl30 relaunch --harness codex --note "preserve concurrent metadata" \
       > "$dir/control.out" &
@@ -988,6 +1103,7 @@ test_post_publication_launch_failure_keeps_the_new_record() {
   dir=$(new_case published rl24)
   add_ship_task "$dir" rl24 claude
   printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl24 codex default default "keep the published record"
   out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
     run_control "$dir" rl24 relaunch --harness codex --note "keep the published record"); rc=$?
   expect_code 1 "$rc" "a post-publication launch failure should fail closed"$'\n'"$out"
@@ -1025,6 +1141,7 @@ test_complete_journal_failure_rolls_back_from_durable_phase() {
   printf 'codex' > "$dir/fake/becomes"
   real_mv=$(command -v mv)
   make_mv_failure_stub "$dir"
+  prepare_relaunch_receipt "$dir" rl27 codex default default "keep durable phase honest"
   out=$(FM_REAL_MV="$real_mv" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL=1 \
     run_control "$dir" rl27 relaunch --harness codex --note "keep durable phase honest"); rc=$?
   expect_code 1 "$rc" "a failed complete journal replacement should fail closed"$'\n'"$out"
@@ -1325,6 +1442,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   add_ship_task "$dir" rl18 claude
   printf 'zsh' > "$dir/fake/command"
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  prepare_relaunch_receipt "$dir" rl18 claude default default
   out=$(run_spawn "$dir" rl18 --relaunch --harness claude); rc=$?
   expect_code 1 "$rc" "a pane outside the worktree should refuse"
   assert_contains "$out" "not its recorded worktree" "the refusal should name the wrong location"
@@ -1338,6 +1456,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
+test_explicit_same_route_requires_a_receipt_before_control_effects
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness

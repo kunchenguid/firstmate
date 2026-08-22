@@ -276,10 +276,10 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
-Every fresh crewmate or scout spawn also requires its own valid task-scoped `ROUTING_DECISION` receipt, whether this optional file is present or absent.
+Every fresh crewmate or scout spawn and every relaunch given `--harness`, `--model`, or `--effort` requires its own valid task-scoped `ROUTING_DECISION` receipt, whether this optional file is present or absent.
 When canonical `config/crew-dispatch.json` exists, `fm-spawn.sh` additionally refuses crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the harness requirement with a shared `--harness`, while each task keeps its own receipt so one decision cannot be reused for another id.
-Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
+Fresh secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics.
 `AGENTS.md` section 4 owns the always-loaded dispatch intake boundary, and `quota-array-dispatch` owns the completion-aware profile-array selection procedure.
 
@@ -322,12 +322,13 @@ The exact validation and atomic persistence mechanics live in `bin/fm-routing-de
 The receipt does not replace the natural-language profile match or the agent-owned capability and quota judgment.
 It makes that judgment inspectable and binds the concrete result to exact brief and intent bytes, canonical configuration state, identity, candidate set, emitted command axes, and freshness facts before a worktree lease, worker endpoint, metadata publication, pane input, or model execution.
 
-Receipt enforcement is an unconditional source-code invariant for every fresh crewmate and scout spawn.
+Receipt enforcement is an unconditional source-code invariant for every fresh crewmate and scout spawn and every relaunch given `--harness`, `--model`, or `--effort`.
 It is not enabled by `config/crew-dispatch.json`, an environment variable, or a movable feature flag.
 The authoritative configuration input is always `<FM_HOME>/config/crew-dispatch.json`, independently of `FM_CONFIG_OVERRIDE`.
 The receipt explicitly attests whether that canonical file is present or absent, so relocating configuration or removing a file changes the attested input and never removes the requirement.
-Secondmate launches retain their separate provisioning, registry, host, and harness contract and do not consume this receipt.
-When a relaunch keeps the exact recorded harness, model, and effort tuple, its republished task metadata preserves an existing regular-file `routing_decision` pointer.
+Fresh secondmate launches retain their separate provisioning, registry, host, and harness contract and do not consume this receipt.
+A flag-free same-route relaunch also stays exempt and preserves an existing regular-file `routing_decision` pointer in its republished task metadata.
+Supplying any routing-axis flag is a fresh routing decision even when the supplied value equals the recorded value.
 
 Each covered task directory supplies `data/<task-id>/routing-intent.json` and `data/<task-id>/routing-decision.pending.json`.
 A multi-candidate route also supplies the exact one-intake `quota-axi --json` object as `data/<task-id>/quota-snapshot.json`.

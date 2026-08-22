@@ -9,6 +9,7 @@ set -u
 
 REAL_JQ=$(command -v jq)
 REAL_PERL=$(command -v perl)
+SPAWN="$ROOT/bin/fm-spawn.sh"
 POST_BINDING_RECEIPT_FILTER=
 POST_SNAPSHOT_SOURCE_FILTER=
 POST_SNAPSHOT_CONFIG_FILTER=
@@ -112,6 +113,170 @@ negative_count=0
 counterexample_count=0
 PREEXISTING_FINAL=0
 RUN_CWD=
+RELAUNCH_COUNTEREXAMPLE_ROOT="$TMP_ROOT/relaunch-counterexample-root"
+RELAUNCH_PROJECT=
+RELAUNCH_WT=
+RELAUNCH_PANE_LOG=
+RELAUNCH_ENDPOINT_LOG=
+RELAUNCH_LEASE_LOG=
+
+prepare_relaunch_counterexample_root() {
+  mkdir -p "$RELAUNCH_COUNTEREXAMPLE_ROOT"
+  cp -R "$ROOT/bin" "$RELAUNCH_COUNTEREXAMPLE_ROOT/bin"
+  cat >> "$RELAUNCH_COUNTEREXAMPLE_ROOT/bin/fm-routing-decision-lib.sh" <<'SH'
+
+# Deliberately neuter the relaunch receipt-requirement owner while retaining a
+# valid launch input so each negative assertion proves that this guard fires.
+fm_routing_decision_required() {
+  FM_ROUTING_BRIEF_FINAL="$DATA/$ID/brief.md"
+  FM_ROUTING_BRIEF_HASH=$(fm_routing_sha256_file "$FM_ROUTING_BRIEF_FINAL") || return 1
+  fm_operational_verified_file_input \
+    launch-brief "$FM_ROUTING_BRIEF_HASH" "$FM_ROUTING_BRIEF_FINAL" FM_ROUTING_LAUNCH_INPUT \
+    || return 1
+  return 1
+}
+SH
+}
+
+write_relaunch_tmux_stub() {
+  cat > "$RAW_HARNESS_BIN/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    payload=${1:-}
+    if [ "$literal" -eq 1 ]; then
+      printf '%s\n' "$payload" >> "$FM_RELAUNCH_TEST_PANE_LOG"
+      case "$payload" in
+        *claude*) printf 'claude' > "$FM_RELAUNCH_TEST_COMMAND" ;;
+      esac
+    fi
+    exit 0
+    ;;
+  display-message)
+    for arg in "$@"; do
+      case "$arg" in
+        *pane_current_command*) cat "$FM_RELAUNCH_TEST_COMMAND"; printf '\n'; exit 0 ;;
+        *pane_current_path*) printf '%s\n' "$FM_RELAUNCH_TEST_WT"; exit 0 ;;
+        *cursor_y*) printf '1\n'; exit 0 ;;
+      esac
+    done
+    printf 'fakepane\n'
+    exit 0
+    ;;
+  list-windows) printf 'fm-t1\n'; exit 0 ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  new-session|new-window|split-window)
+    printf '%s\n' "$*" >> "$FM_RELAUNCH_TEST_ENDPOINT_LOG"
+    exit 0
+    ;;
+  has-session) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$RAW_HARNESS_BIN/tmux"
+  cat > "$RAW_HARNESS_BIN/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_RELAUNCH_TEST_LEASE_LOG"
+exit 1
+SH
+  chmod +x "$RAW_HARNESS_BIN/treehouse"
+}
+
+setup_relaunch_task() {
+  RELAUNCH_PROJECT="$LAB/relaunch-project"
+  RELAUNCH_WT="$LAB/relaunch-worktree"
+  RELAUNCH_PANE_LOG="$LAB/relaunch-pane.log"
+  RELAUNCH_ENDPOINT_LOG="$LAB/relaunch-endpoint.log"
+  RELAUNCH_LEASE_LOG="$LAB/relaunch-lease.log"
+  fm_git_worktree "$RELAUNCH_PROJECT" "$RELAUNCH_WT" task-t1
+  : > "$RELAUNCH_PANE_LOG"
+  : > "$RELAUNCH_ENDPOINT_LOG"
+  : > "$RELAUNCH_LEASE_LOG"
+  printf 'zsh' > "$LAB/relaunch-command"
+  printf '{}\n' > "$TASK_DIR/prior-routing-decision.json"
+  {
+    echo 'window=fmses:fm-t1'
+    echo 'endpoint_task_id=t1'
+    echo "worktree=$RELAUNCH_WT"
+    echo "project=$RELAUNCH_PROJECT"
+    echo 'harness=codex'
+    echo 'kind=ship'
+    echo 'mode=no-mistakes'
+    echo 'yolo=off'
+    echo 'tasktmp=/tmp/fm-t1'
+    echo 'model=default'
+    echo 'effort=default'
+    echo "routing_decision=$TASK_DIR/prior-routing-decision.json"
+  } > "$HOME_DIR/state/t1.meta"
+  cp "$HOME_DIR/state/t1.meta" "$LAB/relaunch-meta.before"
+}
+
+run_relaunch_spawn() { # <spawn-path>
+  local spawn=$1 harness_arg=$RUN_HARNESS
+  [ "$RUN_RAW" -eq 0 ] || harness_arg=$RUN_LAUNCH
+  env PATH="$RAW_HARNESS_BIN:$PATH" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_SPAWN_NO_GUARD=1 \
+    FM_RELAUNCH_TEST_WT="$RELAUNCH_WT" \
+    FM_RELAUNCH_TEST_PANE_LOG="$RELAUNCH_PANE_LOG" \
+    FM_RELAUNCH_TEST_ENDPOINT_LOG="$RELAUNCH_ENDPOINT_LOG" \
+    FM_RELAUNCH_TEST_LEASE_LOG="$RELAUNCH_LEASE_LOG" \
+    FM_RELAUNCH_TEST_COMMAND="$LAB/relaunch-command" \
+    "$spawn" t1 --relaunch --harness "$harness_arg" \
+      --model "$RUN_MODEL" --effort "$RUN_EFFORT" 2>&1
+}
+
+assert_relaunch_refused_before_effects() {
+  cmp -s "$LAB/relaunch-meta.before" "$HOME_DIR/state/t1.meta" \
+    || fail "route-changing relaunch refusal changed task metadata"
+  [ "$(cat "$LAB/relaunch-command")" = zsh ] \
+    || fail "route-changing relaunch refusal started an agent in the endpoint"
+  [ ! -s "$RELAUNCH_PANE_LOG" ] || fail "route-changing relaunch refusal sent pane input"
+  [ ! -s "$RELAUNCH_ENDPOINT_LOG" ] || fail "route-changing relaunch refusal created an endpoint"
+  [ ! -s "$RELAUNCH_LEASE_LOG" ] || fail "route-changing relaunch refusal leased a worktree"
+}
+
+exercise_relaunch_negative() { # <name> <predicate> <setup-function> [detail]
+  local name=$1 predicate=$2 setup=$3 detail=${4:-} out status
+  write_fixture
+  "$setup"
+  setup_relaunch_task
+  out=$(run_relaunch_spawn "$SPAWN")
+  status=$?
+  expect_code 1 "$status" "$name should refuse"
+  assert_contains "$out" "ROUTING_DECISION $predicate" "$name named the wrong predicate"
+  [ -z "$detail" ] || assert_contains "$out" "$detail" "$name named the wrong refusal detail"
+  assert_relaunch_refused_before_effects
+  negative_count=$((negative_count + 1))
+  pass "$name refuses before relaunch effects"
+
+  write_fixture
+  "$setup"
+  setup_relaunch_task
+  run_relaunch_spawn "$RELAUNCH_COUNTEREXAMPLE_ROOT/bin/fm-spawn.sh" >/dev/null 2>&1 || true
+  [ -s "$RELAUNCH_PANE_LOG" ] \
+    || fail "$name counterexample did not reach pane input after the relaunch guard was neutered"
+  [ "$(cat "$LAB/relaunch-command")" = claude ] \
+    || fail "$name counterexample did not start the replacement agent"
+  cmp -s "$LAB/relaunch-meta.before" "$HOME_DIR/state/t1.meta" \
+    && fail "$name counterexample did not reach metadata publication"
+  [ ! -s "$RELAUNCH_ENDPOINT_LOG" ] \
+    || fail "$name counterexample created a second endpoint instead of reusing the recorded one"
+  [ ! -s "$RELAUNCH_LEASE_LOG" ] \
+    || fail "$name counterexample leased a second worktree instead of reusing the recorded one"
+  counterexample_count=$((counterexample_count + 1))
+  pass "$name firing counterexample"
+}
 
 sha_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -684,6 +849,13 @@ assert_raw_effort_binding pi-signed 'pi-signed --model opus --thinking xhigh' xh
 assert_raw_effort_binding muse 'muse --model opus --reasoning-effort ultra' ultra
 pass "supported raw effort syntax remains adapter-specific and observable"
 
+prepare_relaunch_counterexample_root
+write_relaunch_tmux_stub
+exercise_relaunch_negative "route-changing relaunch missing receipt" missing setup_missing_receipt
+exercise_relaunch_negative "route-changing relaunch mismatched receipt" LAUNCH_BINDING_MISMATCH setup_model_binding_mismatch
+exercise_relaunch_negative "route-changing relaunch stale receipt" STALE setup_stale
+exercise_relaunch_negative "route-changing relaunch unobserved receipt" RAW_LAUNCH_NOT_VERIFIABLE setup_dynamic_raw
+
 exercise_negative "01 missing receipt" missing setup_missing_receipt
 exercise_negative "02 missing intent" missing setup_missing_intent
 exercise_negative "03 empty receipt" MALFORMED_SCHEMA setup_empty_receipt
@@ -857,7 +1029,7 @@ run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement
   || fail "canonical config replacement counterexample did not fire"
 pass "canonical config replacement cannot change snapshotted candidate resolution"
 
-expected_count=$((116 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((120 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

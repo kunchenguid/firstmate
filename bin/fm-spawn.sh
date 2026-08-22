@@ -98,12 +98,14 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
-#   Every fresh crewmate or scout invocation requires a
-#   task-scoped ROUTING_INTENT and pending ROUTING_DECISION under data/<id>/.
+#   Every fresh crewmate or scout invocation and every relaunch given
+#   --harness, --model, or --effort requires a task-scoped ROUTING_INTENT and
+#   pending ROUTING_DECISION under data/<id>/.
 #   The gate is unconditional; canonical config presence or absence is attested,
 #   and FM_CONFIG_OVERRIDE cannot relocate the requirement. The pending receipt
 #   is consumed before hook installation, worktree lease, endpoint creation,
-#   metadata publication, pane input, or model execution. Secondmates are exempt.
+#   metadata publication, pane input, or model execution. Fresh secondmate
+#   spawns are exempt.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -297,6 +299,7 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+ROUTING_PREFLIGHT_ONLY=${FM_CONTROL_ROUTING_PREFLIGHT:-0}
 POS=()
 want_value=
 for a in "$@"; do
@@ -346,6 +349,10 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+case "$ROUTING_PREFLIGHT_ONLY" in
+  0|1) ;;
+  *) echo "error: FM_CONTROL_ROUTING_PREFLIGHT must be 0 or 1" >&2; exit 1 ;;
+esac
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -936,6 +943,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
 fi
+if [ "$ROUTING_PREFLIGHT_ONLY" -eq 1 ]; then
+  [ "$RELAUNCH" -eq 1 ] || {
+    echo "error: the control-plane routing preflight applies only to --relaunch" >&2
+    exit 1
+  }
+  [ "$SPAWN_CONTROL_PARENT" -eq 1 ] || {
+    echo "error: the control-plane routing preflight requires the owning fm-control transaction" >&2
+    exit 1
+  }
+  [ "$HARNESS_SET" -eq 1 ] || [ "$MODEL_SET" -eq 1 ] || [ "$EFFORT_SET" -eq 1 ] || {
+    echo "error: the control-plane routing preflight requires a routing-axis override" >&2
+    exit 1
+  }
+fi
 if [ "$RELAUNCH" -eq 0 ]; then
   mkdir -p "$STATE" || {
     echo "error: could not create parent state directory" >&2
@@ -1047,11 +1068,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
+  if [ "$ROUTING_PREFLIGHT_ONLY" -eq 0 ]; then
+    RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+    [ "$RELAUNCH_STATE" = dead ] || {
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 1
+    }
+  fi
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   RELAUNCH_PRIOR_MODEL=$(fm_meta_get "$RELAUNCH_META" model)
   [ -n "$RELAUNCH_PRIOR_MODEL" ] || RELAUNCH_PRIOR_MODEL=default
@@ -1094,6 +1117,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
+  if [ "$HARNESS_SET" -eq 0 ]; then
+    [ "$MODEL_SET" -eq 1 ] || MODEL=$RELAUNCH_PRIOR_MODEL
+    [ "$EFFORT_SET" -eq 1 ] || EFFORT=$RELAUNCH_PRIOR_EFFORT
+  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
@@ -1485,9 +1512,16 @@ effort_flag_for_harness() {
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "${MODEL:-default}")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "${EFFORT:-default}")
 
-# A relaunch that keeps the exact recorded route republishes the existing
-# inspectable receipt pointer alongside that unchanged tuple.
-if [ "$RELAUNCH" -eq 1 ] \
+# A same-route relaunch republishes the existing inspectable receipt pointer.
+# Supplying any routing-axis flag is a fresh decision even when its value equals
+# the recorded value, so only a flag-free relaunch reaches this exemption.
+ROUTING_DECISION_REQUIRED=0
+if fm_routing_decision_required \
+  "$KIND" "$RELAUNCH" "$HARNESS_SET" "$MODEL_SET" "$EFFORT_SET"; then
+  ROUTING_DECISION_REQUIRED=1
+fi
+if [ "$ROUTING_DECISION_REQUIRED" -eq 0 ] \
+  && [ "$RELAUNCH" -eq 1 ] \
   && [ "$HARNESS" = "$RELAUNCH_PRIOR_HARNESS" ] \
   && [ "${MODEL:-default}" = "$RELAUNCH_PRIOR_MODEL" ] \
   && [ "${EFFORT:-default}" = "$RELAUNCH_PRIOR_EFFORT" ] \
@@ -1495,14 +1529,16 @@ if [ "$RELAUNCH" -eq 1 ] \
   FM_ROUTING_DECISION_FINAL=$RELAUNCH_PRIOR_ROUTING_DECISION
 fi
 
-# Routing-receipt enforcement is a source-code invariant for every crewmate and
-# scout route, not a feature enabled by a configuration file.
+# Routing-receipt enforcement is a source-code invariant for every fresh
+# crewmate or scout route and every relaunch with a routing-axis override.
 # Canonical config presence or absence is attested inside the receipt, while an
 # override directory is deliberately irrelevant to the decision authority.
 # Validate and snapshot before fallible spawn preflight, then consume only after
 # that preflight succeeds and immediately before the first spawn side effect.
-# Secondmate routing retains its separate provisioning and registry contract.
-if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
+# Fresh secondmate routing retains its separate provisioning and registry
+# contract, while a secondmate relaunch with an explicit routing override is a
+# fresh decision under the same receipt gate as every other relaunch.
+if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
   fm_routing_decision_validate_and_prepare \
     "$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
     "$RAW_LAUNCH" "$LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
@@ -1512,6 +1548,13 @@ if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
     echo "error: validated routing brief changed before launch input construction" >&2
     exit 1
   }
+fi
+if [ "$ROUTING_PREFLIGHT_ONLY" -eq 1 ]; then
+  fm_routing_decision_discard_prepared || {
+    echo "error: validated relaunch routing preflight could not be discarded safely" >&2
+    exit 1
+  }
+  exit 0
 fi
 
 case "$LAUNCH" in
@@ -1721,7 +1764,9 @@ if [ "$KIND" = secondmate ]; then
       propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
       || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
   fi
-  if [ -f "$PROJ_ABS/data/charter.md" ]; then
+  if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+    BRIEF=$FM_ROUTING_BRIEF_FINAL
+  elif [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
     BRIEF="$DATA/$ID/brief.md"
@@ -1935,7 +1980,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
-if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
+if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
   fm_routing_decision_persist_prepared || exit 1
   if [ -n "${KIMI_BIN:-}" ]; then
     "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
@@ -2818,7 +2863,7 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
-if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
+if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
   sq_launch_input=$(shell_quote "$FM_ROUTING_LAUNCH_INPUT")
 else
   launch_prelude="FM_LAUNCH_INPUT=\$($sq_opinput encode launch-brief < $sq_brief) || exit; "
@@ -2836,7 +2881,7 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
-if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
+if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
   LAUNCH=${LAUNCH//__LAUNCHINPUT__/$sq_launch_input}
   if [ "$RAW_LAUNCH" -eq 1 ]; then
     LAUNCH="$LAUNCH $sq_launch_input"
@@ -2904,7 +2949,9 @@ spawn_record_traceparent() {
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-if { [ "$KIND" = secondmate ] || [ "$RELAUNCH" -eq 1 ]; } && [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" != kimi ]; then
+if [ "$ROUTING_DECISION_REQUIRED" -eq 0 ] \
+  && { [ "$KIND" = secondmate ] || [ "$RELAUNCH" -eq 1 ]; } \
+  && [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" != kimi ]; then
   LAUNCH="$launch_prelude$LAUNCH"
 fi
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
@@ -2938,7 +2985,7 @@ if [ "$HARNESS" = kimi ]; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
-  if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
+  if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
     KIMI_INPUT=$FM_ROUTING_LAUNCH_INPUT
   else
     KIMI_INPUT="Read the brief at $BRIEF_REAL and follow it exactly."

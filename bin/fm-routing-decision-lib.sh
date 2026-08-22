@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Validate and persist the task-scoped ROUTING_DECISION consumed by fm-spawn.
 #
-# Every fresh crewmate or scout dispatch requires these private inputs under
-# data/<task-id>/:
+# Every fresh crewmate or scout dispatch and every relaunch carrying a routing
+# override requires these private inputs under data/<task-id>/:
 #   routing-intent.json             exact ROUTING_INTENT authority object
 #   routing-decision.pending.json   proposed ROUTING_DECISION schema v1 receipt
 #   quota-snapshot.json             required only for a multi-candidate profile
@@ -31,6 +31,15 @@ FM_ROUTING_PREPARED_SOURCE_PENDING=
 FM_ROUTING_PREPARED_COMMITTED=0
 FM_ROUTING_DECISION_MAX_AGE_SECONDS=300
 FM_ROUTING_DECISION_MAX_FUTURE_SECONDS=30
+
+fm_routing_decision_required() { # <kind> <relaunch:0|1> <harness-set:0|1> <model-set:0|1> <effort-set:0|1>
+  local kind=$1 relaunch=$2 harness_set=$3 model_set=$4 effort_set=$5
+  if [ "$relaunch" -eq 1 ]; then
+    [ "$harness_set" -eq 1 ] || [ "$model_set" -eq 1 ] || [ "$effort_set" -eq 1 ]
+    return
+  fi
+  [ "$kind" != secondmate ]
+}
 
 fm_routing_sha256_file() {
   local file=$1 output
