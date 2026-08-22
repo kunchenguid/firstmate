@@ -331,6 +331,44 @@ test_spawn_refuses_ambiguous_worktree_metadata() {
   pass "spawn fails closed on ambiguous worktree metadata without touching the copy"
 }
 
+test_fresh_spawn_refuses_an_existing_task_record_before_side_effects() {
+  local case_dir id out status before after
+  id='custody-existing-id-r1'
+  case_dir=$(make_spawn_case spawn-existing-id "$id")
+  fm_write_meta "$case_dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$case_dir/pool" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  before=$(cksum < "$case_dir/home/state/$id.meta")
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  new-window) touch "$case_dir/endpoint-created" ;;
+  display-message) printf 'firstmate\n' ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" != get ] || touch "$case_dir/lease-requested"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+
+  out=$(run_spawn_case "$case_dir" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  after=$(cksum < "$case_dir/home/state/$id.meta")
+  expect_code 1 "$status" "a fresh spawn must refuse an existing task record"
+  assert_contains "$out" "Use --relaunch" "the refusal did not name the supported reuse path"
+  assert_absent "$case_dir/endpoint-created" "the refused fresh spawn created an endpoint"
+  assert_absent "$case_dir/lease-requested" "the refused fresh spawn requested a worktree lease"
+  [ "$before" = "$after" ] || fail "the refused fresh spawn overwrote existing task metadata"
+  pass "a fresh spawn cannot replace an existing task record, endpoint, or lease"
+}
+
 test_spawn_claims_this_homes_pool_root_before_leasing() {
   local case_dir id out status base_real
   id='custody-own-pool-r1'
@@ -354,6 +392,7 @@ add_release_step() {  # <case-dir> <exit>
   local case_dir=$1 exit_code=$2
   printf '{\n  "name": "fixture",\n  "scripts": {\n    "pool:release-delivered": "node release.js"\n  }\n}\n' \
     > "$case_dir/project/package.json"
+  git -C "$case_dir/project" add package.json
   cat > "$case_dir/fakebin/npm" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = run ] && [ "\${2:-}" = pool:release-delivered ]; then
@@ -370,6 +409,7 @@ add_hanging_release_step() {  # <case-dir>
   local case_dir=$1
   printf '{\n  "name": "fixture",\n  "scripts": {\n    "pool:release-delivered": "node release.js"\n  }\n}\n' \
     > "$case_dir/project/package.json"
+  git -C "$case_dir/project" add package.json
   cat > "$case_dir/fakebin/npm" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = run ] && [ "\${2:-}" = pool:release-delivered ]; then
@@ -412,6 +452,27 @@ SH
   expect_code 0 "$status" "a project without the release step should spawn unchanged: $out"
   assert_not_contains "$out" "must not be invoked" "spawn ran a release step the project never published"
   pass "a project that publishes no release step spawns exactly as before"
+}
+
+test_spawn_ignores_an_untracked_release_manifest() {
+  local case_dir id out status
+  id='custody-untracked-release-r1'
+  case_dir=$(make_spawn_case spawn-untracked-release "$id")
+  printf '{\n  "name": "fixture",\n  "scripts": {\n    "pool:release-delivered": "node release.js"\n  }\n}\n' \
+    > "$case_dir/project/package.json"
+  cat > "$case_dir/fakebin/npm" <<SH
+#!/usr/bin/env bash
+touch "$case_dir/release-ran"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/npm"
+
+  out=$(run_spawn_case "$case_dir" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "an untracked release manifest should not block spawn: $out"
+  assert_absent "$case_dir/release-ran" "an untracked manifest activated housekeeping"
+  assert_contains "$out" "spawned $id" "spawn did not continue after ignoring untracked housekeeping"
+  pass "an untracked manifest cannot activate pool housekeeping"
 }
 
 test_spawn_continues_when_the_release_step_fails() {
@@ -721,6 +782,9 @@ test_teardown_uses_the_canonical_projects_custody_opt_in() {
   case_dir=$(make_teardown_case teardown-custody-canonical)
   printf '{\n  "name": "fixture",\n  "scripts": {\n    "check:worktree-custody": "node custody.js"\n  }\n}\n' \
     > "$case_dir/project/package.json"
+  git -C "$case_dir/project" add package.json
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -qm "publish the custody check"
   cat > "$case_dir/fakebin/npm" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = run ] && [ "\${2:-}" = check:worktree-custody ]; then
@@ -744,6 +808,7 @@ test_teardown_refuses_an_unparseable_canonical_manifest() {
   local case_dir out status
   case_dir=$(make_teardown_case teardown-custody-invalid-manifest)
   printf '{"scripts":{"check:worktree-custody":' > "$case_dir/project/package.json"
+  git -C "$case_dir/project" add package.json
 
   out=$(run_teardown_case "$case_dir")
   status=$?
@@ -752,6 +817,37 @@ test_teardown_refuses_an_unparseable_canonical_manifest() {
   assert_present "$case_dir/state/task-c1.meta" "a refused cleanup removed the task record"
   [ -d "$case_dir/wt" ] || fail "a refused cleanup removed the working copy"
   pass "an unparseable canonical manifest refuses cleanup instead of disabling custody"
+}
+
+test_teardown_detects_custody_hidden_by_a_working_edit() {
+  local case_dir out status
+  case_dir=$(make_teardown_case teardown-custody-working-edit)
+  printf '{\n  "name": "fixture",\n  "scripts": {\n    "check:worktree-custody": "node custody.js"\n  }\n}\n' \
+    > "$case_dir/project/package.json"
+  git -C "$case_dir/project" add package.json
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -qm "publish the custody check"
+  printf '{\n  "name": "fixture",\n  "scripts": {}\n}\n' > "$case_dir/project/package.json"
+  cat > "$case_dir/fakebin/npm" <<SH
+#!/usr/bin/env bash
+printf 'published custody survives working manifest edit\n'
+exit 4
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/npm" "$case_dir/fakebin/treehouse"
+
+  out=$(run_teardown_case "$case_dir")
+  status=$?
+  expect_code 1 "$status" "a working manifest edit must not hide published custody"
+  assert_contains "$out" "published custody survives" "the published check was hidden by the working manifest"
+  assert_present "$case_dir/state/task-c1.meta" "a refused cleanup removed the task record"
+  assert_absent "$case_dir/treehouse.log" "a working manifest edit allowed the copy to be returned"
+  [ -d "$case_dir/wt" ] || fail "a refused cleanup removed the working copy"
+  pass "a working manifest edit cannot hide custody published in Git"
 }
 
 test_teardown_refuses_a_missing_tracked_canonical_manifest() {
@@ -855,9 +951,11 @@ test_pool_root_refuses_when_git_exclude_cannot_be_written
 test_real_treehouse_stops_sharing_a_pool_between_homes
 test_spawn_refuses_a_copy_another_task_claims
 test_spawn_refuses_ambiguous_worktree_metadata
+test_fresh_spawn_refuses_an_existing_task_record_before_side_effects
 test_spawn_claims_this_homes_pool_root_before_leasing
 test_spawn_releases_delivered_copies_before_leasing
 test_spawn_skips_projects_that_publish_no_release_step
+test_spawn_ignores_an_untracked_release_manifest
 test_spawn_continues_when_the_release_step_fails
 test_spawn_bounds_a_hanging_release_step_without_external_timeout
 test_spawn_rejects_a_nonpositive_release_timeout
@@ -870,6 +968,7 @@ test_teardown_skips_projects_that_publish_no_check
 test_teardown_refuses_when_a_published_check_cannot_be_run
 test_teardown_uses_the_canonical_projects_custody_opt_in
 test_teardown_refuses_an_unparseable_canonical_manifest
+test_teardown_detects_custody_hidden_by_a_working_edit
 test_teardown_refuses_a_missing_tracked_canonical_manifest
 test_teardown_detects_a_staged_deleted_canonical_manifest
 test_teardown_refuses_an_unavailable_canonical_project

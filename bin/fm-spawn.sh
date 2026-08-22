@@ -937,6 +937,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
+  if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+    echo "error: task $ID already has a durable record at $STATE/$ID.meta; refusing a fresh spawn that could replace its endpoint or worktree. Use --relaunch to reuse an existing task." >&2
+    exit 1
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
@@ -1786,7 +1790,11 @@ assert_worktree_unclaimed() {  # <worktree>
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || [ -L "$meta" ] || continue
     other_id=$(basename "$meta" .meta)
-    [ "$other_id" != "$ID" ] || continue
+    if [ "$other_id" = "$ID" ]; then
+      echo "error: task $ID acquired a durable record while its fresh spawn was leasing '$worktree'; refusing to replace that task's ownership. Nothing was returned or reset. Endpoint $T is parked in that copy." >&2
+      HERDR_PROJECTION_ABORT_CLEANUP=0
+      exit 1
+    fi
     if [ ! -f "$meta" ] || [ -L "$meta" ] || [ ! -r "$meta" ]; then
       echo "error: cannot confirm worktree ownership because task metadata '$meta' is not a readable regular file; refusing to use '$worktree'. Nothing was returned or reset. Endpoint $T is parked in that copy." >&2
       HERDR_PROJECTION_ABORT_CLEANUP=0
