@@ -30,6 +30,7 @@ SH
   cat > "$bin/fm-backend.sh" <<'SH'
 fm_backend_is_known() { return 0; }
 fm_backend_agent_state() { printf 'alive\n'; }
+fm_run_timed() { shift; "$@"; }
 SH
 cat > "$bin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
@@ -38,10 +39,15 @@ printf '%s\n' "$1" >> "$FM_HOME/crew-state.calls"
 if [ -n "${FM_CREW_STATE_LARGE:-}" ]; then head -c 70000 /dev/zero | tr '\0' x; exit 0; fi
 printf 'state: working · source: pane · implementing\n'
 SH
-  cat > "$bin/fm-wake-drain.sh" <<'SH'
+cat > "$bin/fm-wake-drain.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'drained\n' >> "$FM_HOME/drain.calls"
-printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation fixture-1\n' >&2
+if [ "${FM_DRAIN_MANY_STATUS:-0}" = 1 ]; then
+  printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n'
+  for n in $(seq 1 10); do printf 'alpha note: status-%s\n' "$n"; done
+fi
+[ "${FM_DRAIN_APPEND_WAKE:-0}" != 1 ] || printf '1\t17\tsignal\talpha.status\tlate wake\n' >> "$FM_STATE_OVERRIDE/.wake-queue"
+printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation fixture-1\n' "${FM_DRAIN_ACK_THROUGH:-1}" >&2
 SH
   chmod +x "$bin"/*.sh
 }
@@ -219,6 +225,73 @@ test_stale_window_maps_to_affected_task() {
   pass "stale endpoint wake includes the affected task"
 }
 
+test_packet_projects_unread_status_tail() {
+  local home="$TMP_ROOT/status-tail" packet
+  install_fixture "$home"; append_wake "$home" 1
+  FM_DRAIN_MANY_STATUS=1 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || fail "status projection failed"
+  packet=$(packet_json "$home/out")
+  printf '%s' "$packet" | jq -er '.presentation.stdout' | grep -F 'UNREAD STATUS: 2 older line(s) omitted' >/dev/null \
+    || fail "packet did not report omitted unread status lines"
+  printf '%s' "$packet" | jq -er '.presentation.stdout' | grep -Fx 'alpha note: status-1' >/dev/null && fail "packet retained old unread status lines"
+  printf '%s' "$packet" | jq -er '.presentation.stdout' | grep -F 'status-10' >/dev/null || fail "packet lost recent unread status"
+  pass "wake packet bounds unread-status projection with an omission count"
+}
+
+test_absolute_check_key_maps_to_task() {
+  local home="$TMP_ROOT/absolute-check" packet
+  install_fixture "$home"
+  printf '1\t1\tcheck\t%s/alpha.check.sh\tcheck: alpha\n' "$home/state" > "$home/state/.wake-queue"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || fail "absolute check packet failed"
+  packet=$(packet_json "$home/out")
+  printf '%s' "$packet" | jq -e '.tasks[0].id == "alpha"' >/dev/null || fail "absolute check key did not map to alpha"
+  pass "absolute check keys include their task context"
+}
+
+test_status_only_recovery_uses_zero_ack() {
+  local home="$TMP_ROOT/status-only" packet
+  install_fixture "$home"
+  FM_DRAIN_ACK_THROUGH=0 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || fail "status-only recovery packet failed"
+  packet=$(packet_json "$home/out")
+  printf '%s' "$packet" | jq -e '.replay.ack_through == 0' >/dev/null || fail "status-only recovery serialized a null ACK"
+  FM_DRAIN_ACK_THROUGH=0 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present > "$home/replay" 2> "$home/replay.err" || fail "status-only recovery did not replay"
+  cmp -s "$home/out" "$home/replay" || fail "status-only recovery replay changed before ACK"
+  pass "status-only recovery preserves its zero acknowledgement"
+}
+
+test_post_drain_overflow_falls_back() {
+  local home="$TMP_ROOT/post-drain-overflow" i=1
+  install_fixture "$home"
+  while [ "$i" -le 16 ]; do append_wake "$home" "$i"; i=$((i + 1)); done
+  if FM_DRAIN_APPEND_WAKE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err"; then
+    fail "post-drain overflow produced a packet"
+  fi
+  grep -F 'more than 16 queued notifications' "$home/out" >/dev/null || fail "post-drain overflow did not fail closed"
+  pass "post-drain queue snapshot still enforces wake cardinality"
+}
+
+test_cursor_merge_follows_live_rotation_without_regression() {
+  local home="$TMP_ROOT/cursor-rotation" ident
+  mkdir -p "$home/state"; printf 'note: rotated\n' > "$home/state/alpha.status"
+  ident=$(bash -c '. "$1"; _fm_open_decisions_file_ident "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$home/state/alpha.status")
+  printf 'alpha\told-ident\t100\n' > "$home/state/.status-presentation-cursor"
+  printf 'alpha\t%s\t20\n' "$ident" > "$home/state/.wake-context-cache.status-cursor"
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; . "$2"; status_merge_presentation_cursor "$3" "$4"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-classify-lib.sh" "$home/state" "$home/state/.wake-context-cache.status-cursor" \
+    || fail "cursor merge failed"
+  grep -Fx "alpha	$ident	20" "$home/state/.status-presentation-cursor" >/dev/null || fail "live rotation kept the obsolete cursor identity"
+  printf 'alpha\told-ident\t999\n' > "$home/state/.wake-context-cache.status-cursor"
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; . "$2"; status_merge_presentation_cursor "$3" "$4"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-classify-lib.sh" "$home/state" "$home/state/.wake-context-cache.status-cursor" \
+    || fail "stale cursor merge failed"
+  grep -Fx "alpha	$ident	20" "$home/state/.status-presentation-cursor" >/dev/null || fail "stale cursor regressed the live identity"
+  pass "cursor merge follows a live rotation without replaying stale state"
+}
+
 test_post_presentation_failure_preserves_human_ack() {
   local home="$TMP_ROOT/post-fallback"
   install_fixture "$home"
@@ -286,6 +359,11 @@ test_sigkill_before_cache_publish_keeps_unread_note
 test_mktemp_failure_emits_safe_fallback
 test_cardinality_overflow_falls_back_before_drain
 test_stale_window_maps_to_affected_task
+test_packet_projects_unread_status_tail
+test_absolute_check_key_maps_to_task
+test_status_only_recovery_uses_zero_ack
+test_post_drain_overflow_falls_back
+test_cursor_merge_follows_live_rotation_without_regression
 test_post_presentation_failure_preserves_human_ack
 test_utf8_fallback_ack_commits_unread_cursor
 test_manual_drain_supersedes_truncated_fallback_receipt

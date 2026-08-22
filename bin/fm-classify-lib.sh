@@ -890,6 +890,34 @@ EOF
   mv -f "$tmp" "$target" || { rm -f "$tmp"; return 1; }
 }
 
+status_merge_presentation_cursor() {  # <state> <staged-cursor>
+  local state=$1 staged=$2 cursor lock tmp idents f task ident
+  cursor="$state/.status-presentation-cursor"; lock="$state/.status-presentation-lock"
+  [ -f "$staged" ] && [ ! -L "$staged" ] || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  tmp="$cursor.tmp.$$"
+  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+    [ -f "$cursor" ] && [ ! -L "$cursor" ] || { fm_lock_release "$lock"; return 1; }
+  else
+    : > "$cursor" || { fm_lock_release "$lock"; return 1; }
+  fi
+  idents="$tmp.idents"; : > "$idents" || { fm_lock_release "$lock"; return 1; }
+  for f in "$state"/*.status; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    task=${f##*/}; task=${task%.status}; ident=$(_fm_open_decisions_file_ident "$f") || continue
+    printf '%s\t%s\n' "$task" "$ident" >> "$idents"
+  done
+  if ! awk -F '\t' 'FILENAME == ARGV[1] { live[$1] = $2; next }
+    FILENAME == ARGV[2] { staged[$1] = $0; next }
+    { split(staged[$1], fields, FS); if ($1 in staged && fields[2] == live[$1]) { if (fields[2] == $2 && fields[3] + 0 < $3 + 0) print; else print fields[1] FS fields[2] FS fields[3]; delete staged[$1] } else print }
+    END { for (task in staged) { split(staged[task], fields, FS); if (fields[2] == live[task]) print staged[task] } }' "$idents" "$staged" "$cursor" > "$tmp" \
+    || ! mv -f "$tmp" "$cursor"; then
+    rm -f "$tmp" "$idents"; fm_lock_release "$lock"; return 1
+  fi
+  rm -f "$idents"
+  fm_lock_release "$lock"
+}
+
 scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>
   local state=$1 snapshot=$2 task endpoint ident f open line
   while IFS=$(printf '\t') read -r task endpoint ident; do

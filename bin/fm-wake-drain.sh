@@ -187,7 +187,8 @@ commit_wake_context_cache() {
   wake_context_receipt_matches_ack "$receipt" || return 0
   if [ -e "$WAKE_CONTEXT_CURSOR" ] || [ -L "$WAKE_CONTEXT_CURSOR" ]; then
     [ -f "$WAKE_CONTEXT_CURSOR" ] && [ ! -L "$WAKE_CONTEXT_CURSOR" ] || return 1
-    mv -f "$WAKE_CONTEXT_CURSOR" "$STATE/.status-presentation-cursor" || return 1
+    status_merge_presentation_cursor "$STATE" "$WAKE_CONTEXT_CURSOR" || return 1
+    rm -f -- "$WAKE_CONTEXT_CURSOR" || return 1
   fi
   rm -f -- "$WAKE_CONTEXT_CACHE" "$WAKE_CONTEXT_FALLBACK_RECEIPT"
 }

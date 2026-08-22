@@ -14,6 +14,7 @@ MAX_STATUS_CHARS=240
 MAX_STATUS_FILES=64
 MAX_DECISIONS=24
 MAX_PACKET_BYTES=65536
+BACKEND_TIMEOUT=3
 CACHE="$STATE/.wake-context-cache"
 CACHE_CURSOR="$CACHE.status-cursor"
 FALLBACK_RECEIPT="$STATE/.wake-context-fallback-receipt"
@@ -24,6 +25,8 @@ FALLBACK_RECEIPT="$STATE/.wake-context-fallback-receipt"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 TMP_DIR=
 cleanup() { [ -z "$TMP_DIR" ] || rm -rf -- "$TMP_DIR"; }
@@ -40,7 +43,9 @@ fail_before_presentation() {
 }
 
 cache_matches_queue() { # <cache>
-  local epoch sequence
+  local epoch sequence count
+  count=$(jq -r '.reason_queue | length' "$1" 2>/dev/null) || return 1
+  [ "$count" = 0 ] && [ ! -s "$STATE/.wake-queue" ] && return 0
   epoch=$(jq -r '.reason_queue[0].epoch // empty' "$1" 2>/dev/null) || return 1
   sequence=$(jq -r '.reason_queue[0].sequence // empty' "$1" 2>/dev/null) || return 1
   [ -n "$epoch" ] && [ -n "$sequence" ] || return 1
@@ -130,14 +135,17 @@ all_task_ids() {
 }
 
 task_ids_from_queue() { # <queue> <out>
-  local _epoch _seq kind key _payload id
+  local _epoch _seq kind key _payload id check
   : > "$2.candidates"
   while IFS=$(printf '\t') read -r _epoch _seq kind key _payload; do
     case "$kind:$key" in
       signal:*.status|signal:*.turn-ended) id=${key%.status}; id=${id%.turn-ended}; printf '%s\n' "$id" ;;
       stale:*) task_for_window "$key" ;;
       heartbeat:*) all_task_ids ;;
-      check:*.check.sh) printf '%s\n' "${key%.check.sh}" ;;
+      check:*.check.sh)
+        check=${key#"$STATE"/}; check=${check%.check.sh}
+        printf '%s\n' "$check"
+        ;;
     esac
   done < "$1" > "$2.candidates"
   awk '!seen[$0]++ && /^[A-Za-z0-9._-]+$/' "$2.candidates" > "$2"
@@ -181,7 +189,7 @@ endpoint_json() { # <meta>
   [ -n "$target" ] || { printf 'null\n'; return; }
   live=unknown
   if [ -z "$remote" ] && fm_backend_is_known "$backend"; then
-    live=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf unknown)
+    live=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed "$BACKEND_TIMEOUT" fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf unknown)
   fi
   jq -cn --arg backend "$backend" --arg target "$target" --arg liveness "$live" \
     '{backend:$backend,target:$target,liveness:$liveness}'
@@ -261,13 +269,31 @@ emit_fallback() { # <stdout> <stderr>
   cat "$2" >&2
 }
 
+project_presentation() { # <input> <output>
+  awk -v keep="$MAX_STATUS_LINES" '
+    function flush(    first) {
+      if (!unread) return
+      first = count - keep + 1
+      if (first < 1) first = 1
+      if (count > keep) printf "UNREAD STATUS: %d older line(s) omitted from wake packet\n", count - keep
+      for (; first <= count; first++) print lines[first]
+      delete lines; count = 0; unread = 0
+    }
+    /^UNREAD STATUS \(/ { flush(); unread = 1; print; next }
+    unread && /^(OPEN DECISIONS|RECORD DIVERGENCE)/ { flush() }
+    unread { lines[++count] = $0; next }
+    { print }
+    END { flush() }
+  ' "$1" > "$2"
+}
+
 compose_packet() { # <ack> <generation> <additional> <drain-out> <drain-err>
   local monitoring bounds
   monitoring=$(monitoring_json); bounds=$(bounds_json)
   jq -cn --slurpfile raw "$TMP_DIR/raw.jsonl" --slurpfile tasks "$TMP_DIR/tasks.jsonl" \
     --slurpfile decisions "$TMP_DIR/decisions.jsonl" --argjson monitoring "$monitoring" --argjson bounds "$bounds" \
     --arg ack "$1" --arg generation "$2" --argjson additional "$3" --rawfile presentation_out "$4" --rawfile presentation_err "$5" \
-    '{schema:"fm-wake-context.v1",bounds:$bounds,reason_queue:$raw,presentation:{stdout:$presentation_out,stderr:$presentation_err},tasks:$tasks,open_decisions:$decisions,monitoring:$monitoring,ambiguity:{null_means_unknown:true,status_recent_is_bounded_tail:true},replay:{ack_through:($raw | map(.sequence) | max),recovery_generation:$generation,additional_pending:$additional},ack:{after_handling:$ack}}'
+    '{schema:"fm-wake-context.v1",bounds:$bounds,reason_queue:$raw,presentation:{stdout:$presentation_out,stderr:$presentation_err},tasks:$tasks,open_decisions:$decisions,monitoring:$monitoring,ambiguity:{null_means_unknown:true,status_recent_is_bounded_tail:true},replay:{ack_through:($ack | capture("--ack-through (?<value>[0-9]+)").value | tonumber),recovery_generation:$generation,additional_pending:$additional},ack:{after_handling:$ack}}'
 }
 
 build_packet() { # <queue> <tasks> <drain-out> <drain-err>
@@ -281,7 +307,8 @@ build_packet() { # <queue> <tasks> <drain-out> <drain-err>
   write_tasks "$2" "$TMP_DIR/tasks.jsonl" || return 1
   write_decisions "$TMP_DIR/decisions.jsonl" || return 1
   [ "$(awk -F '\t' -v ack="$ack_through" '$2 > ack { found=1 } END { print found+0 }' "$1")" -eq 0 ] || additional=true
-  packet=$(compose_packet "$ack_command" "$generation" "$additional" "$3" "$4") || return 1
+  project_presentation "$3" "$TMP_DIR/drain.projected" || return 1
+  packet=$(compose_packet "$ack_command" "$generation" "$additional" "$TMP_DIR/drain.projected" "$4") || return 1
   bytes=$(printf '%s' "$packet" | wc -c | tr -d ' '); [ "$bytes" -le "$MAX_PACKET_BYTES" ] || return 1
   publish_cache "$packet" || return 1
   printf 'Wake context packet (already presented; do not run the drain again):\n%s\n' "$packet"
@@ -290,6 +317,7 @@ build_packet() { # <queue> <tasks> <drain-out> <drain-err>
 finish_presentation() {
   copy_queue "$TMP_DIR/queue" || { emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"; return 1; }
   validate_queue "$TMP_DIR/queue" || { emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"; return 1; }
+  preflight "$TMP_DIR/queue" || { emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"; return 1; }
   task_ids_from_queue "$TMP_DIR/queue" "$TMP_DIR/task-ids"
   [ "$(wc -l < "$TMP_DIR/task-ids" | tr -d ' ')" -le "$MAX_TASKS" ] \
     || { emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"; return 1; }
