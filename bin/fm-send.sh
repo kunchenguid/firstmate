@@ -471,7 +471,7 @@ if [ -n "$RESOLVE_KEYS" ]; then
       continue
     fi
     RESOLVE_UNMATCHED_KEYS="${RESOLVE_UNMATCHED_KEYS}${RESOLVE_UNMATCHED_KEYS:+ }$k"
-    echo "warning: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed, mistyped, or transferred). The answer is still being delivered; nothing will be closed for that key." >&2
+    echo "warning: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed, mistyped, or transferred). This does not cancel the answer; nothing will be closed for that key, and the delivery outcome is reported when the send completes." >&2
   done
 fi
 

@@ -390,6 +390,36 @@ test_failed_send_does_not_close() {
   pass "fm-send --resolve-key: a failed send never closes the decision"
 }
 
+# The exit-status contract tells a caller to classify a nonzero by whether
+# stderr says the text was delivered and not to resend.
+# An unmatched key is announced BEFORE the send, so that pre-send line must not
+# assert delivery: a send that then fails would otherwise emit both a delivery
+# claim and "text not sent", and the caller would drop an answer that never
+# landed.
+test_failed_send_with_unmatched_key_never_claims_delivery() {
+  local dir fb log home err rc
+  dir="$TMP_ROOT/fail-unmatched"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home fail-unmatched)
+  fm_write_meta "$home/state/t11.meta" "window=sess:fm-t11" "kind=ship"
+  printf 'needs-decision [key=real-key]: choose\n' > "$home/state/t11.status"
+
+  : > "$log"
+  env PATH="$fb:$PATH" FM_FAKE_TMUX_SEND_FAIL=1 \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t11 --resolve-key mistyped "the answer" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed send with an unmatched key should exit nonzero"
+  assert_contains "$(cat "$err")" "--resolve-key 'mistyped'" \
+    "the unmatched key should still be named before the send"
+  assert_contains "$(cat "$err")" "not sent" \
+    "a failed send must be reported as unsent"
+  assert_not_contains "$(cat "$err")" "delivered" \
+    "a failed send must never claim the answer was delivered"
+  assert_not_contains "$(cat "$err")" "resend" \
+    "a failed send must never tell the caller not to resend"
+  pass "fm-send --resolve-key: a failed send with an unmatched key is never reported as delivered"
+}
+
 test_multiple_keys_close_together() {
   local dir fb log home rc out
   dir="$TMP_ROOT/multi"; mkdir -p "$dir"
@@ -606,6 +636,7 @@ test_not_open_key_still_delivers_but_closes_nothing
 test_partially_matched_keys_close_only_what_is_open
 test_drain_printed_command_is_accepted_verbatim
 test_failed_send_does_not_close
+test_failed_send_with_unmatched_key_never_claims_delivery
 test_multiple_keys_close_together
 test_local_secondmate_answer_marked_and_closed
 test_remote_secondmate_answer_closes_locally
