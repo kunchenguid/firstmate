@@ -73,7 +73,7 @@ Never at-least-once, no-loss, or lossless.
 
 ## What the runner does prove
 
-Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose completion is a process event, not a timer; for the two supervision-delivery rows below, by `tests/fm-watch-triage.test.sh` driving a real `bin/fm-watch.sh` over a real capture; and for adapter-owned application, by `tests/fm-remote-reply.test.sh` driving the real remote-reply relay end to end in an isolated home:
+Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose completion is a process event, not a timer; by `tests/fm-procevent-external-event.test.sh` through the public typed ingress and existing reconciliation path; for the two supervision-delivery rows below, by `tests/fm-watch-triage.test.sh` driving a real `bin/fm-watch.sh` over a real capture; and for adapter-owned application, by `tests/fm-remote-reply.test.sh` driving the real remote-reply relay end to end in an isolated home:
 
 | Guarantee | How it is proven |
 | --- | --- |
@@ -108,15 +108,17 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | foreign ownership | sweeping one home removes its registration without signaling or releasing another home's live claim |
 | nested and force cleanup | normal, force, and nested secondmate removal invoke each target home's sweep at its final removal boundary, a failed removal restores and rearms registrations, and failed rearming at any nested level retains and reports its recovery backup with a distinct status |
 | teardown refusal ordering | a later public-followup refusal retains the home and its active process-event registration without invoking its sweep |
-| healthy-home invariance | homes with no registration or owned runner claim retain ordinary registration-only supervision and teardown behavior |
+| healthy-home invariance | homes with no registration, unhandled result, or owned runner claim retain ordinary inert supervision and teardown behavior |
 | source-only supervision | a registered source with no task metadata trips the shared predicate and general guard |
+| result-only supervision | an unhandled captured result with no registration or task metadata trips the shared predicate; its handled acknowledgement removes that supervision need |
 | argv integrity | an argument containing spaces survives as one argument, a shell-looking argument is passed literally with no interpretation, and an unrepresentable newline is rejected at registration |
 | bounded output | output beyond `FM_PROCEVENT_MAX_OUTPUT_BYTES` is drained while only the bound is staged, then truncated and captured |
 | condition->action single-fire and trust | `tests/fm-procevent-when.test.sh` drives the public `when` adapter and generic runner with real commands, proving stable true fires once, a claimed fire restarts as ambiguous without a second action, concurrent arms publish one complete watch, and mutated specs or action executables are refused before execution |
 | condition->action terminal outcomes | the same suite proves flapping true polls do not fire, action failure, condition error budget, deadline expiry, and a true poll completing after its deadline each produce the expected terminal captured result without an unsafe action |
 | condition->action process bounds | the same suite proves action timeout terminates descendants and command-output staging remains within `FM_WHEN_OUTPUT_TAIL_BYTES` while the command runs |
 | silent failure handling | a nonzero exit with no output publishes nothing and leaves the source registered for retry |
-| inertness | a home with no registered source generates no state, starts no process, and does not need supervision |
+| typed untrusted ingress | the public ingress privately captures bounded payload bytes before publishing a payload-free wake, never writes the captain inbox or executes payload text, durably deduplicates and coalesces one source-scoped delivery revision, preserves later revisions, recovers publication failure through reconciliation, replays after restart, and suppresses handled retries |
+| inertness | a home with neither a registered source nor an unhandled result generates no process-event state, starts no process-event child, and does not need supervision |
 
 ## Runner lifetime and cleanup
 
