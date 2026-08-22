@@ -1278,18 +1278,20 @@ pass "a reader failure is named to the captain, a clean end and a close are not"
 
 # --- the laptop end ---------------------------------------------------------
 #
-# The microphone and speaker paths cannot be tested from a host with neither, and
-# are not tested anywhere: the first live run is their test. What IS testable is
-# everything around them, and these are the pieces whose failure is hardest to
-# read from the symptom. A missing -T corrupts audio rather than erroring, and a
-# banner-printing login shell desynchronises the stream in a way that looks like a
-# protocol bug and is not.
+# The microphone and speaker DEVICES cannot be opened on a host with neither, so
+# the first live run is their test and nothing below touches audio hardware. What
+# IS testable is everything around them, and these are the pieces whose failure is
+# hardest to read from the symptom. A missing -T corrupts audio rather than
+# erroring, and a banner-printing login shell desynchronises the stream in a way
+# that looks like a protocol bug and is not. The speaker's byte accounting is
+# testable as well, being arithmetic rather than device work, and is covered
+# further down this block against a stub stream with the callback driven by hand.
 
 mkdir -p "$TMP_ROOT/client-files"
 printf '\0\0\0\0' > "$TMP_ROOT/client-files/clip.pcm"
 
 python3 - "$ROOT/bin" "$TMP_ROOT/client-files" <<'PY' || fail "laptop client"
-import io, os, sys
+import io, os, sys, types
 sys.path.insert(0, sys.argv[1])
 import importlib.util, pathlib
 spec = importlib.util.spec_from_file_location(
@@ -1511,8 +1513,11 @@ check(cut_record["relay_error"],
       "a dropped connection must be reported in the turn record rather than "
       "leaving it indistinguishable from a turn nobody answered: %r"
       % cut_record)
-check("connection" in cut_record["relay_error"],
-      "and it should say the connection went: %r" % cut_record["relay_error"])
+check("the connection was lost before this turn was answered"
+      in cut_record["relay_error"],
+      "and it should say the connection went before this turn had its answer, "
+      "which is the half of that fault this case is: %r"
+      % cut_record["relay_error"])
 
 # The other moment a connection can go is BETWEEN two turns, during the seconds
 # the client spends letting the previous answer finish. That wait is most of a
@@ -1616,8 +1621,1376 @@ check(closing_runs[0]["answered"] and closing_runs[0]["relay_error"] is None,
 # measurement someone reads as complete.
 check(closing_code != 0,
       "a session that took 1 of 2 runs must not exit 0, got %r" % closing_code)
-check("connection closed" in spoken.getvalue(),
-      "and the captain should be told why it stopped: %r" % spoken.getvalue())
+check("the connection ended before run 2 of 2" in spoken.getvalue(),
+      "and the captain should be told why it stopped, in the words the path that "
+      "stopped it recorded: %r" % spoken.getvalue())
+
+# The case above is the connection going while the run loop is watching for it.
+# The loop cannot only be watching, though: the downlink names the failure and
+# marks the connection closed, and a loop that decides by reading the mark alone
+# is blind for as long as those are two separate writes - the connection is gone,
+# the failure is on the record, and the check has already passed. So the decision
+# belongs where the turn is opened, under the lock both writes are made under.
+# With the connection already gone, opening the turn anyway erased the failure the
+# downlink had recorded, pushed talk-start into a dead pipe, and printed a run
+# that waited out the whole reply timeout as answered: false with relay_error:
+# null - the invented turn this whole seam exists to keep out of runs.jsonl.
+class LostStream:
+    """A downlink that is already gone the first time it is read."""
+
+    def read(self, count):
+        raise OSError(104, "Connection reset by peer")
+
+
+class CountingUplink:
+    """Accepts frames and remembers which kinds were pushed at it."""
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, kind, payload=b""):
+        self.sent.append(kind)
+
+
+gone = client.Client(client.parse_args(
+    ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+     "--out-file", os.path.join(TMP, "reply-gone.pcm"), "--runs", "2",
+     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"]))
+gone.reader = frame.Reader(LostStream())
+gone.uplink = CountingUplink()
+gone.playback = client.FilePlayback(os.path.join(TMP, "reply-gone.pcm"))
+gone.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
+gone.capture.start(gone.up_q, gone.talking)
+thread_lib.Thread(target=gone._sender, daemon=True).start()
+# Run to completion in this thread rather than in a started one: the connection
+# is gone before the first read returns, so the whole downlink is over by the
+# time run() begins and there is no ordering left for the scheduler to decide.
+gone._downlink()
+check(gone.closed.is_set(),
+      "fixture: a connection lost on the first read must leave the client closed")
+
+gone_out, gone_said = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(gone_out), contextlib.redirect_stderr(gone_said):
+    gone_code = gone.run()
+gone.up_q.put(None)
+gone.playback.close()
+
+gone_runs = [json_lib.loads(line) for line in gone_out.getvalue().splitlines()
+             if line.strip()]
+check(gone_runs == [],
+      "a turn must not be opened on a connection already known gone, and no run "
+      "reported for one that never opened: %r" % gone_runs)
+check(gone.uplink.sent == [],
+      "and nothing should be pushed into the dead pipe: %r" % gone.uplink.sent)
+check(gone_code != 0,
+      "a session that took none of its 2 runs must not exit 0, got %r" % gone_code)
+check("the connection was lost before run 1 of 2" in gone_said.getvalue(),
+      "and the captain should be told why nothing was taken, naming the run it "
+      "stopped at and the cause the read that failed recorded: %r"
+      % gone_said.getvalue())
+
+# The third moment is a connection that goes DURING a turn that answered anyway,
+# with runs still to take. The answer is real and its record stands, so nothing
+# here is a turn failure; what must not happen is the session ending quietly on a
+# happy exit code, because two of the three runs asked for are missing and a
+# runs.jsonl short of its runs, reported as success, is read later as the whole
+# measurement. Refusing the next turn is the one place a closed connection stops
+# a session, so it reports the same way wherever the connection went.
+class EndingStream:
+    """Serves one whole turn, then reports end of file without waiting."""
+
+    def __init__(self, gate):
+        self._gate = gate
+        self._reply = (
+            frame.encode(frame.AUDIO, b"\x00\x00" * 1200)
+            + frame.encode_json(frame.MARK, {"mark": "reply_end",
+                                             "since_talk_end": 0.4,
+                                             "tool_calls": 0}))
+        self._at = 0
+
+    def read(self, count):
+        check(self._gate.wait(10), "the turn never opened, so nothing was served")
+        chunk = self._reply[self._at:self._at + count]
+        self._at += len(chunk)
+        return chunk
+
+
+ending_served = thread_lib.Event()
+ending = client.Client(client.parse_args(
+    ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+     "--out-file", os.path.join(TMP, "reply-ending.pcm"), "--runs", "3",
+     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"]))
+ending.reader = frame.Reader(EndingStream(ending_served))
+ending.uplink = StartGate(ending_served)
+ending.playback = client.FilePlayback(os.path.join(TMP, "reply-ending.pcm"))
+ending.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
+ending.capture.start(ending.up_q, ending.talking)
+thread_lib.Thread(target=ending._sender, daemon=True).start()
+thread_lib.Thread(target=ending._downlink, daemon=True).start()
+
+# The end of file lands inside the first turn, so it is already seen by the time
+# the wait after that turn begins. Confirming it here rather than trusting the
+# timing keeps the sequence exact on a loaded host as well as an idle one.
+finish_after_end = ending._let_reply_finish
+
+
+def confirm_ended_then_wait(record):
+    check(ending.closed.wait(10),
+          "fixture: the end of file never reached the client during the turn")
+    return finish_after_end(record)
+
+
+ending._let_reply_finish = confirm_ended_then_wait
+ending_out, ending_said = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(ending_out), contextlib.redirect_stderr(ending_said):
+    ending_code = ending.run()
+ending.up_q.put(None)
+ending.playback.close()
+
+ending_runs = [json_lib.loads(line) for line in ending_out.getvalue().splitlines()
+               if line.strip()]
+check(len(ending_runs) == 1,
+      "one turn was served, so exactly one run belongs in the file: %d, %r"
+      % (len(ending_runs), ending_runs))
+check(ending_runs[0]["answered"] and ending_runs[0]["relay_error"] is None,
+      "an answered turn whose connection then ended cleanly is not a turn "
+      "failure, and its record stands: %r" % ending_runs[0])
+check(ending_code != 0,
+      "but a session that took 1 of 3 runs must not exit 0, got %r" % ending_code)
+check("run 2 of 3" in ending_said.getvalue(),
+      "and it should name the run it stopped at: %r" % ending_said.getvalue())
+
+# The case above is the connection ending AFTER a turn was answered, which is the
+# negative case: nothing broke inside a turn, so nothing is named. The three
+# below are the same three endings landing INSIDE a turn, while it is still
+# waiting for its reply, and there each of them has to name itself.
+#
+# None of them raises. frame.Writer sends whole frames and the relay spends
+# almost all of a turn awaiting the model, so a relay killed mid-turn - SIGKILL,
+# the host going, the SSH connection dropping between frames - ends its stdout on
+# a frame boundary. Reader then reads nothing at all where a header should start
+# and reports end of input by design. A goodbye is the same shape by another
+# route: the relay sends one from its own teardown after a fault. Released with
+# no reason recorded, both come back as answered: false with relay_error: null,
+# which in runs.jsonl is the shape of a turn the model declined, and runs.jsonl
+# is the file docs/voice-relay.md computes its published latency spread from. An
+# infrastructure failure averaged into that number is the whole thing being kept
+# out of it.
+class ScriptedStream:
+    """Serves prepared downlink bytes, held until the turn under test has opened.
+
+    One class for every case below, because each of them differs only in the bytes
+    it serves: the gate and the slicing are the same everywhere, and an empty
+    script is what an end of stream at a frame boundary looks like. The label is
+    per case so a fixture that never fires still names which case it belonged to.
+
+    What happens once the script is spent is the one thing a case may choose, and
+    the default is the clean end of stream every case but one wants. at_end takes
+    a callable for the case that needs the other shape a dropped link has, a reset
+    rather than a close, which reaches the client as a raised error instead of an
+    empty read.
+    """
+
+    def __init__(self, gate, payload, label, at_end=None):
+        self._gate = gate
+        self._bytes = payload
+        self._label = label
+        self._at_end = at_end
+        self._at = 0
+
+    def read(self, count):
+        check(self._gate.wait(10),
+              "the turn never opened, so %s was never served" % self._label)
+        if self._at >= len(self._bytes) and self._at_end is not None:
+            self._at_end()
+        chunk = self._bytes[self._at:self._at + count]
+        self._at += len(chunk)
+        return chunk
+
+
+RELAY_REASON = "FrameError: unknown frame kind: b'\\xff'"
+REPLY_END = frame.encode_json(frame.MARK, {"mark": "reply_end",
+                                           "since_talk_end": 0.4,
+                                           "tool_calls": 0})
+
+
+def wire_client(args, reader, uplink, playback=None, start=True):
+    """Build a client wired to stand-ins for both its ends, threads running.
+
+    The same seven lines were written out at every case below. playback defaults to
+    a file at whatever --out-file the arguments name, which is what most of them
+    want; a case needing a playback of its own passes one. start=False is for the
+    one case that has to arrange something before the threads may read.
+    """
+    wired = client.Client(client.parse_args(args))
+    wired.reader = frame.Reader(reader)
+    wired.uplink = uplink
+    wired.playback = (client.FilePlayback(wired.options.out_file)
+                      if playback is None else playback)
+    wired.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
+    wired.capture.start(wired.up_q, wired.talking)
+    if start:
+        thread_lib.Thread(target=wired._sender, daemon=True).start()
+        thread_lib.Thread(target=wired._downlink, daemon=True).start()
+    return wired
+
+
+def turn_lost(label, make_stream, out_name, runs="1"):
+    """Take one turn against a downlink that ends during it, and return run and stderr."""
+    gate = thread_lib.Event()
+    lost = wire_client(
+        ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+         "--out-file", os.path.join(TMP, out_name), "--runs", runs,
+         "--timeout", "2", "--audio-idle", "0.05"],
+        make_stream(gate), StartGate(gate))
+    out, said = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(said):
+        code = lost.run()
+    lost.up_q.put(None)
+    lost.playback.close()
+    runs = [json_lib.loads(line) for line in out.getvalue().splitlines()
+            if line.strip()]
+    # The record is still emitted: the turn was taken and it really did go
+    # unanswered, so dropping it would hide the failure instead of naming it.
+    check(len(runs) == 1,
+          "%s: the turn was taken, so its run belongs in the file: %d, %r"
+          % (label, len(runs), runs))
+    check(not runs[0]["answered"],
+          "%s: fixture is wrong, the turn was answered after all: %r"
+          % (label, runs[0]))
+    check(code != 0, "%s: an unanswered turn must not exit 0, got %r"
+          % (label, code))
+    check(runs[0]["relay_error"],
+          "%s: a turn lost to the connection must say so rather than reading in "
+          "runs.jsonl exactly like a turn the model declined: %r"
+          % (label, runs[0]))
+    # With one run asked for, the run loop never reaches its "and the rest were
+    # not taken" line. A record on stdout and silence on stderr is a captain who
+    # spoke, heard nothing back, and was told nothing either; the module docstring
+    # puts everything human on stderr.
+    check("client:" in said.getvalue(),
+          "%s: the captain must be told the connection went, not only the file: "
+          "%r" % (label, said.getvalue()))
+    return runs[0], said.getvalue()
+
+
+eof_run, eof_said = turn_lost(
+    "end of stream",
+    lambda gate: ScriptedStream(gate, b"", "the end of stream"),
+    "reply-eof.pcm")
+check("ended" in eof_run["relay_error"],
+      "an end of stream should say the connection ended: %r"
+      % eof_run["relay_error"])
+check("the connection ended" in eof_said,
+      "and should say so on stderr as well: %r" % eof_said)
+
+# A goodbye nobody asked for. This end sent no quit, so the relay stopping is the
+# relay's own decision, and mid-turn it costs the captain their question.
+bye_run, bye_said = turn_lost(
+    "goodbye",
+    lambda gate: ScriptedStream(gate, frame.encode(frame.BYE), "the goodbye"),
+    "reply-bye.pcm")
+check("the relay stopped" in bye_run["relay_error"],
+      "a goodbye nobody asked for mid-turn should say the relay stopped, because "
+      "that is the relay deciding rather than the connection dying: %r"
+      % bye_run["relay_error"])
+# Distinct from the line above, because they are distinct faults: a stream that
+# stopped, versus a relay that chose to stop. One line for both would send the
+# captain looking for the wrong thing.
+check("stopped without being asked" in bye_said
+      and "the connection ended" not in bye_said,
+      "a goodbye should name itself on stderr rather than borrowing the wording "
+      "of an ended stream: %r" % bye_said)
+
+# And when the relay does name the fault, its words are what the record carries.
+# This end can only infer that a goodbye arrived; the relay knows what happened,
+# so a reason it sent is never replaced by one inferred here.
+named_run, _ = turn_lost(
+    "named fault",
+    lambda gate: ScriptedStream(
+        gate,
+        frame.encode_json(frame.NOTICE,
+                          {"event": "turn-failed", "error": RELAY_REASON})
+        + frame.encode(frame.BYE),
+        "the named fault"),
+    "reply-named.pcm")
+check(named_run["relay_error"] == RELAY_REASON,
+      "the relay's own reason must reach the record unchanged rather than being "
+      "overwritten by the goodbye behind it: %r" % named_run["relay_error"])
+
+# THE MIDDLE OF THE SCENARIO, which the cases above and below both miss. A relay
+# killed mid-turn ends its stdout on a frame boundary, and it spends nearly the
+# whole turn streaming a reply, so dying AFTER some of that reply has played is
+# the likelier half of the very fault this work exists to name. The cases above
+# cover dying before any of it, and the answered-turn case below covers a reply
+# that finished, so nothing pinned the middle.
+#
+# In the middle both halves of the record are true at once and must say so: sound
+# reached the captain, so the turn was answered and first_audio_s measures when,
+# AND the answer stopped partway, so the reason has to say the reply did not
+# finish rather than that the turn was never answered. A record asserting both
+# "answered" and "before this turn was answered" sends whoever reads it to the
+# wrong end. At the default of one run this also used to clear every path to a
+# non-zero exit code and report the session a success.
+SOME_REPLY = frame.encode(frame.AUDIO, b"\x00\x00" * 1200)
+SESSION_ENDED = frame.encode_json(frame.NOTICE, {"event": "session-ended"})
+
+
+def turn_cut(label, payload, out_name, at_end=None):
+    """Take one turn, at the default run count, against a scripted downlink."""
+    gate = thread_lib.Event()
+    cut = wire_client(
+        ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+         "--out-file", os.path.join(TMP, out_name),
+         "--timeout", "2", "--audio-idle", "0.05"],
+        ScriptedStream(gate, payload, label, at_end), StartGate(gate))
+    out, said = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(said):
+        code = cut.run()
+    cut.up_q.put(None)
+    cut.playback.close()
+    records = [json_lib.loads(line) for line in out.getvalue().splitlines()
+               if line.strip()]
+    check(len(records) == 1,
+          "%s: one turn was taken, so one record belongs in the file: %r"
+          % (label, records))
+    check(cut.options.runs == 1,
+          "%s: fixture is wrong, this case is about the default run count: %r"
+          % (label, cut.options.runs))
+    return records[0], said.getvalue(), code
+
+
+for label, payload, subject in (
+        ("end of stream", b"", "the connection ended"),
+        ("relay stopped", frame.encode(frame.BYE), "the relay stopped"),
+        ("session ended", SESSION_ENDED, "the relay ended the session")):
+    slug = label.replace(" ", "-")
+    # No audio at all. This half keeps the wording it already had, so the two can
+    # never be collapsed back into one sentence that fits neither.
+    silent, _, silent_code = turn_cut(
+        "%s, nothing played" % label, payload, "reply-silent-%s.pcm" % slug)
+    check(not silent["answered"] and silent["reply_audio_seconds"] == 0,
+          "%s: fixture is wrong, this half is the one where nothing played: %r"
+          % (label, silent))
+    check(silent["relay_error"] == "%s before this turn was answered" % subject,
+          "%s: a turn that got no audio went unanswered and the reason should say "
+          "so: %r" % (label, silent["relay_error"]))
+    check(silent_code != 0,
+          "%s: an unanswered turn must not exit 0, got %r" % (label, silent_code))
+
+    # Some of the reply played, then the same ending. Same fault, different turn,
+    # and the record has to describe the turn it actually got.
+    partial, _, partial_code = turn_cut(
+        "%s, part of a reply played" % label, SOME_REPLY + payload,
+        "reply-partial-%s.pcm" % slug)
+    check(partial["answered"] and partial["reply_audio_seconds"] > 0,
+          "%s: audio reached the captain, so the turn was answered: %r"
+          % (label, partial))
+    check(partial["first_audio_s"] is not None,
+          "%s: and when it reached them is a real measurement, not a null: %r"
+          % (label, partial))
+    check(partial["relay_error"] == "%s before the reply finished" % subject,
+          "%s: a reply cut short must say the reply did not finish: %r"
+          % (label, partial["relay_error"]))
+    check("before this turn was answered" not in partial["relay_error"],
+          "%s: and must not claim nothing arrived, which its own answered field "
+          "contradicts: %r" % (label, partial["relay_error"]))
+    # The record and the exit code have to agree with each other as well.
+    check(partial_code != 0,
+          "%s: a record naming a fault must not exit 0, even at the default of "
+          "one run and even though the turn was answered, got %r"
+          % (label, partial_code))
+
+# THE FOURTH SUBJECT, and the one a real captain is likeliest to meet. The three
+# above all reach the client as an orderly end: a close, a goodbye frame, or a
+# notice. A dropped SSH link is a reset instead, which arrives as a raised error
+# from the read rather than as anything the far end chose to send, and that is a
+# separate path in the downlink from all three. It has to tell the same two halves
+# apart, because the fault is no different from the captain's side.
+#
+# Its never-played half is the cut-header case far above, which pins the other
+# wording, so this is the half that was missing.
+
+
+def a_reset():
+    raise OSError(104, "Connection reset by peer")
+
+
+reset, _, reset_code = turn_cut(
+    "reset, part of a reply played", SOME_REPLY, "reply-partial-reset.pcm",
+    at_end=a_reset)
+check(reset["answered"] and reset["reply_audio_seconds"] > 0,
+      "a reset after some of the reply played still reached the captain, so the "
+      "turn was answered: %r" % reset)
+check(reset["first_audio_s"] is not None,
+      "and when it reached them is a real measurement, not a null: %r" % reset)
+check(reset["relay_error"].startswith(
+          "the connection was lost before the reply finished"),
+      "a reply cut short by a reset must say the reply did not finish, the same "
+      "as one cut short by a close: %r" % reset["relay_error"])
+check("before this turn was answered" not in reset["relay_error"],
+      "and must not claim nothing arrived, which its own answered field "
+      "contradicts: %r" % reset["relay_error"])
+# The clause is what the reader acts on and the detail is what tells a reset from
+# a header cut in half, so neither may be lost to the other.
+check("Connection reset by peer" in reset["relay_error"],
+      "and must still carry what the kernel said, which is the only thing that "
+      "tells a reset from a truncated frame: %r" % reset["relay_error"])
+check(reset_code != 0,
+      "a record naming a fault must not exit 0, even at the default of one run "
+      "and even though the turn was answered, got %r" % reset_code)
+
+# THE OTHER SIDE OF THE SAME LINE, and the complement of the answered case further
+# up this block. Those cases are faults that landed while the turn was still owed
+# an answer. These two land AFTER the answer was complete, in the gap between the
+# reply_end mark arriving and the record being copied, which the client spends
+# waiting for the reply audio to go quiet. A turn answered in full must carry no
+# reason and must not fail the session, whichever path the late fault takes: an
+# end of stream and a reset differ only in what the kernel delivered, and one relay
+# death must not produce two different exit codes depending on which it was.
+#
+# Gated at both ends rather than timed. The fault cannot be delivered until the
+# client has passed the reply_end wait, and the record cannot be copied until the
+# downlink has marked the connection finished with, which it does only after the
+# fault has been applied. Nothing here sleeps and nothing races.
+class RaisingAfterReply:
+    """Serves one whole answer, then raises once the record window is open."""
+
+    def __init__(self, gate, window):
+        self._gate = gate
+        self._window = window
+        self._bytes = frame.encode(frame.AUDIO, b"\x00\x00" * 1200) + REPLY_END
+        self._at = 0
+
+    def read(self, count):
+        check(self._gate.wait(10), "the turn never opened, so nothing was served")
+        if self._at < len(self._bytes):
+            chunk = self._bytes[self._at:self._at + count]
+            self._at += len(chunk)
+            return chunk
+        check(self._window.wait(10),
+              "fixture: the record window never opened, so nothing raced it")
+        raise OSError(104, "Connection reset by peer")
+
+
+class FailingAfterReply:
+    """Serves one whole answer, then a named turn failure in that same window."""
+
+    def __init__(self, gate, window):
+        self._gate = gate
+        self._window = window
+        self._reply = frame.encode(frame.AUDIO, b"\x00\x00" * 1200) + REPLY_END
+        self._late = frame.encode_json(
+            frame.NOTICE, {"event": "turn-failed",
+                           "error": "the model stream dropped"})
+        self._at = 0
+        self._late_at = 0
+
+    def read(self, count):
+        check(self._gate.wait(10), "the turn never opened, so nothing was served")
+        if self._at < len(self._reply):
+            chunk = self._reply[self._at:self._at + count]
+            self._at += len(chunk)
+            return chunk
+        check(self._window.wait(10),
+              "fixture: the record window never opened, so nothing raced it")
+        if self._late_at < len(self._late):
+            chunk = self._late[self._late_at:self._late_at + count]
+            self._late_at += len(chunk)
+            return chunk
+        # The notice is handled before this read is reached again, and the end of
+        # stream behind it is what marks the connection finished with, which is the
+        # gate the record waits on below.
+        return b""
+
+
+def fault_after_answer(label, make_stream, out_name):
+    """Answer one turn in full, then land a fault before the record is copied."""
+    gate, window = thread_lib.Event(), thread_lib.Event()
+    after = wire_client(
+        ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+         "--out-file", os.path.join(TMP, out_name),
+         "--timeout", "2", "--audio-idle", "0.05"],
+        make_stream(gate, window), StartGate(gate))
+    quiet_wait = after._wait_audio_quiet
+
+    def open_the_window(deadline):
+        window.set()
+        quiet_wait(deadline)
+        # take_turn copies the record on the line after this returns, so the fault
+        # has to be in before it. closed is the downlink's own mark that it has
+        # finished with the connection and it is set only after the fault has been
+        # applied, which makes it the gate rather than any elapsed time.
+        check(after.closed.wait(10),
+              "%s: fixture: the late fault never landed before the record"
+              % label)
+
+    after._wait_audio_quiet = open_the_window
+    out, said = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(said):
+        code = after.run()
+    after.up_q.put(None)
+    after.playback.close()
+    records = [json_lib.loads(line) for line in out.getvalue().splitlines()
+               if line.strip()]
+    check(len(records) == 1,
+          "%s: one turn was answered, so one record belongs in the file: %r"
+          % (label, records))
+    check(after.options.runs == 1,
+          "%s: fixture is wrong, this case is about the default run count: %r"
+          % (label, after.options.runs))
+    check(records[0]["answered"] and records[0]["reply_audio_seconds"] > 0,
+          "%s: fixture is wrong, the whole reply should have arrived: %r"
+          % (label, records[0]))
+    check(records[0]["relay_error"] is None,
+          "%s: a turn answered in full must carry no reason, whatever arrived "
+          "afterwards: %r" % (label, records[0]["relay_error"]))
+    check(code == 0,
+          "%s: and a session that delivered its answer must exit 0, got %r"
+          % (label, code))
+    return said.getvalue()
+
+
+# The read-failure path: a reset rather than a clean end of stream.
+rst_said = fault_after_answer(
+    "a reset after the answer", RaisingAfterReply, "reply-rst.pcm")
+# The guard is on the record and nothing else, so the captain is still told.
+check("connection lost" in rst_said,
+      "the connection going is still said on stderr, only not recorded against a "
+      "turn it did not cost: %r" % rst_said)
+
+# The relay fail_turn path: its own model stream broke, after this turn's answer.
+failed_said = fault_after_answer(
+    "a named relay failure after the answer", FailingAfterReply,
+    "reply-late-fail.pcm")
+check("could not finish that turn" in failed_said,
+      "the relay's own words are still said on stderr for the same reason: %r"
+      % failed_said)
+
+# With runs still to take, the loop also has to say why they were not taken, and
+# that line has to restate the cause that was recorded rather than asserting a
+# default. Told "the relay stopped" and then "the connection closed", the captain
+# has been given two causes for one event and has to guess which end to look at.
+for label, payload, expected in (
+        ("end of stream", b"", "the connection ended"),
+        ("goodbye", frame.encode(frame.BYE),
+         "the relay stopped without being asked to")):
+    _, stopped_said = turn_lost(
+        "%s, runs remaining" % label,
+        lambda gate, payload=payload, label=label: ScriptedStream(
+            gate, payload, "the %s" % label),
+        "reply-stop-%s.pcm" % label.replace(" ", "-"), runs="2")
+    check("%s before run 2 of 2" % expected in stopped_said,
+          "the run loop should restate the recorded cause for %s: %r"
+          % (label, stopped_said))
+    check("the connection closed" not in stopped_said,
+          "and must not fall back to the default wording for %s: %r"
+          % (label, stopped_said))
+
+# A fault on THIS end, handling a reply that did arrive. The try in the downlink
+# used to cover only the read, so the output file refusing the audio, or a payload
+# that is not the JSON the wire format promises, killed the reader thread outright
+# with the connection neither marked closed nor released. run() then opened every
+# remaining turn, each waiting out the whole timeout and printing answered false
+# with no reason, so ONE fault cost the session instead of one turn.
+#
+# The reason it records must also be the right reason: the connection here is
+# perfectly healthy, and a record or a message blaming it sends whoever reads it
+# to the wrong end of a working link.
+class FullDiskPlayback(client.FilePlayback):
+    """Refuses reply audio the way a filesystem with nothing left does."""
+
+    def write(self, pcm, turn):
+        raise OSError(28, "No space left on device")
+
+
+handling_served = thread_lib.Event()
+handling = wire_client(
+    ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+     "--out-file", os.path.join(TMP, "reply-handling.pcm"), "--runs", "2",
+     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"],
+    ScriptedStream(handling_served, frame.encode(frame.AUDIO, b"\x00\x00" * 600),
+                   "the one reply frame"),
+    StartGate(handling_served),
+    FullDiskPlayback(os.path.join(TMP, "reply-handling.pcm")))
+handling_out, handling_said = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(handling_out), \
+        contextlib.redirect_stderr(handling_said):
+    handling_code = handling.run()
+handling.up_q.put(None)
+handling.playback.close()
+handling_said = handling_said.getvalue()
+
+handling_runs = [json_lib.loads(line)
+                 for line in handling_out.getvalue().splitlines() if line.strip()]
+# One fault, one lost turn. The reader surviving is the whole point: without it
+# the second run opens as well and burns another whole timeout for nothing.
+check(len(handling_runs) == 1,
+      "a fault handling a reply must stop the session rather than opening every "
+      "remaining turn: %d run(s), %r" % (len(handling_runs), handling_runs))
+check(not handling_runs[0]["answered"],
+      "the audio never reached the file, so the turn was not answered: %r"
+      % handling_runs[0])
+check(handling_runs[0]["relay_error"],
+      "a fault this end could name must not be recorded as a turn that merely "
+      "went unanswered: %r" % handling_runs[0])
+check("No space left on device" in handling_runs[0]["relay_error"],
+      "the record should carry what actually raised: %r"
+      % handling_runs[0]["relay_error"])
+# The overriding rule: a wrong cause is worse than a missing one.
+check("connection" not in handling_runs[0]["relay_error"],
+      "the connection was never lost here, so the record must not say it was: %r"
+      % handling_runs[0]["relay_error"])
+handling_lines = [line for line in handling_said.splitlines()
+                  if line.startswith("client:")]
+check(not any("connection" in line for line in handling_lines),
+      "and the captain must not be sent to a connection that is working: %r"
+      % handling_lines)
+check("No space left on device" in handling_said
+      and "run 2 of 2" in handling_said,
+      "the run loop should name the real reason and the run it stopped at: %r"
+      % handling_said)
+# The one line is what the captain and the record get. The traceback is what
+# whoever has to find the bug behind it gets, and before the guard existed a dying
+# thread printed one, so losing it would make a programming error in the frame
+# handling strictly harder to locate than it used to be.
+check("Traceback (most recent call last)" in handling_said,
+      "a fault this end raised should still leave its traceback on stderr: %r"
+      % handling_said)
+check("Traceback" not in (handling_runs[0]["relay_error"] or ""),
+      "but the record is machine read, so the one-line reason belongs there: %r"
+      % handling_runs[0]["relay_error"])
+check(handling_code != 0,
+      "a session that took none of its runs must not exit 0, got %r"
+      % handling_code)
+
+# The other end of the same handler: reply audio that arrives after THIS end has
+# released the output. close() joins the downlink at five seconds while the relay
+# teardown it waits on can take up to ten, so the join can expire with audio still
+# in flight, and the chunk behind it then met a closed file. That raised into the
+# guard above and printed its fault line and a full traceback on a session that
+# answered its turn and exited 0, which is an alarm firing on success: the reader
+# learns to skip the line, and the real one is then invisible too. The connection
+# was never the problem either, so it was a wrong cause as well as a false one.
+#
+# Driven through the events the client itself reaches, not a sleep: the turn is
+# answered and recorded, the output is released exactly as close() releases it, and
+# only then is the late chunk let through.
+class LateAudioStream:
+    """Serves one whole answer, then one more chunk once the output is released."""
+
+    def __init__(self, opened, released):
+        self._opened = opened
+        self._released = released
+        self._reply = frame.encode(frame.AUDIO, b"\x00\x00" * 1200) + REPLY_END
+        self._late = frame.encode(frame.AUDIO, b"\x00\x00" * 1200)
+        self._at = 0
+        self._late_at = 0
+        self._never = thread_lib.Event()
+
+    def read(self, count):
+        check(self._opened.wait(10), "the turn never opened, so nothing was served")
+        if self._at < len(self._reply):
+            chunk = self._reply[self._at:self._at + count]
+            self._at += len(chunk)
+            return chunk
+        check(self._released.wait(10),
+              "fixture: the output was never released, so nothing arrived late")
+        if self._late_at < len(self._late):
+            chunk = self._late[self._late_at:self._late_at + count]
+            self._late_at += len(chunk)
+            return chunk
+        # Parked rather than ending the stream, so the only lines on stderr are the
+        # ones this case is about.
+        self._never.wait(30)
+        return b""
+
+
+class CountingPlayback(client.FilePlayback):
+    """Reports each chunk once it has been handed over, so the test can wait."""
+
+    def __init__(self, path, handled):
+        client.FilePlayback.__init__(self, path)
+        self._handled = handled
+        self.calls = 0
+
+    def write(self, pcm, turn):
+        self.calls += 1
+        try:
+            client.FilePlayback.write(self, pcm, turn)
+        finally:
+            # In a finally, so the late chunk raising is as observable as the late
+            # chunk being discarded and neither outcome hangs the case.
+            if self.calls >= 2:
+                self._handled.set()
+
+
+def audio_after_close(label, extra):
+    """Answer one turn, release the output, then let a late chunk arrive."""
+    opened, released, handled = (thread_lib.Event(), thread_lib.Event(),
+                                 thread_lib.Event())
+    out_file = os.path.join(TMP, "reply-late-%s.pcm" % label)
+    late = wire_client(
+        ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+         "--out-file", out_file, "--timeout", "2", "--audio-idle", "0.05"]
+        + extra,
+        LateAudioStream(opened, released), StartGate(opened),
+        CountingPlayback(out_file, handled))
+    out, said = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(said):
+        code = late.run()
+        # Exactly what close() does with the output, at the point close() does it.
+        late.playback.close()
+        released.set()
+        check(handled.wait(10), "fixture: the late chunk never reached the output")
+        # Through close(), not the reporting method directly, so the wiring is
+        # covered as well as the report: nothing else drives the only production
+        # caller, and hand-calling it would pass with that call deleted. Returns at
+        # once here, because the uplink stand-in swallows the quit, no downlink
+        # thread or relay process was ever assigned, and the file drain is a no-op.
+        late.close()
+    late.up_q.put(None)
+    records = [json_lib.loads(line) for line in out.getvalue().splitlines()
+               if line.strip()]
+    check(len(records) == 1,
+          "%s: one turn was answered, so one record belongs in the file: %r"
+          % (label, records))
+    return late, records[0], said.getvalue(), code, out_file
+
+
+quiet, quiet_run, quiet_said, quiet_code, quiet_file = audio_after_close(
+    "quiet", [])
+# THE POINT. The session worked, so nothing may read as a fault.
+check("could not handle the relay's reply" not in quiet_said,
+      "audio arriving after the output was released is this end's own teardown, "
+      "not a fault to alarm on: %r" % quiet_said)
+check("Traceback" not in quiet_said,
+      "and it must not leave a traceback behind either: %r" % quiet_said)
+check(quiet_code == 0,
+      "a session whose only turn was answered must still exit 0, got %r"
+      % quiet_code)
+check(quiet_run["answered"] and quiet_run["relay_error"] is None,
+      "and its record stands, reason-free: %r" % quiet_run)
+# Condition 2: the discard is diagnostic only. The late chunk is the same size as
+# the answer, so anything crediting it would double both figures.
+check(quiet.playback.discarded == 1,
+      "the late chunk must be counted as discarded: %r"
+      % quiet.playback.discarded)
+check(quiet.playback.turn_bytes == 2400,
+      "but must not be credited to the turn: %r" % quiet.playback.turn_bytes)
+check(quiet_run["reply_audio_seconds"] == 0.05,
+      "so the reply's own duration stands: %r" % quiet_run["reply_audio_seconds"])
+check(quiet_run["first_audio_s"] is not None,
+      "and the answer's real first-audio figure stands: %r"
+      % quiet_run["first_audio_s"])
+check(os.path.getsize(quiet_file) == 2400,
+      "and the discarded chunk reached no file: %d bytes"
+      % os.path.getsize(quiet_file))
+
+# Condition 1: discarded, not silently swallowed. A write after close outside
+# teardown is a real logic bug, so the count has somewhere to be read.
+loud, _, loud_said, loud_code, _ = audio_after_close("loud", ["--verbose"])
+check("discarded 1 reply audio chunk" in loud_said,
+      "--verbose must say how many chunks were dropped: %r" % loud_said)
+check("could not handle the relay's reply" not in loud_said
+      and "Traceback" not in loud_said,
+      "and saying so is not the same as calling it a fault: %r" % loud_said)
+check(loud_code == 0 and loud.playback.turn_bytes == 2400,
+      "and reporting it changes neither the exit code nor the turn's bytes: %r %r"
+      % (loud_code, loud.playback.turn_bytes))
+
+# Which of the playback's two locks covers what, driven rather than asserted about.
+# take_turn calls turn_reset while holding the client's own turn lock, so anything
+# turn_reset can wait behind stalls the whole client: neither the downlink nor the
+# sender can stamp a thing without that lock. The file write is the one slow step
+# here, so it must sit outside the lock turn_reset takes. The handle below parks
+# instead of writing, which makes a slow filesystem exact rather than simulated.
+parked, release_write, reset_done = (thread_lib.Event(), thread_lib.Event(),
+                                     thread_lib.Event())
+
+
+class ParkingHandle:
+    """A file whose write blocks until this case lets it through."""
+
+    def __init__(self):
+        self.written = 0
+
+    def write(self, pcm):
+        self.written += len(pcm)
+        parked.set()
+        check(release_write.wait(10), "fixture: the parked write was never freed")
+
+    def close(self):
+        pass
+
+
+slow = client.FilePlayback(os.path.join(TMP, "reply-slow.pcm"))
+slow._handle.close()
+slow._handle = ParkingHandle()
+slow.turn_reset(1)
+thread_lib.Thread(target=slow.write, args=(b"\x00\x00" * 600, 1),
+                  daemon=True).start()
+check(parked.wait(10), "fixture: the write never reached the handle")
+
+
+def advance_the_turn():
+    slow.turn_reset(2)
+    reset_done.set()
+
+
+thread_lib.Thread(target=advance_the_turn, daemon=True).start()
+# Bounded, and it discriminates in both directions: with the write outside that
+# lock the reset completes at once, and with the write inside it the reset cannot
+# complete until the line below runs, whatever the machine is doing.
+check(reset_done.wait(5),
+      "a turn advance must not wait behind a file write, because take_turn makes "
+      "it while holding the lock the downlink and the sender both need")
+release_write.set()
+# The accounting still had to happen, and under the lock: the chunk was turn one's.
+check(slow.turn_bytes == 0 and slow.first_played is None,
+      "and turn two starts owed nothing and unstamped: %r %r"
+      % (slow.turn_bytes, slow.first_played))
+
+# The record's own two figures for one turn's audio. reply_audio_seconds and
+# answered are the same measurement asked twice, and the record is built outside
+# the playback's lock, so reading that measurement twice lets a chunk land between
+# the two reads and produce a record saying both that no audio arrived and that the
+# turn was answered. The reader of runs.jsonl then has to guess which half to
+# believe, which is the whole failure this work exists to remove.
+#
+# The playback below is that interleaving made exact rather than raced for: the
+# count grows between one read of it and the next, so a record built from two reads
+# cannot agree with itself and a record built from one always does.
+class SlippingCount(client.FilePlayback):
+    """A playback whose byte count grows between one read of it and the next."""
+
+    def __init__(self, path):
+        self.reads = 0
+        client.FilePlayback.__init__(self, path)
+
+    @property
+    def turn_bytes(self):
+        self.reads += 1
+        return self._counted if self.reads == 1 else self._counted + 2400
+
+    @turn_bytes.setter
+    def turn_bytes(self, count):
+        self._counted = count
+
+
+slip_open, slip_parked = thread_lib.Event(), thread_lib.Event()
+
+
+def park_the_downlink():
+    # Parked rather than ended, because an end of stream would make the downlink
+    # name a reason, and naming one reads the byte count itself. The turn has to
+    # reach its record with the count still unread by anything else.
+    slip_parked.wait(30)
+
+
+slipping = SlippingCount(os.path.join(TMP, "reply-slip.pcm"))
+# The timeout boundary is the one moment the first chunk of a reply can land while
+# the record is being built, because a turn that timed out with nothing played is
+# the only one whose count is still zero when the record reads it.
+slipped = wire_client(
+    ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+     "--out-file", os.path.join(TMP, "reply-slip.pcm"),
+     "--timeout", "0.3", "--audio-idle", "0.05"],
+    ScriptedStream(slip_open, b"", "nothing at all", park_the_downlink),
+    StartGate(slip_open), slipping)
+slip_out, slip_said = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(slip_out), contextlib.redirect_stderr(slip_said):
+    slip_code = slipped.run()
+slipped.up_q.put(None)
+slip_records = [json_lib.loads(line) for line in slip_out.getvalue().splitlines()
+                if line.strip()]
+check(len(slip_records) == 1,
+      "the turn was taken, so its record belongs in the file: %r" % slip_records)
+slip = slip_records[0]
+check(slipping.reads >= 1,
+      "fixture: the record never read the byte count at all, so this case proves "
+      "nothing: %r" % slipping.reads)
+# THE POINT. One record may not answer the same question two ways.
+check(slip["answered"] == (slip["reply_audio_seconds"] > 0),
+      "a record that counts no reply audio must not also call the turn answered: "
+      "%r" % slip)
+check(slip["reply_audio_seconds"] == 0.0 and slip["answered"] is False,
+      "and the figures are the ones true when the record was built, not one from "
+      "before the chunk and one from after: %r" % slip)
+check(slip_code != 0,
+      "an unanswered turn must not exit 0, got %r" % slip_code)
+# Released under a redirect so the end of stream this case parked cannot print into
+# the suite's own output, and waited for so it cannot land after the case has ended.
+with contextlib.redirect_stderr(io.StringIO()):
+    slip_parked.set()
+    slip_drained = slipped.closed.wait(10)
+check(slip_drained, "fixture: the parked stream never ended")
+
+# An end of stream arriving during THIS end's own teardown. close() bounds the
+# relay's exit and the relay's own teardown can outlast that bound, so the child is
+# killed with no goodbye written and the still-live downlink reads the empty stream
+# it left behind. Every turn was answered and the session exits 0, so the mid-turn
+# fault line must not be the last thing the captain reads: an alarm that also fires
+# on success is one they learn to skip past, and then the real one is invisible too.
+#
+# The discriminator is the same one the goodbye branch uses, whether this end asked
+# to stop, and the mid-session case further up this file is the other direction of
+# it: there the stream ends long before close() is reached, so the line still fires.
+class QuitThenEnd:
+    """Serves one whole answer, then ends the stream once this end says goodbye."""
+
+    def __init__(self, opened, quit_seen):
+        self._opened = opened
+        self._quit = quit_seen
+        self._bytes = frame.encode(frame.AUDIO, b"\x00\x00" * 1200) + REPLY_END
+        self._at = 0
+
+    def read(self, count):
+        check(self._opened.wait(10), "the turn never opened, so nothing was served")
+        if self._at < len(self._bytes):
+            chunk = self._bytes[self._at:self._at + count]
+            self._at += len(chunk)
+            return chunk
+        check(self._quit.wait(10),
+              "fixture: this end never asked to stop, so the stream never ended")
+        return b""
+
+
+class GoodbyeWatchingGate:
+    """Opens on the turn's first frame and reports this end asking to stop."""
+
+    def __init__(self, opened, quit_seen):
+        self._opened = opened
+        self._quit = quit_seen
+
+    def send(self, kind, payload=b""):
+        if kind == frame.TALK_START:
+            self._opened.set()
+        elif kind == frame.QUIT:
+            self._quit.set()
+
+
+tidy_open, tidy_quit = thread_lib.Event(), thread_lib.Event()
+tidy = wire_client(
+    ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+     "--out-file", os.path.join(TMP, "reply-tidy.pcm"),
+     "--timeout", "2", "--audio-idle", "0.05"],
+    QuitThenEnd(tidy_open, tidy_quit), GoodbyeWatchingGate(tidy_open, tidy_quit))
+tidy_out, tidy_said = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(tidy_out), contextlib.redirect_stderr(tidy_said):
+    tidy_code = tidy.run()
+    # Gated on the downlink reaching the end of stream rather than on any elapsed
+    # time: close() does not wait for it here, so without this the case could pass
+    # by asserting on output the downlink had not written yet.
+    tidy.close()
+    tidy_drained = tidy.closed.wait(10)
+tidy.up_q.put(None)
+check(tidy_drained, "fixture: the downlink never saw the stream end")
+tidy_records = [json_lib.loads(line) for line in tidy_out.getvalue().splitlines()
+                if line.strip()]
+check(len(tidy_records) == 1,
+      "one turn was answered, so one record belongs in the file: %r" % tidy_records)
+# Proof the end of stream really was taken, so the silence below is a decision
+# rather than a branch this case never reached: the cause is recorded outside the
+# test that decides whether to speak.
+check(tidy.closed_because == "the connection ended",
+      "fixture: the downlink did not take the end of stream at all: %r"
+      % tidy.closed_because)
+# THE POINT. The session answered everything asked of it, so nothing may read as a
+# fault, least of all as the last line the captain sees.
+check("the connection ended" not in tidy_said.getvalue(),
+      "an end of stream during this end's own teardown is the relay doing as it "
+      "was told, not a fault to alarm on: %r" % tidy_said.getvalue())
+check(tidy_code == 0,
+      "and a session whose only turn was answered must still exit 0, got %r"
+      % tidy_code)
+check(tidy_records[0]["answered"] and tidy_records[0]["relay_error"] is None,
+      "and its record stands, reason-free: %r" % tidy_records[0])
+
+# A reply that is handled AFTER the turn it belongs to has already been recorded.
+# The downlink reads a frame on one thread and applies it on another, so a turn
+# that times out while a notice is in flight used to have that notice applied to
+# whatever turn came next: it named the new turn with the old turn's fault, and
+# released it before its own answer had arrived. A turn that would have been
+# answered normally was reported unanswered, carrying a reason belonging to a turn
+# the captain had already been told about.
+#
+# Driven through the client's own say(), not a sleep: the notice is parked exactly
+# where the real window is, after the frame has arrived and before its handler
+# takes the lock, and it is released only once the NEXT turn has really opened,
+# which the uplink reports when that turn's talk start goes out.
+class TurnCountingGate:
+    """Reports the first turn opening, and the second one separately."""
+
+    def __init__(self, first, second):
+        self._first = first
+        self._second = second
+        self.starts = 0
+
+    def send(self, kind, payload=b""):
+        if kind == frame.TALK_START:
+            self.starts += 1
+            (self._first if self.starts == 1 else self._second).set()
+
+
+stale_open, stale_next = thread_lib.Event(), thread_lib.Event()
+# Wired without starting its threads, because the notice has to be parked before
+# the downlink is allowed to read it.
+stale = wire_client(
+    ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+     "--out-file", os.path.join(TMP, "reply-stale.pcm"), "--runs", "2",
+     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"],
+    ScriptedStream(
+        stale_open,
+        frame.encode_json(frame.NOTICE, {"event": "turn-failed",
+                                         "error": "the model dropped turn one"})
+        + frame.encode(frame.AUDIO, b"\x00\x00" * 1200) + REPLY_END,
+        "turn one's failure and turn two's answer"),
+    TurnCountingGate(stale_open, stale_next), start=False)
+
+# The notice is held between arriving and being applied, which is the window the
+# turn identity exists to close. Turn one then times out and is recorded, turn two
+# opens, and only then is the notice allowed to finish being handled.
+said_plainly = client.say
+
+
+def park_the_notice(message):
+    said_plainly(message)
+    if "could not finish that turn" in message:
+        check(stale_next.wait(10),
+              "fixture: the second turn never opened, so nothing went stale")
+
+
+client.say = park_the_notice
+try:
+    thread_lib.Thread(target=stale._sender, daemon=True).start()
+    thread_lib.Thread(target=stale._downlink, daemon=True).start()
+    stale_out, stale_said = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(stale_out), contextlib.redirect_stderr(stale_said):
+        stale_code = stale.run()
+finally:
+    client.say = said_plainly
+stale.up_q.put(None)
+stale.playback.close()
+
+stale_runs = [json_lib.loads(line) for line in stale_out.getvalue().splitlines()
+              if line.strip()]
+check(len(stale_runs) == 2,
+      "both turns were taken, so both belong in the file: %d, %r"
+      % (len(stale_runs), stale_runs))
+check(not stale_runs[0]["answered"],
+      "fixture is wrong: the first turn should time out unanswered: %r"
+      % stale_runs[0])
+# THE POINT. The stale notice belonged to turn one and must touch nothing else.
+check(stale_runs[1]["relay_error"] is None,
+      "a fault from a turn that has already ended must not be recorded against "
+      "the next one: %r" % stale_runs[1])
+check(stale_runs[1]["answered"] and stale_runs[1]["reply_audio_seconds"] > 0,
+      "and the next turn must be left to run normally rather than released "
+      "before its answer arrived: %r" % stale_runs[1])
+check(stale_code != 0,
+      "one turn of two was still lost, so the exit code must say so, got %r"
+      % stale_code)
+
+# The same window, with AUDIO in it instead of a notice, which is the worse half.
+# The frame's timing marks are taken under the turn lock, but the audio itself goes
+# to the playback, and the playback is where first_played is stamped, where the
+# reply's duration is counted, and where answered comes from. Credited to whatever
+# turn is open, one stale chunk gives a turn that was never answered a headline
+# latency figure measured from somebody else's reply, reports it answered, and with
+# that the whole session exits 0 having lost a turn.
+#
+# Parked at the playback rather than at say(), because that IS the accounting
+# point: the write is released only once the next turn has really opened, which the
+# uplink reports when that turn's talk start goes out. No sleeps.
+class LatePlayback(client.FilePlayback):
+    """Holds the first chunk until the turn after the one it belongs to has opened."""
+
+    def __init__(self, path, opened):
+        client.FilePlayback.__init__(self, path)
+        self._opened = opened
+        self._held = False
+
+    def write(self, pcm, turn):
+        if not self._held:
+            self._held = True
+            check(self._opened.wait(10),
+                  "fixture: the next turn never opened, so nothing went stale")
+        client.FilePlayback.write(self, pcm, turn)
+
+
+late_open, late_next = thread_lib.Event(), thread_lib.Event()
+late_out_file = os.path.join(TMP, "reply-late.pcm")
+late = wire_client(
+    ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+     "--out-file", late_out_file, "--runs", "2",
+     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "0.05"],
+    ScriptedStream(late_open, frame.encode(frame.AUDIO, b"\x00\x00" * 1200),
+                   "turn one's audio"),
+    TurnCountingGate(late_open, late_next),
+    LatePlayback(late_out_file, late_next))
+late_out, late_said = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(late_out), contextlib.redirect_stderr(late_said):
+    late_code = late.run()
+late.up_q.put(None)
+late.playback.close()
+
+late_runs = [json_lib.loads(line) for line in late_out.getvalue().splitlines()
+             if line.strip()]
+check(len(late_runs) == 2,
+      "both turns were taken, so both belong in the file: %d, %r"
+      % (len(late_runs), late_runs))
+# THE POINT. Turn two was served nothing at all, and the stale chunk must not make
+# it look otherwise on any of the four figures the playback feeds.
+second = late_runs[1]
+check(not second["answered"],
+      "a turn served no audio of its own must not be reported answered because "
+      "an earlier turn's chunk arrived during it: %r" % second)
+check(second["reply_audio_seconds"] == 0,
+      "and none of that chunk's duration belongs to it: %r" % second)
+check(second["first_played_s"] is None,
+      "and it must not be stamped with when that chunk reached the output: %r"
+      % second)
+check(second["first_audio_s"] is None,
+      "and the headline figure, which prefers the playback stamp, must be absent "
+      "too rather than measured from another turn's reply: %r" % second)
+check(second["first_frame_s"] is None,
+      "and the frame stamp stays absent, as the turn identity already ensured: %r"
+      % second)
+check(late_code != 0,
+      "a session that lost a turn must not exit 0, got %r" % late_code)
+# And the audio was still written. Attributing it to nobody must not mean dropping
+# it: it is the tail of an answer the captain is still listening to.
+check(os.path.getsize(late_out_file) == 2400,
+      "the late chunk must still reach the output, not be discarded to make the "
+      "figures tidy: %d bytes" % os.path.getsize(late_out_file))
+
+# The wait between turns is the last thing a lost session should do. It exists
+# only to avoid talking over the model's own speech, and a relay that is already
+# gone is not speaking, so waiting it out leaves the captain sitting through the
+# previous reply's whole spoken duration before anyone tells them the session
+# stopped. The gap here is deliberately long and the reply deliberately short, so
+# the elapsed time distinguishes stopping from waiting; nothing in the case sleeps
+# on purpose, the code under test is the sleep.
+prompt_served = thread_lib.Event()
+prompt = wire_client(
+    ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+     "--out-file", os.path.join(TMP, "reply-prompt.pcm"), "--runs", "3",
+     "--timeout", "2", "--audio-idle", "0.05", "--gap-seconds", "5"],
+    ScriptedStream(prompt_served,
+                   frame.encode(frame.AUDIO, b"\x00\x00" * 1200) + REPLY_END,
+                   "one whole answer and then the end of stream"),
+    StartGate(prompt_served))
+prompt_out, prompt_said = io.StringIO(), io.StringIO()
+prompt_began = clock.monotonic()
+with contextlib.redirect_stdout(prompt_out), contextlib.redirect_stderr(prompt_said):
+    prompt_code = prompt.run()
+prompt_took = clock.monotonic() - prompt_began
+prompt.up_q.put(None)
+prompt.playback.close()
+
+prompt_runs = [json_lib.loads(line) for line in prompt_out.getvalue().splitlines()
+               if line.strip()]
+check(len(prompt_runs) == 1 and prompt_runs[0]["answered"],
+      "fixture is wrong: one answered turn should be taken and no more: %r"
+      % prompt_runs)
+check(prompt_code != 0,
+      "a session that took 1 of 3 runs must not exit 0, got %r" % prompt_code)
+check(prompt_took < 3,
+      "a session that already knows the connection is gone must stop rather than "
+      "wait out the 5s gap first: took %.2fs" % prompt_took)
+check("the connection ended before run 2 of 3" in prompt_said.getvalue(),
+      "and it should name the cause and the first run it lost: %r"
+      % prompt_said.getvalue())
+
+# The speaker's byte ACCOUNTING, which is not the speaker. No audio device is
+# reached here and none can be on this host: the stream is a stub and the device
+# callback is called by hand, so nothing below says anything about how a real
+# output device behaves. What it does cover is the arithmetic deciding which turn
+# a chunk is credited to and whose first-audio clock it stamps, which until now
+# was the one piece of that logic with no coverage at all while the file path it
+# mirrors had plenty. Its correctness rests on the earlier turns' bytes being a
+# prefix of the buffer, and a sign or bound slip in the prefix count would
+# silently mismeasure the headline latency on the path the captain will use.
+class StubStream:
+    """Stands in for the output device: accepts the settings, plays nothing."""
+
+    def __init__(self, **settings):
+        self.settings = settings
+        self.latency = 0.011
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        pass
+
+    def close(self):
+        pass
+
+
+stub_audio = types.ModuleType("sounddevice")
+stub_audio.RawOutputStream = StubStream
+sys.modules["sounddevice"] = stub_audio
+
+
+def fresh_speaker():
+    return client.SpeakerPlayback()
+
+
+def pull(speaker, frames):
+    """Ask the stub device for one block, and return exactly what it was handed."""
+    block = bytearray(frames * 2)
+    speaker._callback(block, frames, None, None)
+    return bytes(block)
+
+
+opened = fresh_speaker()
+check(opened.device_latency == 0.011,
+      "the reported device latency should come from the stream: %r"
+      % opened.device_latency)
+
+# No earlier bytes at all: the first chunk of this turn's own reply is this turn's
+# first audio.
+speaker = fresh_speaker()
+speaker.turn_reset(1)
+speaker.write(b"\x01\x01" * 300, 1)
+check(speaker.turn_bytes == 600,
+      "this turn's own audio is credited to it: %r" % speaker.turn_bytes)
+check(pull(speaker, 300) == b"\x01\x01" * 300, "and is played unchanged")
+check(speaker.first_played is not None,
+      "and stamps this turn's first audio when it reaches the device")
+
+# An empty buffer. Silence handed to the device is not the reply arriving, so the
+# count taken and the count skipped are equal at zero and nothing is stamped.
+speaker = fresh_speaker()
+speaker.turn_reset(1)
+check(pull(speaker, 100) == b"\x00" * 200,
+      "an empty buffer is padded with silence")
+check(speaker.first_played is None,
+      "and stamps nothing: no reply audio has reached the device yet")
+
+# Earlier bytes exactly equal to the block taken. The whole block belongs to a turn
+# already recorded, so it plays and stamps nothing.
+speaker = fresh_speaker()
+speaker.turn_reset(2)
+speaker.write(b"\x02\x02" * 300, 1)
+check(speaker.turn_bytes == 0,
+      "a chunk from an earlier turn is credited to nobody: %r" % speaker.turn_bytes)
+check(pull(speaker, 300) == b"\x02\x02" * 300,
+      "but is still played, because it is the tail of an answer being listened to")
+check(speaker.first_played is None,
+      "and must not stamp the later turn's first audio")
+
+# Earlier bytes larger than the block taken, drained across two blocks. The count
+# has to come down by what was taken and no more, or the turn's real first audio
+# is stamped by somebody else's tail.
+speaker = fresh_speaker()
+speaker.turn_reset(2)
+speaker.write(b"\x03\x03" * 300, 1)
+speaker.write(b"\x04\x04" * 300, 1)
+check(pull(speaker, 150) == b"\x03\x03" * 150, "the earlier tail plays in order")
+check(speaker.first_played is None, "and stamps nothing on the first block")
+check(pull(speaker, 150) == b"\x03\x03" * 150, "nor on the second")
+check(speaker.first_played is None, "still nothing stamped")
+check(pull(speaker, 300) == b"\x04\x04" * 300, "nor while the rest of it drains")
+check(speaker.first_played is None,
+      "1200 earlier bytes must take 1200 bytes to drain, not one block")
+speaker.write(b"\x05\x05" * 300, 2)
+check(pull(speaker, 300) == b"\x05\x05" * 300, "then this turn's own reply plays")
+check(speaker.first_played is not None, "and that is what stamps the clock")
+
+# Earlier bytes smaller than the block taken, so one block spans the boundary. The
+# first byte past the earlier tail is this turn's first audio, and it is inside a
+# block that started with somebody else's.
+speaker = fresh_speaker()
+speaker.turn_reset(2)
+speaker.write(b"\x06\x06" * 150, 1)
+speaker.write(b"\x07\x07" * 150, 2)
+check(pull(speaker, 300) == b"\x06\x06" * 150 + b"\x07\x07" * 150,
+      "a block spanning the boundary is played whole")
+check(speaker.first_played is not None,
+      "and the first byte past the earlier tail stamps this turn's first audio")
+check(speaker.turn_bytes == 300,
+      "with only this turn's half credited to it: %r" % speaker.turn_bytes)
+
+# A turn advancing while the previous answer is still queued, which is the case
+# turn_reset itself has to handle: everything already buffered belongs to the turn
+# that is being closed, however it got there.
+speaker = fresh_speaker()
+speaker.turn_reset(1)
+speaker.write(b"\x08\x08" * 300, 1)
+check(speaker.turn_bytes == 600, "turn one is credited its own reply")
+speaker.turn_reset(2)
+check(speaker.turn_bytes == 0 and speaker.first_played is None,
+      "turn two starts owed nothing and unstamped: %r %r"
+      % (speaker.turn_bytes, speaker.first_played))
+check(pull(speaker, 300) == b"\x08\x08" * 300,
+      "turn one's undrained tail still reaches the device")
+check(speaker.first_played is None,
+      "but it must not stamp turn two, which is what it would have done before "
+      "turn_reset counted what was already queued")
+speaker.write(b"\x09\x09" * 300, 2)
+check(pull(speaker, 300) == b"\x09\x09" * 300 and speaker.first_played is not None,
+      "and turn two's own reply is what stamps turn two")
+check(speaker.turn_bytes == 600, "credited to turn two: %r" % speaker.turn_bytes)
+
+# A short buffer of earlier bytes: padded with silence, and the padding is not
+# mistaken for this turn's reply either.
+speaker = fresh_speaker()
+speaker.turn_reset(2)
+speaker.write(b"\x0a\x0a" * 100, 1)
+check(pull(speaker, 300) == b"\x0a\x0a" * 100 + b"\x00" * 400,
+      "a short earlier tail is padded rather than repeated")
+check(speaker.first_played is None, "and the padding stamps nothing")
+
+# A chunk arriving after close, which is the same teardown race the file path
+# already discards and counts. Nothing here goes near a device: the stream is the
+# same stub, and stopping it is what makes the chunk unplayable, so queuing it
+# would be recording a measurement the captain never heard.
+speaker = fresh_speaker()
+speaker.turn_reset(1)
+speaker.write(b"\x0b\x0b" * 300, 1)
+speaker.turn_reset(2)
+speaker.write(b"\x0c\x0c" * 150, 2)
+was = (speaker.turn_bytes, speaker._earlier, speaker.first_played,
+       bytes(speaker._buffer))
+check(was == (300, 600, None, b"\x0b\x0b" * 300 + b"\x0c\x0c" * 150),
+      "fixture: turn two should be owed its own bytes behind turn one's tail: %r"
+      % (was,))
+speaker.close()
+speaker.write(b"\x0d\x0d" * 300, 2)
+check(speaker.discarded == 1,
+      "a chunk arriving after close must be counted, not silently swallowed: %r"
+      % speaker.discarded)
+check(bytes(speaker._buffer) == was[3],
+      "and must not be queued for a stream that has already stopped")
+check((speaker.turn_bytes, speaker._earlier, speaker.first_played) == was[:3],
+      "and must leave every per-turn figure exactly as it was: %r"
+      % ((speaker.turn_bytes, speaker._earlier, speaker.first_played),))
+
+# And the count reaches the captain on this path through the same close() that
+# reports it on the file path, so the counter is not merely present here.
+heard = fresh_speaker()
+heard.turn_reset(1)
+heard.write(b"\x0e\x0e" * 300, 1)
+check(pull(heard, 300) == b"\x0e\x0e" * 300,
+      "fixture: the turn's own reply should drain before the output is released")
+heard.close()
+heard.write(b"\x0f\x0f" * 300, 1)
+reported = client.Client(client.parse_args(["--host", "desk", "--verbose"]))
+reported.playback = heard
+speaker_said = io.StringIO()
+with contextlib.redirect_stderr(speaker_said):
+    reported.close()
+check("discarded 1 reply audio chunk" in speaker_said.getvalue(),
+      "--verbose must report the count on this path as it does on the file one: %r"
+      % speaker_said.getvalue())
+
+del sys.modules["sounddevice"]
+
+
 
 # A startup that refuses part way through releases what it already started, and
 # close() therefore has to survive a half-built client. The real devices cannot be
@@ -1626,9 +2999,9 @@ check("connection closed" in spoken.getvalue(),
 class Recorder:
     def __init__(self, closed):
         self._closed = closed
-        self.bytes = 0
         self.first_played = None
         self.device_latency = None
+        self.discarded = 0
 
     def drain(self, timeout=5):
         pass
@@ -2959,6 +4332,29 @@ sent = sum(s["reply_audio_bytes"] for s in sessions)
 got = os.path.getsize(os.path.join(root, "reply.pcm"))
 check(sent > 0 and sent == got,
       "the model sent %d bytes of reply audio and the client wrote %d" % (sent, got))
+
+# AND NOTHING ALARMING WAS SAID, which is the other half of every fault line this
+# build added. The relay's goodbye arrives on this path too, at the end of every
+# ordinary session, so a line that reads as a fault would fire here on a session
+# where all of it worked. An alarm that also goes off on success is worse than no
+# alarm: the captain learns to skip it, and then the one that means their question
+# was lost is invisible as well. The session end still speaks, in its own words.
+for alarming in ("stopped without being asked", "could not handle the relay's",
+                 "connection lost", "the connection ended",
+                 "were not taken", "no reply within"):
+    check(alarming not in transcript,
+          "a session where every turn was answered said %r: %r"
+          % (alarming, transcript))
+# And no record named a reason, which is what now decides the exit code as well.
+# A fault that fires on a session where everything worked would fail every clean
+# run from here on, so the absence is worth pinning next to the exit code itself.
+for run in runs:
+    check(run["relay_error"] is None,
+          "turn %s recorded a reason on a session that worked: %r"
+          % (run["run"], run["relay_error"]))
+check("the relay signed off" in transcript,
+      "but the end of the session should still be said, in wording that cannot be "
+      "read as a fault: %r" % transcript)
 PY
 pass "a spoken turn goes out and comes back: the records answer, firstmate gets the work"
 
@@ -3062,8 +4458,20 @@ check(len(runs) == 2,
 check(len(sessions) == 2,
       "the next talk key did not get a session: %d opened" % len(sessions))
 check(not runs[0]["answered"], "the lost turn should be the first one: %r" % runs[0])
-check(runs[0]["relay_error"] is None,
-      "an ordinary session end is not a turn failure: %r" % runs[0]["relay_error"])
+# An ordinary session end is not a turn FAILURE - the relay names none, marks the
+# session spent for nobody, and the next talk key gets a working one - but the
+# turn it landed in still has no answer, and the record has to say why. Left null
+# there, the only turn in this whole file that went unanswered for a knowable
+# reason reads in runs.jsonl exactly like a turn the model declined, and that file
+# is where the published latency spread comes from.
+check(runs[0]["relay_error"],
+      "a turn released by the session ending must name why it has no answer: %r"
+      % runs[0])
+check("session" in runs[0]["relay_error"],
+      "and it should name the session ending rather than some other fault: %r"
+      % runs[0]["relay_error"])
+check("could not finish that turn" not in transcript,
+      "the relay must not have called this a failed turn: %r" % transcript)
 
 # And it was a working session rather than a closed pipe: a real answer, composed
 # from a real read of the records, spoken to the captain over the same connection.
@@ -3107,6 +4515,104 @@ check("connection lost" not in transcript,
       "the connection should have outlived the session: %r" % transcript)
 PY
 pass "a model session that ends mid-conversation costs one turn, not the relay"
+
+# --- an uplink that stops being a frame stream --------------------------------
+#
+# One of the three things that ends the relay, and the only one it diagnoses: the
+# captain's uplink desynchronises, so the relay can no longer tell a header from
+# audio. It writes what it saw on its own stderr and exits 2, which is honest,
+# and it used to tell the client only goodbye. Everything the relay knew stayed
+# on a stderr no run file quotes, while the turn the captain was in the middle of
+# came back as answered: false with nothing in relay_error - the reason existed
+# and was thrown away.
+#
+# Worse, the teardown closes the model session first, and that sets the flag which
+# silences the session reader's own notice, so this path really did send the client
+# nothing at all but the goodbye.
+#
+# The relay is driven directly here rather than through the client, because no
+# client sends a bad frame: the desync is the transport corrupting one, and the
+# only way to put one on the wire is to be the other end. The model is the same
+# stand-in the round trip above uses, and it is never asked to answer.
+
+set +e
+env -i PATH="$PATH" HOME="$E2E/desktop-home" PYTHONPATH="$E2E/fakesdk" \
+  PYTHONDONTWRITEBYTECODE=1 FM_HOME="$E2E/home" \
+  AWS_ACCESS_KEY_ID="$E2E_KEY" \
+  AWS_SECRET_ACCESS_KEY=desktop-secret-not-a-real-key \
+  python3 - "$ROOT/bin" <<'PY'
+import os, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+import fm_voice_frame as frame
+
+relay = os.path.join(sys.argv[1], "fm-voice-relay.py")
+
+
+def check(cond, label):
+    if not cond:
+        sys.exit("desync: " + label)
+
+
+proc = subprocess.Popen(
+    [sys.executable, relay, "--serve"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+try:
+    magic = proc.stdout.read(len(frame.MAGIC))
+    check(magic == frame.MAGIC, "the relay did not open the stream: %r" % magic)
+    reader = frame.Reader(proc.stdout)
+    kind, payload = reader.read()
+    check(kind == frame.NOTICE
+          and frame.decode_json(payload).get("event") == "ready",
+          "the relay was never ready: %r %r" % (kind, payload))
+
+    # A turn is open when the uplink goes, which is when it goes in practice: the
+    # captain is holding the talk key, so that is when there are frames on the
+    # wire to be corrupted at all.
+    proc.stdin.write(frame.encode(frame.TALK_START))
+    proc.stdin.write(b"\xff\x00\x00\x00\x00")
+    proc.stdin.flush()
+
+    frames = []
+    while True:
+        got = reader.read()
+        if got is None:
+            break
+        frames.append(got)
+        if got[0] == frame.BYE:
+            break
+finally:
+    proc.stdin.close()
+    said = proc.stderr.read().decode("utf-8", "replace")
+    code = proc.wait(timeout=30)
+
+kinds = [k for k, _ in frames]
+check(frame.BYE in kinds, "the relay never said goodbye: %r" % kinds)
+named = [n for n in (frame.decode_json(p) for k, p in frames if k == frame.NOTICE)
+         if n.get("event") == "turn-failed"]
+check(named,
+      "the relay diagnosed the fault and told the client only goodbye: %r" % kinds)
+check("FrameError" in named[0].get("error", ""),
+      "the notice should carry what the relay saw: %r" % named[0])
+# Before the goodbye, and before the model session is closed: closing it awaits
+# the model stream, which can be slow or raise, and the client must learn the
+# reason either way.
+failed_at = next(i for i, (k, p) in enumerate(frames)
+                 if k == frame.NOTICE
+                 and frame.decode_json(p).get("event") == "turn-failed")
+check(failed_at < kinds.index(frame.BYE),
+      "the reason must reach the client ahead of the goodbye: %r" % kinds)
+
+# Still said on the relay's own stderr, which the captain reads over SSH, and
+# still the unhappy exit code: naming the fault down the connection does not make
+# it a turn the relay recovered from.
+check("not a frame stream any more" in said,
+      "the relay should still name the desync on its stderr: %r" % said)
+check(code == 2, "a desynchronised uplink must exit 2, got %r" % code)
+PY
+desync_code=$?
+set -e
+[ "$desync_code" = 0 ] || fail "a desynchronised uplink was not named to the client"
+pass "a desynchronised uplink is named to the client before the goodbye, not only to stderr"
 
 # --- the desktop's own check, and the clock it refuses to lie about ----------
 #

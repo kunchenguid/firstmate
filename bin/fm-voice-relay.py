@@ -22,8 +22,8 @@ Modes:
                      This is the control measurement for the relay path, and it
                      needs no client, no SSH and no microphone.
 
-The two traps this code already avoids, both found the expensive way and
-recorded in data/speech-to-speech-survey-s2/report.md section 10:
+The two traps this code already avoids, both found the expensive way and both
+measured rather than assumed:
 
   1. completionEnd does not arrive on its own. The model holds the session open
      waiting for more speech. The real "the reply is finished" signal is a
@@ -108,8 +108,8 @@ SETTINGS = {
 
 IN_RATE = 16000
 OUT_RATE = 24000
-# 3200 bytes is 100 ms at 16 kHz 16-bit mono, the chunk size the survey measured
-# its timings with. Keeping it identical keeps those numbers comparable.
+# 3200 bytes is 100 ms at 16 kHz 16-bit mono, the chunk size earlier prototype
+# work measured its timings with. Keeping it identical keeps those comparable.
 CHUNK = 3200
 BYTES_PER_MS_IN = IN_RATE * 2 // 1000
 
@@ -1012,6 +1012,11 @@ async def serve(options):
         "connect_seconds": session.connect_seconds})
 
     status = 0
+    # A fault the client cannot see for itself, held so the teardown can name it
+    # down the connection as well as on this stderr. Nothing is captured on the
+    # branch above it: there the client is the end that went away, and there is
+    # nobody left to tell.
+    reason = None
     try:
         while True:
             kind, payload = await read_uplink_frame(reader)
@@ -1025,8 +1030,17 @@ async def serve(options):
         sys.stderr.write(
             "fm-voice-relay: the uplink is not a frame stream any more: {}\n"
             .format(exc))
+        reason = "{}: {}".format(type(exc).__name__, exc)
         status = 2
     finally:
+        # On fail_turn's shape and before close(), which awaits the model stream
+        # and can be slow or raise. session.close() also sets closing, which
+        # silences the reader's own notice, so a goodbye on its own would leave
+        # the captain's turn record saying only that the turn went unanswered
+        # while the reason for it sat on a stderr no run file quotes.
+        if reason is not None:
+            down.send_json(frame.NOTICE, {"event": "turn-failed",
+                                          "error": reason})
         await session.close()
         down.send(frame.BYE)
         down.close()
