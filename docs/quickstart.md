@@ -19,7 +19,8 @@ Most of the time your job is to answer questions, review a finished pull request
 
 ## Your first session
 
-Launch Claude Code, Grok, or Pi inside the firstmate clone, as shown in the README, and let it read `AGENTS.md`.
+Launch one of the supported coding agents inside the firstmate clone, as shown in the README, and let it read `AGENTS.md`.
+Claude Code, Grok, and Pi are the recommended starting points, and the README's Requirements and Recommended harnesses sections own the full supported list.
 The first thing it does is a session start: it takes charge of this home, checks the tools it needs, picks up anything left over from your last session, and prints a startup summary.
 
 That summary - the digest - is the first mate orienting itself out loud, and it is worth skimming once.
@@ -45,8 +46,8 @@ At that point it will settle two things with you, and it helps to know what they
 
 **Delivery mode** is how finished work reaches you:
 
-- `no-mistakes` runs the full validation pipeline before the pull request is opened.
-  What reaches you is already validated and reports green checks, so this is the right choice for anything product-facing.
+- `no-mistakes` runs the full validation pipeline, which carries the work through review, tests, documentation, the pull request, and its checks.
+  It reaches you only once those checks are green, so this is the right choice for anything product-facing.
 - `direct-PR` skips that pipeline and simply opens a pull request.
   Good for small, low-risk, or internal work where the extra rigor is not worth the wait.
 - `local-only` never pushes anywhere.
@@ -134,8 +135,8 @@ You mostly talk in plain language, but these are the commands you type directly.
 | `/stow`            | You are about to reset or compact the session and want what was learned written down first.      |
 | `/updatefirstmate` | You want to pull the latest firstmate and update everything it runs.                             |
 
-Codex uses the same names with `$` instead of `/`, such as `$afk`.
-The README's built-in skills table has the fuller description of each.
+The slash form shown here is what Claude Code and Grok use.
+The README's built-in skills table owns the prefix other agents use and the fuller description of each.
 
 ## When something looks wrong
 

@@ -9,5 +9,6 @@ scratchpad/
 .DS_Store
 __pycache__/
 *.pyc
-.env
 config/
+config.bat
+node_modules
