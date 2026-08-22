@@ -10,8 +10,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $ExtraArgs = @()
 if ($env:FM_LAVISH_WINDOWS_ARGV_JSON) {
-  $DecodedArgs = ConvertFrom-Json -InputObject $env:FM_LAVISH_WINDOWS_ARGV_JSON
-  foreach ($Arg in @($DecodedArgs)) {
+  $DecodedArgs = @(ConvertFrom-Json -InputObject $env:FM_LAVISH_WINDOWS_ARGV_JSON)
+  foreach ($Arg in $DecodedArgs) {
     if ($Arg -isnot [string]) {
       throw 'Lavish forwarded argv must contain strings only'
     }
@@ -107,7 +107,7 @@ if ($Action -eq 'doctor') {
 }
 
 if ($Action -eq 'stop') {
-  & $Lavish stop
+  & $Lavish stop @ExtraArgs
   exit $LASTEXITCODE
 }
 
