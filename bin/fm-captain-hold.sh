@@ -169,6 +169,9 @@ captain_hold_cleanup() {
     fm_lock_release "$CAPTAIN_META_LOCK" || true
     CAPTAIN_META_LOCK_HELD=0
   fi
+  # The archive read stages one copy of the archive per process; this is where it
+  # goes away, so no command here can leave one behind.
+  fm_tasks_axi_archive_view_release
 }
 trap captain_hold_cleanup EXIT
 

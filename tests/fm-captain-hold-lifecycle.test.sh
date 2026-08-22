@@ -1661,6 +1661,76 @@ test_unopenable_archive_refuses_instead_of_reading_as_absent() {
   pass "an archive path that cannot be opened refuses loudly and blocks a duplicate hold"
 }
 
+# The archive read stages one copy of the archive per process and reuses it
+# across lookups, and the archive GROWS underneath that copy: `tasks-axi done`
+# trims by default, so closing one call inside a batch moves an older closed row
+# into the archive between two lookups of the same process. A copy staged before
+# that move must not answer for the row the move added. If it does, a record that
+# is right there in the archive reads as an archive the parser cannot read, which
+# is a false alarm about the file's layout raised over a perfectly healthy file.
+test_a_row_archived_mid_batch_is_still_read_out_of_the_archive() {
+  local home out
+  home=$(make_home retention-archive-midbatch)
+  # A one-row window, so closing one call trims the previously closed one. Under
+  # the tracked ten-row window nothing moves mid-batch and this proves nothing.
+  printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\narchive = "data/done-archive.md"\ndone_keep = 1\n' \
+    > "$home/.tasks.toml"
+
+  # An answered call the archive already holds, so the batch's FIRST row is an
+  # archive read and the copy it stages is the one the later rows inherit.
+  tasks_in "$home" add sample-early-call "Choose the early option" --repo sample >/dev/null \
+    || fail "could not create the early call"
+  run_captain "$home" hold sample-early-call --reason "captain early choice pending" >/dev/null \
+    || fail "could not hold the early call"
+  printf 'Take the early option.\n' > "$home/early.txt"
+  run_captain "$home" answer sample-early-call --decision-file "$home/early.txt" >/dev/null \
+    || fail "could not record the early answer"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention over the early call"
+  assert_grep "sample-early-call" "$home/data/done-archive.md" \
+    "setup error: retention should have moved the early call into the archive"
+
+  # An answered call still sitting in the backlog's Done section. This is the row
+  # the batch itself archives, and the row a later lookup in that same batch asks
+  # for once it has moved.
+  tasks_in "$home" add sample-mid-call "Choose the middle option" --repo sample >/dev/null \
+    || fail "could not create the middle call"
+  run_captain "$home" hold sample-mid-call --reason "captain middle choice pending" >/dev/null \
+    || fail "could not hold the middle call"
+  printf 'Take the middle option.\n' > "$home/mid.txt"
+  run_captain "$home" answer sample-mid-call --decision-file "$home/mid.txt" >/dev/null \
+    || fail "could not record the middle answer"
+  assert_grep "sample-mid-call" "$home/data/backlog.md" \
+    "setup error: the middle call must still be in the backlog, or nothing moves mid-batch"
+
+  # And a live call for the batch to close, which is what triggers the trim.
+  tasks_in "$home" add sample-late-call "Choose the late option" --repo sample >/dev/null \
+    || fail "could not create the late call"
+  run_captain "$home" hold sample-late-call --reason "captain late choice pending" >/dev/null \
+    || fail "could not hold the late call"
+
+  out=$(printf 'sample-early-call\tTake the early option.\tcaptain reply\nsample-late-call\tTake the late option.\tcaptain reply\nsample-mid-call\tTake the middle option.\tcaptain reply\n' \
+    | run_captain "$home" answers --source "test channel" 2>&1) || true
+  assert_contains "$out" "skipped: sample-early-call (already closed and archived" \
+    "setup error: the first row must read the archive, or no copy is staged before the trim"
+  assert_contains "$out" "closed: sample-late-call" \
+    "setup error: the live call must close, because closing it is what trims the middle one"
+  assert_grep "sample-mid-call" "$home/data/done-archive.md" \
+    "setup error: closing the late call should have trimmed the middle one into the archive"
+  assert_no_grep "sample-mid-call" "$home/data/backlog.md" \
+    "setup error: the middle call must be out of the backlog, or its lookup never reaches the archive"
+
+  # The row the batch archived a moment ago is still read out of the archive, as
+  # the closed-and-archived record it is.
+  assert_contains "$out" "skipped: sample-mid-call (already closed and archived" \
+    "a row the batch itself archived must still be read out of the archive"
+  assert_not_contains "$out" "could not be read" \
+    "a healthy archive that grew mid-batch must not be reported as an unreadable layout"
+  assert_contains "$out" "answers: closed=1 skipped=2" \
+    "only the two already-answered deliveries may be skipped"
+  pass "a row archived mid-batch is still read out of the archive"
+}
+
 # The archive is only found through this home's own `[markdown]` table, so every
 # spelling of that table tasks-axi itself honors has to be recognized. Each home
 # here configures a NON-default archive, so a form this read failed to match would
@@ -1788,6 +1858,7 @@ test_legitimate_holds_produce_no_divergence_signal
 test_archived_captain_answer_still_completes_the_investigation
 test_unanswered_and_absent_captain_calls_still_fail_distinguishably
 test_archived_records_are_readable_but_never_written
+test_a_row_archived_mid_batch_is_still_read_out_of_the_archive
 test_archived_origin_still_owns_a_later_review_pass
 test_unopenable_archive_refuses_instead_of_reading_as_absent
 test_markdown_config_forms_all_locate_the_archive

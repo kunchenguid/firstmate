@@ -46,6 +46,12 @@ CAPTAIN_HOLD="$SCRIPT_DIR/fm-captain-hold.sh"
 BACKLOG_FILE=$(fm_tasks_axi_backlog_file "$FM_HOME")
 ARCHIVE_FILE=$(fm_tasks_axi_archive_file "$FM_HOME")
 
+# The shared archive read stages one copy of the archive per process, so this
+# shim removes it on the way out. `resolve` below is the only command here that
+# reads a record at all; every other one hands off to bin/fm-captain-hold.sh,
+# which stages and removes its own in its own process.
+trap fm_tasks_axi_archive_view_release EXIT
+
 usage() {
   awk '
     NR == 1 { next }

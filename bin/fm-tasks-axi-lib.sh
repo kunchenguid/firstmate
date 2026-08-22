@@ -142,6 +142,9 @@ fm_tasks_axi_backend_available() {
 # never depends on the parser tolerating a repeated section heading. tasks-axi
 # stays the single owner of the backlog format; the copy only makes the archive's
 # own section headings legible to it.
+# That copy is staged at most once per process and reused across lookups, so an
+# entry point that sources this file and reads a record must wire
+# fm_tasks_axi_archive_view_release into its exit path; see the memo below.
 #
 # THE OUTCOMES ARE KEPT APART, and fm_tasks_axi_record_show below is the one
 # owner of the whole two-file read so a caller never has to compose it again: a
@@ -162,13 +165,14 @@ fm_tasks_axi_backend_available() {
 # back that other backend's file: the archive lookup would read the wrong file
 # and report an archived record as absent, which is the failure this whole read
 # exists to remove.
-# tasks-axi is this file's real reader, so what tasks-axi accepts is what this
-# resolver accepts, and that bounds it in BOTH directions. Missing a form
-# tasks-axi honors falls back to the default, which for a home that configured
-# its own paths names a file that does not exist; honoring a form tasks-axi
-# ignores resolves a configured path retention never writes. Either way the
-# lookup searches a file that is never written and reports an archived record as
-# absent, which is the failure this whole read exists to remove.
+# tasks-axi is this file's real reader, so what tasks-axi accepts FROM
+# <home>/.tasks.toml is what this resolver accepts from it, and that bounds it in
+# BOTH directions. Missing a form tasks-axi honors falls back to the default,
+# which for a home that configured its own paths names a file that does not
+# exist; honoring a form tasks-axi ignores resolves a configured path retention
+# never writes. Either way the lookup searches a file that is never written and
+# reports an archived record as absent, which is the failure this whole read
+# exists to remove.
 # So, measured against 0.2.4 (the FM_TASKS_AXI_MIN floor) and 0.2.5: a trailing
 # comment, a carriage return, and whitespace inside the brackets all still name
 # this table; a quoted `["markdown"]` key does NOT, because tasks-axi falls back
@@ -177,6 +181,32 @@ fm_tasks_axi_backend_available() {
 # `[[markdown]]` array-of-tables header needs no carve-out: tasks-axi rejects
 # that whole config, so such a home has no backlog for a record to be archived
 # from in the first place.
+#
+# THAT MIRROR CLAIM IS SCOPED TO <home>/.tasks.toml AND NOTHING ELSE. tasks-axi
+# resolves `path` and `archive` from TWO config layers: that project file and a
+# user-level `~/.tasks-axi/config.toml` under the invoking user's own home
+# directory. This resolver does not read the user-level layer at all. So a home
+# that sets `path` in its own .tasks.toml but leaves `archive` to that
+# user-level file has retention writing one file while this read searches
+# another, which is the same false "no record" the whole two-file read exists to
+# remove. Measured against 0.2.5: with the project layer silent on `archive` and
+# the user-level layer naming one, tasks-axi archived into the user-level path
+# while this resolver returned <home>/data/done-archive.md.
+# It is LATENT rather than live, which is why it is written down here instead of
+# fixed: the PROJECT layer WINS whenever both layers set the key, so a home whose
+# .tasks.toml pins `archive`, as firstmate's tracked config does, cannot be
+# reached through the user-level layer at all. Measured the same way: with both
+# layers naming an `archive`, tasks-axi archived into the project path and this
+# resolver agreed.
+# One more divergence sits in the same gap. Within ONE `[markdown]` table
+# tasks-axi lets a repeated key win LAST, while the awk below stops at the first
+# match and takes the FIRST. Measured the same way: with `archive` listed twice
+# in one table, tasks-axi archived into the second path while this resolver
+# returned the first. Latent for the same reason, since the tracked config
+# declares each key exactly once.
+# Work item tasks-config-fallback-divergence-f4 owns the whole question of where
+# this resolver looks when the project file is silent, that layer and this
+# ordering both.
 fm_tasks_axi_markdown_path() {  # <home> <key> <default-relative>
   local home=$1 key=$2 default=$3 config="$1/.tasks.toml" value='' quotes="\"'"
   if [ -f "$config" ] && [ ! -L "$config" ]; then
@@ -248,23 +278,46 @@ fm_tasks_axi_archive_has_entry() {  # <archive-file> <id>
   grep -Eq "^- \[[ x]\] $pattern - " "$file" 2>/dev/null
 }
 
-# One archived task, printed as `tasks-axi show --full` output.
-#   0 - the record is printed on stdout
-#   1 - the archive carries no entry for this id
-#   2 - the archive carries the entry but it could not be read back through
-#       tasks-axi; the archive layout moved, and a caller must say so loudly
-#       rather than treat a record that exists as absent
-#   3 - the archive carries the entry but no readable copy of it could be staged,
-#       so nothing was read at all; the repair is this machine's temp space
-#       rather than the archive, and a caller must blame neither the layout nor
-#       an absent record
-#   4 - the archive path could not be read at all, so whether it carries the
-#       entry is unknown; passed through from fm_tasks_axi_archive_has_entry
-fm_tasks_axi_archive_show() {  # <home> <id>
-  local home=$1 id=$2 archive view out rc=0
-  archive=$(fm_tasks_axi_archive_file "$home")
-  fm_tasks_axi_archive_has_entry "$archive" "$id" || rc=$?
-  [ "$rc" -eq 0 ] || return "$rc"
+# ONE STAGED VIEW PER PROCESS. Every archived lookup needs the same
+# parser-legible copy of the same archive, and the archive only ever grows, so
+# staging it per lookup made an inventory loop or a redelivered `answers` batch
+# copy the whole file once per archived row it touched. The memo is keyed on the
+# RESOLVED archive path and on that file's byte size:
+#   - the path, so two homes in one process, or a reconfigured path, can never be
+#     served each other's view;
+#   - the size, because the archive can GROW mid-process. `tasks-axi done` prunes
+#     by default, so closing one row can archive another between two lookups, and
+#     a view staged before that append must not answer for the row it added. An
+#     archive is only ever appended to, so a changed size is exactly the signal
+#     that a retention move landed.
+FM_TASKS_AXI_ARCHIVE_VIEW=''
+FM_TASKS_AXI_ARCHIVE_VIEW_KEY=''
+
+# Drop the staged view, if one was staged. Idempotent and quiet, so an exit path
+# may call it unconditionally and it never disturbs the status being exited with.
+fm_tasks_axi_archive_view_release() {
+  local view=$FM_TASKS_AXI_ARCHIVE_VIEW
+  FM_TASKS_AXI_ARCHIVE_VIEW=''
+  FM_TASKS_AXI_ARCHIVE_VIEW_KEY=''
+  if [ -n "$view" ]; then
+    rm -f -- "$view" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# The current staged view of <archive-file>, in FM_TASKS_AXI_ARCHIVE_VIEW.
+#   0 - FM_TASKS_AXI_ARCHIVE_VIEW names a readable view of this archive
+#   3 - no readable copy of it could be staged, so nothing was read at all
+fm_tasks_axi_archive_view() {  # <archive-file>
+  local archive=$1 size key view
+  size=$(wc -c < "$archive" 2>/dev/null) || return 3
+  size=${size//[![:digit:]]/}
+  [ -n "$size" ] || return 3
+  key="$size:$archive"
+  if [ "$key" = "$FM_TASKS_AXI_ARCHIVE_VIEW_KEY" ] && [ -f "$FM_TASKS_AXI_ARCHIVE_VIEW" ]; then
+    return 0
+  fi
+  fm_tasks_axi_archive_view_release
   view=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-archive-view.XXXXXX") || return 3
   # Every archived row under ONE section: the first dated heading becomes the
   # `## Done` heading the parser accepts and the later ones are dropped, so their
@@ -281,10 +334,41 @@ fm_tasks_axi_archive_show() {  # <home> <id>
     rm -f -- "$view"
     return 3
   fi
-  out=$( (cd "$home" && tasks-axi show "$id" --full --file "$view") 2>/dev/null ) || rc=$?
-  rm -f -- "$view"
+  FM_TASKS_AXI_ARCHIVE_VIEW=$view
+  FM_TASKS_AXI_ARCHIVE_VIEW_KEY=$key
+  return 0
+}
+
+# One archived task, as `tasks-axi show --full` prints it, in
+# FM_TASKS_AXI_ARCHIVE_RECORD. It reports through a global rather than stdout for
+# the reason fm_tasks_axi_record_show below does, plus one of its own: the staged
+# view above is memoised in this process's shell variables, and a command
+# substitution would run the staging inside a subshell whose memo dies with it,
+# restaging on every lookup and leaving every copy behind.
+#   0 - the record is in FM_TASKS_AXI_ARCHIVE_RECORD
+#   1 - the archive carries no entry for this id
+#   2 - the archive carries the entry but it could not be read back through
+#       tasks-axi; the archive layout moved, and a caller must say so loudly
+#       rather than treat a record that exists as absent
+#   3 - the archive carries the entry but no readable copy of it could be staged,
+#       so nothing was read at all; the repair is this machine's temp space
+#       rather than the archive, and a caller must blame neither the layout nor
+#       an absent record
+#   4 - the archive path could not be read at all, so whether it carries the
+#       entry is unknown; passed through from fm_tasks_axi_archive_has_entry
+FM_TASKS_AXI_ARCHIVE_RECORD=''
+fm_tasks_axi_archive_show() {  # <home> <id>
+  local home=$1 id=$2 archive out rc=0
+  FM_TASKS_AXI_ARCHIVE_RECORD=''
+  archive=$(fm_tasks_axi_archive_file "$home")
+  fm_tasks_axi_archive_has_entry "$archive" "$id" || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  fm_tasks_axi_archive_view "$archive" || return 3
+  out=$( (cd "$home" && tasks-axi show "$id" --full --file "$FM_TASKS_AXI_ARCHIVE_VIEW") 2>/dev/null ) \
+    || rc=$?
   { [ "$rc" -eq 0 ] && [ -n "$out" ]; } || return 2
-  printf '%s\n' "$out"
+  FM_TASKS_AXI_ARCHIVE_RECORD=$out
+  return 0
 }
 
 # One task record from wherever it lives: the active backlog first, then the
@@ -308,8 +392,12 @@ fm_tasks_axi_record_show() {  # <home> <id>
   if FM_TASKS_AXI_RECORD=$( (cd "$home" && tasks-axi show "$id" --full) 2>/dev/null ); then
     return 0
   fi
-  FM_TASKS_AXI_RECORD=$(fm_tasks_axi_archive_show "$home" "$id") || rc=$?
+  # Called directly, never through a command substitution: the archive read
+  # memoises its staged view in this process's shell variables, and a subshell
+  # could carry neither the memo nor the copy's path back out.
+  fm_tasks_axi_archive_show "$home" "$id" || rc=$?
   if [ "$rc" -eq 0 ]; then
+    FM_TASKS_AXI_RECORD=$FM_TASKS_AXI_ARCHIVE_RECORD
     FM_TASKS_AXI_RECORD_ARCHIVED=1
     return 0
   fi
