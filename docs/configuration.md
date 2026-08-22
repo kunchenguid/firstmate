@@ -33,6 +33,15 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Captain reply-shape reminder (config/plainenglish)
+
+Firstmate injects a one-line reminder of its captain-facing reply shape into every primary turn, so the rule arrives before a reply is composed rather than being remembered.
+[`bin/fm-plainenglish-hook.sh`](../bin/fm-plainenglish-hook.sh) prints that line at prompt submission and `.claude/settings.json` registers it; `.agents/skills/plainenglish/SKILL.md` owns the contract itself.
+Write `off` into the local, gitignored `config/plainenglish` to switch the reminder off for this home.
+An absent file, an empty file, or any other value means on, and the value is read whitespace-stripped and case-folded like the other scalar config items.
+The change takes effect on the next captain message with no restart, and the preference is local to each home rather than inherited by secondmate homes.
+Switching the reminder off stops the injection only; `AGENTS.md` section 9 still governs captain communication.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.

@@ -1769,7 +1769,7 @@ TS
     expected_notifications=$4
     local session_arg=${5:-}
     local shape=${6:-single}
-    local extensions
+    local extensions rendered
 
     tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     if [ "$calm_state" = absent ]; then
@@ -1816,9 +1816,22 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
+    # Pi redraws the composer asynchronously once a turn settles, so a capture
+    # taken mid-redraw shows an empty transcript and counts zero answers. Wait
+    # for the answer to appear, then let it settle, so a LATE duplicate render
+    # is still inside the assertion instead of racing ahead of it.
+    i=0
+    while [ "$i" -lt 240 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      printf '%s\n' "$pane" | grep -Fq "CAPTAIN_ANSWER_$label" && break
+      sleep 0.05
+      i=$((i + 1))
+    done
+    sleep 1
     pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
-    [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
-      || fail "Pi follow-up $label case rendered a duplicate captain answer"
+    rendered=$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)
+    [ "$rendered" -eq 1 ] \
+      || fail "Pi follow-up $label case rendered the captain answer $rendered times, expected exactly once"
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
     assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
     if [ "$calm_state" = on ]; then
