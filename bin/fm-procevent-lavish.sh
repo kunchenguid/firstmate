@@ -92,10 +92,14 @@ cmd_source_id() {
 # because every iteration also spends real time on fm_procevent_generation_live's
 # own work - a filesystem lock, claim load, and process-identity check - which a
 # sleep-only budget never accounts for. EPOCHREALTIME is a bash builtin (no
-# fork); a shell without it degrades to whole-second granularity rather than
-# losing the bound entirely.
+# fork) and is tried first. A shell without it - stock macOS ships Bash 3.2,
+# which predates EPOCHREALTIME - falls back to perl's Time::HiRes, a core
+# module bundled with every perl this adapter already requires elsewhere
+# (cmd_source_id, cmd_answers), so sub-second FM_PROCEVENT_LAVISH_ARM_WAIT_MS
+# values stay honored instead of degrading to whole-second granularity, which
+# could make a bounded wait take close to a full second longer than requested.
 arm_now_ms() {
-  local raw sec frac
+  local raw sec frac ms
   raw=${EPOCHREALTIME:-}
   case "$raw" in
     *[0-9][.,][0-9]*)
@@ -109,13 +113,18 @@ arm_now_ms() {
       esac
       ;;
   esac
+  ms=$(perl -MTime::HiRes=time -e 'printf "%.0f", time() * 1000' 2>/dev/null)
+  case "$ms" in
+    ''|*[!0-9]*) ;;
+    *) printf '%s\n' "$ms"; return 0 ;;
+  esac
   sec=$(date +%s 2>/dev/null || printf '0')
   case "$sec" in ''|*[!0-9]*) sec=0 ;; esac
   printf '%s\n' "$(( sec * 1000 ))"
 }
 
 cmd_arm() {
-  local artifact=${1-} id real reg_out identity wait_ms live deadline_ms now_ms remaining_ms frac
+  local artifact=${1-} id real reg_out identity wait_ms live deadline_ms now_ms remaining_ms frac first
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
@@ -151,14 +160,24 @@ cmd_arm() {
   "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 &
   deadline_ms=$(( $(arm_now_ms) + wait_ms ))
   live=1
+  first=1
   while :; do
+    # The very first probe always runs, even for a 0ms budget, so a caller
+    # gets at least one real check. Every later probe is itself real work -
+    # a filesystem lock, claim load, and process-identity check - so the
+    # deadline is re-checked against the wall clock right before starting
+    # one, not only after it returns; otherwise a probe could be kicked off
+    # an instant after the budget already ran out, growing the overrun by
+    # that whole probe's duration instead of stopping at the deadline.
+    if [ "$first" -eq 0 ]; then
+      now_ms=$(arm_now_ms)
+      [ "$now_ms" -lt "$deadline_ms" ] || break
+    fi
+    first=0
     if fm_procevent_generation_live "$id" "$identity"; then
       live=0
       break
     fi
-    # Always attempted at least once above; from here the wall clock alone
-    # decides whether another probe fits, since the probe just run may already
-    # have consumed most or all of the budget.
     now_ms=$(arm_now_ms)
     [ "$now_ms" -lt "$deadline_ms" ] || break
     remaining_ms=$(( deadline_ms - now_ms ))

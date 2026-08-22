@@ -711,6 +711,66 @@ wait "$contend_timer_pid" 2>/dev/null || true
   || fail "arm's bounded wait (300ms) was extended by an unrelated source's lock contention: ${contend_elapsed}s (held for 4s)"
 pass "reconcile's contention on an unrelated source's lock never extends arm's own bound"
 
+# epoch_ms: integer milliseconds from this shell's own $EPOCHREALTIME. Split on
+# either '.' or ',' - LC_NUMERIC can make bash format EPOCHREALTIME with a
+# comma fraction (seen under e.g. nb_NO.UTF-8) - the same tolerance
+# bin/fm-procevent-lavish.sh's own arm_now_ms uses, so this measurement stays
+# correct under whatever locale the suite happens to run in.
+epoch_ms() {
+  local raw=$EPOCHREALTIME sec frac
+  sec=${raw%%[.,]*}
+  frac=${raw#*[.,]}
+  frac="${frac}000"
+  frac=${frac:0:3}
+  printf '%s\n' "$(( sec * 1000 + 10#$frac ))"
+}
+
+# --- arm_now_ms's fallback clock must still honor a sub-second bound --------
+# Stock macOS ships Bash 3.2, which predates EPOCHREALTIME, so arm_now_ms falls
+# back to a portable clock when that builtin is unavailable. A whole-second
+# fallback (plain `date +%s`) cannot see its own truncated reading advance
+# until the wall clock crosses the NEXT full second, so a short documented
+# wait could silently stretch to almost a full extra second. Reproduced here
+# by unsetting EPOCHREALTIME for the adapter's own process (forcing the exact
+# fallback branch, regardless of which bash runs this suite) and staging a
+# listener generation that can never be confirmed live, same as the refusal
+# case above. The test is synchronized to just after a wall-clock second
+# boundary - the fallback's worst case - so the failure is deterministic
+# rather than a timing coin flip.
+HLE="$TMP_ROOT/hle"; new_home "$HLE"
+FALLBACK_ART="$TMP_ROOT/fallback-review.html"
+printf '<h1>fallback review</h1>\n' > "$FALLBACK_ART"
+fallback_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$FALLBACK_ART")
+PE_TRACKED+=("$HLE|$fallback_id")
+pe_register "$HLE" lavish "$fallback_id" -- "$BLOCKER" "$TMP_ROOT/fallback-never-trigger" "older fallback generation" >/dev/null
+sleep 300 & fallback_sleep_pid=$!
+bash -c '
+  . "$1/bin/fm-pr-lib.sh"; . "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-procevent-lib.sh"
+  fm_procevent_source_lock_acquire "$2" || exit 1
+  fm_procevent_claim_acquire_locked "$2" "$3" "$4" "$3/state/procevent/$2.source" \
+    || { fm_procevent_source_lock_release "$2"; exit 1; }
+  fm_procevent_source_lock_release "$2"
+' _ "$ROOT" "$fallback_id" "$HLE" "$fallback_sleep_pid" \
+  || { kill "$fallback_sleep_pid" 2>/dev/null || true; fail "cannot stage an older live generation for the fallback-clock cut"; }
+for _ in $(seq 1 400); do
+  frac=$(( $(epoch_ms) % 1000 ))
+  [ "$frac" -lt 60 ] && break
+  sleep 0.01
+done
+fallback_start=$(epoch_ms)
+out=$(PATH="$LAVISH_BLOCK_BIN:$PATH" FM_HOME="$HLE" FM_PROCEVENT_LAVISH_ARM_WAIT_MS=300 \
+  bash -c 'unset EPOCHREALTIME; . "$0" "$@"' "$ROOT/bin/fm-procevent-lavish.sh" arm "$FALLBACK_ART" 2>&1) \
+  && { kill "$fallback_sleep_pid" 2>/dev/null || true; fail "arm printed ready although this registration's listener never started: $out"; }
+fallback_end=$(epoch_ms)
+kill "$fallback_sleep_pid" 2>/dev/null || true
+wait "$fallback_sleep_pid" 2>/dev/null || true
+fallback_elapsed_ms=$(( fallback_end - fallback_start ))
+assert_not_contains "$out" "armed:" "an unconfirmed listener generation never reports ready without EPOCHREALTIME"
+[ "$fallback_elapsed_ms" -le 700 ] \
+  || fail "arm's bounded wait (300ms) took ${fallback_elapsed_ms}ms under the whole-second fallback clock"
+FM_HOME="$HLE" "$ROOT/bin/fm-procevent.sh" retire "$fallback_id" >/dev/null 2>&1 || true
+pass "arm's readiness wait stays sub-second-accurate even without EPOCHREALTIME"
+
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
 # real blocking source completes, its result is captured and published, the
