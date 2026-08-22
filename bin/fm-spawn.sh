@@ -998,6 +998,11 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] \
+  && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
+  echo "error: task $ID already has metadata at $STATE/$ID.meta; refusing a fresh spawn before routing receipt consumption" >&2
+  exit 1
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=

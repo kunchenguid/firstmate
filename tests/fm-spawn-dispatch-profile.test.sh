@@ -584,6 +584,43 @@ test_config_override_cannot_relocate_receipt_authority() {
   pass "FM_CONFIG_OVERRIDE cannot relocate routing receipt authority"
 }
 
+test_duplicate_spawn_preserves_active_routing_provenance() {
+  local rec id out status pending_tmp
+  id=profile-duplicate-routing-z12b2
+  rec=$(make_spawn_case profile-duplicate-routing claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "initial spawn should establish active routing provenance"
+  cp "$HOME_DIR/state/$id.meta" "$CASE_DIR/active.meta"
+  cp "$HOME_DIR/data/$id/routing-decision.json" "$CASE_DIR/active-routing-decision.json"
+
+  write_test_routing_decision "$HOME_DIR" "$id" claude default default 0
+  pending_tmp="$HOME_DIR/data/$id/routing-decision.pending.json.tmp"
+  jq '.rationale = "duplicate fresh spawn receipt"' \
+    "$HOME_DIR/data/$id/routing-decision.pending.json" > "$pending_tmp"
+  mv "$pending_tmp" "$HOME_DIR/data/$id/routing-decision.pending.json"
+
+  out=$(FM_TEST_ROUTING_PRESERVE=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "duplicate fresh spawn should refuse before receipt consumption"
+  assert_contains "$out" "task $id already has metadata" \
+    "duplicate refusal did not identify the active task record"
+  cmp -s "$CASE_DIR/active.meta" "$HOME_DIR/state/$id.meta" \
+    || fail "duplicate spawn changed active task metadata"
+  cmp -s "$CASE_DIR/active-routing-decision.json" "$HOME_DIR/data/$id/routing-decision.json" \
+    || fail "duplicate spawn changed the active routing receipt bytes"
+  assert_present "$HOME_DIR/data/$id/routing-decision.pending.json" \
+    "duplicate spawn consumed its unaccepted pending receipt"
+  [ ! -s "$LAUNCH_LOG" ] || fail "duplicate spawn sent pane input"
+  [ ! -s "$HOME_DIR/text.log" ] || fail "duplicate spawn sent non-literal pane input"
+  [ ! -s "$HOME_DIR/endpoint.log" ] || fail "duplicate spawn created an endpoint"
+  [ ! -s "$HOME_DIR/worktree.log" ] || fail "duplicate spawn leased a worktree"
+  pass "duplicate fresh spawn preserves active metadata and routing receipt bytes"
+}
+
 test_raw_launches_refuse_unobserved_runtime_selection() {
   local rec dynamic env_prefix env_wrapper terminator nonstandard unresolved id out status command predicate
   dynamic=profile-raw-dynamic-z12c
@@ -1121,6 +1158,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_routing_receipt_is_unconditional_without_dispatch_config
 test_config_override_cannot_relocate_receipt_authority
+test_duplicate_spawn_preserves_active_routing_provenance
 test_raw_launches_refuse_unobserved_runtime_selection
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
