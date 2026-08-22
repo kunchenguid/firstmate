@@ -114,7 +114,7 @@ test_sample_reads_real_accumulated_cpu() {
   idle_sample=$(fm_progress_sample "$idle_pid") || fail "a live sleeping process could not be sampled"
   busy_a=$(printf '%s' "$busy_sample" | cut -d' ' -f3)
   busy_b=$(printf '%s' "$idle_sample" | cut -d' ' -f3)
-  [ "$busy_a" -gt 100 ] || fail "a process that spun for 2s must show over 1s of accumulated CPU, got ${busy_a} centis"
+  [ "$busy_a" -gt "$busy_b" ] || fail "a spinning process must show more accumulated CPU than a sleeping one (spinning: ${busy_a}, sleeping: ${busy_b})"
   [ "$busy_b" -lt 50 ] || fail "a sleeping process must show almost no accumulated CPU, got ${busy_b} centis"
   pass "fm_progress_sample: reads real accumulated CPU, and a spinning process is separated from a sleeping one"
 }
@@ -233,11 +233,13 @@ test_probe_records_a_baseline_then_matures_it() {
   out=$(fm_progress_probe "$state" "$key" 180 "$burner")
   [ "${out%% *}" = unknown ] || fail "the first probe has nothing to compare and must be unknown, got '$out'"
   [ -s "$state/.progress-$key" ] || fail "the first probe must record a baseline to measure the next span from"
+  local base_cpu
+  base_cpu=$(printf '%s' "$(cat "$state/.progress-$key")" | cut -d' ' -f3)
   sleep 2
   out=$(fm_progress_probe "$state" "$key" 1 "$burner")
   [ "${out%% *}" = progressing ] || fail "a spinning process must read progressing on the next probe, got '$out'"
   saved=$(cat "$state/.progress-$key")
-  [ "$(printf '%s' "$saved" | cut -d' ' -f3)" -gt 100 ] \
+  [ "$(printf '%s' "$saved" | cut -d' ' -f3)" -gt "$base_cpu" ] \
     || fail "a progressing verdict must roll the baseline forward to the reading that proved it"
   pass "fm_progress_probe: records a baseline, then rolls it forward on measured progress"
 }

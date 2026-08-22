@@ -304,6 +304,10 @@ SH
   chmod +x "$fakebin/gh-axi"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = "--version" ] || [ "${1:-}" = "-V" ]; then
+  printf 'tmux 3.3a\n'
+  exit 0
+fi
 if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 fi

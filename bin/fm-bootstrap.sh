@@ -19,6 +19,7 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "LIVE_TEST_VERSIONS_CHANGED: <tool> (<old> -> <new>)[, ...]",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
@@ -1217,6 +1218,14 @@ detect_local_tools() {
     ta_ver=$(tool_installed_version tasks-axi) || ta_ver=unknown
     below_floor_diagnostic tasks-axi "$ta_ver" "$FM_TASKS_AXI_MIN"
   fi
+  # Live-test version check: detect when a tool the nine fleet-relevant live
+  # tests depend on has changed its installed version since the last session.
+  # The check itself is cheap (reading version strings) and runs on the local
+  # phase. It prints a LIVE_TEST_VERSIONS_CHANGED: line when a version differs
+  # from the recorded baseline, and silently records the initial baseline on
+  # first run. bin/fm-live-test-versions.sh owns the tool list and the
+  # comparison logic.
+  "$SCRIPT_DIR/fm-live-test-versions.sh" check --state-dir "$STATE"
 }
 
 detect_local_config() {
