@@ -1254,6 +1254,7 @@ assert_absent "$LAB/worktree.lease" "historical generation reuse leased a worktr
 assert_absent "$LAB/endpoint" "historical generation reuse created an endpoint"
 assert_absent "$HOME_DIR/state/t1.meta" "historical generation reuse published metadata"
 if (
+  # shellcheck disable=SC2329 # Invoked indirectly by run_validator_then_effects.
   fm_routing_fs_boundary() {
     if [ "$1" = consume-generation ]; then
       printf '%s\n' "$3"
