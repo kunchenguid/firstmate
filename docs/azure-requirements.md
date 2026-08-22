@@ -378,11 +378,15 @@ These limits are machine-readable in `limitations`.
 
 ## R6. Crosscheck reviews outside the author's model family
 
-Status: PARTIAL. The codex-model leg is complete: accepted Azure review
-`azure-r4-respond-285` recorded a `cross-family-primary` verdict against the codex-declared PR
-#285 head. The non-codex-model leg is still owed, so R6 is not DONE. The acceptance is two
-completed reviews under the evidenceable amendment below, not correct wiring or one successful
-family-screen case. Read "Where the lane actually stands" before treating any of it as finished.
+Status: DONE, met live on 2026-08-22. Accepted Azure review `azure-r4-respond-285` recorded a
+`cross-family-primary` verdict against the codex-declared PR #285 head. Accepted Azure review
+`azure-r6-claude-acceptance` recorded a completed `codex-fallback` verdict against the
+non-codex-model declaration on PR #300, with no same-model marker or relaxation required.
+Together they complete the two evidenceable declaration legs below. The second verdict was
+blocking, not merge approval, and its finding is absorbed by the tracked evidence commit that is
+an ancestor of this record. The compact projection and exact source digests are in
+`docs/evidence/azure-crosscheck-r6-2026-08-22/`. Read "Where the lane actually stands" before
+treating DONE as a claim that every primary reviewer attempt succeeds.
 
 Context: see "The Azure Foundry Fireworks lane is unusable on this subscription" and "The lane is a
 named registry, now serving GLM-5.2 direct from Fireworks" below, both 2026-08-20. The retired
@@ -694,10 +698,13 @@ Later probe runs declare a codex author instead, per the asymmetry.
 
 Stated plainly, because wiring being right is not the acceptance.
 
-**Has a cross-family review run end to end and produced an accepted verdict? YES.** Azure review
+**Has the cross-family lane completed both evidenceable declaration legs? YES.** Azure review
 `azure-r4-respond-285` completed against the codex-declared PR #285 head and recorded
-`review_family_mode: cross-family-primary`. That completes the codex-model leg only. No accepted
-non-codex-model leg is recorded, so the requirement remains PARTIAL.
+`review_family_mode: cross-family-primary`. Azure review `azure-r6-claude-acceptance` completed
+against the non-codex-model declaration on PR #300 and recorded `model: gpt-5.6-sol`,
+`review_family_mode: codex-fallback`, and no `model_independence: same-model` marker. Its blocking
+verdict carried three citations and an executed Azure reproduction. The tracked compact record is
+`docs/evidence/azure-crosscheck-r6-2026-08-22/evidence.json`.
 
 The earlier local attempts against PR #281 on the direct Fireworks lane remain useful failure
 history:
@@ -769,16 +776,16 @@ the end of a long session.
   reviewer, which misprovisions a cross-family lane home (cc-769d7eba2ded).
 - The startup-credit item above, retired as moot.
 
-**What #281 does NOT close, and must not be read as closing:**
+**What #281 did NOT close by itself, and must not be read as closing:**
 
 - The acceptance itself was not closed by #281. The later accepted Azure review
-  `azure-r4-respond-285` completes the codex-model leg, but the evidenceable amendment requires a
-  second accepted review against a non-codex-model declaration, which is still owed.
+  `azure-r4-respond-285` completed the codex-model leg. The second leg was completed later by
+  `azure-r6-claude-acceptance`; it is not retroactive evidence for #281.
 - The status item was not closed by #281, but it was closed by #287.
   `bin/fm-crosscheck.sh status` is a lock-free, state-free read that reports the roster's first
   serving family, the current `crosscheck-same-model` policy, and the latest durable ledger run's
-  `review_family_mode`. It reports configuration and durable history, not proof that R6's
-  cross-family acceptance has completed.
+  `review_family_mode`. It reports configuration and durable history, not proof of acceptance by
+  itself; the two accepted ledger records and their tracked evidence are the proof that closes R6.
 - Review guards sized to the model's context window. Two of the three the Work list names DO
   exist and are stronger than asked: the findings schema is strict (`additionalProperties: false`,
   enum'd severities, `maxItems` caps), and citations are validated before filing by escape check,
@@ -869,8 +876,9 @@ after the credential purge, so a build that reached distribution could not have 
 Image Builder run succeeded between 22:26:20Z and 22:36:46Z on 2026-08-18, after #246 landed on
 main at 20:51:35Z, and `bin/fm-crosscheck-azure-image.sh` builds only from the tracked declaration
 at a HEAD already landed on public main. A Pi-harness review completing on this image is now proven
-by accepted Azure review `azure-r4-respond-285`; it completes R6's codex-model leg but not its
-non-codex-model leg.
+by accepted Azure review `azure-r4-respond-285`; it completes R6's codex-model leg. The separate
+accepted Azure review `azure-r6-claude-acceptance` completes the non-codex-model declaration leg
+on the same current image family.
 
 Acceptance (the evidenceable amendment above): the cross-family lane completes a review end to
 end, and the family screen admits it against both a codex-model declaration and a non-codex-model
@@ -878,7 +886,9 @@ declaration, with the ledger recording reviewer model, review family mode, and w
 same-model relaxation was required. The fallback flip to pi-codex is demonstrated once, its
 activation is visible in the review evidence and status read, and the demonstration records its
 degraded same-family mode. The codex-model leg is complete through `azure-r4-respond-285`; the
-non-codex-model leg is still owed.
+non-codex-model declaration leg is complete through `azure-r6-claude-acceptance`. The latter used
+the screened Codex fallback outside the declared Claude family, recorded that fallback family
+mode, omitted the same-model marker, and completed with a blocking verdict and executed proof.
 
 ## R7. Everything is logged in
 
@@ -967,7 +977,7 @@ An accepted Pi-harness review on the current model image is proven by Azure revi
 `azure-r4-respond-285`.
 
 Outstanding at the moment this update is written: one fresh R4 validation cell reaching `close`
-with its worktree disk released, and R6's non-codex-model review leg. Those two are what keep
+with its worktree disk released. R6's second declaration leg is now complete. R4 is what keeps
 this requirement PARTIAL rather than DONE.
 
 The landing path used to be recorded here as unprovable synthetically, and that was correct
@@ -1136,7 +1146,8 @@ rested on a premise that has since been refuted. If the compartment lane becomes
 default, C1 has to be measured against it, and the three original candidate levers become live
 again at that point.
 
-The contradiction this section previously flagged is partly resolved: R6 now reads PARTIAL.
+The contradiction this section previously flagged is resolved at the R6 acceptance boundary:
+R6 now reads DONE.
 Note the correction that comes with it, since this section discusses R6's reviewer routing.
 GLM-5.2 is the primary reviewer on the registered Fireworks lane, and at the point this section
 describes, the 6m13s reading of 2026-08-20, it had not produced an accepted cross-family review.
@@ -1149,8 +1160,9 @@ unavailable fails closed rather than being reviewed by it. Eligibility does not 
 fallback serves reviews today or that it served either instrumented reading above.
 Which lane and which family served the two instrumented readings above, 35m33s and 44m25s, is not
 established by anything R6 records, and this section does not assert it.
-The accepted Azure verdict satisfies the codex-model leg only. R6 remains open because no accepted
-non-codex-model leg is recorded, and nothing here should be read as closing that remaining leg.
+The later `azure-r6-claude-acceptance` verdict satisfies the non-codex-model declaration leg and
+closes R6. Nothing in either accepted run identifies the reviewer behind the two instrumented C1
+timings, so R6 completion does not change this section's timing attribution or C1's NOT MET status.
 
 ## C2. Many crewmates, no-mistakes, and crosschecks run in parallel without contention
 
@@ -1242,15 +1254,14 @@ billable capacity has not run yet.
 2. C2, because contention blocks demonstrating anything at scale. One of its three changes landed.
 3. R2/R3, done 2026-08-22. It was the largest architectural gap and the requirement the build had
    most misread.
-4. R6, whose direction is decided (GLM-5.2 on the Fireworks Foundry lane) and which no longer
-   needs an owner login.
+4. R6, done 2026-08-22 under its evidenceable two-declaration amendment; the accepted records keep
+   the actual primary or fallback family mode visible.
 5. R4, which needs one validation cell closed; the runner caller is built, and the offload lane is
    an optimisation rather than part of the acceptance.
 6. R5, done 2026-08-22.
 7. C1, instrumented 2026-08-20; the measured local-lane runs are above the band rather than
    inside it, and the compartment lane's phases wait on that lane being switched back on.
-8. R9, which is the proof of the rest; partial since 2026-08-22, waiting on R4's cell close and
-   R6's non-codex-model leg.
+8. R9, which is the proof of the rest; partial since 2026-08-22, waiting only on R4's cell close.
 9. R10, the Slack team exposure, dropped by the owner on 2026-08-21 and no longer ordered work.
 
 ## Standing constraints

@@ -1,0 +1,122 @@
+{
+  "schema": "fm.azure-crosscheck-r6-evidence/v1",
+  "acceptance_date": "2026-08-22",
+  "task_id": "azure-r6-claude-acceptance",
+  "pull_request": "https://github.com/ruby-dlee/firstmate/pull/300",
+  "source_artifacts": {
+    "task_meta": {
+      "sha256": "96d3e71fa96e8b92aee5bf4adf1f821cca22589117689e3e719faf22126c2241"
+    },
+    "crosscheck_ledger": {
+      "schema": "firstmate.crosscheck-ledger.v2",
+      "sha256": "decf039d268b6a2be0991f9c8055d791ecffddc1fc05535ffac0dfdcd6181910",
+      "run_count": 6,
+      "finding_count": 1
+    }
+  },
+  "author_declaration": {
+    "harness": "claude",
+    "model": "claude-opus-5"
+  },
+  "accepted_run": {
+    "at": "2026-08-22T21:48:17Z",
+    "state": "blocking",
+    "head_sha": "e2fa194e3f2581897fcf2d33d70b9acff23e63a3",
+    "base_sha": "483bfb1bb6529d7dde0e0c37ac87c89308aeb584",
+    "base_branch_sha": "483bfb1bb6529d7dde0e0c37ac87c89308aeb584",
+    "claims_sha256": "d92d9a6c80943e583da6c9513b692b46d63484b3782758bdbfaf2785e29e37b7",
+    "citations": [
+      {
+        "path": "docs/azure-requirements.md",
+        "line": 71
+      },
+      {
+        "path": "docs/azure-requirements.md",
+        "line": 77
+      },
+      {
+        "path": "docs/azure-requirements.md",
+        "line": 350
+      }
+    ],
+    "summary": "BLOCK: R2/R3 and R5 are promoted to DONE using an author-local evidence bundle that is not delivered by this documentation-only change, so a clean checkout cannot audit the acceptance claims.",
+    "active_blockers": [
+      "cc-ceeaedcd090c"
+    ],
+    "durations_ms": {
+      "boot": 5796,
+      "collect": 1218,
+      "create": 126956,
+      "ledger": 2,
+      "proofs": 1842370,
+      "reviewer": 359171,
+      "snapshot": 4896,
+      "stage": 1993,
+      "total": 2543257
+    },
+    "reviewer": {
+      "harness": "pi",
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "review_family_mode": "codex-fallback",
+      "model_independence": null,
+      "same_model_relaxation_required": false,
+      "execution_mode": "azure-compartment-v1",
+      "reviewer_account_identity_sha256": "76acda7eb2dfcc7e10e08fb32eefff4e7effdc7fec311da3280e986141e012ec"
+    },
+    "azure_execution": {
+      "review_generation": "47fcc9847f1d3d885f3509e9",
+      "request_digest": "sha256:aec24fa4bcca23ca53c4d06b47fa0a9fd26ca7b7db90e19046890d6236060862",
+      "ledger_digest": "sha256:aa4c2dba4fe689b10214b90554a2217cb9b4e831ca721d0b06e3d2a1cbb5fbc4",
+      "evidence_attempts_digest": "sha256:ca80a393fd3d128ce26e72a4913ec7af1a9dad13ee92e46d06bf5486913d23b0",
+      "model_cleanup_phase": "complete",
+      "staging_cleanup_phase": "complete",
+      "evidence_attempts": [
+        {
+          "result_exit_code": 0,
+          "result_timed_out": false,
+          "tool_cleanup_phase": "complete",
+          "tool_credential_present": false,
+          "tool_network_bytes": 0,
+          "verifier_cleanup_phase": "complete",
+          "verifier_credential_present": false,
+          "verifier_network_bytes": 0
+        },
+        {
+          "result_exit_code": 0,
+          "result_timed_out": false,
+          "tool_cleanup_phase": "complete",
+          "tool_credential_present": false,
+          "tool_network_bytes": 0,
+          "verifier_cleanup_phase": "complete",
+          "verifier_credential_present": false,
+          "verifier_network_bytes": 0
+        }
+      ]
+    },
+    "execution_proof": {
+      "actual_exit": 0,
+      "expected_exit": 0,
+      "output_contains": "EXACT_BASE_HEAD_DIFF_E2FA194_REVIEWED",
+      "receipt_sha256": "13431a9ea283d72c5b980b2562739cc55d62828ebc9bd1686dbc5af72cfd20be"
+    }
+  },
+  "finding": {
+    "id": "cc-ceeaedcd090c",
+    "severity": "blocking",
+    "lifecycle": "open",
+    "title": "DONE claims rely on an author-local evidence bundle",
+    "resolved_by_tracked_evidence_commit": "49f858713d78fea3a3da0f2445dc4cf8c92d592a"
+  },
+  "limitations": {
+    "author_identity_is_a_declaration": true,
+    "blocking_is_a_completed_review_not_merge_approval": true,
+    "glm_primary_completed": false,
+    "does_not_prove": [
+      "R4",
+      "C1",
+      "C2",
+      "C3"
+    ]
+  }
+}
