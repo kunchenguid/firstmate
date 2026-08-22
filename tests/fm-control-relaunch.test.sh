@@ -1457,6 +1457,9 @@ add_herdr_ship_task() {
 #                so its agent-free shell classifies as dead rather than missing
 #   tab create echoes its --cwd back as the new pane's foreground_cwd and
 #              records create-cwd/create-label/new-pane for assertions
+#   a file empty-cwd-reads-<pane-id> holding N makes the first N foreground_cwd
+#              reads of that pane report empty - a brand-new tab that has not
+#              reported any path yet - before settling onto cwd-<pane-id>
 #   launched   created when a send carries the launch-brief literal, after
 #              which agent get reports any queried pane's agent working
 make_herdr_stub() {  # <dir> <gone-pane-id> <recorded-workspace-id>
@@ -1496,7 +1499,17 @@ case "\$cmd \$sub" in
     if [ "\${3:-}" = "$gonepane" ] && [ ! -f "\$D/old-present" ]; then
       printf '{"error":{"code":"pane_not_found","message":"gone"}}\n'
     else
-      printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' "\${3:-}" "\$(cat "\$D/cwd-\${3:-}" 2>/dev/null)"
+      p=\${3:-}
+      n=0
+      [ -f "\$D/getcount-\$p" ] && n=\$(cat "\$D/getcount-\$p")
+      n=\$((n + 1))
+      printf '%s' "\$n" > "\$D/getcount-\$p"
+      lim=\$(cat "\$D/empty-cwd-reads-\$p" 2>/dev/null || true)
+      if [ -n "\$lim" ] && [ "\$n" -le "\$lim" ]; then
+        printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":""}}}\n' "\$p"
+      else
+        printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' "\$p" "\$(cat "\$D/cwd-\$p" 2>/dev/null)"
+      fi
     fi ;;
   "agent get")
     if [ -f "\$D/launched" ]; then
@@ -1650,6 +1663,29 @@ test_ordinary_relaunch_failure_retry_stays_on_the_same_path() {
   pass "fm-control relaunch: a tmux failed-launching retry stays on the ordinary path"
 }
 
+test_recovery_pane_survives_an_empty_first_cwd_read() {
+  local dir out rc
+  dir=$(new_case recov-cwdwait rl48)
+  add_herdr_ship_task "$dir" rl48 claude
+  make_herdr_stub "$dir" "hp-rl48-old" "hws-rl48"
+  # A brand-new Herdr tab can report an EMPTY foreground_cwd on its first
+  # polls, before its shell has reported any path. The recovery wait must keep
+  # polling through those empty reads instead of treating 'no path yet' as a
+  # settled mismatch, then confirm the pane in the recorded copy.
+  : > "$dir/fake/ws-ok"
+  printf '2' > "$dir/fake/empty-cwd-reads-hp-new"
+  out=$(run_control "$dir" rl48 relaunch --note "empty first read"); rc=$?
+  expect_code 0 "$rc" "a recovery whose replacement pane reports an empty first cwd should still settle"$'\n'"$out"
+  assert_contains "$out" "relaunched rl48" "the success line should name the task"
+  [ "$(meta_field "$dir" rl48 window)" = "hses:hp-new" ] \
+    || fail "the recovery should rotate the record onto the rebuilt pane"
+  [ "$(cat "$dir/fake/getcount-hp-new")" -ge 3 ] \
+    || fail "the wait should have polled past both empty reads"
+  [ "$(journal_field "$dir" rl48 phase)" = complete ] \
+    || fail "the settled recovery should end complete"
+  pass "fm-control relaunch: a recovery pane's empty first cwd read does not fail the wait"
+}
+
 test_recover_missing_refuses_alive_endpoint() {
   local dir out rc
   dir=$(new_case recov-alive rl44)
@@ -1671,6 +1707,7 @@ test_recover_missing_refuses_secondmate_kind
 test_recover_missing_recovers_a_missing_herdr_endpoint
 test_recover_missing_refuses_an_ambiguous_herdr_workspace
 test_recover_missing_rebuilds_a_dead_endpoint_only_with_the_marker
+test_recovery_pane_survives_an_empty_first_cwd_read
 test_dead_endpoint_without_a_marker_stays_on_the_ordinary_path
 test_ordinary_relaunch_failure_retry_stays_on_the_same_path
 test_recover_missing_refuses_alive_endpoint
