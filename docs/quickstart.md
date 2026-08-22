@@ -13,7 +13,8 @@ The actual project work is done by workers the first mate launches for you.
 Each worker gets its own isolated copy of the repository, so several pieces of work can run at once without stepping on each other, and none of them touch the copy you are looking at.
 
 You stay the captain.
-The first mate is read-only over your projects, workers make the changes, and nothing lands until the merge authority you set says it can.
+Workers make the changes; the first mate does not edit your projects itself, apart from a few guarded steps such as setting a project up and landing a merge you approved.
+Nothing lands until the merge authority you set says it can.
 Most of the time your job is to answer questions, review a finished pull request, and say "merge it".
 
 ## Your first session
@@ -44,8 +45,8 @@ At that point it will settle two things with you, and it helps to know what they
 
 **Delivery mode** is how finished work reaches you:
 
-- `no-mistakes` runs the full validation pipeline - review, tests, documentation - before a pull request is offered to you.
-  The right choice for anything product-facing.
+- `no-mistakes` runs the full validation pipeline, which owns the review, the tests, the documentation, and the pull request and its checks.
+  What reaches you is already reviewed and green, so this is the right choice for anything product-facing.
 - `direct-PR` skips that pipeline and simply opens a pull request.
   Good for small, low-risk, or internal work where the extra rigor is not worth the wait.
 - `local-only` never pushes anywhere.
@@ -95,12 +96,13 @@ Running them in parallel is the normal case, not a special mode.
 Silence is the healthy state.
 Once work is under way the first mate keeps watch for you, so an idle-looking session usually means everything is fine.
 
-You get pulled in for five things:
+You get pulled in for six things:
 
 - A decision only you can make.
 - Work that is ready for your review, with the full pull request link whenever the work produced one.
 - Findings from a finished scout, handed to you as the findings themselves rather than a bare "done".
 - A real failure or blocker, after the first mate has already tried the obvious recovery.
+- Anything destructive, irreversible, or security-sensitive, whatever a project's standing settings say.
 - Something it needs from you, such as a login or a credential.
 
 You will not be told about retries, routine progress, or the machinery it uses to keep track.
