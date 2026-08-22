@@ -178,7 +178,8 @@ windows_invoke() { # <action> [artifact] [args...]
   argv_json=$(perl -MJSON::PP -e 'print encode_json(\@ARGV)' -- "${windows_args[@]}") \
     || die "cannot encode Lavish argv for Windows"
   set +e
-  output=$(FM_LAVISH_WINDOWS_ARGV_JSON="$argv_json" \
+  output=$(WSLENV="${WSLENV:+$WSLENV:}FM_LAVISH_WINDOWS_ARGV_JSON" \
+    FM_LAVISH_WINDOWS_ARGV_JSON="$argv_json" \
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$windows_bridge" \
       "$action" "$windows_artifact")
   rc=$?
