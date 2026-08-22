@@ -1022,10 +1022,17 @@ while :; do
   # queued rather than acted on here: the descent has already happened (or
   # already been refused) by the time a line comes back, and the wake is how the
   # captain finds out about it.
+  #
+  # This is no longer the only driver, and it must not be: this loop runs
+  # between firstmate's turns, so on its own it made the captain's reserved
+  # quarter conditional on how long a turn lasts. Every agy worker's own turn end
+  # now drives the same evaluation through bin/fm-agy-ladder-tick.sh, and the
+  # evaluation is single-flight, so whichever driver gets there first pays for it.
   while IFS= read -r agy_line; do
     [ -n "$agy_line" ] || continue
-    fm_wake_append check agy-ladder "check: agy ladder $agy_line" || exit 1
-    wake "check: agy ladder $agy_line"
+    agy_reason=$(fm_agy_descent_wake_reason "$agy_line")
+    fm_wake_append check agy-ladder "$agy_reason" || exit 1
+    wake "$agy_reason"
   done < <(fm_agy_descent_tick "$STATE" 2>/dev/null || true)
 
   # Process-to-event liveness repair. This never discovers a result by polling:

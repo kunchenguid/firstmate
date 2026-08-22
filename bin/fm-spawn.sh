@@ -2785,6 +2785,12 @@ EOF
         printf 'id=%s\n' "$ID"
         printf 'gen=%s\n' "$BUSY_GEN"
         printf 'session=%s\n' "$STATE/$ID.agy-session"
+        # The ladder evaluation this worker's own turn end drives. It is the one
+        # driver firstmate's turn boundaries cannot starve, which is what keeps
+        # the captain's reserved quarter of rung 1 from depending on how long a
+        # firstmate turn happens to run (bin/fm-agy-ladder-tick.sh owns why).
+        printf 'ladder=%s\n' "$FM_ROOT/bin/fm-agy-ladder-tick.sh"
+        printf 'home=%s\n' "$FM_HOME"
       } > "$auth_file"
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.agy-turnend-token"
       sq_agy_auth_dir=$(shell_quote "$AGY_AUTH_DIR")
@@ -2811,6 +2817,7 @@ entry="\$auth_dir/\$token"
 field() { LC_ALL=C sed -n "s/^\$1=//p" "\$entry" 2>/dev/null | head -1; }
 turnend=\$(field turnend); busy=\$(field busy); state=\$(field state)
 id=\$(field id); gen=\$(field gen); session=\$(field session)
+ladder=\$(field ladder); home=\$(field home)
 case "\$event" in
   SessionStart)
     case "\$session" in /*) : ;; *) emit ;; esac
@@ -2830,6 +2837,34 @@ case "\$event" in
     case "\$turnend" in /*.turn-ended) touch "\$turnend" 2>/dev/null || true ;; esac
     case "\$busy" in /*) : ;; *) emit ;; esac
     "\$busy" apply "\$state" "\$id" idle --gen "\$gen" --source agy-hook --event stop >/dev/null 2>&1 || true
+    # The agy ladder evaluation, driven by the worker that just spent the quota
+    # (bin/fm-agy-ladder-tick.sh owns why this is the driver that matters).
+    # AFTER the idle record above, never before it: the evaluation refuses to
+    # touch a worker that is not provably idle, and this worker's own turn end is
+    # what makes it idle.
+    #
+    # Detached the same three ways bin/fm-startup-network.sh detaches its own
+    # deferred worker, because the same three things would break it:
+    #   - stdio to /dev/null, because agy reads this hook's stdout and a child
+    #     holding that pipe open would hold the worker's turn open with it;
+    #   - nohup, so the evaluation outlives the hook process;
+    #   - its OWN process group, because agy bounds this hook at 10s while the
+    #     evaluation runs a quota subprocess and may walk a model picker, and a
+    #     shared group would let that bound reap it - a fire-and-forget child
+    #     reaped by the harness that spawned it is a failure this fleet has met
+    #     before.
+    if [ -n "\$ladder" ] && [ -x "\$ladder" ]; then
+      case "\$ladder" in
+        /*)
+          ladder_monitor=0
+          case \$- in *m*) ladder_monitor=1 ;; esac
+          set -m 2>/dev/null || true
+          FM_HOME="\$home" FM_STATE_OVERRIDE="\$state" \
+            nohup "\$ladder" </dev/null >/dev/null 2>&1 &
+          [ "\$ladder_monitor" -eq 1 ] || set +m 2>/dev/null || true
+          ;;
+      esac
+    fi
     ;;
 esac
 emit

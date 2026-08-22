@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # fm-agy-descent-lib.sh - keep an ALREADY RUNNING agy worker on the ladder.
 # Usage: . bin/fm-agy-descent-lib.sh
-# Sourced by bin/fm-watch.sh. This file has no side effects on source.
+# Sourced by bin/fm-watch.sh and bin/fm-agy-ladder-tick.sh. Defining functions
+# is all this file does; the only thing it pulls in on its own is the shared
+# lock library it needs, and only when a caller has not already loaded it.
 #
 # THE HALF THE LAUNCH GATE CANNOT COVER. bin/fm-agy-ladder-lib.sh gates
 # LAUNCHES: it refuses to start a worker on a rung at or below that rung's
@@ -143,6 +145,33 @@
 # about the 2026-08-20 Claude stalls, not a measured cause, and it wants its own
 # reproduction before anything is changed on the strength of it.
 
+# WHO DRIVES IT, AND WHY IT IS NOT ONLY THE WATCHER. The evaluation was first
+# driven from bin/fm-watch.sh alone. The watcher is armed by firstmate when
+# firstmate goes to wait, and it exits the moment it has something to say, so it
+# runs BETWEEN firstmate's turns and not during them. That made the captain's
+# reserved quarter conditional on how long firstmate's turns happen to be, which
+# is not a property anyone chose. Observed on 2026-08-21: the last evaluation ran
+# at 18:48 and read 28.7%, correctly above the floor and correctly declining to
+# move anyone; firstmate then spent about ten minutes inside one turn, nothing
+# re-evaluated, and the rung was at 19.6% - inside the reserve, with workers
+# still spending it - by the time anything looked again.
+#
+# The interval was never the problem, so shortening it fixes nothing: a driver
+# that is not running cannot be run more often. What is needed is a driver
+# firstmate's turn boundaries cannot starve, and the fleet already has exactly
+# one - the spender itself. Every agy worker fires firstmate's own Stop hook at
+# the end of every turn it takes (bin/fm-spawn.sh installs it; bin/fm-busy-lib.sh
+# owns why). That hook runs in the WORKER's process tree, so it is scheduled by
+# the thing consuming the quota rather than by the thing supervising it, and it
+# fires however long firstmate stays inside a turn.
+#
+# Turn end is also the only moment this file can act at all: guard 1 refuses to
+# drive a modal picker into a worker that is not provably idle, so the worker's
+# own turn boundary is simultaneously the tightest useful cadence and the safest
+# one. bin/fm-agy-ladder-tick.sh is the entry point that hook runs, detached so a
+# worker's turn never waits on a quota read or a picker walk, and the two drivers
+# share one evaluation because fm_agy_descent_tick is single-flight.
+#
 # THE OVERRIDE. FM_AGY_LADDER_OVERRIDE is the launch gate's deliberate escape
 # and it is honoured here too: a worker launched past the ladder on the
 # captain's explicit request is not dragged off its model behind their back.
@@ -152,6 +181,21 @@ _FM_AGY_DESCENT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/nul
 if ! declare -f fm_agy_ladder_check >/dev/null 2>&1; then
   # shellcheck source=bin/fm-agy-ladder-lib.sh
   . "$_FM_AGY_DESCENT_LIB_DIR/fm-agy-ladder-lib.sh"
+fi
+# The shared mutex and per-task record lock, which this file uses to serialize
+# concurrent evaluations against each other and its durable record update
+# against bin/fm-spawn.sh's relaunch publication. Both drivers already load this
+# library before this one, so the guarded source below fires only when this file
+# is loaded on its own.
+#
+# Source analysis stops here. That library is a canonical lint root in its own
+# right, so following it from this file adds no uncovered line - and it would be
+# re-expanded inside every root that loads this one, including bin/fm-watch.sh,
+# whose graph is already the most expensive one the bounded CI lint worker has
+# to hold.
+# shellcheck source=/dev/null
+if ! declare -f fm_lock_try_acquire >/dev/null 2>&1; then
+  . "$_FM_AGY_DESCENT_LIB_DIR/fm-wake-lib.sh"
 fi
 
 # FM_AGY_DESCENT: `off` disables the whole evaluation, leaving the launch gate
@@ -780,15 +824,88 @@ fm_agy_descent_switch() {  # <backend> <target> <label> <ladder-display>
 #
 #   descended <id> <from> -> <to>   the worker was moved down and confirmed
 #   climbed <id> <from> -> <to>     the worker was moved back up and confirmed
+#   unrecorded <id> <reason>        it moved, but the move was not written down
 #   refused <id> <reason>           it was not, and the captain needs to know
 #   override <id> <reason>          the captain's own override is holding it
 #
-# The caller decides what a line means for supervision; bin/fm-watch.sh turns
-# each into a wake. Keeping the queue out of this file is what lets the whole
-# decision be exercised without the watcher's wake, lock, and recovery graph.
+# The caller decides what a line means for supervision; bin/fm-watch.sh and
+# bin/fm-agy-ladder-tick.sh each turn one into a wake. Keeping the queue out of
+# this file is what lets the whole decision be exercised without the watcher's
+# wake, lock, and recovery graph.
+
+# fm_agy_descent_wake_reason: the supervision wake one outcome line becomes.
+# One owner for the wording, because two drivers publish it - the watcher live,
+# and the turn-end entry point into the durable queue only - and a supervisor
+# should not be able to tell which of them noticed.
+fm_agy_descent_wake_reason() {  # <outcome-line>
+  printf 'check: agy ladder %s' "$1"
+}
 
 fm_agy_descent_mark() {  # <state-dir> <name>
   printf '%s' "$1/.agy-descent-$2"
+}
+
+# fm_agy_descent_record_model: make <meta> name <model>, or fail printing why.
+#
+# THE DURABLE RECORD IS THE PART THAT MUST NOT BE LOST. A ladder move changes
+# which model a RUNNING worker is on, and recovery takes the model from
+# state/<id>.meta - bin/fm-control.sh's relaunch reads it there, and so does
+# every other reader. A record still naming the rung the worker was moved OFF
+# brings that worker back onto the captain's reserved quarter after any crash,
+# stall, or relaunch, silently undoing the move. Observed on 2026-08-21: two
+# workers reported "Model set to Gemini 3.1 Pro (High)" while their records
+# still said Claude Opus 4.6 (Thinking).
+#
+# It REPLACES the key rather than appending one. An append left the record
+# naming two models at once, the first of them still the reserved rung, and only
+# the tail-wins reading convention kept that from being read as the answer.
+#
+# It takes the SAME per-task lock bin/fm-spawn.sh's relaunch takes before
+# publishing a replacement record, so an update landing mid-publication waits
+# for it instead of writing into the file that publication is about to replace -
+# which is how the move would be lost with nothing to show for it.
+fm_agy_descent_record_model() {  # <meta> <model>
+  local meta=$1 model=$2 lock tmp dir base status=0
+  if ! declare -f fm_meta_lock_path >/dev/null 2>&1 \
+    || ! declare -f fm_lock_acquire_wait >/dev/null 2>&1 \
+    || ! declare -f fm_lock_release >/dev/null 2>&1; then
+    printf 'the shared record-lock helpers are not loaded'
+    return 1
+  fi
+  if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+    printf 'there is no ordinary durable record at %s' "$meta"
+    return 1
+  fi
+  lock=$(fm_meta_lock_path "$meta") || {
+    printf '%s is not a task record path' "$meta"
+    return 1
+  }
+  fm_lock_acquire_wait "$lock" || {
+    printf 'the durable record could not be locked'
+    return 1
+  }
+  # Dot-prefixed and beside the record, the same shape fm-spawn's own
+  # replacement record uses: same filesystem, so the publish is a rename, and
+  # nothing that enumerates task records can see it in between.
+  dir=${meta%/*}
+  base=${meta##*/}
+  tmp="$dir/.$base.agy-model.${BASHPID:-$$}"
+  FM_AGY_RECORD_MODEL=$model awk '
+    BEGIN { done = 0 }
+    /^model=/ {
+      if (!done) { print "model=" ENVIRON["FM_AGY_RECORD_MODEL"]; done = 1 }
+      next
+    }
+    { print }
+    END { if (!done) print "model=" ENVIRON["FM_AGY_RECORD_MODEL"] }
+  ' "$meta" > "$tmp" 2>/dev/null && mv -f "$tmp" "$meta" 2>/dev/null || status=1
+  rm -f "$tmp" 2>/dev/null || true
+  fm_lock_release "$lock" || true
+  if [ "$status" -ne 0 ]; then
+    printf 'the durable record at %s could not be rewritten' "$meta"
+    return 1
+  fi
+  return 0
 }
 
 fm_agy_descent_clear_task() {  # <state-dir> <id>
@@ -810,15 +927,47 @@ fm_agy_descent_due() {  # <state-dir> [<now>]
   [ $((now - stamp)) -ge "$FM_AGY_DESCENT_INTERVAL" ]
 }
 
+# fm_agy_descent_tick: one evaluation of this home's live agy workers.
+#
+# SINGLE-FLIGHT, because there is more than one driver now. The watcher polls it
+# between firstmate's turns and every agy worker's turn end drives it from the
+# worker's own process tree, so two evaluations can genuinely overlap - and an
+# overlap would pay for two quota subprocesses and, far worse, could drive two
+# guarded picker walks into the SAME live pane at once. The lock is held for the
+# whole evaluation and never waited on: a caller that finds an evaluation already
+# running has nothing to add, because the running one reads the same fleet.
 fm_agy_descent_tick() {  # <state-dir> [<now>]
-  local state_dir=$1 now=${2:-}
-  local meta id harness model rung target_rung target_display backend endpoint
-  local label verdict text footer below stamp reason any=1
-  local direction spent climb_failed moved
+  local state_dir=$1 now=${2:-} lock rc=0
 
   [ "$FM_AGY_DESCENT" != off ] || return 0
   [ -d "$state_dir" ] || return 0
   [ -n "$now" ] || now=$(date +%s)
+
+  if ! declare -f fm_lock_try_acquire >/dev/null 2>&1 \
+    || ! declare -f fm_lock_release >/dev/null 2>&1; then
+    # Unreachable in production - this file loads that owner itself when a
+    # caller has not - but a broken load must not degrade into an evaluation
+    # that quietly never runs. Said once per home, because a wake per poll for
+    # a condition nobody can clear from a notification is its own failure.
+    if [ ! -f "$state_dir/.agy-descent-nolock" ]; then
+      : > "$state_dir/.agy-descent-nolock" 2>/dev/null || true
+      printf 'refused the ladder evaluation cannot run at all: its shared lock helpers are not loaded, so no running worker is being kept off the reserved rung\n'
+    fi
+    return 0
+  fi
+  rm -f "$state_dir/.agy-descent-nolock" 2>/dev/null || true
+  lock="$state_dir/.agy-descent.lock"
+  fm_lock_try_acquire "$lock" || return 0
+  _fm_agy_descent_tick_locked "$state_dir" "$now" || rc=$?
+  fm_lock_release "$lock" || true
+  return "$rc"
+}
+
+_fm_agy_descent_tick_locked() {  # <state-dir> <now>
+  local state_dir=$1 now=$2
+  local meta id harness model rung target_rung target_display backend endpoint
+  local label verdict text footer below stamp reason any=1 unrecorded
+  local direction spent climb_failed moved
 
   # Cheap pre-filter: does this home run any agy worker on a rung at all? A home
   # with none must not pay for the quota subprocess, and must not start the
@@ -982,7 +1131,19 @@ fm_agy_descent_tick() {  # <state-dir> [<now>]
     # also means the climb inherits the one-Enter rule that stops the shared
     # submit helper's retry committing a row nobody chose.
     if reason=$(fm_agy_descent_switch "$backend" "$endpoint" "$label" "$target_display"); then
-      printf 'model=%s\n' "$target_display" >> "$meta" 2>/dev/null || true
+      # THE MOVE IS NOT FINISHED UNTIL IT IS WRITTEN DOWN. The worker is already
+      # on the new model at this point, so the record is the only thing that can
+      # still be lost - and losing it is not a missed notification, it is a
+      # recovery that puts this worker straight back onto the model the ladder
+      # just took it off. It is therefore written BEFORE the outcome is reported,
+      # and a failure to write it is reported instead of the move, never
+      # alongside a line that says the move succeeded.
+      if ! unrecorded=$(fm_agy_descent_record_model "$meta" "$target_display"); then
+        fm_agy_descent_escalate_once "$state_dir" "$id" \
+          && printf 'unrecorded %s is now running on %s but its durable record still names %s (%s), so a relaunch would bring it back onto %s\n' \
+            "$id" "$target_display" "$model" "$unrecorded" "$model"
+        continue
+      fi
       fm_agy_descent_clear_task "$state_dir" "$id"
       fm_agy_climb_clear_task "$state_dir" "$id"
       if [ "$direction" = up ]; then moved=climbed; else moved=descended; fi
@@ -999,6 +1160,47 @@ fm_agy_descent_tick() {  # <state-dir> [<now>]
           "$id" "$model" "$target_display" "$reason"
     fi
   done
+}
+
+# fm_agy_descent_turn_end: the evaluation a worker's own turn end drives, with
+# its outcome published where firstmate will find it even though nothing is
+# listening at the time.
+#
+# THIS IS THE DRIVER THE WATCHER CANNOT BE. bin/fm-watch.sh is armed by firstmate
+# when firstmate goes to wait and exits as soon as it has something to say, so it
+# runs between firstmate's turns and never during one - which made the captain's
+# reserved quarter conditional on how long a turn happens to last. Every agy
+# worker fires firstmate's own Stop hook at the end of every turn it takes, in
+# the WORKER's process tree, so this runs on the schedule of the thing spending
+# the quota rather than the thing supervising it.
+#
+# THE OUTCOME IS QUEUED, NEVER PRINTED AT ANYONE. There is no watcher process to
+# wake here, so the durable queue is the whole delivery: firstmate reads it on
+# its next wake-handling turn or at session start. The record is published even
+# when a later one fails, because losing one outcome must not swallow the rest.
+#
+# The queue is addressed by <state-dir> rather than by whatever home the ambient
+# environment happens to name, so this evaluates and publishes for exactly the
+# home it was asked about.
+fm_agy_descent_turn_end() {  # <state-dir> [<now>]
+  local state_dir=$1 now=${2:-} line status=0
+  # Deliberate dynamic scope: fm_wake_append resolves these from the environment
+  # it was loaded into, and binding them here is what makes this function publish
+  # for the home it was ASKED about rather than for whichever home the ambient
+  # environment happens to name.
+  # shellcheck disable=SC2034 # Read by fm_wake_append under bash's dynamic scope.
+  local STATE=$state_dir
+  # shellcheck disable=SC2034 # Read by fm_wake_append under bash's dynamic scope.
+  local FM_WAKE_QUEUE="$state_dir/.wake-queue"
+  # shellcheck disable=SC2034 # Read by fm_wake_append under bash's dynamic scope.
+  local FM_WAKE_QUEUE_LOCK="$state_dir/.wake-queue.lock"
+
+  declare -f fm_wake_append >/dev/null 2>&1 || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    fm_wake_append check agy-ladder "$(fm_agy_descent_wake_reason "$line")" || status=1
+  done < <(fm_agy_descent_tick "$state_dir" "$now" 2>/dev/null || true)
+  return "$status"
 }
 
 # fm_agy_descent_escalate_once: 0 the first time a task needs escalating in this

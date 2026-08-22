@@ -33,6 +33,16 @@
 #      move the worker nowhere, which is the failure that kept this half out of
 #      the descent's own change; both the dead band and the dwell are asserted
 #      by driving a reading across the line and back repeatedly.
+#   9. A confirmed move is written to the durable record before it is reported,
+#      it REPLACES the model the record named rather than adding a second one,
+#      and a move that cannot be recorded is escalated instead of announced as a
+#      success - because recovery reads that record, so one still naming the
+#      reserved rung would put the worker straight back onto it.
+#  10. The reserve is enforced on the schedule of the worker SPENDING it, not on
+#      firstmate's turn boundaries. A reading above the floor, a long gap with no
+#      evaluation at all, then a reading below it must still move the worker, and
+#      an agy worker's own turn end must be a driver that reaches the durable
+#      queue with no watcher running.
 #
 # WHAT THIS SUITE DOES NOT PROVE. The picker's shape is a VENDOR fact, and the
 # fixtures below are real agy 1.1.16 output captured in an isolated lab
@@ -207,10 +217,21 @@ fm_backend_of_meta() {
 }
 fm_backend_target_of_meta() { fm_meta_get "$1" window; }
 
+TMP_ROOT=$(fm_test_tmproot fm-agy-descent)
+
+# The library under test takes the shared per-task record lock and a
+# single-flight lock of its own, and loads the lock owner itself when a caller
+# has not. That owner materializes whatever state directory it resolves, and its
+# default is this repo's own, so point it at a scratch home before it loads. The
+# per-case queue assertions below address their own state directory explicitly.
+# It is unset again immediately: the cases that run a real executable name the
+# home they mean, and an exported override would follow them there.
+FM_STATE_OVERRIDE="$TMP_ROOT/lockhome-state"
+export FM_STATE_OVERRIDE
+
 # shellcheck source=bin/fm-agy-descent-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-agy-descent-lib.sh"
-
-TMP_ROOT=$(fm_test_tmproot fm-agy-descent)
+unset FM_STATE_OVERRIDE
 
 # Readings are written by hand here, so the live intake poll must stay off: a
 # real poll would replace them with the host account's own and every
@@ -261,6 +282,78 @@ meta() {
     printf 'kind=ship\n'
     printf 'model=%s\n' "$3"
   } > "$1/$2.meta"
+}
+
+# wait_for_queue <queue-file> <pattern>: the durable queue is written by a
+# DETACHED evaluation, so the cases that drive one wait for the record instead
+# of assuming it has landed. Bounded, and it never reports success on a timeout.
+wait_for_queue() {  # <queue-file> <pattern>
+  local file=$1 pattern=$2 i=0
+  while [ "$i" -lt 100 ]; do
+    grep -q "$pattern" "$file" 2>/dev/null && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# agy_fakebin <dir>: the two commands a real agy spawn shells out to, and
+# nothing else. `agy models` answers the catalogue the launch validates against;
+# `agy /quota` answers nothing, which the cases below rely on because they write
+# their own readings.
+agy_fakebin() {  # <dir>
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  cat > "$fakebin/agy" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = models ]; then
+  printf 'claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n'
+  printf 'gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n'
+  printf 'gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/agy"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_treehouse "$fakebin"
+  printf '%s\n' "$fakebin"
+}
+
+# spawn_agy_worker <dir> <id>: a REAL bin/fm-spawn.sh launch of an agy ship task
+# on rung 1, into a scratch agy customization root. This exists so the hook the
+# spawn actually writes can be driven, rather than a copy of it written here.
+spawn_agy_worker() {  # <dir> <id>
+  local dir=$1 id=$2 home proj wt fakebin
+  home="$dir/home"
+  proj="$dir/proj"
+  wt="$dir/wt"
+  mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects" "$dir/agy-config"
+  fakebin=$(agy_fakebin "$dir/fake")
+  fm_git_worktree "$proj" "$wt" "wt-$id"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  # A healthy reading so the LAUNCH gate lets rung 1 through; the cases replace
+  # it afterwards with the reading the running worker is to be judged on.
+  fm_agy_quota_observe "$RUNG1 | ctx: 3.0% | quota: 88.0% (4h 0m)" "$home/state"
+  env PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_AGY_CONFIG_HOME="$dir/agy-config" FM_AGY_SETTINGS="$dir/agy-settings.json" \
+    FM_AGY_QUOTA_POLL=off FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-spawn.sh" "$id" "$proj" \
+    --harness agy --model "$RUNG1" --mode no-mistakes --yolo off 2>&1
 }
 
 # --- vendor fixtures --------------------------------------------------------
@@ -1126,27 +1219,303 @@ test_the_dwell_timer_belongs_to_the_rung_not_to_a_worker() {
   pass "fm_agy_climb_dwell_tick: the dwell timer belongs to the rung, is never restarted early, and is destroyed when the condition lapses"
 }
 
-# --- 8. The watcher actually calls it ---------------------------------------
+# --- 8. The durable record follows the worker -------------------------------
+#
+# A ladder move changes which model a RUNNING worker is on, and recovery reads
+# that from state/<id>.meta. Everything below is about the record, not the walk:
+# a record that still names the rung the worker was moved OFF sends it back onto
+# the captain's reserved quarter after the next crash, stall, or relaunch, and
+# does it silently. Observed on 2026-08-21, when two workers reported "Model set
+# to Gemini 3.1 Pro (High)" and both records still said Claude Opus 4.6
+# (Thinking).
 
-test_the_watcher_runs_the_evaluation() {
-  # The library is worthless if nothing invokes it, and a suite that only drives
-  # the library directly cannot tell the difference. This asserts through the
-  # watcher's own executable behaviour: bash's syntax-and-source check loads
-  # every sourced library, so a watcher that no longer pulls this one in loses
-  # the function.
-  local probe
-  probe=$(bash -c '
-    set -u
-    STATE=$1
-    SCRIPT_DIR=$2
-    . "$SCRIPT_DIR/fm-agy-descent-lib.sh"
-    declare -f fm_agy_descent_tick >/dev/null && echo present
-  ' _ "$TMP_ROOT" "$(dirname "${BASH_SOURCE[0]}")/../bin")
-  [ "$probe" = present ] || fail "the descent library must define its evaluation"
+test_a_move_leaves_a_record_naming_only_the_model_the_worker_is_on() {
+  local state out
+  state=$(fresh_state record-replaces)
+  meta "$state" scribe "$RUNG1"
+  record "$state" "$RUNG1" 0.0 '3h 41m'
+  record "$state" "$RUNG2" 94.6 '3h 37m'
+  record "$state" "$RUNG3" 100.0 '4h 59m'
+  FAKE_STICKY=0
+  fake_worker_start "$state" 'Claude Opus 4.6 (Thinking)'
 
-  grep -q 'fm_agy_descent_tick' "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-watch.sh" \
-    || fail "bin/fm-watch.sh must run the descent evaluation on its poll cadence"
-  pass "bin/fm-watch.sh: the descent evaluation is on the watcher's poll cadence"
+  out=$(fm_agy_descent_tick "$state" "$NOW")
+  assert_contains "$out" "descended scribe" "the worker must have been moved"
+
+  # The record must not name the reserved rung ANYWHERE afterwards. Reading the
+  # last matching line happens to give the right answer even when an older one
+  # survives above it, so a record that still carries the reserved model is one
+  # careless reader away from the failure this exists to stop.
+  ! grep -q "^model=$RUNG1\$" "$state/scribe.meta" \
+    || fail "the durable record must no longer name the reserved rung anywhere:
+$(cat "$state/scribe.meta")"
+  [ "$(fm_meta_get "$state/scribe.meta" model)" = "$RUNG2" ] \
+    || fail "the durable record must name the model the worker is actually on"
+
+  # Everything else the record carried is still there: this replaces one field,
+  # it does not rewrite the task.
+  [ "$(fm_meta_get "$state/scribe.meta" harness)" = agy ] \
+    || fail "the rest of the record must survive the update"
+  [ "$(fm_meta_get "$state/scribe.meta" window)" = "fmlab:scribe" ] \
+    || fail "the endpoint the record names must survive the update"
+  FAKE_MODE=static
+  pass "fm_agy_descent_tick: a move replaces the model the record names, leaving no trace of the rung it left"
+}
+
+test_a_move_that_cannot_be_recorded_is_never_reported_as_a_success() {
+  local state out
+  state=$(fresh_state record-fails)
+  meta "$state" mute "$RUNG1"
+  record "$state" "$RUNG1" 0.0 '3h 41m'
+  record "$state" "$RUNG2" 94.6 '3h 37m'
+  record "$state" "$RUNG3" 100.0 '4h 59m'
+  FAKE_STICKY=0
+  fake_worker_start "$state" 'Claude Opus 4.6 (Thinking)'
+
+  # A record that cannot be rewritten in place. Everything up to the write is
+  # unaffected - the model is still read from it, the worker is still moved - so
+  # this isolates the one thing that can still be lost after a confirmed switch.
+  mv "$state/mute.meta" "$state/mute.meta.real"
+  ln -s "$state/mute.meta.real" "$state/mute.meta"
+
+  out=$(fm_agy_descent_tick "$state" "$NOW")
+
+  [ "$(fake_settled)" = "$RUNG2" ] \
+    || fail "this case is only meaningful if the worker really was moved first"
+  assert_not_contains "$out" "descended mute" \
+    "a move whose record was lost must not be reported as a completed descent"
+  assert_contains "$out" "unrecorded mute" \
+    "an unrecorded move must be escalated in its own right"
+  assert_contains "$out" "$RUNG2" "the escalation must name the model the worker is now on"
+  assert_contains "$out" "relaunch would bring it back onto $RUNG1" \
+    "the escalation must name the consequence: recovery onto the reserved rung"
+  FAKE_MODE=static
+  pass "fm_agy_descent_tick: a move that could not be written down is escalated, not announced as done"
+}
+
+# --- 9. The reserve does not wait for firstmate ------------------------------
+#
+# The evaluation was driven from bin/fm-watch.sh alone, and the watcher runs
+# between firstmate's turns rather than during them. That made the captain's
+# reserved quarter conditional on how long a turn happens to last. Observed on
+# 2026-08-21: an evaluation at 18:48 read 28.7%, correctly above the floor and
+# correctly moving nobody; firstmate then spent about ten minutes inside one
+# turn; the rung was at 19.6% with workers still spending it before anything
+# looked again. The interval was never the problem - a driver that is not
+# running cannot run more often - so these cases drive the gap itself.
+
+test_the_reserve_is_enforced_across_a_gap_with_no_evaluation() {
+  local state out later
+  state=$(fresh_state unwatched-gap)
+  meta "$state" holdout "$RUNG1"
+  record_at "$state" "$RUNG1" 28.7 '3h 41m' "$NOW"
+  record_at "$state" "$RUNG2" 94.6 '3h 37m' "$NOW"
+  record_at "$state" "$RUNG3" 100.0 '4h 59m' "$NOW"
+  FAKE_STICKY=0
+  fake_worker_start "$state" 'Claude Opus 4.6 (Thinking)'
+
+  # 18:48. Above the floor, so the right answer is to do nothing.
+  out=$(fm_agy_descent_tick "$state" "$NOW")
+  [ -z "$out" ] || fail "a rung above its floor must move nobody, got: $out"
+  [ "$(fm_meta_get "$state/holdout.meta" model)" = "$RUNG1" ] \
+    || fail "nothing should have moved while the rung was above its floor"
+
+  # Ten minutes inside a single firstmate turn. NOTHING evaluates in this gap -
+  # not once, for ten times the evaluation interval - and the rung falls well
+  # inside the captain's reserve while the worker keeps spending it.
+  later=$((NOW + 600))
+  record_at "$state" "$RUNG1" 19.6 '3h 31m' "$later"
+  record_at "$state" "$RUNG2" 94.6 '3h 27m' "$later"
+  record_at "$state" "$RUNG3" 100.0 '4h 49m' "$later"
+  [ "$(cat "$state/.agy-descent-last")" = "$NOW" ] \
+    || fail "this case is only meaningful if nothing re-evaluated during the gap"
+
+  # The worker ends a turn. That is the one thing guaranteed to happen while
+  # firstmate is mid-turn, because it is the worker spending the quota.
+  fm_agy_descent_turn_end "$state" "$later" \
+    || fail "the turn-end driver must publish its outcome"
+
+  [ "$(fm_meta_get "$state/holdout.meta" model)" = "$RUNG2" ] \
+    || fail "the worker must be off the reserved rung, not still spending it"
+  [ "$(fake_settled)" = "$RUNG2" ] \
+    || fail "the move must have been committed in the worker's own session"
+  assert_grep "descended holdout" "$state/.wake-queue" \
+    "the move must be queued where firstmate finds it, with no watcher running"
+  FAKE_MODE=static
+  pass "the reserved quarter is enforced across a gap in which nothing evaluated at all"
+}
+
+test_a_turn_end_that_finds_nothing_to_do_stays_silent() {
+  local state
+  state=$(fresh_state turn-end-quiet)
+  meta "$state" easy "$RUNG1"
+  record "$state" "$RUNG1" 88.0 '3h 41m'
+  record "$state" "$RUNG2" 94.6 '3h 37m'
+
+  fm_agy_descent_turn_end "$state" "$NOW" || fail "a quiet evaluation must still succeed"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a healthy fleet must not wake anyone on every turn end: $(cat "$state/.wake-queue")"
+  pass "the turn-end driver is silent for a fleet that is where it should be"
+}
+
+test_two_drivers_never_evaluate_at_once() {
+  local state held
+  state=$(fresh_state single-flight)
+  meta "$state" shared "$RUNG1"
+  record "$state" "$RUNG1" 0.0 '3h 41m'
+  record "$state" "$RUNG2" 94.6 '3h 37m'
+
+  # A live holder of the evaluation lock, standing in for the other driver:
+  # the watcher polling while a worker's turn end fires, or two workers ending
+  # turns together. A second evaluation must not start, because it would pay for
+  # a second quota read and could drive a second picker walk into the same pane.
+  held=$(mktemp -d "$TMP_ROOT/holder.XXXXXX")
+  fm_lock_try_acquire "$state/.agy-descent.lock" \
+    || fail "the evaluation lock should have been free"
+
+  [ -z "$(fm_agy_descent_tick "$state" "$NOW")" ] \
+    || fail "a second evaluation must not run while one holds the lock"
+  [ "$(fm_meta_get "$state/shared.meta" model)" = "$RUNG1" ] \
+    || fail "the blocked evaluation must not have touched the worker"
+  [ ! -f "$state/.agy-descent-last" ] \
+    || fail "a blocked evaluation must not consume the evaluation clock either"
+
+  fm_lock_release "$state/.agy-descent.lock"
+  rmdir "$held" 2>/dev/null || true
+  pass "fm_agy_descent_tick: the drivers share one evaluation instead of racing each other"
+}
+
+# --- 10. The drivers are really wired ---------------------------------------
+
+test_the_turn_end_entry_point_publishes_into_the_durable_queue() {
+  local state out
+  state=$(fresh_state entry-point)
+  meta "$state" stranded "$RUNG1"
+  # Every rung spent: the ladder has somewhere to complain but nowhere to move
+  # the worker, which is the one outcome that needs no pane at all, so this case
+  # exercises the real executable end to end with no harness present.
+  record "$state" "$RUNG1" 0.0 '3h 41m'
+  record "$state" "$RUNG2" 0.0 '3h 37m'
+  record "$state" "$RUNG3" 0.0 '4h 59m'
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_AGY_QUOTA_POLL=off FM_AGY_DESCENT_INTERVAL=60 \
+    "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-agy-ladder-tick.sh" 2>&1) \
+    || fail "the turn-end entry point failed: $out"
+  [ -z "$out" ] || fail "the entry point must speak only through the queue, got: $out"
+  assert_grep "agy ladder refused stranded" "$state/.wake-queue" \
+    "the entry point must queue the ladder's verdict for firstmate"
+  pass "bin/fm-agy-ladder-tick.sh: one evaluation, published where firstmate will read it"
+}
+
+test_the_watcher_still_runs_the_evaluation() {
+  local dir state fakebin out pid rc=0
+  dir="$TMP_ROOT/watcher-driver"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$state" "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  meta "$state" polled "$RUNG1"
+  record "$state" "$RUNG1" 0.0 '3h 41m'
+  record "$state" "$RUNG2" 0.0 '3h 37m'
+  record "$state" "$RUNG3" 0.0 '4h 59m'
+
+  # The turn-end driver is an ADDITION, not a replacement: firstmate is still
+  # between turns most of the time, and the watcher is what covers that. Drive
+  # the real one and require the same verdict out of it.
+  out="$dir/watch.out"
+  env PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_AGY_QUOTA_POLL=off \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-watch.sh" > "$out" 2>/dev/null &
+  pid=$!
+  local i=0
+  while [ "$i" -lt 200 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || rc=$?
+  assert_grep "agy ladder refused polled" "$out" \
+    "the watcher must still reach the ladder's verdict on its own poll cadence"
+  assert_grep "agy ladder refused polled" "$state/.wake-queue" \
+    "the watcher must queue that verdict durably as well as reporting it live"
+  pass "bin/fm-watch.sh: the evaluation is still on the watcher's poll cadence too"
+}
+
+test_an_agy_workers_turn_end_drives_the_evaluation() {
+  local dir home state out hook payload
+  dir="$TMP_ROOT/hook-wiring"
+  home="$dir/home"
+  state="$home/state"
+  out=$(spawn_agy_worker "$dir" hooked) \
+    || fail "the agy spawn under test failed: $out"
+  hook="$dir/agy-config/plugins/fm-turn-end/fm-turn-end.sh"
+  assert_present "$hook" "the agy spawn must install its turn-end hook"
+
+  # The worker is on the reserved rung and every rung is spent, so the ladder has
+  # a verdict to reach and needs no pane to reach it.
+  record "$state" "$RUNG1" 0.0 '3h 41m'
+  record "$state" "$RUNG2" 0.0 '3h 37m'
+  record "$state" "$RUNG3" 0.0 '4h 59m'
+  rm -f "$state/.agy-descent-last"
+
+  # agy's real Stop payload shape, naming the worktree this task was registered
+  # for. Nothing else here is firstmate's to fake: the hook is the file the
+  # spawn actually wrote.
+  payload=$(printf '{"conversationId":"c1","workspacePaths":["%s"],"modelName":"%s"}' \
+    "$dir/wt" "$RUNG1")
+  out=$(printf '%s' "$payload" | bash "$hook" Stop 2>&1) \
+    || fail "the Stop hook must succeed: $out"
+  [ "$out" = '{}' ] || fail "the Stop hook must still answer agy with {}, got: $out"
+
+  # The evaluation is detached, so give it a bounded moment to land.
+  wait_for_queue "$state/.wake-queue" "agy ladder refused hooked" \
+    || fail "an agy worker's turn end must drive the ladder evaluation; queue was:
+$(cat "$state/.wake-queue" 2>/dev/null)"
+  pass "an agy worker's own turn end drives the reserve check, with no watcher and no firstmate turn"
+}
+
+test_the_evaluation_outlives_the_hook_that_started_it() {
+  local dir home state out hook payload pgid
+  dir="$TMP_ROOT/hook-detach"
+  home="$dir/home"
+  state="$home/state"
+  out=$(spawn_agy_worker "$dir" outlives) \
+    || fail "the agy spawn under test failed: $out"
+  hook="$dir/agy-config/plugins/fm-turn-end/fm-turn-end.sh"
+
+  # A worker that must be MOVED, so the evaluation is still working when the
+  # hook that started it is torn down: it has a pane to read and a picker to
+  # wait for, and the bounded waits below are shortened so the case costs
+  # seconds rather than the production ceiling.
+  record "$state" "$RUNG1" 0.0 '3h 41m'
+  record "$state" "$RUNG2" 94.6 '3h 37m'
+  record "$state" "$RUNG3" 100.0 '4h 59m'
+  rm -f "$state/.agy-descent-last"
+  payload=$(printf '{"conversationId":"c2","workspacePaths":["%s"],"modelName":"%s"}' \
+    "$dir/wt" "$RUNG1")
+
+  # Run the hook in a process group of its own and then destroy that group, which
+  # is what a harness bounding its hook at a timeout does. The evaluation must
+  # not go with it - a reaped fire-and-forget child would leave the reserve
+  # unenforced with nothing to show for it.
+  set -m
+  ( export PATH="$dir/fake/fakebin:$PATH" FM_AGY_QUOTA_POLL=off \
+      FM_AGY_DESCENT_PICKER_WAIT=4 FM_AGY_DESCENT_CONFIRM_WAIT=4
+    printf '%s' "$payload" | bash "$hook" Stop >/dev/null 2>&1 ) &
+  pgid=$!
+  wait "$pgid" 2>/dev/null || true
+  kill -- -"$pgid" 2>/dev/null || true
+  set +m
+
+  wait_for_queue "$state/.wake-queue" "agy ladder .* outlives" \
+    || fail "the evaluation must outlive the hook process group that started it; queue was:
+$(cat "$state/.wake-queue" 2>/dev/null)"
+  pass "the turn-end evaluation runs in its own process group, so reaping the hook does not reap the reserve check"
 }
 
 test_recognises_the_real_picker
@@ -1177,4 +1546,12 @@ test_a_failed_climb_is_reported_once_and_not_retried_every_minute
 test_the_captains_override_holds_a_worker_down_and_says_nothing
 test_the_climb_can_be_turned_off_on_its_own
 test_the_dwell_timer_belongs_to_the_rung_not_to_a_worker
-test_the_watcher_runs_the_evaluation
+test_a_move_leaves_a_record_naming_only_the_model_the_worker_is_on
+test_a_move_that_cannot_be_recorded_is_never_reported_as_a_success
+test_the_reserve_is_enforced_across_a_gap_with_no_evaluation
+test_a_turn_end_that_finds_nothing_to_do_stays_silent
+test_two_drivers_never_evaluate_at_once
+test_the_turn_end_entry_point_publishes_into_the_durable_queue
+test_the_watcher_still_runs_the_evaluation
+test_an_agy_workers_turn_end_drives_the_evaluation
+test_the_evaluation_outlives_the_hook_that_started_it

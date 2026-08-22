@@ -17,6 +17,12 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. A relaunch resumes on the model the worker is ACTUALLY on, including when
+#      the agy ladder moved it mid-run. Relaunch reads the model from the task's
+#      durable record, so this is where a record that still named the model the
+#      ladder moved the worker OFF would put it back onto the captain's reserved
+#      rung - which is why the ladder's own record update is driven here rather
+#      than a hand-written record standing in for it.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -35,6 +41,18 @@ X_LINK="$ROOT/bin/fm-x-link.sh"
 TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
+
+# The agy ladder's own durable-record writer, so the round trip below is the
+# real one on both sides. It loads the shared lock owner when a caller has not,
+# and that owner materializes whatever state directory it resolves, so point it
+# at a scratch home first rather than this repo's own.
+# It is unset again immediately: every case below runs the real fm-control
+# against its OWN home, and an exported override would send all of them here.
+FM_STATE_OVERRIDE="$TMP_ROOT/lockhome-state"
+export FM_STATE_OVERRIDE
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-agy-descent-lib.sh"
+unset FM_STATE_OVERRIDE
 TASK_TMPS=()
 
 relaunch_cleanup() {
@@ -174,6 +192,7 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_AGY_QUOTA_POLL="${FM_AGY_QUOTA_POLL:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -431,6 +450,58 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   [ "$(journal_field "$dir" rl4 from_harness)" = claude ] || fail "the journal should record the origin harness"
   [ "$(journal_field "$dir" rl4 to_harness)" = codex ] || fail "the journal should record the target harness"
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
+}
+
+test_relaunch_resumes_on_the_model_the_ladder_moved_the_worker_to() {
+  local dir out rc reserved moved
+  reserved='Claude Opus 4.6 (Thinking)'
+  moved='Gemini 3.1 Pro (High)'
+  dir=$(new_case ladder rl40)
+  add_ship_task "$dir" rl40 agy
+  sed "s/^model=default\$/model=$reserved/" "$dir/home/state/rl40.meta" \
+    > "$dir/home/state/rl40.meta.tmp"
+  mv "$dir/home/state/rl40.meta.tmp" "$dir/home/state/rl40.meta"
+
+  # An agy launch resolves its executable and validates the model against the
+  # account catalogue, so a stub answers both without a network call - CI has no
+  # agy, and a case that turned on whether one is installed would prove nothing.
+  cat > "$dir/fakebin/agy" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = models ]; then
+  printf 'claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n'
+  printf 'gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n'
+fi
+exit 0
+SH
+  chmod +x "$dir/fakebin/agy"
+  # The relaunch is a LAUNCH on rung 2, so it faces the ladder gate, which
+  # refuses a descent it cannot prove. These readings are what prove it, and the
+  # live poll stays off so the verdict comes from them rather than from whatever
+  # the host account says today.
+  fm_agy_quota_observe "$reserved | ctx: 3.0% | quota: 0.0% (3h 41m)" "$dir/home/state"
+  fm_agy_quota_observe "$moved | ctx: 3.0% | quota: 94.6% (3h 37m)" "$dir/home/state"
+
+  # The ladder moves the running worker off the captain's reserved rung and
+  # writes that down, exactly as bin/fm-agy-descent-lib.sh does after a confirmed
+  # in-session switch.
+  fm_agy_descent_record_model "$dir/home/state/rl40.meta" "$moved" \
+    || fail "the ladder must be able to record the move it just made"
+  ! grep -q "^model=$reserved\$" "$dir/home/state/rl40.meta" \
+    || fail "the record must not still name the reserved rung:
+$(cat "$dir/home/state/rl40.meta")"
+
+  # The worker then crashes and is relaunched. It must come back on the model it
+  # was actually running, not on the rung the ladder took it off.
+  printf 'agy' > "$dir/fake/becomes"
+  out=$(FM_AGY_QUOTA_POLL=off run_control "$dir" rl40 relaunch --note "recovered after a stall"); rc=$?
+  expect_code 0 "$rc" "the relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl40 model)" = "$moved" ] \
+    || fail "the republished record must still name the model the ladder moved the worker to"
+  assert_grep "$moved" "$dir/fake/literal" \
+    "the replacement must be launched on the model the worker was actually running"
+  assert_no_grep "$reserved" "$dir/fake/literal" \
+    "the replacement must not be launched back onto the captain's reserved rung"
+  pass "fm-control relaunch: a worker the ladder moved comes back on that model, not on the reserved rung"
 }
 
 test_harness_switch_does_not_carry_the_old_profile_axes() {
@@ -1322,6 +1393,7 @@ test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
+test_relaunch_resumes_on_the_model_the_ladder_moved_the_worker_to
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
