@@ -1541,7 +1541,7 @@ if [ "$ROUTING_DECISION_REQUIRED" -eq 0 ] \
   && [ "$HARNESS" = "$RELAUNCH_PRIOR_HARNESS" ] \
   && [ "${MODEL:-default}" = "$RELAUNCH_PRIOR_MODEL" ] \
   && [ "${EFFORT:-default}" = "$RELAUNCH_PRIOR_EFFORT" ] \
-  && fm_routing_decision_resolve_committed "$RELAUNCH_PRIOR_ROUTING_DECISION" "$DATA/$ID"; then
+  && fm_routing_decision_resolve_inherited "$RELAUNCH_PRIOR_ROUTING_DECISION" "$DATA/$ID"; then
   :
 fi
 
@@ -1984,7 +1984,7 @@ fi
 if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
   fm_routing_decision_consume_prepared || exit 1
   fm_routing_decision_seal_prepared || {
-    echo "error: validated routing transaction could not be sealed" >&2
+    echo "error: validated routing decision could not be sealed" >&2
     exit 1
   }
 fi

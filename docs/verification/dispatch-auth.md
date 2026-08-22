@@ -205,6 +205,11 @@ The skill's primary path is that default TOON; `--json` is the documented defens
 
 ## Routing receipt boundary
 
+Verified 2026-08-22 against the generation-specific routing receipt implementation.
+Publication uses no-follow exclusive creation for the receipt and brief, preserves every prior generation, and intentionally makes no all-or-none guarantee across those two files.
+A refused publication may leave partial artifacts, but those artifacts cannot authorize a launch because the runtime never scans generation directories and flag-free inheritance starts only from the successful task metadata `routing_decision` pointer, then requires a non-symlink regular receipt whose task-scoped generation matches its bytes.
+The canonical dispatch snapshot is opened through the executable no-follow boundary, and final receipt freshness is read from the immutable prepared snapshot rather than the mutable pending pathname.
+
 The routing boundary verification entrypoints are:
 
 ```sh

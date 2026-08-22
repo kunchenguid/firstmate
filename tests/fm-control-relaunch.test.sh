@@ -40,12 +40,8 @@ TASK_TMPS=()
 relaunch_cleanup() {
   local d
   for d in "${TASK_TMPS[@]:-}"; do
-    if [ -n "$d" ]; then
-      fm_test_prepare_tree_removal "$d"
-      rm -rf "$d"
-    fi
+    [ -n "$d" ] && rm -rf "$d"
   done
-  fm_test_prepare_tree_removal "$TMP_ROOT"
   rm -rf "$TMP_ROOT"
 }
 trap relaunch_cleanup EXIT
@@ -208,9 +204,7 @@ write_committed_routing_receipt() {
   mkdir "$generation_dir"
   mv "$receipt" "$generation_dir/receipt.json"
   mv "$brief" "$generation_dir/brief.md"
-  printf 'fixture\ttransaction\t%s\n' "$(routing_sha_file "$generation_dir/brief.md")" > "$generation_dir/transaction"
-  chmod 0400 "$generation_dir/receipt.json" "$generation_dir/brief.md" "$generation_dir/transaction"
-  chmod 0500 "$generation_dir"
+  chmod 0400 "$generation_dir/receipt.json" "$generation_dir/brief.md"
   printf '%s/receipt.json\n' "$generation_dir"
 }
 
@@ -695,8 +689,8 @@ test_committed_handoff_does_not_revalidate_after_exit() {
     || fail "route-changing relaunch did not point metadata at its new generation"
   assert_present "$old_receipt" "route-changing relaunch deleted its prior receipt generation"
   assert_present "$new_receipt" "control preflight did not publish the committed receipt generation"
-  perl "$ROOT/bin/fm-routing-fs-boundary.pl" resolve "$new_receipt" >/dev/null 2>&1 \
-    || fail "control preflight did not commit the consumed generation"
+  [ -f "$new_receipt" ] && [ ! -L "$new_receipt" ] \
+    || fail "control preflight did not publish its regular receipt generation"
   assert_present "$dir/home/data/rl42/routing-decision.pending.json" \
     "control preflight deleted the retained pending receipt pathname"
   pass "fm-control relaunch: committed handoff publishes a new durable generation"

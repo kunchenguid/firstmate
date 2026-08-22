@@ -694,17 +694,6 @@ assert_preflight_kept_retryable_receipt() {
   [ ! -s "$home/worktree.log" ] || fail "preflight refusal leased a worktree"
 }
 
-assert_routing_snapshots_retired() {
-  local home=$1 id=$2 snapshot mode found=0
-  for snapshot in "$home/data/$id"/.routing-decision.validate.*; do
-    [ -d "$snapshot" ] || continue
-    found=1
-    mode=$(stat -f %Lp "$snapshot" 2>/dev/null || stat -c %a "$snapshot" 2>/dev/null) || return 1
-    [ "$mode" = 0 ] || fail "validation snapshot residue remained active with mode $mode"
-  done
-  [ "$found" -eq 1 ] || fail "validation snapshot retirement left no observable staged residue"
-}
-
 test_project_preflight_keeps_receipt_retryable() {
   local rec id out status missing_project
   id=profile-project-preflight-z12b1
@@ -842,7 +831,6 @@ test_launch_uses_validated_brief_snapshot_after_source_replacement() {
     || fail "verified harness did not receive every receipt-bound launch-input byte"
   assert_not_contains "$launch" "$routing_brief" \
     "emitted launch reopened the mutable validated brief pathname"
-  assert_routing_snapshots_retired "$HOME_DIR" "$id"
   pass "launch verifies the persisted brief bytes after source replacement"
 }
 
@@ -865,7 +853,6 @@ test_launch_refuses_replaced_validated_brief_target() {
     "brief snapshot replacement lacked its routing refusal diagnostic"
   assert_spawn_refused_before_side_effects "$HOME_DIR" "$id" "$LAUNCH_LOG"
   [ ! -s "$HOME_DIR/worktree.log" ] || fail "brief target replacement leased a worktree"
-  assert_routing_snapshots_retired "$HOME_DIR" "$id"
   pass "spawn refuses a substituted brief snapshot before side effects"
 }
 

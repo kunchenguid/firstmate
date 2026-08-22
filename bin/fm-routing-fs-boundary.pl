@@ -3,9 +3,7 @@ use strict;
 use warnings;
 use Errno qw(EEXIST ENOENT);
 use Fcntl qw(:DEFAULT :mode);
-use File::Basename qw(basename dirname);
 use Digest::SHA qw(sha256_hex);
-use JSON::PP qw(decode_json);
 
 sub fail {
   print STDERR "$_[0]\n";
@@ -130,26 +128,16 @@ sub snapshot_bundle {
   print join("\t", $snapshot_st->[0], $snapshot_st->[1], $pending_st->[0], $pending_st->[1], $config_present, sha256_hex($pending_bytes)), "\n";
 }
 
-sub validate_generation {
-  my ($generation_dir, $generation, $transaction) = @_;
-  my ($receipt, $receipt_st) = open_regular_at($generation_dir, 'receipt.json', 0);
-  my ($brief, $brief_st) = open_regular_at($generation_dir, 'brief.md', 0);
-  my ($transaction_fh, $transaction_st) = open_regular_at($generation_dir, 'transaction', 0);
-  (($receipt_st->[2] & 0777) == 0400 && $receipt_st->[3] == 1) or fail("COLLISION:receipt.json:ownership");
-  (($brief_st->[2] & 0777) == 0400 && $brief_st->[3] == 1) or fail("COLLISION:brief.md:ownership");
-  (($transaction_st->[2] & 0777) == 0400 && $transaction_st->[3] == 1) or fail("STAGING_COLLISION:transaction:ownership");
-  my $receipt_bytes = read_all($receipt);
-  my $brief_bytes = read_all($brief);
-  sha256_hex($receipt_bytes) eq $generation or fail("COLLISION:receipt.json:generation");
-  my $receipt_json = eval { decode_json($receipt_bytes) };
-  ref($receipt_json) eq 'HASH' or fail("COLLISION:receipt.json:json");
-  my $transaction_bytes = read_all($transaction_fh);
-  $transaction_bytes =~ /\A[^\t\n]+\t[^\t\n]+\t([0-9a-f]{64})\n\z/ or fail("STAGING_COLLISION:transaction:format");
-  $1 eq sha256_hex($brief_bytes) or fail("COLLISION:brief.md:hash");
-  if (defined($transaction)) {
-    $transaction_bytes eq $transaction or fail("STAGING_COLLISION:transaction");
-  }
-  return ($receipt, $receipt_st, $brief, $brief_st, $transaction_bytes);
+sub publish_artifact {
+  my ($generation_dir, $name, $bytes) = @_;
+  my ($created, $created_st) = create_at($generation_dir, $name, $bytes, 0400);
+  return ($created, $created_st) if $created;
+  $! == EEXIST or fail("PUBLISH:$name:$!");
+  my ($existing, $existing_st) = open_regular_at($generation_dir, $name, 0);
+  (($existing_st->[2] & 0777) == 0400 && $existing_st->[3] == 1)
+    or fail("COLLISION:$name:ownership");
+  read_all($existing) eq $bytes or fail("COLLISION:$name:bytes");
+  return ($existing, $existing_st);
 }
 
 sub publish_bundle {
@@ -170,7 +158,6 @@ sub publish_bundle {
   $generation eq $expected_generation or fail("PUBLISH:generation-mismatch");
   read_all($pending) eq $receipt_bytes or fail("PENDING_BYTES");
   my $generation_name = "routing-generation.$generation";
-  my $transaction = "$snapshot_dev\t$snapshot_ino\t" . sha256_hex($brief_bytes) . "\n";
   enter_dir($task);
   my $created = mkdir($generation_name, 0700);
   if (!$created && $! != EEXIST) {
@@ -178,41 +165,17 @@ sub publish_bundle {
   }
   my ($generation_dir, $generation_st) = open_dir_at($task, $generation_name, 0);
   my $mode = $generation_st->[2] & 0777;
-  if ($mode == 0500) {
-    fail("CONSUMED");
-  }
-  $mode == 0700 or fail("STAGING_COLLISION:$generation_name:mode");
-  if ($created) {
-    create_at($generation_dir, 'transaction', $transaction, 0400) or fail("STAGING_RESIDUE:transaction:$!");
-    create_at($generation_dir, 'receipt.json', $receipt_bytes, 0400) or fail("STAGING_RESIDUE:receipt.json:$!");
-    create_at($generation_dir, 'brief.md', $brief_bytes, 0400) or fail("STAGING_RESIDUE:brief.md:$!");
-  } else {
-    validate_generation($generation_dir, $generation, $transaction);
-  }
-  my ($receipt, $receipt_st, $brief, $brief_st) = validate_generation($generation_dir, $generation, $transaction);
-  chmod(0500, $generation_dir) or fail("STAGING_RESIDUE:$generation_name:COMMIT:$!");
-  print join("\t", $generation, $receipt_st->[0], $receipt_st->[1], $brief_st->[0], $brief_st->[1], $generation_st->[0], $generation_st->[1]), "\n";
+  $mode == 0700 or fail("COLLISION:$generation_name:mode");
+  publish_artifact($generation_dir, 'receipt.json', $receipt_bytes);
+  publish_artifact($generation_dir, 'brief.md', $brief_bytes);
+  print "$generation\n";
 }
 
-sub resolve_receipt {
-  my ($receipt_path) = @_;
-  basename($receipt_path) eq 'receipt.json' or fail("UNCOMMITTED_RECEIPT:name");
-  my $generation_path = dirname($receipt_path);
-  my $generation_name = basename($generation_path);
-  $generation_name =~ /\Arouting-generation\.([0-9a-f]{64})\z/ or fail("UNCOMMITTED_RECEIPT:generation");
-  my $generation = $1;
-  my ($generation_dir, $generation_st) = open_dir($generation_path);
-  (($generation_st->[2] & 0777) == 0500) or fail("UNCOMMITTED_RECEIPT:stage");
-  validate_generation($generation_dir, $generation, undef);
-  my $brief_path = "$generation_path/brief.md";
-  print "$receipt_path\t$brief_path\n";
-}
-
-sub retire_snapshot {
-  my ($path, $dev, $ino) = @_;
-  my ($snapshot, $snapshot_st) = open_dir($path);
-  $snapshot_st->[0] == $dev && $snapshot_st->[1] == $ino or fail("CLEANUP_IDENTITY");
-  chmod(0000, $snapshot) or fail("STAGING_RESIDUE:$path:RETIRE:$!");
+sub hash_regular {
+  my ($dir_path, $name) = @_;
+  my ($dir) = open_dir($dir_path);
+  my ($file) = open_regular_at($dir, $name, 0);
+  print sha256_hex(read_all($file)), "\n";
 }
 
 my $operation = shift(@ARGV) // fail('USAGE');
@@ -223,10 +186,8 @@ if ($operation eq 'identity') {
   snapshot_bundle(@ARGV);
 } elsif ($operation eq 'publish') {
   publish_bundle(@ARGV);
-} elsif ($operation eq 'resolve') {
-  resolve_receipt(@ARGV);
-} elsif ($operation eq 'cleanup') {
-  retire_snapshot(@ARGV);
+} elsif ($operation eq 'hash') {
+  hash_regular(@ARGV);
 } else {
   fail('USAGE');
 }

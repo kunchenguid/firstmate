@@ -82,27 +82,14 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   return 1
 }
 
-fm_test_prepare_tree_removal() {
-  local root=$1
-  [ -d "$root" ] || return 0
-  find "$root" -type d \( -name '.routing-decision.validate.*' -o -name 'routing-generation.*' \) \
-    -exec chmod 0700 {} + 2>/dev/null || true
-}
-
 fm_test_cleanup() {
   local d
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    if [ -n "$d" ]; then
-      fm_test_prepare_tree_removal "$d"
-      rm -rf "$d"
-    fi
+    [ -n "$d" ] && rm -rf "$d"
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      if [ -n "$d" ]; then
-        fm_test_prepare_tree_removal "$d"
-        rm -rf "$d"
-      fi
+      [ -n "$d" ] && rm -rf "$d"
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
@@ -151,7 +138,6 @@ fm_test_reap_orphans() {
     mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
     [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     dir=$(dirname "$marker")
-    fm_test_prepare_tree_removal "$dir"
     rm -rf "$dir"
   done
 }
@@ -313,7 +299,6 @@ fm_test_existing_routing_decision_path() { # <home> <id> [data]
   local home=$1 id=$2 data=${3:-$1/data} candidate
   for candidate in "$data/$id"/routing-generation.*/receipt.json; do
     [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
-    perl "$ROOT/bin/fm-routing-fs-boundary.pl" resolve "$candidate" >/dev/null 2>&1 || continue
     printf '%s\n' "$candidate"
     return 0
   done

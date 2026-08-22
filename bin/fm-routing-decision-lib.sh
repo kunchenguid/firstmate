@@ -34,10 +34,7 @@ FM_ROUTING_PREPARED_DIR_INO=
 FM_ROUTING_PREPARED_PENDING_DEV=
 FM_ROUTING_PREPARED_PENDING_INO=
 FM_ROUTING_PREPARED_GENERATION=
-FM_ROUTING_PREPARED_RECEIPT_DEV=
-FM_ROUTING_PREPARED_RECEIPT_INO=
-FM_ROUTING_PREPARED_CONSUMED=0
-FM_ROUTING_PREPARED_COMMITTED=0
+FM_ROUTING_PREPARED_PUBLISHED=0
 FM_ROUTING_DECISION_MAX_AGE_SECONDS=300
 FM_ROUTING_DECISION_MAX_FUTURE_SECONDS=30
 
@@ -94,15 +91,18 @@ fm_routing_fs_boundary() {
   perl "$(dirname "${BASH_SOURCE[0]}")/fm-routing-fs-boundary.pl" "$@"
 }
 
-fm_routing_decision_resolve_committed() {
-  local receipt=$1 task_dir=$2 result resolved brief
+fm_routing_decision_resolve_inherited() {
+  local receipt=$1 task_dir=$2 generation_dir generation expected
   [ "$(dirname "$(dirname "$receipt")")" = "$task_dir" ] || return 1
+  [ "$(basename "$receipt")" = receipt.json ] || return 1
   [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
-  result=$(fm_routing_fs_boundary resolve "$receipt" 2>/dev/null) || return 1
-  IFS=$'\t' read -r resolved brief <<<"$result"
-  [ "$resolved" = "$receipt" ] && [ -f "$brief" ] && [ ! -L "$brief" ] || return 1
-  FM_ROUTING_DECISION_FINAL=$resolved
-  FM_ROUTING_BRIEF_FINAL=$brief
+  generation_dir=$(basename "$(dirname "$receipt")")
+  generation=${generation_dir#routing-generation.}
+  [ "$generation_dir" = "routing-generation.$generation" ] || return 1
+  [[ "$generation" =~ ^[0-9a-f]{64}$ ]] || return 1
+  expected=$(fm_routing_fs_boundary hash "$(dirname "$receipt")" receipt.json 2>/dev/null) || return 1
+  [ "$expected" = "$generation" ] || return 1
+  FM_ROUTING_DECISION_FINAL=$receipt
 }
 
 FM_ROUTING_WORDS=()
@@ -834,17 +834,17 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
 fm_routing_decision_persist_prepared() {
   local snapshot_dir=$FM_ROUTING_PREPARED_DIR data=$FM_ROUTING_PREPARED_DATA
   local id=$FM_ROUTING_PREPARED_ID source_pending=$FM_ROUTING_PREPARED_SOURCE_PENDING
-  local home=$FM_ROUTING_PREPARED_HOME task_dir pending final brief_final generation generated_at meta prior result
-  [ -n "$snapshot_dir" ] && [ -d "$snapshot_dir" ] && [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 0 ] || {
-    fm_routing_refuse "PERSISTENCE_REFUSED" "no validated routing transaction is prepared"
+  local home=$FM_ROUTING_PREPARED_HOME task_dir prepared_pending final brief_final generation generated_at meta prior result
+  [ -n "$snapshot_dir" ] && [ -d "$snapshot_dir" ] && [ "$FM_ROUTING_PREPARED_PUBLISHED" -eq 0 ] || {
+    fm_routing_refuse "PERSISTENCE_REFUSED" "no validated routing decision is prepared"
     return 1
   }
   task_dir="$data/$id"
-  pending="$task_dir/routing-decision.pending.json"
+  prepared_pending="$task_dir/routing-decision.pending.json"
   generation=$FM_ROUTING_PREPARED_GENERATION
   final="$(dirname "$source_pending")/routing-generation.$generation/receipt.json"
   brief_final="$(dirname "$source_pending")/routing-generation.$generation/brief.md"
-  generated_at=$(jq -r '.generated_at' "$pending")
+  generated_at=$(jq -r '.generated_at' "$prepared_pending")
   fm_routing_timestamp_fresh "$generated_at" "STALE" || return 1
   meta="$home/state/$id.meta"
   if [ -f "$meta" ] && [ ! -L "$meta" ]; then
@@ -865,31 +865,18 @@ fm_routing_decision_persist_prepared() {
     fm_routing_refuse "PERSISTENCE_REFUSED" "$result"
     return 1
   }
-  IFS=$'\t' read -r generation FM_ROUTING_PREPARED_RECEIPT_DEV FM_ROUTING_PREPARED_RECEIPT_INO _ _ _ _ _ _ <<<"$result"
+  generation=$result
   FM_ROUTING_PREPARED_GENERATION=$generation
-  FM_ROUTING_PREPARED_COMMITTED=1
-  FM_ROUTING_PREPARED_CONSUMED=1
+  FM_ROUTING_PREPARED_PUBLISHED=1
   FM_ROUTING_DECISION_FINAL=$final
   FM_ROUTING_BRIEF_FINAL=$brief_final
 }
 
 fm_routing_decision_consume_prepared() {
-  [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 1 ] || return 1
-  FM_ROUTING_PREPARED_CONSUMED=1
-}
-
-fm_routing_decision_cleanup_prepared() {
-  [ -n "$FM_ROUTING_PREPARED_DIR" ] || return 0
-  fm_routing_fs_boundary cleanup "$FM_ROUTING_PREPARED_DIR" \
-    "$FM_ROUTING_PREPARED_DIR_DEV" "$FM_ROUTING_PREPARED_DIR_INO"
+  [ "$FM_ROUTING_PREPARED_PUBLISHED" -eq 1 ] || return 1
 }
 
 fm_routing_decision_discard_prepared() {
-  local cleanup_error
-  if [ -n "$FM_ROUTING_PREPARED_DIR" ]; then
-    cleanup_error=$(fm_routing_decision_cleanup_prepared 2>&1) ||
-      echo "warning: routing validation staging residue remains: $cleanup_error" >&2
-  fi
   FM_ROUTING_PREPARED_DIR=
   FM_ROUTING_PREPARED_DATA=
   FM_ROUTING_PREPARED_ID=
@@ -900,20 +887,14 @@ fm_routing_decision_discard_prepared() {
   FM_ROUTING_PREPARED_PENDING_DEV=
   FM_ROUTING_PREPARED_PENDING_INO=
   FM_ROUTING_PREPARED_GENERATION=
-  FM_ROUTING_PREPARED_RECEIPT_DEV=
-  FM_ROUTING_PREPARED_RECEIPT_INO=
-  FM_ROUTING_PREPARED_CONSUMED=0
-  FM_ROUTING_PREPARED_COMMITTED=0
+  FM_ROUTING_PREPARED_PUBLISHED=0
   FM_ROUTING_DECISION_FINAL=
   FM_ROUTING_BRIEF_FINAL=
   FM_ROUTING_BRIEF_HASH=
 }
 
 fm_routing_decision_seal_prepared() {
-  [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 1 ] || return 1
-  local cleanup_error
-  cleanup_error=$(fm_routing_decision_cleanup_prepared 2>&1) ||
-    echo "warning: routing validation staging residue remains: $cleanup_error" >&2
+  [ "$FM_ROUTING_PREPARED_PUBLISHED" -eq 1 ] || return 1
   FM_ROUTING_PREPARED_DIR=
   FM_ROUTING_PREPARED_DATA=
   FM_ROUTING_PREPARED_ID=
@@ -924,10 +905,7 @@ fm_routing_decision_seal_prepared() {
   FM_ROUTING_PREPARED_PENDING_DEV=
   FM_ROUTING_PREPARED_PENDING_INO=
   FM_ROUTING_PREPARED_GENERATION=
-  FM_ROUTING_PREPARED_RECEIPT_DEV=
-  FM_ROUTING_PREPARED_RECEIPT_INO=
-  FM_ROUTING_PREPARED_CONSUMED=0
-  FM_ROUTING_PREPARED_COMMITTED=0
+  FM_ROUTING_PREPARED_PUBLISHED=0
 }
 
 fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment>
@@ -947,10 +925,7 @@ fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-i
   FM_ROUTING_PREPARED_PENDING_DEV=
   FM_ROUTING_PREPARED_PENDING_INO=
   FM_ROUTING_PREPARED_GENERATION=
-  FM_ROUTING_PREPARED_RECEIPT_DEV=
-  FM_ROUTING_PREPARED_RECEIPT_INO=
-  FM_ROUTING_PREPARED_CONSUMED=0
-  FM_ROUTING_PREPARED_COMMITTED=0
+  FM_ROUTING_PREPARED_PUBLISHED=0
   task_dir="$data/$id"
   source_pending="$task_dir/routing-decision.pending.json"
   command -v jq >/dev/null 2>&1 || {
