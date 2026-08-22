@@ -13,7 +13,9 @@
 # the installed lavish-axi CLI. On WSL it refuses to start a Linux live session
 # and routes every live-session lifecycle action through the tracked Windows
 # PowerShell bridge instead. The bridge uses one Windows CLI, state store, and
-# port for open, poll, end, export, share, and stop.
+# port for open, poll, end, export, share, and stop. Lifecycle argv crosses the
+# PowerShell boundary as JSON so dash-prefixed values remain data, and returned
+# output rewrites only owned next-step and path-bearing fields.
 #
 # FM_LAVISH_RUNTIME_OVERRIDE=native|windows is accepted only with
 # FM_LAVISH_TESTING=1. Production routing is derived from WSL_DISTRO_NAME or the
@@ -72,10 +74,9 @@ toon_escape() { # <value>
   printf '%s' "$value"
 }
 
-windows_rewrite_output() { # <output> <windows-path> <wsl-path>...
-  local output=$1 windows_path wsl_path windows_encoded wsl_encoded
-  local command_prefix='`lavish-axi' routed_prefix
-  local line prefix encoded_path suffix decoded_path converted_path converted_encoded
+rewrite_known_windows_paths() { # <line> <windows-path> <wsl-path>...
+  local line=$1 windows_path wsl_path windows_encoded wsl_encoded
+  local prefix encoded_path suffix decoded_path converted_path converted_encoded
   local windows_path_pattern='^(.*)"([[:alpha:]]:\\\\[^"]*)"(.*)$'
   shift
   while [ "$#" -gt 0 ]; do
@@ -84,27 +85,47 @@ windows_rewrite_output() { # <output> <windows-path> <wsl-path>...
     shift 2
     windows_encoded=$(toon_escape "$windows_path")
     wsl_encoded=$(toon_escape "$wsl_path")
-    output=${output//"$windows_encoded"/"$wsl_encoded"}
+    line=${line//"$windows_encoded"/"$wsl_encoded"}
   done
-  routed_prefix="\`$SCRIPT_DIR/fm-lavish.sh"
-  output=${output//"$command_prefix"/"$routed_prefix"}
+  while [[ $line =~ $windows_path_pattern ]]; do
+    prefix=${BASH_REMATCH[1]}
+    encoded_path=${BASH_REMATCH[2]}
+    suffix=${BASH_REMATCH[3]}
+    decoded_path=${encoded_path//\\\\/\\}
+    converted_path=$(wslpath -u "$decoded_path" 2>/dev/null) || break
+    converted_encoded=$(toon_escape "$converted_path")
+    line="${prefix}\"${converted_encoded}\"${suffix}"
+  done
+  printf '%s\n' "$line"
+}
 
+windows_rewrite_output() { # <output> <artifact> <windows-path> <wsl-path>...
+  local output=$1 artifact=$2 line attachment_rows=0 artifact_encoded
+  shift 2
+  artifact_encoded=$(toon_escape "$artifact")
   while IFS= read -r line || [ -n "$line" ]; do
-    while [[ $line =~ $windows_path_pattern ]]; do
-      prefix=${BASH_REMATCH[1]}
-      encoded_path=${BASH_REMATCH[2]}
-      suffix=${BASH_REMATCH[3]}
-      decoded_path=${encoded_path//\\\\/\\}
-      converted_path=$(wslpath -u "$decoded_path" 2>/dev/null) || break
-      converted_encoded=$(toon_escape "$converted_path")
-      line="${prefix}\"${converted_encoded}\"${suffix}"
-    done
-    printf '%s\n' "$line"
+    if [ "$attachment_rows" -eq 1 ] && [[ ! $line =~ ^[[:space:]] ]]; then
+      attachment_rows=0
+    fi
+    if [[ $line == next_step:* ]]; then
+      printf 'next_step: "Continue through the Firstmate Lavish router using WSL artifact \\"%s\\"; do not invoke lavish-axi directly."\n' \
+        "$artifact_encoded"
+      continue
+    fi
+    if [[ $line =~ ^[[:space:]]*(file|path|scenePath|output|out):[[:space:]] ]] \
+      || [ "$attachment_rows" -eq 1 ]; then
+      rewrite_known_windows_paths "$line" "$@"
+    else
+      printf '%s\n' "$line"
+    fi
+    if [[ $line =~ ^[[:space:]]*attachments\[[0-9]+\] ]]; then
+      attachment_rows=1
+    fi
   done <<< "$output"
 }
 
 windows_invoke() { # <action> [artifact] [args...]
-  local action=$1 windows_bridge artifact real windows_artifact output rc
+  local action=$1 windows_bridge artifact real windows_artifact output rc argv_json
   local arg out real_out windows_out
   local -a windows_args output_paths
   shift
@@ -154,13 +175,16 @@ windows_invoke() { # <action> [artifact] [args...]
     fi
   done
 
+  argv_json=$(perl -MJSON::PP -e 'print encode_json(\@ARGV)' -- "${windows_args[@]}") \
+    || die "cannot encode Lavish argv for Windows"
   set +e
-  output=$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$windows_bridge" \
-    "$action" "$windows_artifact" "${windows_args[@]}")
+  output=$(FM_LAVISH_WINDOWS_ARGV_JSON="$argv_json" \
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$windows_bridge" \
+      "$action" "$windows_artifact")
   rc=$?
   set -e
   if [ -n "$output" ]; then
-    windows_rewrite_output "$output" "${output_paths[@]}"
+    windows_rewrite_output "$output" "$real" "${output_paths[@]}"
   fi
   return "$rc"
 }

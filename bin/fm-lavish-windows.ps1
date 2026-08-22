@@ -4,13 +4,20 @@ param(
   [string]$Action,
 
   [Parameter(Position = 1)]
-  [string]$Artifact,
-
-  [Parameter(ValueFromRemainingArguments = $true)]
-  [string[]]$ExtraArgs
+  [string]$Artifact
 )
 
 $ErrorActionPreference = 'Stop'
+$ExtraArgs = @()
+if ($env:FM_LAVISH_WINDOWS_ARGV_JSON) {
+  $DecodedArgs = ConvertFrom-Json -InputObject $env:FM_LAVISH_WINDOWS_ARGV_JSON
+  foreach ($Arg in @($DecodedArgs)) {
+    if ($Arg -isnot [string]) {
+      throw 'Lavish forwarded argv must contain strings only'
+    }
+    $ExtraArgs += [string]$Arg
+  }
+}
 $Port = 4388
 $env:LAVISH_AXI_PORT = [string]$Port
 $WorkDir = $env:USERPROFILE
