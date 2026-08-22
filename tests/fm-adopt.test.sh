@@ -330,7 +330,7 @@ test_send_adopted_targets_by_uuid() {
   cmux_panes_response "$dir" 1 "$SF_A"
   cmux_panes_response "$dir" 3 "$SF_A"
   cmux_panes_response "$dir" 5 "$SF_A"
-  cmux_read_screen_response "$dir" 6 $'  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ─────╯'
+  cmux_read_screen_response "$dir" 6 $'  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ──────╯\n\n  Enter:send'
 
   FM_ROOT_OVERRIDE="$TANGLE_ROOT" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" PATH="$dir/fakebin:$PATH" \
     FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
