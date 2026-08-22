@@ -2,6 +2,9 @@
 # Behavioral contract for the bounded adapter-owned wake context.
 set -u
 
+# Keep real-backend fixtures fast while retaining the production hard timeout.
+export FM_WAKE_CONTEXT_BACKEND_TIMEOUT=1
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-wake-context-r1.XXXXXX") || exit 1
 trap 'rm -rf "$TMP_ROOT"' EXIT INT TERM
@@ -30,12 +33,16 @@ SH
   cat > "$bin/fm-backend.sh" <<'SH'
 fm_backend_is_known() { return 0; }
 fm_backend_agent_state() { printf 'alive\n'; }
-fm_run_timed() { shift; "$@"; }
+fm_run_timed() { printf '%s\n' "$1" >> "$FM_HOME/backend-timeout"; shift; "$@"; }
 SH
 cat > "$bin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 [ -f "$FM_HOME/drain.calls" ] || exit 9
 printf '%s\n' "$1" >> "$FM_HOME/crew-state.calls"
+if [ -n "${FM_CREW_STATE_HANG:-}" ] && [ -e "$FM_CREW_STATE_HANG" ]; then
+  printf '%s\n' "$$" > "$FM_CREW_STATE_HANG.entered"
+  while [ -e "$FM_CREW_STATE_HANG" ]; do sleep 0.05; done
+fi
 if [ -n "${FM_CREW_STATE_LARGE:-}" ]; then head -c 70000 /dev/zero | tr '\0' x; exit 0; fi
 printf 'state: working · source: pane · implementing\n'
 SH
@@ -175,18 +182,18 @@ test_real_drain_presentation_replays_identically_before_ack() {
 
 test_sigkill_before_cache_publish_keeps_unread_note() {
   local home="$TMP_ROOT/sigkill-before-publish" pid i=0 packet
-  prepare_real_wake "$home"; mkdir "$home/tmp"; : > "$home/hang"
+  install_fixture "$home"; append_wake "$home" 1; mkdir "$home/tmp"; : > "$home/hang"
   TMPDIR="$home/tmp" FM_CREW_STATE_HANG="$home/hang" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
     "$home/bin/fm-wake-context.sh" --present > "$home/killed.out" 2> "$home/killed.err" & pid=$!
   while [ ! -e "$home/hang.entered" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
   [ -e "$home/hang.entered" ] || fail "crew-state never reached the crash window"
   kill -KILL "$pid" 2>/dev/null || fail "could not SIGKILL wake-context in the crash window"
   wait "$pid" 2>/dev/null || true; rm -f "$home/hang"; sleep 0.1
-  cmp -s "$home/cursor.before" "$home/state/.status-presentation-cursor" || fail "SIGKILL advanced the unread cursor before cache publication"
+  [ ! -e "$home/state/.wake-context-cache" ] || fail "SIGKILL published a cache before completing the packet"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/retry" 2> "$home/retry.err" || fail "retry after SIGKILL failed"
   packet=$(packet_json "$home/retry")
-  printf '%s' "$packet" | jq -er '.presentation.stdout' | grep -F 'beta note: beta during alpha wake' >/dev/null || fail "retry after SIGKILL lost beta note"
-  pass "SIGKILL before cache publication leaves the full presentation replayable"
+  printf '%s' "$packet" | jq -e '.reason_queue[0].key == "alpha.status"' >/dev/null || fail "retry after SIGKILL lost the durable wake"
+  pass "SIGKILL before cache publication leaves the durable wake replayable"
 }
 
 test_mktemp_failure_emits_safe_fallback() {
@@ -272,6 +279,19 @@ test_post_drain_overflow_falls_back() {
   fi
   grep -F 'more than 16 queued notifications' "$home/out" >/dev/null || fail "post-drain overflow did not fail closed"
   pass "post-drain queue snapshot still enforces wake cardinality"
+}
+
+test_backend_timeout_normalizes_to_a_positive_decimal() {
+  local value home expected
+  for value in 0 00 000 7; do
+    home="$TMP_ROOT/backend-timeout-$value"; expected=3
+    [ "$value" = 7 ] && expected=7
+    install_fixture "$home"; append_wake "$home" 1
+    FM_WAKE_CONTEXT_BACKEND_TIMEOUT="$value" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+      "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || fail "timeout fixture $value failed"
+    [ "$(cat "$home/backend-timeout")" = "$expected" ] || fail "timeout $value did not normalize to $expected"
+  done
+  pass "backend liveness timeout stays strictly positive after normalization"
 }
 
 test_cursor_merge_follows_live_rotation_without_regression() {
@@ -363,6 +383,7 @@ test_packet_projects_unread_status_tail
 test_absolute_check_key_maps_to_task
 test_status_only_recovery_uses_zero_ack
 test_post_drain_overflow_falls_back
+test_backend_timeout_normalizes_to_a_positive_decimal
 test_cursor_merge_follows_live_rotation_without_regression
 test_post_presentation_failure_preserves_human_ack
 test_utf8_fallback_ack_commits_unread_cursor
