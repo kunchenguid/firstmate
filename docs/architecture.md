@@ -13,13 +13,13 @@ A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies de
 ### External event intake
 
 External issue trackers need a different trust boundary from captain conversation.
-Periodic Linear polling alone would either spend a network query every few minutes or accept hourly latency; an external hourly scan remains useful as drift detection, not as the primary signal.
+Periodic Linear polling alone fits the existing authenticated custom-check cadence, but prompt discovery would either spend a network query every few minutes or accept hourly latency; it remains useful as drift detection, not as the primary signal.
 Forwarding a Linear webhook through `fm-inbox.sh note` would wake promptly, but it would place machine bytes in the captain-authored input channel and could make untrusted text appear to carry captain authority.
 A typed untrusted ingress composed with the existing process-event inbox and durable wake queue preserves prompt event-driven detection, capture-before-publication ordering, restart replay, and handled acknowledgements without adding another watcher or detached retry loop.
 
 `bin/fm-procevent-external-event.sh` is that ingress and adapter.
 An external authenticated webhook terminator or automation invokes it locally or over an operator-controlled SSH route; Firstmate intentionally contains no public HTTP server.
-The same boundary accepts findings from an external operator-owned hourly initiative-wide reconciliation scan, with a shared issue-revision delivery key coalescing webhook retries and unchanged scan observations.
+The same boundary accepts hourly initiative-wide reconciliation findings, with a shared issue-revision delivery key coalescing webhook retries and unchanged scan observations.
 Transport bytes remain hints: the wake-time handler queries Linear authoritatively, then applies the existing natural-language secondmate scope judgment and handoff workflow.
 Consequently the transport owns no project or initiative-to-secondmate mapping, and a restart after durable capture but before handling is recovered by the existing process-event reconciliation path.
 Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or a Relay mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS` without their own task worktree being written, declared external waits and verified captain-held transfers that remain declared past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
