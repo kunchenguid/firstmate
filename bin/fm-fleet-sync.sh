@@ -257,9 +257,11 @@ prune_gone_branches() {
 
 # Backstop for the task-branch cleanup fm-teardown.sh normally does inline:
 # delete an fm/<task-id> branch whose tip is provably merged (fm-branch-merge-lib.sh's
-# shared proof - a fast-forward or non-squash merge ancestor, or a "[gone]"
-# upstream after a squash-merged PR), scoped to firstmate's own fm/* naming so
-# this never touches a branch firstmate did not create. This is the ONLY sweep
+# shared ancestor proof - a fast-forward or non-squash merge already contains
+# its tip), scoped to firstmate's own fm/* naming so this never touches a branch
+# firstmate did not create. A "[gone]" upstream is deliberately not enough to
+# prove merge; the separately-owned prune_gone_branches flow covers
+# squash-merged PR cleanup. This is the ONLY sweep
 # that covers a local-only-mode project (prune_gone_branches above never runs
 # for one, since local-only skips the whole remote-backed sync below, and a
 # purely local fast-forward merge leaves no "[gone]" upstream to notice) and a
