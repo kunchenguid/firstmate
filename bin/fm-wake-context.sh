@@ -14,7 +14,7 @@ MAX_STATUS_CHARS=240
 MAX_STATUS_FILES=64
 MAX_DECISIONS=24
 MAX_PACKET_BYTES=65536
-BACKEND_TIMEOUT=3
+BACKEND_TIMEOUT=${FM_WAKE_CONTEXT_BACKEND_TIMEOUT:-3}
 CACHE="$STATE/.wake-context-cache"
 CACHE_CURSOR="$CACHE.status-cursor"
 FALLBACK_RECEIPT="$STATE/.wake-context-fallback-receipt"
@@ -327,6 +327,13 @@ finish_presentation() {
 
 main() {
   [ "${1:-}" = --present ] && [ "$#" -eq 1 ] || usage
+  case "$BACKEND_TIMEOUT" in
+    ''|*[!0-9]*) BACKEND_TIMEOUT=3 ;;
+    *)
+      BACKEND_TIMEOUT=$(printf '%s' "$BACKEND_TIMEOUT" | sed 's/^0*//')
+      [ -n "$BACKEND_TIMEOUT" ] || BACKEND_TIMEOUT=3
+      ;;
+  esac
   fm_session_lock_owned_by_self "$STATE" || fail_before_presentation "this session does not own the fleet lock"
   replay_cached && exit 0
   [ -e "$FALLBACK_RECEIPT" ] || [ ! -e "$CACHE_CURSOR" ] \
