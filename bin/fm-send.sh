@@ -709,6 +709,10 @@ fi
 # re-surfaces in the next OPEN DECISIONS listing - which is also where the key
 # that actually closes it is printed, next to its own close command.
 if [ -n "$RESOLVE_UNMATCHED_KEYS" ]; then
-  echo "error: the answer was delivered to $T, but no decision was closed for --resolve-key '$RESOLVE_UNMATCHED_KEYS' (not open in $RESOLVE_STATUS_FILE). Do not resend the answer. Re-check the OPEN DECISIONS listing and close the real key with its printed command, or leave it open if it is already closed." >&2
+  RESOLVE_UNMATCHED_RENDERED=
+  for k in $RESOLVE_UNMATCHED_KEYS; do
+    RESOLVE_UNMATCHED_RENDERED="${RESOLVE_UNMATCHED_RENDERED}${RESOLVE_UNMATCHED_RENDERED:+ }--resolve-key '$k'"
+  done
+  echo "error: the answer was delivered to $T, but no decision was closed for $RESOLVE_UNMATCHED_RENDERED (not open in $RESOLVE_STATUS_FILE). Do not resend the answer. Re-check the OPEN DECISIONS listing and close the real key with its printed command, or leave it open if it is already closed." >&2
   exit 1
 fi

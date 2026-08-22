@@ -512,14 +512,14 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  # Read once past the declared-wait gate, so a mate's stale poll costs one metadata
-  # scan for the liveness gate below and the far more common no-declaration path
-  # above still costs none.
-  kind=$(window_kind "$win")
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     printf 'paused'
     return
   fi
+  # Read once past both cheap gates, so only the poll that actually re-decides a
+  # declared wait pays the metadata scan the liveness gate below needs; the far
+  # more common no-declaration and held-cadence paths above cost none.
+  kind=$(window_kind "$win")
   class=$(crew_absorb_class "$task")
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
