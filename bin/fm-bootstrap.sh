@@ -219,7 +219,6 @@ local_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != only ]; }
 network_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != skip ]; }
 
 FORGE_UNSUPPORTED_REPORTED=0
-FORGE_NETWORK_ALLOWED=1
 forge_report_unsupported() {
   local unsupported=0
   while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
