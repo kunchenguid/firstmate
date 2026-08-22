@@ -150,11 +150,14 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # no-mistakes step, or a busy pane, via crew_is_provably_working over
 # fm-crew-state.sh); a crew that stopped its turn with no running pipeline and no
 # busy pane is SURFACED, so a finish reported only through interactive pane menus
-# (no done: status) is never swallowed. Two DECLARED waits are the exceptions, each
-# absorbed on the long PAUSE_RESURFACE_SECS cadence rather than wedge-escalated: a
-# `paused:` status line (an external dependency the worker itself named), and a
-# recorded merge wait for a task whose checks are green and whose merge only someone
-# outside this fleet can make (bin/fm-merge-wait.sh; handle_merge_wait_stale).
+# (no done: status) is never swallowed. A `paused:` status line (an external
+# dependency the worker itself named) is the classification-time exception, absorbed
+# on the long PAUSE_RESURFACE_SECS cadence rather than wedge-escalated. A recorded
+# merge wait for a task whose checks are green and whose merge only someone outside
+# this fleet can make (bin/fm-merge-wait.sh) is NOT a classification at all: it
+# absorbs the alarm at the single emit point (merge_wait_absorbs_alarm via
+# emit_stale_wake), after whichever owner classified the window, and passes one
+# reminder through per PAUSE_RESURFACE_SECS.
 # An ACTIONABLE wake (a captain-relevant
 # signal, a no-verb signal whose crew is not provably working, any check, a stale
 # pane whose crew is not provably working, a provably-working stale past the
@@ -316,10 +319,17 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # absorb can rot invisibly. <age> is how long the current absorb has held and
 # <throttle> is the per-window marker whose mtime records the last re-surface, so
 # once past PAUSE_RESURFACE_SECS the pane wakes once per window rather than every
-# poll. Shared by the declared-pause absorb and the worktree-write deferral so the
-# two cadences cannot drift apart; each caller owns its own marker and reason.
+# poll. Shared by the declared-pause absorb, the worktree-write deferral, and the
+# declared merge wait's own pass-through, so those cadences cannot drift apart; each
+# caller owns its own marker and reason.
 # Returns without waking while either the absorb or the throttle is inside the
 # window; wake() itself exits the cycle, exactly as it does inline.
+# Deliberately NOT routed through emit_stale_wake below: this IS the bounded-cadence
+# emitter, so it is already once per window per PAUSE_RESURFACE_SECS rather than the
+# per-poll noise a declaration absorbs, it is the pass-through the merge-wait
+# suppressor itself calls (routing it through the suppressor would eat the one
+# reminder that suppression is required to keep), and its callers are other owners'
+# reminders whose wording names a different human.
 resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
   local win=$1 throttle=$2 age=$3 reason=$4
   [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
@@ -327,6 +337,89 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
   fm_wake_append stale "$win" "$reason" || exit 1
   date +%s > "$throttle"
   wake "$reason"
+}
+
+# THE ONE place the watcher consults a declared merge wait (bin/fm-merge-wait.sh
+# writes the record; fm-classify-lib.sh's merge_wait_declared and crew_absorb_class
+# say whether it holds). 0 when this window's alarm is absorbed by the declaration,
+# 1 when the alarm must proceed untouched.
+#
+# It is reached ONLY from emit_stale_wake, after some owner has already decided to
+# alarm. That placement is the whole design: classification is left exactly as it
+# was, so this can never preempt the hash-changed, paused, captain-held,
+# provably-working, terminal, or wedge-timer owners the way a classification-time or
+# repeat-poll entry gate did. "Absorbed" is a transient answer for ONE alarm, so
+# there is no durable refusal to age, expire, or permanently void a declaration:
+# every later alarm asks again.
+#
+# Four gates, cheapest first:
+#   - a crew that declared its OWN wait (`paused:` or a verified `captain-held`
+#     transfer) owns this window's reminder and its wording. A merge wait and a hold
+#     block on different humans, and a recheck naming the wrong human is worse than
+#     no recheck, so the declaration stands aside here;
+#   - the record must be live: present, naming the pull request the task still
+#     records, and with the merge poll still armed. A withdrawn, superseded, or
+#     poll-less declaration fails on file tests alone, with no crew-state read;
+#   - authoritative crew state must still report the terminal checks-green outcome.
+#     .merge-wait-rechecked-<key> bounds the COST of that read to once per
+#     STALE_ESCALATE_SECS per window and nothing else: only a POSITIVE verdict is
+#     stamped, so a bounded no-mistakes timeout (which reports the run as
+#     unattributed) merely lets one alarm through and is re-asked on the next one;
+#   - the escalation count is reset, because wedge_timer_check bumps it BEFORE it
+#     emits, so a suppressor at the emit would otherwise let the count climb
+#     invisibly until a genuine escalation surfaced pre-loaded at
+#     "escalation 7, demand-deep-inspection".
+#
+# What the crew-state re-read can and cannot catch: while the run is still open it
+# is live (nm_ci_checks_state re-derives greenness, so a red check flips the verdict
+# back to working and the declaration stops absorbing), and a rebased or rewritten
+# head drops run attribution at any time. But once the run has RECORDED the terminal
+# checks-passed outcome, that outcome is immutable for that run at that head
+# (bin/fm-crew-state.sh), so no amount of re-reading can see a pull request that
+# later goes red or is closed at the same head, and the merge poll only ever reports
+# `merged`. The bounded pass-through below is the real bound for those cases: it is
+# why the reminder asks firstmate to confirm the merge is still someone else's to
+# make, and why removing it would leave them genuinely unreported.
+merge_wait_absorbs_alarm() {  # <window> <task>
+  local win=$1 task=$2 key recheck mtime age
+  [ -n "$task" ] || return 1
+  status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && return 1
+  merge_wait_declared "$task" "$STATE" || return 1
+  key=$(window_key "$win")
+  recheck="$STATE/.merge-wait-rechecked-$key"
+  if [ "$(age_of "$recheck")" -ge "$STALE_ESCALATE_SECS" ]; then
+    [ "$(crew_absorb_class "$task" "$STATE")" = merge-wait ] || return 1
+    date +%s > "$recheck"
+  fi
+  rm -f "$STATE/.wedge-escalations-$key"
+  mtime=$(stat_mtime "$STATE/$task.merge-wait")
+  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
+  age=$(( $(date +%s) - mtime ))
+  resurface_absorbed "$win" "$STATE/.merge-wait-resurfaced-$key" "$age" \
+    "stale: $win (merge wait ${age}s, checks green and awaiting a merge this fleet cannot perform, rechecked on a long cadence not a wedge; confirm the merge is still someone else's to make)"
+  triage_log "absorbed stale (declared merge wait, age ${age}s): $win"
+  return 0
+}
+
+# The one emit point for every stale wake a declaration may absorb. 0 when the wake
+# was queued and the caller must carry on to wake(); 1 when it was absorbed, in which
+# case the caller keeps its own bookkeeping and simply does not wake. The caller's
+# bookkeeping must run either way, because a suppressed alarm still settled this
+# hash: the emit is the only thing the declaration removes.
+emit_stale_wake() {  # <window> <task> <reason>
+  local win=$1 task=$2 reason=$3
+  merge_wait_absorbs_alarm "$win" "$task" && return 1
+  fm_wake_append stale "$win" "$reason" || exit 1
+  return 0
+}
+
+# Drop this window's merge-wait markers. Only the read-cost cache and the
+# pass-through throttle exist to drop: suppression never records the pane hash or any
+# stale bookkeeping of its own, so unlike the absorb this replaces there is nothing
+# that could keep a window quiet on a declaration that no longer holds.
+clear_merge_wait_markers() {  # <window-key>
+  local key=$1
+  rm -f "$STATE/.merge-wait-rechecked-$key" "$STATE/.merge-wait-resurfaced-$key"
 }
 
 # Defer ONE wedge escalation for a pane that went quiet while its own task
@@ -375,7 +468,7 @@ clear_write_tracking() {  # <window-key>
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason emitted
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -396,9 +489,11 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
-        fm_wake_append stale "$win" "$reason" || exit 1
+        emitted=0
+        emit_stale_wake "$win" "$task" "$reason" && emitted=1
         rm -f "$since_file"
         clear_write_tracking "$(window_key "$win")"
+        [ "$emitted" = 1 ] || return 0
         wake "$reason"
       fi
       ;;
@@ -478,145 +573,6 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
   fi
   wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task"
   return 1
-}
-
-# Absorb a stale pane whose task has a live declared merge wait (firstmate has
-# recorded that its green pull request waits on a merge nobody here can perform;
-# bin/fm-merge-wait.sh writes the record, fm-classify-lib.sh's merge_wait_declared
-# and crew_absorb_class decide it is admissible), and re-surface it once every
-# PAUSE_RESURFACE_SECS so the wait cannot rot invisibly. The declared-pause absorb
-# next door cannot be reused for it: a merge-waiting task's last status line is
-# `done: ... checks green`, not `paused:`, so the stale loop's pause reconciliation
-# would wipe .paused-<key> - and with it the re-surface throttle - on every poll,
-# and the wait would re-surface every poll instead of once per long cadence. Hence
-# its own three markers, cleared together by clear_merge_wait_state below.
-#
-# Like the pause absorb it must be cheap enough for a repeat poll: it NEVER re-reads
-# crew state, and it anchors the re-surface age on the declaration record's own
-# mtime, so a churny idle pane (a ticking clock, a token counter) cannot keep
-# resetting the cadence the way a hash-tied timer would. It advances the stale
-# suppressor to <hash> and drops the wedge timer, exactly as a declared pause does:
-# an admitted merge wait is not a wedge suspect, and dropping the timer is what
-# stops the 90-to-150-second alarm chain this whole path exists to remove.
-handle_merge_wait_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key mtime age
-  key=$(window_key "$win")
-  printf '%s' "$h" > "$STATE/.stale-$key"
-  : > "$STATE/.merge-wait-$key"
-  # Stamped only when absent, because it ages the recheck below: every caller
-  # reaches here straight off a positive merge-wait verdict, so its creation marks
-  # a real read, while a repeat poll that merely keeps absorbing must NOT refresh it
-  # or the recheck would be starved for as long as the pane stayed quiet.
-  [ -e "$STATE/.merge-wait-rechecked-$key" ] || date +%s > "$STATE/.merge-wait-rechecked-$key"
-  rm -f "$STATE/.merge-wait-refused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-  clear_write_tracking "$key"
-  mtime=$(stat_mtime "$STATE/$task.merge-wait")
-  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
-  age=$(( $(date +%s) - mtime ))
-  resurface_absorbed "$win" "$STATE/.merge-wait-resurfaced-$key" "$age" \
-    "stale: $win (merge wait ${age}s, checks green and awaiting a merge this fleet cannot perform, rechecked on a long cadence not a wedge; confirm the merge is still someone else's to make)"
-  triage_log "absorbed stale (declared merge wait, age ${age}s): $win"
-}
-
-# Drop only the merge-wait cadence markers, for a caller that has already settled
-# this hash's own stale bookkeeping itself (surfaced it, or handed it to the wedge
-# timer) and must not have that settlement undone.
-clear_merge_wait_state() {  # <window-key>
-  local key=$1
-  rm -f "$STATE/.merge-wait-$key" "$STATE/.merge-wait-rechecked-$key" \
-    "$STATE/.merge-wait-resurfaced-$key" "$STATE/.merge-wait-refused-$key"
-}
-
-# Drop the cadence AND this window's stale bookkeeping, so the next poll
-# re-classifies the pane from scratch instead of leaving the absorbed hash
-# suppressed. The pair mirrors clear_pause_state/clear_pause_tracking below for the
-# same reason: an absorb records the hash in .stale-<key> to stop re-deciding it, so
-# whoever withdraws the absorb has to release that record too or the window stays
-# quiet on the strength of a declaration that no longer holds.
-clear_merge_wait_tracking() {  # <window-key>
-  local key=$1
-  clear_merge_wait_state "$key"
-  clear_write_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-}
-
-# Remember that THIS declaration record was refused, so the refusal is sticky per
-# declaration rather than recomputed every poll. The record's own mtime is the
-# identity, because bin/fm-merge-wait.sh writes the record through mktemp plus a
-# rename, so re-declaring always produces a new one; a refused declaration therefore
-# re-enters only when firstmate re-declares it.
-merge_wait_record_refusal() {  # <window-key> <task>
-  local key=$1 task=$2 mtime
-  mtime=$(merge_wait_record_identity "$task")
-  printf '%s' "$mtime" > "$STATE/.merge-wait-refused-$key"
-}
-
-# The record identity both refusal helpers compare. A missing or unreadable record
-# reads as 0, which can never equal a real mtime, so a withdrawn declaration never
-# looks like one that was already refused.
-merge_wait_record_identity() {  # <task>
-  local task=$1 mtime
-  mtime=$(stat_mtime "$STATE/$task.merge-wait") || mtime=0
-  case "$mtime" in ''|*[!0-9]*) mtime=0 ;; esac
-  printf '%s' "$mtime"
-}
-
-# 0 when this window already refused the declaration currently on disk.
-merge_wait_refused() {  # <window-key> <task>
-  local key=$1 task=$2 recorded
-  recorded=$(cat "$STATE/.merge-wait-refused-$key" 2>/dev/null || true)
-  [ -n "$recorded" ] || return 1
-  [ "$recorded" = "$(merge_wait_record_identity "$task")" ]
-}
-
-# The ONE rule for entering the merge-wait cadence on a repeat poll of an unchanged
-# hash. Three cases, in order:
-#   - already on the cadence (marker present): stay, and let the bounded recheck below
-#     decide whether the wait still holds;
-#   - a declaration recorded after this hash was last classified: enter, because the
-#     classification that writes the marker runs only on a NEW hash, and a pane that
-#     never changes is exactly the population this feature exists for;
-#   - a declaration this window has ALREADY refused: do NOT enter. Re-entering it
-#     would re-run the crew-state read every poll and re-arm the wedge timer behind
-#     every escalation, so a live-but-inadmissible declaration would alarm forever on
-#     an unchanged pane - strictly noisier than never declaring it, which is the very
-#     failure this feature removes.
-merge_wait_cadence_entry() {  # <window-key> <task>
-  local key=$1 task=$2
-  [ -e "$STATE/.merge-wait-$key" ] && return 0
-  merge_wait_declared "$task" "$STATE" || return 1
-  ! merge_wait_refused "$key" "$task"
-}
-
-# The repeat-poll path for a window already absorbed on the merge-wait cadence.
-# The declaration alone must never hold that cadence open: a green pull request can
-# still fail, be closed, pick up a review comment, or have its branch rebased out
-# from under the recorded head - on 2026-08-21 three merge watches were found
-# pointing at heads that no longer existed and one merge had already happened
-# unnoticed - so green is not a safe reason to stop looking on its own.
-# Authoritative crew state is therefore re-read, but at most once every
-# STALE_ESCALATE_SECS (the same bound pause_state_class puts on its own recheck), so
-# a quiet pane costs one bounded read per wedge window instead of one per poll.
-# When the wait no longer holds, the cadence is dropped, the refusal is recorded
-# against that exact declaration record so this path is not re-entered on the next
-# poll, and the window is handed to the ordinary wedge timer, which ages and
-# escalates exactly as an undeclared window does and then falls quiet with it.
-merge_wait_repeat_poll() {  # <window> <task> <hash> <since-file> <escalation-file> <label>
-  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 label=$6 key recheck_file
-  key=$(window_key "$win")
-  recheck_file="$STATE/.merge-wait-rechecked-$key"
-  if [ "$(age_of "$recheck_file")" -ge "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(crew_absorb_class "$task" "$STATE")" = merge-wait ]; then
-      date +%s > "$recheck_file"
-    else
-      clear_merge_wait_state "$key"
-      merge_wait_record_refusal "$key" "$task"
-      wedge_timer_check "$win" "$since_file" "$label" "$escalation_file" "$task"
-      return
-    fi
-  fi
-  handle_merge_wait_stale "$win" "$task" "$h"
 }
 
 clear_pause_state() {  # <window-key>
@@ -701,18 +657,14 @@ pause_state_class() {  # <window> <task>
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+  local win=$1 h=$2 key task last emitted
   key=$(window_key "$win")
-  fm_wake_append stale "$win" "stale: $win" || exit 1
+  task=$(window_to_task "$win" "$STATE")
+  emitted=0
+  emit_stale_wake "$win" "$task" "stale: $win" && emitted=1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
-  # A surfaced stale is by definition not on the merge-wait cadence, and leaving its
-  # marker behind would let the next poll of this same hash absorb the window again
-  # off a declaration the classifier has just refused. The suppressor this function
-  # just wrote is the surfacing decision itself, so only the cadence is dropped.
-  clear_merge_wait_state "$key"
-  task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
@@ -721,6 +673,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   else
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   fi
+  [ "$emitted" = 1 ] || return 0
   wake "stale: $win"
 }
 
@@ -1295,20 +1248,15 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
-    # Withdraw merge-wait bookkeeping the moment the declaration stops holding -
-    # cleared, re-armed on another pull request, or its merge poll retired - releasing
-    # the absorbed hash with it, so the next poll re-classifies this pane from scratch
-    # and it falls straight back to ordinary aging rather than staying quiet on a
-    # declaration that is gone. Two file tests and a small record read
-    # (fm-classify-lib.sh's merge_wait_declared), never a crew-state call, and skipped
-    # entirely for the overwhelmingly common undeclared window.
-    if [ -e "$STATE/.merge-wait-$key" ] && ! merge_wait_declared "$task" "$STATE"; then
-      clear_merge_wait_tracking "$key"
-    elif [ -e "$STATE/.merge-wait-refused-$key" ] && ! merge_wait_declared "$task" "$STATE"; then
-      # A refusal outlives the record it refused. Drop only the refusal: nothing was
-      # absorbed on its strength, so releasing this window's stale bookkeeping too
-      # would reset a wedge timer that is legitimately already running.
-      rm -f "$STATE/.merge-wait-refused-$key"
+    # Retire the merge-wait markers once the declaration stops holding - cleared,
+    # re-armed on another pull request, or its merge poll retired - so a later
+    # declaration cannot inherit a stale read cache or a throttle that would delay its
+    # first reminder. Nothing else needs releasing: suppression records no pane hash
+    # and no stale bookkeeping, so a window can never be left quiet on a withdrawn
+    # declaration. Skipped entirely for the overwhelmingly common undeclared window,
+    # and never a crew-state call.
+    if [ -e "$STATE/.merge-wait-rechecked-$key" ] || [ -e "$STATE/.merge-wait-resurfaced-$key" ]; then
+      merge_wait_declared "$task" "$STATE" || clear_merge_wait_markers "$key"
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
     # the pane-stale path ONLY to serve a declared wait's bounded re-surface -
@@ -1348,6 +1296,10 @@ EOF
           esac
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
+          # Deliberately NOT routed through emit_stale_wake: away mode is a hand-off to
+          # bin/fm-supervise-daemon.sh, which classifies stale panes through its own
+          # classify_stale, so suppressing the hand-off here would silence a pane the
+          # daemon then never absorbs. That second consumer is its own work item.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             fm_wake_append stale "$w" "stale: $w" || exit 1
             printf '%s' "$h" > "$sf"
@@ -1368,46 +1320,36 @@ EOF
           # line. On a NEW hash, give an active run/busy pane (the same
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
-          # A declared merge wait is admitted on the SAME single read (it is one
-          # more crew_absorb_class token, not a second state call), because this is
-          # the branch the wait actually lands in: `done: PR ... checks green` is
-          # captain-relevant, so a green ship task waiting on an outside maintainer
-          # reaches here on every new hash and, being finished rather than working,
-          # surfaced one more possible-wedge alarm each time.
+          # This is also the branch the measured merge-wait noise came through:
+          # `done: PR ... checks green` is captain-relevant, so a green ship task
+          # waiting on an outside maintainer reaches here on EVERY new hash and, being
+          # finished rather than working, alarmed once per hash - one every 90 to 150
+          # seconds on a churning pane. Nothing about that classification changes; the
+          # declaration is consulted only when the wake is emitted below.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             case "$(crew_absorb_class "$task" "$STATE")" in
               working)
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
-                clear_merge_wait_state "$key"
                 clear_write_tracking "$key"
                 triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
                 ;;
-              merge-wait)
-                handle_merge_wait_stale "$w" "$task" "$h"
-                ;;
               *)
-                fm_wake_append stale "$w" "stale: $w" || exit 1
+                # A `merge-wait` verdict reaches here with every other non-working
+                # token and is classified identically: the declaration changes only
+                # whether emit_stale_wake queues the wake, never who owns the window.
+                # The status is marked surfaced either way, because a declaration IS
+                # firstmate acknowledging this green line, and leaving it unmarked
+                # would just move the same alarm to the heartbeat backstop.
+                stale_emitted=0
+                emit_stale_wake "$w" "$task" "stale: $w" && stale_emitted=1
                 printf '%s' "$h" > "$sf"
                 rm -f "$ssf"
-                clear_merge_wait_state "$key"
                 clear_write_tracking "$key"
                 mark_surfaced "$STATE/$task.status"
-                wake "stale: $w"
+                [ "$stale_emitted" = 1 ] && wake "stale: $w"
                 ;;
             esac
-          elif merge_wait_cadence_entry "$key" "$task"; then
-            # merge_wait_cadence_entry owns which declarations may enter here (already
-            # on the cadence, or newly recorded against an unchanged hash, but never
-            # one this window already refused). Entry alone is not admission: the
-            # bounded recheck decides whether the wait keeps holding or the window
-            # returns to the ordinary wedge timer, and on a first entry its timer is
-            # absent, so that recheck is due immediately and a red, superseded, or
-            # poll-less declaration is handed straight back rather than silencing the
-            # pane. A `paused:` or `captain-held` log line cannot reach this branch at
-            # all: those verbs are not captain-relevant, so they are classified by the
-            # non-terminal path below, where their own owner runs first.
-            merge_wait_repeat_poll "$w" "$task" "$h" "$ssf" "$ewf" "stale (merge wait withdrawn)"
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
             # wedge timer is running for it) - keep treating it that way
@@ -1438,9 +1380,7 @@ EOF
             case "$(pause_state_class "$w" "$task")" in
               working)
                 clear_pause_tracking "$key"
-                # Only the cadence: clear_pause_tracking just released this hash's
-                # stale bookkeeping, and the two lines below re-record it.
-                clear_merge_wait_state "$key"
+                clear_merge_wait_markers "$key"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
@@ -1448,44 +1388,25 @@ EOF
               paused)
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
-              merge-wait)
-                # Reachable when a merge-waiting task's log no longer ENDS in the
-                # captain-relevant green line (a later working: note, say). The
-                # declared wait is a property of the run and the declaration, not of
-                # which line happens to be last, so it takes the same cadence here.
-                handle_merge_wait_stale "$w" "$task" "$h"
-                ;;
               *)
+                # A `merge-wait` verdict is classified as any other non-working,
+                # non-paused token: surface_nonterminal_stale decides the window and
+                # emit_stale_wake alone decides whether the wake is queued.
                 surface_nonterminal_stale "$w" "$h"
                 ;;
             esac
           else
             task=$(window_to_task "$w" "$STATE")
-            # The crew's OWN declared wait is asked first, because a `paused:` line or a
-            # verified captain-held transfer names a different human than a merge wait
-            # does, and pause_state_class is the stronger test of the two: it recovers
-            # paused for a confidently dead crew and for a secondmate, where
-            # crew_absorb_class alone reports neither. A leftover merge-wait record must
-            # not take a window this owner holds, or a declared pause would age into a
-            # possible wedge it is exempt from today and a held decision would be
-            # rechecked against the wrong human.
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$key"
-                         clear_merge_wait_state "$key"
+                         clear_merge_wait_markers "$key"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
-            elif merge_wait_cadence_entry "$key" "$task"; then
-              # No declaring verb on the log, so the merge wait owns this window. This is
-              # the branch where the unchanged-hash gap actually repeated:
-              # surface_nonterminal_stale records the hash and drops both the pause flag
-              # and the cadence, so a declaration written afterwards had nothing left to
-              # re-enter through and the pane wedge-escalated on the timer below forever.
-              merge_wait_repeat_poll "$w" "$task" "$h" "$ssf" "$ewf" "non-terminal stale (merge wait withdrawn)"
             else
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task"
             fi
