@@ -1164,6 +1164,20 @@ test_lock_failure_reason_separates_held_from_unavailable() {
     *"blocked-reason=unavailable"*) ;;
     *) fail "a filesystem refusal was not distinguishable from a held lock: $out" ;;
   esac
+  # A steal mutex is acquired through its own leaf path, so its success has to
+  # clear the reason too: fm_autoarm_release_abandoned reads both.
+  rm -rf "$lockdir" "$lockdir.steal"
+  mkdir "$lockdir.steal"
+  printf '%s\n' "$(dead_pid)" > "$lockdir.steal/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2.steal"; then rc=0; else rc=1; fi
+    printf "steal-rc=%s steal-reason=%s\n" "$rc" "${FM_LOCK_FAIL_REASON:-none}"
+  ' _ "$LIB" "$lockdir" 2>/dev/null)
+  case "$out" in
+    *"steal-rc=0 steal-reason=none"*) ;;
+    *) fail "a successful steal-mutex reclaim reported a failure reason: $out" ;;
+  esac
   pass "a failing filesystem primitive is distinguishable from a lock that is simply held"
 }
 
@@ -1267,6 +1281,86 @@ test_lock_stale_steal_mutex_single_winner_under_concurrency() {
   pass "concurrent reclaim through a stale steal mutex yields exactly one winner"
 }
 
+# Two processes both publishing the primary lock through a stale steal mutex.
+#
+# Why the deliberate stalls, and why they must not be traded for a bigger
+# hammer: the racers above run the fast path, and no number of them reproduces
+# this - the two gaps that matter are each a handful of instructions wide, so
+# the scheduler essentially never lands a second process inside them. The window
+# has to be held open on purpose, in two places at once:
+#   - the loser stalls between its staleness recheck of the steal mutex and its
+#     reclaim of it, so it wakes to find a mutex the winner has since published
+#     and is holding live;
+#   - the winner stalls between its staleness recheck of the primary lock and
+#     its publish, so it wakes holding a reading that is no longer true.
+# Both stalls are injected by redefining library functions inside the racer, so
+# bin/fm-wake-lib.sh carries no test-only hook. They are anchored on the recheck
+# and the marker publish rather than on whatever performs the reclaim, so the
+# same schedule is imposed on any implementation of the reclaim itself.
+#
+# The lock must be $STATE/.watch.lock. That is the only path whose reclaim runs
+# _fm_recovery_marker_publish inside the second gap, and that multi-fork write
+# is what the gap is made of. On any other lock the recheck and the publish are
+# adjacent, there is nothing to stall, and the test goes vacuous.
+test_lock_stale_steal_mutex_reclaim_race_has_one_publisher() {
+  local dir state lockdir dead marker loser winner wins holder
+  dir=$(make_case lock-steal-reclaim-race)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  marker="$dir/wins"
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$lockdir.steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  : > "$marker"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    eval "$(declare -f fm_lock_recheck_stale_owner \
+      | sed "1s/^fm_lock_recheck_stale_owner/fm_test_real_recheck/")"
+    fm_lock_recheck_stale_owner() {
+      local rc=0
+      fm_test_real_recheck "$@" || rc=$?
+      if [ "$rc" -eq 0 ]; then
+        case "$1" in
+          *.steal) sleep 2 ;;
+        esac
+      fi
+      return "$rc"
+    }
+    if fm_lock_try_acquire "$2"; then
+      printf "%s\n" "${BASHPID:-$$}" >> "$3"
+      sleep 4
+    fi
+  ' _ "$LIB" "$lockdir" "$marker" >/dev/null 2>&1 &
+  loser=$!
+  sleep 0.7
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    eval "$(declare -f _fm_recovery_marker_publish \
+      | sed "1s/^_fm_recovery_marker_publish/fm_test_real_publish/")"
+    _fm_recovery_marker_publish() {
+      sleep 4
+      fm_test_real_publish "$@"
+    }
+    if fm_lock_try_acquire "$2"; then
+      printf "%s\n" "${BASHPID:-$$}" >> "$3"
+      sleep 4
+    fi
+  ' _ "$LIB" "$lockdir" "$marker" >/dev/null 2>&1 &
+  winner=$!
+  wait "$loser" 2>/dev/null || true
+  wait "$winner" 2>/dev/null || true
+
+  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  [ "$wins" -le 1 ] || fail "two processes published the primary lock through one steal mutex ($wins)"
+  [ "$wins" -eq 1 ] || fail "the stalled reclaim race published no lock at all, so it proves nothing"
+  holder=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$holder" = "$(awk 'NF { print; exit }' "$marker")" ] \
+    || fail "the publisher's lock was evicted by the racer that lost the mutex (now $holder)"
+  pass "a stalled reclaim race through one steal mutex yields at most one publisher"
+}
+
 test_lock_wait_never_proceeds_without_the_lock() {
   local dir parent waiter i alive errlines
   dir=$(make_case lock-wait-refuses)
@@ -1316,6 +1410,7 @@ test_lock_failure_reason_separates_held_from_unavailable
 test_lock_steal_is_bounded_to_one_level
 test_lock_clears_legacy_steal_chains
 test_lock_stale_steal_mutex_single_winner_under_concurrency
+test_lock_stale_steal_mutex_reclaim_race_has_one_publisher
 test_lock_wait_never_proceeds_without_the_lock
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer

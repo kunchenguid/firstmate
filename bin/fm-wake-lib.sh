@@ -382,15 +382,21 @@ fm_lock_path_exists() {  # <lock-path>
 
 fm_lock_claim_blocked_by_steal() {
   local lockdir=$1 allowed_steal_owner=${2:-} steal
+  steal="$lockdir.steal"
+  if [ -n "$allowed_steal_owner" ]; then
+    # A caller only names a steal owner because it believes it is mid-reclaim
+    # holding that mutex, so the mutex still pointing at it is the whole licence
+    # to publish. A mutex that is gone, or that now names someone else, proves
+    # the licence was lost - another reclaimer took the mutex and released it -
+    # and publishing anyway is how two processes end up both holding the lock.
+    fm_lock_points_to_owner "$steal" "$allowed_steal_owner" && return 1
+    return 0
+  fi
   # A steal mutex has no steal mutex of its own, so a legacy <lock>.steal.steal
   # left behind by the recursive implementation is never a live claim and must
   # not block reclaiming this one.
   fm_lock_is_steal_mutex "$lockdir" && return 1
-  steal="$lockdir.steal"
-  [ -e "$steal" ] || [ -L "$steal" ] || return 1
-  if [ -n "$allowed_steal_owner" ] && fm_lock_points_to_owner "$steal" "$allowed_steal_owner"; then
-    return 1
-  fi
+  fm_lock_path_exists "$steal" || return 1
   return 0
 }
 
@@ -407,10 +413,12 @@ fm_lock_claim() {
     return 1
   fi
   if ! fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+    FM_LOCK_CREATE_FAILURE=contended
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
   if fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
+    FM_LOCK_CREATE_FAILURE=contended
     if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
       rm -f "$lockdir" 2>/dev/null || true
     fi
@@ -426,6 +434,15 @@ fm_lock_claim() {
 # look identical to a caller, which is what let issue #2787's runaway stay
 # silent until the path itself grew too long for the filesystem.
 FM_LOCK_FAIL_REASON=
+
+# Why the last fm_lock_try_create failed: "contended" (something was already
+# there, or another process's steal mutex rejected the claim) or "unavailable"
+# (a primitive - mktemp, the pid write, ln -s - refused). It has to be recorded
+# where the failure happens: by the time the caller looks, a contended path is
+# routinely absent, because a rejected claimant removes its own link on the way
+# out and a reclaimer takes the stale one away. Reading the cause off the path
+# reports a healthy filesystem as out of space.
+FM_LOCK_CREATE_FAILURE=
 
 # Bound the operator report: fm_lock_acquire_wait polls at 10 Hz, so an
 # unbroken stream would recreate the megabyte of stderr the runaway produced.
@@ -454,6 +471,10 @@ fm_lock_after_failed_create() {  # <lock-path>
     FM_LOCK_FAIL_REASON=held
     return 0
   fi
+  if [ "${FM_LOCK_CREATE_FAILURE:-unavailable}" != unavailable ]; then
+    FM_LOCK_FAIL_REASON=held
+    return 1
+  fi
   FM_LOCK_FAIL_REASON=unavailable
   fm_lock_note_unavailable "$1"
   return 1
@@ -461,9 +482,14 @@ fm_lock_after_failed_create() {  # <lock-path>
 
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  # Anything that does not positively identify itself as contention is a refused
+  # primitive, so a genuinely full or read-only filesystem is never talked out
+  # of its own diagnosis by a later, unrelated change to the lock path.
+  FM_LOCK_CREATE_FAILURE=unavailable
   FM_LOCK_OWNER_DIR=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
-  if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+  if fm_lock_path_exists "$lockdir"; then
+    FM_LOCK_CREATE_FAILURE=contended
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -474,12 +500,18 @@ fm_lock_try_create() {
   if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
+      FM_LOCK_CREATE_FAILURE=
       return 0
     fi
     if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
       rm -f "$lockdir" 2>/dev/null || true
     fi
   else
+    # A link that lost to someone else's is contention; one the filesystem
+    # refused outright leaves the path as empty as it found it.
+    if fm_lock_path_exists "$lockdir"; then
+      FM_LOCK_CREATE_FAILURE=contended
+    fi
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
   fi
   fm_lock_discard_owner "$ownerdir"
@@ -496,6 +528,25 @@ fm_lock_remove_path() {
   fi
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null
+}
+
+# Take a stale lock out of the way by renaming it to a private path, and report
+# whether THIS process is the one that took it. rename(2) fails with ENOENT on a
+# source that is already gone, so when several processes reclaim the same stale
+# holder exactly one of them wins the rename and the rest are told to back off.
+# An unlink-then-recreate cannot say that: every racer's unlink "succeeds",
+# including the ones that unlinked a fresh lock the winner had already published.
+#
+# The private name deliberately does not end in ".steal": nothing may mistake it
+# for a steal mutex, and fm_lock_clear_legacy_steal_chain must not walk it.
+fm_lock_claim_stale_by_rename() {  # <lock-path>
+  local lockdir=$1 private
+  private=$(mktemp -u "$lockdir.reclaiming.XXXXXX" 2>/dev/null) || return 1
+  [ -n "$private" ] || return 1
+  fm_lock_path_exists "$private" && return 1
+  mv "$lockdir" "$private" 2>/dev/null || return 1
+  fm_lock_remove_path "$private" || rm -rf "$private" 2>/dev/null || true
+  return 0
 }
 
 fm_lock_mid_acquire_is_fresh() {
@@ -869,21 +920,22 @@ fm_lock_clear_legacy_steal_chain() {  # <steal-mutex-path>
 #
 # fm_lock_try_acquire used to serialize this by calling itself on
 # "<path>.steal", which for a steal mutex meant "<path>.steal.steal" and so on
-# with no base case (issue #2787). A leaf therefore has no lock to serialize it,
-# and does not need one: mutual exclusion here rests on the same facts the rest
-# of the primitive already rests on.
-#   - Two LIVE processes can never both hold it. Reclaim requires the recorded
-#     holder to be dead and past the mid-acquire window, and ln -s is atomic, so
-#     a live holder is never evicted.
-#   - Two processes racing to reclaim the same DEAD holder can both create it,
-#     but neither can act on it: the primary reclaim re-proves it still owns the
-#     steal mutex (fm_lock_points_to_owner) before touching the primary lock,
-#     and its final claim is rejected unless the steal mutex still points at it
-#     (fm_lock_claim_blocked_by_steal). The loser backs out and retries.
-# The property fm_autoarm_release_abandoned depends on - while the steal mutex
-# is held no other process can publish the primary lock - is unchanged, because
-# that comes from the primary lock's claim check, not from serializing the
-# mutex's own creation.
+# with no base case (issue #2787). A leaf has no lock to serialize it, so the
+# exclusion it needs comes from two atomic operations instead of a third lock:
+#   - Creating it is ln -s, which is atomic, so a live holder is never evicted
+#     and two processes never both create it from nothing.
+#   - Reclaiming a dead holder is rename(2) via fm_lock_claim_stale_by_rename,
+#     which fails on a source that is already gone. Exactly one racer takes the
+#     stale mutex out of the way; the rest refuse rather than proceed. An
+#     unlink-then-recreate is what let two of them both believe they had it.
+# Together those bound the mutex to a single holder per reclaim. The residual
+# window - a racer whose staleness recheck passed a moment before the winner
+# published a fresh mutex - is closed downstream rather than here: a reclaimer
+# publishing the primary lock names the mutex owner it believes it holds, and
+# fm_lock_claim_blocked_by_steal rejects that claim unless the mutex is still
+# there and still points at it. That is the property fm_autoarm_release_abandoned
+# depends on: while a steal mutex is held by someone else, no other process can
+# publish the primary lock.
 fm_lock_try_acquire_leaf() {  # <steal-mutex-path>
   local lockdir=$1 pid owner
   FM_LOCK_HELD_PID=
@@ -906,6 +958,7 @@ fm_lock_try_acquire_leaf() {  # <steal-mutex-path>
     # in fm_lock_try_acquire.
     fm_lock_remove_path "$lockdir" || true
     if fm_lock_try_create "$lockdir"; then
+      FM_LOCK_FAIL_REASON=
       return 0
     fi
     fm_lock_after_failed_create "$lockdir" || return 1
@@ -932,10 +985,17 @@ fm_lock_try_acquire_leaf() {  # <steal-mutex-path>
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
   fi
-  fm_lock_remove_path "$lockdir" || true
+  # Losing the rename means another reclaimer already took this stale mutex, so
+  # refuse: recreating it here would hand the same mutex to two processes.
+  if ! fm_lock_claim_stale_by_rename "$lockdir"; then
+    FM_LOCK_FAIL_REASON=held
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    return 1
+  fi
   if fm_lock_try_create "$lockdir"; then
     # shellcheck disable=SC2034 # Read by sourcing callers after acquisition.
     FM_LOCK_RECOVERED_PID=$pid
+    FM_LOCK_FAIL_REASON=
     return 0
   fi
   fm_lock_after_failed_create "$lockdir" || return 1
@@ -1041,6 +1101,19 @@ fm_lock_try_acquire() {
     && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
+    FM_LOCK_OWNER_DIR=
+    return 1
+  fi
+  # The recovery-marker publish above is several forks wide, so re-prove both
+  # facts that licence evicting the holder immediately before doing it: that
+  # this process still owns the steal mutex, and that the lock is still the same
+  # stale holder. Evicting on a stale reading unlinks whoever took the mutex in
+  # the meantime, which leaves the lock free for a third process while that
+  # holder still believes it has it.
+  if ! fm_lock_points_to_owner "$steal" "$steal_owner" \
+    || ! fm_lock_recheck_stale_owner "$lockdir" "$primary_owner" "$cur"; then
+    fm_lock_release "$steal"
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
   fi
