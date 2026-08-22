@@ -55,7 +55,7 @@ jq() {
 }
 
 perl() {
-  local operation=${2:-} status final
+  local operation=${2:-} status final result generation brief
   if [ "$operation" = snapshot ] && [ "$POST_CONFIG_SYMLINK" -eq 1 ]; then
     mv "$HOME_DIR/config/crew-dispatch.json" "$HOME_DIR/config/crew-dispatch.original.json" || return 1
     ln -s "$LAB/relocated-config/crew-dispatch.json" "$HOME_DIR/config/crew-dispatch.json" || return 1
@@ -76,20 +76,60 @@ perl() {
     printf 'replacement directory sentinel\n' > "$TASK_DIR/routing-decision.pending.json/sentinel" || return 1
     POST_PENDING_DIRECTORY=0
   fi
-  if [ "$operation" = consume ] && [ "$POST_CONSUME_REPLACE" -eq 1 ]; then
-    final="$3/routing-decision.$7.json"
-    mv "$final" "$final.validated" || return 1
-    printf 'consume substitute\n' > "$final" || return 1
-    chmod 0400 "$final" || return 1
-    POST_CONSUME_REPLACE=0
-  fi
   if [ "$operation" = cleanup ] && [ "$POST_CLEANUP_REPLACE" -eq 1 ]; then
     mv "$3" "$LAB/prepared-original" || return 1
     mkdir "$3" || return 1
     printf 'cleanup substitute\n' > "$3/sentinel" || return 1
     POST_CLEANUP_REPLACE=0
   fi
-  "$REAL_PERL" "$@"
+  result=$("$REAL_PERL" "$@" 2>&1)
+  status=$?
+  if [ "$operation" = publish ] && [ "$status" -eq 0 ]; then
+    generation=${result%%$'\t'*}
+    final="$3/routing-decision.$generation.json"
+    brief="$3/routing-brief.$generation.md"
+    if [ "${FM_TEST_ROUTING_FS_COLLIDE_BEFORE:-}" = brief ]; then
+      rm "$brief" || return 1
+      printf 'collision\n' > "$brief" || return 1
+      chmod 0400 "$brief" || return 1
+      "$REAL_PERL" "$1" abort "$3" "$4" "$5" "$6" >/dev/null 2>&1 || true
+      printf 'CREATE:routing-brief\n' >&2
+      return 1
+    fi
+    if [ "${FM_TEST_ROUTING_FS_ORDER:-}" = brief-first ] \
+      && [ "${FM_TEST_ROUTING_FS_COLLIDE_BEFORE:-}" = receipt ]; then
+      rm "$final" || return 1
+      printf 'collision\n' > "$final" || return 1
+      chmod 0400 "$final" || return 1
+      "$REAL_PERL" "$1" abort "$3" "$4" "$5" "$6" >/dev/null 2>&1 || true
+      printf 'CREATE:routing-decision\n' >&2
+      return 1
+    fi
+    if [ "${FM_TEST_ROUTING_FS_FAIL_AFTER:-}" = receipt ]; then
+      "$REAL_PERL" "$1" abort "$3" "$4" "$5" "$6" >/dev/null 2>&1 || true
+      printf 'TEST_FAILURE:receipt\n' >&2
+      return 1
+    fi
+    if [ "${FM_TEST_ROUTING_FS_REPLACE_AFTER:-}" = receipt ]; then
+      rm "$final" || return 1
+      printf 'substitute\n' > "$final" || return 1
+      chmod 0400 "$final" || return 1
+      "$REAL_PERL" "$1" abort "$3" "$4" "$5" "$6" >/dev/null 2>&1 || true
+      printf 'ROLLBACK_IDENTITY:routing-decision\n' >&2
+      return 1
+    fi
+    if [ "$POST_CONSUME_REPLACE" -eq 1 ]; then
+      rm "$final" || return 1
+      printf 'consume substitute\n' > "$final" || return 1
+      chmod 0400 "$final" || return 1
+      "$REAL_PERL" "$1" abort "$3" "$4" "$5" "$6" >/dev/null 2>&1 || true
+      POST_CONSUME_REPLACE=0
+      printf 'FINAL_IDENTITY\n' >&2
+      return 1
+    fi
+  fi
+  printf '%s\n' "$result"
+  return "$status"
 }
 
 TMP_ROOT=$(fm_test_tmproot fm-routing-decision-negative-battery)
@@ -1202,8 +1242,8 @@ write_fixture
 cp "$TASK_DIR/routing-decision.pending.json" "$(receipt_final)"
 cp "$TASK_DIR/brief.md" "$(brief_final)"
 chmod 0400 "$(receipt_final)" "$(brief_final)"
-run_validator_then_effects >/dev/null 2>&1 \
-  || fail "byte-identical generation publication was not idempotent"
+idempotent_out=$(run_validator_then_effects 2>&1) \
+  || fail "byte-identical generation publication was not idempotent: $idempotent_out"
 assert_present "$LAB/worktree.lease" "idempotent generation did not reach the worktree lease"
 assert_present "${TASK_DIR}/routing-decision.$(receipt_generation).consumed" \
   "idempotent generation was not consumed"
@@ -1231,6 +1271,69 @@ run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement
 [ "$(sha_file "$HOME_DIR/config/crew-dispatch.json")" != "$expected_config_hash" ] \
   || fail "canonical config replacement counterexample did not fire"
 pass "canonical config replacement cannot change snapshotted candidate resolution"
+
+write_fixture
+expected_generation=$(receipt_generation)
+fm_routing_decision_validate_and_prepare \
+  "$HOME_DIR/data" "$HOME_DIR/config" t1 \
+  "$RUN_HARNESS" "$RUN_MODEL" "$RUN_EFFORT" "$HOME_DIR" "$RUN_RAW" "$RUN_LAUNCH" \
+  "$RUN_MODEL_FRAGMENT" "$RUN_EFFORT_FRAGMENT" \
+  || fail "immutable generation test could not prepare a valid receipt"
+MUTABLE_GENERATION_COUNTEREXAMPLE=1
+fm_routing_sha256_file() {
+  local source=$1 backup="$LAB/generation-source.backup" altered
+  if [ "$MUTABLE_GENERATION_COUNTEREXAMPLE" -eq 0 ] \
+    || [ "$source" != "$TASK_DIR/routing-decision.pending.json" ]; then
+    sha_file "$source"
+    return
+  fi
+  cp "$source" "$backup" || return 1
+  altered="$source.altered"
+  "$REAL_JQ" '.rationale = "mutable pathname generation counterexample"' "$source" > "$altered" || return 1
+  cp "$altered" "$source" || return 1
+  rm "$altered"
+  sha_file "$source"
+  cp "$backup" "$source" || return 1
+  rm "$backup"
+}
+mutable_generation=$(fm_routing_sha256_file "$TASK_DIR/routing-decision.pending.json")
+[ "$mutable_generation" != "$expected_generation" ] \
+  || fail "mutable pathname generation counterexample did not fire"
+fm_routing_decision_persist_prepared \
+  || fail "generation was not derived from the immutable validated snapshot"
+fm_routing_decision_consume_prepared \
+  || fail "immutable snapshot generation was not consumed"
+fm_routing_decision_seal_prepared \
+  || fail "immutable snapshot generation transaction did not seal"
+MUTABLE_GENERATION_COUNTEREXAMPLE=0
+assert_present "$TASK_DIR/routing-decision.$expected_generation.json" \
+  "immutable snapshot generation was not published"
+assert_absent "$TASK_DIR/routing-decision.$mutable_generation.json" \
+  "mutable pending pathname selected the durable generation"
+pass "generation derives from the immutable validated snapshot"
+
+write_fixture
+run_validator_then_effects >/dev/null 2>&1 \
+  || fail "one-shot generation setup did not publish"
+consumed_marker="$TASK_DIR/routing-decision.$(receipt_generation).consumed"
+assert_present "$consumed_marker" "successful publication did not consume its generation"
+rm -rf "$LAB/worktree.lease" "$LAB/endpoint"
+rm "$HOME_DIR/state/t1.meta"
+reuse_out=$(run_validator_then_effects 2>&1)
+reuse_status=$?
+expect_code 1 "$reuse_status" "successful ordinary generation was reusable"
+assert_contains "$reuse_out" "ROUTING_DECISION PERSISTENCE_REFUSED" \
+  "ordinary generation reuse named the wrong predicate"
+assert_contains "$reuse_out" "CONSUMED" \
+  "ordinary generation reuse did not name its one-shot marker"
+PREEXISTING_FINAL=1
+assert_no_effects
+rm "$consumed_marker"
+run_validator_then_effects >/dev/null 2>&1 \
+  || fail "one-shot generation firing counterexample did not reach effects"
+assert_present "$LAB/worktree.lease" \
+  "one-shot generation firing counterexample did not lease a worktree"
+pass "ordinary successful publication consumes its generation once"
 
 expected_count=$((136 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \

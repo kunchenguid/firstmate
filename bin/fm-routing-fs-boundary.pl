@@ -4,8 +4,21 @@ use warnings;
 use Errno qw(EEXIST ENOENT);
 use Fcntl qw(:DEFAULT :mode);
 use File::Basename qw(basename dirname);
+use Digest::SHA qw(sha256_hex);
+
+my @rollback;
+my $rollback_dir;
+my $rolling_back = 0;
+my $quarantine_counter = 0;
 
 sub fail {
+  if (@rollback && !$rolling_back) {
+    $rolling_back = 1;
+    for my $item (reverse @rollback) {
+      quarantine_identity_at($rollback_dir, $item->[0], $item->[1]);
+    }
+    @rollback = ();
+  }
   print STDERR "$_[0]\n";
   exit 1;
 }
@@ -49,10 +62,15 @@ sub read_all {
 }
 
 sub create_at {
-  my ($dir, $name, $bytes, $mode) = @_;
+  my ($dir, $name, $bytes, $mode, $durable) = @_;
   enter_dir($dir);
   sysopen(my $fh, $name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, $mode)
     or return;
+  my @st = stat($fh);
+  if ($durable) {
+    $rollback_dir = $dir;
+    push @rollback, [$name, \@st];
+  }
   my $offset = 0;
   while ($offset < length($bytes)) {
     my $count = syswrite($fh, $bytes, length($bytes) - $offset, $offset);
@@ -60,7 +78,6 @@ sub create_at {
     $offset += $count;
   }
   chmod($mode, $fh) or fail("CHMOD:$name:$!");
-  my @st = stat($fh);
   return ($fh, \@st);
 }
 
@@ -84,13 +101,24 @@ sub existing_at {
   return ($fh, $st);
 }
 
-sub unlink_identity_at {
+sub quarantine_identity_at {
   my ($dir, $name, $expected) = @_;
   enter_dir($dir);
-  my @current = lstat($name);
-  return 1 if !@current && $! == ENOENT;
-  return 0 unless @current && $current[0] == $expected->[0] && $current[1] == $expected->[1];
-  return unlink($name);
+  my $quarantine = ".fm-routing-quarantine.$$." . ++$quarantine_counter;
+  return 1 if !lstat($name) && $! == ENOENT;
+  rename($name, $quarantine) or return 0;
+  my @moved = lstat($quarantine);
+  if (!@moved || $moved[0] != $expected->[0] || $moved[1] != $expected->[1]) {
+    rename($quarantine, $name) if !lstat($name) && $! == ENOENT;
+    return 0;
+  }
+  if (S_ISDIR($moved[2])) {
+    sysopen(my $held, $quarantine, O_RDONLY | O_NOFOLLOW | O_DIRECTORY) or return 0;
+    remove_contents_dir($held) or return 0;
+    enter_dir($dir);
+    return rmdir($quarantine);
+  }
+  return unlink($quarantine);
 }
 
 sub open_nested_dir {
@@ -129,13 +157,13 @@ sub snapshot_bundle {
   copy_at($task, 'brief.md', $task_snapshot, 'brief.md', 0, 0400);
   my $config_present = copy_at($config, 'crew-dispatch.json', $config_snapshot, 'crew-dispatch.json', 1);
   copy_at($task, 'quota-snapshot.json', $task_snapshot, 'quota-snapshot.json', 1);
-  print join("\t", $snapshot_st->[0], $snapshot_st->[1], $pending_st->[0], $pending_st->[1], $config_present), "\n";
+  print join("\t", $snapshot_st->[0], $snapshot_st->[1], $pending_st->[0], $pending_st->[1], $config_present, sha256_hex($pending_bytes)), "\n";
 }
 
 sub publish_bundle {
-  my ($task_path, $snapshot_path, $snapshot_dev, $snapshot_ino, $pending_dev, $pending_ino, $id, $generation) = @_;
+  my ($task_path, $snapshot_path, $snapshot_dev, $snapshot_ino, $pending_dev, $pending_ino, $id, $expected_generation) = @_;
   $id =~ /\A[A-Za-z0-9._-]+\z/ or fail("PUBLISH:task-id");
-  $generation =~ /\A[0-9a-f]{64}\z/ or fail("PUBLISH:generation");
+  $expected_generation =~ /\A[0-9a-f]{64}\z/ or fail("PUBLISH:generation");
   my ($task) = open_dir($task_path);
   my ($snapshot, $snapshot_st) = open_dir($snapshot_path);
   $snapshot_st->[0] == $snapshot_dev && $snapshot_st->[1] == $snapshot_ino
@@ -148,6 +176,8 @@ sub publish_bundle {
   my ($brief_source) = open_regular_at($task_snapshot, 'brief.md', 0);
   my $receipt_bytes = read_all($receipt_source);
   my $brief_bytes = read_all($brief_source);
+  my $generation = sha256_hex($receipt_bytes);
+  $generation eq $expected_generation or fail("PUBLISH:generation-mismatch");
   read_all($pending) eq $receipt_bytes or fail("PENDING_BYTES");
   my ($receipt_anchor) = create_at($snapshot, 'final.anchor.json', $receipt_bytes, 0400);
   $receipt_anchor or fail("ANCHOR:receipt:$!");
@@ -160,99 +190,97 @@ sub publish_bundle {
   my ($brief, $brief_st) = existing_at($task, $brief_name, $brief_bytes);
   my ($marker) = open_regular_at($task, $marker_name, 1);
   !$marker or fail("CONSUMED");
-  my @created;
-  my @order = $ENV{FM_TEST_ROUTING_FS_ORDER} && $ENV{FM_TEST_ROUTING_FS_ORDER} eq 'brief-first'
-    ? ('brief', 'receipt') : ('receipt', 'brief');
-  for my $which (@order) {
+  my $receipt_created = 0;
+  my $brief_created = 0;
+  for my $which ('receipt', 'brief') {
     next if $which eq 'receipt' ? $receipt : $brief;
-    if ($ENV{FM_TEST_ROUTING_FS_COLLIDE_BEFORE} && $ENV{FM_TEST_ROUTING_FS_COLLIDE_BEFORE} eq $which) {
-      my $name = $which eq 'receipt' ? $receipt_name : $brief_name;
-      my ($collision) = create_at($task, $name, "collision\n", 0400);
-      $collision or fail("TEST_COLLISION:$name:$!");
-    }
     my $name = $which eq 'receipt' ? $receipt_name : $brief_name;
     my $bytes = $which eq 'receipt' ? $receipt_bytes : $brief_bytes;
-    my ($fh, $st) = create_at($task, $name, $bytes, 0400);
-    if (!$fh) {
-      for my $item (reverse @created) {
-        unlink_identity_at($task, $item->[0], $item->[2]) or fail("ROLLBACK_IDENTITY:$item->[0]");
-      }
-      fail("CREATE:$name:$!");
-    }
-    push @created, [$name, $fh, $st];
-    if ($ENV{FM_TEST_ROUTING_FS_REPLACE_AFTER} && $ENV{FM_TEST_ROUTING_FS_REPLACE_AFTER} eq $which) {
-      unlink_identity_at($task, $name, $st) or fail("TEST_REPLACE_UNLINK:$name");
-      my ($substitute) = create_at($task, $name, "substitute\n", 0400);
-      $substitute or fail("TEST_REPLACE_CREATE:$name:$!");
-      for my $item (reverse @created) {
-        unlink_identity_at($task, $item->[0], $item->[2]) or fail("ROLLBACK_IDENTITY:$item->[0]");
-      }
-      fail("TEST_REPLACEMENT:$which");
-    }
-    if ($ENV{FM_TEST_ROUTING_FS_FAIL_AFTER} && $ENV{FM_TEST_ROUTING_FS_FAIL_AFTER} eq $which) {
-      for my $item (reverse @created) {
-        unlink_identity_at($task, $item->[0], $item->[2]) or fail("ROLLBACK_IDENTITY:$item->[0]");
-      }
-      fail("TEST_FAILURE:$which");
-    }
-    if ($which eq 'receipt') { $receipt = $fh; $receipt_st = $st; }
-    else { $brief = $fh; $brief_st = $st; }
+    my ($fh, $st) = create_at($task, $name, $bytes, 0400, 1);
+    $fh or fail("CREATE:$name:$!");
+    if ($which eq 'receipt') { $receipt = $fh; $receipt_st = $st; $receipt_created = 1; }
+    else { $brief = $fh; $brief_st = $st; $brief_created = 1; }
   }
-  print join("\t", $receipt_st->[0], $receipt_st->[1], $brief_st->[0], $brief_st->[1]), "\n";
+  my ($receipt_final, $receipt_final_st) = open_regular_at($task, $receipt_name, 0);
+  my ($brief_final, $brief_final_st) = open_regular_at($task, $brief_name, 0);
+  $receipt_final_st->[0] == $receipt_st->[0] && $receipt_final_st->[1] == $receipt_st->[1]
+    && read_all($receipt_final) eq $receipt_bytes or fail("FINAL_IDENTITY:receipt");
+  $brief_final_st->[0] == $brief_st->[0] && $brief_final_st->[1] == $brief_st->[1]
+    && read_all($brief_final) eq $brief_bytes or fail("FINAL_IDENTITY:brief");
+  my ($marker_created, $marker_st) = create_at($task, $marker_name, $receipt_bytes, 0400, 1);
+  $marker_created or fail("CONSUME:$!");
+  my ($marker_final, $marker_final_st) = open_regular_at($task, $marker_name, 0);
+  $marker_final_st->[0] == $marker_st->[0] && $marker_final_st->[1] == $marker_st->[1]
+    && read_all($marker_final) eq $receipt_bytes or fail("CONSUME_IDENTITY");
+  ($receipt_final, $receipt_final_st) = open_regular_at($task, $receipt_name, 0);
+  ($brief_final, $brief_final_st) = open_regular_at($task, $brief_name, 0);
+  $receipt_final_st->[0] == $receipt_st->[0] && $receipt_final_st->[1] == $receipt_st->[1]
+    && read_all($receipt_final) eq $receipt_bytes or fail("FINAL_IDENTITY:receipt");
+  $brief_final_st->[0] == $brief_st->[0] && $brief_final_st->[1] == $brief_st->[1]
+    && read_all($brief_final) eq $brief_bytes or fail("FINAL_IDENTITY:brief");
+  my $manifest = join("\t", $generation, $receipt_st->[0], $receipt_st->[1], $brief_st->[0], $brief_st->[1], $marker_st->[0], $marker_st->[1], $receipt_created, $brief_created) . "\n";
+  my ($manifest_fh) = create_at($snapshot, 'publication.manifest', $manifest, 0400);
+  $manifest_fh or fail("MANIFEST:$!");
+  @rollback = ();
+  print $manifest;
 }
 
-sub consume {
-  my ($task_path, $snapshot_path, $snapshot_dev, $snapshot_ino, $generation, $receipt_dev, $receipt_ino) = @_;
-  $generation =~ /\A[0-9a-f]{64}\z/ or fail("CONSUME:generation");
+sub verify_consumed {
+  my ($task_path, $snapshot_path, $snapshot_dev, $snapshot_ino) = @_;
   my ($task) = open_dir($task_path);
   my ($snapshot, $snapshot_st) = open_dir($snapshot_path);
   $snapshot_st->[0] == $snapshot_dev && $snapshot_st->[1] == $snapshot_ino or fail("SNAPSHOT_IDENTITY");
-  my ($anchor) = open_regular_at($snapshot, 'final.anchor.json', 0);
-  my $anchor_bytes = read_all($anchor);
-  my $receipt_name = "routing-decision.$generation.json";
-  my ($receipt, $receipt_st) = open_regular_at($task, $receipt_name, 0);
-  $receipt_st->[0] == $receipt_dev && $receipt_st->[1] == $receipt_ino or fail("FINAL_IDENTITY");
-  read_all($receipt) eq $anchor_bytes or fail("FINAL_BYTES");
+  my ($manifest_fh) = open_regular_at($snapshot, 'publication.manifest', 0);
+  my $manifest = read_all($manifest_fh);
+  chomp($manifest);
+  my ($generation, $receipt_dev, $receipt_ino, $brief_dev, $brief_ino, $marker_dev, $marker_ino) = split(/\t/, $manifest, -1);
+  $generation =~ /\A[0-9a-f]{64}\z/ or fail("CONSUME:generation");
   my $marker_name = "routing-decision.$generation.consumed";
-  my ($marker_created) = create_at($task, $marker_name, $anchor_bytes, 0400);
-  $marker_created or fail("CONSUME:$!");
   my ($marker, $marker_st) = open_regular_at($task, $marker_name, 0);
-  read_all($marker) eq $anchor_bytes or fail("CONSUME_IDENTITY");
+  $marker_st->[0] == $marker_dev && $marker_st->[1] == $marker_ino or fail("CONSUME_IDENTITY");
+  print "$generation\n";
 }
 
-sub remove_contents {
+sub abort_bundle {
+  my ($task_path, $snapshot_path, $snapshot_dev, $snapshot_ino) = @_;
+  my ($task) = open_dir($task_path);
+  my ($snapshot, $snapshot_st) = open_dir($snapshot_path);
+  $snapshot_st->[0] == $snapshot_dev && $snapshot_st->[1] == $snapshot_ino or fail("SNAPSHOT_IDENTITY");
+  my ($manifest_fh) = open_regular_at($snapshot, 'publication.manifest', 0);
+  my $manifest = read_all($manifest_fh);
+  chomp($manifest);
+  my ($generation, $receipt_dev, $receipt_ino, $brief_dev, $brief_ino, $marker_dev, $marker_ino, $receipt_created, $brief_created) = split(/\t/, $manifest, -1);
+  my $ok = quarantine_identity_at($task, "routing-decision.$generation.consumed", [$marker_dev, $marker_ino]);
+  $ok = 0 unless !$brief_created || quarantine_identity_at($task, "routing-brief.$generation.md", [$brief_dev, $brief_ino]);
+  $ok = 0 unless !$receipt_created || quarantine_identity_at($task, "routing-decision.$generation.json", [$receipt_dev, $receipt_ino]);
+  $ok or fail("ABORT:identity");
+}
+
+sub remove_contents_dir {
   my ($dir) = @_;
   enter_dir($dir);
-  opendir(my $scan, '.') or fail("SCAN:$!");
+  opendir(my $scan, '.') or return 0;
   my @names = grep { $_ ne '.' && $_ ne '..' } readdir($scan);
   closedir($scan);
   for my $name (@names) {
     enter_dir($dir);
-    my @st = lstat($name);
-    next if !@st && $! == ENOENT;
-    if (S_ISDIR($st[2]) && !S_ISLNK($st[2])) {
-      sysopen(my $child, $name, O_RDONLY | O_NOFOLLOW | O_DIRECTORY) or fail("OPEN_CHILD:$name:$!");
-      remove_contents($child);
+    if (sysopen(my $child, $name, O_RDONLY | O_NOFOLLOW | O_DIRECTORY)) {
+      remove_contents_dir($child) or return 0;
       enter_dir($dir);
-      rmdir($name) or fail("RMDIR:$name:$!");
+      rmdir($name) or return 0;
     } else {
-      unlink($name) or fail("UNLINK:$name:$!");
+      unlink($name) or return 0;
     }
   }
+  return 1;
 }
 
 sub cleanup {
   my ($path, $dev, $ino) = @_;
-  my ($dir, $st) = open_dir($path);
-  $st->[0] == $dev && $st->[1] == $ino or fail("CLEANUP_IDENTITY");
-  remove_contents($dir);
   my $parent_path = dirname($path);
   my $name = basename($path);
   my ($parent) = open_dir($parent_path);
-  enter_dir($parent);
-  my @current = lstat($name);
-  @current && $current[0] == $dev && $current[1] == $ino or fail("CLEANUP_REPLACED");
-  rmdir($name) or fail("CLEANUP_RMDIR:$!");
+  quarantine_identity_at($parent, $name, [$dev, $ino]) or fail("CLEANUP_IDENTITY");
 }
 
 my $operation = shift(@ARGV) // fail('USAGE');
@@ -264,7 +292,9 @@ if ($operation eq 'identity') {
 } elsif ($operation eq 'publish') {
   publish_bundle(@ARGV);
 } elsif ($operation eq 'consume') {
-  consume(@ARGV);
+  verify_consumed(@ARGV);
+} elsif ($operation eq 'abort') {
+  abort_bundle(@ARGV);
 } elsif ($operation eq 'cleanup') {
   cleanup(@ARGV);
 } else {

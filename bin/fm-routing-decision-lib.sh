@@ -830,10 +830,7 @@ fm_routing_decision_persist_prepared() {
   }
   task_dir="$data/$id"
   pending="$task_dir/routing-decision.pending.json"
-  generation=$(fm_routing_sha256_file "$pending") || {
-    fm_routing_refuse "PERSISTENCE_REFUSED" "validated receipt generation could not be derived"
-    return 1
-  }
+  generation=$FM_ROUTING_PREPARED_GENERATION
   final="$(dirname "$source_pending")/routing-decision.$generation.json"
   brief_final="$(dirname "$source_pending")/routing-brief.$generation.md"
   generated_at=$(jq -r '.generated_at' "$pending")
@@ -857,21 +854,21 @@ fm_routing_decision_persist_prepared() {
     fm_routing_refuse "PERSISTENCE_REFUSED" "$result"
     return 1
   }
-  IFS=$'\t' read -r FM_ROUTING_PREPARED_RECEIPT_DEV FM_ROUTING_PREPARED_RECEIPT_INO _ _ <<<"$result"
+  IFS=$'\t' read -r generation FM_ROUTING_PREPARED_RECEIPT_DEV FM_ROUTING_PREPARED_RECEIPT_INO _ _ _ _ _ _ <<<"$result"
   FM_ROUTING_PREPARED_GENERATION=$generation
   FM_ROUTING_PREPARED_COMMITTED=1
+  FM_ROUTING_PREPARED_CONSUMED=1
   FM_ROUTING_DECISION_FINAL=$final
   FM_ROUTING_BRIEF_FINAL=$brief_final
 }
 
 fm_routing_decision_consume_prepared() {
   local result
-  [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 1 ] && [ "$FM_ROUTING_PREPARED_CONSUMED" -eq 0 ] || return 1
+  [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 1 ] || return 1
+  [ "$FM_ROUTING_PREPARED_CONSUMED" -eq 0 ] || return 0
   result=$(fm_routing_fs_boundary consume \
     "$(dirname "$FM_ROUTING_DECISION_FINAL")" "$FM_ROUTING_PREPARED_DIR" \
-    "$FM_ROUTING_PREPARED_DIR_DEV" "$FM_ROUTING_PREPARED_DIR_INO" \
-    "$FM_ROUTING_PREPARED_GENERATION" \
-    "$FM_ROUTING_PREPARED_RECEIPT_DEV" "$FM_ROUTING_PREPARED_RECEIPT_INO" 2>&1) || {
+    "$FM_ROUTING_PREPARED_DIR_DEV" "$FM_ROUTING_PREPARED_DIR_INO" 2>&1) || {
     fm_routing_refuse "PERSISTENCE_REFUSED" "$result"
     return 1
   }
@@ -886,6 +883,11 @@ fm_routing_decision_cleanup_prepared() {
 
 fm_routing_decision_discard_prepared() {
   [ -n "$FM_ROUTING_PREPARED_DIR" ] || return 0
+  if [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 1 ]; then
+    fm_routing_fs_boundary abort "$(dirname "$FM_ROUTING_DECISION_FINAL")" \
+      "$FM_ROUTING_PREPARED_DIR" "$FM_ROUTING_PREPARED_DIR_DEV" "$FM_ROUTING_PREPARED_DIR_INO" \
+      || return 1
+  fi
   fm_routing_decision_cleanup_prepared || return 1
   FM_ROUTING_PREPARED_DIR=
   FM_ROUTING_PREPARED_DATA=
@@ -981,7 +983,7 @@ fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-i
     esac
     return 1
   fi
-  IFS=$'\t' read -r _ _ FM_ROUTING_PREPARED_PENDING_DEV FM_ROUTING_PREPARED_PENDING_INO _ <<<"$snapshot_result"
+  IFS=$'\t' read -r _ _ FM_ROUTING_PREPARED_PENDING_DEV FM_ROUTING_PREPARED_PENDING_INO _ FM_ROUTING_PREPARED_GENERATION <<<"$snapshot_result"
 
   fm_routing_decision_validate_snapshot \
     "$snapshot_data" "$snapshot_config" "$id" "$4" "$5" "$6" "$7" "$8" "$9" \
