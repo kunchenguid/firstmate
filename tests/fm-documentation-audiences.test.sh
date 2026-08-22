@@ -85,6 +85,20 @@ test_required_pointer_fails() {
   pass "required documentation owner pointers cannot silently disappear"
 }
 
+test_unclassified_internal_skill_fails() {
+  local repo="$TMP_ROOT/unclassified-internal-skill"
+  mkdir -p "$repo/docs" "$repo/.agents/skills/example"
+  git -C "$repo" init -q
+  printf '%s\n' '[Setup](docs/setup.md) [Policy](docs/policy.md)' > "$repo/README.md"
+  printf '%s\n' '# Setup' > "$repo/docs/setup.md"
+  printf '%s\n' '# Policy' > "$repo/docs/policy.md"
+  printf '%s\n' '# Internal skill' > "$repo/.agents/skills/example/SKILL.md"
+  write_fixture_inventory "$repo"
+  git -C "$repo" add README.md docs .agents
+  run_expect_failure "unclassified: .agents/skills/example/SKILL.md" "$CHECK" --root "$repo"
+  pass "a new internal skill must receive an explicit runtime-audience classification"
+}
+
 write_fixture_inventory() {
   local repo=$1
   cat > "$repo/docs/documentation-audiences.json" <<'JSON'
@@ -138,4 +152,5 @@ MD
 test_repository_inventory_passes
 test_duplicate_and_setup_classification_fail
 test_required_pointer_fails
+test_unclassified_internal_skill_fails
 test_local_links_and_no_keyword_heuristic

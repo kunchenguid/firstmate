@@ -411,6 +411,27 @@ Observed output:
 fm-claude-stop-autoarm: ok
 ```
 
+## Exhaustive review routing
+
+Verified 2026-08-22 on Pi 0.82.1 through the public Pi skill-loading interface.
+The opt-in guard runs a real primary agent turn against isolated brief and spawn interfaces, then requires the spawned worker runtime to invoke the GSD review interface from its own directory with the committed immutable SHA.
+It does not inspect instruction-source bytes.
+
+```sh
+FM_EXHAUSTIVE_REVIEW_ROUTING_LIVE_E2E=1 \
+  bin/fm-test-run.sh tests/fm-exhaustive-review-routing-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - real Pi primary dispatched the configured worker, and only that worker ran the immutable-SHA GSD review
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+```
+
+This confirms the live Pi path routes an exhaustive-review request through the configured worker boundary instead of executing the review at the primary layer.
+Other harnesses are not covered by this Pi-specific live result.
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
