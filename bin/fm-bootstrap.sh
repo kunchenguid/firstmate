@@ -1565,11 +1565,12 @@ detect_home_summary_publication() {
 # bash's dynamic scoping would let them overwrite a stamp held by a caller.
 local_phase && detect_local_tools
 if network_phase; then
-  if forge_report_unsupported; then
-    __fm_timing_stamp=$(fm_timing_now_ms)
-  # Authentication is checked for each registered supported forge. The deferred
-  # network phase must repeat the same provider-aware checks, not a global GitHub
-  # probe that mislabels GitLab-only and local homes.
+  __fm_timing_stamp=$(fm_timing_now_ms)
+  # Authentication is checked for each registered supported forge. An unknown
+  # origin is reported by the local pass, but must not suppress authentication
+  # remediation for an unrelated supported project in the same home.
+  # The deferred network phase repeats these provider-aware checks rather than a
+  # global GitHub probe that mislabels GitLab-only and local homes.
   FORGE_AUTH_CHECKED=""
   while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
     [ -n "${_proj_provider:-}" ] || continue
@@ -1584,8 +1585,7 @@ if network_phase; then
     FORGE_AUTH_CHECKED="$FORGE_AUTH_CHECKED $_pair"
     fm_forge_check_auth "$_proj_provider" "${_proj_host:-}"
   done <<< "$FORGE_PROJECTS"
-    fm_timing_record phase forge-auth "$__fm_timing_stamp"
-  fi
+  fm_timing_record phase forge-auth "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config
 
@@ -1636,6 +1636,9 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     "$SCRIPT_DIR/fm-contributions.sh" arm --if-owned >/dev/null \
       || echo "MISSING: contribution observation could not be armed; coverage is unconfirmed"
   fi
+  # Never hand an unclassified registered origin to the clone-refresh worker:
+  # its remote transport is not a supported forge boundary, so fail closed for
+  # that project while leaving unrelated secondmate supervision sweeps intact.
   if [ -n "$fleet_sync_pid" ]; then
     wait "$fleet_sync_pid" || true
     cat "$fleet_sync_out"
