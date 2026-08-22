@@ -972,10 +972,11 @@ while :; do
   fm_pending_reply_tick "$STATE" || true
 
   # Process-to-event liveness repair. This never discovers a result by polling:
-  # each registered source has its own child blocking on that source, and this
-  # only republishes results already captured durably and restarts a source
-  # whose owner is gone. It is a no-op with nothing registered.
-  if [ -d "$STATE/procevent" ]; then
+  # each registered source has its own child blocking on that source, while a
+  # typed ingress captures its result directly. This only republishes results
+  # already captured durably and restarts a registered source whose owner is
+  # gone. It is a no-op with neither registrations nor captured results.
+  if [ -d "$STATE/procevent" ] || [ -d "$STATE/procevent-inbox" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi
   # Then deliver any queued-but-unsurfaced result, including one a runner

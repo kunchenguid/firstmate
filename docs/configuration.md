@@ -570,6 +570,38 @@ To recover, restore that home's tracked `bin/fm-procevent.sh`, run `FM_HOME=<hom
 
 The runner proves exactly one durability boundary: output that reached the runner is stored at mode `0600` before any event referencing it is published, and a captured result with no durable handled acknowledgement remains eligible for bounded re-announcement across any number of drains and restarts, not only the crash window right after capture.
 `bin/fm-procevent.sh handled <source-id> <sequence>` is the only thing that stops re-announcement: a generation-keyed, private, path-safe, durable, and idempotent acknowledgement that atomically checks and deduplicates by the exact source and sequence, so a paired effect gated on its first-time-vs-repeat report is never authorized twice.
+
+### Typed external-event ingress
+
+`bin/fm-procevent-external-event.sh ingest <source> <delivery-key>` is the stable local boundary for machine-authored event hints.
+It reads an untrusted payload from stdin, durably stores it in `state/procevent-inbox/` at mode `0600`, and only then appends a normalized process-event wake whose bytes contain no payload text.
+The source-scoped delivery key is durably deduplicated, an unhandled result is replayable after a restart, and a retry coalesces with an already queued wake.
+An unhandled captured result keeps the existing supervision loop required even when the home has no task metadata or registered long-polling source.
+This is deliberately separate from `fm-inbox.sh note`, whose records are captain-authored input.
+
+The command is not a public listener and does not authenticate callers.
+Terminate and authenticate a webhook outside Firstmate, then invoke the command locally or through an operator-controlled SSH route.
+`FM_EXTERNAL_EVENT_MAX_BYTES` changes the default 1 MiB payload ceiling up to a hard maximum of 16 MiB.
+
+```sh
+printf '%s' "$payload" | FM_HOME=/path/to/home /path/to/firstmate/bin/fm-procevent-external-event.sh ingest linear "$delivery_key"
+```
+
+An SSH forwarder supplies the same two arguments and stdin to that command on the Firstmate host.
+
+For Linear, configure both of these producers to call the same local boundary:
+
+- A Linear webhook or automation invokes `ingest linear <delivery-key>` immediately for issue creation and for changes to bug type, workflow state, initiative, labels, or other routing-relevant fields.
+- An initiative-wide reconciliation job scans eligible Linear bugs hourly and invokes the same command for every candidate as the drift backstop.
+
+Use a delivery key derived by the forwarding integration from the immutable Linear issue UUID plus its `updatedAt` revision, using only the ingress command's accepted key characters.
+The webhook and hourly scan must derive the same key for the same revision so retries and harmless duplicate observations coalesce, while a later revision remains discoverable.
+Pass the event body or a minimal issue locator on stdin; neither is authoritative.
+Store any webhook secret in the external terminator or automation, not in Firstmate, and do not pass it in the payload or delivery key.
+
+On the resulting `procevent external-event ...` wake, Firstmate reads the typed envelope and queries Linear authoritatively before it creates or routes work.
+Current initiative and domain semantics are compared with the natural-language secondmate scopes in `data/secondmates.md`, so mutable ownership mappings stay out of transport configuration.
+The operator must ensure the external reconciliation job can enumerate every initiative in scope and that its authoritative Linear credential remains valid; Firstmate cannot prove delivery before either producer successfully invokes the local boundary.
 Default and fallback `check` publication is still best-effort, so the same source and sequence can repeat even before any restart; handlers deduplicate that identity rather than assuming a wake is unique.
 The runner proves nothing about the source side, and the handled acknowledgement proves nothing about a paired external effect performed before it: a crash between that effect and the acknowledgement call can still repeat the effect on replay, so this is never a generic exactly-once guarantee.
 The published `lavish-axi poll` clears feedback destructively before returning it, so a result lost between that clearing and the runner reading process output is unrecoverable.
@@ -640,6 +672,7 @@ FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-too
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
+FM_EXTERNAL_EVENT_MAX_BYTES=1048576     # bound on one typed external-event payload; hard maximum 16777216
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
