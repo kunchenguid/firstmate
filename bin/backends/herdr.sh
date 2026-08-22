@@ -1453,15 +1453,40 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
   return 0
 }
 
+# fm_backend_herdr_server_running: confirm a live herdr server for <session>
+# across a few quick retries, returning 0 iff one is confirmed running. One
+# `herdr status --json` can come back slow, empty, or partial while the server
+# is actually UP - a momentarily busy server, or the ~2s window of an in-flight
+# restart - and `jq '.server.running // false'` then reduces that to non-"true".
+# Retrying turns a single flaky probe into a reliable verdict, returning as soon
+# as any probe sees "true" so the healthy path adds no latency. This is the
+# defense that keeps fm_backend_herdr_server_ensure from mistaking a live server
+# for a dead one and performing a pane-killing `herdr server` takeover.
+fm_backend_herdr_server_running() {  # <session>
+  local session=$1 running i
+  for i in 1 2 3; do
+    running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
+    [ "$running" = "true" ] && return 0
+    [ "$i" -lt 3 ] && sleep 0.2
+  done
+  return 1
+}
+
 # fm_backend_herdr_server_ensure: start the herdr server for <session>
 # headless (no TUI client) if not already running, mirroring tmux's `tmux
 # has-session || tmux new-session -d`. Verified: a bare socket CLI call does
 # NOT auto-start the server, so this must run before any workspace/tab/pane
 # call. Bounded poll for the server to report running.
+#
+# Runs ONLY on genuine spawn/recovery paths (container_ensure,
+# projection_create_task, recovery) - reads query the pane directly and never
+# reach here. Starting `herdr server` while one is already running performs a
+# live handoff that kills every pane, so it confirms the server is genuinely
+# unreachable (not just one flaky probe) via fm_backend_herdr_server_running
+# before taking over.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i
-  running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
-  [ "$running" = "true" ] && return 0
+  local session=$1 running i
+  fm_backend_herdr_server_running "$session" && return 0
   ( fm_backend_herdr_cli "$session" server >/dev/null 2>&1 & ) || return 1
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
@@ -2599,7 +2624,14 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # always request a generous fetch far above any realistic viewport height, then
 # trim to the caller's requested bound ourselves with `tail`.
 fm_backend_herdr_capture() {  # <target> <lines>
-  fm_backend_herdr_target_ready "$1" || return 1
+  # A read must NEVER restart the herdr server: parse the target directly
+  # instead of routing through fm_backend_herdr_target_ready, which calls
+  # fm_backend_herdr_server_ensure and can take over a live server (killing
+  # every pane) on one flaky status probe. This mirrors fm_backend_target_exists
+  # / fm_backend_current_session, which already query the pane directly. If the
+  # server is genuinely down the `pane read` below fails and this returns 1, the
+  # same result the old server-down path produced.
+  fm_backend_herdr_parse_target "$1" || return 1
   local lines=${2:-200} fetch out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
@@ -2609,7 +2641,8 @@ fm_backend_herdr_capture() {  # <target> <lines>
 }
 
 fm_backend_herdr_capture_ansi() {  # <target> <lines>
-  fm_backend_herdr_target_ready "$1" || return 1
+  # Read path: parse directly, never server_ensure. See fm_backend_herdr_capture.
+  fm_backend_herdr_parse_target "$1" || return 1
   local lines=${2:-200} fetch out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
@@ -2678,7 +2711,9 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
 # RENDERED busy footer, the same delivery-only signal bin/fm-tmux-lib.sh's
 # fm_pane_busy_state reads, scanning the same 40-line tail folded to its last
 # 12 non-blank rows. This is NOT a worker-state source: herdr's native
-# agent-state (fm_backend_herdr_busy_state) stays the semantic owner, and this
+# agent-state (fm_backend_herdr_busy_state, which now parses the target directly
+# and never server-ensures - a read must not restart the server) stays the
+# semantic owner, and this
 # read exists only so the submit core below can confirm a delivery for a
 # harness whose native state never transitions. Without a harness argument the
 # shared matcher uses its union of verified tokens, which is what the submit
@@ -2987,13 +3022,12 @@ fm_backend_herdr_classify_submit_agent_status() {  # <raw-agent_status>
 
 # fm_backend_herdr_agent_status_raw: one `agent get` read, echoing the raw
 # agent_status string (working/idle/done/blocked/...), or empty on any
-# failure. Deliberately skips fm_backend_herdr_target_ready's server-ensure
-# round trip (an extra `status --json` call) that fm_backend_herdr_busy_state
-# pays on every call: fm_backend_herdr_wait_for_working polls this in a tight
-# loop right after a caller has already parsed the target and confirmed the
-# server is live (e.g. fm_backend_herdr_send_text_submit, immediately after a
-# successful send-text), so re-checking server liveness on every poll would
-# only add latency without adding safety.
+# failure. Parses nothing and never server-ensures - the caller passes an
+# already-split <session> <pane_id>: fm_backend_herdr_wait_for_working polls this
+# in a tight loop right after a caller has already parsed the target and
+# confirmed the server is live (e.g. fm_backend_herdr_send_text_submit,
+# immediately after a successful send-text), so re-checking server liveness on
+# every poll would only add latency without adding safety.
 fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null) || { printf ''; return 0; }
@@ -3006,7 +3040,10 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # fm_backend_herdr_classify_agent_status for the status->busy/idle/unknown
 # mapping.
 fm_backend_herdr_busy_state() {  # <target>
-  fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
+  # Read path: parse directly, never server_ensure (see fm_backend_herdr_capture).
+  # A down server makes the `agent get` read empty -> classify -> unknown, the
+  # same verdict the old server-down path produced.
+  fm_backend_herdr_parse_target "$1" || { printf 'unknown'; return 0; }
   fm_backend_herdr_classify_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")"
 }

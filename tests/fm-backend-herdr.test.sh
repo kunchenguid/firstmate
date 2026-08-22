@@ -524,16 +524,20 @@ test_container_ensure_starts_server_and_workspace() {
   dir="$TMP_ROOT/container"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # 1: version_check status --json (server not running yet, irrelevant to client check)
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
-  # 2: server_ensure's status --json check -> not running
+  # 2-4: server_ensure -> fm_backend_herdr_server_running probes up to 3 times
+  # before concluding the server is genuinely down (one flaky non-"true" probe
+  # must not trigger a pane-killing takeover). All three report not running.
   printf '{"server":{"running":false}}\n' > "$resp/2.out"
-  # 3: `herdr server` backgrounded launch - no meaningful output
-  # 4: server_ensure poll -> now running
-  printf '{"server":{"running":true}}\n' > "$resp/4.out"
-  # 5: workspace list -> empty (no "firstmate" workspace yet)
-  printf '{"result":{"workspaces":[]}}\n' > "$resp/5.out"
-  # 6: workspace create -> w1, seeding default tab w1:t9 (real herdr returns
+  printf '{"server":{"running":false}}\n' > "$resp/3.out"
+  printf '{"server":{"running":false}}\n' > "$resp/4.out"
+  # 5: `herdr server` backgrounded launch - no meaningful output
+  # 6: server_ensure poll -> now running
+  printf '{"server":{"running":true}}\n' > "$resp/6.out"
+  # 7: workspace list -> empty (no "firstmate" workspace yet)
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/7.out"
+  # 8: workspace create -> w1, seeding default tab w1:t9 (real herdr returns
   # the seeded tab/pane ids in the SAME response - verified empirically).
-  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/6.out"
+  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
@@ -556,6 +560,113 @@ test_container_ensure_reuses_existing_workspace() {
   [ "$out" = $'fmtest:w9\t' ] || fail "container_ensure should reuse the existing firstmate workspace id with an EMPTY seeded-tab field (an ADOPTED workspace is never a prune candidate), got '$out'"
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "container_ensure should not create a workspace that already exists"
   pass "fm_backend_herdr_container_ensure: reuses an existing firstmate workspace without recreating it, and reports no seeded default tab (adopted, not created)"
+}
+
+# --- read-path never restarts the server (herdr-restart-rootcause fix) --------
+#
+# The proven defect: a READ (the fleet dashboard's fm-crew-state.sh poll of a
+# backend=herdr task, which calls fm_backend_herdr_capture + _busy_state) routed
+# through fm_backend_herdr_target_ready -> fm_backend_herdr_server_ensure, which
+# on one flaky `status --json` probe ran `herdr server` -> a live handoff that
+# killed every pane. The fix: reads parse the target directly and NEVER
+# server-ensure; server_ensure survives only on spawn/recovery paths and now
+# retries the probe before taking a live server over. The `herdr server` argv is
+# logged as "<unit>server<unit>--session" (fm_backend_herdr_cli appends
+# --session); its ABSENCE from the call log is the read-no-restart contract.
+
+test_read_capture_never_restarts_server() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/read-capture-up"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Default fakebin: `status --json` always reports running (uncounted). The one
+  # counted call is capture's `pane read`; return two lines of pane content.
+  printf 'crew-line-one\ncrew-line-two\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture fmtest:w1:p2 40' "$ROOT" )
+  status=$?
+  expect_code 0 "$status" "capture should succeed when the server is up"
+  assert_contains "$out" "crew-line-two" "capture did not return the pane content"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read' "capture did not read the pane"
+  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\x1f''--session' "a herdr READ (capture) must never run \`herdr server\`"
+  pass "fm_backend_herdr_capture: reads the pane WITHOUT ever running \`herdr server\` (no read-path restart)"
+}
+
+test_read_busy_state_never_restarts_server() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/read-busy-up"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The one counted call is busy_state's `agent get`; report a working agent.
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state fmtest:w1:p2' "$ROOT" )
+  [ "$out" = busy ] || fail "busy_state should report 'busy' for a working agent, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''get' "busy_state did not read the agent state"
+  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\x1f''--session' "a herdr READ (busy_state) must never run \`herdr server\`"
+  pass "fm_backend_herdr_busy_state: reads agent state WITHOUT ever running \`herdr server\` (no read-path restart)"
+}
+
+test_read_capture_fails_without_restart_when_server_down() {
+  local dir log resp fb status
+  dir="$TMP_ROOT/read-capture-down"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Server down: `pane read` fails (nonzero) instead of returning content.
+  printf '1' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture fmtest:w1:p2 40' "$ROOT" >/dev/null
+  status=$?
+  [ "$status" -ne 0 ] || fail "capture should fail (nonzero) when the pane read fails, not restart the server"
+  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\x1f''--session' "a failing herdr READ must return failure, never run \`herdr server\`"
+  pass "fm_backend_herdr_capture: a down server yields read failure, never a \`herdr server\` restart"
+}
+
+test_read_busy_state_unknown_without_restart_when_server_down() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/read-busy-down"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Server down: `agent get` fails -> raw status empty -> classify -> unknown.
+  printf '1' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state fmtest:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "busy_state should print 'unknown' when the server is down, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\x1f''--session' "a herdr READ on a down server must print unknown, never run \`herdr server\`"
+  pass "fm_backend_herdr_busy_state: a down server yields 'unknown', never a \`herdr server\` restart"
+}
+
+test_server_ensure_starts_server_on_spawn_path_when_down() {
+  local dir log resp fb status
+  dir="$TMP_ROOT/ensure-spawn-down"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # SCRIPT_STATUS=1: script the probes. All three server_running probes report
+  # not-running, so server_ensure concludes the server is genuinely gone and
+  # (correctly, on a spawn path) starts it; the post-start poll then sees it up.
+  printf '{"server":{"running":false}}\n' > "$resp/1.out"
+  printf '{"server":{"running":false}}\n' > "$resp/2.out"
+  printf '{"server":{"running":false}}\n' > "$resp/3.out"
+  # 4: `herdr server` launch (ignored). 5: post-start poll -> running.
+  printf '{"server":{"running":true}}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
+  status=$?
+  expect_code 0 "$status" "server_ensure should succeed once the started server reports running"
+  assert_contains "$(cat "$log")" $'\x1f''server'$'\x1f''--session'$'\x1f''fmtest' "server_ensure did not start a genuinely-down server on the spawn path"
+  pass "fm_backend_herdr_server_ensure: still starts \`herdr server\` on a spawn path when the server is genuinely down"
+}
+
+test_server_ensure_does_not_take_over_on_a_single_flaky_probe() {
+  local dir log resp fb status
+  dir="$TMP_ROOT/ensure-flaky"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # SCRIPT_STATUS=1: first probe flaps to not-running (a slow/partial status on a
+  # live server), the retry sees it running. server_ensure must NOT take the live
+  # server over - the defense-in-depth hardening.
+  printf '{"server":{"running":false}}\n' > "$resp/1.out"
+  printf '{"server":{"running":true}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
+  status=$?
+  expect_code 0 "$status" "server_ensure should accept a live server confirmed on retry"
+  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\x1f''--session' "one flaky status probe must never trigger a \`herdr server\` takeover of a live server"
+  pass "fm_backend_herdr_server_ensure: a single flaky probe does not trigger a takeover of a live server"
 }
 
 test_create_task_refuses_duplicate_label() {
@@ -2907,11 +3018,16 @@ test_capture_preserves_pane_read_failure() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 2' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "capture should fail when pane read fails, got output '$out'"
-  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''status'$'\x1f''--json' \
-    "capture did not ensure the herdr server before reading the pane"
+  # A read must NEVER restart the server (herdr-restart-rootcause fix): capture
+  # parses the target directly and does not probe/ensure the server, so a down
+  # server surfaces as a plain read failure, never a `herdr server` takeover.
+  assert_not_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''status'$'\x1f''--json' \
+    "capture must NOT probe the server on a read (that is the server_ensure path a read must avoid)"
+  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\x1f''--session' \
+    "capture must NEVER run \`herdr server\` on a read"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2' \
     "capture did not try to read the requested pane"
-  pass "fm_backend_herdr_capture: ensures the session and preserves pane read failure"
+  pass "fm_backend_herdr_capture: reads the pane directly and preserves pane read failure WITHOUT probing or restarting the server"
 }
 
 test_send_key_normalizes_and_targets_pane() {
@@ -4468,6 +4584,12 @@ test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
+test_read_capture_never_restarts_server
+test_read_busy_state_never_restarts_server
+test_read_capture_fails_without_restart_when_server_down
+test_read_busy_state_unknown_without_restart_when_server_down
+test_server_ensure_starts_server_on_spawn_path_when_down
+test_server_ensure_does_not_take_over_on_a_single_flaky_probe
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
 test_workspace_ensure_prunes_default_tab
