@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports current session-start, turn-end, watcher-continuity, and wedge-alarm guarantees.
+This record supports current session-start, per-turn reminder, turn-end, watcher-continuity, and wedge-alarm guarantees.
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
@@ -170,6 +170,26 @@ Cursor's refresh command is `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primar
 The Ahoy first-message boundary was reverified on 2026-07-22 with Pi 0.81.1 and OpenCode 1.17.18.
 Marked current operational input and the two exact legacy compatibility shapes selected Bearings, while genuine near-miss captain messages remained real boundaries.
 The detailed reconciliation and task chronology stay in the private audit report and PR evidence.
+
+## Per-turn captain reply-shape reminder
+
+The reminder described in [`configuration.md`](../configuration.md#captain-reply-shape-reminder-configplainenglish) depends on two vendor behaviors: whether prompt-submission hook stdout reaches model context on an ordinary turn, and whether a broken hook of that kind erases the captain's prompt.
+Both were measured on 2026-08-21 with Claude 2.1.238 (Claude Code) against a throwaway Firstmate-shaped lab carrying the tracked `.claude/settings.json` entry and the real `bin/fm-plainenglish-hook.sh`.
+The model was asked whether such a line existed and to copy it back, so producing hook stdout could never be mistaken for delivering it, and the switched-off case had to report the absence rather than merely fail to match.
+
+| Case | Observed result |
+| --- | --- |
+| Reminder on | The model returned the hook's line, `[plain-english] Answer the captain in one paragraph of at most two sentences ...`, so the registration fires on an ordinary turn and its stdout reaches model context. |
+| `config/plainenglish=off` | The same question returned `NONE`, so the off switch removes the injected line rather than only silencing part of it. |
+| Hook replaced by an unparseable script | The turn still completed and answered, so a hook that exits 2 through a bash syntax error cannot erase the captain's prompt. |
+
+Refresh command, one Claude turn per case:
+
+```sh
+FM_PLAINENGLISH_LIVE_E2E=1 tests/fm-plainenglish-live-e2e.test.sh
+```
+
+The portable regression that pins the reminder's own scoping, off switch, and exit contract with no harness is `tests/fm-plainenglish-hook.test.sh`.
 
 ## Semantic busy state
 
