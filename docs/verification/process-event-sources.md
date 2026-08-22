@@ -9,6 +9,20 @@ Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 install
 Generic keyed-answer feed verified on 2026-08-16 on the same platform, against the same published poll response shape.
 Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
 
+## WSL Windows-runtime routing
+
+Verified portably on 2026-08-22 through `tests/fm-lavish-route.test.sh`.
+The suite stubs Windows facilities at the executable boundary and proves that WSL open, poll, end, export, share, stop, setup, and doctor operations all select the tracked Windows bridge without invoking a Linux `lavish-axi` fallback.
+It also proves that canonical artifact identity and argv containing spaces or `#` survive path conversion, that open and poll select the same bridge, that each operation creates one runtime invocation, and that native routing remains argv-compatible.
+
+The real Windows server, user-profile store, browser opening, and feedback round trip require an interactive WSL host and are covered by the opt-in live smoke:
+
+```sh
+FM_LAVISH_WINDOWS_LIVE=1 tests/fm-lavish-windows-live-e2e.test.sh
+```
+
+The smoke creates a temporary artifact, opens it through the Windows runtime, waits for feedback submitted in the Windows browser, polls that same artifact, and closes the session without deleting or migrating either Lavish history store.
+
 ## The published Lavish poll interface the adapter wraps
 
 Verified at implementation time without upgrading the installed build:

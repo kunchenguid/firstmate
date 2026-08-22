@@ -29,6 +29,10 @@ set -u
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
 export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
+# Existing table cases stub the native lavish-axi binary explicitly; the WSL
+# route has its own public-interface regression suite.
+export FM_LAVISH_TESTING=1
+export FM_LAVISH_RUNTIME_OVERRIDE=native
 
 # Hermetic runtime-backend detection. These cases pin the backend per-home via
 # config/backend; the dev shell's ambient runtime markers ($TMUX inside tmux,

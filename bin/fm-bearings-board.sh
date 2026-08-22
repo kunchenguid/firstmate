@@ -19,7 +19,7 @@
 #            precedes arm, so the board can never produce an answer that has
 #            nowhere to go (captain-hold-lifecycle's ordering rule, enforced
 #            here rather than left to agent memory). Output starts with
-#            `board: <path>`, then includes lavish-axi's session output and
+#            `board: <path>`, then includes the Lavish router's session output and
 #            the remaining status:
 #              served: <path>
 #              bound: <source-id>
@@ -173,8 +173,8 @@ command_build() {
   fi
   printf 'board: %s\n' "$board"
 
-  command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"
-  lavish-axi "$board" || fail "cannot establish the board Lavish session"
+  "$SCRIPT_DIR/fm-lavish.sh" open "$board" \
+    || fail "cannot establish the board Lavish session"
   printf 'served: %s\n' "$board"
 
   sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \

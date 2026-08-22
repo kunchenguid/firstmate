@@ -1,0 +1,151 @@
+param(
+  [Parameter(Mandatory = $true, Position = 0)]
+  [ValidateSet('open', 'poll', 'end', 'export', 'share', 'stop', 'doctor', 'setup')]
+  [string]$Action,
+
+  [Parameter(Position = 1)]
+  [string]$Artifact,
+
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]]$ExtraArgs
+)
+
+$ErrorActionPreference = 'Stop'
+$Port = 4388
+$env:LAVISH_AXI_PORT = [string]$Port
+$WorkDir = $env:USERPROFILE
+
+function Get-LavishCommand {
+  $Command = Get-Command 'lavish-axi.cmd' -ErrorAction SilentlyContinue
+  if (-not $Command) {
+    throw 'Windows lavish-axi is not installed. From Firstmate run: bin/fm-bootstrap.sh install lavish-axi'
+  }
+  return $Command.Source
+}
+
+function Get-LavishVersion([string]$Lavish) {
+  $Output = @(& $Lavish --version 2>&1)
+  if ($LASTEXITCODE -ne 0) {
+    throw 'Windows lavish-axi did not report its version'
+  }
+  $Match = [regex]::Match(($Output -join "`n"), '(?i)v?(\d+)\.(\d+)\.(\d+)')
+  if (-not $Match.Success) {
+    throw "Cannot parse the Windows lavish-axi version: $($Output -join ' ')"
+  }
+  return [version]::new(
+    [int]$Match.Groups[1].Value,
+    [int]$Match.Groups[2].Value,
+    [int]$Match.Groups[3].Value
+  )
+}
+
+function Test-LavishPort {
+  try {
+    $Client = [System.Net.Sockets.TcpClient]::new()
+    $Task = $Client.ConnectAsync('127.0.0.1', $Port)
+    if (-not $Task.Wait(400)) {
+      $Client.Dispose()
+      return $false
+    }
+    $Client.Dispose()
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+function Ensure-LavishServer([string]$Lavish) {
+  if (Test-LavishPort) {
+    return
+  }
+
+  $ServerArgs = @('server', '--port', [string]$Port)
+  Start-Process -FilePath $Lavish -ArgumentList $ServerArgs -WorkingDirectory $WorkDir -WindowStyle Hidden | Out-Null
+  foreach ($Attempt in 1..60) {
+    Start-Sleep -Milliseconds 200
+    if (Test-LavishPort) {
+      return
+    }
+  }
+  throw "Windows Lavish server did not start on 127.0.0.1:$Port"
+}
+
+Set-Location $WorkDir
+
+if ($Action -eq 'setup') {
+  $Npm = Get-Command 'npm.cmd' -ErrorAction SilentlyContinue
+  if (-not $Npm) {
+    throw 'Windows npm.cmd is unavailable. Install Node.js for Windows, then rerun: bin/fm-bootstrap.sh install lavish-axi'
+  }
+  & $Npm.Source install -g lavish-axi
+  if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+  }
+  $Lavish = Get-LavishCommand
+  & $Lavish setup hooks
+  exit $LASTEXITCODE
+}
+
+$Lavish = Get-LavishCommand
+
+if ($Action -eq 'doctor') {
+  $Version = Get-LavishVersion $Lavish
+  if ($Artifact) {
+    $Minimum = [version]$Artifact
+    if ($Version -lt $Minimum) {
+      throw "Windows lavish-axi $Version is older than required $Minimum. Run: bin/fm-bootstrap.sh install lavish-axi"
+    }
+  }
+  exit 0
+}
+
+if ($Action -eq 'stop') {
+  & $Lavish stop
+  exit $LASTEXITCODE
+}
+
+if (-not $Artifact) {
+  throw "Artifact path is required for action '$Action'"
+}
+
+Ensure-LavishServer $Lavish
+
+switch ($Action) {
+  'open' {
+    $env:LAVISH_AXI_NO_OPEN = '1'
+    $Output = @(& $Lavish $Artifact @ExtraArgs 2>&1)
+    $ExitCode = $LASTEXITCODE
+    $Output | ForEach-Object { Write-Output $_ }
+    if ($ExitCode -ne 0) {
+      exit $ExitCode
+    }
+
+    $Url = $null
+    foreach ($Line in $Output) {
+      if ([string]$Line -match '^\s*url:\s*"([^"]+)"\s*$') {
+        $Url = $Matches[1]
+        break
+      }
+    }
+    if (-not $Url) {
+      throw 'Windows lavish-axi did not return a session URL'
+    }
+    Start-Process $Url | Out-Null
+  }
+  'poll' {
+    & $Lavish poll $Artifact @ExtraArgs
+    exit $LASTEXITCODE
+  }
+  'end' {
+    & $Lavish end $Artifact @ExtraArgs
+    exit $LASTEXITCODE
+  }
+  'export' {
+    & $Lavish export $Artifact @ExtraArgs
+    exit $LASTEXITCODE
+  }
+  'share' {
+    & $Lavish share $Artifact @ExtraArgs
+    exit $LASTEXITCODE
+  }
+}

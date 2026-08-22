@@ -18,8 +18,9 @@
 #
 # This adapter is deliberately thin. It owns only what is specific to Lavish:
 # canonical source identity, the argv for the currently published poll command,
-# and how to read a completed result. Ownership, durable capture, publication,
-# and restart recovery all belong to bin/fm-procevent.sh.
+# and how to read a completed result. bin/fm-lavish.sh owns native-versus-Windows
+# runtime routing for that argv. Ownership, durable capture, publication, and
+# restart recovery all belong to bin/fm-procevent.sh.
 #
 # `answers` is this adapter's half of the generic keyed-answer contract in
 # bin/fm-procevent.sh. It reports what the captain actually chose, as
@@ -82,12 +83,14 @@ cmd_arm() {
   local artifact=${1-} id real
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
-  command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   id=$(cmd_source_id "$artifact") || exit 1
   real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
     || die "cannot resolve the artifact path: $artifact"
   # The plain blocking form: no --timeout-ms, so completion is a server event.
-  "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" -- lavish-axi poll "$real" || exit 1
+  # The tracked router refuses a Linux live session under WSL and keeps this
+  # poll on the same Windows runtime and state store that opened the artifact.
+  "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" -- \
+    "$SCRIPT_DIR/fm-lavish.sh" poll "$real" || exit 1
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
 }
