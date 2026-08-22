@@ -4535,6 +4535,73 @@ SH
   pass "fm_backend_herdr_wait_transition: a reader wedged past its budget is killed and classified unusable (rc 2 after ${elapsed}s)"
 }
 
+# make_server_ensure_fakebin: a `herdr` stub for the server_ensure poll alone.
+# `status --json` fails INSTANTLY (the connection-refused shape of a cold
+# control socket) for the first $FM_FAKE_COLD_CALLS calls and then reports the
+# server running; `status --json` HANGS forever when FM_FAKE_STATUS_HANGS=1
+# (the wedged-socket shape). The backgrounded `server` launch always returns at
+# once so the unbounded launch never holds the test.
+make_server_ensure_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  server) exit 0 ;;
+  status)
+    if [ "${FM_FAKE_STATUS_HANGS:-0}" = 1 ]; then exec sleep 60; fi
+    n=$(( $(cat "${FM_FAKE_STATE:?}" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$FM_FAKE_STATE"
+    [ "$n" -le "${FM_FAKE_COLD_CALLS:-0}" ] && exit 1
+    printf '{"server":{"running":true}}\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s' "$fb"
+}
+
+test_server_ensure_polls_through_cold_socket_failures() {
+  local dir fb start rc elapsed
+  dir="$TMP_ROOT/server-ensure-cold"; mkdir -p "$dir"
+  fb=$(make_server_ensure_fakebin "$dir")
+  # A just-launched server is not listening yet, so its first status RPCs fail
+  # instantly. Those failures cost NOTHING, so they must not shorten the poll:
+  # bailing on a raw failure count would abort the ensure about a second in and
+  # fail every fm_backend_herdr_target_ready consumer on the cycle - capture,
+  # agent_alive, spawn - for a server that comes up moments later.
+  start=$(date +%s)
+  PATH="$fb:$PATH" FM_FAKE_STATE="$dir/count" FM_FAKE_COLD_CALLS=6 FM_BACKEND_HERDR_CLI_TIMEOUT=5 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure sess' "$ROOT" >/dev/null 2>&1
+  rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  [ "$rc" = 0 ] || fail "instant cold-socket status failures must keep polling the full budget, got rc $rc"
+  [ "$elapsed" -lt 15 ] || fail "the cold-socket poll must not burn the RPC bound; took ${elapsed}s"
+  pass "fm_backend_herdr_server_ensure: instant cold-socket status failures keep polling and the server is picked up when it binds (${elapsed}s)"
+}
+
+test_server_ensure_bails_on_repeated_bound_hits() {
+  local dir fb start rc elapsed err
+  dir="$TMP_ROOT/server-ensure-wedged"; mkdir -p "$dir"; err="$dir/err"
+  fb=$(make_server_ensure_fakebin "$dir")
+  # The wedged socket the bail exists for: every status RPC accepts and then
+  # never answers, so each one burns the whole bound. Polling all 20 attempts
+  # would multiply the bound by the poll budget - the multi-minute hang that
+  # blocked fm-peek, teardown chains, and the watcher's stale scan.
+  start=$(date +%s)
+  PATH="$fb:$PATH" FM_FAKE_STATE="$dir/count" FM_FAKE_STATUS_HANGS=1 FM_BACKEND_HERDR_CLI_TIMEOUT=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure sess' "$ROOT" >/dev/null 2> "$err"
+  rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  [ "$rc" -ne 0 ] || fail "a wedged control socket must fail server_ensure, got success"
+  [ "$elapsed" -lt 15 ] || fail "repeated bound hits must cut the poll short; took ${elapsed}s"
+  assert_contains "$(cat "$err")" "RPC bound" "the wedged-socket bail must name the bound it kept hitting"
+  pass "fm_backend_herdr_server_ensure: consecutive RPC-bound hits bail out of a wedged socket instead of polling the whole budget (${elapsed}s)"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4723,3 +4790,5 @@ test_cli_bound_kills_hung_rpc
 test_cli_bound_preserves_failure_status
 test_events_capable_large_schema_is_pipe_noise_free
 test_wait_transition_hung_reader_bounded
+test_server_ensure_polls_through_cold_socket_failures
+test_server_ensure_bails_on_repeated_bound_hits

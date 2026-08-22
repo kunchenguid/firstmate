@@ -1504,28 +1504,35 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # NOT auto-start the server, so this must run before any workspace/tab/pane
 # call. Bounded poll for the server to report running.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i fails=0
+  local session=$1 running out i rc bound_hits=0
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
   ( fm_backend_herdr_cli_unbounded "$session" server >/dev/null 2>&1 & ) || return 1
   for i in $(seq 1 20); do
-    # A status RPC that FAILS (as opposed to answering running=false) is a
-    # socket that cannot even be read - a wedged server, not one still coming
-    # up - and each such failure already costs a full RPC bound. Bail after a
-    # few consecutive failures rather than multiplying the bound by the whole
-    # poll budget: pre-bound, exactly that multiplication turned one wedged
-    # server into multi-minute hangs in every caller of the capture path
-    # (fm-peek, teardown chains, the watcher's stale scan; 2026-08-22).
-    if out=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null); then
-      fails=0
+    # Only a status RPC that BURNED THE WHOLE RPC BOUND (fm_run_timed's rc 124)
+    # is evidence of a wedged socket, and only those may cut the poll short:
+    # pre-bound, multiplying that bound by the full poll budget turned one
+    # wedged server into multi-minute hangs in every caller of the capture path
+    # (fm-peek, teardown chains, the watcher's stale scan; 2026-08-22). Every
+    # OTHER failure is free - notably the connection-refused a cold control
+    # socket returns instantly while the just-launched server is still binding -
+    # so it must NOT shorten the poll, or the ensure would abort after about a
+    # second and fail every fm_backend_herdr_target_ready consumer on the cycle
+    # for a server that comes up moments later.
+    out=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      bound_hits=0
       running=$(printf '%s' "$out" | jq -r '.server.running // false' 2>/dev/null)
       [ "$running" = "true" ] && return 0
-    else
-      fails=$((fails + 1))
-      if [ "$fails" -ge 3 ]; then
-        echo "error: herdr status for session '$session' failed $fails times in a row while waiting for the server; giving up instead of polling a wedged socket" >&2
+    elif [ "$rc" -eq 124 ]; then
+      bound_hits=$((bound_hits + 1))
+      if [ "$bound_hits" -ge 3 ]; then
+        echo "error: herdr status for session '$session' hit the ${FM_BACKEND_HERDR_CLI_TIMEOUT}s RPC bound $bound_hits times in a row while waiting for the server; giving up instead of polling a wedged socket" >&2
         return 1
       fi
+    else
+      bound_hits=0
     fi
     sleep 0.5
   done

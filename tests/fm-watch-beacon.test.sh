@@ -250,6 +250,7 @@ test_liveness_hook_beats_per_signal_triage_task() {
   : > "$state/one.status"; : > "$state/two.status"; : > "$state/three.status"
   (
     set +u
+    # shellcheck disable=SC2030 # Deliberately scoped to this subshell; other cases source the lib without it.
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
     # shellcheck source=bin/fm-classify-lib.sh
     . "$ROOT/bin/fm-classify-lib.sh"
@@ -266,6 +267,29 @@ test_liveness_hook_beats_per_signal_triage_task() {
   [ "$n" -ge 3 ] \
     || fail "signal_crew_provably_working must beat once per task; three tasks produced $n beats"
   pass "signal_crew_provably_working beats the liveness hook once per task ($n beats for 3 tasks)"
+}
+
+test_liveness_hook_is_never_evaluated_as_shell_code() {
+  local dir marker argc n
+  dir=$(make_case liveness-hook-no-eval); marker="$dir/evaluated"; argc="$dir/argc"
+  (
+    set +u
+    # shellcheck source=bin/fm-classify-lib.sh
+    . "$ROOT/bin/fm-classify-lib.sh"
+    # shellcheck disable=SC2329 # Invoked indirectly through FM_LIVENESS_BEAT_HOOK.
+    beat_probe() { printf '%s\n' "$#" >> "$argc"; }
+    # The hook is a COMMAND WORD plus arguments, never shell source text. Every
+    # consumer of this library sources it, so an eval here would turn an
+    # environment string into shell code in fm-crew-state.sh, fm-brief.sh,
+    # fm-fleet-snapshot.sh, and the rest.
+    FM_LIVENESS_BEAT_HOOK="beat_probe one two > $marker" fm_liveness_beat || exit 1
+  ) || fail "a hook carrying shell metacharacters must still leave the loop alive"
+  [ ! -e "$marker" ] \
+    || fail "fm_liveness_beat evaluated the hook as shell code: the redirection created $marker"
+  n=$(head -1 "$argc" 2>/dev/null || printf '0')
+  [ "${n:-0}" -eq 4 ] \
+    || fail "the hook must be word-split into a command plus its literal arguments, got $n arguments"
+  pass "fm_liveness_beat invokes the hook directly with word-split arguments and never evaluates it as shell code"
 }
 
 test_liveness_hook_unset_is_a_noop() {
@@ -299,6 +323,7 @@ test_beacon_advances_when_backend_hangs
 test_unwritable_beacon_ends_the_cycle
 test_liveness_hook_beats_per_pending_reply_record
 test_liveness_hook_beats_per_signal_triage_task
+test_liveness_hook_is_never_evaluated_as_shell_code
 test_liveness_hook_unset_is_a_noop
 
 echo "fm-watch-beacon tests passed"

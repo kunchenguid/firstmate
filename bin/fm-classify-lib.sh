@@ -50,9 +50,20 @@ FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 # units of work. Unset means no-op, which is what every other consumer (the
 # away-mode daemon, tests) gets. A hook that merely fails never breaks the loop;
 # a hook that must stop the process exits by itself.
+#
+# The hook is a COMMAND WORD plus optional arguments, invoked directly - never
+# evaluated as shell source text. Every consumer of this library
+# (fm-crew-state.sh, fm-brief.sh, fm-inactive-reconcile.sh, fm-fleet-snapshot.sh,
+# fm-captain-hold.sh, ...) inherits this call, and none of them may start running
+# environment-derived strings as shell code just because they source the shared
+# classifier. Word splitting is therefore the whole of the contract: pipelines,
+# redirections, and separators in the hook string are arguments, not syntax. A
+# caller needing those wraps them in a function - which is exactly what
+# fm-watch.sh's watcher_beat is.
 fm_liveness_beat() {
   [ -n "${FM_LIVENESS_BEAT_HOOK:-}" ] || return 0
-  eval "$FM_LIVENESS_BEAT_HOOK" || true
+  # shellcheck disable=SC2086 # Deliberate word splitting: the hook is a command plus arguments.
+  $FM_LIVENESS_BEAT_HOOK || true
   return 0
 }
 
