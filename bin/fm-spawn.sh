@@ -1964,7 +1964,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
         ;;
       dead)
         HERDR_CONTAINER_RAW=$(HERDR_SESSION="$HERDR_SES" FM_HOME="$FM_HOME" \
-          fm_backend_herdr_container_ensure "$HERDR_CREATE_CWD") || exit 1
+          fm_backend_herdr_container_ensure "$HERDR_CREATE_CWD" other-home) || exit 1
         HERDR_CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
         HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
         HERDR_SES=${HERDR_CONTAINER%%:*}

@@ -1506,8 +1506,12 @@ cmd=\${1:-}; sub=\${2:-}
 case "\$cmd \$sub" in
   "status --json")
     printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
+  "session list")
+    printf '{"sessions":[{"name":"hses","running":true,"socket_path":"/tmp/fm-herdr-hses.sock"}]}\n' ;;
   "workspace list")
-    if [ -f "\$D/ws-ok" ]; then
+    if [ -f "\$D/home-workspace" ]; then
+      printf '{"result":{"workspaces":[{"workspace_id":"hws-home","label":"firstmate"},{"workspace_id":"hws-launch","label":"captain"}]}}\n'
+    elif [ -f "\$D/ws-ok" ]; then
       printf '{"result":{"workspaces":[{"workspace_id":"%s"}]}}\n' "$wsid"
     else
       printf '<html>not json</html>\n'
@@ -1515,10 +1519,11 @@ case "\$cmd \$sub" in
   "tab list")
     printf '{"result":{"tabs":[]}}\n' ;;
   "tab create")
-    cwd= label=
+    cwd= label= workspace=
     shift 2
     while [ \$# -gt 0 ]; do
       case "\$1" in
+        --workspace) workspace=\$2; shift 2 ;;
         --cwd) cwd=\$2; shift 2 ;;
         --label) label=\$2; shift 2 ;;
         *) shift ;;
@@ -1526,11 +1531,14 @@ case "\$cmd \$sub" in
     done
     printf '%s' "\$cwd" > "\$D/create-cwd"
     printf '%s' "\$label" > "\$D/create-label"
+    printf '%s' "\$workspace" > "\$D/create-workspace"
     printf 'hp-new' > "\$D/new-pane"
     printf '%s' "\$cwd" > "\$D/cwd-hp-new"
     printf '{"result":{"tab":{"tab_id":"ht-new"},"root_pane":{"pane_id":"hp-new"}}}\n' ;;
   "pane get")
-    if [ "\${3:-}" = "$gonepane" ] && [ ! -f "\$D/old-present" ]; then
+    if [ "\${3:-}" = launcher-pane ]; then
+      printf '{"result":{"pane":{"pane_id":"launcher-pane","tab_id":"ht-launch","workspace_id":"hws-launch","foreground_cwd":"%s"}}}\n' "\$(cat "\$D/cwd-launcher" 2>/dev/null)"
+    elif [ "\${3:-}" = "$gonepane" ] && [ ! -f "\$D/old-present" ]; then
       printf '{"error":{"code":"pane_not_found","message":"gone"}}\n'
     else
       p=\${3:-}
@@ -1545,6 +1553,8 @@ case "\$cmd \$sub" in
         printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' "\$p" "\$(cat "\$D/cwd-\$p" 2>/dev/null)"
       fi
     fi ;;
+  "tab get")
+    printf '{"result":{"tab":{"tab_id":"ht-launch","workspace_id":"hws-launch"}}}\n' ;;
   "agent get")
     if [ -f "\$D/launched" ]; then
       printf '{"result":{"agent":{"pane_id":"%s","agent_status":"working"}}}\n' "\${3:-}"
@@ -1555,6 +1565,7 @@ case "\$cmd \$sub" in
     printf '%s\n' "\$*" >> "\$D/sends"
     case "\$*" in
       *'encode launch-brief'*) : > "\$D/launched" ;;
+      *'/exit'*) rm -f "\$D/launched" ;;
     esac ;;
   *)
     exit 0 ;;
@@ -1593,6 +1604,27 @@ test_recover_missing_recovers_a_missing_herdr_endpoint() {
   pass "fm-control relaunch: a missing Herdr endpoint recovers through a rebuilt recorded pane"
 }
 
+test_recover_missing_uses_the_homes_flat_workspace_when_recorded_workspace_is_gone() {
+  local dir out rc
+  dir=$(new_case recov-flat rl54)
+  add_herdr_ship_task "$dir" rl54 claude
+  make_herdr_stub "$dir" "hp-rl54-old" "hws-rl54"
+  : > "$dir/fake/home-workspace"
+  printf '%s' "$dir/wt" > "$dir/fake/cwd-launcher"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    HERDR_ENV=1 HERDR_PANE_ID=launcher-pane HERDR_SESSION=hses \
+    HERDR_SOCKET_PATH=/tmp/fm-herdr-hses.sock \
+    "$CONTROL" rl54 relaunch --note "recover in the home workspace" 2>&1); rc=$?
+  expect_code 0 "$rc" "a gone recorded workspace should recover in the home's flat workspace"$'\n'"$out"
+  [ "$(cat "$dir/fake/create-workspace")" = hws-home ] \
+    || fail "recovery should use the home's flat workspace, not the launcher's workspace"
+  [ "$(meta_field "$dir" rl54 window)" = hses:hp-new ] \
+    || fail "the recovered task should record the replacement pane"
+  pass "fm-control relaunch: gone-workspace recovery uses the home's flat workspace"
+}
+
 test_recovery_marker_cleanup_failure_is_incomplete() {
   local dir out rc marker real_rm
   dir=$(new_case recov-marker-rm rl51)
@@ -1611,6 +1643,26 @@ test_recovery_marker_cleanup_failure_is_incomplete() {
   [ "$(journal_field "$dir" rl51 rollback)" = none-new-agent-confirmed ] \
     || fail "a live replacement with an uncleared marker must be recorded as incomplete"
   pass "fm-control relaunch: marker cleanup failure stays incomplete"
+}
+
+test_live_endpoint_retires_a_stale_recovery_marker_before_ordinary_relaunch() {
+  local dir out rc marker
+  dir=$(new_case recov-marker-live rl53)
+  add_herdr_ship_task "$dir" rl53 claude
+  make_herdr_stub "$dir" "hp-rl53-old" "hws-rl53"
+  marker="$dir/home/state/rl53.control-relaunch.recovery-attempt"
+  : > "$dir/fake/ws-ok"
+  : > "$dir/fake/old-present"
+  : > "$dir/fake/launched"
+  printf '%s' "$dir/wt" > "$dir/fake/cwd-hp-rl53-old"
+  : > "$marker"
+  out=$(run_control "$dir" rl53 relaunch --note "ordinary relaunch after recovery"); rc=$?
+  expect_code 0 "$rc" "a live endpoint with a stale recovery marker should relaunch ordinarily"$'\n'"$out"
+  [ ! -e "$marker" ] || fail "an alive endpoint must retire its stale recovery marker"
+  [ ! -e "$dir/fake/create-label" ] || fail "ordinary relaunch must not rebuild a pane"
+  [ "$(meta_field "$dir" rl53 window)" = "hses:hp-rl53-old" ] \
+    || fail "ordinary relaunch must keep the existing endpoint"
+  pass "fm-control relaunch: a live endpoint clears stale recovery provenance before ordinary relaunch"
 }
 
 test_recover_missing_refuses_an_ambiguous_herdr_workspace() {
@@ -1836,7 +1888,9 @@ test_recover_missing_refuses_alive_endpoint() {
 test_recover_missing_refuses_without_relaunch
 test_recover_missing_refuses_secondmate_kind
 test_recover_missing_recovers_a_missing_herdr_endpoint
+test_recover_missing_uses_the_homes_flat_workspace_when_recorded_workspace_is_gone
 test_recovery_marker_cleanup_failure_is_incomplete
+test_live_endpoint_retires_a_stale_recovery_marker_before_ordinary_relaunch
 test_recover_missing_refuses_an_ambiguous_herdr_workspace
 test_recover_missing_rebuilds_a_dead_endpoint_only_with_the_marker
 test_recovery_pane_survives_an_empty_first_cwd_read

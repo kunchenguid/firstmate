@@ -526,6 +526,13 @@ TARGET_HARNESS=$HARNESS
 TARGET_MODEL=
 TARGET_EFFORT=
 
+clear_recovery_attempt_marker() {
+  if [ -e "$RECOVERY_ATTEMPT_MARKER" ] || [ -L "$RECOVERY_ATTEMPT_MARKER" ]; then
+    rm -f "$RECOVERY_ATTEMPT_MARKER" 2>/dev/null \
+      || die "the replacement agent for $ID is alive, but its recovery-attempt marker could not be cleared"
+  fi
+}
+
 journal_write() {  # <phase> [extra-line]...
   local phase=$1
   shift
@@ -820,6 +827,10 @@ do_relaunch() {
   # failure leaves the same dead-pane-plus-failed-journal shape behind, and its
   # retry must stay on the ordinary same-endpoint path.
   state=$(agent_state)
+  if [ "$state" = alive ] \
+     && { [ -e "$RECOVERY_ATTEMPT_MARKER" ] || [ -L "$RECOVERY_ATTEMPT_MARKER" ]; }; then
+    clear_recovery_attempt_marker
+  fi
   case "$KIND" in
     ship|scout)
       if [ "$BACKEND" = herdr ] && [ "$state" = missing ]; then
@@ -892,8 +903,7 @@ do_relaunch() {
   # The recovery landed: its attempt marker must not outlive it, or a later
   # ordinary agent-free relaunch would be misread as a failed recovery retry.
   if [ "$recover_missing" = 1 ]; then
-    rm -f "$RECOVERY_ATTEMPT_MARKER" 2>/dev/null \
-      || die "the replacement agent for $ID is alive, but its recovery-attempt marker could not be cleared"
+    clear_recovery_attempt_marker
   fi
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
