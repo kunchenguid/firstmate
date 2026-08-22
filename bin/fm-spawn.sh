@@ -107,7 +107,9 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
+#   new adapters. When that command's first non-assignment word is omp, omp's
+#   secondmate refusal, model pin, and Orca backend gate still apply; the hatch
+#   does not bypass them. For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
@@ -633,15 +635,39 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_IS_BATCH" -eq 0 ]; then
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
+# Identity a raw launch command claims: the basename of its first
+# non-assignment word. spawn_selection_is_omp and the raw-launch branch
+# share this so a command that claims omp is classified the same way both
+# before the watcher guard and when the launch string is adopted.
+spawn_raw_launch_identity() {
+  local word
+  # Unquoted split matches the raw-launch branch: IFS words, skipping
+  # leading KEY=value assignments, then the first remaining token's basename.
+  # shellcheck disable=SC2086
+  for word in $1; do
+    case "$word" in
+      [A-Za-z_]*=*) continue ;;
+      *) basename "$word"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # Does this invocation select omp? Read exactly the way the launch path resolves
 # the harness below - an explicit --harness, then the back-compat positional
 # argument, then this home's configured crew/secondmate harness - without copying
-# any adapter table. A positional carrying a space is a raw launch command, which
-# stays outside every adapter contract.
+# any adapter table. A raw launch command claims omp when its first
+# non-assignment word's basename is omp, so claiming the identity applies the
+# same guards.
 spawn_selection_is_omp() {
   local configured=
+  local identity=
   case "$ARG3" in
-    *' '*) return 1 ;;
+    *' '*)
+      identity=$(spawn_raw_launch_identity "$ARG3") || return 1
+      [ "$identity" = omp ]
+      return
+      ;;
     omp) return 0 ;;
     '') : ;;
     *) return 1 ;;
@@ -668,7 +694,8 @@ spawn_selection_is_omp() {
 # the batch re-exec, before the per-task spawn lock, and before every endpoint,
 # worktree, state, configuration, registry, metadata, and extension mutation. It
 # covers an explicit --harness omp, the back-compat positional token, a configured
-# crew or secondmate harness, and a batch carrying any of those.
+# crew or secondmate harness, a batch carrying any of those, and a raw launch
+# command whose first non-assignment word is omp.
 if spawn_selection_is_omp; then
   # A secondmate selection is refused first and unconditionally - its model is
   # never even consulted, because the refusal is on adapter identity alone.
@@ -1515,10 +1542,7 @@ launch_template() {
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    HARNESS=$(spawn_raw_launch_identity "$LAUNCH") || HARNESS=
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1559,13 +1583,14 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   exit 1
 fi
 
-# Both omp refusals already ran for every fresh-spawn selection shape and for
-# every relaunch the read-only preflight could classify, before the watcher
-# guard and every lock. This is defense in depth for a --relaunch that named
-# --harness omp explicitly after that preflight, and still lands before any
-# launch command is built or delivered. Scoped to a relaunch on purpose: a raw
-# launch command stays outside every adapter contract, exactly as it does for
-# the early gate.
+# Both omp refusals already ran for every fresh-spawn selection shape -
+# including a raw launch that claims omp - and for every relaunch the
+# read-only preflight could classify from the task's own record, before the
+# watcher guard and every lock. A relaunch creates nothing of its own - it
+# adopts the endpoint, worktree, and state the task already owns - and this
+# is defense in depth for a --relaunch that named --harness omp explicitly
+# after that preflight. The refusal still lands before any launch command is
+# built or delivered.
 if [ "$RELAUNCH" -eq 1 ] && [ "$HARNESS" = omp ]; then
   if [ "$KIND" = secondmate ]; then
     refuse_omp_secondmate

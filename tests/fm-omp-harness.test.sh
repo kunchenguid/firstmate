@@ -12,7 +12,7 @@
 # Two of the cases are POLICY MATRICES that report their own row counts rather
 # than a bare pass, so a silently shrinking matrix cannot read as green:
 #   - the model policy matrix, 12 equivalence classes of rejected model value;
-#   - the selection policy matrix, 8 ways omp can be selected or refused.
+#   - the selection policy matrix, 11 ways omp can be selected or refused.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -628,7 +628,7 @@ test_omp_model_policy_matrix() {
   pass "omp model policy matrix: $OMP_MODEL_CLASSES/12 rejected-model classes refuse before the watcher guard, the task lock, and every other mutation"
 }
 
-# --- policy matrix 2: selection shapes, 8 rows ------------------------------
+# --- policy matrix 2: selection shapes, 11 rows -----------------------------
 
 test_omp_selection_policy_matrix() {
   local rec out status guard_marker sub_home launch tmux_log rows=0 enforced=0
@@ -764,10 +764,76 @@ test_omp_selection_policy_matrix() {
   assert_not_contains "$launch" "--provider" "a non-omp launch must never carry a provider flag"
   enforced=$((enforced + 1))
 
-  [ "$rows" -eq 8 ] || fail "the omp selection policy matrix must carry 8 rows, found $rows"
+  # Row 9: a raw launch command whose first non-assignment word is omp. It
+  # claims the omp identity, so it must also meet omp's contract - the same
+  # model-pin refusal, at the same point, before any mutation.
+  rec=$(make_omp_case omp-sel-raw claude omp-s9)
+  read_case_record "$rec"
+  guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
+  rows=$((rows + 1))
+  arm_ordering_probes omp-s9
+  out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    omp-s9 "$PROJ_DIR" "omp --approval-mode yolo" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a raw launch that names omp with no model must be refused: $out"
+  assert_contains "$out" "$want_model" "raw omp shape: $out"
+  assert_not_contains "$out" "another spawn is already creating" "raw omp shape reached the task lock: $out"
+  assert_absent "$guard_marker" "raw omp shape was refused after the watcher guard wrote state"
+  assert_absent "$HOME_DIR/state/omp-s9.meta" "raw omp shape published task metadata"
+  assert_absent "$HOME_DIR/state/omp-s9.omp-ext.ts" "raw omp shape wrote the extension"
+  assert_absent "$HOME_DIR/state/omp-s9.busy-gen" "raw omp shape armed a busy contract"
+  rm -rf "$HOME_DIR/state/.spawn-omp-s9.lock"
+  enforced=$((enforced + 1))
+
+  # Row 10: a raw launch that names omp for a secondmate. Refused on adapter
+  # identity alone, the same as --harness omp, because omp has no primary
+  # supervision protocol.
+  rec=$(make_omp_case omp-sel-raw-secondmate claude omp-s10)
+  read_case_record "$rec"
+  guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
+  sub_home="$CASE_DIR/secondmate-home"
+  rows=$((rows + 1))
+  rm -rf "$sub_home"
+  mkdir -p "$sub_home"
+  arm_ordering_probes omp-s10
+  out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    omp-s10 "$sub_home" "omp --approval-mode yolo" --secondmate)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a raw --secondmate launch that names omp must be refused: $out"
+  assert_contains "$out" "$want_second" "raw omp secondmate refusal missing: $out"
+  assert_not_contains "$out" "requires an explicit --model" \
+    "the raw omp secondmate refusal must not depend on the model: $out"
+  assert_not_contains "$out" "another spawn is already creating" \
+    "the raw omp secondmate refusal must precede task-lock acquisition: $out"
+  assert_absent "$guard_marker" \
+    "the raw omp secondmate refusal must precede the watcher guard's own state write"
+  assert_absent "$HOME_DIR/state/omp-s10.meta" "raw omp secondmate published task metadata"
+  assert_absent "$HOME_DIR/state/omp-s10.omp-ext.ts" "raw omp secondmate wrote the extension"
+  assert_absent "$HOME_DIR/state/omp-s10.busy-gen" "raw omp secondmate armed a busy contract"
+  assert_absent "$HOME_DIR/data/secondmates.md" "raw omp secondmate touched the registry"
+  assert_absent "$sub_home/config" "raw omp secondmate mutated the secondmate home config"
+  assert_absent "$sub_home/state" "raw omp secondmate mutated the secondmate home state"
+  rm -rf "$HOME_DIR/state/.spawn-omp-s10.lock"
+  enforced=$((enforced + 1))
+
+  # Row 11: the negative control that stops the fix from over-reaching. A raw
+  # launch naming nothing known must still succeed exactly as today. Without
+  # this row, governing omp's raw shape could silently become a blanket
+  # refusal of every raw launch.
+  rec=$(make_omp_case omp-sel-raw-unverified claude omp-s11)
+  read_case_record "$rec"
+  rows=$((rows + 1))
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    omp-s11 "$PROJ_DIR" "someunverifiedagent --flag" --mode no-mistakes --yolo off)
+  expect_code 0 $? "a raw launch naming an unverified adapter should succeed: $out"
+  assert_contains "$out" "spawned omp-s11 harness=someunverifiedagent" \
+    "raw unverified launch did not keep its claimed identity: $out"
+  enforced=$((enforced + 1))
+
+  [ "$rows" -eq 11 ] || fail "the omp selection policy matrix must carry 11 rows, found $rows"
   [ "$enforced" -eq "$rows" ] || fail "omp selection policy matrix: only $enforced/$rows rows enforced"
   printf 'omp selection-policy matrix: %d/%d rows enforced before any mutation\n' "$enforced" "$rows"
-  pass "omp selection policy matrix: $enforced/$rows selection shapes - explicit, positional, configured, batch, three secondmate models, and the non-omp control - enforce the pin before any mutation"
+  pass "omp selection policy matrix: $enforced/$rows selection shapes - explicit, positional, configured, batch, three secondmate models, the non-omp control, raw omp, raw omp secondmate, and the raw unverified control - enforce the pin before any mutation"
 }
 
 # --- relaunch ---------------------------------------------------------------
