@@ -156,10 +156,13 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # merge wait for a task whose checks are green and whose merge only someone outside
 # this fleet can make (bin/fm-merge-wait.sh) is NOT a classification at all: it
 # absorbs the alarm at the single emit point (merge_wait_absorbs_alarm via
-# emit_stale_wake), after whichever owner classified the window, and passes one
-# reminder through per PAUSE_RESURFACE_SECS. It absorbs the idle-pane stale class
-# ONLY, never the busy-pane completed-turn bound below, which reports a possible hung
-# foreground call rather than a pending merge.
+# emit_stale_wake), after whichever owner classified the window. It passes one reminder
+# through per PAUSE_RESURFACE_SECS only where an owner keeps attempting an alarm, which
+# is a pane whose hash keeps changing and the non-terminal wedge window; a byte-static
+# pane on the terminal branch attempts none once its hash is recorded, so it gets no
+# reminder and the armed merge poll is what covers it (see merge_wait_absorbs_alarm).
+# It absorbs the idle-pane stale class ONLY, never the busy-pane completed-turn bound
+# below, which reports a possible hung foreground call rather than a pending merge.
 # An ACTIONABLE wake (a captain-relevant
 # signal, a no-verb signal whose crew is not provably working, any check, a stale
 # pane whose crew is not provably working, a provably-working stale past the
@@ -399,14 +402,16 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 #     plus at most one per wedge window, with no read added by this function on any
 #     first-sighting path;
 # This function does NOT touch .wedge-escalations-<key>. The count must not climb for
-# an alarm nobody saw, but it must not be wiped either: the count is per window while
-# suppression is per alarm class, so clearing it here would let an absorbed idle-stale
-# alarm erase a count the busy-turn class earned, and that class's chain would restart
-# at 1 and never reach demand-deep-inspection on a genuinely hung call. Only
-# wedge_timer_check bumps the count, so only wedge_timer_check undoes its own bump when
-# its own emit was absorbed, which scopes the clear to the class that created it by
-# construction rather than by a recorded token that could drift. The first-sighting
-# emits never bump it and so never clear it, exactly as they behave with no declaration.
+# an alarm nobody saw, but it must not be wiped either: the count file is per window
+# while suppression is per alarm class, so deleting it would erase a count the busy-turn
+# class earned, and that class's chain would restart at 1 and never reach
+# demand-deep-inspection on a genuinely hung call. Only wedge_timer_check bumps the
+# count, and it undoes exactly its own bump arithmetically (writing back the previous
+# value, removing the file only when that was 0) when its own emit was absorbed. Being
+# the only bumper is not on its own enough to make a DELETE safe there, because the
+# window it bumps may already carry another class's count; the arithmetic undo is what
+# makes it safe. The first-sighting emits never bump it and so never clear it, exactly
+# as they behave with no declaration.
 #
 # What the crew-state verdict can and cannot catch: while the run is still open it is
 # live (nm_ci_checks_state re-derives greenness, so a red check flips the verdict back
@@ -420,11 +425,21 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 # to. It fires only where an owner attempts an alarm, so it reaches a pane whose hash
 # keeps changing and the non-terminal wedge window, but a byte-static pane on the
 # terminal branch attempts no alarm at all once its hash is recorded, so nothing calls
-# this function and no reminder can fire. Two things already cover that pane, which is
-# why no timer is added back here: the merge poll stays armed and is what reports the
-# merge (bin/fm-merge-wait.sh declare refuses outright without one), and firstmate's
-# fleet-wide heartbeat review reads every task in flight from the structured fleet
-# view whether or not its pane ever changes.
+# this function and no reminder can fire. What covers that pane, and why no timer is
+# added back here, is the merge poll: it stays armed and is what reports the merge, and
+# bin/fm-merge-wait.sh declare refuses outright without one. That is ONE cover, not two,
+# and it is thinner than two. The `heartbeat:` fleet review is NOT a second cover for
+# this population: the absorbed path marks the green line surfaced, so
+# heartbeat_scan_finds_actionable never becomes true for that task again while that line
+# is its last, and the whole-fleet review only happens in response to a heartbeat wake
+# that therefore never arrives. It reaches the pane only if unrelated fleet activity
+# happens to raise a heartbeat, which is luck rather than a guarantee.
+# The known exposure is therefore a declaration whose poll has died. A fleet-level check
+# that every declared merge wait still has a live poll is the right backstop for that
+# and is filed as separate work; deliberately no such mechanism is added here. Dropping
+# the surfaced mark to buy a backstop was refused, because it would produce one fleet
+# notification per cadence for every waiting pull request, which is the exact noise this
+# feature exists to remove.
 #
 # The same accepted limit has a second face, documented at the loop-top reconciliation
 # below: a WITHDRAWN declaration is likewise honored only at the next alarm attempt, so
@@ -530,7 +545,7 @@ clear_write_tracking() {  # <window-key>
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <alarm-class>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 alarm=$6 since age n reason emitted
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 alarm=$6 since age prev n reason emitted
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -545,7 +560,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
         fi
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+        prev=$(cat "$escalation_file" 2>/dev/null || echo 0)
+        case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
+        n=$(( prev + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
@@ -553,11 +570,17 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fi
         emitted=0
         emit_stale_wake "$win" "$task" "$reason" "$alarm" && emitted=1
-        # Undo this call's own bump when its own emit was absorbed, so the count never
-        # climbs for an alarm nobody saw. Scoped here rather than inside the suppressor
-        # because the count is per window while suppression is per class: clearing it
-        # from an absorbed first sighting would erase a count another class earned.
-        [ "$emitted" = 1 ] || rm -f "$escalation_file"
+        # Undo exactly THIS call's own bump when its own emit was absorbed, so the count
+        # never climbs for an alarm nobody saw. An arithmetic undo, not a delete: the
+        # count file is per window while suppression is per alarm class, so deleting it
+        # would erase whatever the other class had already earned on this window and
+        # restart its chain at 1, and a genuinely hung foreground call would then never
+        # reach demand-deep-inspection. Writing back prev cannot destroy another class's
+        # count, and removing the file when prev was 0 keeps an absent file meaning no
+        # chain in progress, so a later genuine escalation still starts from 1.
+        if [ "$emitted" != 1 ]; then
+          if [ "$prev" -gt 0 ]; then echo "$prev" > "$escalation_file"; else rm -f "$escalation_file"; fi
+        fi
         rm -f "$since_file"
         clear_write_tracking "$(window_key "$win")"
         [ "$emitted" = 1 ] || return 0
@@ -1339,9 +1362,10 @@ EOF
     # remembered "absorbed" answer suppressed an alarm on the very poll a fresh read
     # already said the task was no longer green. The silence above is the same accepted
     # limit merge_wait_absorbs_alarm's header documents for a byte-static terminal pane,
-    # showing up in a second place, and it is covered by the same two things: the merge
-    # poll stays armed (bin/fm-merge-wait.sh declare refuses outright without one), and
-    # firstmate's fleet-wide heartbeat review reads every task in flight.
+    # showing up in a second place, and it has the same single cover: the merge poll stays
+    # armed (bin/fm-merge-wait.sh declare refuses outright without one). That header owns
+    # why the heartbeat review is not a second cover here and what the residual exposure
+    # is.
     if [ -e "$STATE/.merge-wait-resurfaced-$key" ]; then
       merge_wait_declared "$task" "$STATE" || clear_merge_wait_markers "$key"
     fi

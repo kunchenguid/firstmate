@@ -1366,7 +1366,8 @@ test_merge_wait_superseded_or_poll_less_declaration_still_alarms() {
 # the emit arrives too late: left alone the count would climb invisibly for every
 # absorbed window and the first genuine escalation would surface pre-loaded at
 # "escalation 7, demand-deep-inspection", telling firstmate a one-off is a repeat
-# offender. The suppressor resets it, so a later real escalation starts from 1.
+# offender. wedge_timer_check undoes its own bump when its own emit was absorbed, so a
+# later real escalation starts from 1. The suppressor itself never touches the count.
 test_merge_wait_suppression_does_not_inflate_the_escalation_count() {
   local dir state fakebin out capture_file window key pid pr text sig i
   dir=$(make_case merge-wait-escalation-count); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1924,7 +1925,9 @@ record_pi_idle() {  # <state-dir> <id>
     --source pi-ext --event agent-idle >/dev/null
 }
 
-# --- an absorbed idle-stale alarm does not erase a busy-turn count ---------------
+# --- FIRST-SIGHTING arm: an absorbed idle-stale alarm does not erase a busy-turn count -
+# This covers the first-sighting arm only. The wedge-path arm, where wedge_timer_check
+# itself bumps and then has its emit absorbed, is pinned by the sibling test below.
 # The escalation count is per WINDOW while suppression is per alarm CLASS, so a clear
 # from the wrong class is the mirror image of the count climbing invisibly: same
 # counter, erased from the other side. Reachable when a checks-green declared task's
@@ -1999,11 +2002,11 @@ test_absorbed_idle_stale_alarm_keeps_a_busy_turn_escalation_count() {
   pass "an absorbed idle-stale alarm leaves a busy-turn escalation count intact, so a hung call still reaches demand-deep-inspection"
 }
 
-# --- an absorbed idle-stale wedge alarm still clears an idle-stale count ---------
+# --- an absorbed idle-stale wedge alarm leaves no count of its own behind ---------
 # The original requirement, unregressed: wedge_timer_check bumps the count before it
 # emits, so when its own emit is absorbed the bump must not stand, or a later genuine
-# escalation would surface pre-loaded. Undoing it in the bumping call is what scopes the
-# clear to the class that earned it.
+# escalation would surface pre-loaded. This pins the case where that bump is the window's
+# ONLY contribution, so undoing it must leave no count file at all.
 test_absorbed_idle_stale_wedge_alarm_clears_its_own_count() {
   local dir state fakebin out capture_file window key pid pr text sig
   dir=$(make_case idle-stale-count-cleared); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2019,8 +2022,11 @@ test_absorbed_idle_stale_wedge_alarm_clears_its_own_count() {
   key=$(printf '%s' "$window" | tr ':/.' '___')
   printf '%s' "$(hash_text "$text")" > "$state/.stale-$key"
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  # An earlier idle-stale escalation on this same window earned a count of 2.
-  printf '2\n' > "$state/.wedge-escalations-$key"
+  # No count on this window yet, so the absorbed bump below is the ONLY contribution and
+  # must leave nothing behind. A pre-seeded count would be a different case entirely, and
+  # no comment can tell the code which class earned it: see the sibling test that pins a
+  # busy-turn count surviving this same wedge-path absorb.
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "the fixture started with a count, so this would prove nothing"
   export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
 
   merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
@@ -2030,8 +2036,10 @@ test_absorbed_idle_stale_wedge_alarm_clears_its_own_count() {
     reap "$pid"; fail "the idle-stale wedge alarm was not absorbed: $(cat "$out")"
   fi
   [ ! -s "$out" ] || { reap "$pid"; fail "the absorbed idle-stale wedge alarm printed a wake: $(cat "$out")"; }
-  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq 0 ] \
-    || { reap "$pid"; fail "the absorbed idle-stale alarm left its own count standing at $(cat "$state/.wedge-escalations-$key")"; }
+  # Absent, not zero: an existing count file means a chain is in progress to every other
+  # consumer, so undoing the only bump has to remove it rather than write a 0 into it.
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || { reap "$pid"; fail "the absorbed idle-stale alarm left its own count behind as $(cat "$state/.wedge-escalations-$key")"; }
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional absorb stop"
 
@@ -2050,7 +2058,104 @@ test_absorbed_idle_stale_wedge_alarm_clears_its_own_count() {
     && fail "the first genuine escalation after an absorb demanded deep inspection"
   [ -s "$state/idleclear.check.sh" ] || fail "the merge poll did not survive the escalation"
   unset FM_FAKE_CREW_STATE
-  pass "an absorbed idle-stale wedge alarm clears the count its own bump created, so a later genuine escalation starts from 1"
+  pass "an absorbed idle-stale wedge alarm leaves behind no count of its own, so a later genuine escalation starts from 1"
+}
+
+# --- WEDGE-PATH arm: an absorbed idle-stale bump does not erase a busy-turn count ------
+# The arm the first-sighting test above does NOT reach, and the one a whole-file delete
+# breaks. Here wedge_timer_check itself is the bumper: it bumps the shared per-window
+# count, its own emit is absorbed by the declaration, and it must undo exactly its own
+# bump. Deleting the file instead would erase whatever the busy-turn class had already
+# earned on this window, so the hung-call chain would restart at 1 and never reach
+# demand-deep-inspection, which is the loss the alarm-class separation exists to prevent.
+# The busy-turn count is established by driving the real busy-turn escalations rather than
+# by pre-seeding a number a comment merely labels, because the code cannot read a comment.
+test_absorbed_idle_stale_wedge_bump_keeps_a_busy_turn_count() {
+  local dir state fakebin out capture_file window key pid pr text sig
+  dir=$(make_case wedge-path-busy-count); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedgeflap"; pr='https://example.test/pr/28'
+  text='Working... (3600.1s)'
+  printf '%s' "$text" > "$capture_file"
+  seed_busy_green_merge_task "$state" wedgeflap "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  # A later non-captain-relevant note routes the idle poll through the NON-TERMINAL
+  # branch, whose repeat-poll fallthrough is the wedge_timer_check idle-stale arm.
+  printf 'working: rebased onto the latest base\n' >> "$state/wedgeflap.status"
+  sig=$(seen_sig "$state/wedgeflap.status"); printf '%s' "$sig" > "$state/.seen-wedgeflap_status"
+  declare_merge_wait "$state" wedgeflap || fail "could not declare the fixture merge wait"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/wedgeflap.meta"
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+
+  # Phase A: two real busy-turn escalations, so the count is earned by that class rather
+  # than pre-seeded. FM_WEDGE_DEMAND_INSPECT_COUNT=3 keeps the threshold ahead of them.
+  local round=1
+  while [ "$round" -le 2 ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+      FM_BUSY_TURN_MAX_SECS=1 FM_WEDGE_DEMAND_INSPECT_COUNT=3 \
+      FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "busy-turn round $round did not escalate"; }
+    grep -F "possible wedge, escalation $round" "$out" >/dev/null \
+      || fail "busy-turn round $round did not report escalation $round: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge busy-turn round $round"
+    round=$((round + 1))
+  done
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq 2 ] \
+    || fail "the busy-turn class did not earn a count of 2"
+
+  # Phase B: the busy verdict lapses, so the idle pane records this hash as a first
+  # sighting. That arm does not touch the count; it is what gets us to the wedge arm.
+  record_pi_idle "$state" wedgeflap
+  : > "$out"
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_WEDGE_DEMAND_INSPECT_COUNT=3 FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the idle first sighting alarmed instead of being absorbed: $(cat "$out")"
+  fi
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$(hash_text "$text")" ] \
+    || { reap "$pid"; fail "the idle first sighting never recorded the hash, so the wedge arm is unreachable"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-B stop"
+
+  # Phase C: the WEDGE arm. The recorded hash plus an elapsed since-file sends the repeat
+  # poll to wedge_timer_check idle-stale, which bumps 2 to 3 and has its emit absorbed.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_WEDGE_DEMAND_INSPECT_COUNT=3 FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the idle-stale wedge alarm was not absorbed: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the absorbed wedge alarm printed a wake: $(cat "$out")"; }
+  [ ! -e "$state/.stale-since-$key" ] \
+    || { reap "$pid"; fail "the wedge arm never reached its emit, so this proved nothing"; }
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq 2 ] \
+    || { reap "$pid"; fail "the absorbed idle-stale bump did not restore the busy-turn count, leaving $(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo absent)"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-C stop"
+
+  # Phase D: busy again, so the hung-call chain continues from 2 and reaches the threshold.
+  record_pi_busy "$state" wedgeflap
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_WEDGE_DEMAND_INSPECT_COUNT=3 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the busy-turn chain did not resume after the wedge absorb"; }
+  grep -F "possible wedge, escalation 3" "$out" >/dev/null \
+    || fail "the busy-turn chain restarted instead of continuing from 2: $(cat "$out")"
+  grep -F "demand-deep-inspection" "$out" >/dev/null \
+    || fail "the resumed busy-turn chain never reached demand-deep-inspection: $(cat "$out")"
+  [ -s "$state/wedgeflap.check.sh" ] || fail "the merge poll did not survive the flap"
+  unset FM_FAKE_CREW_STATE
+  pass "an absorbed idle-stale wedge bump undoes only itself, so a busy-turn count survives and its hung-call chain still reaches demand-deep-inspection"
 }
 
 
@@ -3875,6 +3980,7 @@ test_idle_wedge_window_is_still_absorbed_by_a_merge_wait
 test_merge_wait_reminder_passes_through_from_the_wedge_window
 test_absorbed_idle_stale_alarm_keeps_a_busy_turn_escalation_count
 test_absorbed_idle_stale_wedge_alarm_clears_its_own_count
+test_absorbed_idle_stale_wedge_bump_keeps_a_busy_turn_count
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
