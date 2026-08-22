@@ -29,6 +29,8 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
    Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
 7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
 
+For a public behavior change, add a distinguishing test that fails against the old behavior and passes against the new one, so reviewers reject a test that cannot distinguish the two; run it through [`bin/fm-test-run.sh`](bin/fm-test-run.sh).
+
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
 ## Repo conventions
