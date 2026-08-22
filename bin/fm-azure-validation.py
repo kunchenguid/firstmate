@@ -1465,6 +1465,22 @@ def storage_account_scope(env):
     )
 
 
+def direct_role_assignments_at_scope(env, scope):
+    """Return only direct assignments at one exact scope.
+
+    Current Azure CLI rejects combining ``role assignment list --scope`` with
+    ``--all``.  A scoped query already uses Azure's direct ``atScope()`` read;
+    retain a local exact-scope fence as defense in depth.
+    """
+    assignments, _, _ = az_command(
+        env, ["role", "assignment", "list", "--scope", scope]
+    )
+    return [
+        item for item in assignments or []
+        if str(item.get("scope", "")).lower() == scope.lower()
+    ]
+
+
 def read_github_token(state):
     """Read the current GitHub token for boot-time injection into the guest."""
     override = os.environ.get("FM_AZURE_GITHUB_TOKEN_FILE")
@@ -3874,8 +3890,8 @@ def delete_auth_share_role(env, state):
     expected_role = "/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{}".format(
         env["subscription"], FILE_DATA_PRIVILEGED_CONTRIBUTOR_ROLE
     )
-    assignments, _, _ = az_command(env, ["role", "assignment", "list", "--scope", account_scope, "--all"])
-    for item in assignments or []:
+    assignments = direct_role_assignments_at_scope(env, account_scope)
+    for item in assignments:
         if (
             str(item.get("scope", "")).lower() == account_scope.lower()
             and str(item.get("principalId", "")).lower() == str(principal).lower()
@@ -3893,8 +3909,7 @@ def delete_cell_storage_scope(env, state):
     )
     plan = state.get("storage_cleanup")
     container_exists, container = read_resource(env, scope, "container")
-    assignments, _, _ = az_command(env, ["role", "assignment", "list", "--scope", scope, "--all"])
-    direct = [item for item in assignments if str(item.get("scope", "")).lower() == scope.lower()]
+    direct = direct_role_assignments_at_scope(env, scope)
     expected_principals = {env["operator_object_id"].lower(), state["resources"]["identity_principal_id"].lower()}
     expected_role = "/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{}".format(
         env["subscription"], BLOB_DATA_CONTRIBUTOR_ROLE
@@ -3944,8 +3959,7 @@ def delete_cell_storage_scope(env, state):
         if rc != 0:
             raise ValidationError("exact cell role assignment deletion failed: {}".format(stderr))
     for _ in range(60):
-        remaining, _, _ = az_command(env, ["role", "assignment", "list", "--scope", scope, "--all"])
-        current = [item for item in remaining if str(item.get("scope", "")).lower() == scope.lower()]
+        current = direct_role_assignments_at_scope(env, scope)
         if not current:
             break
         if not {item.get("id") for item in current}.issubset(planned_ids):
@@ -4573,10 +4587,9 @@ def build_purge_plan(env, state):
     blob_role = "/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{}".format(
         env["subscription"], BLOB_DATA_CONTRIBUTOR_ROLE
     )
-    assignments, _, _ = az_command(env, ["role", "assignment", "list", "--scope", scope, "--all"])
+    assignments = direct_role_assignments_at_scope(env, scope)
     direct = [
         purge_role_identity(item) for item in assignments or []
-        if str(item.get("scope", "")).lower() == scope.lower()
     ]
     expected_principals = {env["operator_object_id"].lower(), principal.lower()}
     if (
@@ -4589,13 +4602,10 @@ def build_purge_plan(env, state):
     file_role = "/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{}".format(
         env["subscription"], FILE_DATA_PRIVILEGED_CONTRIBUTOR_ROLE
     )
-    account_assignments, _, _ = az_command(
-        env, ["role", "assignment", "list", "--scope", account_scope, "--all"]
-    )
+    account_assignments = direct_role_assignments_at_scope(env, account_scope)
     auth_roles = [
         purge_role_identity(item) for item in account_assignments or []
-        if str(item.get("scope", "")).lower() == account_scope.lower()
-        and str(item.get("principalId", "")).lower() == principal.lower()
+        if str(item.get("principalId", "")).lower() == principal.lower()
     ]
     expected_auth_count = 1 if auth_share_name() else 0
     if len(auth_roles) != expected_auth_count or any(
@@ -4728,21 +4738,19 @@ def delete_planned_purge_resource(env, state, resource_id, kind, planned_identit
 def current_planned_roles(env, state, plan):
     storage = plan["storage"]
     scope = storage["container_scope"]
-    assignments, _, _ = az_command(env, ["role", "assignment", "list", "--scope", scope, "--all"])
+    assignments = direct_role_assignments_at_scope(env, scope)
     current_container = [
         purge_role_identity(item) for item in assignments or []
-        if str(item.get("scope", "")).lower() == scope.lower()
     ]
     planned_container = storage["container_roles"]
     if any(not any(same_purge_role(item, expected) for expected in planned_container) for item in current_container):
         raise ValidationError("cell container gained foreign RBAC after purge planning")
     account_scope = storage_account_scope(env)
-    account, _, _ = az_command(env, ["role", "assignment", "list", "--scope", account_scope, "--all"])
+    account = direct_role_assignments_at_scope(env, account_scope)
     principal = storage["identity"]["principal_id"]
     current_auth = [
         purge_role_identity(item) for item in account or []
-        if str(item.get("scope", "")).lower() == account_scope.lower()
-        and str(item.get("principalId", "")).lower() == principal.lower()
+        if str(item.get("principalId", "")).lower() == principal.lower()
     ]
     planned_auth = storage["auth_share_roles"]
     if any(not any(same_purge_role(item, expected) for expected in planned_auth) for item in current_auth):

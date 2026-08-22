@@ -1123,11 +1123,17 @@ role="/subscriptions/sub/providers/Microsoft.Authorization/roleDefinitions/"+m.B
 file_role="/subscriptions/sub/providers/Microsoft.Authorization/roleDefinitions/"+m.FILE_DATA_PRIVILEGED_CONTRIBUTOR_ROLE
 roles=[{"id":"/role/one","scope":scope,"principalId":"operator","roleDefinitionId":role},{"id":"/role/two","scope":scope,"principalId":"cell-principal","roleDefinitionId":role},{"id":"/role/file","scope":account_scope,"principalId":"cell-principal","roleDefinitionId":file_role}]
 container=[True]
+scope_reads=[]
 def read(_env,rid,kind):
  if kind=="container": return (container[0],{"id":scope,"etag":"E1","properties":{"publicAccess":"None"}} if container[0] else None)
  raise AssertionError((rid,kind))
 def az(_env,args,**kwargs):
- if args[:3]==["role","assignment","list"]: return (list(roles),0,"")
+ if args[:3]==["role","assignment","list"]:
+  assert args[:4]==["role","assignment","list","--scope"] and len(args)==5
+  requested=args[4].lower(); scope_reads.append(requested)
+  matching=[item for item in roles if item["scope"].lower()==requested]
+  foreign=next((item for item in roles if item["scope"].lower()!=requested),None)
+  return (matching+([foreign] if foreign else []),0,"")
  if args[:3]==["role","assignment","delete"]:
   wanted=args[-1]; roles[:]=[item for item in roles if item["id"]!=wanted]; return (None,0,"")
  if args[:2]==["rest","--method"]:
@@ -1141,6 +1147,8 @@ assert not any(item["id"]=="/role/file" for item in roles)
 # A retry after both child assignments, the file grant, and the container are
 # already absent is idempotent from the persisted exact plan.
 m.delete_cell_storage_scope(env,state)
+assert scope_reads==[scope.lower(),scope.lower(),account_scope.lower(),
+                     scope.lower(),scope.lower(),account_scope.lower()]
 PY
   pass "partial container/role cleanup resumes idempotently from its exact persisted plan"
 }
@@ -1234,6 +1242,7 @@ roles=[
  {"id":"/roles/auth","scope":account_scope,"principalId":principal,"roleDefinitionId":file_role},
 ]
 mutations=[]; lock_stack=[]; lock_events=[]; release_fail=[True]
+role_scope_reads=[]
 retired_fences=set(); retirement_tombstones={}; delete_seam_attempts=[]
 def read_resource(_env,resource_id,kind):
  value=resources.get(resource_id)
@@ -1248,8 +1257,11 @@ def az(_env,args,**kwargs):
   if "--assignee-object-id" in args:
    wanted=args[args.index("--assignee-object-id")+1].lower()
    return ([copy.deepcopy(item) for item in roles if item["principalId"].lower()==wanted],0,"")
-  scope=args[args.index("--scope")+1].lower()
-  return ([copy.deepcopy(item) for item in roles if item["scope"].lower()==scope],0,"")
+  assert args[:4]==["role","assignment","list","--scope"] and len(args)==5
+  requested=args[4].lower(); role_scope_reads.append(requested)
+  matching=[copy.deepcopy(item) for item in roles if item["scope"].lower()==requested]
+  foreign=next((copy.deepcopy(item) for item in roles if item["scope"].lower()!=requested),None)
+  return (matching+([foreign] if foreign else []),0,"")
  if args[:3]==["role","assignment","delete"]:
   assert_sealed_before_mutation(); wanted=args[-1]
   mutations.append(("role",wanted)); roles[:]=[item for item in roles if item["id"]!=wanted]
@@ -1511,6 +1523,8 @@ assert mutations==before_extended
 resources[worktree_id].pop("managedByExtended")
 assert m.replacement_allowed(partial,"absent-proven")[0] is False
 assert set(resources)=={worktree_id,identity_id,container_scope} and len(roles)==3
+assert container_scope.lower() in role_scope_reads and account_scope.lower() in role_scope_reads
+assert set(role_scope_reads)=={container_scope.lower(),account_scope.lower()}
 assert lock_events[-4:]==[("enter",cell+"-shards"),("enter",cell),("exit",cell),("exit",cell+"-shards")]
 
 # Exercise the real bridge end to end: this retirement was emitted by the real
