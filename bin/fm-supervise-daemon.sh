@@ -137,6 +137,32 @@
 #                                   not misread as pending input.
 #          FM_INJECT_CONFIRM_SLEEP  seconds between daemon submit checks
 #                                   (default 0.5)
+#          FM_INJECT_STABLE_SECS    gap between the two captures that must be
+#                                   byte-identical before an affirmatively empty
+#                                   composer may outrank a rendered busy
+#                                   signature (default 6, calibrated against real
+#                                   harnesses; see INJECT_STABLE_SECS_DEFAULT).
+#                                   Never relaxes the pending/unknown guards.
+#          FM_INJECT_STABLE_LINES   capture depth for that comparison and for the
+#                                   self-heal stability probe (default 40)
+#          FM_AWAY_SELFHEAL_SECS    seconds of undelivered escalations AND
+#                                   uninterrupted screen byte-stability before
+#                                   the daemon restarts the primary session
+#                                   (default 1200; 0 disables)
+#          FM_AWAY_SELFHEAL_COOLDOWN_SECS  minimum seconds between two self-heal
+#                                   attempts (default 3600)
+#          FM_AWAY_SELFHEAL_CMD     relaunch command typed into the pane once the
+#                                   agent has verifiably exited; overrides
+#                                   config/away-selfheal-command. With neither
+#                                   set, self-healing stays OFF, so no home
+#                                   inherits an unconfigured restart.
+#          FM_AWAY_SELFHEAL_EXIT_WAIT_SECS / FM_AWAY_SELFHEAL_READY_WAIT_SECS
+#                                   bounded waits for the agent to stop (default
+#                                   60) and for the relaunched composer to become
+#                                   ready (default 180)
+#          FM_TMUX_SEND_IMSG_MAX / FM_TMUX_SEND_IMSG_RESERVE  override the tmux
+#                                   one-send byte ceiling and its reserve; see
+#                                   bin/fm-tmux-lib.sh, which owns that fact.
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
@@ -183,6 +209,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
 
+# Per-harness lifecycle vocabulary (fm_control_exit_command). Layer 2's
+# self-healing restart asks the agent to leave through its OWN exit command
+# rather than inventing one here, so the harness knowledge keeps its single owner
+# in the control plane.
+# shellcheck source=bin/fm-control-lib.sh
+. "$FM_DAEMON_DIR/fm-control-lib.sh"
+
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
@@ -219,6 +252,30 @@ CRASH_BACKOFF_DEFAULT=60
 CRASH_NORMAL_SLEEP_DEFAULT=5
 LOG_MAX_BYTES_DEFAULT=1048576
 LOG_KEEP_LINES_DEFAULT=2000
+# Delivery-guard window for the busy-optics override (Layer 1b). Two captures
+# this far apart must be byte-identical before an affirmatively empty composer
+# may outrank a rendered busy signature; fm_composer_injection_verdict
+# (bin/fm-composer-lib.sh) owns the rule itself.
+#
+# The window must exceed the longest stretch a WORKING harness can go without
+# repainting, or the override could fire mid-turn. That number is per harness and
+# only a real harness can supply it, so it is measured rather than assumed:
+# tests/fm-away-delivery-live-e2e.test.sh reports the longest byte-identical run
+# it observes while a pane reports busy and FAILS naming the number to configure
+# if this window no longer clears it. Measured 2026-08-22: claude 2.1.239 1s,
+# opencode 1.18.18 2s. The default keeps a wide margin over both, and the cost of
+# being generous is only latency on a delivery attempt that already looked busy.
+INJECT_STABLE_SECS_DEFAULT=6
+INJECT_STABLE_LINES_DEFAULT=40
+# Layer 2 self-healing. After this long with nothing deliverable AND positive
+# proof that the primary session is doing nothing at all, the daemon restarts the
+# session shell through the configured relaunch command. Absent configuration
+# disables it; see selfheal_maybe.
+AWAY_SELFHEAL_SECS_DEFAULT=1200
+AWAY_SELFHEAL_COOLDOWN_SECS_DEFAULT=3600
+AWAY_SELFHEAL_EXIT_WAIT_SECS_DEFAULT=60
+AWAY_SELFHEAL_READY_WAIT_SECS_DEFAULT=180
+SELFHEAL_CONFIG_NAME="away-selfheal-command"
 
 # --- presence-gating --------------------------------------------------------
 # bin/fm-operational-input.sh owns the U+2063 FIRSTMATE_OP bytes and typed
@@ -247,6 +304,86 @@ _file_age() {  # seconds since mtime; very large if missing
 _hash_text() {
   if command -v md5 >/dev/null 2>&1; then printf '%s' "$1" | md5 -q
   else printf '%s' "$1" | md5sum | cut -d ' ' -f1; fi
+}
+
+# --- delivery payload budget ------------------------------------------------
+# The transport refuses an oversize command outright, delivering NOTHING, so the
+# digest must be sized before it is offered. Three numbers combine here:
+#   1. the backend's own one-send ceiling (bin/fm-backend.sh's
+#      fm_backend_send_text_max_bytes; only tmux publishes one today),
+#   2. the operational-input envelope every digest is wrapped in, which is
+#      measured rather than guessed by encoding the candidate itself, and
+#   3. a persisted shrink factor, so a ceiling that is still wrong on some future
+#      transport corrects itself downward instead of wedging the channel again.
+# A backend answering 0 (no measured ceiling) leaves the digest unbounded, which
+# is exactly the behavior that backend had before this existed.
+_bytes() {  # <text> -> byte length
+  local LC_ALL=C
+  printf '%s' "${#1}"
+}
+
+# The persisted shrink factor: the number of halvings currently applied to the
+# transport ceiling. Written only on a send-level refusal, cleared on any
+# confirmed delivery, so a transient wrong guess costs one digest, not a night.
+_send_shrink_path() { printf '%s' "$1/.subsuper-send-shrink"; }
+
+_send_shrink_get() {  # <state>
+  local v
+  v=$(cat "$(_send_shrink_path "$1")" 2>/dev/null) || v=0
+  case "$v" in ''|*[!0-9]*) v=0 ;; esac
+  [ "$v" -le 6 ] || v=6
+  printf '%s' "$v"
+}
+
+_send_shrink_bump() {  # <state>
+  local state=$1 v
+  v=$(_send_shrink_get "$state")
+  [ "$v" -ge 6 ] || v=$((v + 1))
+  printf '%s\n' "$v" > "$(_send_shrink_path "$state")" 2>/dev/null || true
+  printf '%s' "$v"
+}
+
+_send_shrink_clear() {  # <state>
+  rm -f "$(_send_shrink_path "$1")" 2>/dev/null || true
+}
+
+# Two budgets, deliberately kept apart, because they are measured against
+# different strings and conflating them double-counts the envelope:
+#   inject_transport_ceiling - what the WIRE accepts, compared against the fully
+#                              encoded message inject_msg is about to send.
+#   inject_payload_budget    - what the DIGEST TEXT may be, compared while
+#                              escalate_flush is still filling it, i.e. before
+#                              the envelope exists.
+inject_transport_ceiling() {  # <state> <backend> <target> -> bytes, 0 = unknown
+  local state=$1 backend=$2 target=$3 ceiling shrink
+  ceiling=$(fm_backend_send_text_max_bytes "$backend" "$target" 2>/dev/null) || ceiling=0
+  case "$ceiling" in ''|*[!0-9]*) ceiling=0 ;; esac
+  [ "$ceiling" -gt 0 ] || { printf '0'; return 0; }
+  shrink=$(_send_shrink_get "$state")
+  while [ "$shrink" -gt 0 ]; do ceiling=$((ceiling / 2)); shrink=$((shrink - 1)); done
+  [ "$ceiling" -ge 320 ] || ceiling=320
+  printf '%s' "$ceiling"
+}
+
+inject_payload_budget() {  # <state> <backend> <target> -> bytes, 0 = unknown
+  local state=$1 backend=$2 target=$3 ceiling envelope encoded
+  ceiling=$(inject_transport_ceiling "$state" "$backend" "$target")
+  [ "$ceiling" -gt 0 ] || { printf '0'; return 0; }
+  # Measure the envelope instead of assuming it: encode a one-byte probe and
+  # subtract whatever the canonical encoder added around it.
+  if fm_operational_input_encode away-supervisor x encoded 2>/dev/null; then
+    envelope=$(( $(_bytes "$encoded") - 1 ))
+  else
+    envelope=64
+  fi
+  [ "$envelope" -ge 0 ] || envelope=64
+  # Headroom for the wrapper's own variable part: the item counter grows from
+  # "N event(s)" to "N of M event(s)" once a digest carries only part of the
+  # backlog, and a shortened item adds its marker. Reserving it here keeps
+  # escalate_flush's fill measurement below what inject_msg will later enforce.
+  ceiling=$(( ceiling - envelope - 160 ))
+  [ "$ceiling" -ge 256 ] || ceiling=256
+  printf '%s' "$ceiling"
 }
 
 # --- presence-gating helpers (PURE-ish: side-effect-free reads of state) -----
@@ -652,21 +789,130 @@ escalate_add() {  # <state> <distilled-item>
   printf '%s\n' "$item" >> "$buf"
 }
 
-# Flush the escalation buffer as ONE batched, single-line digest to the
-# supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
-# inject failure (buffer preserved for retry / catch-up).
+# Flush the escalation buffer to the supervisor pane as ONE batched, single-line
+# digest that is GUARANTEED to fit the transport.
+#
+# The buffer used to be joined whole and cleared only on success. That pairing is
+# what took the away channel down on 2026-08-21/22: every failed delivery left
+# the items buffered, so the next digest was larger, and once it passed the
+# transport's command ceiling the send was refused outright - which failed, which
+# grew the buffer again. An absorbing state; the buffer reached 89577 bytes
+# before morning and nothing was ever delivered again.
+#
+# Both halves of that trap are closed here. The digest is filled from the HEAD of
+# the buffer only while it still fits inject_payload_budget, and a confirmed
+# delivery drops EXACTLY the items that went out, leaving the rest queued. The
+# buffer therefore drains instead of growing, and a backlog costs several digests
+# rather than the channel.
+#
+# Progress is guaranteed even in the pathological case: a single item larger than
+# the whole budget is shortened to fit and marked, because refusing to send it
+# would block every item behind it forever. Shortening loses nothing durable -
+# the digest is a pre-read, the item's own status record is untouched, and the
+# buffer file keeps the full text until it is delivered.
+#
+# Returns 0 on a confirmed delivery (or an empty buffer), non-zero when nothing
+# could be delivered; the buffer survives either way.
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+  local state=$1 buf target backend budget total sent rest msg body line rc shrink
+  local truncated=0 candidate remainder
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
-  n=$(wc -l < "$buf" 2>/dev/null || echo 0)
-  # Join buffered items with the literal " | " separator into one digest line.
-  msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
-  # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
-  # safety net, but keeping the source single-line makes the intent explicit).
-  msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  total=$(wc -l < "$buf" 2>/dev/null || echo 0)
+  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  backend="${FM_SUPERVISOR_BACKEND:-tmux}"
+  budget=$(inject_payload_budget "$state" "$backend" "$target")
+
+  body=''
+  sent=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [ -z "$body" ]; then candidate=$line; else candidate="$body | $line"; fi
+    if [ "$budget" -gt 0 ] \
+       && [ "$(_bytes "$(_digest_wrap "$candidate" "$total" "$total")")" -gt "$budget" ]; then
+      # The first item does not fit on its own: shorten it so the queue behind it
+      # can still move. Every later item simply waits for the next digest.
+      if [ "$sent" -eq 0 ]; then
+        body=$(_digest_fit_first "$line" "$budget" "$total")
+        truncated=1
+        sent=1
+      fi
+      break
+    fi
+    body=$candidate
+    sent=$((sent + 1))
+  done < "$buf"
+
+  [ "$sent" -gt 0 ] || return 1
+  rest=$((total - sent))
+  msg=$(_digest_wrap "$body" "$sent" "$total")
+  [ "$truncated" -eq 0 ] \
+    || msg="$msg [one oversize item was shortened to fit; its full text stays in the durable record]"
+
+  inject_msg "$msg" "$state"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    _send_shrink_clear "$state"
+    if [ "$rest" -gt 0 ]; then
+      # Drop exactly the items that went out - which is ONE when the head item had
+      # to be shortened - and leave the rest queued so the next flush continues
+      # where this one stopped. Clearing the whole buffer here would silently drop
+      # every item queued behind an oversize one.
+      remainder=$(tail -n +"$((sent + 1))" "$buf" 2>/dev/null || true)
+      if [ -n "$remainder" ]; then
+        printf '%s\n' "$remainder" > "$buf" 2>/dev/null || true
+        _now > "${buf}.since"
+      else
+        # Nothing actually left: an empty write would leave a blank line behind,
+        # and a buffer holding only blank lines can never be drained again.
+        : > "$buf"
+        rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+      fi
+      log "escalate flush partial: delivered $sent of $total buffered event(s); $rest still queued"
+    else
+      : > "$buf"
+      rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+    fi
+    return 0
+  fi
+  # A send-level refusal means the transport would not accept the command at all,
+  # so nothing was typed. Shrink the working ceiling: a budget that is still wrong
+  # on some future transport then costs one more digest instead of the channel.
+  if [ "$rc" -eq 2 ]; then
+    shrink=$(_send_shrink_bump "$state")
+    log "ERROR: transport refused the digest outright (budget=$budget bytes, $sent event(s)); shrink level now $shrink, next digest will be smaller"
+  fi
   return 1
+}
+
+# The single-line digest wrapper, kept as ONE function so the size measured while
+# filling the buffer is exactly the size that is sent.
+_digest_wrap() {  # <body> <sent> <total>
+  local body=$1 sent=$2 total=$3 count
+  if [ "$sent" -ge "$total" ]; then count="$total event(s)"; else count="$sent of $total event(s)"; fi
+  printf 'Supervisor escalate (%s): %s (pre-read; re-arm not needed — watcher daemon-managed)' \
+    "$count" "$body"
+}
+
+# Shorten ONE oversize item until the wrapped digest fits <budget>. The cut is
+# made on bytes, and iconv then drops any partial multibyte tail so a shortened
+# digest does not carry an invalid sequence into the composer. Where iconv is
+# missing the raw cut stands: a trailing partial character is a cosmetic flaw in
+# a pre-read digest, and refusing to deliver would re-create the very blockage
+# this whole path exists to prevent.
+_digest_fit_first() {  # <item> <budget> <total>
+  local item=$1 budget=$2 total=$3 keep cut
+  keep=$(_bytes "$item")
+  while [ "$keep" -gt 16 ]; do
+    cut=$(printf '%s' "$item" | LC_ALL=C cut -c1-"$keep")
+    cut=$(printf '%s' "$cut" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null || printf '%s' "$cut")
+    if [ "$(_bytes "$(_digest_wrap "$cut" 1 "$total")")" -le "$budget" ]; then
+      printf '%s' "$cut"
+      return 0
+    fi
+    keep=$(( keep * 3 / 4 ))
+  done
+  printf '%s' "$item" | LC_ALL=C cut -c1-16
 }
 
 # --- backend-independent active wedge alert ---------------------------------
@@ -1007,6 +1253,19 @@ housekeeping() {  # <state>
     fi
   fi
 
+  # (1c) Layer 2 self-heal. Evaluated on every pass while anything is buffered,
+  # because the byte-stability window it depends on has to be tracked
+  # continuously; every gate lives in selfheal_maybe, which restarts nothing
+  # until all of them agree. A successful restart is followed immediately by a
+  # flush so the backlog leaves in the same pass.
+  if afk_active "$state" && [ -s "$state/.subsuper-escalations" ]; then
+    if selfheal_maybe "$state" "$(_oldest_line_age "$state/.subsuper-escalations")"; then
+      escalate_flush "$state" || true
+    fi
+  else
+    rm -f "$state/.subsuper-selfheal-probe"
+  fi
+
   # (2) stale persistence recheck
   for marker in "$state"/.subsuper-stale-*; do
     [ -e "$marker" ] || continue
@@ -1123,12 +1382,158 @@ window_for_task() {  # <task-key> [state]
   return 1
 }
 
+# --- Layer 2: self-healing session restart -----------------------------------
+# When Layer 1 still cannot deliver for a long time AND the primary session is
+# provably doing nothing at all, the daemon restarts the session SHELL and then
+# delivers. This is the last resort for a session that is alive, idle, and
+# nonetheless unreachable - the shape of the 2026-08-21/22 outage's first two
+# hours, where the composer read `unknown` on a live, never-restarted, provably
+# idle session and no guard could tell why.
+#
+# THE INACTIVITY PROOF is screen byte-stability held across the WHOLE window,
+# not a sampled counter. The task called for a token/consumption counter; that
+# substitution is deliberate and is the stronger signal here. A consumption
+# counter only ever supports a threshold ("less than X per minute"), and
+# thresholds drift with harness and hardware - an idle claude still burns about
+# 0.9% of a core, measured on this machine, so "unchanged" is not even reachable.
+# Byte-equality is an EQUALITY test with nothing to tune, and it is decisive: a
+# working agent redraws its elapsed counter every second (9 of 9 samples changed
+# across a 1s gap on claude 2.1.239), so a screen that is byte-identical for
+# twenty minutes proves no turn ran in those twenty minutes.
+#
+# SAFETY. It runs only in away mode; only on an affirmatively empty composer, so
+# a half-typed captain line or an unreadable surface is never restarted over;
+# only once per cooldown; and only when the home has configured a relaunch
+# command, so no home inherits a surprise restart. The agent is asked to exit
+# through its own exit command and the stop is VERIFIED before anything is typed
+# into the shell - the daemon never force-kills and never types a shell command
+# into a pane that might still be an agent. Work state is untouched: this
+# replaces the session shell, and the configured command is expected to resume
+# the same conversation.
+#
+# Config: FM_AWAY_SELFHEAL_CMD, else the first non-comment line of
+# $FM_HOME/config/away-selfheal-command (LOCAL, gitignored). Absent = disabled.
+selfheal_command() {
+  local f line
+  if [ -n "${FM_AWAY_SELFHEAL_CMD:-}" ]; then printf '%s' "$FM_AWAY_SELFHEAL_CMD"; return 0; fi
+  f="${FM_HOME:-}/config/$SELFHEAL_CONFIG_NAME"
+  [ -r "$f" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) continue ;; esac
+    printf '%s' "$line"; return 0
+  done < "$f"
+  return 1
+}
+
+_selfheal_screen_hash() {  # <backend> <target>
+  local screen
+  screen=$(fm_backend_capture "$1" "$2" "${FM_INJECT_STABLE_LINES:-$INJECT_STABLE_LINES_DEFAULT}" 2>/dev/null) || return 1
+  [ -n "$screen" ] || return 1
+  _hash_text "$screen"
+}
+
+# selfheal_maybe: evaluate and, when every gate agrees, perform the restart.
+# Returns 0 only when a restart actually ran.
+selfheal_maybe() {  # <state> <undelivered-seconds>
+  local state=$1 age=$2 window cooldown target backend probe hash prev_hash prev_epoch
+  local composer cmd harness exitcmd waited limit agent
+  window=${FM_AWAY_SELFHEAL_SECS:-$AWAY_SELFHEAL_SECS_DEFAULT}
+  [ "$window" -gt 0 ] || return 1
+  afk_active "$state" || return 1
+  [ "$age" -ge "$window" ] || return 1
+
+  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  backend="${FM_SUPERVISOR_BACKEND:-tmux}"
+  probe="$state/.subsuper-selfheal-probe"
+
+  # Track byte-stability. Any change at all restarts the window, so the twenty
+  # minutes must be uninterrupted rather than merely sampled at both ends.
+  hash=$(_selfheal_screen_hash "$backend" "$target") || { rm -f "$probe"; return 1; }
+  prev_epoch=$(cut -f1 "$probe" 2>/dev/null) || prev_epoch=
+  prev_hash=$(cut -f2 "$probe" 2>/dev/null) || prev_hash=
+  case "$prev_epoch" in ''|*[!0-9]*) prev_epoch= ;; esac
+  if [ -z "$prev_epoch" ] || [ "$prev_hash" != "$hash" ]; then
+    printf '%s\t%s\n' "$(_now)" "$hash" > "$probe" 2>/dev/null || true
+    return 1
+  fi
+  [ $(( $(_now) - prev_epoch )) -ge "$window" ] || return 1
+
+  # Never restart over a surface we cannot positively identify as an idle agent
+  # composer: pending text and unknown surfaces keep their full protection here.
+  composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  if [ "$composer" != empty ]; then
+    log "self-heal declined: session unreachable ${age}s but composer is ${composer:-unknown}, not a confirmed-empty agent composer"
+    return 1
+  fi
+
+  cooldown=${FM_AWAY_SELFHEAL_COOLDOWN_SECS:-$AWAY_SELFHEAL_COOLDOWN_SECS_DEFAULT}
+  [ "$(_file_age "$state/.subsuper-selfheal-last")" -ge "$cooldown" ] || return 1
+
+  if ! cmd=$(selfheal_command); then
+    log "self-heal declined: session idle and unreachable ${age}s, but no relaunch command is configured (FM_AWAY_SELFHEAL_CMD or config/$SELFHEAL_CONFIG_NAME)"
+    _now > "$state/.subsuper-selfheal-last" 2>/dev/null || true
+    return 1
+  fi
+
+  harness=$(fm_daemon_primary_harness)
+  if ! exitcmd=$(fm_control_exit_command "$harness"); then
+    log "self-heal declined: no verified exit command for harness '$harness'"
+    _now > "$state/.subsuper-selfheal-last" 2>/dev/null || true
+    return 1
+  fi
+
+  _now > "$state/.subsuper-selfheal-last" 2>/dev/null || true
+  log "ERROR: self-heal restarting the primary session: ${age}s undelivered, screen byte-identical for $(( $(_now) - prev_epoch ))s, composer empty. Conversation is preserved; no work state is touched."
+  {
+    printf 'fm away-mode self-heal restart at %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'undelivered_seconds=%s screen_stable_seconds=%s harness=%s backend=%s target=%s\n' \
+      "$age" "$(( $(_now) - prev_epoch ))" "$harness" "$backend" "$target"
+    printf 'relaunch_command=%s\n' "$cmd"
+  } > "$state/.subsuper-selfheal-last" 2>/dev/null || true
+
+  # Ask the agent to exit, then VERIFY it stopped before typing anything else.
+  fm_backend_send_text_submit "$backend" "$target" "$exitcmd" 1 0.5 0.5 >/dev/null 2>&1 || true
+  waited=0
+  limit=${FM_AWAY_SELFHEAL_EXIT_WAIT_SECS:-$AWAY_SELFHEAL_EXIT_WAIT_SECS_DEFAULT}
+  while [ "$waited" -lt "$limit" ]; do
+    agent=$(fm_backend_agent_alive "$backend" "$target")
+    [ "$agent" = dead ] && break
+    sleep 2
+    waited=$((waited + 2))
+  done
+  if [ "$agent" != dead ]; then
+    log "ERROR: self-heal aborted: the agent did not stop within ${limit}s (state=$agent). Nothing typed into the pane; escalations stay buffered."
+    rm -f "$probe"
+    return 1
+  fi
+
+  # The pane is now a shell. Type the configured relaunch command.
+  fm_backend_send_text_submit "$backend" "$target" "$cmd" 1 0.5 0.5 >/dev/null 2>&1 || true
+  waited=0
+  limit=${FM_AWAY_SELFHEAL_READY_WAIT_SECS:-$AWAY_SELFHEAL_READY_WAIT_SECS_DEFAULT}
+  while [ "$waited" -lt "$limit" ]; do
+    [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" = empty ] && break
+    sleep 3
+    waited=$((waited + 3))
+  done
+  rm -f "$probe"
+  _send_shrink_clear "$state"
+  if [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" = empty ]; then
+    log "self-heal complete: session relaunched and its composer is ready; buffered escalations will be delivered on the next flush"
+    return 0
+  fi
+  log "ERROR: self-heal relaunched the session but its composer is not ready after ${limit}s; escalations stay buffered and the wedge alarm remains armed"
+  return 1
+}
+
 # --- injection --------------------------------------------------------------
 # inject_msg: send one escalation digest to the supervisor pane.
-# Returns 0 on successful inject (or empty buffer), non-zero if the pane is
-# gone, the supervisor is busy, afk is inactive, or the verified submit cannot
-# be confirmed after bounded retries. On non-zero the caller preserves
-# the buffer so the escalation survives for the next cycle or the catch-up flush.
+# Returns 0 on a confirmed submit; 1 when delivery was DEFERRED or left
+# unconfirmed (pane gone, afk inactive, guarded surface, swallowed Enter); and 2
+# when the transport REFUSED the send outright, which means nothing was typed and
+# the payload must shrink before the next attempt. On any non-zero the caller
+# preserves the buffer so the escalation survives for the next cycle or the
+# catch-up flush; only 2 tells it that resending the same bytes is pointless.
 #
 # Submit model:
 #   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
@@ -1143,8 +1548,12 @@ window_for_task() {  # <task-key> [state]
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
+#   - SIZE GUARD before typing: a message above the transport's one-send ceiling
+#     is refused here rather than offered, because such a send delivers nothing
+#     at all instead of delivering part.
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local busy screen_a screen_b stable_lines budget
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1164,26 +1573,63 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
+  # (2b) Transport-capacity guard. A transport that refuses an oversize command
+  # types NOTHING, so an over-budget message is a lost delivery, never a partial
+  # one. Callers size their own payload (escalate_flush), but this is the last
+  # place that can still tell the difference between "too big" and "pane wedged",
+  # and mistaking one for the other is exactly what hid the 2026-08-21/22 outage
+  # behind a busy-or-wedged alarm for six hours.
+  budget=$(inject_transport_ceiling "$state" "$backend" "$target")
+  if [ "$budget" -gt 0 ] && [ "$(_bytes "$msg")" -gt "$budget" ]; then
+    log "inject refused: message is $(_bytes "$msg") bytes, above this transport's $budget-byte ceiling for one send; nothing typed"
+    return 2
+  fi
   fm_backend_target_exists "$backend" "$target" || return 1
-  # (3) Busy-guard: never inject into an in-use supervisor pane.
-  if pane_is_busy "$target" "$backend"; then
-    log "inject deferred: supervisor pane busy (agent mid-turn)"
-    return 1
-  fi
-  #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
-  #      composer. The shared classifier (fm_backend_composer_state ->
-  #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
-  #      for real unsubmitted text (a human's half-typed line, or a swallowed
-  #      prior injection) and 'unknown' for a bare dead-shell prompt (the agent
-  #      exited to its login shell) or an unreadable pane. Neither is a safe
-  #      target - typing the escalation into a shell could execute it - so defer
-  #      on anything that is not affirmatively 'empty'. A deferred escalation
-  #      stays buffered for the next cycle or the catch-up flush.
+  # (3) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
+  #     composer. The shared classifier (fm_backend_composer_state ->
+  #     fm_composer_classify_screen, bin/fm-composer-lib.sh) reports 'pending'
+  #     for real unsubmitted text (a human's half-typed line, or a swallowed
+  #     prior injection) and 'unknown' for a bare dead-shell prompt (the agent
+  #     exited to its login shell) or an unreadable pane. Neither is a safe
+  #     target - typing the escalation into a shell could execute it - so defer
+  #     on anything that is not affirmatively 'empty'. A deferred escalation
+  #     stays buffered for the next cycle or the catch-up flush.
+  #
+  #     BUSY OPTICS (task fm-afk-zustellblockade-spinner-daempfung): the busy
+  #     read below is a rendered string, the weakest evidence in the delivery
+  #     path, and a finished turn can leave it looking busy - a completion line
+  #     with a spinner glyph, a footer still advertising its interrupt key, a
+  #     background shell the daemon itself is hosted in. So a busy verdict alone
+  #     no longer holds an escalation: when the composer is affirmatively empty,
+  #     two captures across a bounded window must also be byte-identical before
+  #     delivery proceeds. A working agent redraws - measured on claude 2.1.239,
+  #     every sample taken during a live turn changed across a 1s gap - so
+  #     byte-equality is positive evidence that no turn is running. The rule
+  #     itself lives in fm_composer_injection_verdict; nothing here relaxes the
+  #     pending/unknown guards, which still defer on any evidence at all.
+  #     The window is calibrated against real harnesses by the live guard; see
+  #     INJECT_STABLE_SECS_DEFAULT above for the measured numbers.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
-  if [ "$composer" != empty ]; then
-    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+  busy=idle
+  pane_is_busy "$target" "$backend" && busy=busy
+  screen_a=''
+  screen_b=''
+  if [ "$busy" = busy ] && [ "$composer" = empty ]; then
+    stable_lines=${FM_INJECT_STABLE_LINES:-$INJECT_STABLE_LINES_DEFAULT}
+    screen_a=$(fm_backend_capture "$backend" "$target" "$stable_lines" 2>/dev/null) || screen_a=''
+    sleep "${FM_INJECT_STABLE_SECS:-$INJECT_STABLE_SECS_DEFAULT}"
+    screen_b=$(fm_backend_capture "$backend" "$target" "$stable_lines" 2>/dev/null) || screen_b=''
+  fi
+  if [ "$(fm_composer_injection_verdict "$composer" "$busy" "$screen_a" "$screen_b")" != deliver ]; then
+    if [ "$composer" = empty ]; then
+      log "inject deferred: supervisor pane busy and still redrawing (agent mid-turn)"
+    else
+      log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    fi
     return 1
   fi
+  [ "$busy" = busy ] \
+    && log "inject proceeding: supervisor composer empty and screen byte-stable; rendered busy signature treated as finished-turn residue"
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
   # retype) via the shared submit primitive. Success = the backend confirms
   # submit. An unconfirmed/unknown pane does NOT count as delivered, so the
@@ -1196,6 +1642,15 @@ inject_msg() {  # <message> [state]
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
+  fi
+  # A send-level refusal is reported separately (2) from an unconfirmed submit
+  # (1): the first means the transport never accepted the command and NOTHING was
+  # typed, which the caller answers by shrinking the payload; the second means
+  # our text may be sitting in the composer, which it must never answer by
+  # retyping.
+  if [ "$verdict" = send-failed ]; then
+    log "inject failed: transport refused the send outright (verdict=$verdict); nothing was typed"
+    return 2
   fi
   log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
   return 1

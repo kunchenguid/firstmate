@@ -197,7 +197,8 @@ family_for_basename() {
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
-    fm-herdr-submit-confirm-live-e2e.test.sh)
+    fm-herdr-submit-confirm-live-e2e.test.sh|\
+    fm-away-delivery-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -395,6 +396,7 @@ tests/fm-backend-zellij-smoke.test.sh 22
 tests/fm-backend-zellij.test.sh 8297
 tests/fm-backend.test.sh 17169
 tests/fm-backlog-handoff.test.sh 4157
+tests/fm-away-delivery-live-e2e.test.sh 20
 tests/fm-bearings-board.test.sh 3385
 tests/fm-bearings-snapshot.test.sh 68659
 tests/fm-bootstrap.test.sh 38417
@@ -1009,6 +1011,13 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
+    bin/fm-tmux-lib.sh)
+      # Besides its pure primitives this file owns the tmux one-send transport
+      # ceiling, which a tmux upgrade can move, so it re-selects the live guard
+      # (fm-away-delivery-live-e2e) as well.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' live-harness-optin
+      ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
@@ -1027,7 +1036,7 @@ families_for_changed_path() {
     bin/fm-install-actionlint.sh|\
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
     bin/fm-captain-hold.sh|bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
-    bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
+    bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
     bin/fm-vendor-auth-probe.sh|\
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)

@@ -117,6 +117,17 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Away-mode session self-healing (config/away-selfheal-command)
+
+When away-mode escalations stay undelivered for `FM_AWAY_SELFHEAL_SECS` (default 1200) and the primary session is provably doing nothing, the sub-supervisor restarts the session shell and then delivers.
+The inactivity proof is uninterrupted screen byte-stability across that whole window, plus an affirmatively empty composer; any change at all restarts the window.
+Self-healing is OFF unless the home configures the relaunch command, so no home inherits a surprise restart.
+`config/away-selfheal-command` (local, gitignored) supplies it as its first non-comment line, and `FM_AWAY_SELFHEAL_CMD` overrides the file.
+The command is typed into the pane only after the agent has been asked to leave through its own exit command and its stop has been verified, so it must be the command that resumes this home's session rather than starting a fresh one.
+It runs only in away mode, at most once per `FM_AWAY_SELFHEAL_COOLDOWN_SECS` (default 3600), never over a composer that is not confirmed empty, and it changes no work state - only the session shell.
+Each attempt logs loudly and leaves a durable `state/.subsuper-selfheal-last` record naming what was run.
+See `bin/fm-supervise-daemon.sh`'s header for the remaining knobs and [`examples/away-selfheal-command`](examples/away-selfheal-command) for a copyable config.
+
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
 The optional local, gitignored `config/trace-context` presence flag enables default-off native W3C trace-context propagation.

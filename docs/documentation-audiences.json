@@ -261,6 +261,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/examples/away-selfheal-command",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
       "audience": "operator-example"
     },

@@ -289,3 +289,49 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
 }
+
+# --- transport capacity ------------------------------------------------------
+# fm_tmux_send_text_max_bytes: the largest LITERAL payload a single
+# `tmux send-keys -l -t <target> <text>` may carry, in BYTES.
+#
+# WHY THIS EXISTS (incident 2026-08-21/22, task
+# fm-afk-zustellblockade-spinner-daempfung): the away-mode daemon joins its whole
+# escalation buffer into ONE line and types it in ONE send-keys. A tmux client
+# hands each command to its server as a single imsg, and imsg's MAX_IMSGSIZE caps
+# the WHOLE command, so an oversize digest is refused outright ("command too
+# long") and nothing is typed at all. Because that daemon's buffer only empties
+# on a confirmed submit, every refusal made the next digest larger: once the cap
+# was crossed the state was ABSORBING and could not heal. That night it took the
+# away channel down for six hours with an 89577-byte buffer.
+#
+# The cap is a property of the whole command, not of the payload: measured on
+# tmux 3.6, payload+target reached exactly 16346 bytes and the ceiling moved
+# one-for-one as the target name grew, which is what proves it is the imsg budget
+# (MAX_IMSGSIZE 16384 minus this command's fixed overhead) rather than a payload
+# constant. The target is therefore subtracted here, and the remaining reserve
+# covers the argument vector and the imsg header.
+#
+# Callers MUST treat the result as a hard ceiling for one send and split or
+# truncate above it; a refused send delivers nothing, so exceeding it is never a
+# partial delivery, only a lost one. The reserve is deliberately generous: being
+# a few hundred bytes conservative costs one extra digest, while being one byte
+# optimistic costs the whole channel.
+FM_TMUX_SEND_IMSG_MAX=${FM_TMUX_SEND_IMSG_MAX:-16384}
+FM_TMUX_SEND_IMSG_RESERVE=${FM_TMUX_SEND_IMSG_RESERVE:-512}
+FM_TMUX_SEND_MIN_BYTES=${FM_TMUX_SEND_MIN_BYTES:-512}
+
+# fm_tmux_byte_length: byte-exact length of <text>. `${#var}` counts CHARACTERS
+# under a UTF-8 locale and BYTES under LC_ALL=C, and every digest carries
+# multibyte text, so the byte count must never depend on the ambient locale -
+# the same locale-independence rule bin/fm-composer-lib.sh applies to its trims.
+fm_tmux_byte_length() {  # <text>
+  local LC_ALL=C
+  printf '%s' "${#1}"
+}
+
+fm_tmux_send_text_max_bytes() {  # <target> -> positive byte budget
+  local target=${1:-} budget
+  budget=$(( FM_TMUX_SEND_IMSG_MAX - FM_TMUX_SEND_IMSG_RESERVE - $(fm_tmux_byte_length "$target") ))
+  [ "$budget" -ge "$FM_TMUX_SEND_MIN_BYTES" ] || budget=$FM_TMUX_SEND_MIN_BYTES
+  printf '%s' "$budget"
+}

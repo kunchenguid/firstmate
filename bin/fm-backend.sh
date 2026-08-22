@@ -738,6 +738,25 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
+# fm_backend_send_text_max_bytes: the largest payload ONE send_text_submit may
+# carry on this backend, in bytes, or 0 when the backend publishes no such
+# ceiling. A caller that composes its own payload (the away-mode daemon's
+# escalation digest) must split or truncate at this budget: a transport that
+# refuses an oversize command delivers NOTHING, so exceeding it loses the whole
+# message rather than part of it. Only tmux has a measured ceiling today - its
+# imsg command budget, owned and explained in bin/fm-tmux-lib.sh; every other
+# adapter answers 0 until its own limit is measured, which keeps an unmeasured
+# backend honest instead of inventing a number for it.
+fm_backend_send_text_max_bytes() {  # <backend> <target> -> byte budget, 0 = unknown
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf '0'; return 0; }
+  case "$backend" in
+    tmux) fm_backend_tmux_send_text_max_bytes "$@" ;;
+    *) printf '0' ;;
+  esac
+}
+
 # fm_backend_kill: remove the task's session endpoint (best-effort; a
 # nonexistent/already-gone target is not an error - callers already swallow
 # failures here exactly as the inline `tmux kill-window ... || true` did).

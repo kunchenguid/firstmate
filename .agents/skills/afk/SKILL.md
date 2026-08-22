@@ -94,18 +94,26 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
 
 - **Primary-pane busy guard** - `pane_is_busy` trusts Herdr native `busy` when available, otherwise matches rendered output against only the detected primary harness's signature.
   This narrow delivery guard never classifies a recorded worker task and never uses a global union of vendor patterns.
+  A busy verdict alone no longer holds an escalation, because a finished turn leaves busy-looking residue - a completion line with a spinner glyph, a footer still advertising its interrupt key, a background shell the daemon itself is hosted in.
+  When the composer is affirmatively `empty`, two captures across `FM_INJECT_STABLE_SECS` must also be byte-identical before delivery proceeds; a working agent redraws, so byte-equality is positive evidence that no turn is running.
+  `fm_composer_injection_verdict` in `bin/fm-composer-lib.sh` owns that rule, and `tests/fm-away-delivery-live-e2e.test.sh` calibrates the window against each real harness.
 - **Composer-state guard** - `inject_msg` reads the full `empty`/`pending`/`pending-unproven`/`unknown` verdict from `fm_backend_composer_state` and injects only when it is affirmatively `empty`.
   Every other or future verdict defers, including an unreadable pane, ambiguous geometry, a blank unidentified row, and a bare shell prompt left after the agent exits.
   Each adapter contributes only capture and capability facts to the fleet-wide screen classifier in `bin/fm-composer-lib.sh`, which owns every shape and verdict.
   It preserves proven idle composers as empty but requires a genuine container around shell glyphs; see `docs/herdr-backend.md` "Composer and injection safety" for the operator contract.
   `pane_input_pending` is the tested fail-closed predicate for callers that need to know whether the composer is unsafe: it treats every result except exact `empty` as pending.
 
-A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
+Any composer verdict other than `empty`, or a busy pane that is still redrawing, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
 In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
+
+**Transport capacity.**
+The digest is one command, and a transport that refuses an oversize command types nothing at all, so an over-budget digest is a lost delivery rather than a partial one.
+`escalate_flush` fills each digest from the head of the buffer only while it still fits the backend's one-send ceiling, and a confirmed delivery drops exactly the items that went out, so a backlog drains across several digests instead of growing into one nothing can carry.
+`bin/fm-tmux-lib.sh` owns the tmux ceiling and `docs/verification/runtime-backends.md` "Away-delivery guards" owns its evidence.
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
-attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
+attempts one normal flush, which still requires an affirmatively empty composer and a pane that is not still redrawing.
 The alarm is defense in depth rather than a substitute for keeping every genuinely idle supported composer injectable.
 If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
@@ -113,6 +121,14 @@ an ERROR in the daemon log, a durable
 catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
+
+**Self-healing restart (the last resort).**
+A session can be alive, idle, and still unreachable - on 2026-08-21/22 the composer read `unknown` for two hours on a live, never-restarted, provably idle primary and no guard could say why.
+So when escalations stay undelivered past `FM_AWAY_SELFHEAL_SECS` (default 1200) AND the screen has been byte-identical for that whole uninterrupted window AND the composer is affirmatively `empty`, the daemon asks the agent to exit through its own exit command, verifies the stop, and types the home's configured relaunch command.
+It is OFF unless the home configures that command, runs only in away mode, runs at most once per `FM_AWAY_SELFHEAL_COOLDOWN_SECS` (default 3600), never acts over a `pending` or `unknown` composer, and never force-kills.
+It replaces the session shell only; the conversation is expected to resume and no work state is touched.
+Every attempt logs an ERROR and leaves a durable `state/.subsuper-selfheal-last` record naming what was run - surface it on the "while you were out" catch-up if present.
+`docs/configuration.md` "Away-mode session self-healing" owns the setup.
 
 ## Submit model
 
@@ -170,9 +186,10 @@ the operational prefix lets firstmate distinguish it from a real captain message
 - **Single-line digest** - embedded newlines are collapsed to a literal
   separator before injection, so submission is unambiguous regardless of
   harness.
-- **Busy and composer guards on the supervisor pane** - before injecting, the daemon runs the detected-primary-harness rendered busy guard and reads `fm_backend_composer_state` directly.
+- **Busy and composer guards on the supervisor pane** - before injecting, the daemon reads `fm_backend_composer_state` directly and runs the detected-primary-harness rendered busy guard.
   Only `empty` permits injection; `pending` protects half-typed or swallowed input, and `unknown` protects unreadable panes and bare dead-shell prompts.
   Every other result preserves the buffer for retry, so the daemon never merges its digest into the captain's half-typed line or types it into a shell.
+  A busy signature over an empty composer defers only while the screen is still changing; see "Busy-guard and composer guard" above.
 - The active backend passes its capture plus declarative styled, cursor, identity, and row capabilities to the shared screen classifier; all structural recognition and verdict logic remains in `bin/fm-composer-lib.sh`.
   Styled captures let that owner remove dim/faint and dark-TRUECOLOR ghost or placeholder text while shape detection uses the ANSI-stripped screen, so a dark border is not lost with ghost content.
   A ghost-only or idle bordered composer such as claude's `│ > ... │` therefore reads empty without allowing an unbordered shell prompt to do the same.
@@ -181,7 +198,8 @@ the operational prefix lets firstmate distinguish it from a real captain message
   A blank or otherwise unidentified input row carries no positive container proof and defers injection, so a modal dialog or a mid-redraw pane is never an injection target.
 - **Max-defer escape** - the daemon must never silently wedge. If anything stays
   buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one
-  normal flush, which still requires an idle pane and an affirmatively empty composer. If that
+  normal flush, which still requires an affirmatively empty composer and a pane
+  that is not still redrawing. If that
   cannot confirm a submit, it raises a loud, rate-limited wedge alarm: ERROR log,
   durable `state/.subsuper-inject-wedged` marker, a tmux status-line flash when
   applicable, and a backend-independent active alert. A
