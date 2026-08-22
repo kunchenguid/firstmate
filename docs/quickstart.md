@@ -53,10 +53,9 @@ At that point it will settle two things with you, and it helps to know what they
   Use this for private repos, experiments, or anything that must not reach a remote.
 
 You are not asked to pick one cold.
-The first mate works out the default for the project it just registered, tells you what it resolved, and lets you confirm or change it.
-A project with a remote resolves to `no-mistakes-prod-only`, which is not a fourth flat mode but a policy: product-facing, mixed, and uncertain work ships `no-mistakes`, while genuinely internal tooling, automation, and process work ships `direct-PR`.
-A project with no remote resolves to `local-only`.
-Ask for one flat mode instead whenever you would rather have it.
+A newly added project with a remote resolves to `no-mistakes-prod-only` unless you say otherwise, and a project with no remote resolves to `local-only`.
+The first mate states the posture it resolved when it confirms the registration, so you only have to speak up if you want a different one.
+`no-mistakes-prod-only` is a conditional policy rather than a fourth flat mode, and the [`project-management` skill](../.agents/skills/project-management/SKILL.md) owns which work it sends down which path.
 
 **Merge authority** is the separate question of who presses merge.
 By default you do: every pull request and every local landing waits for your explicit word.
@@ -64,7 +63,7 @@ If you set `yolo` on a project, the first mate will merge green, in-scope work i
 It still never merges anything failing, and anything destructive, irreversible, or security-sensitive still comes to you.
 
 You can pick a standing choice per project and override it for a single request whenever you want.
-The [`project-management` skill](../.agents/skills/project-management/SKILL.md) owns how registration resolves a posture, and [docs/architecture.md](architecture.md) owns the registry entry behind it, including the `+yolo` merge flag and how each task's mode is decided.
+[docs/architecture.md](architecture.md) owns the registry entry behind these choices, including the `+yolo` merge flag and how each task's mode is decided.
 
 ## Dispatching your first piece of work
 
