@@ -783,13 +783,15 @@ pass "arm's readiness wait stays sub-second-accurate even without EPOCHREALTIME"
 # verbatim by byte range, not paraphrased) against a stand-in for
 # fm_procevent_generation_live that hangs forever, so the assertion is on
 # arm_probe_live's real, observed exit code and elapsed time - not on any
-# text in the file.
+# text in the file. A generous 10s remaining-budget argument is passed so the
+# safety-ceiling path is what gets exercised here, not the deadline-bound path
+# covered separately below.
 PROBE_HANG_OUT=$(bash -c '
   . "$1/bin/fm-timeout-lib.sh"
   eval "$(sed -n "/^FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S=/,/^}/p" "$1/bin/fm-procevent-lavish.sh")"
   fm_procevent_generation_live() { sleep 300; }
   start=$SECONDS
-  arm_probe_live x y
+  arm_probe_live x y 10000
   rc=$?
   printf "rc=%s elapsed=%s\n" "$rc" "$(( SECONDS - start ))"
 ' _ "$ROOT")
@@ -799,6 +801,95 @@ probe_hang_elapsed=${PROBE_HANG_OUT##*elapsed=}
 [ "$probe_hang_elapsed" -le 5 ] \
   || fail "arm_probe_live took ${probe_hang_elapsed}s to bound a hung probe: $PROBE_HANG_OUT"
 pass "a single hung liveness probe is bounded rather than left free to run indefinitely"
+
+# --- a probe launched near the deadline cannot overrun it by the full ceiling
+# Regression for the "probe timeout exceeds arm deadline" defect: a hung probe
+# was always given the full FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S (2s)
+# ceiling regardless of how much of the caller's own bound actually remained,
+# so a near-zero or already-exhausted budget could still overrun by roughly
+# 2s. arm_probe_live now bounds each probe by whichever is smaller: the
+# ceiling, or the caller's own remaining-ms argument (floored at
+# FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS so a real check still happens). Same
+# extraction technique as above - the real shipped function, a hanging
+# fm_procevent_generation_live stand-in - but this time with a 0ms remaining
+# budget, so a passing result depends on the probe actually honoring that
+# argument rather than falling back to the full ceiling.
+PROBE_DEADLINE_OUT=$(bash -c '
+  . "$1/bin/fm-timeout-lib.sh"
+  eval "$(sed -n "/^FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S=/,/^}/p" "$1/bin/fm-procevent-lavish.sh")"
+  fm_procevent_generation_live() { sleep 300; }
+  start=$SECONDS
+  arm_probe_live x y 0
+  rc=$?
+  printf "rc=%s elapsed=%s\n" "$rc" "$(( SECONDS - start ))"
+' _ "$ROOT")
+assert_contains "$PROBE_DEADLINE_OUT" "rc=124" \
+  "a hung probe at a zero-ms remaining budget is still killed and reported as timed out: $PROBE_DEADLINE_OUT"
+probe_deadline_elapsed=${PROBE_DEADLINE_OUT##*elapsed=}
+[ "$probe_deadline_elapsed" -le 1 ] \
+  || fail "arm_probe_live took ${probe_deadline_elapsed}s to bound a hung probe at a zero-ms remaining budget (expected close to FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS, not the full 2s ceiling): $PROBE_DEADLINE_OUT"
+pass "a liveness probe launched at a zero-ms remaining budget is bounded by that budget, not the full safety ceiling"
+
+# --- arm's background reconcile kick is single-flighted, not one-per-call ---
+# Regression for the "background reconciles remain unowned" defect: arm used
+# to fire an unconditional `fm-procevent.sh reconcile &` on every call, so a
+# burst of calls landing while an earlier kick was still blocked (e.g. on an
+# unrelated source's lock) could pile up N independent, untracked reconcile
+# processes each doing its own full sweep. arm_reconcile_kick_lock now
+# serializes the kick itself through fm_lock_acquire_wait/fm_lock_release -
+# the same ownership-by-lock-pid primitive every other resource in this repo
+# uses - so at most one reconcile process this adapter started is ever
+# running at once. Proven by holding an unrelated registered source's lock,
+# forcing any reconcile that reaches it to block inside cmd_reconcile (the
+# same mechanism the lock-contention cut above uses), firing several arm
+# calls while it is held, and counting the actual OS processes running this
+# repo's own `fm-procevent.sh reconcile` - real observed process state, not
+# source text.
+HLK="$TMP_ROOT/hlk"; new_home "$HLK"
+# Sorts before any "lavish-<hash>" source id, so reconcile's own *.source walk
+# reaches this home's contended registration before the arm-registered one.
+KICK_BLOCKER_ID="aab-arm-kick-single-flight-blocker"
+pe_register "$HLK" lavish "$KICK_BLOCKER_ID" -- /bin/true >/dev/null
+KICK_READY="$TMP_ROOT/kick-lock-ready"
+KICK_RELEASE="$TMP_ROOT/kick-lock-release"
+hold_source_lock "$KICK_BLOCKER_ID" "$KICK_READY" "$KICK_RELEASE"
+kick_holder_pid=$HOLDER_PID
+wait_for "$KICK_READY" || fail "could not hold the unrelated source's lock boundary for the kick single-flight cut"
+
+KICK_LAVISH_BIN=$(fm_fakebin "$TMP_ROOT/kick-lavish-stub")
+cat > "$KICK_LAVISH_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Never needs to complete: this cut only inspects how many background
+# reconcile processes a burst of arm calls leaves running, not readiness.
+sleep 300
+SH
+chmod +x "$KICK_LAVISH_BIN/lavish-axi"
+
+KICK_ART="$TMP_ROOT/kick-review.html"
+printf '<h1>kick review</h1>\n' > "$KICK_ART"
+kick_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$KICK_ART")
+PE_TRACKED+=("$HLK|$kick_id")
+for _ in 1 2 3; do
+  PATH="$KICK_LAVISH_BIN:$PATH" FM_HOME="$HLK" FM_PROCEVENT_LAVISH_ARM_WAIT_MS=200 \
+    "$ROOT/bin/fm-procevent-lavish.sh" arm "$KICK_ART" >/dev/null 2>&1 || true
+done
+
+# pgrep -f excludes its own invocation from the match, so this needs no extra
+# filtering the way a `ps | grep` pipeline would to avoid matching itself.
+reconcile_pattern="$ROOT/bin/fm-procevent.sh reconcile"
+running_reconciles=0
+for _ in $(seq 1 50); do
+  running_reconciles=$(pgrep -cf "$reconcile_pattern" 2>/dev/null || printf '0')
+  [ "$running_reconciles" -ge 1 ] && break
+  sleep 0.1
+done
+: > "$KICK_RELEASE"
+wait "$kick_holder_pid" 2>/dev/null || true
+[ "$running_reconciles" -ge 1 ] \
+  || fail "no reconcile process was ever observed running while a kick was blocked; the single-flight cut proves nothing without one"
+[ "$running_reconciles" -le 1 ] \
+  || fail "3 arm calls issued while a kick was blocked left $running_reconciles reconcile processes running concurrently, expected at most 1"
+pass "a burst of arm calls single-flights its background reconcile kick instead of piling up untracked processes"
 
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a

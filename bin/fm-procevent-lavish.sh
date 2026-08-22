@@ -59,6 +59,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -137,19 +138,44 @@ arm_now_ms() {
 # it runs the probe in a background subshell of THIS interpreter, so it calls
 # fm_procevent_generation_live directly rather than needing to re-exec a bare
 # process that never sourced fm-procevent-lib.sh, the way fm_run_timed's
-# preferred timeout/gtimeout/perl mechanisms would. The bound is a generous
-# safety ceiling relative to that normal sub-millisecond cost, so it is never
-# expected to fire in ordinary operation; it exists only so a single
-# unexpectedly stuck probe cannot grow arm's overrun past
-# FM_PROCEVENT_LAVISH_ARM_WAIT_MS by an unbounded amount.
+# preferred timeout/gtimeout/perl mechanisms would.
+#
+# A FIXED ceiling here would itself blow the documented bound: the caller's
+# very first probe always runs even against a near-zero remaining budget (see
+# cmd_arm below), so a stuck probe given the full ceiling could return up to
+# FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S seconds after
+# FM_PROCEVENT_LAVISH_ARM_WAIT_MS already expired. Each probe is therefore
+# bounded by whichever is SMALLER: the safety ceiling, or the caller's own
+# remaining time until its deadline - floored at
+# FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS so a probe launched at (or past) that
+# deadline still gets a real, if brief, chance to complete rather than a
+# zero/negative timeout, which fm_run_bash_timeout does not accept as a bound.
+# In ordinary operation a probe finishes in sub-millisecond time either way, so
+# this floor is the only overrun a caller can ever see past its own deadline.
 FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S=2
-arm_probe_live() {
-  fm_run_bash_timeout "$FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S" \
-    fm_procevent_generation_live "$1" "$2"
+FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS=50
+arm_probe_live() {  # <source-id> <registration-identity> <remaining-ms>
+  local id=$1 identity=$2 remaining_ms=$3 ceiling_ms bound_ms probe_s
+  ceiling_ms=$(( FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S * 1000 ))
+  bound_ms=$remaining_ms
+  [ "$bound_ms" -lt "$ceiling_ms" ] || bound_ms=$ceiling_ms
+  [ "$bound_ms" -ge "$FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS" ] || bound_ms=$FM_PROCEVENT_LAVISH_ARM_PROBE_MIN_MS
+  printf -v probe_s '%d.%03d' "$(( bound_ms / 1000 ))" "$(( bound_ms % 1000 ))"
+  fm_run_bash_timeout "$probe_s" \
+    fm_procevent_generation_live "$id" "$identity"
+}
+
+# Single-flight lock for cmd_arm's background reconcile kick, scoped to this
+# home's own registry directory (the same STATE a sibling fm-procevent.sh
+# process derives) rather than the machine-wide claim root: reconcile's
+# runner-starting sweep only ever reads THIS home's own registrations, so
+# concurrent arm calls against a different home must never wait on this one.
+arm_reconcile_kick_lock() {
+  printf '%s/.lavish-arm-reconcile-kick.lock\n' "$(fm_procevent_registry_dir "$STATE")"
 }
 
 cmd_arm() {
-  local artifact=${1-} id real reg_out identity wait_ms live deadline_ms now_ms remaining_ms frac first
+  local artifact=${1-} id real reg_out identity wait_ms live deadline_ms now_ms remaining_ms frac first kick_lock
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
@@ -182,7 +208,23 @@ cmd_arm() {
   # the timed sampling loop below is allowed to bound how long arm waits.
   # Running it synchronously here would let that internal blocking silently
   # replace the documented bound with reconcile's own, possibly unbounded, one.
-  "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 &
+  # The kick is single-flighted through arm_reconcile_kick_lock rather than
+  # fired unconditionally: each call's kick blocks on that lock until any
+  # earlier kick's reconcile pass has fully finished, then runs its own fresh
+  # pass - which is guaranteed to see this call's own registration, already
+  # committed above before the kick was even queued. A burst of concurrent arm
+  # calls therefore collapses to at most one reconcile process actually
+  # running at a time, each still with a real pass of its own, instead of N
+  # independent, unowned processes racing reconcile's internal per-source
+  # locking. The lock's recorded pid IS the kick's ownership; if its holder
+  # dies mid-reconcile, the same stale-lock recovery every other lock in this
+  # repo relies on reclaims it.
+  (
+    kick_lock=$(arm_reconcile_kick_lock)
+    fm_lock_acquire_wait "$kick_lock"
+    "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1
+    fm_lock_release "$kick_lock"
+  ) &
   deadline_ms=$(( $(arm_now_ms) + wait_ms ))
   live=1
   first=1
@@ -193,13 +235,17 @@ cmd_arm() {
     # deadline is re-checked against the wall clock right before starting
     # one, not only after it returns; otherwise a probe could be kicked off
     # an instant after the budget already ran out, growing the overrun by
-    # that whole probe's duration instead of stopping at the deadline.
+    # that whole probe's duration instead of stopping at the deadline. The
+    # same fresh reading also bounds the probe itself (arm_probe_live), so a
+    # probe started near the deadline cannot run long past it either.
+    now_ms=$(arm_now_ms)
     if [ "$first" -eq 0 ]; then
-      now_ms=$(arm_now_ms)
       [ "$now_ms" -lt "$deadline_ms" ] || break
     fi
     first=0
-    if arm_probe_live "$id" "$identity"; then
+    remaining_ms=$(( deadline_ms - now_ms ))
+    [ "$remaining_ms" -gt 0 ] || remaining_ms=0
+    if arm_probe_live "$id" "$identity" "$remaining_ms"; then
       live=0
       break
     fi
