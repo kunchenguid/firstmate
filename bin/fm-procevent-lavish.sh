@@ -9,6 +9,15 @@
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #
+# arm        Register the canonical source for the published poll argv, start
+#            this home's liveness reconciliation immediately rather than at a
+#            later watcher cycle, and print `armed:` only after a live owner
+#            of that exact registration is confirmed within a bounded wait
+#            (FM_PROCEVENT_LAVISH_ARM_WAIT_MS milliseconds, default 5000).
+#            Without confirmation arm exits nonzero without printing `armed:`;
+#            the registration stays in place for later reconciliation either
+#            way.
+#
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
 # terminal   Exit 0 when the captured result means this Lavish source will never
@@ -50,6 +59,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -57,9 +67,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,56p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -78,8 +90,178 @@ cmd_source_id() {
   fi
 }
 
+# Milliseconds since the epoch, used only to bound cmd_arm's listener-liveness
+# wait by wall clock. Counting fixed sleep intervals cannot bound elapsed time,
+# because every iteration also spends real time on fm_procevent_generation_live's
+# own work - a filesystem lock, claim load, and process-identity check - which a
+# sleep-only budget never accounts for. EPOCHREALTIME is a bash builtin (no
+# fork) and is tried first. A shell without it - stock macOS ships Bash 3.2,
+# which predates EPOCHREALTIME - falls back to perl's Time::HiRes, a core
+# module bundled with every perl this adapter already requires elsewhere
+# (cmd_source_id, cmd_answers), so sub-second FM_PROCEVENT_LAVISH_ARM_WAIT_MS
+# values stay honored instead of degrading to whole-second granularity, which
+# could make a bounded wait take close to a full second longer than requested.
+arm_now_ms() {
+  local raw sec frac ms
+  raw=${EPOCHREALTIME:-}
+  case "$raw" in
+    *[0-9][.,][0-9]*)
+      sec=${raw%%[.,]*}
+      frac=${raw#*[.,]}
+      frac="${frac}000"
+      frac=${frac:0:3}
+      case "$sec$frac" in
+        ''|*[!0-9]*) ;;
+        *) printf '%s\n' "$(( sec * 1000 + 10#$frac ))"; return 0 ;;
+      esac
+      ;;
+  esac
+  ms=$(perl -MTime::HiRes=time -e 'printf "%.0f", time() * 1000' 2>/dev/null)
+  case "$ms" in
+    ''|*[!0-9]*) ;;
+    *) printf '%s\n' "$ms"; return 0 ;;
+  esac
+  sec=$(date +%s 2>/dev/null || printf '0')
+  case "$sec" in ''|*[!0-9]*) sec=0 ;; esac
+  printf '%s\n' "$(( sec * 1000 ))"
+}
+
+# fm_procevent_generation_live's own work - a try-once source lock, a claim
+# read, a pid identity check - is normally a handful of fast, non-blocking
+# filesystem/process operations with nothing that retries or waits on
+# contention, but nothing in its contract actually bounds how long any single
+# one of those operations can take (e.g. unusually slow disk I/O). Give every
+# probe its own hard bound via fm_run_bash_timeout, this repo's bash-native
+# bounded-execution mechanism (bin/fm-timeout-lib.sh): it runs the probe in a
+# background subshell of THIS interpreter, so it calls
+# fm_procevent_generation_live directly rather than needing to re-exec a bare
+# process that never sourced fm-procevent-lib.sh, the way fm_run_timed's
+# preferred timeout/gtimeout/perl mechanisms would.
+#
+# This bound exists only to keep a wedged probe from running forever; it is
+# NOT how arm's own readiness wait is bounded (arm_await_live below owns
+# that, independently of how long any one probe takes). So a fixed
+# FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S ceiling on every probe, regardless
+# of how much of the caller's own budget remains, cannot make arm itself
+# return late: an earlier revision sized this bound to the caller's
+# remaining-ms, floored at a minimum so fm_run_bash_timeout was never handed
+# a zero/negative timeout (which disables the bound entirely), and that floor
+# is exactly what let a probe launched near the deadline still run past it -
+# because arm's loop back then WAITED synchronously for this call to return.
+# It no longer does; see arm_await_live.
+FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S=2
+# fm_procevent_generation_live traps no signal - it is a plain shell function
+# with a try-once lock, a claim read, and a pid check, none of which install a
+# TERM handler - so SIGTERM already ends it outright and fm_run_bash_timeout's
+# general-purpose 0.2s post-TERM grace (meant for a bounded command that DOES
+# trap TERM to clean up) buys a hung probe nothing. Scope it down so an
+# abandoned probe's own subshell exits promptly once its bound is hit, rather
+# than sitting around for a teardown allowance it cannot use.
+FM_PROCEVENT_LAVISH_ARM_PROBE_TERM_GRACE_S=0.02
+# Launches one liveness probe in the background and returns immediately - the
+# caller reads $! for its pid. The probe's result (fm_run_bash_timeout's own
+# exit status, including 124 on the probe's internal bound) is written to
+# status_file once the probe subshell finishes; nothing here blocks on that.
+arm_probe_live() {  # <source-id> <registration-identity> <status-file>
+  local id=$1 identity=$2 status_file=$3
+  (
+    FM_TIMEOUT_TERM_GRACE_S=$FM_PROCEVENT_LAVISH_ARM_PROBE_TERM_GRACE_S \
+      fm_run_bash_timeout "$FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S" \
+      fm_procevent_generation_live "$id" "$identity"
+    printf '%s\n' "$?" > "$status_file"
+  ) &
+}
+
+# Confirms id/identity's registered generation is live before deadline_ms, or
+# gives up and returns nonzero - but NEVER blocks past deadline_ms on a single
+# probe. An earlier revision ran each probe through fm_run_bash_timeout and
+# then synchronously WAITED for that call to return (bound plus termination
+# grace) before rechecking the wall clock: a probe launched with only a few ms
+# of budget left still had to run its own full bound before the loop could
+# give up, so a genuinely wedged fm_procevent_generation_live could make arm
+# return tens of ms after FM_PROCEVENT_LAVISH_ARM_WAIT_MS already expired.
+# This version launches each probe in the background (arm_probe_live) and
+# polls its status file against the wall clock rather than waiting on it, so
+# once deadline_ms passes this returns immediately regardless of whether the
+# most recent probe has finished. An abandoned probe is left running - its own
+# fm_run_bash_timeout bound still terminates it eventually, so it cannot leak
+# forever, but nothing here waits for that to happen, and the status file it
+# was writing to is deliberately left in place (not unlinked) for it to
+# finish writing to, rather than removed out from under that pending write -
+# see the removal guard at the bottom of this function.
+arm_await_live() {  # <source-id> <registration-identity> <deadline-ms>
+  local id=$1 identity=$2 deadline_ms=$3
+  local status_file probe_pid now_ms remaining_ms rc frac live=1
+  status_file=$(mktemp "${TMPDIR:-/tmp}/fm-arm-probe-status.XXXXXX" 2>/dev/null) \
+    || die "cannot create a liveness-probe status file for $id"
+  probe_pid=
+  while :; do
+    if [ -z "$probe_pid" ]; then
+      now_ms=$(arm_now_ms)
+      [ "$now_ms" -lt "$deadline_ms" ] || break
+      arm_probe_live "$id" "$identity" "$status_file"
+      probe_pid=$!
+    fi
+    if [ -s "$status_file" ]; then
+      wait "$probe_pid" 2>/dev/null
+      rc=$(cat "$status_file" 2>/dev/null)
+      probe_pid=
+      [ "$rc" = 0 ] && { live=0; break; }
+      : > "$status_file"
+      now_ms=$(arm_now_ms)
+      [ "$now_ms" -lt "$deadline_ms" ] || break
+      continue
+    fi
+    now_ms=$(arm_now_ms)
+    [ "$now_ms" -lt "$deadline_ms" ] || break
+    remaining_ms=$(( deadline_ms - now_ms ))
+    [ "$remaining_ms" -le 20 ] || remaining_ms=20
+    printf -v frac '%03d' "$remaining_ms"
+    sleep "0.$frac"
+  done
+  # Only unlink status_file when no probe is outstanding (probe_pid empty):
+  # every probe still in flight when the deadline hits is left running (see
+  # above) and will later reopen this exact path for its delayed write via a
+  # plain `>` redirection, which follows a symlink. Removing the path here
+  # while that write is still pending would hand a local attacker a window to
+  # replace it with a symlink to an arbitrary file the arm-running user can
+  # write, so the abandoned probe's delayed write clobbers that file instead
+  # of the status file it thinks it is writing to. Leaving the real file in
+  # place - rather than deleting it out from under a write we know is still
+  # coming - is what makes that write land on the file we created, symlink or
+  # not. The only cost is a single leaked temp file in the rare case a probe
+  # is still outstanding at the deadline; it is small, bounded to one file
+  # per arm_await_live call, and self-overwrites harmlessly once the
+  # abandoned probe finally does write to it.
+  [ -n "$probe_pid" ] || rm -f "$status_file" 2>/dev/null || true
+  return "$live"
+}
+
+# Single-flight lock for cmd_arm's background reconcile kick, scoped to this
+# home's own registry directory (the same STATE a sibling fm-procevent.sh
+# process derives) rather than the machine-wide claim root: reconcile's
+# runner-starting sweep only ever reads THIS home's own registrations, so
+# concurrent arm calls against a different home must never wait on this one.
+arm_reconcile_kick_lock() {
+  printf '%s/.lavish-arm-reconcile-kick.lock\n' "$(fm_procevent_registry_dir "$STATE")"
+}
+
+# Companion lock: whether a reconcile kick is currently QUEUED for this home -
+# either waiting for arm_reconcile_kick_lock or about to. Bounds how many arm
+# calls ever act on a kick to at most one queued plus one running, no matter
+# how large a concurrent burst is, instead of one detached waiter per call.
+# Every arm call still forks its own background attempt (see cmd_arm) - that
+# fork cannot be avoided, since only a fresh process can try this lock
+# without blocking cmd_arm's own readiness wait - but an attempt that finds a
+# kick already queued does one non-blocking try, loses it, and exits
+# immediately: it never blocks, never runs reconcile, and never survives past
+# that try, so it is not itself a waiter.
+arm_reconcile_kick_pending_lock() {
+  printf '%s/.lavish-arm-reconcile-kick-pending.lock\n' "$(fm_procevent_registry_dir "$STATE")"
+}
+
 cmd_arm() {
-  local artifact=${1-} id real
+  local artifact=${1-} id real reg_out identity wait_ms deadline_ms kick_lock pending_lock
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
@@ -87,7 +269,67 @@ cmd_arm() {
   real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
     || die "cannot resolve the artifact path: $artifact"
   # The plain blocking form: no --timeout-ms, so completion is a server event.
-  "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" -- lavish-axi poll "$real" || exit 1
+  # register reports the identity of the exact generation it just published,
+  # captured on the other side while it still held the source lock. Reading it
+  # back from that line - rather than re-deriving it here with a separate,
+  # unlocked stat of the registry file - is what keeps this attempt's identity
+  # from ever being some concurrent arm call's later registration instead.
+  reg_out=$("$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" -- lavish-axi poll "$real") || exit 1
+  printf '%s\n' "$reg_out"
+  identity=${reg_out##* }
+  [ -n "$identity" ] || die "cannot read the registered generation: $id"
+  # Registration proves the source definition was accepted; it does not prove
+  # this attempt's listener ever starts, because reconcile owns that launch.
+  # Readiness is therefore proved before it is reported: kick one reconcile so
+  # the runner starts now rather than at the watcher's leisure, then require a
+  # live owner whose claim names THIS registration attempt. Anything else stays
+  # unconfirmed - exit nonzero without armed:, leaving the registration in
+  # place for later reconciliation either way.
+  case "${FM_PROCEVENT_LAVISH_ARM_WAIT_MS:-5000}" in
+    ''|*[!0-9]*) die "FM_PROCEVENT_LAVISH_ARM_WAIT_MS must be a nonnegative integer" ;;
+  esac
+  wait_ms=${FM_PROCEVENT_LAVISH_ARM_WAIT_MS:-5000}
+  # Kicked in the background, never awaited: reconcile can block on a source
+  # lock held by a live process elsewhere or on slow runner cleanup, and only
+  # the timed sampling loop below is allowed to bound how long arm waits.
+  # Running it synchronously here would let that internal blocking silently
+  # replace the documented bound with reconcile's own, possibly unbounded, one.
+  #
+  # Coalesced through arm_reconcile_kick_pending_lock rather than fired
+  # unconditionally or queued per call. This background attempt first tries
+  # (non-blocking) to own the "a kick is queued" marker:
+  #   - Losing that try means some earlier, still-pending attempt already
+  #     owns it and has not yet started reconcile (it releases the marker
+  #     only once it actually holds arm_reconcile_kick_lock, immediately
+  #     before running reconcile). That earlier attempt is therefore
+  #     guaranteed to run its pass AFTER this call's own registration, which
+  #     was already committed above before this attempt even started. This
+  #     attempt does nothing further and exits.
+  #   - Winning it makes this attempt the queued kick: it waits for
+  #     arm_reconcile_kick_lock (serializing against any reconcile pass
+  #     already running), releases the pending marker the instant it holds
+  #     that lock so a later arm call can queue the NEXT pass, then runs its
+  #     own fresh reconcile pass and releases the lock. The lock's recorded
+  #     pid IS the kick's ownership; if its holder dies mid-reconcile, the
+  #     same stale-lock recovery every other lock in this repo relies on
+  #     reclaims it.
+  # A burst of concurrent arm calls therefore leaves at most one background
+  # process actually waiting on anything - one running (or about to run)
+  # reconcile pass plus, at most, one queued behind it - never one detached,
+  # unowned waiter per call.
+  (
+    pending_lock=$(arm_reconcile_kick_pending_lock)
+    if fm_lock_try_acquire "$pending_lock"; then
+      kick_lock=$(arm_reconcile_kick_lock)
+      fm_lock_acquire_wait "$kick_lock"
+      fm_lock_release "$pending_lock"
+      "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1
+      fm_lock_release "$kick_lock"
+    fi
+  ) &
+  deadline_ms=$(( $(arm_now_ms) + wait_ms ))
+  arm_await_live "$id" "$identity" "$deadline_ms" \
+    || die "listener for $id did not confirm live within ${wait_ms}ms"
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
 }

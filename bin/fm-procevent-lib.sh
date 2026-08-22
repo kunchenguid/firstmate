@@ -199,6 +199,27 @@ fm_procevent_claim_state_locked() {
   fm_procevent_pid_state "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_IDENTITY"
 }
 
+# fm_procevent_generation_live <source-id> <registration-identity>
+# True only when a live owner holds exactly this registration generation: under
+# one try-acquire of the source lock, the claim must load, its recorded
+# registration identity must equal the caller's own register attempt, and the
+# owning process must be verifiably alive. A lock held elsewhere counts as not
+# confirmed yet - sampling never blocks - and every other outcome, including an
+# orphaned group whose leader is gone (nobody would capture its result), is no.
+fm_procevent_generation_live() {
+  local id=$1 identity=$2 st=1
+  fm_procevent_source_id_valid "$id" || return 1
+  if ! fm_lock_try_acquire "$(fm_procevent_source_lock_path "$id")"; then
+    return 1
+  fi
+  if fm_procevent_claim_load_locked "$id" \
+    && [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" = "$identity" ]; then
+    fm_procevent_pid_state "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_IDENTITY" && st=0
+  fi
+  fm_lock_release "$(fm_procevent_source_lock_path "$id")"
+  return "$st"
+}
+
 # fm_procevent_claim_acquire_locked <source-id> <home> <pid> <registration>
 # 0 acquired, 1 error, 2 held by a live owner (possibly another home).
 fm_procevent_claim_acquire_locked() {

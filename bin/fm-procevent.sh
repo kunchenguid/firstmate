@@ -212,7 +212,7 @@ read_argv() {  # <source-id>
 }
 
 cmd_register() {
-  local adapter=${1-} id=${2-} sep=${3-}
+  local adapter=${1-} id=${2-} sep=${3-} identity
   shift 3 2>/dev/null || usage
   fm_procevent_adapter_valid "$adapter" || die "adapter name must be lowercase alphanumeric or dash: $adapter"
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe and at most 64 characters: $id"
@@ -228,8 +228,17 @@ cmd_register() {
     fm_procevent_source_lock_release "$id"
     die "cannot publish the registration"
   fi
+  # Read the identity of the generation just published while STILL holding the
+  # source lock: register and every future register for this same id serialize
+  # on that lock, so no concurrent registration can replace this file before
+  # its own identity is captured here, and a caller that needs to confirm THIS
+  # attempt later never has to re-derive it through a separate, unlocked read.
+  if ! identity=$(fm_pr_file_identity "$(source_file "$id")"); then
+    fm_procevent_source_lock_release "$id"
+    die "cannot read the registered generation: $id"
+  fi
   fm_procevent_source_lock_release "$id"
-  printf 'registered: %s (%s)\n' "$id" "$adapter"
+  printf 'registered: %s (%s) %s\n' "$id" "$adapter" "$identity"
 }
 
 # Publish every durably captured result with no handled acknowledgement yet.
