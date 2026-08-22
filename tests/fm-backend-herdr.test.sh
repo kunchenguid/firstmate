@@ -4535,12 +4535,16 @@ SH
   pass "fm_backend_herdr_wait_transition: a reader wedged past its budget is killed and classified unusable (rc 2 after ${elapsed}s)"
 }
 
-# make_server_ensure_fakebin: a `herdr` stub for the server_ensure poll alone.
-# `status --json` fails INSTANTLY (the connection-refused shape of a cold
-# control socket) for the first $FM_FAKE_COLD_CALLS calls and then reports the
-# server running; `status --json` HANGS forever when FM_FAKE_STATUS_HANGS=1
-# (the wedged-socket shape). The backgrounded `server` launch always returns at
-# once so the unbounded launch never holds the test.
+# make_server_ensure_fakebin: a `herdr` stub for the server_ensure poll alone,
+# counting every status call in $FM_FAKE_STATE. Three shapes, selected by env:
+# FM_FAKE_COLD_CALLS makes the first N status calls fail INSTANTLY (the
+# connection-refused a cold control socket gives while the server is binding)
+# before reporting running; FM_FAKE_STATUS_HANGS=1 makes every status call hang
+# (the wedged socket); FM_FAKE_ALTERNATE=1 hangs on every SECOND call and
+# answers a fast running=false on the others (the partially responsive server
+# that trips neither the attempt count nor the consecutive-bound-hit bail).
+# The backgrounded `server` launch always returns at once so the unbounded
+# launch never holds the test.
 make_server_ensure_fakebin() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -4550,9 +4554,14 @@ set -u
 case "${1:-}" in
   server) exit 0 ;;
   status)
-    if [ "${FM_FAKE_STATUS_HANGS:-0}" = 1 ]; then exec sleep 60; fi
     n=$(( $(cat "${FM_FAKE_STATE:?}" 2>/dev/null || echo 0) + 1 ))
     echo "$n" > "$FM_FAKE_STATE"
+    if [ "${FM_FAKE_ALTERNATE:-0}" = 1 ]; then
+      [ $((n % 2)) -eq 0 ] && exec sleep 60
+      printf '{"server":{"running":false}}\n'
+      exit 0
+    fi
+    [ "${FM_FAKE_STATUS_HANGS:-0}" = 1 ] && exec sleep 60
     [ "$n" -le "${FM_FAKE_COLD_CALLS:-0}" ] && exit 1
     printf '{"server":{"running":true}}\n'
     exit 0
@@ -4600,6 +4609,29 @@ test_server_ensure_bails_on_repeated_bound_hits() {
   [ "$elapsed" -lt 15 ] || fail "repeated bound hits must cut the poll short; took ${elapsed}s"
   assert_contains "$(cat "$err")" "RPC bound" "the wedged-socket bail must name the bound it kept hitting"
   pass "fm_backend_herdr_server_ensure: consecutive RPC-bound hits bail out of a wedged socket instead of polling the whole budget (${elapsed}s)"
+}
+
+test_server_ensure_poll_stops_at_its_wall_clock_budget() {
+  local dir fb start rc elapsed err calls
+  dir="$TMP_ROOT/server-ensure-budget"; mkdir -p "$dir"; err="$dir/err"
+  fb=$(make_server_ensure_fakebin "$dir")
+  # The partially responsive server: a fast running=false between bound hits
+  # resets the consecutive-bound-hit counter, so that bail never fires and the
+  # attempt count alone would let this poll multiply the RPC bound across all
+  # 20 attempts - the very multiplication the bound exists to prevent, and a
+  # span that sits inside one gap between watcher beats. The poll's own
+  # wall-clock budget is what has to stop it.
+  start=$(date +%s)
+  PATH="$fb:$PATH" FM_FAKE_STATE="$dir/count" FM_FAKE_ALTERNATE=1 FM_BACKEND_HERDR_CLI_TIMEOUT=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure sess' "$ROOT" >/dev/null 2> "$err"
+  rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  calls=$(cat "$dir/count" 2>/dev/null || printf '0')
+  [ "$rc" -ne 0 ] || fail "a server that never reports running must fail server_ensure, got success"
+  [ "$calls" -lt 20 ] || fail "the poll budget must stop the loop before its attempt count is exhausted, made $calls status calls"
+  [ "$elapsed" -lt 20 ] || fail "the poll must end at its wall-clock budget plus one in-flight bound; took ${elapsed}s"
+  assert_contains "$(cat "$err")" "poll budget" "the give-up message must report the budget it actually applied"
+  pass "fm_backend_herdr_server_ensure: a wall-clock budget caps the whole poll when fast answers keep resetting the bound-hit bail (${elapsed}s, $calls status calls)"
 }
 
 # shellcheck source=bin/fm-backend.sh
@@ -4792,3 +4824,4 @@ test_events_capable_large_schema_is_pipe_noise_free
 test_wait_transition_hung_reader_bounded
 test_server_ensure_polls_through_cold_socket_failures
 test_server_ensure_bails_on_repeated_bound_hits
+test_server_ensure_poll_stops_at_its_wall_clock_budget

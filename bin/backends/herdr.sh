@@ -1504,10 +1504,21 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # NOT auto-start the server, so this must run before any workspace/tab/pane
 # call. Bounded poll for the server to report running.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i rc bound_hits=0
+  local session=$1 running out i rc bound_hits=0 poll_budget=10 start deadline elapsed
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
   ( fm_backend_herdr_cli_unbounded "$session" server >/dev/null 2>&1 & ) || return 1
+  # The poll's OWN ceiling, and the only one that holds for every mix of
+  # outcomes. The attempt count below bounds how many RPCs are tried, not how
+  # long they take, and the consecutive-bound-hit bail only fires on an
+  # unbroken run of them - so a server answering fast running=false between
+  # bound hits never trips either and would otherwise stretch this ensure
+  # toward the FM_GUARD_GRACE window that the RPC bound exists to stay inside.
+  # poll_budget is the pre-bound healthy polling budget; the RPC in flight when
+  # the deadline passes can add one more bound on top, which is the reported
+  # elapsed rather than a claim about the budget.
+  start=$(date +%s)
+  deadline=$((start + poll_budget))
   for i in $(seq 1 20); do
     # Only a status RPC that BURNED THE WHOLE RPC BOUND (fm_run_timed's rc 124)
     # is evidence of a wedged socket, and only those may cut the poll short:
@@ -1534,9 +1545,11 @@ fm_backend_herdr_server_ensure() {  # <session>
     else
       bound_hits=0
     fi
+    [ "$(date +%s)" -lt "$deadline" ] || break
     sleep 0.5
   done
-  echo "error: herdr server for session '$session' did not report running within 10s" >&2
+  elapsed=$(( $(date +%s) - start ))
+  echo "error: herdr server for session '$session' did not report running within its ${poll_budget}s poll budget (gave up after ${elapsed}s)" >&2
   return 1
 }
 
