@@ -123,6 +123,17 @@ prime_status_seen() {  # <state> <file>
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
 }
 
+# Give a watcher-recovery case something the handling drain genuinely owes the
+# captain, so it exercises resurfacing rather than an empty-fleet wake. The
+# primed seen marker keeps the ordinary signal path quiet, leaving the recovery
+# path as the only one that can surface it.
+seed_open_decision() {  # <state> <key>
+  local state=$1 key=$2
+  printf 'needs-decision [key=%s]: fixture is held for a decision\n' "$key" \
+    > "$state/held.status"
+  prime_status_seen "$state" "$state/held.status"
+}
+
 # Acknowledge a drain from its captured stderr (the WAKE_ACK_REQUIRED line).
 ack_drain_err() {  # <state> <stderr-file>
   local state=$1 err=$2 sequence generation

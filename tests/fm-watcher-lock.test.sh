@@ -427,6 +427,7 @@ test_watch_restart_rejects_reused_pid() {
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
   mark_pr_check_migration_complete "$state"
+  seed_open_decision "$state" reused-pid
   sleep 300 &
   live=$!
   mkdir "$state/.watch.lock"
@@ -659,6 +660,7 @@ test_arm_starts_and_self_heals() {
       printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
       printf '%s\n' "dead watcher identity" > "$state/.watch.lock/pid-identity"
       touch "$state/.last-watcher-beat"
+      seed_open_decision "$state" dead-pid-lock
     fi
     PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
     armpid=$!
