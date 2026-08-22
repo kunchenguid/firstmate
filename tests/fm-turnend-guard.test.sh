@@ -1888,6 +1888,56 @@ SH
   pass "fm-turnend-guard --claude: the cooperative wait is bounded by elapsed time, not by a pass count"
 }
 
+# The deadline can lapse in the gap between the loop's last evaluation and the
+# break that follows it - exactly when a loaded host's auto-arm is likeliest to
+# land its claim, since that is when the guard has spent the longest waiting.
+# The fm_timing_now_ms shim below stands in for that gap: its first call seeds
+# the deadline, and its second call - the deadline check right after the
+# loop's one and only evaluation - both reports the deadline already elapsed
+# AND publishes the claim as a side effect, so the claim exists only after the
+# loop has given up. Without the trailing re-check this fails: the loop breaks
+# having seen no claim, and the turn is force-blocked while recovery is
+# already under way.
+test_hook_claude_mode_trailing_check_catches_claim_published_at_deadline() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-trailing-check")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify the fixture claim publisher"
+  }
+  cat > "$dir/bin/fm-timing-lib.sh" <<SH
+#!/usr/bin/env bash
+set -u
+FM_TIMING_CALLS_FILE="$dir/timing-calls"
+: > "\$FM_TIMING_CALLS_FILE"
+fm_timing_now_ms() {
+  local n
+  n=\$(cat "\$FM_TIMING_CALLS_FILE" 2>/dev/null || printf '0')
+  n=\$((n + 1))
+  printf '%s\n' "\$n" > "\$FM_TIMING_CALLS_FILE"
+  if [ "\$n" -eq 2 ]; then
+    printf 'pid=%s\nidentity=%s\nstarted_at=%s\n' "$pid" "$identity" "\$(date +%s)" \
+      > "$dir/state/.claude-autoarm-claim"
+  fi
+  if [ "\$n" -ge 2 ]; then
+    printf '999999999\n'
+  else
+    printf '0\n'
+  fi
+}
+SH
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a claim published in the gap between the loop's last evaluation and its deadline break must still be seen by the trailing check"
+  [ -z "$out" ] || fail "--claude trailing-check allow produced output: $out"
+  pass "fm-turnend-guard --claude: the trailing check catches a claim published right at the deadline"
+}
+
 
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
@@ -1960,3 +2010,4 @@ test_hook_claude_mode_early_claim_is_the_whole_difference
 test_hook_claude_mode_claim_requires_live_matched_publisher
 test_hook_claude_mode_dead_arming_epoch_blocks
 test_hook_claude_mode_wait_is_bounded_by_elapsed_time
+test_hook_claude_mode_trailing_check_catches_claim_published_at_deadline
