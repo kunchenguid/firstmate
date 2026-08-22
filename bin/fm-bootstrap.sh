@@ -1616,7 +1616,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
       fm_timing_record phase fleet-sync "$__fm_timing_stamp"
     fi
   fi
-  if network_phase && forge_report_unsupported; then
+  if network_phase; then
     if network_sweep_authorized 'dead-secondmate relaunch'; then
       __fm_timing_stamp=$(fm_timing_now_ms)
       secondmate_liveness_sweep
