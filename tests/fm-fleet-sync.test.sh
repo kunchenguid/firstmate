@@ -499,6 +499,46 @@ test_unmerged_task_branch_is_left_alone() {
   pass "the backstop sweep leaves an unmerged/diverged fm/* branch untouched"
 }
 
+test_branch_update_between_proof_and_delete_is_left_alone() {
+  local home clone fakegit merged_tip unmerged_tip real_git
+  home=$(new_home)
+  clone=$(build_pair "$home" race)
+  ff_merge_task_branch "$clone" fm/task-race feature.txt merged
+  merged_tip=$(git -C "$clone" rev-parse fm/task-race)
+  git -C "$clone" checkout -q fm/task-race
+  commit_file "$clone" later.txt unmerged "concurrent unmerged update"
+  unmerged_tip=$(git -C "$clone" rev-parse fm/task-race)
+  git -C "$clone" checkout -q main
+  git -C "$clone" update-ref refs/heads/fm/task-race "$merged_tip"
+  fakegit="$home/fake-git"; mkdir -p "$fakegit"
+  real_git=$(command -v git)
+  cat > "$fakegit/git" <<'EOF'
+#!/bin/sh
+if [ "$1" = "-C" ] && [ "$2" = "$RACE_REPO" ] \
+  && [ "$3" = "merge-base" ] && [ "$4" = "--is-ancestor" ]; then
+  "$REAL_GIT" "$@"; status=$?
+  if [ "$status" -eq 0 ]; then
+    "$REAL_GIT" -C "$RACE_REPO" update-ref "refs/heads/$RACE_BRANCH" "$RACE_NEW_TIP"
+  fi
+  exit "$status"
+fi
+exec "$REAL_GIT" "$@"
+EOF
+  chmod +x "$fakegit/git"
+
+  PATH="$fakegit:$PATH" REAL_GIT="$real_git" RACE_REPO="$clone" \
+    RACE_BRANCH=fm/task-race RACE_NEW_TIP="$unmerged_tip" \
+    bash -c '. "$1"; fm_branch_delete_if_safely_merged "$2" fm/task-race refs/heads/main' \
+    bash "$ROOT/bin/fm-branch-merge-lib.sh" "$clone" \
+    && fail "concurrent-branch-update: deletion unexpectedly succeeded"
+
+  branch_exists "$clone" fm/task-race \
+    || fail "concurrent-branch-update: branch was deleted after its tip changed"
+  [ "$(git -C "$clone" rev-parse fm/task-race)" = "$unmerged_tip" ] \
+    || fail "concurrent-branch-update: updated unmerged tip was not preserved"
+  pass "a branch update between merged proof and deletion is left intact"
+}
+
 test_gone_unmerged_task_branch_is_left_alone() {
   local home clone remote out
   home=$(new_home)
@@ -815,6 +855,7 @@ test_no_origin_prunes_merged_task_branch
 test_detached_project_prunes_merged_task_branch
 test_merged_task_branch_requires_explicit_prune_authority
 test_unmerged_task_branch_is_left_alone
+test_branch_update_between_proof_and_delete_is_left_alone
 test_gone_unmerged_task_branch_is_left_alone
 test_checked_out_task_branch_is_left_alone
 test_prune_never_targets_the_default_branch
