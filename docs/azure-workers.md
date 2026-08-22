@@ -293,6 +293,8 @@ Every live read classifies each controller-owned slot into exactly one operator 
 
 The Azure adapter inventories only names in the reviewed resource group and separates same-name foreign owner or generation conflicts.
 It never adopts unrelated subscription resources.
+The monitor extension, bootstrap/execute Run Commands, and TTL schedule use their exact ARM resource IDs as identity; Azure `provisioningState` is mutable lifecycle state, not identity.
+Create, execute, and steer still require ready monitor/bootstrap children, while deallocation and exact cleanup tolerate Azure's ordinary post-deallocation state transition and retain the resource-ID, parent-VM, tag, script, and digest fences.
 A missing VM with retained task or account disks is always retained-for-investigation.
 It is never interpreted as a free slot and never triggers duplicate task execution.
 

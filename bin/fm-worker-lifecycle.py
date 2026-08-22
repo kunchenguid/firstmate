@@ -126,6 +126,9 @@ REQUIRED_RESOURCE_KINDS = (
     "task-command", "ttl-schedule", "global-reservation", "staging-request",
     "staging-result",
 )
+MUTABLE_PROVISIONING_CHILD_KINDS = frozenset({
+    "monitor-extension", "bootstrap-command", "task-command", "ttl-schedule",
+})
 REVIEWED_SKU_FAMILY = {
     "Standard_D4as_v6": "standardDav6Family",
     "Standard_D4as_v7": "StandardDasv7Family",
@@ -1172,14 +1175,17 @@ def resources_exact(worker, cloud, allow_missing_compute=False):
                 continue
             missing.append(kind)
             continue
-        # Task commands and staging request/result blobs are per-execution
-        # transport: every execute rewrites them and binds their content
-        # through the request and result digests, so their transport identity
-        # legitimately changes while every other kind stays immutable.
+        if prior is not None and current.get("id") != prior.get("id"):
+            return False, "{} resource ID changed".format(kind)
+        # Compute-child provisioningState changes during ordinary VM lifecycle
+        # transitions. Its stable ARM ID remains fenced above; the provider
+        # independently checks exact VM attachment, tags, and readiness where
+        # the requested operation needs a ready child.
         if (
             prior is not None
-            and kind not in ("task-command", "staging-request", "staging-result")
-            and resource_identity(current) != resource_identity(prior)
+            and kind not in MUTABLE_PROVISIONING_CHILD_KINDS
+            and kind not in ("staging-request", "staging-result")
+            and current.get("immutable_id") != prior.get("immutable_id")
         ):
             return False, "{} immutable identity changed".format(kind)
         tags = current.get("tags") or {}

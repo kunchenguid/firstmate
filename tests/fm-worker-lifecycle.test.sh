@@ -243,11 +243,25 @@ executed["resources"]["task-command"]["provisioning_state"] = "Failed"
 executed["resources"]["staging-request"]["immutable_id"] = "post-execute-etag"
 executed["resources"]["staging-result"]["immutable_id"] = "post-execute-etag-2"
 assert module.classify_worker(worker, executed)[0] == "assigned"
+# Azure legitimately changes child provisioning state after VM deallocation.
+# The exact ARM ID remains the identity; a mutable Succeeded -> Updating value
+# must not strand the worker as an identity mismatch.
+transitioned = copy.deepcopy(cloud)
+for kind in ("monitor-extension", "bootstrap-command", "ttl-schedule"):
+    transitioned["resources"][kind]["immutable_id"] = "Updating"
+transitioned["resources"]["monitor-extension"]["provisioning_state"] = "Updating"
+assert module.resources_exact(worker, transitioned)[0] is True
+foreign_child = copy.deepcopy(transitioned)
+foreign_child["resources"]["monitor-extension"]["id"] = "/foreign/monitor-extension"
+exact, reason = module.resources_exact(worker, foreign_child)
+assert exact is False and "monitor-extension resource ID changed" in reason, reason
 for kind in module.REQUIRED_RESOURCE_KINDS:
     changed = copy.deepcopy(cloud)
     changed["resources"][kind]["immutable_id"] = "foreign-" + kind
     classification = module.classify_worker(worker, changed)[0]
-    if kind in ("task-command", "staging-request", "staging-result"):
+    if kind in module.MUTABLE_PROVISIONING_CHILD_KINDS or kind in (
+        "staging-request", "staging-result",
+    ):
         assert classification == "assigned", (kind, classification)
     else:
         assert classification == "retained-for-investigation", (kind, classification)
@@ -468,6 +482,61 @@ action["resources"] = {
 }
 worker = {"slot": 1, "resources": resources}
 module.recorded_exact(action, worker)
+# Compute-child ARM IDs are stable across mutable provisioningState changes;
+# preserve compatibility with a live assignment recorded before this fix,
+# whose legacy immutable_id contains the old Succeeded value.
+for kind in module.MUTABLE_PROVISIONING_CHILD_KINDS:
+    succeeded = {
+        "id": resources[kind]["id"],
+        "properties": {"provisioningState": "Succeeded"},
+    }
+    updating = copy.deepcopy(succeeded)
+    updating["properties"]["provisioningState"] = "Updating"
+    assert module.immutable_id(kind, succeeded) == resources[kind]["id"]
+    assert module.immutable_id(kind, updating) == resources[kind]["id"]
+
+transitioned = copy.deepcopy(worker)
+transitioned["resources"]["monitor-extension"]["immutable_id"] = "Updating"
+transitioned["resources"]["monitor-extension"]["provisioning_state"] = "Updating"
+try:
+    module.recorded_exact(action, transitioned)
+except module.ProviderError as exc:
+    assert not isinstance(exc, module.ProviderIdentityRefusal), exc
+    assert "provisioning state" in str(exc), exc
+else:
+    raise AssertionError("ready-child admission accepted an Updating monitor extension")
+module.recorded_exact(action, transitioned, require_ready_children=False)
+foreign_child_tags = copy.deepcopy(transitioned)
+foreign_child_tags["resources"]["monitor-extension"]["tags"]["task-binding"] = "foreign"
+try:
+    module.recorded_exact(action, foreign_child_tags, require_ready_children=False)
+except module.ProviderError as exc:
+    assert "task-binding" in str(exc), exc
+else:
+    raise AssertionError("cleanup accepted foreign monitor-extension ownership tags")
+
+# The surrender cleanup shape is a deallocated exact VM whose monitor child
+# moved Succeeded -> Updating. Cleanup must proceed, while a foreign child ID
+# remains a permanent identity refusal.
+deallocated_transition = copy.deepcopy(transitioned)
+deallocated_transition["resources"]["vm"]["power_state"] = "VM deallocated"
+original_inventory = module.inventory
+module.inventory = lambda controller_arg, include_metrics=False: {
+    "workers": [deallocated_transition], "conflicts": [], "metrics": {},
+}
+assert module.mutate_deallocate(controller, action) == deallocated_transition
+foreign_transition = copy.deepcopy(deallocated_transition)
+foreign_transition["resources"]["monitor-extension"]["id"] = "/foreign/monitor-extension"
+module.inventory = lambda controller_arg, include_metrics=False: {
+    "workers": [foreign_transition], "conflicts": [], "metrics": {},
+}
+try:
+    module.mutate_deallocate(controller, action)
+except module.ProviderIdentityRefusal as exc:
+    assert "resource ID differs" in str(exc), exc
+else:
+    raise AssertionError("deallocate cleanup accepted a foreign monitor-extension ID")
+module.inventory = original_inventory
 # Ordinary provider failures stay on exit 2. If every ProviderError were
 # mislabeled as a permanent identity refusal, abandon-claim could clear a
 # transiently failed claim.
@@ -507,8 +576,11 @@ else:
 for kind in module.REQUIRED_RESOURCE_KINDS:
     changed = copy.deepcopy(worker)
     changed["resources"][kind]["immutable_id"] = "foreign"
-    if kind in ("task-command", "staging-request", "staging-result"):
-        # Execute transport rewrites on every run; only its path is fenced.
+    if kind in module.MUTABLE_PROVISIONING_CHILD_KINDS or kind in (
+        "staging-request", "staging-result",
+    ):
+        # Mutable child state and execute/blob transport identity are not an
+        # ownership fence; their exact resource path remains one.
         module.recorded_exact(action, changed)
         moved = copy.deepcopy(worker)
         moved["resources"][kind]["id"] = "/slot/1/elsewhere"

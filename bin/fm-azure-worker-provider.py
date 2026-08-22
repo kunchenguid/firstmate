@@ -251,6 +251,10 @@ REQUIRED_RESOURCE_KINDS = (
     "task-command", "ttl-schedule", "global-reservation", "staging-request",
     "staging-result",
 )
+MUTABLE_PROVISIONING_CHILD_KINDS = frozenset({
+    "monitor-extension", "bootstrap-command", "task-command", "ttl-schedule",
+})
+READY_CHILD_KINDS = frozenset({"monitor-extension", "bootstrap-command"})
 
 
 class ProviderError(RuntimeError):
@@ -424,8 +428,12 @@ def immutable_id(kind, value):
         return "{}|{}".format(principal, role) if principal and role else None
     if kind == "state-container":
         return value.get("etag") or properties.get("etag") or value.get("version")
-    if kind in ("monitor-extension", "bootstrap-command", "task-command", "ttl-schedule"):
-        return value.get("etag") or properties.get("provisioningState") or value.get("provisioningState")
+    if kind in MUTABLE_PROVISIONING_CHILD_KINDS:
+        # Azure mutates provisioningState during ordinary VM lifecycle
+        # transitions (including Succeeded -> Updating after deallocation).
+        # The child ARM ID is stable; attachment, tags, and readiness are
+        # validated independently by recorded_exact.
+        return value.get("id")
     if kind in ("global-reservation", "staging-request", "staging-result"):
         return value.get("etag") or properties.get("etag") or value.get("version")
     return None
@@ -1276,7 +1284,7 @@ def worker_by_slot(snapshot, slot):
 
 def recorded_exact(
     action, worker, allow_missing=(), allow_previous_cloud_generation=False,
-    skip_immutable=(),
+    skip_immutable=(), require_ready_children=True,
 ):
     if worker is None:
         raise ProviderError("exact worker slot is absent")
@@ -1298,13 +1306,14 @@ def recorded_exact(
                 raise ProviderIdentityRefusal(
                     "{} resource ID differs from the recorded assignment".format(kind)
                 )
-            # Task commands and staging request/result blobs are per-execution
-            # transport: every execute rewrites them under the same stable
-            # resource path and binds their content through the request and
-            # result digests, so only their path identity is fenced here.
+            # Compute-child provisioning state is mutable while each exact ARM
+            # path stays fixed. Task commands and staging request/result blobs
+            # also bind changing execution content through request/result
+            # digests, so their path identity is the ownership fence here.
             if (
                 kind not in skip_immutable
-                and kind not in ("task-command", "staging-request", "staging-result")
+                and kind not in MUTABLE_PROVISIONING_CHILD_KINDS
+                and kind not in ("staging-request", "staging-result")
                 and current.get("immutable_id") != prior.get("immutable_id")
             ):
                 raise ProviderIdentityRefusal(
@@ -1343,10 +1352,14 @@ def recorded_exact(
         str(ttl.get("status", "")).lower() != "enabled" or not ttl.get("deadline")
     ):
         raise ProviderError("worker TTL schedule is disabled or has no exact deadline")
-    for kind in ("bootstrap-command", "monitor-extension"):
-        child = resources.get(kind)
-        if child is not None and str(child.get("provisioning_state", "")).lower() != "succeeded":
-            raise ProviderError("{} provisioning state is not succeeded".format(kind))
+    if require_ready_children:
+        for kind in READY_CHILD_KINDS:
+            child = resources.get(kind)
+            if (
+                child is not None
+                and str(child.get("provisioning_state", "")).lower() != "succeeded"
+            ):
+                raise ProviderError("{} provisioning state is not succeeded".format(kind))
     return resources
 
 
@@ -2355,7 +2368,9 @@ def conditional_delete(controller, kind, resource):
 
 def mutate_deallocate(controller, action):
     snapshot = inventory(controller, include_metrics=False)
-    resources = recorded_exact(action, worker_by_slot(snapshot, action["slot"]))
+    resources = recorded_exact(
+        action, worker_by_slot(snapshot, action["slot"]), require_ready_children=False
+    )
     power = str(resources["vm"].get("power_state", "")).lower()
     if "deallocated" not in power:
         _, rc, stderr = az(controller, [
@@ -2365,7 +2380,7 @@ def mutate_deallocate(controller, action):
         if rc != 0:
             raise ProviderError("exact worker deallocation failed: {}".format(stderr))
     final = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
-    final_resources = recorded_exact(action, final)
+    final_resources = recorded_exact(action, final, require_ready_children=False)
     if "deallocated" not in str(final_resources["vm"].get("power_state", "")).lower():
         raise ProviderError("worker compute did not reach Azure deallocated state")
     return final
@@ -2382,7 +2397,7 @@ def mutate_delete_compute(controller, action):
         container, "compute-action", action["idempotency_key"]
     )
     if not marked:
-        resources = recorded_exact(action, worker)
+        resources = recorded_exact(action, worker, require_ready_children=False)
         if "deallocated" not in str(resources["vm"].get("power_state", "")).lower():
             raise ProviderError("compute deletion requires the exact deallocated worker")
         mark_cleanup_container(
@@ -2398,7 +2413,7 @@ def mutate_delete_compute(controller, action):
             "vm", "nic", "os-disk", "monitor-extension", "bootstrap-command", "task-command",
             "ttl-schedule",
         ),
-        skip_immutable=("state-container",),
+        skip_immutable=("state-container",), require_ready_children=False,
     )
     if resources.get("ttl-schedule") is None and resources.get("vm") is not None:
         raise ProviderError("TTL disappeared while the worker VM still exists")
@@ -2461,7 +2476,7 @@ def mutate_delete_compute(controller, action):
     # bound held for the worker's whole compute lifetime.
     recorded_exact(
         action, final, allow_missing=compute_kinds + ("ttl-schedule",),
-        skip_immutable=("state-container",),
+        skip_immutable=("state-container",), require_ready_children=False,
     )
     return final
 
@@ -2485,7 +2500,9 @@ def mutate_reset(controller, action):
             "vm", "nic", "os-disk", "monitor-extension", "bootstrap-command", "task-command",
             "ttl-schedule",
         )
-        resources = recorded_exact(action, worker, allow_missing=disposable)
+        resources = recorded_exact(
+            action, worker, allow_missing=disposable, require_ready_children=False
+        )
         if any(kind in resources for kind in disposable):
             raise ProviderError("reset refuses while disposable compute still exists")
         mark_cleanup_container(
@@ -2494,7 +2511,8 @@ def mutate_reset(controller, action):
         worker = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
     allow_missing = tuple(kind for kind in REQUIRED_RESOURCE_KINDS if kind != "state-container")
     resources = recorded_exact(
-        action, worker, allow_missing=allow_missing, skip_immutable=("state-container",)
+        action, worker, allow_missing=allow_missing, skip_immutable=("state-container",),
+        require_ready_children=False,
     )
     if any(kind in resources for kind in (
         "vm", "nic", "os-disk", "monitor-extension", "bootstrap-command", "task-command",
