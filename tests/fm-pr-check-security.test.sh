@@ -2886,15 +2886,22 @@ EOF
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
-  # The merge path still addresses GitHub only, so it refuses rather than
-  # sending a merge request to the wrong forge.
+  # The merge path addresses the forge the URL names, and never the other one.
+  # This fixture's glab answers with the field output the poll reads, so the
+  # merge's JSON read cannot be parsed, which must refuse rather than merge on a
+  # state it could not read.
   write_task_meta "$dir" task-c
+  : > "$dir/glab.log"
   set +e
   run_merge_entry "$dir" task-c "$url" >/dev/null 2>&1
   rc=$?
   set -e
-  [ "$rc" -eq 2 ] || fail "merge wrapper did not refuse a GitLab merge request URL"
+  [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
   [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
+  grep -qF "mr view 7 -R https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
+    || fail "merge wrapper did not read the merge request through glab at its own instance"
+  ! grep -qF ' mr merge ' "$dir/glab.log" \
+    || fail "merge wrapper merged despite an unreadable merge request state"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
