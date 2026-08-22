@@ -14,9 +14,10 @@
 #   2. A routine steer without the flag never closes anything, and a working:/
 #      done: line still cannot clear a captain decision.
 #   3. A key that is not open closes nothing and exits nonzero, while the answer
-#      itself is still delivered - and a mixed batch closes only its open keys.
-#      Cancelling the send used to drop the captain's answer entirely, which is
-#      the worse half of the same mis-state this flag exists to prevent.
+#      itself is still delivered - that nonzero is not "unsent" - and a mixed
+#      batch closes only its open keys. Cancelling the send used to drop the
+#      captain's answer entirely, which is the worse half of the same mis-state
+#      this flag exists to prevent.
 #   3b. Whatever key the drain PRINTS is a key fm-send ACCEPTS: the printed close
 #      commands are replayed verbatim, never retyped, for the inline-marker
 #      form, the keyless fallback, and a note carrying key-shaped prose.
@@ -270,6 +271,12 @@ test_not_open_key_still_delivers_but_closes_nothing() {
   assert_contains "$(cat "$err")" "--resolve-key 'mistyped'" "the diagnostic should name the bad key"
   assert_contains "$(cat "$err")" "Do not resend the answer" \
     "the diagnostic should say the answer already landed"
+  assert_contains "$(cat "$err")" "the answer was delivered" \
+    "the diagnostic should say the answer already landed, not that the send failed"
+  assert_not_contains "$(cat "$err")" "nothing may be assumed delivered" \
+    "a delivered unmatched-key must not be described as undelivered"
+  assert_not_contains "$(cat "$err")" "not sent" \
+    "a delivered unmatched-key must not be treated as unsent"
   assert_contains "$(cat "$log")" "the answer" "the answer itself should still reach the worker"
   if grep -F 'resolved' "$home/state/t4.status" >/dev/null; then
     fail "an unmatched key still closed something: $(cat "$home/state/t4.status")"

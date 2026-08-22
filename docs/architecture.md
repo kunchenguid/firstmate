@@ -50,7 +50,7 @@ This home's answerer close, pending-reply escalation close, and captain-held tra
 A turn-ended-only queue row omits its historical status annotation when that status file exactly matches the same seen marker.
 Any direct or remaining historical annotation prints every status line unread at the presentation cursor instead of replaying only the latest line.
 Because that closure is keyed, the listing and the send must agree on the key: the section renders the key the fold decided, including the shared `default` bucket a keyless line opens, beside the exact command that closes it, so it can never advertise a key that would close nothing.
-An answer naming a key that is not open is still delivered and simply closes nothing, exiting nonzero: an open decision re-surfaces on the next presentation, whereas cancelling the send would lose the answer itself.
+An answer naming a key that is not open is still delivered and simply closes nothing, exiting nonzero: that nonzero is a ledger mismatch, not an undelivered send, and `bin/fm-send.sh`'s header owns the exit-status contract.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.

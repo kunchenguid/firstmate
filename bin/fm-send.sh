@@ -20,14 +20,12 @@
 # 3 = the text was typed into the live endpoint and Enter was sent, but the
 # submit read-back stayed unconfirmed (verify the pane before any resend, and
 # never re-type blindly; a marked request's pending-reply expectation stays
-# armed because this outcome is not a proven failure); any other nonzero = the
-# send failed and nothing may be assumed delivered, UNLESS its stderr says the
-# text WAS delivered and not to resend. A bookkeeping step that runs only after
-# the submit is confirmed - the pending-reply delivery commit, and the
-# answerer-closes close (a closing append that failed, or a named key that was
-# not open) - can still fail on its own, and those paths exit nonzero to report
-# that the ledger is not in the expected state, never to invite a resend of an
-# answer that already landed. Reconcile the named record; do not re-send.
+# armed because this outcome is not a proven failure); a nonzero whose stderr
+# says the text was delivered and not to resend = a post-delivery bookkeeping
+# step failed after the submit was confirmed (the pending-reply delivery commit,
+# a failed closing append, or a named --resolve-key that was not open) - the
+# answer already landed, so reconcile the named record and do not resend; any
+# other nonzero = the send failed and nothing may be assumed delivered.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).

@@ -128,6 +128,31 @@ test_unslug_task_id_gets_a_pointer_not_a_command() {
   pass "a task id outside the plain-slug charset gets a pointer instead of a runnable command"
 }
 
+# A leading dash is a legal filename character, but fm-send treats `-foo` as a
+# flag, so the advertised close command would send nothing and leave the
+# decision open. Treat it like any other unpasteable id.
+test_leading_dash_task_id_gets_a_pointer_not_a_command() {
+  local dir state out
+  dir=$(make_case leading-dash-id)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'needs-decision [key=real]: a normal task\n' > "$state/normal.status"
+  printf 'needs-decision [key=dash]: a leading-dash task id\n' > "$state/-foo.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with a leading-dash status filename"
+
+  grep -F "close it: bin/fm-send.sh normal --resolve-key real '<answer>'" "$out" >/dev/null \
+    || fail "the ordinary task lost its close command: $(cat "$out")"
+  grep -F 'a leading-dash task id' "$out" >/dev/null \
+    || fail "the leading-dash decision was dropped instead of listed: $(cat "$out")"
+  if grep -F 'close it: bin/fm-send.sh -foo' "$out" >/dev/null; then
+    fail "a leading-dash task id was pasted into a runnable command: $(cat "$out")"
+  fi
+  grep -F 'its id is not a plain slug' "$out" >/dev/null \
+    || fail "the leading-dash decision did not explain why it has no command: $(cat "$out")"
+  pass "a leading-dash task id gets a pointer instead of a runnable command"
+}
+
 # The section's global byte budget now pays for each entry's close command as
 # well as its note, and the two are charged together on purpose: at the cap
 # boundary an entry must be dropped whole rather than listed with no way to
@@ -346,6 +371,7 @@ test_buried_decision_still_surfaces
 test_printed_key_and_command_agree_for_every_key_form
 test_over_long_decision_note_is_capped_with_a_marker
 test_unslug_task_id_gets_a_pointer_not_a_command
+test_leading_dash_task_id_gets_a_pointer_not_a_command
 test_global_cap_never_lists_a_decision_without_its_command
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it

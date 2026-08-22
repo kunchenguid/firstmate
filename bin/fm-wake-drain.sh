@@ -163,10 +163,11 @@ print_open_decisions_section() {
     # and both operands are bounded already (a task id and a slug-charset key).
     # The key is slug-charset by the fold's own check, but the task id is just a
     # state-dir filename, and this line is printed to be RUN: an id outside the
-    # plain-slug charset gets a pointer instead of a command rather than a
-    # string an agent would paste into a shell.
+    # plain-slug charset, or one that starts with a dash (fm-send would parse it
+    # as a flag), gets a pointer instead of a command rather than a string an
+    # agent would paste into a shell.
     case "$task" in
-      *[!A-Za-z0-9._-]*)
+      -*|*[!A-Za-z0-9._-]*)
         cmd="  close it: answer that task with bin/fm-send.sh --resolve-key $key (its id is not a plain slug; check $STATE)"
         ;;
       *) cmd="  close it: bin/fm-send.sh $task --resolve-key $key '<answer>'" ;;
