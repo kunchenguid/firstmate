@@ -33,8 +33,11 @@
 # selects jj bookmarks for jj-managed projects when the jj/jjhouse tooling is
 # installed (a jj-managed project without that tooling refuses to scaffold: its
 # AGENTS.md forbids raw git writes, so no branch command this host could emit
-# would be runnable and the token must never mandate one); the delivery mode
-# itself is never read from it here - the explicit --mode is authoritative:
+# would be runnable and the token must never mandate one; the generated brief
+# also makes the worker verify the tooling in its own environment, which may
+# not inherit this host's PATH, and report `blocked:` if it is missing); the
+# delivery mode itself is never read from it here - the explicit --mode is
+# authoritative:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
@@ -427,7 +430,11 @@ DOD=${DOD%$'\n'}
 # A jj-managed project without that tooling cannot be worked on from this host
 # at all: `jj bookmark create` would fail and the git fallback would violate
 # the project's raw-git-write ban, so the scaffold refuses instead of emitting
-# a mandatory first action the worker cannot run.
+# a mandatory first action the worker cannot run. The scaffold PATH check is a
+# fast-fail only, not the whole gate: the worker runs in a daemon-owned pane
+# that does not inherit this PATH, so the generated branch step makes the
+# worker verify jj/jjhouse in its own environment and report a `blocked:`
+# status if either is missing there.
 JJ_MANAGED=0
 if [ -f "$DATA/projects.md" ]; then
   # The token is read only from the documented registry line format: the mode
@@ -450,7 +457,7 @@ if [ -f "$DATA/projects.md" ]; then
 fi
 if [ "$JJ_MANAGED" = 1 ]; then
   if command -v jj >/dev/null 2>&1 && command -v jjhouse >/dev/null 2>&1; then
-    BRANCH_STEP="1. First action: create your branch. This repo is jj-managed (its AGENTS.md forbids raw git write commands): run \`jj bookmark create fm/$ID\`."
+    BRANCH_STEP="1. First action: create your branch. This repo is jj-managed (its AGENTS.md forbids raw git write commands): first verify the jj tooling exists in YOUR environment, not just firstmate's - run \`command -v jj && command -v jjhouse\`; if either is missing, append \`blocked: jj tooling missing in worker environment\` to the status file and stop; if both are present, run \`jj bookmark create fm/$ID\`."
   else
     echo "error: $REPO is registered jj-managed in data/projects.md but jj/jjhouse is not on PATH; a jj-managed project forbids raw git writes, so there is no branch step this host can run - provision jjhouse here or remove the jj token, then re-scaffold" >&2
     exit 1

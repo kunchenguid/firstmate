@@ -312,6 +312,10 @@ EOF
     "jj-token project brief did not scaffold the jj bookmark step"
   assert_no_grep 'git checkout -b fm/brief-jj-a9' "$brief" \
     "jj-token project brief still scaffolds the git branch step"
+  assert_grep 'command -v jj && command -v jjhouse' "$brief" \
+    "jj-token brief does not make the worker verify the jj tooling in its own environment"
+  assert_grep 'blocked: jj tooling missing in worker environment' "$brief" \
+    "jj-token brief does not give the worker a blocked path when the jj tooling is missing in the worker env"
 
   FM_HOME="$home" FM_DATA_OVERRIDE="$data" PATH="$toolbin" \
     "$ROOT/bin/fm-brief.sh" brief-git-b9 git-proj --mode no-mistakes >/dev/null 2>&1 \
@@ -321,6 +325,8 @@ EOF
     "project without the jj token did not keep the git branch step"
   assert_no_grep 'jj bookmark create fm/brief-git-b9' "$brief" \
     "project without the jj token got the jj bookmark step"
+  assert_no_grep 'command -v jj' "$brief" \
+    "git-managed brief carries the worker-side jj tooling check it should not need"
 
   # A relocated data dir (FM_DATA_OVERRIDE) is where the token is read from;
   # a home whose default-location registry has no jj token must not flip it.
@@ -376,6 +382,7 @@ test_jj_scan_ignores_legacy_description_brackets() {
   mkdir -p "$data"
   cat > "$data/projects.md" <<'EOF'
 - legacy-proj - uses [custom] jj workflows in the description (added 2026-07-01)
+- v2legacy-proj - handles [v2] jj migration (added 2026-07-01)
 - bracketed-proj [no-mistakes] - fixture with [note] jj text (added 2026-07-01)
 EOF
   FM_HOME="$home" FM_DATA_OVERRIDE="$data" PATH="$toolbin" \
@@ -386,6 +393,15 @@ EOF
     "legacy row without a mode bracket was misread as jj-managed"
   assert_no_grep 'jj bookmark create fm/brief-legacy-e1' "$brief" \
     "legacy description bracket text flipped the branch step to jj"
+
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" PATH="$toolbin" \
+    "$ROOT/bin/fm-brief.sh" brief-v2legacy-f3 v2legacy-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "legacy [v2] jj row brief should scaffold"
+  brief="$data/brief-v2legacy-f3/brief.md"
+  assert_grep 'git checkout -b fm/brief-v2legacy-f3' "$brief" \
+    "legacy [v2] jj description row was misread as jj-managed"
+  assert_no_grep 'jj bookmark create fm/brief-v2legacy-f3' "$brief" \
+    "legacy [v2] jj description row flipped the branch step to jj"
 
   FM_HOME="$home" FM_DATA_OVERRIDE="$data" PATH="$toolbin" \
     "$ROOT/bin/fm-brief.sh" brief-bracket-e2 bracketed-proj --mode no-mistakes >/dev/null 2>&1 \

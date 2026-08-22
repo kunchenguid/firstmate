@@ -36,7 +36,9 @@
 #   emitted mode/yolo are unaffected. fm-brief.sh honours the token only when
 #   the jj/jjhouse tooling is on PATH, else it refuses the scaffold: a jj-managed
 #   project without that tooling has no runnable branch step (its AGENTS.md
-#   forbids the raw-git fallback), so no brief is emitted.
+#   forbids the raw-git fallback), so no brief is emitted. The generated brief
+#   also makes the worker verify the tooling in its own environment and report
+#   `blocked:` if it is missing there (mechanics in bin/fm-brief.sh).
 #
 # --raw prints the registered annotation unmapped, so a caller that must tell a
 # conditional policy apart from a flat mode sees "no-mistakes-prod-only" itself.
