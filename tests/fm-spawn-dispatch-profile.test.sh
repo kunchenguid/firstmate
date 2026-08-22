@@ -856,8 +856,8 @@ test_launch_refuses_replaced_validated_brief_target() {
   pass "spawn refuses a substituted brief snapshot before side effects"
 }
 
-test_late_commit_failure_keeps_receipt_retryable() {
-  local rec id out status marker routing_brief_count routing_brief
+test_late_commit_failure_burns_generation_and_requires_fresh_receipt() {
+  local rec id out status marker pending fresh_pending consumed_count routing_brief_count routing_brief
   id=profile-late-commit-retry-z12b5
   rec=$(make_spawn_case profile-late-commit-retry claude "$id")
   read_case_record "$rec"
@@ -873,14 +873,30 @@ test_late_commit_failure_keeps_receipt_retryable() {
   out=$(FM_TEST_ROUTING_PRESERVE=1 FM_TEST_FAIL_RECEIPT_LINK_MARKER="$marker" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "retry after late receipt publication failure should succeed"
+  expect_code 1 "$status" "a late publication failure must burn the consumed receipt generation"
+  assert_contains "$out" "ROUTING_DECISION PERSISTENCE_REFUSED: CONSUMED_GENERATION:" \
+    "same-generation retry lacked its replay refusal diagnostic"
+  assert_spawn_refused_before_side_effects "$HOME_DIR" "$id" "$LAUNCH_LOG"
+
+  pending="$HOME_DIR/data/$id/routing-decision.pending.json"
+  fresh_pending="$pending.fresh"
+  jq '.rationale = "fresh retry after burned generation"' "$pending" > "$fresh_pending" \
+    || fail "could not author a fresh receipt generation for the retry counterexample"
+  mv "$fresh_pending" "$pending" \
+    || fail "could not publish the fresh receipt generation for the retry counterexample"
+  out=$(FM_TEST_ROUTING_PRESERVE=1 FM_TEST_FAIL_RECEIPT_LINK_MARKER="$marker" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a fresh receipt should allow retry after late publication failure"
+  consumed_count=$(sort -u "$HOME_DIR/data/$id/routing-generations.consumed" | wc -l | tr -d ' ')
+  [ "$consumed_count" -eq 2 ] || fail "late commit retry recorded $consumed_count consumed generations instead of the burned and fresh generations"
   routing_brief_count=$(find "$HOME_DIR/data/$id" -maxdepth 1 -type d -name 'routing-generation.*' | wc -l | tr -d ' ')
-  [ "$routing_brief_count" -eq 1 ] || fail "late commit retry left $routing_brief_count durable brief links"
+  [ "$routing_brief_count" -eq 1 ] || fail "late commit retry left $routing_brief_count published receipt generations instead of only the fresh generation"
   routing_brief=$(sed -n 's/^routing_brief=//p' "$HOME_DIR/state/$id.meta")
   assert_present "$routing_brief" "late commit retry left its durable brief link orphaned"
   assert_present "$(fm_test_routing_decision_path "$HOME_DIR" "$id")" \
     "late commit retry did not publish the routing receipt"
-  pass "late commit failure leaves a retryable receipt and adoptable brief"
+  pass "late commit failure burns its generation and a fresh receipt can retry"
 }
 
 test_raw_launches_refuse_unobserved_runtime_selection() {
@@ -1438,7 +1454,7 @@ test_muse_credential_preflight_keeps_receipt_retryable
 test_duplicate_spawn_preserves_active_routing_provenance
 test_launch_uses_validated_brief_snapshot_after_source_replacement
 test_launch_refuses_replaced_validated_brief_target
-test_late_commit_failure_keeps_receipt_retryable
+test_late_commit_failure_burns_generation_and_requires_fresh_receipt
 test_raw_launches_refuse_unobserved_runtime_selection
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
