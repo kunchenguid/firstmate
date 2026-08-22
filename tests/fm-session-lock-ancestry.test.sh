@@ -36,9 +36,13 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 
 # Run one library expression with <fakebin> shadowing ps. kill is stubbed so
 # liveness questions are decided by the process table alone.
+# These cases describe the POSIX branch, so they pin it rather than inheriting
+# whatever host runs the suite: on Windows the library reads the Win32 process
+# tree and would ignore the fake ps entirely, and the failure would look like a
+# broken classifier instead of a test asking the wrong branch a question.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
-  PATH="$fakebin:$PATH" bash -c "
+  PATH="$fakebin:$PATH" FM_PROC_PLATFORM_OVERRIDE=posix bash -c "
     . \"\$0\"
     kill() { return 0; }
     $expr
@@ -220,6 +224,178 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# --- Windows layer: the same identity question over the Win32 process tree ---
+#
+# Windows answers none of the questions the POSIX branch asks. The bundled ps
+# has no -o, and MSYS reports PPid 1 for every shell a native harness started,
+# so the walk reads the real Win32 tree instead. These cases drive that branch
+# from any host through its documented seams, because the platform it describes
+# cannot be reached from CI at all.
+
+# win_fake_powershell <fakebin> <table-file>: stand in for the Win32 process
+# table query. The real one shells out to PowerShell; this prints rows.
+win_fake_powershell() {  # <fakebin> <table-file>
+  local fakebin=$1 table=$2
+  cat > "$fakebin/powershell.exe" <<SH
+#!/usr/bin/env bash
+cat "$table"
+SH
+  chmod +x "$fakebin/powershell.exe"
+}
+
+# win_proc_root <dir> <msys-pid:winpid:msys-ppid>...: build the files MSYS
+# publishes for its own processes, which is where the true parent link lives.
+win_proc_root() {  # <dir> <spec>...
+  local root=$1 spec msys winpid parent
+  shift
+  mkdir -p "$root"
+  for spec in "$@"; do
+    IFS=: read -r msys winpid parent <<EOF
+$spec
+EOF
+    mkdir -p "$root/$msys"
+    printf '%s\n' "$winpid" > "$root/$msys/winpid"
+    printf '%s\n' "$parent" > "$root/$msys/ppid"
+  done
+  printf '%s\n' "$root"
+}
+
+# Run one library expression on the Windows branch, with <self> as the starting
+# WINPID and <proc-root> as the MSYS view.
+win_eval() {  # <fakebin> <self-winpid> <proc-root> <expression>
+  local fakebin=$1 self=$2 proc_root=$3 expr=$4
+  PATH="$fakebin:$PATH" \
+  FM_PROC_PLATFORM_OVERRIDE=windows \
+  FM_PROC_SELF_PID_OVERRIDE="$self" \
+  FM_PROC_MSYS_PROC_ROOT="$proc_root" \
+    bash -c ". \"\$0\"; $expr" "$LIB"
+}
+
+test_windows_walk_crosses_the_msys_exec_boundary() {
+  local dir fakebin table proc_root empty_root got
+  dir="$TMP_ROOT/win-msys-boundary"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # WINPID 1000 is this shell. Its RECORDED Win32 parent is 9999, which is
+  # absent from the table: MSYS has no execve, so it starts a fresh process and
+  # ends the old one, leaving every exec'd child pointing at a corpse. The
+  # living link - 1000's MSYS parent is 1100 - is the one that reaches the
+  # harness. Above 1100 the emulation stops and Windows is right again.
+  table="$dir/table"
+  cat > "$table" <<'ROWS'
+1000	9999	300	C:\Program Files\Git\usr\bin\bash.exe	bash session-start
+1100	1200	200	C:\Program Files\Git\bin\bash.exe	bash -c fm
+1200	1300	100	C:\Users\u\.local\bin\claude.exe	claude --resume
+1300	0	50	C:\windows\System32\WindowsPowerShell\v1.0\powershell.exe	powershell
+ROWS
+  win_fake_powershell "$fakebin" "$table"
+  proc_root=$(win_proc_root "$dir/proc" 10:1000:11 11:1100:1)
+
+  got=$(win_eval "$fakebin" 1000 "$proc_root" 'fm_harness_ancestry_pid') \
+    || fail "the walk never reached the harness across the MSYS exec boundary"
+  [ "$got" = 1200 ] \
+    || fail "ancestry resolved '$got', expected the claude.exe WINPID 1200"
+
+  # The divergence itself: without the MSYS link the walk follows the recorded
+  # Win32 parent into a process that no longer exists and finds nothing. If this
+  # ever starts passing, the case above has stopped proving anything.
+  empty_root="$dir/proc-empty"
+  mkdir -p "$empty_root"
+  if win_eval "$fakebin" 1000 "$empty_root" 'fm_harness_ancestry_pid' >/dev/null 2>&1; then
+    fail "the walk found a harness without the MSYS link, so this fixture no longer exercises the boundary"
+  fi
+  pass "session-lock windows: the walk crosses MSYS's exec boundary to reach the native harness"
+}
+
+test_windows_walk_refuses_a_parent_that_starts_after_its_child() {
+  local dir fakebin table proc_root got
+  dir="$TMP_ROOT/win-recycled-parent"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/proc"
+  proc_root="$dir/proc"
+
+  # Windows reuses process ids, and a ParentProcessId is only the number
+  # recorded at creation. Once that parent exits the number can name a
+  # stranger - and if the stranger is a harness, the walk would hand this
+  # home's lock to an unrelated session. A real parent cannot start after its
+  # own child, so that ordering is what catches it.
+  table="$dir/table"
+  cat > "$table" <<'ROWS'
+2000	2100	100	C:\Program Files\Git\usr\bin\bash.exe	bash
+2100	0	500	C:\Users\u\.local\bin\claude.exe	claude --resume
+ROWS
+  win_fake_powershell "$fakebin" "$table"
+  if win_eval "$fakebin" 2000 "$proc_root" 'fm_harness_ancestry_pid' >/dev/null 2>&1; then
+    fail "the walk climbed into a claimed parent that started after its own child"
+  fi
+
+  # And the divergence: the SAME shape with a possible start time does resolve,
+  # so the refusal above is the ordering check and not a broken fixture.
+  cat > "$table" <<'ROWS'
+2000	2100	100	C:\Program Files\Git\usr\bin\bash.exe	bash
+2100	0	50	C:\Users\u\.local\bin\claude.exe	claude --resume
+ROWS
+  got=$(win_eval "$fakebin" 2000 "$proc_root" 'fm_harness_ancestry_pid') \
+    || fail "a parent that plausibly precedes its child was rejected too"
+  [ "$got" = 2100 ] || fail "ancestry resolved '$got', expected 2100"
+  pass "session-lock windows: a parent that starts after its child is refused as a recycled id"
+}
+
+test_windows_liveness_reads_the_win32_table() {
+  local dir fakebin table proc_root
+  dir="$TMP_ROOT/win-liveness"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/proc"
+  proc_root="$dir/proc"
+
+  # The lock records a WINPID, which is not a pid `kill -0` can ask about, so
+  # presence in the Win32 table is what existence means here. These ids do not
+  # exist on the host running this test, which is the point: a POSIX liveness
+  # check would call the harness dead and let a live session's home be stolen.
+  table="$dir/table"
+  cat > "$table" <<'ROWS'
+3000	0	100	C:\Program Files\Git\usr\bin\bash.exe	bash
+3100	0	100	C:\Users\u\.local\bin\claude.exe	claude --resume
+ROWS
+  win_fake_powershell "$fakebin" "$table"
+
+  win_eval "$fakebin" 3000 "$proc_root" 'fm_harness_pid_alive 3100' \
+    || fail "a harness present in the Win32 table was reported dead"
+  if win_eval "$fakebin" 3000 "$proc_root" 'fm_harness_pid_alive 3000'; then
+    fail "an ordinary shell was accepted as a live harness lock owner"
+  fi
+  if win_eval "$fakebin" 3000 "$proc_root" 'fm_harness_pid_alive 4242'; then
+    fail "a pid absent from the Win32 table was reported alive"
+  fi
+  pass "session-lock windows: harness liveness is decided by the Win32 table, not by kill"
+}
+
+test_windows_unreadable_process_table_never_resolves_an_owner() {
+  local dir fakebin proc_root
+  dir="$TMP_ROOT/win-no-table"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/proc"
+  proc_root="$dir/proc"
+
+  # No table means the question was not answered, which must never be reported
+  # as "no competing session": that reading would let two sessions each take
+  # the home. The absent-powershell case is the same answer by another route.
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/powershell.exe"
+  if win_eval "$fakebin" 5000 "$proc_root" 'fm_harness_ancestry_pid' >/dev/null 2>&1; then
+    fail "an ancestry was resolved from a process table that could not be read"
+  fi
+  printf '5000\n' > "$dir/state/.lock"
+  if win_eval "$fakebin" 5000 "$proc_root" "fm_session_lock_owned_by_self '$dir/state'" 2>/dev/null; then
+    fail "lock ownership was claimed while the process table was unreadable"
+  fi
+  pass "session-lock windows: an unreadable process table resolves no owner and claims no lock"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +536,10 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_windows_walk_crosses_the_msys_exec_boundary
+test_windows_walk_refuses_a_parent_that_starts_after_its_child
+test_windows_liveness_reads_the_win32_table
+test_windows_unreadable_process_table_never_resolves_an_owner
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

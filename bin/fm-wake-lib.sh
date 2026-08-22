@@ -403,6 +403,22 @@ fm_lock_claim() {
   return 0
 }
 
+# Say once, per shell, why a lock can never be taken here.
+#
+# Refusing the claim is the correct outcome when the platform cannot make a
+# symlink, but every caller of fm_lock_acquire_wait then waits for a lock that
+# can never be granted. Without this the whole fleet simply stops with no
+# output at all. The condition is narrow on purpose: an ordinary lost race
+# leaves an existing lock behind and says nothing.
+FM_LOCK_SYMLINK_UNSUPPORTED_REPORTED=0
+fm_lock_report_unsupported_symlink() {
+  local lockdir=$1
+  [ "$FM_LOCK_SYMLINK_UNSUPPORTED_REPORTED" -eq 0 ] || return 0
+  [ -e "$lockdir" ] && [ ! -L "$lockdir" ] || return 0
+  FM_LOCK_SYMLINK_UNSUPPORTED_REPORTED=1
+  echo "fm-lock: this filesystem or platform will not create a symbolic link, so $lockdir cannot be claimed and every wait for it will block forever. On Windows this means Developer Mode is off: enable it (Settings > System > For developers), then start a new session." >&2
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
@@ -415,7 +431,14 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  # MSYS is inert everywhere else and decides, on Windows, whether ln -s makes a
+  # real symlink. Git Bash's default quietly substitutes a COPY of the target
+  # and still exits 0, which would turn this compare-and-swap into two sessions
+  # each holding their own private directory and each believing it won.
+  # nativestrict makes it refuse instead, and the verification below is what
+  # turns any such substitution into a lost race rather than a granted lock.
+  if MSYS="winsymlinks:nativestrict" ln -s "$ownerdir" "$lockdir" 2>/dev/null \
+    && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0
@@ -424,6 +447,7 @@ fm_lock_try_create() {
       rm -f "$lockdir" 2>/dev/null || true
     fi
   else
+    fm_lock_report_unsupported_symlink "$lockdir"
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
   fi
   fm_lock_discard_owner "$ownerdir"

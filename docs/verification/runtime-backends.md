@@ -914,3 +914,95 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 ```sh
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
+
+## Windows host (MSYS and Git Bash)
+
+Audience: maintainer verification.
+
+The session lock's identity walk and every `fm_lock_*` claim depend on host facts that differ from POSIX.
+These were verified on 2026-08-21 on Windows 11 build 26200 with Git for Windows bash (`MINGW64_NT-10.0-26200`) and bash 5.3.15.
+`docs/configuration.md` and `bin/fm-session-lock-lib.sh` own the resulting behavior; this record is the evidence for why that behavior exists.
+
+### The emulated process view answers neither identity question
+
+```sh
+uname -s
+ps -o comm= -p $$
+grep '^PPid' /proc/$$/status
+```
+
+Observed output:
+
+```text
+MINGW64_NT-10.0-26200
+ps: unknown option -- o
+PPid:	1
+```
+
+The bundled `ps` has no `-o`, so the POSIX ancestry walk cannot read a command, argument string, or parent at all.
+A shell the harness started natively is reported with `PPid: 1`, because MSYS tracks parentage only between its own processes.
+Both together mean the POSIX branch can never locate a harness on this host, and a session start that trusted it stays read-only forever.
+
+### MSYS has no execve, so a recorded Win32 parent is routinely dead
+
+MSYS implements exec by starting a fresh Windows process and ending the old one.
+A child launched from a shell therefore records a Windows parent that has already exited, while its MSYS parent is still correct.
+
+```sh
+echo "shell msys pid: $$"
+bash -c 'echo "child msys ppid: $(cat /proc/$$/ppid)"; w=$(cat /proc/$$/winpid); \
+  p=$(powershell.exe -NoProfile -NonInteractive -Command "(Get-CimInstance Win32_Process -Filter \"ProcessId=$w\").ParentProcessId" | tr -d "\r "); \
+  echo "child winpid: $w  recorded win32 parent: $p"; \
+  powershell.exe -NoProfile -NonInteractive -Command "if (Get-CimInstance Win32_Process -Filter \"ProcessId=$p\") {(...)} else {\"win32 parent GONE\"}" | tr -d "\r"'
+```
+
+Observed output:
+
+```text
+shell msys pid: 51725
+child msys ppid: 51725
+child winpid: 36148  recorded win32 parent: 23472
+win32 parent GONE
+```
+
+This is why the walk prefers the MSYS parent link where one exists and falls back to the Win32 link only at the outermost MSYS process, which is the hop a native harness actually started.
+Trusting the Win32 link alone ends the ancestry one hop above the caller; trusting the MSYS link alone never leaves the emulation and never reaches the harness.
+
+### Windows reuses process ids, so a parent link needs a second signal
+
+A `ParentProcessId` is only the number recorded when the child was created, and Windows may reassign it after that parent exits.
+The walk therefore refuses any hop whose claimed parent started after its own child, which no real parent can do.
+`tests/fm-session-lock-ancestry.test.sh` pins that refusal, and pins that the same shape with a possible start time still resolves, so the case cannot go vacuous.
+
+### Lock claims require real symlinks, which are off by default
+
+Every `fm_lock_*` claim is an atomic `ln -s`.
+Git Bash's default substitutes a directory copy and still exits 0, which would let two sessions each hold their own private directory and each believe it won the race.
+
+```sh
+ln -s owner link; [ -L link ] && echo symlink || echo "plain directory"
+MSYS="winsymlinks:nativestrict" ln -s owner link2
+```
+
+Observed output before Windows Developer Mode was enabled:
+
+```text
+plain directory
+ln: failed to create symbolic link 'link2': Operation not permitted
+```
+
+With Developer Mode enabled the same `nativestrict` call creates a real symlink and the claim verification passes.
+`fm_lock_try_create` requests `nativestrict` and verifies the result with `readlink`, so a substituted copy is a lost race rather than a granted lock.
+`git config core.symlinks` must also be `true` for this repo's own tracked symlink to check out as a link rather than a text file.
+
+### Session start needs a larger time budget here
+
+Every external command costs roughly ten times what it does on Linux, because process creation is emulated.
+Detect-only bootstrap measured 82s against the default 120s `FM_SESSION_START_TIMEOUT`, and the digest truncated intermittently.
+Individual tool version probes measured 0.9s to 3.2s each.
+Raising `FM_SESSION_START_TIMEOUT` lets the digest complete; the cost is the tools' own startup, not firstmate's work.
+
+### Pinned ShellCheck is not installable by the bundled helper
+
+`bin/fm-install-shellcheck.sh` supports linux and darwin only, so it refuses on this host.
+The pinned version is published for Windows as `shellcheck-v0.11.0.zip` on the upstream release, and `bin/fm-lint.sh` accepts that binary once it is on PATH.

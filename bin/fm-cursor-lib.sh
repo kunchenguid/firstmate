@@ -224,7 +224,10 @@ fm_cursor_process_matches() {  # <comm> <args> [argv0]
   local comm=$1 argv0=${3:-} base
   [ -n "$comm" ] || [ -n "$argv0" ] || return 1
   argv0=${argv0:-$comm}
-  base=$(basename -- "$comm")
+  # Builtin rather than basename: the session-lock ancestry walk reaches this
+  # for every hop that is not already a harness, on every turn end, and a fork
+  # here costs real time under MSYS's emulated process creation.
+  base=${comm##*/}
   base=${base#-}
   case "$base" in
     cursor-agent) return 0 ;;
