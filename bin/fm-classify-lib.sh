@@ -464,22 +464,35 @@ EOF
 # without re-walking the fold itself. A thin directory scan only - the fold
 # above remains the ONE place the open/resolved semantics are decided. Prints
 # one "<task>\t<key>\t<verb>\t<note>" line per open decision, in glob (task id)
-# order; prints nothing when none are open.
+# order; prints nothing when none are open. Returns NONZERO when a status file
+# could not be read, because an unread file is unknown, not empty: callers that
+# treat no output as proof there is nothing open (the watcher's recovery gate)
+# must be able to tell the two apart, and silence about a real open decision is
+# the one failure this fold exists to prevent.
 # Each file is pre-filtered by FM_DECISION_OPENING_VERB_RE first: the whole-file
 # fold costs several forks per status LINE, so a fleet-wide walk over long logs
 # is expensive, while one grep per FILE proves most of them cannot hold an open
 # decision at all. The grep is a strictly read-only test and skips only files
-# the fold would have returned nothing for, so the output is unchanged. The
-# symlink rejection status_open_decisions applies is repeated ahead of it so the
-# pre-filter never reads through one either.
+# the fold would have returned nothing for, so the output is unchanged. Only
+# grep's "no match" (exit 1) is that proof; any other exit is a read failure and
+# propagates. The symlink rejection status_open_decisions applies is repeated
+# ahead of it so the pre-filter never reads through one either, and the plain
+# file test is repeated for the same reason - the fold ignores anything else, so
+# reading one is neither a match nor a failure worth reporting.
 scan_open_decisions() {  # <state>
-  local state=$1 f task open line
+  local state=$1 f task open line filtered
   for f in "$state"/*.status; do
-    [ -e "$f" ] || continue
+    [ -f "$f" ] || continue
     [ ! -L "$f" ] || continue
-    grep -qE "$FM_DECISION_OPENING_VERB_RE" "$f" 2>/dev/null || continue
+    filtered=0
+    grep -qE "$FM_DECISION_OPENING_VERB_RE" "$f" 2>/dev/null || filtered=$?
+    case "$filtered" in
+      0) ;;
+      1) continue ;;
+      *) return 1 ;;
+    esac
     task=$(basename "$f"); task="${task%.status}"
-    open=$(status_open_decisions "$f") || continue
+    open=$(status_open_decisions "$f") || return 1
     [ -n "$open" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue

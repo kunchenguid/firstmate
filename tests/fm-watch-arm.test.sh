@@ -894,6 +894,44 @@ test_recovery_still_surfaces_every_presentable_source() {
   pass "watch-arm: downtime still resurfaces a queued wake, an open decision, and an unread note"
 }
 
+# A status file the watcher cannot READ is unknown, not empty. The presentable
+# test scans every status file to decide whether an episode may be retired, so a
+# read failure that answers "nothing open" would let a still-open decision be
+# retired unseen - the one loss this gate must never take. An unreadable file
+# still has a stat-visible signature, so the ordinary signal path is primed
+# quiet here too and the recovery path is the only route left.
+test_unreadable_status_file_is_not_proof_of_an_empty_fleet() {
+  local dir home state fakebin
+  dir=$(make_case recovery-source-unreadable-status)
+  home="$dir/home"; state="$dir/state"; fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  seed_open_decision "$state" unreadable-signoff
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
+  is_live_non_zombie "$ARM_PID" || fail "unreadable-status fixture watcher did not stay live"
+  close_live_watcher "$state"
+  chmod 000 "$state/held.status" || fail "could not make the seeded decision unreadable"
+  [ ! -r "$state/held.status" ] \
+    || fail "this account can still read a 000 status file, so the case proves nothing"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "unreadable-status fixture queued a wake, so it proves nothing"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/recovery-arm.out"
+  wait_for_exit "$ARM_PID" 80 \
+    || fail "an unreadable status file was read as an empty fleet and stayed silent"
+  grep -F 'check: rearm-resurface' "$dir/recovery-arm.out" >/dev/null \
+    || fail "a status file that could not be read retired the episode: $(cat "$dir/recovery-arm.out")"
+
+  # The hidden work was real: once the file is readable again the same episode
+  # presents the decision the silent path would have thrown away.
+  chmod 600 "$state/held.status" || fail "could not restore the seeded decision"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2>/dev/null \
+    || fail "unreadable-status recovery drain failed"
+  grep -F 'held [key=unreadable-signoff] needs-decision:' "$dir/drain.out" >/dev/null \
+    || fail "the resurfaced recovery did not present the decision the read failure hid"
+
+  pass "watch-arm: a status file that cannot be read never retires a recovery episode"
+}
+
 # The reported symptom: with the fleet fully torn down, every re-arm delivered
 # "check: rearm-resurface" and every handling turn found nothing. Each re-arm
 # closes the previous watcher, which republishes downtime, so a watcher that
@@ -1009,6 +1047,7 @@ test_reclaimed_stale_lock_obeys_the_presentable_test() {
 }
 
 test_recovery_still_surfaces_every_presentable_source
+test_unreadable_status_file_is_not_proof_of_an_empty_fleet
 test_empty_fleet_recovery_stays_silent_across_rearms
 test_reclaimed_stale_lock_obeys_the_presentable_test
 test_attached_arm_reports_the_delivered_wake
