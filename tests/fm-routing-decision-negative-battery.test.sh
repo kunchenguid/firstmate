@@ -11,6 +11,20 @@ REAL_JQ=$(command -v jq)
 POST_BINDING_RECEIPT_FILTER=
 POST_SNAPSHOT_SOURCE_FILTER=
 POST_SNAPSHOT_CONFIG_FILTER=
+POST_FINAL_DIRECTORY=0
+
+chmod() {
+  local target=${!#}
+  command chmod "$@" || return 1
+  if [ "$POST_FINAL_DIRECTORY" -eq 1 ]; then
+    case "$target" in
+      */routing-decision.pending.json)
+        mkdir "$TASK_DIR/routing-decision.json" || return 1
+        POST_FINAL_DIRECTORY=0
+        ;;
+    esac
+  fi
+}
 
 # One authority guard is defense in depth against the receipt changing after
 # its exact configuration binding is checked.
@@ -150,6 +164,7 @@ write_fixture() {
   POST_BINDING_RECEIPT_FILTER=
   POST_SNAPSHOT_SOURCE_FILTER=
   POST_SNAPSHOT_CONFIG_FILTER=
+  POST_FINAL_DIRECTORY=0
 }
 
 update_receipt() {
@@ -297,6 +312,16 @@ setup_raw_single_nonascii() { setup_raw_literal $'claude --model \'mod\303\250le
 setup_raw_double_nonascii() { setup_raw_literal $'claude --model "mod\303\250le" --effort high'; }
 setup_raw_flag_shape() { setup_raw_literal "$RAW_SHAPE_COMMAND"; }
 setup_raw_terminator() { setup_raw_literal 'claude -- --model opus --effort high'; }
+setup_raw_reserved_placeholder() {
+  RUN_MODEL=__BRIEF__
+  setup_raw_literal 'claude --model __BRIEF__ --effort high'
+  update_receipt '.model = "__BRIEF__"
+    | .candidates_considered[0].model = "__BRIEF__"
+    | .launch_binding.model = "__BRIEF__"'
+}
+setup_raw_cross_harness_codex_config() {
+  setup_raw_literal 'claude --model opus -c model_reasoning_effort=high'
+}
 setup_raw_no_executable() { setup_raw_literal '--model opus --effort high'; }
 setup_raw_harness_contradiction() { setup_raw_literal 'codex --model opus --effort high'; }
 setup_raw_model_contradiction() { setup_raw_literal 'claude --model sonnet --effort high'; }
@@ -334,6 +359,10 @@ setup_final_symlink() {
   PREEXISTING_FINAL=1
   printf '{}\n' > "$TASK_DIR/attacker-target.json"
   ln -s "$TASK_DIR/attacker-target.json" "$TASK_DIR/routing-decision.json"
+}
+setup_final_directory_after_check() {
+  PREEXISTING_FINAL=1
+  POST_FINAL_DIRECTORY=1
 }
 setup_truncated_receipt() { printf '{"schema_version":1' > "$TASK_DIR/routing-decision.pending.json"; }
 setup_config_byte_mutation() { printf '\n' >> "$HOME_DIR/config/crew-dispatch.json"; }
@@ -618,15 +647,19 @@ effort next value is a flag|claude --model opus --effort --flag|effort flag has 
 effort equals duplicate|claude --model opus --effort high --effort=low|effort flag is duplicated
 effort equals empty|claude --model opus --effort=|effort flag has no fixed literal value
 config missing value|claude --model opus -c|config flag has no fixed literal value
-config effort duplicate|claude --model opus --effort high -c model_reasoning_effort=low|effort flag is duplicated
-config effort empty|claude --model opus -c model_reasoning_effort=|effort config has no fixed literal value
-equals config effort duplicate|claude --model opus --effort high -c=model_reasoning_effort=low|effort flag is duplicated
-equals config effort empty|claude --model opus -c=model_reasoning_effort=|effort config has no fixed literal value
+config effort duplicate|codex --model opus --effort high -c model_reasoning_effort=low|effort flag is duplicated
+config effort empty|codex --model opus -c model_reasoning_effort=|effort config has no fixed literal value
+equals config effort duplicate|codex --model opus --effort high -c=model_reasoning_effort=low|effort flag is duplicated
+equals config effort empty|codex --model opus -c=model_reasoning_effort=|effort config has no fixed literal value
 command wrapper env|env ROUTE_MODEL=sonnet claude --model opus --effort high|raw launch begins with a command wrapper rather than the emitted harness
 RAW_SHAPES
 
 exercise_negative "raw option terminator" RAW_LAUNCH_UNRESOLVED setup_raw_terminator \
   "raw launches must expose fixed literal model and effort selections"
+exercise_negative "raw reserved placeholder" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_reserved_placeholder \
+  "raw launch contains a reserved template placeholder expanded after receipt validation"
+exercise_negative "raw cross-harness codex config" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_cross_harness_codex_config \
+  "model_reasoning_effort config is only verifiable for the codex harness"
 
 exercise_negative "42 raw launch without executable" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_no_executable \
   "launch has no executable harness word"
@@ -671,6 +704,8 @@ exercise_negative "60 rule source with post-binding kind drift" DISPATCH_CONFIG_
   "rule source requires canonical dispatch configuration"
 exercise_negative "61 pending receipt replaced after snapshot" PERSISTENCE_REFUSED setup_pending_replaced_after_snapshot \
   "pending receipt changed after its validation snapshot"
+exercise_negative "62 final directory raced after target check" PERSISTENCE_REFUSED setup_final_directory_after_check \
+  "validated receipt was not published as the exact regular-file target"
 
 write_fixture
 expected_config_hash=$(jq -r '.dispatch_config.sha256' "$TASK_DIR/routing-decision.pending.json")
@@ -682,7 +717,7 @@ run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement
   || fail "canonical config replacement counterexample did not fire"
 pass "canonical config replacement cannot change snapshotted candidate resolution"
 
-expected_count=$((83 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((86 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

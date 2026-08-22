@@ -150,6 +150,14 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
   FM_ROUTING_COMMAND_EFFORT=
   FM_ROUTING_COMMAND_MODEL_SEEN=0
   FM_ROUTING_COMMAND_EFFORT_SEEN=0
+  if [ "$raw" -eq 1 ]; then
+    case "$input" in
+      *'__MODELFLAG__'*|*'__EFFORTFLAG__'*|*'__BRIEF__'*|*'__TURNEND__'*|*'__PIEXT__'*|*'__PITURNEND__'*|*'__PIWATCH__'*|*'__OPINPUT__'*|*'__WORKTREE__'*|*'__PIBIN__'*|*'__PITUIMODE__'*|*'__CURSORBIN__'*|*'__KIMIBIN__'*|*'__MUSEBIN__'*|*'__MUSECONFIG__'*|*'__MUSEDATA__'*)
+        fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch contains a reserved template placeholder expanded after receipt validation"
+        return 1
+        ;;
+    esac
+  fi
   fm_routing_literal_words "$input" "$raw" || {
     fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
     return 1
@@ -249,6 +257,10 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
         value=${FM_ROUTING_WORDS[$i]}
         case "$value" in
           model_reasoning_effort=*)
+            [ "$FM_ROUTING_COMMAND_HARNESS" = codex ] || {
+              fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "model_reasoning_effort config is only verifiable for the codex harness"
+              return 1
+            }
             [ "$FM_ROUTING_COMMAND_EFFORT_SEEN" -eq 0 ] || {
               fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag is duplicated"
               return 1
@@ -267,6 +279,10 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
         esac
         ;;
       -c=model_reasoning_effort=*)
+        [ "$FM_ROUTING_COMMAND_HARNESS" = codex ] || {
+          fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "model_reasoning_effort config is only verifiable for the codex harness"
+          return 1
+        }
         [ "$FM_ROUTING_COMMAND_EFFORT_SEEN" -eq 0 ] || {
           fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "effort flag is duplicated"
           return 1
@@ -689,6 +705,18 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
     fm_routing_refuse "PERSISTENCE_REFUSED" "validated receipt could not be persisted atomically"
     return 1
   }
+  if [ ! -f "$final" ] || [ -L "$final" ] || ! cmp -s "$final" "$consumed_pending"; then
+    if [ -f "$final/$(basename "$pending")" ] \
+      && [ ! -L "$final/$(basename "$pending")" ] \
+      && cmp -s "$final/$(basename "$pending")" "$consumed_pending"; then
+      rm -f -- "$final/$(basename "$pending")"
+    fi
+    if [ ! -e "$source_pending" ] && [ ! -L "$source_pending" ]; then
+      mv -- "$consumed_pending" "$source_pending" 2>/dev/null || true
+    fi
+    fm_routing_refuse "PERSISTENCE_REFUSED" "validated receipt was not published as the exact regular-file target"
+    return 1
+  fi
   rm -f -- "$consumed_pending"
   # shellcheck disable=SC2034 # consumed by the sourcing fm-spawn.sh process
   FM_ROUTING_DECISION_FINAL=$final

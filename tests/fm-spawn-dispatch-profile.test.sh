@@ -597,7 +597,7 @@ test_raw_launches_refuse_unobserved_runtime_selection() {
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
 
-  for id in "$dynamic" "$env_prefix" "$nonstandard" "$unresolved"; do
+  for id in "$dynamic" "$env_prefix" "$env_wrapper" "$terminator" "$nonstandard" "$unresolved"; do
     # shellcheck disable=SC2016 # This fixture must preserve the unresolved variable literally.
     case "$id" in
       "$dynamic") command='claude --model "$ROUTE_MODEL" --effort high'; predicate=RAW_LAUNCH_NOT_VERIFIABLE ;;
