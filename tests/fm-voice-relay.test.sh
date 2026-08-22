@@ -1513,8 +1513,11 @@ check(cut_record["relay_error"],
       "a dropped connection must be reported in the turn record rather than "
       "leaving it indistinguishable from a turn nobody answered: %r"
       % cut_record)
-check("connection" in cut_record["relay_error"],
-      "and it should say the connection went: %r" % cut_record["relay_error"])
+check("the connection was lost before this turn was answered"
+      in cut_record["relay_error"],
+      "and it should say the connection went before this turn had its answer, "
+      "which is the half of that fault this case is: %r"
+      % cut_record["relay_error"])
 
 # The other moment a connection can go is BETWEEN two turns, during the seconds
 # the client spends letting the previous answer finish. That wait is most of a
@@ -1777,21 +1780,29 @@ class ScriptedStream:
     """Serves prepared downlink bytes, held until the turn under test has opened.
 
     One class for every case below, because each of them differs only in the bytes
-    it serves: the gate, the slicing and the exhaustion behaviour are the same
-    everywhere, and an empty script is what an end of stream at a frame boundary
-    looks like. The label is per case so a fixture that never fires still names
-    which case it belonged to.
+    it serves: the gate and the slicing are the same everywhere, and an empty
+    script is what an end of stream at a frame boundary looks like. The label is
+    per case so a fixture that never fires still names which case it belonged to.
+
+    What happens once the script is spent is the one thing a case may choose, and
+    the default is the clean end of stream every case but one wants. at_end takes
+    a callable for the case that needs the other shape a dropped link has, a reset
+    rather than a close, which reaches the client as a raised error instead of an
+    empty read.
     """
 
-    def __init__(self, gate, payload, label):
+    def __init__(self, gate, payload, label, at_end=None):
         self._gate = gate
         self._bytes = payload
         self._label = label
+        self._at_end = at_end
         self._at = 0
 
     def read(self, count):
         check(self._gate.wait(10),
               "the turn never opened, so %s was never served" % self._label)
+        if self._at >= len(self._bytes) and self._at_end is not None:
+            self._at_end()
         chunk = self._bytes[self._at:self._at + count]
         self._at += len(chunk)
         return chunk
@@ -1925,14 +1936,14 @@ SOME_REPLY = frame.encode(frame.AUDIO, b"\x00\x00" * 1200)
 SESSION_ENDED = frame.encode_json(frame.NOTICE, {"event": "session-ended"})
 
 
-def turn_cut(label, payload, out_name):
+def turn_cut(label, payload, out_name, at_end=None):
     """Take one turn, at the default run count, against a scripted downlink."""
     gate = thread_lib.Event()
     cut = wire_client(
         ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
          "--out-file", os.path.join(TMP, out_name),
          "--timeout", "2", "--audio-idle", "0.05"],
-        ScriptedStream(gate, payload, label), StartGate(gate))
+        ScriptedStream(gate, payload, label, at_end), StartGate(gate))
     out, said = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(said):
         code = cut.run()
@@ -1989,6 +2000,45 @@ for label, payload, subject in (
           "%s: a record naming a fault must not exit 0, even at the default of "
           "one run and even though the turn was answered, got %r"
           % (label, partial_code))
+
+# THE FOURTH SUBJECT, and the one a real captain is likeliest to meet. The three
+# above all reach the client as an orderly end: a close, a goodbye frame, or a
+# notice. A dropped SSH link is a reset instead, which arrives as a raised error
+# from the read rather than as anything the far end chose to send, and that is a
+# separate path in the downlink from all three. It has to tell the same two halves
+# apart, because the fault is no different from the captain's side.
+#
+# Its never-played half is the cut-header case far above, which pins the other
+# wording, so this is the half that was missing.
+
+
+def a_reset():
+    raise OSError(104, "Connection reset by peer")
+
+
+reset, _, reset_code = turn_cut(
+    "reset, part of a reply played", SOME_REPLY, "reply-partial-reset.pcm",
+    at_end=a_reset)
+check(reset["answered"] and reset["reply_audio_seconds"] > 0,
+      "a reset after some of the reply played still reached the captain, so the "
+      "turn was answered: %r" % reset)
+check(reset["first_audio_s"] is not None,
+      "and when it reached them is a real measurement, not a null: %r" % reset)
+check(reset["relay_error"].startswith(
+          "the connection was lost before the reply finished"),
+      "a reply cut short by a reset must say the reply did not finish, the same "
+      "as one cut short by a close: %r" % reset["relay_error"])
+check("before this turn was answered" not in reset["relay_error"],
+      "and must not claim nothing arrived, which its own answered field "
+      "contradicts: %r" % reset["relay_error"])
+# The clause is what the reader acts on and the detail is what tells a reset from
+# a header cut in half, so neither may be lost to the other.
+check("Connection reset by peer" in reset["relay_error"],
+      "and must still carry what the kernel said, which is the only thing that "
+      "tells a reset from a truncated frame: %r" % reset["relay_error"])
+check(reset_code != 0,
+      "a record naming a fault must not exit 0, even at the default of one run "
+      "and even though the turn was answered, got %r" % reset_code)
 
 # THE OTHER SIDE OF THE SAME LINE, and the complement of the answered case further
 # up this block. Those cases are faults that landed while the turn was still owed

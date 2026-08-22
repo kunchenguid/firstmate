@@ -153,7 +153,7 @@ the timings for each turn as JSON on stdout and everything human on stderr, so
 above.
 
 Every record carries `relay_error`, which is null when nothing broke and otherwise names what did.
-It tells the two mid-turn failures apart, because they are not the same fault: a turn that got no reply audio at all says the connection ended, or the relay stopped, or the session ended, before that turn was answered, while a turn whose answer had already started playing says the same thing happened before the reply finished.
+It tells the two mid-turn failures apart, because they are not the same fault: a turn that got no reply audio at all says the connection ended, or was lost, or the relay stopped, or the session ended, before that turn was answered, while a turn whose answer had already started playing says the same thing happened before the reply finished.
 The second still reads `answered: true`, because sound did reach you and `first_audio_s` is a real measurement of when.
 
 The exit code is non-zero if any turn went unanswered, if any record carries a `relay_error`, or if the session stopped before it had taken the runs you asked for.

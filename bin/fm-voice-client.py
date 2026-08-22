@@ -831,7 +831,9 @@ class Client:
                 with self.lock:
                     if not self.reply_done.is_set():
                         self.turn.setdefault(
-                            "failed", "the connection was lost: {}".format(exc))
+                            "failed", "{}: {}".format(
+                                self._unfinished("the connection was lost"),
+                                exc))
                     self.closed_because = "the connection was lost"
                     self.closed.set()
                 break
