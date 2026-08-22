@@ -858,6 +858,56 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+test_per_file_isolation() {
+  local tmp fakebin log fixture_a fixture_b out rc invocations max_args
+  tmp=$(fm_test_tmproot fm-lint-per-file)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck-invocations.log"
+  : > "$log"
+
+  # ShellCheck stub that logs the count of root arguments per invocation.
+  # The per-file fix calls shellcheck once per root; the old code called it
+  # once with ALL roots, so this test fails against pre-fix code.
+  cat > "$fakebin/shellcheck" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+# Skip --norc --external-sources --
+shift 3
+printf '%s\n' "\$#" >> "$log"
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+
+  fixture_a="$tmp/a.sh"
+  fixture_b="$tmp/b.sh"
+  cat > "$fixture_a" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  cat > "$fixture_b" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 "$LINT" "$fixture_a" "$fixture_b" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "per-file isolation lint failed (exit $rc)"$'\n'"$out"
+
+  invocations=$(wc -l < "$log" | tr -d '[:space:]')
+  [ "$invocations" -ge 2 ] \
+    || fail "expected at least 2 ShellCheck invocations (one per root), got $invocations"
+
+  # Each invocation must receive exactly 1 root, not all roots at once.
+  max_args=$(sort -rn "$log" | head -1)
+  [ "$max_args" -eq 1 ] \
+    || fail "ShellCheck received $max_args roots in one invocation; per-file isolation requires 1"
+
+  pass "workers invoke ShellCheck one file at a time for per-file memory isolation"
+}
+
 test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
@@ -873,6 +923,7 @@ test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
 test_seeded_module_boundary_parity
+test_per_file_isolation
 test_changed_mode_lints_only_the_changed_file
 test_ci_forces_full_lint_even_with_empty_diff
 test_main_branch_forces_full_lint

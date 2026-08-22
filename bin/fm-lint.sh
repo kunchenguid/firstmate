@@ -25,9 +25,16 @@
 # given paths, matching the same config, without the workflow YAML check.
 #
 # Canonical lint defaults to two bounded workers over two stable logical shards.
-# Each shard writes separate diagnostics, and the parent replays those outputs in
-# deterministic shard and root order after every worker finishes. FM_LINT_JOBS=1
-# runs the same shards serially with byte-identical diagnostics and exit selection.
+# Each worker runs ShellCheck one file at a time to bound peak RSS to the worst
+# single file rather than the sum of every file in the shard.  The parent
+# replays per-file outputs in deterministic shard and manifest order after every
+# worker finishes.  FM_LINT_JOBS=1 runs the same shards serially with
+# byte-identical diagnostics and exit selection.
+#
+# On Linux, each ShellCheck invocation inherits a virtual-memory ceiling
+# (FM_LINT_RSS_LIMIT_KIB, default 8 GiB) so a pathological source graph fails
+# the lint rather than starving the machine.  macOS ignores ulimit -v, so the
+# per-file isolation is the primary protection there.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
@@ -67,17 +74,23 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
     roots+=("$path")
   done < "$manifest"
   output="$output_dir/shard.$shard_index"
+  : > "$output.out"
   if [ "${#roots[@]}" -gt 0 ]; then
     trap 'fm_lint_worker_stop; exit 129' HUP
     trap 'fm_lint_worker_stop; exit 130' INT
     trap 'fm_lint_worker_stop; exit 143' TERM
-    "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${roots[@]}" > "$output.out" 2>&1 &
-    FM_LINT_WORKER_SHELLCHECK_PID=$!
-    wait "$FM_LINT_WORKER_SHELLCHECK_PID" || rc=$?
-    FM_LINT_WORKER_SHELLCHECK_PID=
+    local file_rc
+    for path in "${roots[@]}"; do
+      file_rc=0
+      "$FM_LINT_SHELLCHECK" --norc --external-sources -- "$path" >> "$output.out" 2>&1 &
+      FM_LINT_WORKER_SHELLCHECK_PID=$!
+      wait "$FM_LINT_WORKER_SHELLCHECK_PID" || file_rc=$?
+      FM_LINT_WORKER_SHELLCHECK_PID=
+      if [ "$rc" -eq 0 ] && [ "$file_rc" -ne 0 ]; then
+        rc=$file_rc
+      fi
+    done
     trap - HUP INT TERM
-  else
-    : > "$output.out"
   fi
   printf '%s\n' "$rc" > "$output.rc"
   return "$rc"
@@ -90,6 +103,12 @@ if [ "${1:-}" = "--internal-worker" ]; then
     exit 2
   }
   [ "$#" -eq 4 ] && [ -n "${FM_LINT_SHELLCHECK:-}" ] || exit 2
+  # On Linux, apply a virtual-memory ceiling so a pathological source graph
+  # kills the lint rather than the machine.  macOS ignores ulimit -v.
+  if [ "$(uname)" != Darwin ] && [ -n "${FM_LINT_RSS_LIMIT_KIB:-}" ] \
+    && [ "${FM_LINT_RSS_LIMIT_KIB:-0}" -ne 0 ] 2>/dev/null; then
+    ulimit -v "$FM_LINT_RSS_LIMIT_KIB" 2>/dev/null || true
+  fi
   fm_lint_worker "$2" "$3" "$4"
   exit $?
 fi
@@ -100,7 +119,7 @@ if [ "${1:-}" = "--required-version" ]; then
 fi
 
 fm_lint_usage() {
-  sed -n '2,42{s/^# \{0,1\}//;p;}' "$SELF"
+  sed -n '2,49{s/^# \{0,1\}//;p;}' "$SELF"
 }
 
 # Default no-args lint also validates GitHub workflows. Explicit paths stay a
@@ -112,6 +131,12 @@ fm_lint_run_workflows() {
 
 JOBS=${FM_LINT_JOBS:-2}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
+# Default 8 GiB virtual-memory ceiling per ShellCheck process (Linux only).
+# Virtual address space can be significantly larger than RSS, so the ceiling
+# is generous; per-file execution is the primary bound on peak memory.
+# Override with FM_LINT_RSS_LIMIT_KIB=0 to disable, or a custom value in KiB.
+FM_LINT_RSS_LIMIT_KIB=${FM_LINT_RSS_LIMIT_KIB:-8388608}
+export FM_LINT_RSS_LIMIT_KIB
 LIST_FILES=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
