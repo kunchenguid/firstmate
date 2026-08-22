@@ -1901,6 +1901,22 @@ if [ "$KIND" = ship ]; then
   fi
 fi
 
+# Ordinary ship/scout briefs carry the load-bearing task text at both the
+# opening # Task block and the closing # Load-bearing contract bookend so it
+# stays visible at both structural boundaries. A half-filled or divergent pair
+# would let a stale copy dominate the intended task and hard constraints, so
+# refuse it here, before any endpoint or task state is created. A secondmate
+# charter is not an ordinary brief and is left to secondmate-provisioning.
+# fm-brief.sh --validate-bookends is the single owner of the check; it no-ops a
+# charter so this gate only acts on ordinary ship/scout briefs.
+if [ "$KIND" != secondmate ] && { [ "$KIND" != scout ] || ! grep -qx 'Access contract: access=reader' "$BRIEF"; }; then
+  VB_ERR=$("$FM_ROOT/bin/fm-brief.sh" --validate-bookends "$BRIEF" 2>&1) || {
+    printf '%s\n' "$VB_ERR" >&2
+    echo "error: $ID brief failed the load-bearing bookend check; fill both standalone {TASK} slots from one input (bin/fm-brief.sh <task-id> --fill <text-file>) before launch" >&2
+    exit 1
+  }
+fi
+
 # Brief/spawn access agreement, checked before any endpoint exists (the exact
 # analog of the ship delivery-contract check above). fm-brief.sh records a
 # reader scout brief's axis as exactly one fixed "Access contract:

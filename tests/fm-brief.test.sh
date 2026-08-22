@@ -42,6 +42,216 @@ test_crewmate_brief_explains_session_lock_scope() {
   pass "fm-brief: ship and scout briefs explain that fleet lock refusal does not make workers read-only"
 }
 
+test_ordinary_briefs_state_slice_contracts() {
+  local kind id brief section_file line_count charter
+  for kind in ship scout; do
+    id="brief-slice-contracts-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 \
+        || fail "fm-brief.sh failed to generate the $kind slice-contract brief"
+    else
+      FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1 \
+        || fail "fm-brief.sh failed to generate the $kind slice-contract brief"
+    fi
+    brief="$BRIEF_HOME/data/$id/brief.md"
+    assert_grep '# Rules' "$brief" "$kind brief is missing its Rules section"
+    section_file="$TMP_ROOT/$kind-rules-section"
+    awk '/^# Rules$/ {seen=1; next} seen && /^# / {exit} seen {print}' "$brief" > "$section_file"
+    assert_grep '- Specify the exact verification command and the observable passing result.' "$section_file" \
+      "$kind brief omitted the exact verification oracle contract from Rules"
+    assert_grep '- Never weaken, skip, delete, or rewrite a test or guard to make a gate pass; adapt the implementation instead.' "$section_file" \
+      "$kind brief omitted the never-edit-scorer contract from Rules"
+    assert_grep '- Deliver one independently reviewable outcome; route each distinct outcome as a separate task.' "$section_file" \
+      "$kind brief omitted the one-slice contract from Rules"
+    assert_grep '- Write the specification so it reads top to bottom without link-chasing for instructions.' "$section_file" \
+      "$kind brief omitted the linear-spec contract from Rules"
+    line_count=$(grep -Ec '^- (Specify the exact|Never weaken,|Deliver one|Write the specification)' "$section_file")
+    [ "$line_count" -eq 4 ] || fail "$kind brief generated $line_count slice-contract lines in Rules instead of four"
+    awk '/^- (Specify the exact|Never weaken,|Deliver one|Write the specification)/ && length($0) > 140 {exit 1}' "$section_file" \
+      || fail "$kind brief Rules section contains an overlong slice-contract line"
+  done
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-slice-contracts-secondmate --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh failed to generate the secondmate slice-contract fixture"
+  charter="$BRIEF_HOME/data/brief-slice-contracts-secondmate/brief.md"
+  assert_no_grep 'Specify the exact verification command' "$charter" \
+    "secondmate charter must not receive ordinary-task verification guidance"
+  assert_no_grep 'Never weaken, skip, delete, or rewrite a test or guard' "$charter" \
+    "secondmate charter must not receive ordinary-task guard guidance"
+  assert_no_grep 'Deliver one independently reviewable outcome' "$charter" \
+    "secondmate charter must not receive ordinary-task slice guidance"
+  assert_no_grep 'Write the specification so it reads top to bottom' "$charter" \
+    "secondmate charter must not receive ordinary-task specification guidance"
+  pass "fm-brief: ship and scout briefs state four short Rules-section slice contracts"
+}
+
+test_ordinary_briefs_bookend_load_bearing_task() {
+  local kind id brief filled task_slots bookend_line dod_line setup_line task_line oracle_count text_file inline_count remaining
+  for kind in ship scout; do
+    id="brief-bookend-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 \
+        || fail "fm-brief.sh failed to generate the $kind bookend brief"
+    else
+      FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1 \
+        || fail "fm-brief.sh failed to generate the $kind bookend brief"
+    fi
+    brief="$BRIEF_HOME/data/$id/brief.md"
+    task_slots=$(grep -c '^{TASK}$' "$brief" || true)
+    [ "$task_slots" -eq 2 ] || fail "$kind brief emitted $task_slots standalone {TASK} bookends instead of two"
+    assert_grep '# Load-bearing contract' "$brief" \
+      "$kind brief missing its closing load-bearing contract section"
+    bookend_line=$(grep -n '^# Load-bearing contract$' "$brief" | head -1 | cut -d: -f1)
+    dod_line=$(grep -n '^# Definition of done$' "$brief" | head -1 | cut -d: -f1)
+    task_line=$(grep -n '^# Task$' "$brief" | head -1 | cut -d: -f1)
+    setup_line=$(grep -n '^# Setup$' "$brief" | head -1 | cut -d: -f1)
+    [ -n "$bookend_line" ] && [ -n "$dod_line" ] && [ -n "$task_line" ] && [ -n "$setup_line" ] \
+      || fail "$kind brief lost a structural boundary needed for bookend placement"
+    [ "$bookend_line" -gt "$dod_line" ] \
+      || fail "$kind brief closing load-bearing contract must follow Definition of done"
+    # Fill both standalone slots from one input through the public command, not
+    # a test-only Perl substitution. The text includes an inline {TASK}: prose
+    # line so the fill must target only the two standalone {TASK} lines and leave
+    # the inline token intact as content (colon-split false-negative guard).
+    text_file="$TMP_ROOT/bookend-text-$kind.txt"
+    printf 'Oracle: FM-BOOKEND-ORACLE-7f3a\n{TASK}: FM-BOOKEND-INLINE-7f3a\nAcceptance: FM-BOOKEND-ACCEPT-7f3a\nConstraints: FM-BOOKEND-CONSTRAINT-7f3a\n' > "$text_file"
+    FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" --fill "$text_file" >/dev/null 2>&1 \
+      || fail "fm-brief.sh --fill failed to fill the $kind bookend brief from one input"
+    filled="$brief"
+    oracle_count=$(grep -c 'FM-BOOKEND-ORACLE-7f3a' "$filled" || true)
+    [ "$oracle_count" -eq 2 ] || fail "$kind brief duplicated $oracle_count load-bearing copies instead of start and end bookends"
+    sed -n "${task_line},${setup_line}p" "$filled" | grep -q 'FM-BOOKEND-ACCEPT-7f3a' \
+      || fail "$kind brief start bookend missing acceptance criteria content"
+    sed -n "${bookend_line},\$p" "$filled" | grep -q 'FM-BOOKEND-CONSTRAINT-7f3a' \
+      || fail "$kind brief end bookend missing hard-constraint content"
+    sed -n "${setup_line},${dod_line}p" "$filled" | grep -q 'FM-BOOKEND-ORACLE-7f3a' \
+      && fail "$kind brief load-bearing content appears only in the middle scaffold"
+    inline_count=$(grep -c '{TASK}: FM-BOOKEND-INLINE-7f3a' "$filled" || true)
+    [ "$inline_count" -eq 2 ] || fail "$kind brief fill replaced or dropped the inline {TASK}: prose token instead of leaving it as content"
+    remaining=$(grep -c '^{TASK}$' "$filled" || true)
+    [ "$remaining" -eq 0 ] || fail "$kind brief fill left $remaining standalone {TASK} slot(s) unfilled"
+    FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" --validate-bookends "$filled" >/dev/null 2>&1 \
+      || fail "$kind brief failed the bookend validation after a one-input fill"
+  done
+  FM_SECONDMATE_CHARTER='Supervise the beta domain.' \
+    FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-bookend-secondmate --secondmate beta >/dev/null 2>&1 \
+    || fail "fm-brief.sh failed to generate the secondmate bookend fixture"
+  assert_no_grep '# Load-bearing contract' "$BRIEF_HOME/data/brief-bookend-secondmate/brief.md" \
+    "secondmate charter must not receive ordinary-task load-bearing bookends"
+  pass "fm-brief: ship and scout briefs fill both standalone slots from one input and keep the load-bearing bookends"
+}
+
+test_fill_refuses_non_ordinary_or_already_filled_brief() {
+  local home text_file out status
+  home="$TMP_ROOT/fill-refuse-home"
+  mkdir -p "$home/data"
+  text_file="$TMP_ROOT/fill-refuse-text.txt"
+  printf 'Oracle: x\n' > "$text_file"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise gamma.' \
+    "$ROOT/bin/fm-brief.sh" fill-charter --secondmate --no-projects >/dev/null 2>&1
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fill-charter --fill "$text_file" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "--fill accepted a secondmate charter (not an ordinary two-slot brief)"
+  assert_contains "$out" "standalone {TASK} slot" "--fill refusal did not name the slot contract"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fill-ship firstmate --mode direct-PR >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fill-ship --fill "$text_file" >/dev/null 2>&1
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fill-ship --fill "$text_file" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "--fill accepted an already-filled brief"
+  assert_contains "$out" "standalone {TASK} slot" "second --fill refusal did not name the slot contract"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fill-ship --fill "$home/no-such-file" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "--fill accepted a missing text file"
+  assert_contains "$out" "no task text file" "--fill did not name the missing text file"
+  pass "fm-brief.sh: --fill refuses charters, already-filled briefs, and missing text"
+}
+
+test_validate_bookends_refuses_half_filled_and_divergent() {
+  local home text_file out status
+  home="$TMP_ROOT/validate-bookends-home"
+  mkdir -p "$home/data"
+  text_file="$TMP_ROOT/validate-bookends-text.txt"
+  printf 'Oracle: FM-VB-ORACLE\nAcceptance: FM-VB-ACCEPT\nConstraints: FM-VB-CONSTRAINT\n' > "$text_file"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" vb-unfilled firstmate --mode direct-PR >/dev/null 2>&1
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$home/data/vb-unfilled/brief.md" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "validate-bookends accepted an unfilled brief"
+  assert_contains "$out" "unfilled standalone {TASK} slot" "validate-bookends did not name the unfilled slot"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" vb-half firstmate --mode direct-PR >/dev/null 2>&1
+  python3 - "$home/data/vb-half/brief.md" <<'PY'
+import sys
+p=sys.argv[1]; s=open(p).read()
+s=s.replace("{TASK}\n","Oracle: FM-VB-ORACLE\nAcceptance: FM-VB-ACCEPT\nConstraints: FM-VB-CONSTRAINT\n",1)
+open(p,"w").write(s)
+PY
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$home/data/vb-half/brief.md" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "validate-bookends accepted a half-filled brief"
+  assert_contains "$out" "unfilled standalone {TASK} slot" "validate-bookends did not name the half-filled slot"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" vb-div firstmate --mode direct-PR >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" vb-div --fill "$text_file" >/dev/null 2>&1
+  python3 - "$home/data/vb-div/brief.md" <<'PY'
+import sys
+p=sys.argv[1]; s=open(p).read()
+i=s.rfind("# Load-bearing contract")
+open(p,"w").write(s[:i] + s[i:].replace("Oracle: FM-VB-ORACLE","Oracle: FM-VB-DIVERGED",1))
+PY
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$home/data/vb-div/brief.md" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "validate-bookends accepted a divergent bookend pair"
+  assert_contains "$out" "diverge" "validate-bookends did not name the divergent pair"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" vb-ok firstmate --mode direct-PR >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" vb-ok --fill "$text_file" >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$home/data/vb-ok/brief.md" >/dev/null 2>&1 \
+    || fail "validate-bookends refused an identical one-input fill"
+  pass "fm-brief.sh: --validate-bookends refuses unfilled, half-filled, and divergent briefs"
+}
+
+test_validate_bookends_is_no_op_for_secondmate_charter() {
+  local home out status
+  home="$TMP_ROOT/validate-charter-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise delta.' \
+    "$ROOT/bin/fm-brief.sh" vb-charter --secondmate --no-projects >/dev/null 2>&1
+  assert_no_grep '^# Task$' "$home/data/vb-charter/brief.md" \
+    "secondmate charter must not carry an ordinary # Task section"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$home/data/vb-charter/brief.md" 2>&1); status=$?
+  expect_code 0 "$status" "validate-bookends must no-op a charter (no # Task section)"
+  [ -z "$out" ] || fail "validate-bookends emitted output for a charter no-op"
+  pass "fm-brief.sh: --validate-bookends is a no-op for a secondmate charter"
+}
+
+test_herdr_omission_keeps_inserted_after_scaffolding_wording() {
+  local home kind id brief
+  home="$TMP_ROOT/herdr-wording-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-herdr-wording-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "this scaffold cannot inspect the task text inserted after scaffolding." "$brief" \
+      "$kind brief lost the precise Herdr hard-safety wording"
+    assert_no_grep "this scaffold cannot inspect the task text that follows." "$brief" \
+      "$kind brief kept the weakened spatially-false Herdr wording"
+  done
+  pass "fm-brief.sh: omitted-Herdr briefs keep the precise inserted-after-scaffolding safety wording"
+}
+
+test_ordinary_brief_echoes_describe_two_slots() {
+  local kind id output
+  for kind in ship scout; do
+    id="brief-echo-slots-$kind"
+    if [ "$kind" = scout ]; then
+      output=$(FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout 2>&1) \
+        || fail "fm-brief.sh failed to generate the $kind echo fixture"
+    else
+      output=$(FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes 2>&1) \
+        || fail "fm-brief.sh failed to generate the $kind echo fixture"
+    fi
+    assert_contains "$output" 'replace the two standalone {TASK} slots' \
+      "$kind scaffold echo must describe both standalone task slots"
+  done
+  pass "fm-brief: ship and scout scaffold echoes describe both standalone task slots"
+}
+
 # The script itself must always parse under the ambient bash. That is Bash 5 in
 # CI and locally, where the issue #958/#1069 parser bug does not fire, so this
 # is a weak guard on its own; test_no_heredoc_in_command_substitution carries
@@ -1036,6 +1246,13 @@ test_scout_and_secondmate_scaffold() {
 
 test_script_parses
 test_crewmate_brief_explains_session_lock_scope
+test_ordinary_briefs_state_slice_contracts
+test_ordinary_briefs_bookend_load_bearing_task
+test_fill_refuses_non_ordinary_or_already_filled_brief
+test_validate_bookends_refuses_half_filled_and_divergent
+test_validate_bookends_is_no_op_for_secondmate_charter
+test_herdr_omission_keeps_inserted_after_scaffolding_wording
+test_ordinary_brief_echoes_describe_two_slots
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs

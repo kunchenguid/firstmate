@@ -2231,6 +2231,36 @@ test_oversized_cooldown_evidence_is_recorded_truncated() {
   pass "an oversized cooldown evidence quote is truncated into the ledger, never dropped"
 }
 
+# The load-bearing bookend gate (bin/fm-brief.sh --validate-bookends) is wired
+# into bin/fm-spawn.sh before any endpoint or task-state creation. A ship brief
+# whose two standalone {TASK} slots are not both filled must be refused before
+# the backend creates a window, so a half-filled or divergent brief can never
+# launch a worker. This drives the real spawn path with a fake tmux that logs
+# new-window calls, and asserts the gate refuses and no endpoint is created.
+test_spawn_refuses_unfilled_bookends_before_endpoint_creation() {
+  local rec id out status endpoint_log
+  id=profile-bookend-refuse-z30
+  rec=$(make_spawn_case bookend-refuse codex "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  : > "$endpoint_log"
+  # Replace the stub brief with a real unfilled ordinary ship brief so the
+  # bookend gate sees the two standalone {TASK} slots and refuses.
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" "$PROJ_DIR" --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh failed to scaffold a real ship brief for the bookend gate"
+  grep -qx '^# Task$' "$HOME_DIR/data/$id/brief.md" || fail "real ship brief missing its # Task section"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort medium --routing-source fallback 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a ship brief with unfilled {TASK} bookends"
+  assert_contains "$out" "bookend check" "spawn refusal did not name the bookend gate"
+  assert_contains "$out" "fill both standalone {TASK} slots" "spawn refusal did not point at the fill command"
+  # No endpoint mutation: the fake tmux new-window hook never ran.
+  [ ! -s "$endpoint_log" ] || fail "spawn created an endpoint before the bookend gate refused"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn wrote task metadata before the bookend gate refused"
+  pass "fm-spawn refuses an unfilled bookend brief before endpoint or task-state creation"
+}
+
 test_routing_source_recorded_only_when_declared
 test_spawn_writes_routing_facts_into_intake
 test_recorded_default_axes_respawn_as_unset
@@ -3158,6 +3188,7 @@ test_matched_rule_guard_matches_the_intake_schema
 test_oversized_cooldown_evidence_is_recorded_truncated
 test_expired_and_sibling_cooldowns_do_not_suppress_spawn
 test_captain_override_dispatches_cooled_tuple_and_updates_record
+test_spawn_refuses_unfilled_bookends_before_endpoint_creation
 test_missing_axis_refusal_names_the_flags_spawn_accepts
 test_cooldown_protects_the_static_crew_harness_path
 test_claude_threads_model_and_effort
