@@ -398,10 +398,15 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 #     one bounded read per new pane hash (the classification the branch already did)
 #     plus at most one per wedge window, with no read added by this function on any
 #     first-sighting path;
-#   - the escalation count is reset, because wedge_timer_check bumps it BEFORE it
-#     emits, so a suppressor at the emit would otherwise let the count climb
-#     invisibly until a genuine escalation surfaced pre-loaded at
-#     "escalation 7, demand-deep-inspection".
+# This function does NOT touch .wedge-escalations-<key>. The count must not climb for
+# an alarm nobody saw, but it must not be wiped either: the count is per window while
+# suppression is per alarm class, so clearing it here would let an absorbed idle-stale
+# alarm erase a count the busy-turn class earned, and that class's chain would restart
+# at 1 and never reach demand-deep-inspection on a genuinely hung call. Only
+# wedge_timer_check bumps the count, so only wedge_timer_check undoes its own bump when
+# its own emit was absorbed, which scopes the clear to the class that created it by
+# construction rather than by a recorded token that could drift. The first-sighting
+# emits never bump it and so never clear it, exactly as they behave with no declaration.
 #
 # What the crew-state verdict can and cannot catch: while the run is still open it is
 # live (nm_ci_checks_state re-derives greenness, so a red check flips the verdict back
@@ -420,6 +425,12 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 # merge (bin/fm-merge-wait.sh declare refuses outright without one), and firstmate's
 # fleet-wide heartbeat review reads every task in flight from the structured fleet
 # view whether or not its pane ever changes.
+#
+# The same accepted limit has a second face, documented at the loop-top reconciliation
+# below: a WITHDRAWN declaration is likewise honored only at the next alarm attempt, so
+# a byte-static terminal pane that was absorbed stays quiet until its pane changes.
+# Both faces are covered by the two things named above, and neither is bought back with
+# a marker remembering which hash was absorbed, because that would cache toward silence.
 merge_wait_absorbs_alarm() {  # <window> <task> <alarm-class> [fresh-crew-class]
   local win=$1 task=$2 alarm=$3 class=${4-} key mtime age
   afk_present && return 1
@@ -430,7 +441,6 @@ merge_wait_absorbs_alarm() {  # <window> <task> <alarm-class> [fresh-crew-class]
   [ -n "$class" ] || class=$(crew_absorb_class "$task" "$STATE")
   [ "$class" = merge-wait ] || return 1
   key=$(window_key "$win")
-  rm -f "$STATE/.wedge-escalations-$key"
   mtime=$(stat_mtime "$STATE/$task.merge-wait")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
@@ -543,6 +553,11 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fi
         emitted=0
         emit_stale_wake "$win" "$task" "$reason" "$alarm" && emitted=1
+        # Undo this call's own bump when its own emit was absorbed, so the count never
+        # climbs for an alarm nobody saw. Scoped here rather than inside the suppressor
+        # because the count is per window while suppression is per class: clearing it
+        # from an absorbed first sighting would erase a count another class earned.
+        [ "$emitted" = 1 ] || rm -f "$escalation_file"
         rm -f "$since_file"
         clear_write_tracking "$(window_key "$win")"
         [ "$emitted" = 1 ] || return 0
@@ -1307,10 +1322,26 @@ EOF
     # Retire the merge-wait throttle once the declaration stops holding - cleared,
     # re-armed on another pull request, or its merge poll retired - so a later
     # declaration cannot inherit a throttle that would delay its first reminder.
-    # Nothing else needs releasing: suppression records no pane hash and no stale
-    # bookkeeping, so a window can never be left quiet on a withdrawn declaration.
     # Skipped entirely for the overwhelmingly common undeclared window, and never a
     # crew-state call.
+    #
+    # A withdrawal is honored at the next ALARM ATTEMPT, not at this reconciliation:
+    # the declaration is re-read at every emit and never cached, so the first attempt
+    # after it stops holding proceeds untouched. It is not honored sooner, because an
+    # absorbed alarm leaves the same bookkeeping a surfaced one does - the terminal arm
+    # records the pane hash and drops the wedge timer on both paths - so a byte-static
+    # pane on the terminal branch makes no further attempt and stays quiet until its
+    # pane changes.
+    #
+    # DO NOT add a marker recording which hash was absorbed so a withdrawal could
+    # release it. That is caching in the direction of silence, which is the forbidden
+    # direction, and it is exactly the defect removing the old cadence marker fixed: a
+    # remembered "absorbed" answer suppressed an alarm on the very poll a fresh read
+    # already said the task was no longer green. The silence above is the same accepted
+    # limit merge_wait_absorbs_alarm's header documents for a byte-static terminal pane,
+    # showing up in a second place, and it is covered by the same two things: the merge
+    # poll stays armed (bin/fm-merge-wait.sh declare refuses outright without one), and
+    # firstmate's fleet-wide heartbeat review reads every task in flight.
     if [ -e "$STATE/.merge-wait-resurfaced-$key" ]; then
       merge_wait_declared "$task" "$STATE" || clear_merge_wait_markers "$key"
     fi

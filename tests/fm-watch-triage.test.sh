@@ -1475,9 +1475,18 @@ test_nonterminal_stale_declaration_after_surface_goes_quiet() {
   pass "a merge wait declared after its pane was already surfaced goes quiet on the next poll, without waiting for the pane to change"
 }
 
-# --- withdrawing the declaration returns the pane to ordinary aging -------------
-# Suppression records no pane hash of its own, so there is nothing to release: the
-# classifier already owns the window and the next alarm simply proceeds.
+# --- a withdrawn declaration is honored at the next alarm attempt ---------------
+# What this pins: the declaration is re-read at every emit and never cached, so the
+# first alarm attempt after it stops holding proceeds untouched and the window ages
+# ordinarily again.
+# What this does NOT show: that a withdrawal releases an already-absorbed pane hash.
+# It does not. An absorbed alarm leaves the same bookkeeping a surfaced one does, so a
+# byte-static pane on the terminal branch makes no further attempt and stays quiet
+# until its pane changes. The `rm -f "$state/.stale-$key"` below MANUFACTURES the fresh
+# sighting this test needs; nothing in the watcher would have done it. That silence is
+# the accepted limit documented at merge_wait_absorbs_alarm and at the loop-top
+# reconciliation, and it is deliberately not bought back with a marker recording which
+# hash was absorbed, because that would cache toward silence.
 test_merge_wait_withdrawn_record_returns_to_aging() {
   local dir state fakebin out drain_out capture_file window key pid pr text
   dir=$(make_case merge-wait-withdrawn); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1516,7 +1525,7 @@ test_merge_wait_withdrawn_record_returns_to_aging() {
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
     || fail "the released pane's stale was not queued"
   unset FM_FAKE_CREW_STATE
-  pass "withdrawing a declaration returns its pane to ordinary aging and retires its markers"
+  pass "a withdrawn declaration is honored at the next alarm attempt, returning its pane to ordinary aging and retiring its markers"
 }
 
 # --- the crew's OWN declared pause outranks a live merge-wait record ------------
@@ -1908,6 +1917,142 @@ test_merge_wait_reminder_passes_through_from_the_wedge_window() {
   unset FM_FAKE_CREW_STATE
   pass "the bounded reminder also passes through from the non-terminal wedge window, not only from a first sighting"
 }
+# Flip <task>'s semantic busy verdict to idle through the real event owner, so the same
+# unchanged pane hash stops being busy-exempt and reaches the stale triage instead.
+record_pi_idle() {  # <state-dir> <id>
+  "$ROOT/bin/fm-busy-event.sh" apply "$1" "$2" idle --current-gen \
+    --source pi-ext --event agent-idle >/dev/null
+}
+
+# --- an absorbed idle-stale alarm does not erase a busy-turn count ---------------
+# The escalation count is per WINDOW while suppression is per alarm CLASS, so a clear
+# from the wrong class is the mirror image of the count climbing invisibly: same
+# counter, erased from the other side. Reachable when a checks-green declared task's
+# pane text is byte-identical while its busy verdict flaps. While busy and past the
+# turn bound the busy-turn chain accumulates; on a poll where the verdict lapses the
+# same hash reaches the terminal stale triage as a first sighting (the busy path never
+# recorded the hash), the declaration absorbs it, and a window-wide clear there would
+# restart the hung-call chain at 1 so it never reaches demand-deep-inspection.
+test_absorbed_idle_stale_alarm_keeps_a_busy_turn_escalation_count() {
+  local dir state fakebin out capture_file window key pid pr text
+  dir=$(make_case busy-turn-count-survives-absorb); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-flap"; pr='https://example.test/pr/26'
+  text='Working... (3600.1s)'
+  printf '%s' "$text" > "$capture_file"
+  seed_busy_green_merge_task "$state" flap "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  declare_merge_wait "$state" flap || fail "could not declare the fixture merge wait"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # No completed turn ever recorded, so the spawn record ages past the bound.
+  touch -t 200001010000 "$state/flap.meta"
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+
+  # Phase A: busy and past the bound, so the busy-turn class earns escalation 1.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_WEDGE_DEMAND_INSPECT_COUNT=2 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the busy-turn bound did not escalate"; }
+  grep -F "possible wedge, escalation 1)" "$out" >/dev/null \
+    || fail "the busy-turn class did not earn escalation 1: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq 1 ] \
+    || fail "the busy-turn escalation was not counted"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A stop"
+
+  # Phase B: the busy verdict lapses on the SAME pane text, so this unchanged hash
+  # reaches the terminal stale triage as a first sighting and the declaration absorbs it.
+  record_pi_idle "$state" flap
+  : > "$out"
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_WEDGE_DEMAND_INSPECT_COUNT=2 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the idle first sighting was not absorbed by the declaration: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the idle first sighting alarmed instead of being absorbed: $(cat "$out")"; }
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$(hash_text "$text")" ] \
+    || { reap "$pid"; fail "the absorbed first sighting never reached the terminal triage, so this proved nothing"; }
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq 1 ] \
+    || { reap "$pid"; fail "the absorbed idle-stale alarm erased the busy-turn escalation count"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-B stop"
+
+  # Phase C: busy again, so the hung-call chain continues from its earned count and
+  # reaches demand-deep-inspection instead of restarting at 1.
+  record_pi_busy "$state" flap
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_WEDGE_DEMAND_INSPECT_COUNT=2 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the busy-turn chain did not resume after the absorb"; }
+  grep -F "possible wedge, escalation 2" "$out" >/dev/null \
+    || fail "the busy-turn chain restarted instead of continuing from its earned count: $(cat "$out")"
+  grep -F "demand-deep-inspection" "$out" >/dev/null \
+    || fail "the resumed busy-turn chain never reached demand-deep-inspection: $(cat "$out")"
+  [ -s "$state/flap.check.sh" ] || fail "the merge poll did not survive the flap"
+  unset FM_FAKE_CREW_STATE
+  pass "an absorbed idle-stale alarm leaves a busy-turn escalation count intact, so a hung call still reaches demand-deep-inspection"
+}
+
+# --- an absorbed idle-stale wedge alarm still clears an idle-stale count ---------
+# The original requirement, unregressed: wedge_timer_check bumps the count before it
+# emits, so when its own emit is absorbed the bump must not stand, or a later genuine
+# escalation would surface pre-loaded. Undoing it in the bumping call is what scopes the
+# clear to the class that earned it.
+test_absorbed_idle_stale_wedge_alarm_clears_its_own_count() {
+  local dir state fakebin out capture_file window key pid pr text sig
+  dir=$(make_case idle-stale-count-cleared); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-idleclear"; pr='https://example.test/pr/27'
+  text='idle, declared, aging on the wedge timer'
+  printf '%s' "$text" > "$capture_file"
+  seed_green_merge_task "$state" idleclear "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  printf 'working: rebased onto the latest base\n' >> "$state/idleclear.status"
+  sig=$(seen_sig "$state/idleclear.status"); printf '%s' "$sig" > "$state/.seen-idleclear_status"
+  declare_merge_wait "$state" idleclear || fail "could not declare the fixture merge wait"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "$text")" > "$state/.stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  # An earlier idle-stale escalation on this same window earned a count of 2.
+  printf '2\n' > "$state/.wedge-escalations-$key"
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the idle-stale wedge alarm was not absorbed: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the absorbed idle-stale wedge alarm printed a wake: $(cat "$out")"; }
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq 0 ] \
+    || { reap "$pid"; fail "the absorbed idle-stale alarm left its own count standing at $(cat "$state/.wedge-escalations-$key")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional absorb stop"
+
+  # Withdrawn, so the next genuine escalation starts from 1 rather than pre-loaded.
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-merge-wait.sh" clear idleclear >/dev/null \
+    || fail "could not withdraw the declared merge wait"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the withdrawn declaration never wedge-escalated"; }
+  grep -F "possible wedge, escalation 1)" "$out" >/dev/null \
+    || fail "the genuine escalation surfaced pre-loaded instead of starting from 1: $(cat "$out")"
+  grep -F "demand-deep-inspection" "$out" >/dev/null \
+    && fail "the first genuine escalation after an absorb demanded deep inspection"
+  [ -s "$state/idleclear.check.sh" ] || fail "the merge poll did not survive the escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "an absorbed idle-stale wedge alarm clears the count its own bump created, so a later genuine escalation starts from 1"
+}
+
 
 
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
@@ -3728,6 +3873,8 @@ test_merge_wait_away_mode_gate_refuses_before_any_read
 test_merge_wait_absorbs_nothing_in_away_mode
 test_idle_wedge_window_is_still_absorbed_by_a_merge_wait
 test_merge_wait_reminder_passes_through_from_the_wedge_window
+test_absorbed_idle_stale_alarm_keeps_a_busy_turn_escalation_count
+test_absorbed_idle_stale_wedge_alarm_clears_its_own_count
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
